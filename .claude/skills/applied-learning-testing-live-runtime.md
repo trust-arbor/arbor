@@ -37,6 +37,9 @@ if the same unrelated files fail there, record the baseline and run exact
 changed-file formatting/lint checks plus behavioral tests for the feature. Do
 not format unrelated files merely to make the aggregate alias green (found
 2026-07-22 while verifying the software-factory remediation program).
+Compare lint against the original pre-task base as well as a test-only parent;
+the latter already contains the new regressions and can hide findings introduced
+by those tests (reinforced 2026-09-25 during timeout regression qualification).
 
 <!-- applied-learning: terminal-tool-contracts-need-a-reserved-terminal-only-request-after-normal-inspection-tool-rounds-are-exhausted -->
 <a id="applied-learning-terminal-tool-contracts-need-a-reserved-terminal-only-request-after-normal-inspection-tool-rounds-are-exhausted"></a>

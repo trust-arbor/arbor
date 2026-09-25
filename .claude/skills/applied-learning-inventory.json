@@ -6275,8 +6275,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-compare-repository-wide-quality-failures-with-the-frozen-starting-revision",
       "source_date": "2026-07-22",
-      "source_incident": "found 2026-07-22 while verifying the software-factory remediation program).",
-      "content_sha256": "d29e5909b2d4c07efc191c1aada230930bd053a70de41eb649c85b127e21b3e3",
+      "source_incident": "2026-07-22 software-factory baseline comparison; 2026-09-25 test-only parents can conceal regression-test lint findings.",
+      "content_sha256": "83fb35325935b3ab9109304c89fde0cc96cc6f0f60ac96201a3cbb541c3d29c0",
       "always_loaded": false
     },
     {
