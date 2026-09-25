@@ -33,6 +33,45 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# Host-selected evidence is deployment policy. An invalid present setting must
+# never silently restore exploratory execution. Tests ignore ambient policy.
+if config_env() != :test do
+  case System.get_env("ARBOR_SECURITY_QUALIFICATION_PROFILES") do
+    nil ->
+      :ok
+
+    encoded ->
+      valid_source = fn {source, value} ->
+        source in ["turn", "heartbeat"] and is_map(value) and
+          Map.keys(value) == ["run_id"] and is_binary(value["run_id"]) and
+          byte_size(value["run_id"]) in 1..256 and
+          Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, value["run_id"])
+      end
+
+      with true <- byte_size(encoded) in 1..65_536,
+           {:ok, profiles} when is_map(profiles) <- JSON.decode(encoded),
+           true <- map_size(profiles) <= 128,
+           true <-
+             Enum.all?(profiles, fn {principal, sources} ->
+               Regex.match?(~r/\Aagent_[0-9a-f]{64}\z/, principal) and is_map(sources) and
+                 map_size(sources) <= 2 and Enum.all?(sources, valid_source)
+             end) do
+        selected =
+          Map.new(profiles, fn {principal, sources} ->
+            {principal,
+             Map.new(sources, fn
+               {"turn", %{"run_id" => id}} -> {:turn, %{run_id: id}}
+               {"heartbeat", %{"run_id" => id}} -> {:heartbeat, %{run_id: id}}
+             end)}
+          end)
+
+        config :arbor_orchestrator, :security_qualification_profiles, selected
+      else
+        _ -> raise ArgumentError, "invalid ARBOR_SECURITY_QUALIFICATION_PROFILES"
+      end
+  end
+end
+
 # ============================================================================
 # Private conversation memory (explicit operator opt-in, dev/prod only)
 # ============================================================================

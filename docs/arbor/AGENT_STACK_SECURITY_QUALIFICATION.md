@@ -16,6 +16,11 @@ No caller-supplied fingerprint can override this capture.
 The workflow binding reuses the Engine's execution manifest, including selected
 handler delegates and nested graphs. The Trust binding includes the configured
 policy module and its loaded implementation, not only the available modules.
+For standard Session compute nodes without explicit node tools, manifest capture
+projects the owner's effective tool names into an analysis-only graph. Explicit
+node tools retain priority. The original workflow and complete Session selection
+remain bound; the projected graph is never executed. This initial qualified lane
+accepts concrete action-name selections and refuses injected tool-definition maps.
 
 The initial qualified lane uses the Arbor runtime with one resolved route and
 preprocessing disabled for that Session (`"preprocessor_enabled" => false`).
@@ -96,6 +101,13 @@ Turn and heartbeat graphs have separate profiles. Once an agent is listed, a
 missing source entry refuses that source; a request cannot disable the requirement.
 Unlisted agents remain exploratory and unqualified. This distinction must be
 preserved in operator reports; ordinary use is not evidence of qualification.
+
+For a local deployment, `ARBOR_SECURITY_QUALIFICATION_PROFILES` persists the same
+selection as bounded JSON in the operator environment. Keys are exact `agent_`
+identities, then `turn` and/or `heartbeat`, each containing only `run_id`. Startup
+refuses a malformed present value. Test runtimes ignore this ambient deployment
+setting. Store the operator's local agent/run IDs in private configuration, not
+in a public source file.
 
 Before each turn or heartbeat, the owner recomputes the profile, reloads complete
 evidence, verifies artifact digests and reauthorizes the exact current signed
