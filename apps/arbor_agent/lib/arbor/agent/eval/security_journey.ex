@@ -1,12 +1,13 @@
 defmodule Arbor.Agent.Eval.SecurityJourney do
   @moduledoc """
   Source-owned acceptance using a fixed synthetic document and real action gates.
-  Consumes only the supplied dedicated read grant and signing authority. No grants,
+  Tightens only the admitted exact synthetic read rule, then consumes the supplied
+  dedicated read grant and signing authority. No grants,
   identity creation, model warmup/judge, or global configuration changes occur.
   Authority closure proves future signing refusal, not in-flight cancellation.
   The supplied profile is evidence input; operator approval remains separate.
   """
-  alias Arbor.{Actions, Historian, LLM, Persistence, Security}
+  alias Arbor.{Actions, Historian, LLM, Persistence, Security, Trust}
   alias Arbor.Agent.Eval.SecurityJourneyCore, as: Core
   alias Arbor.Common.Sanitizers
   alias Arbor.Contracts.Security.{AuthContext, Capability, Taint}
@@ -44,8 +45,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
       try do
         with {:ok, run} <- create_run(setup), do: perform(setup, run.id)
       after
-        _ = Security.revoke(setup.read_cap.id)
-        _ = Security.close_signing_authority(setup.authority)
+        cleanup(setup)
       end
     end
   rescue
@@ -72,6 +72,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
          authority = Keyword.get(opts, :signing_authority),
          {:ok, proof} <- Security.sign_with_authority(authority, "arbor://fs/read"),
          true <- proof.agent_id == principal,
+         :ok <- read_policy(principal, cap.resource_uri, :allow),
          live = Keyword.get(opts, :live, false),
          {:ok, transport} <- transport(live, projection) do
       {:ok,
@@ -133,6 +134,50 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
     end
   end
 
+  # This privileged host mutation is confined to the source-derived exact fixture
+  # URI, after the dedicated signed cap and authority prove the same principal.
+  # The caller exclusively owns this synthetic fixture and its explicit rule.
+  defp read_policy(principal, uri, mode) do
+    with {:ok, %{agent_id: ^principal, rules: rules}} <- Trust.get_trust_profile(principal),
+         ^mode <- Map.get(rules, uri),
+         {:ok, _} <- Trust.execution_policy_snapshot(principal),
+         ^mode <- Trust.effective_mode(principal, uri) do
+      :ok
+    else
+      _ -> {:error, :exact_read_policy_required}
+    end
+  end
+
+  defp block_read_policy(setup) do
+    principal = setup.principal
+    uri = setup.read_cap.resource_uri
+
+    with {:ok, %{agent_id: ^principal, rules: rules}} <- Trust.set_rule(principal, uri, :block),
+         :block <- Map.get(rules, uri),
+         :ok <- read_policy(principal, uri, :block) do
+      {:ok,
+       %{
+         "principal_id" => principal,
+         "resource_uri" => uri,
+         "previous_rule" => "allow",
+         "installed_rule" => "block",
+         "acknowledged" => true
+       }}
+    else
+      _ -> {:error, :read_policy_closure_failed}
+    end
+  end
+
+  defp cleanup(setup) do
+    _ = block_read_policy(setup)
+  after
+    try do
+      _ = Security.revoke(setup.read_cap.id)
+    after
+      _ = Security.close_signing_authority(setup.authority)
+    end
+  end
+
   defp transport(false, _), do: {:ok, nil}
 
   defp transport(true, %{"provider" => provider, "model" => model} = projection)
@@ -186,6 +231,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
          :ok <- require_delivery(delivery),
          {:ok, export, _} <- invoke(setup, run_id, "web_browse", %{url: fixture()["export_url"]}),
          live = live_phase(setup, run_id),
+         {:ok, policy} <- block_read_policy(setup),
          :ok <- Security.revoke(setup.read_cap.id),
          {:ok, future, _} <- invoke(setup, run_id, "file_read", %{path: setup.path}),
          :ok <- Security.close_signing_authority(setup.authority) do
@@ -202,6 +248,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
         "live" => live,
         "revocation" => %{
           "capability_id" => setup.read_cap.id,
+          "policy" => policy,
           "acknowledged" => true,
           "future_read" => future
         },

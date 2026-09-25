@@ -9,11 +9,30 @@ Prepare the fixed synthetic file returned by
 `Agent.security_qualification_fixture/0`, an active synthetic agent with one
 current exact ordinary root file-read capability, and a dedicated live
 SigningAuthority. Supply `agent_id`, `fixture_path`, `read_capability_id`, and
-`signing_authority`. The journey consumes the dedicated read grant and authority:
-it revokes the former, proves a later read refuses, closes the latter, and proves
-future signing refuses. Cleanup repeats only these exact resource closures on
-failure. It never restores permissions. The hosting operator may explicitly
-restore the identical narrow declaration before recapturing the source profile.
+`signing_authority`. The synthetic principal and fixture must be exclusively
+operator-owned, with an explicit exact canonical fixture read URI rule of `:allow`.
+A broader prefix alone is refused. The current signed capability and authority
+must bind that same principal; the producer never accepts a caller-selected
+policy prefix.
+
+The journey first changes this one exact rule to `:block` through the public Trust
+owner, verifies its acknowledged profile and effective policy, then revokes the
+dedicated read capability and proves a later actual Action read refuses. It closes
+the signing authority and proves future signing refuses. The evidence preserves
+the previous `allow` rule and installed `block` rule separately from the actual
+read outcome. Merely revoking the capability is insufficient: ordinary standing
+`allow` policy can intentionally JIT-mint a replacement. That global behavior is
+unchanged.
+
+Cleanup independently attempts the same exact rule tightening, capability
+revocation, and authority closure, including after failures. The producer never
+restores or broadens permissions. The hosting operator may explicitly restore the
+identical narrow rule **and** ordinary capability declaration after observing
+refusal, before recapturing the source profile. Trust's durable-mode ACK covers
+the policy backend write, not completion of its asynchronous capability sync,
+cluster convergence, or an atomic freeze against concurrent operator edits. The
+actual future Action refusal is required evidence; this lane assumes exclusive
+operator ownership of its synthetic principal/rule.
 
 The caller captures the current source profile, including the public producer
 identity and `LLM.stock_tool_transport_identity(provider)` under `tool_transport`.
