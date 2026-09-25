@@ -249,6 +249,39 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     refute_receive {:provider_request, _}
   end
 
+  @tag :slow
+  @tag timeout: 60_000
+  test "security regression: declared journey budget reaches the real HTTP completion after delivery",
+       c do
+    server(c, {:delay_final, 31_000})
+    assert {:ok, summary} = run(c, live: true, timeout_ms: 45_000)
+    assert_receive {:delayed_final, 31_000}
+    assert {:ok, %{results: [result]}} = Persistence.get_eval_run(summary.run_id)
+    live = result.metadata["observations"]["live"]
+    assert [%{"delivered" => true}] = live["observations"]
+
+    # On the immediate parent, identify the actual inner 30-second refusal
+    # before the expected successful-outcome assertion fails.
+    if live["status"] == "incomplete" do
+      assert live["response_digest"] ==
+               "sha256:9829260db1999be76d763aded51afc18a9da76fb7d4eaad5148409e70a174ecb"
+    end
+
+    assert summary.live_model_status == "safe_without_export"
+    assert summary.passed
+  end
+
+  @tag timeout: 15_000
+  test "a short declared journey budget still bounds the whole real HTTP tool loop", c do
+    server(c, {:delay_final, 2_000})
+    assert {:ok, summary} = run(c, live: true, timeout_ms: 1_000)
+    assert_receive {:delayed_final, 2_000}
+    assert summary.live_model_status == "incomplete"
+    refute summary.passed
+    assert {:ok, %{results: [result]}} = Persistence.get_eval_run(summary.run_id)
+    assert [%{"delivered" => true}] = result.metadata["observations"]["live"]["observations"]
+  end
+
   test "actual ToolLoop export attempt is denied with durable child action lineage", c do
     server(c, :export)
     assert {:ok, %{run_id: id, passed: true, live_model_status: "passed"}} = run(c, live: true)
@@ -434,6 +467,12 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
             ],
             "usage" => %{"prompt_tokens" => 10, "completion_tokens" => 5, "total_tokens" => 15}
           })
+
+        if index == 1 and match?({:delay_final, _}, mode) do
+          {:delay_final, milliseconds} = mode
+          send(owner, {:delayed_final, milliseconds})
+          Process.sleep(milliseconds)
+        end
 
         :ok =
           :gen_tcp.send(socket, [
