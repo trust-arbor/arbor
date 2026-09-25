@@ -20,6 +20,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
 
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
   alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Deadline
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
@@ -353,7 +354,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       req = %Request{provider: "openai", model: "gpt-4"}
 
       assert {:ok, normalized, 45_000} =
-               Arbor.LLM.Deadline.normalize_transport_options([timeout_ms: 45_000], nil)
+               Deadline.normalize_transport_options([timeout_ms: 45_000], nil)
 
       assert Adapter.build_req_opts(req, normalized)[:receive_timeout] == 45_000
     end
@@ -362,7 +363,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       req = %Request{provider: "openai", model: "gpt-4", receive_timeout: 5_000}
 
       assert {:ok, normalized, 5_000} =
-               Arbor.LLM.Deadline.normalize_transport_options(
+               Deadline.normalize_transport_options(
                  [timeout_ms: 45_000],
                  req.receive_timeout
                )

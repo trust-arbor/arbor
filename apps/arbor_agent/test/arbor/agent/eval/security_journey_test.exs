@@ -400,6 +400,13 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     end)
   end
 
+  defp delay_final(owner, {:delay_final, milliseconds}, 1) do
+    send(owner, {:delayed_final, milliseconds})
+    Process.sleep(milliseconds)
+  end
+
+  defp delay_final(_owner, _mode, _index), do: :ok
+
   defp serve(listener, owner, c, mode, index) do
     case :gen_tcp.accept(listener, 10_000) do
       {:ok, socket} ->
@@ -468,11 +475,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
             "usage" => %{"prompt_tokens" => 10, "completion_tokens" => 5, "total_tokens" => 15}
           })
 
-        if index == 1 and match?({:delay_final, _}, mode) do
-          {:delay_final, milliseconds} = mode
-          send(owner, {:delayed_final, milliseconds})
-          Process.sleep(milliseconds)
-        end
+        delay_final(owner, mode, index)
 
         :ok =
           :gen_tcp.send(socket, [
