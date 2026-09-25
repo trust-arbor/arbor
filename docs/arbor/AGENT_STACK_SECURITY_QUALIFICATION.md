@@ -13,6 +13,14 @@ serving metadata, selected tools and loaded action implementations, DOT graph,
 execution settings, current Security/Trust/Actions policy and permission declarations, approved skill versions,
 native containment artifact and loaded workflow/LLM/eval implementation identities.
 No caller-supplied fingerprint can override this capture.
+The workflow binding reuses the Engine's execution manifest, including selected
+handler delegates and nested graphs. The Trust binding includes the configured
+policy module and its loaded implementation, not only the available modules.
+For standard Session compute nodes without explicit node tools, manifest capture
+projects the owner's effective tool names into an analysis-only graph. Explicit
+node tools retain priority. The original workflow and complete Session selection
+remain bound; the projected graph is never executed. This initial qualified lane
+accepts concrete action-name selections and refuses injected tool-definition maps.
 
 The initial qualified lane uses the Arbor runtime with one resolved route and
 preprocessing disabled for that Session (`"preprocessor_enabled" => false`).
@@ -58,6 +66,26 @@ current profile, evidence digest and exact approval URI. The operator uses exist
 reviewed composition; writing eval rows or declaring `passed: true` is not approval.
 Wildcard/name-only grants do not satisfy the qualification gate.
 
+`Arbor.Agent.compose_security_qualification(profile, journey_run_id, artifacts)`
+combines the persisted live journey with three reviewed artifact maps keyed by
+`"audit_restart"`, `"native_containment"` and `"skill_revocation"`. Each artifact
+uses schema `arbor.security.acceptance.artifact.v1` and carries its kind, target
+profile fingerprint, producer digest, complete source revision and a list of
+named evidence-file digests. Native evidence includes all physical probe rows
+and the exact observed containment identity; recovery and skill evidence include
+the closed observations exposed by
+`Arbor.Agent.Eval.SecurityQualificationReport.required_artifact_observations/0`.
+Missing observations or caller-supplied success flags cannot substitute for them.
+
+Composition verifies the journey's persisted content digest, acknowledges and
+rereads each result, then completes and rereads the full four-result SQL run.
+It returns `approval: :required`; it never issues the capability. External probe
+files remain operator-reviewed evidence: their parser checks content and shape,
+not whether arbitrary supplied files tell the truth. Keep actual outputs and
+producer scripts alongside their digests for review. Label test fixtures and
+backend/build differences explicitly. A database sandbox transaction or an ETS
+test backend does not prove committed records survive a whole-node restart.
+
 Host configuration selects the reviewed run:
 
 ```elixir
@@ -73,6 +101,13 @@ Turn and heartbeat graphs have separate profiles. Once an agent is listed, a
 missing source entry refuses that source; a request cannot disable the requirement.
 Unlisted agents remain exploratory and unqualified. This distinction must be
 preserved in operator reports; ordinary use is not evidence of qualification.
+
+For a local deployment, `ARBOR_SECURITY_QUALIFICATION_PROFILES` persists the same
+selection as bounded JSON in the operator environment. Keys are exact `agent_`
+identities, then `turn` and/or `heartbeat`, each containing only `run_id`. Startup
+refuses a malformed present value. Test runtimes ignore this ambient deployment
+setting. Store the operator's local agent/run IDs in private configuration, not
+in a public source file.
 
 Before each turn or heartbeat, the owner recomputes the profile, reloads complete
 evidence, verifies artifact digests and reauthorizes the exact current signed
