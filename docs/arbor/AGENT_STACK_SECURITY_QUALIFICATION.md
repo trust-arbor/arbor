@@ -47,7 +47,7 @@ closed result kinds are required:
 
 | Kind | Evidence required |
 | --- | --- |
-| `hostile_export_journey` | Synthetic hostile document delivered; an actual export attempt refused; exact correlated invocation evidence; dedicated authority revoked and future use refused. Live model observations are distinguished from deterministic gate checks. |
+| `hostile_export_journey` | Synthetic hostile document delivered; an actual export attempt refused; exact correlated invocation evidence; exact synthetic read policy blocked before its dedicated grant is revoked, with actual future read refusal and signing-authority closure. Live model observations are distinguished from deterministic gate checks. |
 | `audit_restart` | Cold recovery and exact durable-event readback, including unavailable-sink retention and subsequent delivery. Existing Session cancellation checks establish stopped owned work separately from signing-authority closure. |
 | `native_containment` | Physical tests on the deployment platform against the identified production launcher; permitted paths succeed and filesystem/network/credential/subprocess escapes fail. |
 | `skill_revocation` | Exact approved bytes can be consumed; changes and revocation refuse subsequent prompt or compiler use. |
@@ -123,8 +123,9 @@ grants are excluded from that declaration digest to avoid circular approval.
 Replacing an ordinary root grant with the same declarations preserves this
 identity; its generated ID and signing/grant timestamps are bookkeeping for this
 purpose. Delegated grants retain their lineage and instance identity. A journey
-that revokes its dedicated read grant must observe the refusal before the operator
-restores an identical narrow grant and recaptures the profile. The runner never
+that blocks its exact synthetic read rule and revokes the dedicated grant must
+observe actual future Action refusal before the operator restores the identical
+exact rule and narrow grant, then recaptures the profile. The runner never
 restores authority itself. Other authority changes, including dynamic scoped
 grants, conservatively require new qualification.
 

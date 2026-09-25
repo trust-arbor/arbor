@@ -691,6 +691,17 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   cost_class, constraints}`) and commit a test that calls `Trust.authorize/3`
   under an `:auto` rule — not just one that checks disclosure. Grep the enforcer
   log for `:unprofiled` after wiring any new tool.
+- **Revoking a grant does not revoke standing policy (2026-09-24).** An
+  exact `:allow` rule can mint a replacement after `Security.revoke/1`; the real
+  hostile-document acceptance journey observed a later file read succeed this
+  way. For source-owned access-closure checks, first block only the verified
+  synthetic principal's exact fixture URI through the public Trust owner,
+  verify its acknowledged rule and healthy policy snapshot, then revoke the
+  dedicated grant and require actual future Action refusal. Preserve both
+  observations. Cleanup may tighten that admitted rule but must never restore
+  access; only the operator may restore the identical rule and grant after
+  reviewing the denial. Do not disable JIT globally or treat asynchronous
+  capability synchronization as a completed revocation barrier.
 
 ## 26. Self-scoped resources: the minted parent covers only *your own* child
 
