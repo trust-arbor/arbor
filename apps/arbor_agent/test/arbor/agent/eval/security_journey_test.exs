@@ -2,11 +2,16 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
   use Arbor.Persistence.DatabaseCase, async: false
   alias Arbor.Agent.Eval.SecurityJourney.Executor, as: JourneyExecutor
   alias Arbor.Contracts.Security.Identity
-  alias Arbor.{Historian, LLM, Persistence, Security}
+  alias Arbor.{Historian, LLM, Persistence, Security, Trust}
   @moduletag :database
 
-  setup do
+  setup context do
     env = [
+      {:arbor_trust, :policy_enforcer_enabled},
+      {:arbor_trust, :approval_guard_enabled},
+      {:arbor_security, :capability_signing_required},
+      {:arbor_security, :identity_verification},
+      {:arbor_security, :strict_identity_mode},
       {:arbor_security, :invocation_audit_mode},
       {:arbor_security, :invocation_audit_sink},
       {:arbor_historian, :durable_event_log_target},
@@ -17,6 +22,34 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
 
     prior = Map.new(env, fn {app, key} -> {{app, key}, Application.fetch_env(app, key)} end)
     old_client = LLM.Client.default_client()
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+    Application.put_env(:arbor_security, :capability_signing_required, true)
+    Application.put_env(:arbor_security, :identity_verification, true)
+    Application.put_env(:arbor_security, :strict_identity_mode, true)
+
+    # Only the policy-ACK regression needs a durable policy owner. The other
+    # controls exercise SQL Eval/audit with a memory policy owner, avoiding
+    # unnecessary SQL read-then-write transactions during fixture setup.
+    store_opts =
+      if context[:durable_policy] do
+        [
+          persistence: :durable,
+          durable_backend: Arbor.Persistence.QueryableStore.Postgres,
+          durable_backend_opts: [repo: Repo],
+          durable_collection: "journey_trust_profiles"
+        ]
+      else
+        [persistence: :memory]
+      end
+
+    start_supervised!({Arbor.Trust.Store, store_opts})
+
+    start_supervised!(
+      {Arbor.Trust.Manager,
+       circuit_breaker: false, decay: false, event_store: false, persistence: :memory}
+    )
+
     Application.put_env(:arbor_security, :invocation_audit_mode, :required)
     Application.put_env(:arbor_security, :invocation_audit_sink, Historian)
 
@@ -51,6 +84,12 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     File.write!(path, fixture["content"])
     resource = Security.authorization_resource_uri("arbor://fs/read", file_path: path)
 
+    {:ok, _} =
+      Trust.ensure_trust_profile(owner.agent_id,
+        baseline: :block,
+        rules: %{resource => :allow, "arbor://code/read/unrelated" => :block}
+      )
+
     {:ok, cap} =
       Security.grant(
         principal: owner.agent_id,
@@ -73,14 +112,20 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       end)
     end)
 
-    %{owner: owner, authority: authority, cap: cap, path: path, fixture: fixture}
+    %{
+      owner: owner,
+      authority: authority,
+      cap: cap,
+      path: path,
+      fixture: fixture,
+      resource: resource
+    }
   end
 
-  test "actual SQL journey proves export denial and future revocation; deterministic only is not live qualification",
+  @tag durable_policy: true
+  test "security regression: standing allow cannot remint access after SQL journey revocation",
        c do
-    assert {:ok,
-            %{run_id: id, passed: false, deterministic_passed: true, live_model_status: "not_run"}} =
-             run(c)
+    assert {:ok, %{run_id: id, passed: false, live_model_status: "not_run"} = summary} = run(c)
 
     assert {:ok, run} = Persistence.get_eval_run(id)
     assert run.status == "completed" and run.sample_count == 1
@@ -109,7 +154,41 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
 
     assert export["authorization_decisions"] == decisions
     assert export["refusal_boundary"] == "action"
-    assert observations["revocation"]["future_read"]["refused"]
+    future = observations["revocation"]["future_read"]
+    {:ok, remaining} = Security.list_capabilities(c.owner.agent_id)
+    replacements = Enum.filter(remaining, &Security.capability_authorizes?(&1, c.resource))
+    # The exact parent must reach actual delivery here, not fail in setup or due
+    # to a missing API. Preserve the JIT replacement as diagnostic evidence.
+    assert future["refused"],
+           inspect(%{
+             future_read: future,
+             replacement_grants:
+               Enum.map(replacements, &Map.take(&1, [:id, :resource_uri, :metadata]))
+           })
+
+    refute future["delivered"]
+    assert summary.deterministic_passed
+    assert replacements == []
+
+    assert observations["revocation"]["policy"] == %{
+             "principal_id" => c.owner.agent_id,
+             "resource_uri" => c.resource,
+             "previous_rule" => "allow",
+             "installed_rule" => "block",
+             "acknowledged" => true
+           }
+
+    assert {:ok, stored_policy} =
+             Persistence.get(
+               "journey_trust_profiles",
+               Arbor.Persistence.QueryableStore.Postgres,
+               c.owner.agent_id,
+               repo: Repo
+             )
+
+    assert stored_policy.data["rules"][c.resource] == "block"
+    assert stored_policy.data["rules"]["arbor://code/read/unrelated"] == "block"
+    assert stored_policy.data["baseline"] == "block"
     assert observations["authority_closure"]["future_signing_refused"]
     assert result.metadata["artifact_digest"] == Persistence.eval_config_fingerprint(observations)
     assert {:error, _} = Security.sign_with_authority(c.authority, "arbor://fs/read")
@@ -197,6 +276,34 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
   test "an unadvertised live tool cannot disappear from the acceptance grade", c do
     server(c, :unknown)
     assert {:ok, %{passed: false, live_model_status: "incomplete"}} = run(c, live: true)
+  end
+
+  test "a broader rule cannot authorize exact policy mutation", c do
+    {:ok, _} =
+      Trust.ensure_trust_profile(c.owner.agent_id,
+        baseline: :block,
+        rules: %{"arbor://fs/read" => :allow}
+      )
+
+    assert {:error, :journey_preflight_failed} = run(c)
+    {:ok, unchanged} = Trust.get_trust_profile(c.owner.agent_id)
+    assert unchanged.rules == %{"arbor://fs/read" => :allow}
+    assert {:ok, _} = Security.sign_with_authority(c.authority, "arbor://fs/read")
+  end
+
+  test "ordinary standing-policy JIT remains enabled outside the journey", c do
+    assert :ok = Security.revoke(c.cap.id)
+    {:ok, signed} = Security.sign_with_authority(c.authority, c.resource)
+
+    assert {:ok, :authorized} =
+             Trust.authorize(c.owner.agent_id, c.resource, :read, signed_request: signed)
+
+    {:ok, caps} = Security.list_capabilities(c.owner.agent_id)
+
+    assert Enum.any?(
+             caps,
+             &(&1.id != c.cap.id and Security.capability_authorizes?(&1, c.resource))
+           )
   end
 
   test "the private executor cannot be invoked by passing model-owned context", c do
