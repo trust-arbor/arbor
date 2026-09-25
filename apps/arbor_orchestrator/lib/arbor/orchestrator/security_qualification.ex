@@ -10,8 +10,8 @@ defmodule Arbor.Orchestrator.SecurityQualification do
   """
   alias Arbor.Orchestrator.{ActionsExecutor, Config}
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
-  alias Arbor.Orchestrator.Session.{ContextBuilder, TurnEgress}
   alias Arbor.Orchestrator.SecurityQualification.EvidenceCore
+  alias Arbor.Orchestrator.Session.{ContextBuilder, TurnEgress}
   alias Arbor.Persistence
 
   @schema "arbor.security.qualification.v1"

@@ -180,7 +180,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
 
     descriptor_failures =
       for module <-
-            Arbor.Orchestrator.ActionsExecutor.build_action_map() |> Map.values() |> Enum.uniq(),
+            ActionsExecutor.build_action_map() |> Map.values() |> Enum.uniq(),
           result = Arbor.Actions.runtime_descriptor(module),
           not match?({:ok, _}, result),
           do: {module, result}
