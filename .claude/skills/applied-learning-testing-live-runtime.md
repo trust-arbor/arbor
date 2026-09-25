@@ -599,6 +599,14 @@ candidate. Run the supported `./bin/mix arbor.recompile`, verify loaded
 identities, and restart only when the supported reload cannot converge (found
 2026-07-28 before the validation-capacity coding canary).
 
+For a reviewed stop/build/start deployment, stop the old owning dev daemon before
+fast-forwarding its canonical source checkout, as well as before compilation.
+Phoenix can observe source changes and trigger automatic compilation/reload;
+waiting until the explicit compile step leaves an unintended live transition.
+Keep the prior process stopped through source integration and build, then verify
+the newly started owner and loaded identities (clarified 2026-09-24 during the
+agent-stack acceptance rollout).
+
 <!-- applied-learning: cancellation-tests-must-synchronize-on-the-cancellable-phase -->
 <a id="applied-learning-cancellation-tests-must-synchronize-on-the-cancellable-phase"></a>
 **Cancellation tests must synchronize on the cancellable phase.** A coding
@@ -809,6 +817,15 @@ In a private production-profile boot, configure isolated targets before their
 owners start, retain enforcing flags, and verify public readiness before effects.
 A test-profile bootstrap with disabled gates proves a different claim
 (reconfirmed 2026-09-24 during hostile-document qualification).
+
+Keep receipt serialization separate from the policy identity being observed.
+Explicitly project known tagged structs, such as `%CapabilityProfile{}`, with
+`Map.from_struct/1` before recursive JSON serialization; being a map does not
+make a struct implement `Enumerable`. Refuse unknown struct types rather than silently
+flattening them, and preserve the original raw term for the authoritative policy
+fingerprint. Exercise the receipt against the actual public snapshot before
+acceptance effects (found 2026-09-24 when metadata-only capture reached real
+capability profiles).
 
 <!-- applied-learning: test-observation-helpers-must-not-acquire-authority -->
 <a id="applied-learning-test-observation-helpers-must-not-acquire-authority"></a>

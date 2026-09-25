@@ -6769,8 +6769,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-recompile-the-live-runtime-after-integrating-action-or-handler-beams",
       "source_date": "2026-07-28",
-      "source_incident": "found 2026-07-28 before the validation-capacity coding canary).",
-      "content_sha256": "7e15b29a4b0155ae01fdf98d0f33a7c6ef12869d4db72090a94e448d4cef542e",
+      "source_incident": "found 2026-07-28 before the validation-capacity coding canary). Clarified 2026-09-24: stop the old dev daemon before canonical source fast-forward as well as compilation during a stop/build/start rollout.",
+      "content_sha256": "0ff475d0bcaebebda9a314bef34dc7c6e88200c2e49c1845d0bb596c8f770e2d",
       "always_loaded": false
     },
     {
@@ -7796,8 +7796,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it",
       "source_date": "2026-08-04",
-      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance.",
-      "content_sha256": "0fa77dd56975b252614d557acf69ec606b5a061e53c8acee41ae758014c55b49",
+      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance: serialize only known tagged snapshot structs and preserve raw policy identity before acceptance effects.",
+      "content_sha256": "51526a7d00735f4b97093155ee5c98389454ad97ba3ded925a5508ecc290161a",
       "always_loaded": false
     },
     {
