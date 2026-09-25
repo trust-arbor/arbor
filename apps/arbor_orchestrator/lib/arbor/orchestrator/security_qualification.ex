@@ -83,10 +83,11 @@ defmodule Arbor.Orchestrator.SecurityQualification do
          true <- containment["supported"] == true,
          {:ok, tools} <- tool_manifest(state),
          {:ok, workflow_digest} <- term_digest(graph),
+         {:ok, manifest_graph} <- manifest_graph(graph, tools["selected"]),
          {:ok, action_catalog} <- ActionCatalog.snapshot(),
          {:ok, {_manifest, execution_digest}} <-
            ExecutionManifest.build(
-             graph,
+             manifest_graph,
              action_catalog,
              String.replace_prefix(workflow_digest, "sha256:", "")
            ),
@@ -171,6 +172,37 @@ defmodule Arbor.Orchestrator.SecurityQualification do
         error
     end
   end
+
+  # Session places this exact selection in context under session.tools. The
+  # generic manifest requires explicit tool names, so bind a capture-only view.
+  # Never execute this view; the original workflow digest remains in the profile.
+  defp manifest_graph(graph, selected) when is_list(selected) do
+    if Enum.all?(selected, &(is_binary(&1) and Regex.match?(~r/\A[A-Za-z0-9_]+\z/, &1))) do
+      nodes =
+        Map.new(graph.nodes, fn {id, node} ->
+          attrs = node.attrs
+
+          projected =
+            if node.handler_module == Arbor.Orchestrator.Handlers.ComputeHandler and
+                 Map.get(attrs, "use_tools") in [true, "true"] and
+                 is_nil(Map.get(attrs, "tools")) do
+              if selected == [],
+                do: Map.put(attrs, "use_tools", false),
+                else: Map.put(attrs, "tools", Enum.join(selected, ","))
+            else
+              attrs
+            end
+
+          {id, %{node | attrs: projected}}
+        end)
+
+      {:ok, %{graph | nodes: nodes}}
+    else
+      {:error, :unsupported_qualified_tool_selection}
+    end
+  end
+
+  defp manifest_graph(_, _), do: {:error, :unsupported_qualified_tool_selection}
 
   defp producer_identity do
     producer = Config.security_qualification_producer()
