@@ -6509,8 +6509,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-direct-engine-fixtures-must-seed-owner-computed-budget-context",
       "source_date": "2026-07-28",
-      "source_incident": "found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline fixture failures).",
-      "content_sha256": "0ea5de7d079cdd79cf3d294345aeed31047929ff0ca171e84cc89f944d59dc86",
+      "source_incident": "2026-07-28 direct Engine budget projection; 2026-09-25 nested client and provider defaults truncated a larger declared live-phase budget.",
+      "content_sha256": "57cfc651cff3fd702efceb37f956604a0fa62a8cd1629d6938b84c975d655c02",
       "always_loaded": false
     },
     {

@@ -887,7 +887,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       |> maybe_put(:top_p, top_p)
       |> maybe_put(:max_tokens, request.max_tokens)
       |> maybe_put(:reasoning_effort, request.reasoning_effort)
-      |> maybe_put(:receive_timeout, request.receive_timeout)
+      |> maybe_put(:receive_timeout, Keyword.get(opts, :receive_timeout, request.receive_timeout))
       |> maybe_put(:provider_options, request_provider_opts)
       |> maybe_put(:tools, translate_tools(request.tools))
       |> maybe_put(:tool_choice, translate_tool_choice(request.tool_choice))

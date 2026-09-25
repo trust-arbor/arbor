@@ -560,6 +560,17 @@ most of a 15-minute task budget. Size `budgets.wall_clock_ms` for those stages
 plus both cold isolated validation legs, or capacity will fail closed before
 the selected test runs (reinforced 2026-08-15 when E0B2P timed out compiling
 candidate dependencies with the base leg still `not_run`).
+A declared live-phase budget must also reach each nested client's explicit
+`timeout_ms`: inheriting the outer deadline only narrows the per-call budget;
+it does not replace an omitted client's 30-second default. Pass the declared
+budget through the ToolLoop client options while retaining the inherited
+remaining deadline, so later calls cannot reset elapsed time. Forward the
+normalized `receive_timeout` into the provider request too; an adapter that
+rereads only the original request field can reintroduce the provider default.
+Test a real response beyond the default and a shorter outer-deadline control. Name the
+budget's phase precisely: deterministic preparation and cleanup are outside
+this live-phase deadline (reinforced 2026-09-25 after an actual delivered
+hostile-input journey stopped at 30 seconds despite its larger declared budget).
 
 <!-- applied-learning: required-evidence-is-intent-not-an-executable-validation-program -->
 <a id="applied-learning-required-evidence-is-intent-not-an-executable-validation-program"></a>
