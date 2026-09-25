@@ -25,8 +25,16 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
     # Read the exact real composition source and its environment imports in an
     # empty tree. dev.exs loads ../.env by __DIR__, so merely changing cwd would
     # still expose the developer's dotenv file in the source checkout.
-    for name <- ~w(config.exs dev.exs prod.exs) do
+    for name <- ~w(config.exs dev.exs prod.exs provider_route_profile.exs) do
       File.cp!(Path.join(@config_dir, name), Path.join(configs, name))
+    end
+
+    fixture_dir = "apps/arbor_kernel/test/fixtures/extension_envelopes/v1"
+    File.mkdir_p!(Path.join(root, fixture_dir))
+
+    for name <- ~w(boot_profile_manifest.json boot_profile_signature.json) do
+      relative = Path.join(fixture_dir, name)
+      File.cp!(Path.join(Path.dirname(@config_dir), relative), Path.join(root, relative))
     end
 
     previous = Application.fetch_env(:arbor_shell, :agent_authorizer)
