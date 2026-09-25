@@ -645,6 +645,15 @@ ready, and then prove the public behavior; a skipped negative-security path is
 not evidence (found 2026-07-28 while reviewing pending-approval settlement
 tests).
 
+For hostile-input acceptance, first prove the actual tool delivered the exact
+fixture with its provenance and required sanitizer evidence. A refused setup
+read is not successful resistance to an injection the model never received.
+Preserve missing delivery as incomplete. A model that reads the fixture and
+refuses the attacker can be safe without attempting export; pair that observation
+with a separate deterministic attempted-export refusal to prove the gate. Grade
+the actual action receipt and durable outcome, naming an earlier Trust refusal
+honestly rather than inventing a Security decision (reconfirmed 2026-09-24).
+
 <!-- applied-learning: zsh-command-substitution-does-not-split-newline-path-lists -->
 <a id="applied-learning-zsh-command-substitution-does-not-split-newline-path-lists"></a>
 **Zsh command substitution does not split newline path lists by default.**
@@ -791,6 +800,15 @@ owner and retain only observability and failure injection. Assert state on the
 process that actually owns it, such as a cleanup lease that outlives its
 coordinator (found 2026-08-04 reconciling Voice Session and ResourceOwner
 migrations).
+
+For acceptance, invoke the same execution owner as the deployed consumer:
+`LLM.generate` and the Session's `ToolLoop.run` are different loops. Bind the
+actual configured client, adapter map, plug order, auditor, and loaded owner
+identity; source defaults alone do not describe runtime dependency injection.
+In a private production-profile boot, configure isolated targets before their
+owners start, retain enforcing flags, and verify public readiness before effects.
+A test-profile bootstrap with disabled gates proves a different claim
+(reconfirmed 2026-09-24 during hostile-document qualification).
 
 <!-- applied-learning: test-observation-helpers-must-not-acquire-authority -->
 <a id="applied-learning-test-observation-helpers-must-not-acquire-authority"></a>

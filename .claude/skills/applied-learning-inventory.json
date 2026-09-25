@@ -5573,8 +5573,8 @@
       "destination": ".claude/skills/applied-learning-persistence-database.md",
       "anchor": "applied-learning-trust-the-store-s-advertised-durability-class-not-its-configured-backend",
       "source_date": "2026-07-20",
-      "source_incident": "found 2026-07-20 while designing terminal coding-task artifact retention; refined 2026-07-26 after agent creation reported success for a failed profile write).",
-      "content_sha256": "82077f7ceb957c3d467213fe580cbb5dfec4f8fca921bcdb3698f5c7f44f1b5e",
+      "source_incident": "found 2026-07-20 while designing terminal coding-task artifact retention; refined 2026-07-26 after agent creation reported success for a failed profile write). Clarified 2026-09-24 during agent-stack acceptance.",
+      "content_sha256": "f26c3497f00f65deda274481673648f78232e61c7f53ff37fecc22bcec3d642c",
       "always_loaded": false
     },
     {
@@ -6938,8 +6938,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-conditional-readiness-fixtures-must-assert-their-precondition",
       "source_date": "2026-07-28",
-      "source_incident": "found 2026-07-28 while reviewing pending-approval settlement tests).",
-      "content_sha256": "606eb33b23899805f75908d1992441d0d84dd1804b0ba3794582bdcffbe2a99c",
+      "source_incident": "found 2026-07-28 while reviewing pending-approval settlement tests). Clarified 2026-09-24 during agent-stack acceptance.",
+      "content_sha256": "ea07ceda56a8f4f1dc83874cd68d10169d4bc7d48c8a84d8560bbe791a22afd6",
       "always_loaded": false
     },
     {
@@ -7796,8 +7796,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it",
       "source_date": "2026-08-04",
-      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations).",
-      "content_sha256": "37a15b1ac3a466ad853479cb153f553e90198937fa23f3aad1f7bc66d2e986f0",
+      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance.",
+      "content_sha256": "0fa77dd56975b252614d557acf69ec606b5a061e53c8acee41ae758014c55b49",
       "always_loaded": false
     },
     {
