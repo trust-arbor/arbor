@@ -74,15 +74,22 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
 
     {compute_branch, compute_purpose} = optional_compute_branch(context)
 
-    File.write!(dot_path, """
-    digraph QualificationAdmission {
-      start [shape=Mdiamond]
-      echo [type="transform", transform="identity", source_key="session.input", output_key="session.response"]
-      done [shape=Msquare]
-      start -> echo -> done
-      #{compute_branch}
-    }
-    """)
+    dot =
+      if context[:production_graph] do
+        File.read!(Path.expand("../../../specs/pipelines/session/turn.dot", __DIR__))
+      else
+        """
+        digraph QualificationAdmission {
+          start [shape=Mdiamond]
+          echo [type="transform", transform="identity", source_key="session.input", output_key="session.response"]
+          done [shape=Msquare]
+          start -> echo -> done
+          #{compute_branch}
+        }
+        """
+      end
+
+    File.write!(dot_path, dot)
 
     on_exit(fn -> File.rm_rf!(root) end)
     journal_supervisor = durable_journal!(Path.join(root, "authority-journal"))
@@ -136,7 +143,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
            "llm_model" => "qualification-model",
            "llm_runtime" => "arbor",
            "llm_fallback_chain" => [],
-           "tools" => [],
+           "tools" => if(context[:production_graph], do: ["memory_recall"], else: []),
            "stream" => false,
            "preprocessor_enabled" => false,
            "recover_session" => false
@@ -251,6 +258,15 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     assert response.content == "qualified fixture response"
     assert Session.get_state(c.session).turn_count == 1
     assert_receive {:qualification_metadata_request, "GET /api/v1/models HTTP/1.1"}
+    refute_received {:qualification_unexpected_http, _}
+  end
+
+  @tag production_graph: true
+  test "the production turn graph qualifies its selected Session tools without inference", c do
+    assert c.profile.projection["tools"]["selected"] == ["memory_recall"]
+    assert {:ok, prepared} = Session.prepare_security_qualification(c.session, c.run_id)
+    assert prepared.profile.fingerprint == c.profile.fingerprint
+    assert Session.get_state(c.session).turn_count == 0
     refute_received {:qualification_unexpected_http, _}
   end
 
