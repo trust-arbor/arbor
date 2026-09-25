@@ -13,6 +13,10 @@ serving metadata, selected tools and loaded action implementations, DOT graph,
 execution settings, current Security/Trust/Actions policy and permission declarations, approved skill versions,
 native containment artifact and loaded workflow/LLM/eval implementation identities.
 No caller-supplied fingerprint can override this capture.
+Tool schemas use the existing ActionCatalog normalization of the advertised name,
+description and parameter schema. Jido runtime callbacks are excluded because their
+serialized identity changes across node restarts; the separate action descriptor
+continues to bind the loaded executable implementation.
 The workflow binding reuses the Engine's execution manifest, including selected
 handler delegates and nested graphs. The Trust binding includes the configured
 policy module and its loaded implementation, not only the available modules.

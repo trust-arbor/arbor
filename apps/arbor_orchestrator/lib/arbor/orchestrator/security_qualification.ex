@@ -156,20 +156,29 @@ defmodule Arbor.Orchestrator.SecurityQualification do
     catalog = ActionsExecutor.build_action_map()
     modules = catalog |> Map.values() |> Enum.uniq() |> Enum.sort()
 
-    Enum.reduce_while(modules, {:ok, []}, fn module, {:ok, acc} ->
-      with {:ok, descriptor} <- Arbor.Actions.runtime_descriptor(module),
-           {:ok, schema} <- term_digest(module.to_tool()) do
-        {:cont, {:ok, [%{"descriptor" => descriptor, "schema_digest" => schema} | acc]}}
-      else
-        _ -> {:halt, {:error, :tool_identity_unavailable}}
-      end
-    end)
-    |> case do
-      {:ok, descriptors} ->
-        {:ok, %{"selected" => selected, "catalog" => Enum.reverse(descriptors)}}
+    # Jido's :function is a local callback whose serialized identity changes at
+    # node restart. Bind the normalized model-visible schema, while retaining
+    # the action owner's separate loaded-code descriptor.
+    with {:ok, snapshot} <- ActionCatalog.snapshot(modules: modules) do
+      Enum.reduce_while(modules, {:ok, []}, fn module, {:ok, acc} ->
+        with {:ok, descriptor} <- Arbor.Actions.runtime_descriptor(module),
+             {:ok, action} <- ActionCatalog.fetch(snapshot, descriptor["name"]),
+             {:ok, schema} <-
+               action
+               |> Map.take(["name", "description", "parameters_schema"])
+               |> term_digest() do
+          {:cont, {:ok, [%{"descriptor" => descriptor, "schema_digest" => schema} | acc]}}
+        else
+          _ -> {:halt, {:error, :tool_identity_unavailable}}
+        end
+      end)
+      |> case do
+        {:ok, descriptors} ->
+          {:ok, %{"selected" => selected, "catalog" => Enum.reverse(descriptors)}}
 
-      error ->
-        error
+        error ->
+          error
+      end
     end
   end
 

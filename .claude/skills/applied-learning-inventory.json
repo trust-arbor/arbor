@@ -7796,8 +7796,8 @@
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it",
       "source_date": "2026-08-04",
-      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance: serialize only known tagged snapshot structs and preserve raw policy identity before acceptance effects.",
-      "content_sha256": "51526a7d00735f4b97093155ee5c98389454ad97ba3ded925a5508ecc290161a",
+      "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance: serialize only known tagged snapshot structs and preserve raw policy identity before acceptance effects. Clarified 2026-09-24: fingerprint normalized model-visible schemas rather than callback identity; align Repo configuration with its serving owner, distinguish PostgreSQL address representation, and verify the Stop node ACK separately from PID absence.",
+      "content_sha256": "cfc8cd0ef6168c619ff0a8d49139e8ca64011afb65345d46d6592c0f6f8ad93f",
       "always_loaded": false
     },
     {

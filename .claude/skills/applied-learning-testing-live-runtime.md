@@ -827,6 +827,21 @@ fingerprint. Exercise the receipt against the actual public snapshot before
 acceptance effects (found 2026-09-24 when metadata-only capture reached real
 capability profiles).
 
+Fingerprint model-visible tool data, not incidental runtime terms: Jido tool maps
+can include callback functions whose node-creation identity changes after restart.
+Project the exact advertised JSON schema and bind executable owners separately;
+prove a fresh BEAM keeps the same profile while schema or executable changes still
+invalidate it. Do not normalize unknown code differences because source matches.
+
+Validate public configuration and result shapes against their actual owners
+before acceptance effects. A private Repo started with explicit `ConnectionPool`
+can still report Sandbox through `Repo.config/0` unless its owned configuration
+matches; fix the fixture, not migration verification. PostgreSQL
+`inet_server_addr()::text` can include `/32`; use `host(inet_server_addr())` when a gate
+expects a bare address, retaining the exact loopback check. Managed Stop returns
+`{:stopped, node_name}`; verify that tuple and separately observe the prior PID's
+absence (found 2026-09-24 during deployed qualification and cold restart).
+
 <!-- applied-learning: test-observation-helpers-must-not-acquire-authority -->
 <a id="applied-learning-test-observation-helpers-must-not-acquire-authority"></a>
 **Test observation helpers must not acquire authority.** A helper named
