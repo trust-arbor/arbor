@@ -178,8 +178,8 @@ defmodule Arbor.Orchestrator.SecurityQualification do
   # Never execute this view; the original workflow digest remains in the profile.
   defp manifest_graph(graph, selected) when is_list(selected) do
     if Enum.all?(selected, &(is_binary(&1) and Regex.match?(~r/\A[A-Za-z0-9_]+\z/, &1))) do
-      nodes =
-        Map.new(graph.nodes, fn {id, node} ->
+      projected_nodes =
+        Enum.reduce_while(graph.nodes, {:ok, %{}}, fn {id, node}, {:ok, nodes} ->
           attrs = node.attrs
 
           projected =
@@ -193,16 +193,36 @@ defmodule Arbor.Orchestrator.SecurityQualification do
               attrs
             end
 
-          {id, %{node | attrs: projected}}
+          case manifest_action_attrs(node, projected) do
+            {:ok, attrs} -> {:cont, {:ok, Map.put(nodes, id, %{node | attrs: attrs})}}
+            {:error, _} = error -> {:halt, error}
+          end
         end)
 
-      {:ok, %{graph | nodes: nodes}}
+      case projected_nodes do
+        {:ok, nodes} -> {:ok, %{graph | nodes: nodes}}
+        {:error, _} = error -> error
+      end
     else
       {:error, :unsupported_qualified_tool_selection}
     end
   end
 
   defp manifest_graph(_, _), do: {:error, :unsupported_qualified_tool_selection}
+
+  defp manifest_action_attrs(node, attrs) do
+    if node.handler_module == Arbor.Orchestrator.Handlers.ExecHandler and
+         Map.get(attrs, "target") == "action" do
+      # The actual executor accepts dotted aliases; the catalog uses canonical
+      # Jido names. Resolve through that owner so registry selection is bound too.
+      with {:ok, %{descriptor: %{"name" => name}}} <-
+             ActionsExecutor.resolve_execution_binding(Map.get(attrs, "action")) do
+        {:ok, Map.put(attrs, "action", name)}
+      end
+    else
+      {:ok, attrs}
+    end
+  end
 
   defp producer_identity do
     producer = Config.security_qualification_producer()
