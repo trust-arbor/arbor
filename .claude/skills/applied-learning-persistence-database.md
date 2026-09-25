@@ -20,6 +20,15 @@ contract matches the recovery claim (found 2026-07-20 while designing terminal
 coding-task artifact retention; refined 2026-07-26 after agent creation reported
 success for a failed profile write).
 
+Probe the exact serving backend through its owning facade, not a status label
+or a similarly named store: an audit sink configured with a volatile EventLog
+must not advertise restart-durable evidence. Distinguish acknowledged readback,
+owner-process reopen, and whole-BEAM loss. A controller-held store surviving a
+worker restart proves the first boundaries only; node-loss proof needs a fresh
+BEAM reading the same private physical database or journal after the original
+BEAM is gone, with exact record and pending-outcome comparisons (reconfirmed
+2026-09-24 during audit acceptance).
+
 <!-- applied-learning: persistence-record-logical-ids-are-global-across-the-shared-records-table -->
 <a id="applied-learning-persistence-record-logical-ids-are-global-across-the-shared-records-table"></a>
 **Persistence Record logical IDs are global across the shared `records` table.**
