@@ -11,6 +11,8 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
   alias Arbor.LLM.Client
+  alias Arbor.Orchestrator.ActionsExecutor
+  alias Arbor.Orchestrator.CodingPlan.ActionCatalog
   alias Arbor.Orchestrator.Handlers.{LlmHandler, RoutingHandler}
   alias Arbor.Orchestrator.Session
   alias Arbor.Persistence
@@ -251,6 +253,26 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
       profile: profile,
       approval_uri: prepared.approval_uri
     }
+  end
+
+  test "security regression: public Session binds model-visible schema without runtime callbacks", c do
+    assert {:ok, profile} = Session.security_qualification_profile(c.session)
+    modules = ActionsExecutor.build_action_map() |> Map.values() |> Enum.uniq()
+    assert {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
+    assert length(profile.projection["tools"]["catalog"]) == length(modules)
+
+    for entry <- profile.projection["tools"]["catalog"] do
+      assert {:ok, action} = ActionCatalog.fetch(catalog, entry["descriptor"]["name"])
+      schema = Map.take(action, ["name", "description", "parameters_schema"])
+
+      expected =
+        "sha256:" <>
+          Base.encode16(:crypto.hash(:sha256, :erlang.term_to_binary(schema, [:deterministic])),
+            case: :lower
+          )
+
+      assert entry["schema_digest"] == expected
+    end
   end
 
   test "real public Session admits exact signed qualification approval and completes a turn", c do
