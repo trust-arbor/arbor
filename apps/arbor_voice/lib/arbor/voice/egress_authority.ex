@@ -1,6 +1,7 @@
 defmodule Arbor.Voice.EgressAuthority do
   @moduledoc false
 
+  alias Arbor.Voice.ConversationAuthority
   alias Arbor.Voice.Redacted
 
   @xai_route %{
@@ -59,43 +60,22 @@ defmodule Arbor.Voice.EgressAuthority do
 
   def resolve_backend_route(_backend, _ai_module), do: {:error, :start_failed}
 
-  @spec authenticate_human(map(), map()) :: :ok | {:error, :start_failed}
-  def authenticate_human(%{kind: :local}, _config), do: :ok
-
-  def authenticate_human(%{kind: :external}, config) when is_map(config) do
-    security = Map.get(config, :security_module)
-    user_id = Map.get(config, :user_id)
-    agent_id = Map.get(config, :agent_id)
-    resource = chat_resource(agent_id)
-
-    with %Redacted{} = token <- Map.get(config, :session_token),
-         {:ok, receipt} <-
-           safe_apply(security, :authorize_and_issue_delivery_receipt, [
-             user_id,
-             resource,
-             :chat,
-             [session_token: Redacted.value(token)]
-           ]),
-         {:ok, ^user_id} <-
-           safe_apply(security, :consume_delivery_receipt, [receipt, resource, :chat]) do
-      :ok
-    else
-      _ -> {:error, :start_failed}
-    end
-  end
-
-  def authenticate_human(_route_context, _config), do: {:error, :start_failed}
-
   @spec prepare_session_authority(map(), map(), String.t(), pos_integer()) ::
           {:ok, session_authority()} | {:error, :start_failed}
   def prepare_session_authority(
         %{kind: :local, route: :none},
-        _config,
+        config,
         session_id,
         _reserved_ms
       ) do
     if canonical_session_id?(session_id) do
-      {:ok, %{kind: :local, route: :none, session_id: session_id}}
+      {:ok,
+       %{
+         kind: :local,
+         route: :none,
+         session_id: session_id,
+         conversation_binding: Map.get(config, :conversation_binding)
+       }}
     else
       {:error, :start_failed}
     end
@@ -144,7 +124,8 @@ defmodule Arbor.Voice.EgressAuthority do
          resource_uri: resource_uri,
          route_capability_id: capability_id,
          security_module: security,
-         trust_module: config.trust_module
+         trust_module: config.trust_module,
+         conversation_binding: Map.get(config, :conversation_binding)
        }}
     else
       {:invalid_capability_id, id} ->
@@ -360,6 +341,7 @@ defmodule Arbor.Voice.EgressAuthority do
   defp authorize_physical_effect(tid, effect, route) when effect in @effects do
     with {:ok, cell} <- read_cell(tid),
          false <- cell.poisoned,
+         :ok <- recheck_conversation(cell.session),
          true <- route == cell.session.route,
          :allow <- authorize_for_mode(cell, effect, route) do
       :allow
@@ -374,6 +356,33 @@ defmodule Arbor.Voice.EgressAuthority do
 
   defp authorize_physical_effect(_tid, _effect, _route),
     do: {:error, @authorization_error}
+
+  # The ResourceOwner checks every callback, including local backends that do
+  # not request cloud effect authorization. Close is always permitted so a
+  # revoked conversation can still release its resources.
+  def authorize_operation(_tid, :close), do: :ok
+
+  def authorize_operation(tid, _operation) do
+    with {:ok, cell} <- read_cell(tid),
+         false <- cell.poisoned,
+         true <- cell.mode not in [:fenced, :poisoned],
+         :ok <- recheck_conversation(cell.session) do
+      :ok
+    else
+      _ -> {:error, @authorization_error}
+    end
+  end
+
+  defp recheck_conversation(%{conversation_binding: %Redacted{} = binding}),
+    do: ConversationAuthority.recheck(binding)
+
+  # Standalone owner primitives contain no conversation. Every production
+  # Voice Session supplies a binding before handing ownership to ResourceOwner.
+  defp recheck_conversation(authority) do
+    if is_nil(Map.get(authority, :conversation_binding)),
+      do: :ok,
+      else: {:error, @authorization_error}
+  end
 
   defp authorize_for_mode(%{mode: :route, session: %{kind: :local}}, effect, :none)
        when effect in @route_effects,
@@ -614,11 +623,6 @@ defmodule Arbor.Voice.EgressAuthority do
   end
 
   defp canonical_scalar?(_), do: false
-
-  defp chat_resource(agent_id) when is_binary(agent_id),
-    do: "arbor://chat/agent/" <> agent_id
-
-  defp chat_resource(_), do: ""
 
   defp session_resource(session_id) when is_binary(session_id) do
     if canonical_session_id?(session_id) do

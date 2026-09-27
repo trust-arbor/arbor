@@ -165,7 +165,12 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
         %{"turn_detection" => nil}
         |> maybe_put("instructions", Map.get(config, :instructions))
         |> maybe_put("tools", Map.get(config, :tools))
-        |> put_media(Map.get(config, :audio))
+        |> put_media(
+          if(Map.get(config, :audio_mode) == :pcm16,
+            do: Map.get(config, :audio, %{}),
+            else: Map.get(config, :audio)
+          )
+        )
 
       session = %{session | input_format: nil, output_format: nil}
 

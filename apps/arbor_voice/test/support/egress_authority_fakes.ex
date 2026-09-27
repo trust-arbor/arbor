@@ -154,6 +154,24 @@ defmodule Arbor.Voice.Test.EgressAuthorityFakes do
     @moduledoc false
     alias Arbor.Voice.Test.EgressAuthorityFakes
 
+    def authorize_and_issue_conversation_receipt(subject, resource, action, opts),
+      do: authorize_and_issue_delivery_receipt(subject, resource, action, opts)
+
+    def conversation_receipt_owner(
+          {:voice_test_receipt, subject, resource, :chat},
+          subject,
+          target
+        ) do
+      if resource == "arbor://chat/agent/" <> target,
+        do: {:ok, subject},
+        else: {:error, :unauthorized}
+    end
+
+    def discard_delivery_receipt(_), do: :ok
+
+    def recheck_conversation_session(subject, _target, subject, token) when is_binary(token),
+      do: EgressAuthorityFakes.mode(:conversation_recheck, fn -> {:ok, :authorized} end)
+
     def authorize_and_issue_delivery_receipt(user_id, resource, action, opts) do
       token_present? = Keyword.get(opts, :session_token) not in [nil, ""]
       EgressAuthorityFakes.record({:receipt_issue, user_id, resource, action, token_present?})

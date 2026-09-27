@@ -1,1 +1,1 @@
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:isolated_repo, :llm, :llm_local])

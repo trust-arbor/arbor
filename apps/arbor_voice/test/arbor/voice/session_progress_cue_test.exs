@@ -146,7 +146,9 @@ defmodule Arbor.Voice.SessionProgressCueTest do
     SpeechProbe.reset()
 
     {:ok, _eng} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_progress", agent_id: "agent_x"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_72741e0bd647b52965234e7f41517717", agent_id: "agent_x"}}
+      )
 
     {:ok, _ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()
@@ -154,6 +156,7 @@ defmodule Arbor.Voice.SessionProgressCueTest do
 
     opts =
       [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: FakeLedger,
@@ -185,6 +188,7 @@ defmodule Arbor.Voice.SessionProgressCueTest do
   end
 
   setup do
+    Arbor.Voice.Test.ConversationSecurityFixture.install()
     assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
     :ok
   end
@@ -246,7 +250,7 @@ defmodule Arbor.Voice.SessionProgressCueTest do
     assert data.speech_output == :accepted
     assert data.user_id == user_id
     assert data.agent_id == agent_id
-    assert data.engagement_id == "eng_progress"
+    assert data.engagement_id == "eng_72741e0bd647b52965234e7f41517717"
     refute Map.has_key?(data, :call_id)
     refute Map.has_key?(data, :name)
     refute Map.has_key?(data, :arguments)

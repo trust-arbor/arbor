@@ -466,6 +466,10 @@ defmodule Arbor.Voice.Config do
   @security_exports [
     authorize: 4,
     authorize_and_issue_delivery_receipt: 4,
+    authorize_and_issue_conversation_receipt: 4,
+    conversation_receipt_owner: 3,
+    recheck_conversation_session: 4,
+    discard_delivery_receipt: 1,
     consume_delivery_receipt: 3,
     grant_capability_id: 1,
     issue_disclosure_capability_id: 1,

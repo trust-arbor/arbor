@@ -252,7 +252,9 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     SharedTransport.reset(frames)
 
     {:ok, eng} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_consult_e2e", agent_id: "agent_x"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_e0fa222f4eca4f9f5eade82cc4f23666", agent_id: "agent_x"}}
+      )
 
     {:ok, _ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()
@@ -325,7 +327,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert router_context.arguments == %{"message" => "what is status?"}
     assert router_context.user_id == user_id
     assert router_context.agent_id == agent_id
-    assert router_context.engagement_id == "eng_consult_e2e"
+    assert router_context.engagement_id == "eng_e0fa222f4eca4f9f5eade82cc4f23666"
     refute Map.has_key?(router_context, :session_token)
     refute Map.has_key?(router_context, :authority)
     refute inspect(router_context) =~ @distinctive_token
@@ -404,7 +406,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
 
   @tag spec: "VOICE-9"
   @tag :security_regression
-  test "security regression: unauthenticated local backend preserves consult engagement without proof",
+  test "security regression: authenticated local backend preserves the pinned consult engagement",
        %{opts: opts, recorder: recorder} do
     FakeAgentFacade.reset()
     ControllableTurnBackend.ensure_table!()
@@ -423,12 +425,11 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
 
     local_opts =
       opts
-      |> Keyword.delete(:session_token)
       |> Keyword.put(:backend, ControllableTurnBackend)
       |> Keyword.put(:backend_opts, [])
       |> Keyword.put(:tool_router, FrontDesk)
 
-    refute Keyword.has_key?(local_opts, :session_token)
+    assert Keyword.has_key?(local_opts, :session_token)
     assert ControllableTurnBackend.egress_route() == :none
 
     {user_id, agent_id} = unique_ids()
@@ -445,10 +446,13 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert call.message.content == "local status"
     assert call.message.transport == :voice
     assert call.message.sender_id == user_id
-    assert call.message.engagement_id == "eng_consult_e2e"
-    assert call.opts == [timeout: 5_000]
-    refute Keyword.has_key?(call.opts, :session_token)
-    refute inspect(call) =~ "session_token"
+    assert call.message.engagement_id == nil
+
+    assert call.opts == [
+             timeout: 5_000,
+             session_token: @distinctive_token,
+             expected_engagement_id: "eng_e0fa222f4eca4f9f5eade82cc4f23666"
+           ]
 
     assert [{"call_local_consult", output}] = ControllableTurnBackend.tool_results()
 
@@ -457,7 +461,10 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
              "result" => %{"reply" => "agent grounded reply"}
            }
 
-    assert [{^agent_id, "eng_consult_e2e", _user_entry, assistant_entry, _record_opts}] =
+    assert [
+             {^agent_id, "eng_e0fa222f4eca4f9f5eade82cc4f23666", _user_entry, assistant_entry,
+              _record_opts}
+           ] =
              FakeCommsSession.record_calls(recorder)
 
     assert assistant_entry.content == "Local consult final"
@@ -490,7 +497,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
 
     opts = Keyword.delete(opts, :session_token)
     {user_id, agent_id} = unique_ids()
-    assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, opts)
+    assert {:error, :invalid_opts} = Voice.start_session(user_id, agent_id, opts)
     assert FakeAgentFacade.calls() == []
     assert SharedTransport.sent() == []
     assert EgressAuthorityFakes.active_capabilities() == []

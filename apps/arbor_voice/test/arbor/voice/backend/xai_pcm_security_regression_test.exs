@@ -117,6 +117,20 @@ defmodule Arbor.Voice.Backend.XaiPcmSecurityRegressionTest do
     end
   end
 
+  test "PCM-mode configuration requests provider audio while retaining exact JSON format acknowledgement" do
+    {:ok, session} = raw_open([])
+    assert {:ok, session} = XaiRealtime.configure(session, %{audio_mode: :pcm16})
+    [update] = session.transport_state.sent
+    refute update["session"]["modalities"] == ["text"]
+    assert update["session"]["audio"]["input"]["format"]["rate"] == 16_000
+    assert update["session"]["audio"]["output"]["transport"] == "json"
+
+    assert %{input_format: %{sample_rate: 16_000}, output_format: %{sample_rate: 24_000}} =
+             XaiRealtime.meta(session)
+
+    assert {:ok, _} = XaiRealtime.send_audio(session, <<0, 0>>)
+  end
+
   test "startup control events do not renew the configuration acknowledgement deadline" do
     key = {__MODULE__, make_ref()}
     Process.put(key, 0)

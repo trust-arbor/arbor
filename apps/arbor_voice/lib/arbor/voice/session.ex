@@ -9,11 +9,15 @@ defmodule Arbor.Voice.Session do
 
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
+  alias Arbor.Voice.ConversationAuthority
+  alias Arbor.Voice.Contracts.AudioTurn
   alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.PcmFormat
   alias Arbor.Voice.Redacted
   alias Arbor.Voice.ResourceOwner
   alias Arbor.Voice.Session.ManagedDispatchCore
+  alias Arbor.Voice.Session.AudioPresentationCore
+  alias Arbor.Voice.Session.AudioTurnCore
   alias Arbor.Voice.Session.Settlement
   alias Arbor.Voice.Session.ToolTaskCore
   alias Arbor.Voice.Session.TurnCore
@@ -34,6 +38,7 @@ defmodule Arbor.Voice.Session do
   @default_owner_max_recv_ms 1_000
   # Text turns can run until hard budget; reply path clears the caller.
   @turn_call_timeout_ms :infinity
+  @audio_turn_timeout_ms 30_000
   # Max bytes of a guarded speakable string offered to speech_output.
   @speech_output_max_bytes 8192
   # Dedicated acceptance-seam Task.Supervisor (VP-04E2R1). Not ResourceCleanup.
@@ -106,6 +111,22 @@ defmodule Arbor.Voice.Session do
     :exit, _ -> {:error, :session_stopped}
   end
 
+  @doc false
+  def audio_turn(pid, %Redacted{} = input, operation) when is_pid(pid) do
+    GenServer.call(pid, {:audio_turn, input, operation}, :infinity)
+  catch
+    :exit, {{:shutdown, :cleanup_pending}, _} -> {:error, :cleanup_pending}
+    :exit, _ -> {:error, :session_stopped}
+  end
+
+  @doc false
+  def cancel_audio_turn(pid, operation_id) when is_pid(pid) do
+    GenServer.call(pid, {:cancel_audio_turn, operation_id}, @stop_call_timeout_ms)
+  catch
+    :exit, {{:shutdown, :cleanup_pending}, _} -> {:error, :cleanup_pending}
+    :exit, _ -> {:error, :not_found}
+  end
+
   defp via(session_key), do: {:via, Registry, {@registry, session_key}}
 
   # ---------------------------------------------------------------------------
@@ -128,8 +149,9 @@ defmodule Arbor.Voice.Session do
            EgressAuthority.resolve_backend_route(config.backend, config.ai_module),
          voice_session_id <- Identifiers.generate_session_id(),
          true <- EgressAuthority.canonical_session_id?(voice_session_id),
-         :ok <- EgressAuthority.authenticate_human(route_context, config),
-         {:ok, engagement_id} <- resolve_engagement(config) do
+         {:ok, binding} <- ConversationAuthority.admit(config) do
+      engagement_id = Redacted.value(binding).engagement_id
+      config = Map.put(config, :conversation_binding, binding)
       after_engagement(config, engagement_id, route_context, voice_session_id)
     else
       {:error, reason} -> {:error, reason}
@@ -232,9 +254,9 @@ defmodule Arbor.Voice.Session do
          owner_ref
        ) do
     case configure_and_read_meta(config, owner) do
-      {:ok, backend, mode} ->
+      {:ok, backend, mode, formats} ->
         after_backend_ready(
-          config,
+          Map.put(config, :audio_formats, formats),
           engagement_id,
           tool_authority,
           voice_session_id,
@@ -281,6 +303,9 @@ defmodule Arbor.Voice.Session do
           session_key: config.session_key,
           voice_session_id: voice_session_id,
           engagement_id: engagement_id,
+          conversation_binding: config.conversation_binding,
+          audio_mode: Map.get(config, :audio_mode, :text),
+          audio_formats: config.audio_formats,
           owner: owner,
           owner_ref: owner_ref,
           # Needed only to mint bounded per-turn authority. Lease-owned route
@@ -307,8 +332,8 @@ defmodule Arbor.Voice.Session do
           tool_router_timeout_ms: config.tool_router_timeout_ms,
           tool_declarations: config.tool_declarations,
           progress_threshold_ms: config.progress_threshold_ms,
-          # Single live retention path for the redacted proof: closed over
-          # inside tool_authority only (never a separate Session field).
+          # Tools close over the same immutable binding; router context never
+          # contains its proof. The binding outlives each turn-egress lease.
           tool_authority: tool_authority,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
@@ -341,38 +366,6 @@ defmodule Arbor.Voice.Session do
   # ---------------------------------------------------------------------------
   # Startup steps
   # ---------------------------------------------------------------------------
-
-  defp resolve_engagement(config) do
-    comms_opts =
-      case config.engagement_store do
-        nil -> []
-        store -> [engagement_store: store]
-      end
-
-    try do
-      case config.comms.resolve_user_engagement(config.agent_id, config.user_id, comms_opts) do
-        {:ok, engagement} ->
-          case engagement_id(engagement) do
-            {:ok, id} -> {:ok, id}
-            :error -> {:error, :engagement_unavailable}
-          end
-
-        {:error, _reason} ->
-          {:error, :engagement_unavailable}
-
-        _other ->
-          {:error, :engagement_unavailable}
-      end
-    catch
-      _kind, _reason ->
-        {:error, :engagement_unavailable}
-    end
-  end
-
-  defp engagement_id(%{id: id}) when is_binary(id) and id != "", do: {:ok, id}
-  defp engagement_id(%{id: id}) when is_binary(id), do: :error
-  defp engagement_id(%{id: id}) when is_atom(id), do: :error
-  defp engagement_id(_), do: :error
 
   defp reserve_budget(config) do
     # Wall clock is an injected collaborator: invoke inside catch/normalization
@@ -601,12 +594,17 @@ defmodule Arbor.Voice.Session do
   defp configure_and_read_meta(config, owner) do
     tools = Map.get(config, :tool_declarations, [])
 
+    configure =
+      if Map.get(config, :audio_mode) == :pcm16,
+        do: %{tools: tools, audio_mode: :pcm16},
+        else: %{tools: tools}
+
     try do
-      case config.resource_owner.configure(owner, %{tools: tools}) do
+      case config.resource_owner.configure(owner, configure) do
         :ok ->
           case config.resource_owner.meta(owner) do
             {:ok, meta} ->
-              reduce_backend_meta(meta)
+              reduce_backend_meta(meta, Map.get(config, :audio_mode, :text))
 
             {:error, _reason} ->
               {:error, :start_failed}
@@ -627,8 +625,8 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  # Fixed tool authority: binds caller, target, engagement, timeout, optional
-  # redacted proof, and (when catalog requires it) orchestrator roots + policy
+  # Fixed tool authority: binds caller, target, engagement, timeout, redacted
+  # proof, and (when catalog requires it) orchestrator roots + policy
   # factory. Router never sees raw credentials or MFA choice.
   defp build_tool_authority(config, engagement_id) do
     user_id = config.user_id
@@ -637,25 +635,23 @@ defmodule Arbor.Voice.Session do
     redacted = config.session_token
     agent_module = config.agent_module
     orchestrator_module = Map.get(config, :orchestrator_module)
+    binding = config.conversation_binding
 
     base = %{
       consult_agent: fn message when is_binary(message) ->
-        {um, opts} =
-          case redacted do
-            nil ->
-              um =
-                message
-                |> UserMessage.from_voice(sender_id: user_id)
-                |> UserMessage.with_engagement(engagement_id)
-
-              {um, [timeout: tool_timeout_ms]}
-
-            %Redacted{} = r ->
-              um = UserMessage.from_voice(message, sender_id: user_id)
-              {um, [timeout: tool_timeout_ms, session_token: Redacted.value(r)]}
-          end
-
-        agent_module.send_message(user_id, agent_id, um, opts)
+        with :ok <- ConversationAuthority.recheck(binding),
+             um = UserMessage.from_voice(message, sender_id: user_id),
+             opts = [
+               timeout: tool_timeout_ms,
+               session_token: Redacted.value(redacted),
+               expected_engagement_id: engagement_id
+             ],
+             {:ok, reply} <- agent_module.send_message(user_id, agent_id, um, opts),
+             :ok <- ConversationAuthority.recheck(binding) do
+          {:ok, reply}
+        else
+          _ -> {:error, :tool_error}
+        end
       end
     }
 
@@ -665,14 +661,16 @@ defmodule Arbor.Voice.Session do
 
       orch when is_atom(orch) and not is_nil(orch) ->
         Map.put(base, :dispatch_coding_task, fn task_intent when is_binary(task_intent) ->
-          dispatch_coding_task(
-            task_intent,
-            user_id,
-            agent_id,
-            agent_module,
-            orch,
-            redacted
-          )
+          with :ok <- ConversationAuthority.recheck(binding) do
+            dispatch_coding_task(
+              task_intent,
+              user_id,
+              agent_id,
+              agent_module,
+              orch,
+              redacted
+            )
+          end
         end)
     end
   end
@@ -736,12 +734,24 @@ defmodule Arbor.Voice.Session do
 
   defp first_coding_root(_), do: {:error, :roots_unavailable}
 
-  defp reduce_backend_meta(%{backend: backend, mode: mode})
+  defp reduce_backend_meta(%{backend: backend, mode: mode} = meta, audio_mode)
        when is_atom(backend) and not is_nil(backend) and mode in [:cloud, :local] do
-    {:ok, backend, mode}
+    formats = Map.take(meta, [:input_format, :output_format])
+
+    if audio_mode == :pcm16 do
+      with :ok <- PcmFormat.validate_meta(meta),
+           :ok <- PcmFormat.validate(meta.input_format),
+           :ok <- PcmFormat.validate(meta.output_format) do
+        {:ok, backend, mode, formats}
+      else
+        _ -> {:error, :start_failed}
+      end
+    else
+      {:ok, backend, mode, formats}
+    end
   end
 
-  defp reduce_backend_meta(_), do: {:error, :start_failed}
+  defp reduce_backend_meta(_, _), do: {:error, :start_failed}
 
   defp settle_release(settlement, config) do
     now_ms =
@@ -804,6 +814,11 @@ defmodule Arbor.Voice.Session do
     {:reply, {:error, :not_found}, state}
   end
 
+  def handle_call(:stop, _from, %{turn: %{kind: :audio} = turn, closing: false} = state) do
+    next = finish_audio_error(state, turn, :session_stopped)
+    {:reply, audio_cleanup_reply(next), next}
+  end
+
   def handle_call(:stop, _from, %{lifecycle: :ready, closing: false} = state) do
     turn = state.turn
     state = cancel_pending_tools_with_outputs(state)
@@ -837,6 +852,13 @@ defmodule Arbor.Voice.Session do
     {:reply, {:error, :not_found}, state}
   end
 
+  def handle_call(
+        {:text_turn, _user_text},
+        _from,
+        %{lifecycle: :ready, closing: false, audio_mode: :pcm16} = state
+      ),
+      do: {:reply, {:error, :audio_only_session}, state}
+
   def handle_call({:text_turn, user_text}, from, %{lifecycle: :ready, closing: false} = state)
       when is_binary(user_text) do
     # In-flight turn is always a map; nil means idle.
@@ -869,6 +891,30 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_call(
+        {:audio_turn, input, operation},
+        from,
+        %{lifecycle: :ready, closing: false} = state
+      ) do
+    cond do
+      is_map(state.turn) or is_map(state.audio_operation) -> {:reply, {:error, :busy}, state}
+      state.audio_mode != :pcm16 -> {:reply, {:error, :audio_not_enabled}, state}
+      true -> begin_audio_turn(state, from, input, operation)
+    end
+  end
+
+  def handle_call(
+        {:cancel_audio_turn, id},
+        _from,
+        %{turn: %{kind: :audio, operation_id: id} = turn, closing: false} = state
+      ) do
+    next = finish_audio_error(state, turn, :audio_cancelled)
+    {:reply, audio_cleanup_reply(next), next}
+  end
+
+  def handle_call({:cancel_audio_turn, _id}, _from, state),
+    do: {:reply, {:error, :not_found}, state}
+
+  def handle_call(
         {:audio_send_once, format, pcm, timeout_ms},
         from,
         %{lifecycle: :ready, closing: false} = state
@@ -895,6 +941,12 @@ defmodule Arbor.Voice.Session do
   # ---------------------------------------------------------------------------
 
   @impl true
+  def handle_info(:hard_timeout, %{turn: %{kind: :audio} = turn, closing: false} = state) do
+    next = finish_audio_error(state, turn, :budget_exhausted)
+    if audio_cleanup_reply(next) == :ok, do: offer_speech(next, @budget_exhaustion_notice)
+    {:noreply, next}
+  end
+
   def handle_info(:hard_timeout, %{lifecycle: :ready, closing: false} = state) do
     turn = state.turn
     state = cancel_pending_tools_with_outputs(state)
@@ -928,6 +980,34 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info(:hard_timeout, state), do: {:noreply, state}
+
+  def handle_info(
+        {:audio_turn_deadline, generation, token},
+        %{
+          turn: %{kind: :audio, generation: generation, deadline_token: token} = turn,
+          closing: false
+        } = state
+      ) do
+    {:noreply, finish_audio_error(state, turn, :turn_timeout)}
+  end
+
+  def handle_info({:audio_turn_deadline, _, _}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:voice_audio_turn_ready, ticket},
+        %{turn: %{kind: :audio, ticket: ticket, audio_phase: :sending} = turn, closing: false} =
+          state
+      ) do
+    next = %{turn | audio_phase: :receiving, request_id: nil}
+    {:noreply, enqueue_poll(%{state | turn: next}, turn.generation)}
+  end
+
+  def handle_info(
+        {:voice_audio_operation_result, ticket, _, _},
+        %{turn: %{kind: :audio, ticket: ticket} = turn, closing: false} = state
+      ) do
+    {:noreply, finish_audio_error(state, turn, :turn_failed)}
+  end
 
   def handle_info(
         {:voice_audio_operation_result, _, _, _} = message,
@@ -1018,6 +1098,13 @@ defmodule Arbor.Voice.Session do
   def handle_info({:tool_progress, _gen, _id, _token}, state), do: {:noreply, state}
 
   def handle_info(
+        {:DOWN, ref, :process, caller, _},
+        %{turn: %{kind: :audio, caller_ref: ref, caller: caller} = turn, closing: false} = state
+      ) do
+    {:noreply, finish_audio_error(state, turn, :audio_cancelled)}
+  end
+
+  def handle_info(
         {:DOWN, ref, :process, caller, _reason},
         %{audio_operation: %{caller_ref: ref, caller: caller}} = state
       ) do
@@ -1054,6 +1141,30 @@ defmodule Arbor.Voice.Session do
 
   def handle_info({:DOWN, _mon, :process, _pid, _reason}, state), do: {:noreply, state}
 
+  def handle_info(
+        message,
+        %{turn: %{kind: :audio, request_id: request_id} = turn, closing: false} = state
+      )
+      when not is_nil(request_id) do
+    case :gen_server.check_response(message, request_id) do
+      {:reply, :ok} when turn.audio_phase == :sending ->
+        {:noreply, %{state | turn: %{turn | request_id: nil}}}
+
+      {:reply, %Redacted{} = reply} when turn.audio_phase == :receiving ->
+        next = %{turn | request_id: nil}
+        {:noreply, receive_audio_reply(%{state | turn: next}, next, Redacted.value(reply))}
+
+      {:reply, _} ->
+        {:noreply, finish_audio_error(state, turn, :turn_failed)}
+
+      {:error, _} ->
+        {:noreply, finish_audio_error(state, turn, :turn_failed)}
+
+      :no_reply ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(message, %{audio_operation: %{request_id: request_id}} = state)
       when not is_nil(request_id) do
     case :gen_server.check_response(message, request_id) do
@@ -1074,6 +1185,9 @@ defmodule Arbor.Voice.Session do
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp handle_resource_owner_down(state) do
+    if match?(%{kind: :audio}, state.turn),
+      do: emit_audio_telemetry(state, state.turn, :cleanup_pending)
+
     state = reply_audio_operation(state, {:error, :cleanup_pending}, :session_stopped)
     turn = state.turn
 
@@ -1149,7 +1263,8 @@ defmodule Arbor.Voice.Session do
   # ---------------------------------------------------------------------------
 
   defp begin_text_turn(state, from, user_text) do
-    with {:ok, wall} <- read_wall_clock_utc(state.wall_clock),
+    with :ok <- ConversationAuthority.admit_turn(state.conversation_binding),
+         {:ok, wall} <- read_wall_clock_utc(state.wall_clock),
          {:ok, started_ms} <- read_monotonic_ms(state.monotonic_clock),
          {:ok, turn_lease} <- prepare_turn_authority(state) do
       user_message =
@@ -1191,6 +1306,11 @@ defmodule Arbor.Voice.Session do
           end
       end
     else
+      {:error, :conversation_unauthorized} ->
+        {next_state, cleanup_result} = close_session_without_turn(state, :turn_failed, nil)
+        reason = if cleanup_result == :ok, do: :turn_failed, else: :cleanup_pending
+        {:fatal, reason, next_state}
+
       {:error, :invalid_clock} ->
         {:error, :turn_failed, state}
 
@@ -1211,8 +1331,274 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  defp begin_audio_turn(state, from, %Redacted{value: %{pcm: pcm, format: format}}, operation)
+       when is_map(operation) do
+    validated =
+      with :ok <- PcmFormat.validate(format),
+           :ok <- PcmFormat.validate_pcm(pcm),
+           true <- format == state.audio_formats.input_format,
+           true <- byte_size(pcm) <= format.sample_rate * 2 * AudioTurn.max_input_seconds(),
+           {:ok, operation} <- AudioTurn.options(Map.to_list(operation)),
+           {:ok, started_ms} <- read_monotonic_ms(state.monotonic_clock),
+           {:ok, wall} <- read_wall_clock_utc(state.wall_clock),
+           {:ok, core} <- AudioTurnCore.new(state.audio_formats.output_format) do
+        {:ok, operation, started_ms, wall, core}
+      else
+        _ -> {:error, :invalid_audio}
+      end
+
+    case validated do
+      {:ok, operation, started_ms, wall, core} ->
+        admit_audio_turn(state, from, pcm, format, operation, started_ms, wall, core)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp begin_audio_turn(state, _from, _input, _operation),
+    do: {:reply, {:error, :invalid_audio}, state}
+
+  defp admit_audio_turn(state, from, pcm, format, operation, started_ms, wall, core) do
+    with :ok <- ConversationAuthority.admit_turn(state.conversation_binding),
+         {:ok, lease} <- prepare_turn_authority(state) do
+      {caller, _} = from
+
+      deadline_token = make_ref()
+      generation = state.turn_generation + 1
+
+      deadline_timer =
+        Process.send_after(
+          self(),
+          {:audio_turn_deadline, generation, deadline_token},
+          @audio_turn_timeout_ms
+        )
+
+      turn = %{
+        kind: :audio,
+        generation: generation,
+        deadline_ms: System.monotonic_time(:millisecond) + @audio_turn_timeout_ms,
+        deadline_token: deadline_token,
+        deadline_timer: deadline_timer,
+        from: from,
+        user_message: nil,
+        core: core,
+        started_ms: started_ms,
+        utterance_ended_at: operation.utterance_ended_at,
+        capture_delay_ms: max(0, DateTime.diff(wall, operation.utterance_ended_at, :millisecond)),
+        first_audio_ms: nil,
+        operation_id: operation.operation_id,
+        caller: caller,
+        caller_ref: Process.monitor(caller),
+        turn_id: lease.turn_id,
+        lease: Redacted.new(lease),
+        pending: %{},
+        dispatch: ManagedDispatchCore.new(),
+        ticket: nil,
+        request_id: nil,
+        audio_phase: :sending
+      }
+
+      active = %{state | turn: turn, turn_generation: turn.generation}
+
+      result =
+        try do
+          with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+               {:ok, ticket} <-
+                 state.resource_owner.reserve_audio_turn(
+                   state.owner,
+                   format,
+                   byte_size(pcm),
+                   30_000
+                 ),
+               {:ok, request_id} <- state.resource_owner.handoff_audio(state.owner, ticket, pcm) do
+            {:ok, ticket, request_id}
+          end
+        catch
+          _, _ -> {:error, :turn_failed}
+        end
+
+      case result do
+        {:ok, ticket, request_id} ->
+          {:noreply, %{active | turn: %{turn | ticket: ticket, request_id: request_id}}}
+
+        _ ->
+          {:noreply, finish_audio_error(active, turn, :turn_failed)}
+      end
+    else
+      {:error, _, {:fatal, provisional}} ->
+        {next, cleanup} = close_session_without_turn(state, :turn_failed, provisional)
+        audio_start_failure(next, cleanup)
+
+      {:error, :conversation_unauthorized} ->
+        {next, cleanup} = close_session_without_turn(state, :turn_failed, nil)
+        audio_start_failure(next, cleanup)
+
+      _ ->
+        {:reply, {:error, :turn_failed}, state}
+    end
+  end
+
+  defp receive_audio_reply(state, turn, reply) do
+    if audio_turn_current?(state, turn) do
+      case reply do
+        {:ok, event} -> apply_audio_event(state, turn, event)
+        {:error, :timeout} -> enqueue_poll(state, turn.generation)
+        _ -> finish_audio_error(state, turn, :turn_failed)
+      end
+    else
+      finish_audio_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp apply_audio_event(state, turn, event) do
+    turn =
+      if match?({:output_audio, _}, event) and is_nil(turn.first_audio_ms),
+        do: %{turn | first_audio_ms: turn.capture_delay_ms + turn_duration_ms(state, turn)},
+        else: turn
+
+    case AudioTurnCore.reduce(turn.core, event) do
+      {:continue, core} ->
+        enqueue_poll(%{state | turn: %{turn | core: core}}, turn.generation)
+
+      {:cycle_reset, core} ->
+        next =
+          turn
+          |> Map.put(:core, core)
+          |> Map.put(:first_audio_ms, nil)
+          |> Map.delete(:held_terminal)
+
+        enqueue_poll(%{state | turn: next}, turn.generation)
+
+      {:admit_tool, core, call} ->
+        next =
+          turn
+          |> Map.put(:core, core)
+          |> Map.put(:first_audio_ms, nil)
+          |> Map.delete(:held_terminal)
+
+        admit_and_route_tool(%{state | turn: next}, next, call)
+
+      {:done, completed} ->
+        if map_size(turn.pending) == 0 do
+          complete_audio_turn(state, turn, completed)
+        else
+          %{state | turn: Map.put(turn, :held_terminal, completed)}
+        end
+
+      {:error, _} ->
+        finish_audio_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp complete_audio_turn(state, turn, %Redacted{} = completed) do
+    data = Redacted.value(completed)
+
+    user_message =
+      data.input_transcript
+      |> UserMessage.from_voice(sent_at: turn.utterance_ended_at, sender_id: state.user_id)
+      |> UserMessage.with_engagement(state.engagement_id)
+
+    turn = %{turn | user_message: user_message}
+    final_text = ManagedDispatchCore.select_raw_assistant(turn.dispatch, data.provider_text)
+
+    with :healthy <- finalize_turn_authority(state, turn),
+         true <- audio_turn_current?(state, turn),
+         :ok <- ConversationAuthority.recheck(state.conversation_binding),
+         :ok <- record_transcript(state, turn, final_text),
+         true <- audio_turn_current?(state, turn),
+         :ok <- ConversationAuthority.recheck(state.conversation_binding) do
+      presentation = audio_presentation(state, data, final_text)
+      turn = if is_binary(presentation.audio), do: turn, else: %{turn | first_audio_ms: nil}
+      {next, cleanup} = quarantine_turn(%{state | turn: turn})
+
+      if cleanup == :ok and audio_turn_current?(next, turn) do
+        result = %{
+          operation_id: turn.operation_id,
+          reply: final_text,
+          input_transcript: data.input_transcript,
+          presentation: presentation
+        }
+
+        emit_audio_telemetry(next, turn, :success)
+        safe_reply(turn.from, {:ok, result})
+        clear_turn(next)
+      else
+        reason = if cleanup == :ok, do: :turn_failed, else: :cleanup_pending
+        emit_audio_telemetry(next, turn, reason)
+        safe_reply(turn.from, {:error, reason})
+        clear_turn(next)
+      end
+    else
+      {:error, :transcript_record_failed} ->
+        safe_emit(state, :"transcript.record_failed")
+        finish_audio_error(state, turn, :transcript_record_failed)
+
+      _ ->
+        finish_audio_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp audio_presentation(state, data, final_text) do
+    with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+         verdict <- state.speakable.render(final_text, []),
+         guarded <- state.speakable.tts_guard!(verdict),
+         :ok <- ConversationAuthority.recheck(state.conversation_binding) do
+      AudioPresentationCore.render(%{
+        provider_terminal_text: data.provider_terminal_text,
+        final_text: final_text,
+        verdict: verdict,
+        guarded_text: guarded,
+        audio: data.audio,
+        audio_format: data.output_format,
+        authorized_format: state.audio_formats.output_format
+      })
+    else
+      _ -> AudioPresentationCore.render(%{})
+    end
+  rescue
+    _ -> AudioPresentationCore.render(%{})
+  catch
+    _, _ -> AudioPresentationCore.render(%{})
+  end
+
+  defp finish_audio_error(state, turn, reason) do
+    state = cancel_pending_tools_without_outputs(%{state | turn: turn})
+    {next, cleanup} = quarantine_turn(state)
+    reason = if cleanup == :ok, do: reason, else: :cleanup_pending
+    emit_audio_telemetry(next, turn, reason)
+    safe_reply(turn.from, {:error, reason})
+    clear_turn(next)
+  end
+
+  defp audio_cleanup_reply(%{terminal_stop_reason: @cleanup_pending_stop_reason}),
+    do: {:error, :cleanup_pending}
+
+  defp audio_cleanup_reply(_), do: :ok
+
+  defp emit_audio_telemetry(state, turn, status) do
+    :telemetry.execute(
+      [:arbor_voice, :turn],
+      %{
+        ack_ms: nil,
+        first_audio_ms: if(status == :success, do: turn.first_audio_ms, else: nil),
+        total_ms: turn_duration_ms(state, turn)
+      },
+      %{kind: :audio, status: status, backend: state.backend, mode: state.mode}
+    )
+  end
+
+  defp audio_turn_current?(state, turn),
+    do:
+      System.monotonic_time(:millisecond) < turn.deadline_ms and
+        ConversationAuthority.recheck(state.conversation_binding) == :ok
+
   defp begin_audio_operation(state, from, format, pcm, timeout_ms) do
-    case prepare_turn_authority(state) do
+    admission =
+      with :ok <- ConversationAuthority.admit_turn(state.conversation_binding),
+           do: prepare_turn_authority(state)
+
+    case admission do
       {:ok, _lease} ->
         result =
           try do
@@ -1251,6 +1637,10 @@ defmodule Arbor.Voice.Session do
 
       {:error, _, {:fatal, provisional}} ->
         {state, cleanup} = close_session_without_turn(state, :audio_failed, provisional)
+        audio_start_failure(state, cleanup)
+
+      {:error, :conversation_unauthorized} ->
+        {state, cleanup} = close_session_without_turn(state, :audio_failed, nil)
         audio_start_failure(state, cleanup)
 
       _ ->
@@ -1378,7 +1768,11 @@ defmodule Arbor.Voice.Session do
 
   defp safe_send_text(state, user_text) do
     try do
-      case state.resource_owner.send_text(state.owner, user_text) do
+      result =
+        with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+             do: state.resource_owner.send_text(state.owner, user_text)
+
+      case result do
         :ok -> :ok
         {:error, _reason} -> {:error, :turn_failed}
         _other -> {:error, :turn_failed}
@@ -1388,6 +1782,26 @@ defmodule Arbor.Voice.Session do
         {:error, :turn_failed}
     end
   end
+
+  defp poll_turn(state, %{kind: :audio, audio_phase: :receiving, request_id: nil} = turn) do
+    result =
+      with true <- audio_turn_current?(state, turn),
+           do:
+             state.resource_owner.recv_audio_request(
+               state.owner,
+               turn.ticket,
+               state.poll_window_ms
+             )
+
+    case result do
+      {:ok, request_id} -> %{state | turn: %{turn | request_id: request_id}}
+      _ -> finish_audio_error(state, turn, :turn_failed)
+    end
+  catch
+    _, _ -> finish_audio_error(state, turn, :turn_failed)
+  end
+
+  defp poll_turn(state, %{kind: :audio}), do: state
 
   defp poll_turn(state, turn) do
     case safe_recv(state) do
@@ -1407,7 +1821,13 @@ defmodule Arbor.Voice.Session do
     window_ms = state.poll_window_ms
 
     try do
-      case state.resource_owner.recv(state.owner, window_ms) do
+      result =
+        with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+             {:ok, event} <- state.resource_owner.recv(state.owner, window_ms),
+             :ok <- ConversationAuthority.recheck(state.conversation_binding),
+             do: {:ok, event}
+
+      case result do
         {:ok, event} -> {:ok, event}
         {:error, :timeout} -> {:error, :timeout}
         {:error, _reason} -> {:error, :turn_failed}
@@ -1544,6 +1964,16 @@ defmodule Arbor.Voice.Session do
   end
 
   defp start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate) do
+    case ConversationAuthority.recheck(state.conversation_binding) do
+      :ok ->
+        do_start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate)
+
+      _ ->
+        finish_turn_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp do_start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate) do
     # Pre-create fence token before spawn; activation carries the same token.
     token = make_ref()
     generation = turn.generation
@@ -1760,6 +2190,9 @@ defmodule Arbor.Voice.Session do
       map_size(turn.pending) > 0 ->
         enqueue_poll(state, turn.generation)
 
+      Map.get(turn, :kind) == :audio and match?(%Redacted{}, Map.get(turn, :held_terminal)) ->
+        complete_audio_turn(state, turn, turn.held_terminal)
+
       is_binary(Map.get(turn, :held_terminal)) and String.trim(turn.held_terminal) != "" ->
         complete_turn(state, turn, turn.held_terminal)
 
@@ -1769,9 +2202,20 @@ defmodule Arbor.Voice.Session do
   end
 
   # Synchronous send for turn-path settle (need accept/fail for :turn_failed).
+  defp safe_send_tool_result(%{turn: %{kind: :audio}} = state, call_id, output) do
+    with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+         :ok <- queue_send_tool_result(state, call_id, output),
+         do: :ok,
+         else: (_ -> {:error, :turn_failed})
+  end
+
   defp safe_send_tool_result(state, call_id, output) do
     try do
-      case state.resource_owner.send_tool_result(state.owner, call_id, output) do
+      result =
+        with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+             do: state.resource_owner.send_tool_result(state.owner, call_id, output)
+
+      case result do
         :ok -> :ok
         {:error, _reason} -> {:error, :turn_failed}
         _other -> {:error, :turn_failed}
@@ -1870,7 +2314,13 @@ defmodule Arbor.Voice.Session do
         dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
         presented = ManagedDispatchCore.select_raw_assistant(dispatch, raw_text)
 
-        case record_transcript(state, turn, presented) do
+        committed =
+          with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+               :ok <- record_transcript(state, turn, presented),
+               :ok <- ConversationAuthority.recheck(state.conversation_binding),
+               do: :ok
+
+        case committed do
           :ok ->
             # Speech is presentation only: never rewrite durable/public raw text.
             # Rendering runs only after exact transcript success and never falls
@@ -1884,6 +2334,9 @@ defmodule Arbor.Voice.Session do
             # Recorder failure: no render, no output callback.
             safe_emit(state, :"transcript.record_failed")
             reply_and_clear_turn(state, turn, {:error, :transcript_record_failed})
+
+          {:error, :conversation_unauthorized} ->
+            reply_and_clear_turn(state, turn, {:error, :turn_failed})
         end
 
       :owner_down ->
@@ -1931,8 +2384,8 @@ defmodule Arbor.Voice.Session do
                  completed_at,
                  opts
                ) do
-            # Public contract: {:ok, non_neg_integer()}. Reject malformed success.
-            {:ok, n} when is_integer(n) and n >= 0 -> :ok
+            # Exactly the acknowledged user/assistant pair, never a partial count.
+            {:ok, 2} -> :ok
             {:error, _reason} -> {:error, :transcript_record_failed}
             _other -> {:error, :transcript_record_failed}
           end
@@ -1961,6 +2414,7 @@ defmodule Arbor.Voice.Session do
 
       callback when is_function(callback, 1) ->
         render_guard_and_offer(
+          state.conversation_binding,
           state.speakable,
           callback,
           source_text,
@@ -1975,19 +2429,16 @@ defmodule Arbor.Voice.Session do
 
   defp offer_speech(_state, _source_text), do: :failed
 
-  defp render_guard_and_offer(speakable, callback, source_text, timeout_ms) do
+  defp render_guard_and_offer(binding, speakable, callback, source_text, timeout_ms) do
     try do
-      verdict = speakable.render(source_text, [])
-      guarded = speakable.tts_guard!(verdict)
-
-      case accept_guarded_speech(guarded) do
-        {:ok, spoken} ->
-          invoke_speech_output(callback, spoken, timeout_ms)
-
-        :error ->
-          # Malformed/oversized/blank guard output — do not invoke callback,
-          # do not fall back to raw.
-          :failed
+      with :ok <- ConversationAuthority.recheck(binding),
+           verdict = speakable.render(source_text, []),
+           guarded = speakable.tts_guard!(verdict),
+           {:ok, spoken} <- accept_guarded_speech(guarded),
+           :ok <- ConversationAuthority.recheck(binding) do
+        invoke_speech_output(binding, callback, spoken, timeout_ms)
+      else
+        _ -> :failed
       end
     rescue
       _ -> :failed
@@ -2013,7 +2464,7 @@ defmodule Arbor.Voice.Session do
   # timeout. Failures (return shape, raise, throw, exit, timeout, supervisor
   # unavailability) collapse to :failed. Session never retains the Task, the
   # spoken text, or any callback error term.
-  defp invoke_speech_output(callback, spoken, timeout_ms)
+  defp invoke_speech_output(binding, callback, spoken, timeout_ms)
        when is_function(callback, 1) and is_binary(spoken) and is_integer(timeout_ms) and
               timeout_ms > 0 do
     try do
@@ -2022,7 +2473,10 @@ defmodule Arbor.Voice.Session do
           # Catch inside the task so exception text never reaches Task logs,
           # Session state, signals, or public errors.
           try do
-            case callback.(spoken) do
+            offered =
+              with :ok <- ConversationAuthority.recheck(binding), do: callback.(spoken)
+
+            case offered do
               :ok -> :accepted
               {:error, _reason} -> :failed
               _other -> :failed
@@ -2050,7 +2504,7 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp invoke_speech_output(_callback, _spoken, _timeout_ms), do: :failed
+  defp invoke_speech_output(_binding, _callback, _spoken, _timeout_ms), do: :failed
 
   defp turn_duration_ms(state, turn) do
     case read_monotonic_ms(state.monotonic_clock) do
@@ -2065,7 +2519,24 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  defp finish_turn_error(state, %{kind: :audio} = turn, reason),
+    do: finish_audio_error(state, turn, reason)
+
   defp finish_turn_error(state, turn, reason) do
+    case ConversationAuthority.recheck(state.conversation_binding) do
+      :ok ->
+        do_finish_turn_error(state, turn, reason)
+
+      _ ->
+        state = cancel_pending_tools_with_outputs(%{state | turn: turn})
+        {state, cleanup} = close_failed_turn(state, turn, :turn_failed)
+        reason = if cleanup == :ok, do: :turn_failed, else: :cleanup_pending
+        safe_reply(turn.from, {:error, reason})
+        clear_turn(state)
+    end
+  end
+
+  defp do_finish_turn_error(state, turn, reason) do
     # Cancel owners + queue one structured cancellation attempt per still-pending
     # sibling (no admitted id silently dropped). Then reply and clear.
     from = Map.get(turn, :from)
@@ -2178,11 +2649,30 @@ defmodule Arbor.Voice.Session do
   end
 
   defp reply_and_clear_turn(state, turn, reply) do
-    safe_reply(turn.from, reply)
-    clear_turn(state)
+    case ConversationAuthority.recheck(state.conversation_binding) do
+      :ok ->
+        safe_reply(turn.from, reply)
+        clear_turn(state)
+
+      _ ->
+        {next_state, cleanup_result} = close_failed_turn(state, turn, :turn_failed)
+        reason = if cleanup_result == :ok, do: :turn_failed, else: :cleanup_pending
+        safe_reply(turn.from, {:error, reason})
+        clear_turn(next_state)
+    end
   end
 
   defp clear_turn(state) do
+    case state.turn do
+      %{kind: :audio, caller_ref: ref, request_id: request, deadline_timer: timer} ->
+        Process.cancel_timer(timer)
+        Process.demonitor(ref, [:flush])
+        if request, do: :gen_server.receive_response(request, 0)
+
+      _ ->
+        :ok
+    end
+
     # Increment generation so any queued {:turn_poll, old} / tool_outcome is rejected.
     generation = state.turn_generation + 1
     %{state | turn: nil, turn_generation: generation}

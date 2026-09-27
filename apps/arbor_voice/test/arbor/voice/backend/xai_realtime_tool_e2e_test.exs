@@ -152,7 +152,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
     SharedTransport.reset(frames)
 
     {:ok, eng} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_xai_e2e", agent_id: "agent_x"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_09a6a2f921bc9bd5a17da90365ff1665", agent_id: "agent_x"}}
+      )
 
     {:ok, _ledger} = FakeLedger.start()
     {:ok, _signals} = FakeSignals.start()

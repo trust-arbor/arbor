@@ -35,6 +35,7 @@ defmodule Arbor.VoiceTest do
     {:ok, _signals} = FakeSignals.start()
 
     [
+      session_token: "voice-fixture-proof",
       comms: FakeCommsSession,
       engagement_store: FakeEngagementStore,
       ledger: FakeLedger,
@@ -52,6 +53,7 @@ defmodule Arbor.VoiceTest do
   end
 
   setup do
+    Arbor.Voice.Test.ConversationSecurityFixture.install()
     assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
     :ok
   end

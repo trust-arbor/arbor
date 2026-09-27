@@ -37,7 +37,9 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     ControllableTurnBackend.reset()
 
     {:ok, eng} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_turn_1", agent_id: "agent_x"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_4940c0262fbf4d2d81f5307756ce0233", agent_id: "agent_x"}}
+      )
 
     {:ok, ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()
@@ -60,6 +62,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
     opts =
       [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: FakeLedger,
@@ -95,6 +98,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
   end
 
   setup do
+    Arbor.Voice.Test.ConversationSecurityFixture.install()
     assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
     assert is_pid(Process.whereis(Arbor.Voice.ResourceSupervisor))
     :ok
@@ -124,7 +128,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert length(calls) == 1
 
       assert [
-               {^agent_id, "eng_turn_1", user_entry, assistant_entry, forwarded_opts}
+               {^agent_id, "eng_4940c0262fbf4d2d81f5307756ce0233", user_entry, assistant_entry,
+                forwarded_opts}
              ] = calls
 
       assert user_entry.content == "hi there"
@@ -149,7 +154,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert [{_, _, payload, []}] = completed
       assert payload.user_id == user_id
       assert payload.agent_id == agent_id
-      assert payload.engagement_id == "eng_turn_1"
+      assert payload.engagement_id == "eng_4940c0262fbf4d2d81f5307756ce0233"
       assert payload.backend == :controllable_turn
       assert payload.mode == :local
       assert is_integer(payload.duration_ms) and payload.duration_ms >= 0
@@ -997,10 +1002,11 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       task = Task.async(fn -> Voice.text_turn(user_id, agent_id, "hi") end)
       assert_receive {:worker_pid, worker}, 1_000
       refute_receive {:worker_pid, _duplicate_worker}, 100
+      worker_ref = Process.monitor(worker)
 
       assert :ok = Voice.stop_session(key)
       assert {:error, :session_stopped} = Task.await(task, 5_000)
-      refute Process.alive?(worker)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 1_000
       assert length(ControllableTurnBackend.tool_results()) == 1
     end
 

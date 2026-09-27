@@ -119,7 +119,9 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     ])
 
     {:ok, _engagement} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_p3_selector", agent_id: "agent"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_82a6ddb459986362121fb2903439ea7e", agent_id: "agent_x"}}
+      )
 
     {:ok, ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()

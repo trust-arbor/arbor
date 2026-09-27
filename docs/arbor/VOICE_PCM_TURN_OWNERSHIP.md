@@ -1,9 +1,10 @@
 # VP-07A1: one bounded PCM conversation turn
 
-Design checkpoint, 2026-09-27. The pure contracts and reducers described below
-are implemented. Session, ResourceOwner and public audio entry-point integration
-remain pending the private conversation binding slice. This document does not
-qualify a device, a live provider journey, or an external tuple-addressed RPC.
+Implementation checkpoint, 2026-09-27. The pure contracts, reducers, authenticated
+Session/ResourceOwner lifecycle and bounded public audio entry point are
+implemented. This document qualifies hermetic protocol and lifecycle behavior;
+it does not qualify a device, a live provider journey, or an external
+tuple-addressed RPC.
 
 ## Source authority and ownership
 
@@ -25,6 +26,13 @@ A0's default disposition stays `:close`. A1 adds an owner-authenticated
 result transfers that exact ticket into a receive phase. A timeout, cancellation,
 authority denial, malformed result or ambiguous send retires the backend.
 
+One source-owned absolute deadline covers the entire admitted audio operation,
+with a 30-second ceiling independent of the longer Session budget. The owner's
+timer survives send acceptance and bounds all later callbacks; the Session has
+an independent timer and checks expiry before append, after acknowledgment and
+before final reply. Callback deadlines remain no greater than their configured
+owner bound. Neither empty receive windows nor late STT renew this budget.
+
 Receive uses an asynchronous request tagged by the active ticket and a fresh
 callback token. Session retains the request reference, caller monitor and pure
 redacted reducer state, and can service cancellation while a backend callback is
@@ -40,7 +48,8 @@ The approved bounded lifecycle is:
 3. Receive bounded events, retain completed STT and admit tools through the same
    conversation authority.
 4. Select final source-owned assistant text, including the existing D1 rewrite.
-5. Recheck authority and persist the actual transcript/final assistant pair.
+5. Recheck authority and persist the actual transcript/final assistant pair,
+   accepting only the exact acknowledged count `{:ok, 2}`.
 6. Recheck after acknowledged persistence, obtain the guarded presentation, close
    the backend positively, recheck authority and return the bounded result.
 
@@ -48,6 +57,8 @@ The next utterance starts a fresh authenticated Voice Session. The normalized
 backend protocol does not currently carry provider item/response correlation;
 reusing a connection could associate a delayed prior transcript with a later
 utterance. This slice therefore does not provide reusable provider sessions.
+PCM-mode sessions also reject text turns before admission or provider effects,
+so a prior text response cannot contaminate the sole audio operation's stream.
 Connection and configuration latency recur for every utterance. No first-audio
 latency target or real playback performance is qualified here.
 
@@ -94,23 +105,30 @@ empty `spoken_text`; its display text remains in the verdict and durable reply.
 The audio path does not invoke
 legacy `speech_output`; progress and exhaustion cues remain separately owned.
 
-## Integration acceptance still required
+## Public boundary and telemetry
 
-The public `audio_mode: :pcm16`, tuple-keyed audio turn and exact-operation cancel
-are not enabled by the pure-module commit. They must wait for source-owned
-conversation admission and all continuation fences. The final result must have
-only operation id, durable reply, durable input transcript and presentation.
+The public `audio_mode: :pcm16`, tuple-keyed `audio_turn/4` and exact-operation
+`cancel_audio_turn/3` are integrated with source-owned conversation admission and
+continuation fences. The result contains only operation id, durable reply,
+durable input transcript and presentation. Invalid pre-admission input has no
+provider effect or terminal telemetry. Cancellation success retires the current
+operation; another id cannot cancel it.
 
-The integrated shell must emit exactly one closed `[:arbor_voice, :turn]`
-telemetry event at admitted operation settlement, and none for pre-admission
-errors. Timing comes from source clocks and actual utterance-end evidence, not
-from these pure reducers. `:telemetry` must become a direct Voice dependency.
-No telemetry implementation or VOICE-32 qualification is claimed by this slice.
+The shell emits exactly one closed `[:arbor_voice, :turn]` telemetry event at
+admitted operation settlement. `:telemetry` is a direct Voice dependency.
+This covers normal source-owned success, failure, cancellation and timeout
+settlement. It is not a crash-durable event log: forced Session `:kill` relies on
+owner-monitor cleanup and cannot guarantee a terminal telemetry event.
+`ack_ms` is nil. `first_audio_ms` is the arrival time of the first chunk in the
+final eligible provider wave, relative to the actual utterance-end evidence;
+tool-wave resets clear it, and suppressed media or any failed turn reports nil.
+This is a provider-arrival diagnostic, not audible playback timing or a device
+acknowledgment. `total_ms` measures the admitted operation through settlement.
+VOICE-32 remains planned for device timing and measured latency qualification.
 
-Remaining behavioral proofs include send/receive/cancel races, denial during
-provider work and append, real utterance timestamp persistence, exact result and
-telemetry shapes, suppression of audio after D1 rewrite, positive final close,
-text compatibility and no PCM in status, logs, errors or durable records.
+No microphone, speaker, live provider or transport endpoint is opened by these
+tests. Actual device acknowledgment, audible latency, capture qualification and
+long-lived provider response correlation remain separate work.
 
 ## Pure-slice validation
 
@@ -121,3 +139,21 @@ silence, completed STT ordering, intermediate-wave disposal and output bounds.
 These are pure decision proofs; they do not substitute for the integration
 acceptance above, and no historical production security counterwitness is claimed
 for newly introduced modules.
+
+The public audio lifecycle file subsequently passed 14 tests, including exact
+durable STT/timestamp/result, asynchronous blocked-receive cancel/stop/caller
+death/hard timeout, total deadline after successful send, pending STT expiry,
+tool-wave disposal, D1 text replacement, guarded PCM suppression, redacted state,
+durable-ack barrier, transcript failure and rejection of a prior text turn in
+PCM mode. The separate real Security/SQLite
+journey passed 15 tests, including web-to-audio-to-web continuity, revoked receive
+denial, pinned owner checks and exact pair acknowledgments. The final complete
+Voice suite passed 513 tests with those 15 isolated-database cases excluded; the
+15 cases passed separately. Both development and test umbrella builds passed with
+warnings as errors, all 25 changed Voice Elixir files passed scoped formatting,
+and strict VOICE conformance passed with planned device/latency markers intact.
+
+The predecessor `6c03e94797a8d43be23a652beed266a14e4dcdca` was built independently.
+The same 11 applicable binding/pair-ack security witnesses fail through old public
+admissions or replies; none rely on an undefined new audio API. Fixture SQLite
+paths include the OS process id to keep concurrent independent BEAMs isolated.

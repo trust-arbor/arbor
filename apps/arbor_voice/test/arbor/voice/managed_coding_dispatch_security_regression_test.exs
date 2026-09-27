@@ -331,7 +331,9 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     SharedTransport.reset(frames)
 
     {:ok, eng} =
-      FakeEngagementStore.start(result: {:ok, %{id: "eng_dispatch_e2e", agent_id: "agent_x"}})
+      FakeEngagementStore.start(
+        result: {:ok, %{id: "eng_2a6de75a737333afd6589d076d1128eb", agent_id: "agent_x"}}
+      )
 
     {:ok, _ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()
@@ -412,7 +414,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     assert router_context.arguments == %{"task" => @adversarial_intent}
     assert router_context.user_id == user_id
     assert router_context.agent_id == agent_id
-    assert router_context.engagement_id == "eng_dispatch_e2e"
+    assert router_context.engagement_id == "eng_2a6de75a737333afd6589d076d1128eb"
     refute Map.has_key?(router_context, :session_token)
     refute Map.has_key?(router_context, :authority)
     refute inspect(router_context) =~ @distinctive_token
@@ -529,7 +531,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
   @tag spec: "VOICE-10"
   @tag :security_regression
-  test "security regression: unauthenticated local backend preserves managed dispatch engagement without proof",
+  test "security regression: authenticated local backend preserves explicit managed dispatch profile",
        %{opts: opts, recorder: recorder} do
     FakeAgentFacade.reset()
     ControllableTurnBackend.ensure_table!()
@@ -548,12 +550,11 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
     local_opts =
       opts
-      |> Keyword.delete(:session_token)
       |> Keyword.put(:backend, ControllableTurnBackend)
       |> Keyword.put(:backend_opts, [])
       |> Keyword.put(:tool_router, FrontDesk)
 
-    refute Keyword.has_key?(local_opts, :session_token)
+    assert Keyword.has_key?(local_opts, :session_token)
     assert ControllableTurnBackend.egress_route() == :none
 
     {user_id, agent_id} = unique_ids()
@@ -568,9 +569,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     assert call.target_agent_id == agent_id
     assert call.task["kind"] == "coding_change"
     assert call.task["plan"]["task"] == "local coding intent"
-    assert call.opts == []
-    refute Keyword.has_key?(call.opts, :session_token)
-    refute inspect(call) =~ "session_token"
+    assert call.opts == [session_token: @distinctive_token]
 
     assert [{"call_local_dispatch", output}] = ControllableTurnBackend.tool_results()
 
@@ -579,7 +578,10 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
              "result" => %{"task_id" => "task_voice_dispatch_1", "status" => "dispatched"}
            }
 
-    assert [{^agent_id, "eng_dispatch_e2e", user_entry, assistant_entry, _record_opts}] =
+    assert [
+             {^agent_id, "eng_2a6de75a737333afd6589d076d1128eb", user_entry, assistant_entry,
+              _record_opts}
+           ] =
              FakeCommsSession.record_calls(recorder)
 
     assert user_entry.metadata["transport"] == "voice"
@@ -648,7 +650,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
     opts = Keyword.delete(opts, :session_token)
     {user_id, agent_id} = unique_ids()
-    assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, opts)
+    assert {:error, :invalid_opts} = Voice.start_session(user_id, agent_id, opts)
     assert FakeAgentFacade.dispatch_calls() == []
     assert SharedTransport.sent() == []
     assert EgressAuthorityFakes.active_capabilities() == []
@@ -907,7 +909,23 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
         ref = Process.monitor(pid)
 
         assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
-        assert Elixir.Registry.lookup(Arbor.Voice.Registry, key) == []
+        assert_registry_gone(key, 100)
+    end
+  end
+
+  # DOWN confirms the Session died; Registry processes its own monitor message
+  # independently. Preserve both requirements without assuming delivery order.
+  defp assert_registry_gone(key, 0),
+    do: assert(Elixir.Registry.lookup(Arbor.Voice.Registry, key) == [])
+
+  defp assert_registry_gone(key, remaining) do
+    case Elixir.Registry.lookup(Arbor.Voice.Registry, key) do
+      [] ->
+        :ok
+
+      [_] ->
+        Process.sleep(5)
+        assert_registry_gone(key, remaining - 1)
     end
   end
 end

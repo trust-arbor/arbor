@@ -1,19 +1,25 @@
 defmodule Arbor.Voice do
   @moduledoc """
-  Public facade for the voice-first interface (VP-04 lifecycle through VP-05B).
+  Public facade for authenticated text turns and one bounded PCM conversation turn.
 
   Exposes a tuple-keyed session lifecycle and message-driven text turns —
   `start_session/3`, `session_status/1`, `stop_session/1`, and `text_turn/3`.
-  No public operation accepts or returns a pid. Optional speech output is an
-  arity-1 callback seam only; no device transport or public output API.
+  `audio_turn/4` returns durable text plus guarded PCM presentation;
+  `cancel_audio_turn/3` retires the exact in-flight operation. One audio turn
+  retires its Session: the next utterance requires a fresh authenticated start.
+
+  No public operation accepts or returns a pid. Tuple addressing is a trusted
+  in-process boundary, not external transport authentication. These APIs do not
+  open capture or playback devices, and do not qualify live-provider latency.
+  Optional speech output remains a callback for text turns and fixed cues;
+  final PCM presentation never invokes that callback.
 
   ## VP-05B / VP-05C — front-desk tools and progress (VOICE-9, VOICE-11; partial VOICE-10/12/17)
 
-  Production sessions default to `Arbor.Voice.ToolRouter.FrontDesk` with a
-  static two-tool catalog: `consult_agent` and `dispatch_coding_task`.
-  Consultation and managed coding dispatch run through a Session-built
-  authority that calls public `Arbor.Agent` / `Arbor.Orchestrator` facades; the
-  optional `:session_token` bearer proof is wrapped in `Arbor.Voice.Redacted`
+  Production sessions default to `Arbor.Voice.ToolRouter.PrivateConversation`
+  with one source-fenced `consult_agent` tool. Explicit `FrontDesk` retains
+  managed dispatch outside the private continuity profile. The required
+  `:session_token` bearer proof is wrapped in `Arbor.Voice.Redacted`
   and never enters router context, signals, status, or tool output.
 
   Slow tools schedule one generation/token-fenced progress timer. Crossing
@@ -23,6 +29,7 @@ defmodule Arbor.Voice do
   """
 
   alias Arbor.Voice.Config
+  alias Arbor.Voice.Contracts.AudioTurn
   alias Arbor.Voice.Redacted
   alias Arbor.Voice.Session
   alias Arbor.Voice.Session.JsonTerm
@@ -64,6 +71,7 @@ defmodule Arbor.Voice do
     :tool_router,
     :tool_router_timeout_ms,
     :session_token,
+    :audio_mode,
     :progress_threshold_ms
   ]
 
@@ -90,12 +98,18 @@ defmodule Arbor.Voice do
 
   ## VP-05B options (closed allowlist)
 
-  * `:tool_router` — defaults to `Arbor.Voice.ToolRouter.FrontDesk` (VOICE-9/10
-    static `consult_agent` + `dispatch_coding_task` catalog). Explicit empty:
-    `EmptyCatalog`.
-  * `:session_token` — optional non-empty binary human session proof (≤4096
-    bytes). Wrapped in `Redacted` before Session state; omitted Agent key when
-    absent. Malformed values → `{:error, :invalid_opts}`.
+  * `:tool_router` — defaults to `Arbor.Voice.ToolRouter.PrivateConversation`
+    (`consult_agent` only). Explicit `FrontDesk` retains managed dispatch;
+    `EmptyCatalog` disables tools. Denial never changes the catalog.
+  * `:session_token` — required non-empty binary human session proof (≤4096
+    bytes), for local and cloud backends. Wrapped in `Redacted` before Session
+    state. Malformed or missing values → `{:error, :invalid_opts}`.
+  * `:audio_mode` — the sole explicit value is `:pcm16`; absence retains text
+    configuration. Requires confirmed non-nil mono s16le input/output formats.
+    PCM sessions reject `text_turn/3` as `:audio_only_session` before admission;
+    no prior text response can share their provider stream.
+    Input PCM must match the source-admitted rate exactly. The bounded audio
+    operation has a fixed 30-second deadline across send, receive and finalization.
   * `:progress_threshold_ms` — positive integer, default 2000, hard ceiling
     30000, must not exceed the effective tool-router timeout (VOICE-11).
     Explicit malformed → `{:error, :invalid_opts}`; malformed Application
@@ -189,6 +203,7 @@ defmodule Arbor.Voice do
 
   * `:not_found` — no live session for the tuple
   * `:busy` — another turn is already in flight
+  * `:audio_only_session` — PCM-mode sessions accept only their one audio turn
   * `:invalid_user_text` — blank, non-UTF-8, oversized, or non-binary text
   * `:turn_failed` — backend/protocol failure (normalized)
   * `:transcript_record_failed` — durable write failed before public success
@@ -201,6 +216,7 @@ defmodule Arbor.Voice do
           | {:error,
              :not_found
              | :busy
+             | :audio_only_session
              | :invalid_user_text
              | :invalid_user_id
              | :invalid_agent_id
@@ -225,12 +241,51 @@ defmodule Arbor.Voice do
     end
   end
 
+  @doc """
+  Complete one bounded PCM turn in a session started with `audio_mode: :pcm16`.
+
+  Requires exact `operation_id` and actual UTC `utterance_ended_at` options.
+  Returns durable raw text and guarded presentation only after positive backend
+  cleanup. This retires the Session; start a fresh authenticated Session for the
+  next utterance. No device, transport authentication or provider reuse is implied.
+  """
+  @spec audio_turn(String.t(), String.t(), AudioTurn.input(), keyword()) ::
+          {:ok, AudioTurn.result()} | {:error, atom()}
+  def audio_turn(user_id, agent_id, input, opts) do
+    with :ok <- validate_id(user_id, :user_id),
+         :ok <- validate_id(agent_id, :agent_id),
+         {:ok, input} <- AudioTurn.new(input),
+         {:ok, operation} <- AudioTurn.options(opts),
+         {:ok, pid} <- lookup({user_id, agent_id}) do
+      Session.audio_turn(pid, input, operation)
+    else
+      :error -> {:error, :not_found}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc "Cancel exactly one in-flight audio operation and retire its Session."
+  @spec cancel_audio_turn(String.t(), String.t(), String.t()) :: :ok | {:error, atom()}
+  def cancel_audio_turn(user_id, agent_id, operation_id) do
+    with :ok <- validate_id(user_id, :user_id),
+         :ok <- validate_id(agent_id, :agent_id),
+         true <- AudioTurn.operation_id?(operation_id),
+         {:ok, pid} <- lookup({user_id, agent_id}) do
+      Session.cancel_audio_turn(pid, operation_id)
+    else
+      false -> {:error, :invalid_operation_id}
+      :error -> {:error, :not_found}
+      {:error, _} = error -> error
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Config construction — closed, duplicate-free option list
   # ---------------------------------------------------------------------------
 
   defp build_config(user_id, agent_id, opts) do
     with :ok <- validate_opts(opts),
+         {:ok, audio_mode} <- resolve_audio_mode(opts),
          {:ok, daily_ms} <- resolve_daily_budget_ms(opts),
          {:ok, session_ms} <- resolve_session_budget_ms(opts, daily_ms),
          {:ok, backend} <- resolve_backend(opts),
@@ -275,6 +330,7 @@ defmodule Arbor.Voice do
          resource_owner_opts: resource_owner_opts,
          backend: backend,
          backend_opts: backend_opts,
+         audio_mode: audio_mode,
          signals: signals,
          wall_clock: wall_clock,
          monotonic_clock: mono_clock,
@@ -296,6 +352,14 @@ defmodule Arbor.Voice do
          agent_module: agent_module,
          orchestrator_module: orchestrator_module
        }}
+    end
+  end
+
+  defp resolve_audio_mode(opts) do
+    case Keyword.fetch(opts, :audio_mode) do
+      :error -> {:ok, :text}
+      {:ok, :pcm16} -> {:ok, :pcm16}
+      _ -> {:error, :invalid_opts}
     end
   end
 
@@ -383,13 +447,13 @@ defmodule Arbor.Voice do
     end
   end
 
-  # Closed tool-router seam: default FrontDesk; module must export tools/0 + invoke/2.
+  # Closed tool-router seam: default PrivateConversation; tools/0 + invoke/2.
   # Returns {module, :default | :explicit} so declaration failures map correctly:
   # explicit router → :invalid_opts; default/config path → :invalid_config.
   defp resolve_tool_router(opts) do
     case Keyword.fetch(opts, :tool_router) do
       :error ->
-        case validate_tool_router_module(Arbor.Voice.ToolRouter.FrontDesk) do
+        case validate_tool_router_module(Arbor.Voice.ToolRouter.PrivateConversation) do
           {:ok, mod} -> {:ok, mod, :default}
           {:error, _} = err -> err
         end
@@ -674,7 +738,7 @@ defmodule Arbor.Voice do
   defp resolve_session_token(opts) do
     case Keyword.fetch(opts, :session_token) do
       :error ->
-        {:ok, nil}
+        {:error, :invalid_opts}
 
       {:ok, token}
       when is_binary(token) and byte_size(token) > 0 and
@@ -945,6 +1009,7 @@ defmodule Arbor.Voice do
 
   defp public_turn_error(:not_found), do: :not_found
   defp public_turn_error(:busy), do: :busy
+  defp public_turn_error(:audio_only_session), do: :audio_only_session
   defp public_turn_error(:invalid_user_text), do: :invalid_user_text
   defp public_turn_error(:turn_failed), do: :turn_failed
   defp public_turn_error(:transcript_record_failed), do: :transcript_record_failed

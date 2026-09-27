@@ -11,6 +11,12 @@ defmodule Arbor.Voice.AudioOperationTest do
   }
 
   @moduletag :fast
+
+  setup do
+    Arbor.Voice.Test.ConversationSecurityFixture.install()
+    :ok
+  end
+
   @moduletag spec: "VOICE-5"
   @pcm "private-pcm-sample!!"
   @owner_opts [
@@ -261,6 +267,7 @@ defmodule Arbor.Voice.AudioOperationTest do
     suffix = System.unique_integer([:positive])
 
     opts = [
+      session_token: "voice-fixture-proof",
       comms: FakeCommsSession,
       engagement_store: FakeEngagementStore,
       ledger: FakeLedger,

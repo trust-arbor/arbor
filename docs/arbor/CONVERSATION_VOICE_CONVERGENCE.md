@@ -1,7 +1,8 @@
 # Voice conversation convergence
 
-Design checkpoint, 2026-09-27. This document proposes the next bounded slices;
-it does not claim that private Voice binding or device playback is implemented.
+Candidate implementation checkpoint, 2026-09-27. Private Voice binding is
+implemented in this change; qualification is recorded below. Device capture and
+playback remain separate work.
 
 The first useful journey is an authenticated web turn, a bounded Voice turn in
 the same private engagement, and a web follow-up whose running Agent has seen
@@ -9,24 +10,34 @@ the durable Voice exchange. Keep the existing Voice Session, ResourceOwner,
 backend and Speakable ownership. Do not add a receipt broker or a second chat
 engine. Orchestrator transcript freshness is a separate source-owned slice.
 
-## Current source and gaps
+## Current source and limits
 
-* `Arbor.Voice.start_session/3` accepts a redacted session token;
-  `text_turn/3` subsequently addresses a trusted local tuple, without new proof.
-  No external transport may treat knowledge of that tuple as authentication.
-* `Voice.EgressAuthority.authenticate_human/2` authenticates external backend
-  startup through `Security.authorize_and_issue_delivery_receipt/4`, then
-  consumes and discards its binding. Local backends skip this check.
-* `Voice.Session.resolve_engagement/1` passes the raw subject to
-  `Comms.resolve_user_engagement/3`. This can differ from authenticated web
-  history's canonical owner. The tool closure also retains the original token
-  without checking it on ordinary later Voice turns.
-* `TranscriptRecorder.record/5` writes through
-  `Comms.record_engagement_turn/5`; Session correctly persists before Speakable
-  or output. The write and later publication lack a live conversation fence.
-* `configure_and_read_meta/2` configures tools only. The front desk has its own
-  provider context; a common transcript store alone does not make it consume
-  the Agent's prior conversation.
+* `Arbor.Voice.start_session/3` requires a session token for every backend.
+  `text_turn/3` addresses a trusted local tuple and reauthenticates that stored
+  proof at each turn. An external transport must authenticate its caller; tuple
+  knowledge is never a remote credential.
+* `Voice.ConversationAuthority` retains the authenticated subject separately
+  from the canonical owner. It resolves and checks the complete private
+  engagement scope, consumes one fresh receipt, and retains one immutable
+  redacted binding. `EgressAuthority` adds provider disclosure and route gates;
+  choosing a local backend no longer skips conversation authentication.
+* `TranscriptRecorder.record/5` still writes one ordered pair through
+  `Comms.record_engagement_turn/5`. Only its exact `{:ok, 2}` acknowledgement
+  admits publication. Session checks authority before and after that write,
+  during presentation, and immediately before the public reply.
+* The default `PrivateConversation` catalog exposes only `consult_agent`.
+  Explicit `FrontDesk` retains managed dispatch, outside this bounded private
+  continuity qualification. Denial never changes catalogs or backends.
+* The realtime front desk does not automatically receive historical context.
+  Shared durable storage plus a source-fenced Agent consultation is the first
+  qualified continuity path. Direct history injection remains deferred.
+* `audio_mode: :pcm16` enables the bounded `Arbor.Voice.audio_turn/4` API.
+  Completed STT supplies the durable user text; provider PCM is presentation
+  only and is never persisted. Each completed audio turn closes its backend
+  and Session before returning. Start a fresh authenticated Session for the
+  next utterance until provider item correlation is qualified. This mode
+  rejects text turns before admission or provider effects; text sessions reject
+  audio turns.
 
 ## Admission and lifetime
 
@@ -66,11 +77,10 @@ cache a start request as session authority or replay it for a tool/history call.
 
 `Security.recheck_conversation_owner(subject, agent, pinned_owner)` already
 checks active identities, alias binding and current chat authority without
-spending rate/use counters. It does not verify token expiry. Add a narrow
-Security facade continuation check for the session-token profile which verifies
-the HMAC token's exact subject and expiry inside Security, then calls that
-existing owner check. This is a proposed facade addition, not an existing API;
-Voice must not import `Security.SessionToken` or decode token claims itself.
+spending rate/use counters. `Security.recheck_conversation_session/4` adds
+the original token: it verifies the HMAC token's exact subject and expiry inside
+Security, then calls the existing owner check. Voice does not import
+`Security.SessionToken` or decode token claims itself.
 The continuation check is not fresh admission and cannot create authority.
 
 Run the continuation check at each provider effect, tool dispatch, durable
@@ -86,15 +96,27 @@ already committed pair. Tests must state that boundary honestly. Playback is
 an effect: the later presentation owner rechecks when dequeuing, and revocation
 or cancellation stops active playback. Already emitted audio is irreversible.
 
-The existing `Agent.send_message/4` tool path does not accept
-`:expected_engagement_id`. An external precheck alone leaves a scope-change
-race before the source admits the tool. Extend its authenticated source path
-with the same compare-only fence as the public conversation APIs, or use a
-reviewed source-owned continuation. Do not import MessageFacade/Manager from
-Voice. Likewise, `dispatch_task/4` needs a source-admission binding fence before
-it qualifies as part of this private profile. Until qualified, the selected
-profile excludes that tool explicitly; unrelated existing profiles retain
-their behavior. A model cannot select the binding, collaborator or target.
+The authenticated `Agent.send_message/4` tool path admits the compare-only
+`:expected_engagement_id` fence with HMAC session proof. Ordinary and signed
+message modes reject this new option; their existing no-fence behavior remains.
+Malformed, duplicate, or unsupported fence options fail before authorization
+allowances or receipt issue. Security stores the fence in its opaque receipt,
+then transfers it into the source Session's private-memory admission. The
+source compares its resolved engagement before queue/start and again at
+activation. The message itself remains route-free, and a caller cannot choose
+an owner, turn authority, collaborator, or destination with this fence.
+
+`dispatch_task/4` still needs a corresponding source-admission fence before it
+qualifies for this private profile. `PrivateConversation` excludes it. Operators
+who explicitly select `FrontDesk` retain its existing managed-dispatch behavior
+with the new conversation proof requirement.
+
+The ResourceOwner checks continuation before every backend callback (except
+cleanup), including local backends with no physical effect callback. It also
+rechecks callback results before returning them. Cloud physical frames retain
+their own effect checks. The immutable conversation binding remains alive after
+the turn-egress lease is finalized, so transcript and publication gates do not
+lose their proof prematurely.
 
 ## History and continuity qualification
 
@@ -144,3 +166,64 @@ and Agent consultation continuity, not identical front-desk context.
 The existing VP-07 packets are currently local ignored planning files under
 `docs/specs/voice/packets/` in the operator checkout. Native packages, image
 admission and hardware proof remain prerequisites; this design installs none.
+
+## Qualification
+
+The committed `conversation_binding_security_regression_test.exs` uses actual
+OIDC identities, alias links, HMAC session proofs, capabilities, receipt broker,
+Agent and Orchestrator Session, Comms, and a private migrated SQLite database.
+The budget ledger and provider I/O are explicit test collaborators; no live LLM,
+OAuth, microphone, speaker, terminal PTY, or remote deployment is exercised.
+The cloud text-revocation lane drives the production xAI backend through a
+scripted transport. The completed PCM journey uses a scripted local backend;
+it proves the public turn, authority, persistence and presentation boundaries,
+not provider recognition quality or device playback.
+
+Run it in an isolated checkout with a private test database:
+
+```sh
+MIX_ENV=test ./bin/mix test apps/arbor_voice/test/arbor/voice/conversation_binding_security_regression_test.exs --include isolated_repo --include database --seed 0
+```
+
+The positive journey sends a web-origin Agent message, consults the same Agent
+from a linked Voice subject, durably appends the Voice exchange, then inspects
+the next real Agent provider request without restarting its Session. The
+consultation creates its own genuine user/assistant pair; the outer Voice turn
+creates another pair. Including the initial web pair, this is six entries,
+not a deduplication or correlation protocol. A separate bounded audio journey
+persists the actual completed STT and final text, returns guarded PCM only after
+positive backend close, and verifies both in the next Agent provider context.
+Negative journeys cover missing/foreign proof, foreign engagement scope, alias changes,
+revocation in local/cloud receive, real token expiry, revocation after consult,
+authorization changes after append and during presentation, incomplete pair
+acknowledgements, and real grant revocation during audio receive.
+
+On 2026-09-27, the full Voice suite passed **513 tests** and the isolated real
+Security/SQLite journey passed **15 tests**. The existing consultation, egress
+and managed-dispatch suite also passed **18 tests in four consecutive runs**.
+The source engagement-fence commit separately passed 170 focused source tests;
+see `CONVERSATION_SOURCE_FENCE.md` for its boundary and evidence.
+
+The identical journey test was copied into an independently compiled checkout
+of the immediate implementation parent `6c03e94797a8d43be23a652beed266a14e4dcdca`.
+The eleven selected security witnesses failed there at the actual old public
+behavior: local startup admitted missing proof or foreign scope; changed
+authority still returned successful text; and recorder counts 0, 1, and 3 still
+published a reply. All eleven pass as part of the candidate's fifteen tests.
+The new audio API tests are excluded from the predecessor comparison.
+
+To reproduce the selected predecessor witnesses after copying only the test
+file into that revision:
+
+```sh
+MIX_ENV=test ./bin/mix compile --warnings-as-errors
+MIX_ENV=test ./bin/mix test apps/arbor_voice/test/arbor/voice/conversation_binding_security_regression_test.exs:416:481:495:519:584:613:639:660 --include isolated_repo --include database --seed 0
+```
+
+The fixture exclusively creates a process-specific random temporary root, so
+candidate and predecessor SQLite databases cannot share a VM-local counter path.
+
+Existing lifecycle and presentation tests now supply explicit fixture proof and
+a reviewed test-only Security collaborator. Their earlier unauthenticated-local
+behavior is deliberately removed from the public API. No production option
+bypasses the new authority requirement.

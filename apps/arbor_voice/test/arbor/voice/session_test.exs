@@ -36,6 +36,7 @@ defmodule Arbor.Voice.SessionTest do
 
     opts =
       [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: FakeLedger,
@@ -61,6 +62,7 @@ defmodule Arbor.Voice.SessionTest do
   end
 
   setup do
+    Arbor.Voice.Test.ConversationSecurityFixture.install()
     assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
     assert is_pid(Process.whereis(Arbor.Voice.ResourceSupervisor))
     :ok
@@ -198,7 +200,7 @@ defmodule Arbor.Voice.SessionTest do
             FakeEngagementStore.set_result(ctx.eng, {:error, :store_down})
             ctx
           end,
-          expect_error: :engagement_unavailable,
+          expect_error: :start_failed,
           expect_releases: 0,
           expect_owner_closes: 0,
           expect_registers: 0,
@@ -658,6 +660,7 @@ defmodule Arbor.Voice.SessionTest do
       ]
 
       opts = [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: Arbor.Voice.BudgetLedger,
@@ -694,6 +697,7 @@ defmodule Arbor.Voice.SessionTest do
       {:ok, signals} = FakeSignals.start()
 
       opts = [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: FakeLedger,
@@ -774,6 +778,7 @@ defmodule Arbor.Voice.SessionTest do
       FakeLedger.set_consume_fail_remaining(ledger, 1)
 
       opts = [
+        session_token: "voice-fixture-proof",
         comms: FakeCommsSession,
         engagement_store: FakeEngagementStore,
         ledger: FakeLedger,

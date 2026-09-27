@@ -106,7 +106,11 @@ defmodule Arbor.Voice.Test.SessionFakes do
       ensure_table!()
 
       result =
-        Keyword.get(opts, :result, {:ok, %{id: "eng_lifecycle", agent_id: "agent_x"}})
+        Keyword.get(
+          opts,
+          :result,
+          {:ok, %{id: "eng_f20fda2970f1e611ef629b1e5e976eb8", agent_id: "agent_x"}}
+        )
 
       {:ok, agent} =
         Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
@@ -126,7 +130,23 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
       Agent.get_and_update(agent, fn state ->
         call = {agent_id, user_id, opts}
-        {state.result, %{state | calls: [call | state.calls]}}
+
+        result =
+          case state.result do
+            {:ok, %{agent_id: "agent_x"} = template} ->
+              {:ok,
+               Map.merge(template, %{
+                 agent_id: agent_id,
+                 owner_tenant: user_id,
+                 scope: :user,
+                 visibility: :private
+               })}
+
+            other ->
+              other
+          end
+
+        {result, %{state | calls: [call | state.calls]}}
       end)
     end
 
