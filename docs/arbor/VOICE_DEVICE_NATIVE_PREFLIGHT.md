@@ -16,7 +16,7 @@ package source; do not patch the live dependency directory or publish a fork.
 | Required behavior | Source finding | Smallest proposed correction |
 | --- | --- | --- |
 | Capture has a hard data bound | `source.c` sends every callback without downstream demand. Its callback-visible `frame_size` is assigned after `init_pa` has already started the stream. | Initialize callback fields before start. Admit a fixed frame cap, clip the last callback and stop production at that cap. A distinct early-finish operation stops callbacks and reports the final produced count for push-to-talk release. No general streaming credit protocol is needed. |
-| Permission denial is observable | `osx_permissions.m` requests asynchronously and immediately returns success; denial only prints a warning. | Query closed OS authorization states, request once and poll under the operation deadline. Open only while authorized and the operation remains current. A late OS grant does not itself create a device. |
+| Permission denial is observable | `osx_permissions.m` requests asynchronously and immediately returns success; denial only prints a warning. | In bounded mode, query closed OS authorization states at initialization and immediately before opening; proceed only while already authorized. Missing platform permission support fails closed. A permission request requires a separate explicit flow. |
 | Playback consumes the exact payload | Sink ignores native overrun and its callback leaves a sub-block tail in the ring buffer. | Check writes, count the admitted payload frames, consume the final partial block with zero padding, and return `paComplete` at the exact payload count. |
 | Successful playback means completion | Upstream EOS and ring-buffer demand do not prove device completion. | Use `Pa_SetStreamFinishedCallback` plus the operation's completion disposition and count. PortAudio documents completion after generated samples play; Abort also invokes this callback, so notification alone is insufficient. |
 | Cleanup is positively known | Native destroy discards stop/close errors and may free callback storage despite failed close. ResourceGuard logs cleanup failures and still returns success. | Preserve checked close results and storage ownership on uncertainty. Keep ResourceGuard as fallback, not success evidence. A media error followed by confirmed close may release the fence. |
@@ -86,9 +86,20 @@ test is excluded there). No live dependency was replaced. A Git bundle, full pat
 qualification report and root test logs are preserved under
 `tmp/preserved/voice-device-prerequisites-20260927/`.
 
-The PortAudio prerequisite remains in isolated review. Its standalone fake-driver
-C harness compiles the actual native implementation with ASan/UBSan; its Objective-C
-permission harness links fake AVFoundation. These do not open devices.
+PortAudio candidate `3ecfad95d64b0edde79219c37934ac660083d9a6` is prepared in
+`/private/tmp/arbor-portaudio-bounded-20260927`. Independent root verification
+reproduced 329 native C assertions with ASan/UBSan, 23 sealed fake-BEAM tests and
+five fake Objective-C permission outcomes. The unchanged-source predecessor
+fails seven native lifecycle assertions. A subsequent test-bearing predecessor
+also reproduces three write/close failures; writes, starts, finishes and cleanup
+now share the native executor, and late operations fail closed. Missing Darwin
+permission support has a separate behavioral fail-before/pass-after witness.
+These final harnesses do not open devices. Bundles, full patches, regression
+logs and metadata for both dependency candidates are preserved together.
+
+The proposed portable adoption uses full immutable refs on Arbor's existing
+private Git host. See [the concrete source adoption proposal](VOICE_MEDIA_SOURCE_ADOPTION.md).
+No fork has been published or adopted into Arbor's dependencies.
 
 A separate first BEAM ownership harness had a failed mock boundary: Mockery
 interception was not compiled into the dependency, so four attempted fake native
@@ -99,6 +110,6 @@ that attempt. No permission request/status function was called by that harness.
 The test VM exited. The failed log is retained at
 `/private/tmp/portaudio-ownership-tests.log`. The replacement harness removes the
 real plugin code path, verifies real native modules are unloaded, installs checked
-fake native modules, and compiles only the executor under test, making native
+fake native modules, and compiles the exact Source, Sink and executor under test, making native
 fallback impossible. This incident is not device qualification or user audio
 acceptance, and the earlier general claim of no capture is withdrawn.

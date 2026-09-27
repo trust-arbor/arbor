@@ -139,10 +139,26 @@ The separate coding-dispatch readiness API has a 30-second budget and intermitte
 refused this larger baseline with `:deadline_exhausted`. A successful timed probe
 used 26.995 seconds; six full baseline verifications accounted for 21.786 seconds.
 The 35-second executor callback and 45-second MCP budget make an isolated inner
-timeout increase inappropriate. An isolated optimization is being qualified to
-share an authority's freshly verified receipt with its policy at the initial and
-final boundaries, preserving per-image and final drift checks. This performance
-issue is not fixed by the successful operator proof.
+timeout increase inappropriate. Commits `c19164526` / `121e2ad74` now share an
+authority's freshly verified receipt with its policy at initial and final
+admission. The normal probe performs four full scans instead of six, preserving
+each distinct per-image/final checkpoint, exact receipt equality, drift poisoning
+and existing deadlines. There is no cached receipt or TTL. Independent replay
+passed 79 tests; the original algorithm fails the committed deadline witness.
+
+After the managed restart, the actual 30-second readiness facade passed in
+14.405 seconds on 2026-09-27. The loaded identities of all three changed Shell
+modules matched disk, and the baseline lock still matched. This is a single
+host measurement, not a concurrent-load or end-to-end coding-dispatch latency
+guarantee. Authority calls still cannot preempt work already executing. Evidence:
+`tmp/preserved/voice-device-prerequisites-20260927/live-owner-readiness.json`.
+
+The same restart activated Multimedia's supervised owner from `5083ffa13` /
+`e4e4276e6`. Thirty isolated fake-driver tests, three additional independent
+diagnostic/forgery probes and four hierarchy checks passed. The live owner is
+present, and `Arbor.Multimedia.devices/0` confirms the default unavailable driver.
+This call did not enumerate hardware. The restart reported 26 applications ready
+and Gateway health returned HTTP 200.
 
 B0 establishes the original locked native baseline. It does not qualify microphone
 capture, audible playback, updated native forks or the desk conversation journey.
