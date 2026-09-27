@@ -51,6 +51,9 @@ defmodule Arbor.Agent.Config do
   # executors that opt in, so it gets a larger but still finite deadline.
   @default_executor_finalization_timeout_ms 2_000
 
+  @doc "Fixed supervised owner for opt-in conversation delivery workers."
+  def conversation_task_supervisor, do: Arbor.Agent.Orchestration.TaskSupervisor
+
   @doc "Public Actions facade used to resolve executor action names."
   @spec actions_module() :: module()
   def actions_module do

@@ -968,6 +968,51 @@ defmodule Arbor.Comms do
     end
   end
 
+  @doc """
+  Read a strict, ordinal-ordered page of a verified principal's private transcript.
+
+  This trusted host API derives the engagement from the principal; it does not
+  authenticate a transport request. External callers use
+  `Arbor.Agent.conversation_history/3`. Options are closed to `:after`, `:through`
+  and `:limit`; storage failures remain errors. The ordinal cursor is independent
+  of the conversation command journal's cursor.
+  """
+  defdelegate read_user_conversation_page(agent_id, verified_principal, opts \\ []),
+    to: Arbor.Comms.ConversationRead
+
+  @doc """
+  Durably admit a command for a source-verified private conversation scope.
+
+  The trusted host supplies `%{principal_id: id, agent_id: id, engagement_id: id}`.
+  External callers use `Arbor.Agent.submit_conversation_command/4` for fresh
+  authentication, canonical routing and supervised delivery. Exact retries
+  return saved state; reusing a principal's command ID with changed input or
+  destination conflicts. Admission alone does not authorize execution.
+  """
+  defdelegate admit_conversation_command(scope, command),
+    to: Arbor.Comms.ConversationJournal,
+    as: :admit
+
+  @doc "Read a command in a source-verified conversation scope; excludes its private claim token."
+  defdelegate get_conversation_command(scope, command_id),
+    to: Arbor.Comms.ConversationJournal,
+    as: :get
+
+  @doc "Durably claim one delivery attempt; a saved claim is never reissued after owner loss."
+  defdelegate claim_conversation_command(scope, command_id),
+    to: Arbor.Comms.ConversationJournal,
+    as: :claim
+
+  @doc "Save an immutable delivery outcome using the winning worker's private claim token."
+  defdelegate settle_conversation_command(scope, command_id, claim_token, outcome),
+    to: Arbor.Comms.ConversationJournal,
+    as: :settle
+
+  @doc "Replay a pinned, contiguous command-journal page in a source-verified scope."
+  defdelegate conversation_events(scope, after_cursor, opts \\ []),
+    to: Arbor.Comms.ConversationJournal,
+    as: :events
+
   # -- Voice/dashboard engagement transcript: validation and shaping (private) --
 
   defp resolve_canonical_user_engagement(store, agent_id, user_id) do

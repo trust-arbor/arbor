@@ -75,6 +75,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.ExtensionEnvelopes
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.InvocationAudit
   alias Arbor.Security.Keychain
   alias Arbor.Security.KeyFile
   alias Arbor.Security.Reflex
@@ -665,6 +666,160 @@ defmodule Arbor.Security do
   catch
     :throw, _ -> {:error, :authorization_failed}
     :exit, _ -> {:error, :authorization_failed}
+  end
+
+  @doc """
+  Authenticate one opt-in conversation request and issue its delivery receipt.
+
+  Accepts exactly one session token or signed request, for a bounded chat-agent
+  resource and action `:chat`. The selected capability must be reusable
+  (`max_uses: nil`) and contain only supported chat constraints. Finite-use or
+  unknown constraints are refused before any usage/rate counter is consumed.
+  Ordinary constraint effects occur once, after proof verification. The generic
+  delivery receipt API retains its existing behavior.
+  """
+  @spec authorize_and_issue_conversation_receipt(String.t(), String.t(), :chat, keyword()) ::
+          {:ok, DeliveryReceipt.t()}
+          | {:error, :unauthorized | :unsupported_conversation_capability}
+  def authorize_and_issue_conversation_receipt(principal, resource, action, opts) do
+    with :ok <- validate_conversation_authorization_request(principal, resource, action),
+         true <- Keyword.keyword?(opts),
+         true <- Enum.all?(Keyword.keys(opts), &(&1 in [:session_token, :signed_request])),
+         {:ok, proof_opts} <- validate_issue_opts(opts),
+         {:ok, cap, auth, safe_opts} <-
+           conversation_authorization_decision(principal, resource, proof_opts),
+         :ok <- reusable_conversation_capability(cap),
+         authorization = handle_authorized(cap, auth, principal, resource, :chat, safe_opts),
+         {:ok, :authorized} <-
+           InvocationAudit.observe_authorization(
+             authorization,
+             principal,
+             resource
+           ),
+         {:ok, %DeliveryReceipt{} = receipt} <-
+           DeliveryReceiptBroker.issue(principal, resource, :chat) do
+      {:ok, receipt}
+    else
+      {:error, :unsupported_conversation_capability} = error -> error
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  @doc """
+  Recheck current chat access after source-owned conversation authentication.
+
+  This is a continuation check, not proof authentication and not an execution
+  grant. Only a trusted boundary that already verified fresh proof may use it.
+  Accepts no caller options, never consumes a signed nonce or usage/rate token,
+  and issues no receipt. Current identity, reflex, capability, delegation,
+  approval and supported stateless constraints still fail closed.
+  """
+  @spec recheck_conversation_access(String.t(), String.t()) ::
+          {:ok, :authorized} | {:error, :unauthorized}
+  def recheck_conversation_access(principal, target_agent) when is_binary(target_agent) do
+    resource = "arbor://chat/agent/" <> target_agent
+
+    with :ok <- validate_conversation_authorization_request(principal, resource, :chat),
+         {:ok, cap, _auth, _opts} <-
+           conversation_authorization_decision(principal, resource, verify_identity: false),
+         :ok <- reusable_conversation_capability(cap),
+         :ok <- conversation_stateless_constraints(cap.constraints, resource) do
+      {:ok, :authorized}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  def recheck_conversation_access(_, _), do: {:error, :unauthorized}
+
+  defp validate_conversation_authorization_request(principal, resource, :chat)
+       when is_binary(resource) and byte_size(resource) <= 512 do
+    with :ok <- validate_issue_human_principal(principal),
+         true <- String.valid?(resource),
+         "arbor://chat/agent/" <> target <- resource,
+         true <- byte_size(target) <= 256,
+         true <- Regex.match?(~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/, target) do
+      :ok
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp validate_conversation_authorization_request(_, _, _), do: {:error, :unauthorized}
+
+  # Same decision stages as authorize/4, stopping before its stateful effects.
+  # Extract HMAC proof before context/reflex/event work. Signed proof is checked
+  # once by AuthDecision; initial admission passes the decision to the existing
+  # effect handler rather than evaluating that nonce again.
+  defp conversation_authorization_decision(principal, resource, opts) do
+    with :ok <- require_exact_active_identity(principal),
+         {:ok, proof, safe_opts} <- extract_session_token(opts),
+         {:ok, ^resource} <- normalize_authorization_resource_uri(resource, safe_opts),
+         reflex_context = build_reflex_context(resource, :chat, safe_opts),
+         :ok <- check_reflexes(principal, reflex_context, resource, :chat, safe_opts) do
+      decision_opts =
+        case proof do
+          token when is_binary(token) -> Keyword.put(safe_opts, :session_token, token)
+          _absent -> safe_opts
+        end
+
+      case AuthDecision.evaluate(
+             build_auth_context(principal, safe_opts),
+             resource,
+             :chat,
+             decision_opts
+           ) do
+        {:ok, :authorized, cap, auth} -> {:ok, cap, auth, safe_opts}
+        _ -> {:error, :unauthorized}
+      end
+    end
+  end
+
+  defp reusable_conversation_capability(%Capability{max_uses: nil, constraints: constraints})
+       when is_map(constraints) do
+    if Enum.all?(constraints, &conversation_constraint?/1),
+      do: :ok,
+      else: {:error, :unsupported_conversation_capability}
+  end
+
+  defp reusable_conversation_capability(_), do: {:error, :unsupported_conversation_capability}
+  defp conversation_constraint?({:rate_limit, nil}), do: true
+  defp conversation_constraint?({:rate_limit, limit}), do: is_integer(limit) and limit > 0
+  defp conversation_constraint?({:requires_approval, value}), do: value in [nil, false, true]
+  defp conversation_constraint?({:time_window, nil}), do: true
+
+  defp conversation_constraint?({:time_window, %{start_hour: start, end_hour: finish} = window}),
+    do:
+      map_size(window) == 2 and is_integer(start) and start in 0..23 and
+        is_integer(finish) and finish in 0..24
+
+  defp conversation_constraint?({:allowed_paths, nil}), do: true
+
+  defp conversation_constraint?({:allowed_paths, paths}) when is_list(paths),
+    do:
+      length(paths) <= 256 and
+        Enum.all?(paths, fn path ->
+          is_binary(path) and byte_size(path) in 1..4096 and String.valid?(path)
+        end)
+
+  defp conversation_constraint?(_), do: false
+
+  defp conversation_stateless_constraints(constraints, resource) do
+    if Config.constraint_enforcement_enabled?() do
+      with :ok <- Constraint.evaluate_time_window(Map.get(constraints, :time_window)) do
+        Constraint.evaluate_allowed_paths(Map.get(constraints, :allowed_paths), resource)
+      end
+    else
+      :ok
+    end
   end
 
   @doc """

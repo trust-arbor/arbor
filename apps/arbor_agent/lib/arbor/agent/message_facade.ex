@@ -120,6 +120,94 @@ defmodule Arbor.Agent.MessageFacade do
   end
 
   @doc false
+  # Source-owned continuation for the opt-in conversation ingress. It runs only
+  # after the existing proof gate, never through a caller-supplied option. A nil
+  # message authorizes a read and supplies no delivery function. :handoff means
+  # a supervised worker has taken receipt ownership; every other path discards
+  # the unused receipt. Neither the continuation nor the receipt is persisted.
+  def with_authenticated_receipt(caller, target, message, opts, continuation) do
+    collaborators = %{
+      production_collaborators()
+      | issue_receipt: &Arbor.Security.authorize_and_issue_conversation_receipt/4
+    }
+
+    with_authenticated_receipt(
+      caller,
+      target,
+      message,
+      opts,
+      continuation,
+      collaborators
+    )
+  end
+
+  @doc false
+  def with_authenticated_receipt(caller, target, message, opts, continuation, collaborators)
+      when is_function(continuation, 1) and is_map(collaborators) do
+    with {:ok, timeout, proof} <- validate_opts(opts),
+         :ok <- require_proof(proof),
+         :ok <- validate_principal_id(caller, :invalid_caller_id),
+         :ok <- validate_principal_id(target, :invalid_agent_id),
+         :ok <- validate_conversation_message(message, caller, proof),
+         {:ok, receipt} <-
+           issue_receipt(
+             collaborators.issue_receipt,
+             caller,
+             "arbor://chat/agent/" <> target,
+             proof
+           ) do
+      secrets = secrets_for(proof, receipt)
+      discard = fn -> discard_receipt(collaborators, receipt) end
+
+      deliver =
+        if message do
+          fn ->
+            try do
+              deliver_authenticated(
+                collaborators,
+                :response,
+                message,
+                caller,
+                target,
+                timeout,
+                receipt,
+                secrets
+              )
+            after
+              discard.()
+            end
+          end
+        end
+
+      try do
+        case continuation.(%{deliver: deliver, discard: discard}) do
+          {:handoff, result} ->
+            result
+
+          result ->
+            discard.()
+            result
+        end
+      rescue
+        _ ->
+          discard.()
+          {:error, :delivery_failed}
+      catch
+        _, _ ->
+          discard.()
+          {:error, :delivery_failed}
+      end
+    end
+  end
+
+  defp require_proof(@proof_absent), do: {:error, :unauthorized}
+  defp require_proof({_kind, _value}), do: :ok
+  defp validate_conversation_message(nil, _caller, _proof), do: :ok
+
+  defp validate_conversation_message(message, caller, proof),
+    do: validate_message_for_branch(message, caller, proof)
+
+  @doc false
   # Ordinary-path test adapter: maps (authorize, chat) into the collaborator map.
   @spec deliver(
           String.t(),

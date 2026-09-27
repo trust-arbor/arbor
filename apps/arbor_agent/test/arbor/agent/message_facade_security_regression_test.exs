@@ -135,7 +135,8 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
 
     on_exit(fn ->
-      assert :ok = Security.revoke(cap.id)
+      # Revocation regressions may already have consumed this cleanup step.
+      assert Security.revoke(cap.id) in [:ok, {:error, :not_found}]
       assert {:ok, capabilities} = Security.list_capabilities(principal)
       refute Enum.any?(capabilities, &(&1.id == cap.id))
     end)
@@ -586,6 +587,317 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     for secret <- secrets, is_binary(secret), byte_size(secret) > 0 do
       refute String.contains?(inspected, secret)
       refute :binary.match(inspected, secret) != :nomatch
+    end
+  end
+
+  setup context do
+    if context[:conversation_ingress] do
+      previous = Application.fetch_env(:arbor_security, :session_token_secret)
+
+      Application.put_env(
+        :arbor_security,
+        :session_token_secret,
+        "conversation-public-#{System.unique_integer([:positive])}"
+      )
+
+      Application.put_env(:arbor_security, :identity_verification, true)
+      Application.put_env(:arbor_security, :capability_signing_required, true)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_security, :session_token_secret, value)
+          :error -> Application.delete_env(:arbor_security, :session_token_secret)
+        end
+      end)
+    end
+
+    :ok
+  end
+
+  @tag :conversation_ingress
+  test "security regression: public conversation reads and retries require real current proof", %{
+    target: target
+  } do
+    caller = register_active_human!()
+    other = register_active_human!()
+    resource = "arbor://chat/agent/" <> target
+    capability = track_grant!(caller, resource)
+    assert {:ok, token} = SessionToken.generate(caller)
+    assert {:ok, wrong_token} = SessionToken.generate(other)
+    command = %{id: "command-public-proof", text: "private conversation"}
+
+    for opts <- [[], [session_token: wrong_token], [session_token: "forged"]] do
+      assert {:error, :unauthorized} =
+               Arbor.Agent.submit_conversation_command(caller, target, command, opts)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.conversation_command(caller, target, command.id, opts)
+
+      assert {:error, :unauthorized} = Arbor.Agent.conversation_events(caller, target, 0, opts)
+      assert {:error, :unauthorized} = Arbor.Agent.conversation_history(caller, target, opts)
+    end
+
+    assert {:error, :invalid_opts} =
+             Arbor.Agent.conversation_history(caller, target,
+               session_token: token,
+               engagement_id: "eng_other"
+             )
+
+    assert {:error, :invalid_opts} =
+             Arbor.Agent.submit_conversation_command(caller, target, command,
+               session_token: token,
+               identity_verified: true
+             )
+
+    assert :ok = Security.revoke(capability.id)
+
+    for result <- [
+          Arbor.Agent.submit_conversation_command(caller, target, command, session_token: token),
+          Arbor.Agent.conversation_command(caller, target, command.id, session_token: token),
+          Arbor.Agent.conversation_events(caller, target, 0, session_token: token),
+          Arbor.Agent.conversation_history(caller, target, session_token: token)
+        ] do
+      assert result == {:error, :unauthorized}
+      assert_no_secret_leak(result, [token, wrong_token])
+    end
+  end
+
+  @tag :conversation_ingress
+  @tag :isolated_repo
+  test "security regression: public conversation replay preserves private ownership over real SQLite",
+       %{target: target} do
+    start_conversation_repo!()
+    caller = register_active_human!()
+    other = register_active_human!()
+    capability = track_grant!(caller, "arbor://chat/agent/" <> target)
+    track_grant!(other, "arbor://chat/agent/" <> target)
+    assert {:ok, token} = SessionToken.generate(caller)
+    assert {:ok, other_token} = SessionToken.generate(other)
+    assert {:ok, engagement} = Arbor.Comms.resolve_user_engagement(target, caller)
+    assert {:ok, foreign} = Arbor.Comms.resolve_user_engagement(target, other)
+    scope = %{principal_id: caller, agent_id: target, engagement_id: engagement.id}
+    command = %{id: "replay-existing", text: "owner request 🌲"}
+
+    assert {:ok, _} = Arbor.Comms.admit_conversation_command(scope, command)
+    assert {:ok, claim} = Arbor.Comms.claim_conversation_command(scope, command.id)
+    outcome = %{status: :completed, text: "saved owner response"}
+
+    assert {:ok, completed} =
+             Arbor.Comms.settle_conversation_command(scope, command.id, claim, outcome)
+
+    assert {:ok, ^completed} =
+             Arbor.Agent.submit_conversation_command(caller, target, command,
+               session_token: token
+             )
+
+    assert {:ok, ^completed} =
+             Arbor.Agent.conversation_command(caller, target, command.id, session_token: token)
+
+    assert {:error, :command_conflict} =
+             Arbor.Agent.submit_conversation_command(caller, target, %{command | text: "changed"},
+               session_token: token
+             )
+
+    assert {:ok, first} =
+             Arbor.Agent.conversation_events(caller, target, 0, session_token: token, limit: 1)
+
+    assert first.head == 3
+    assert first.cursor == 1
+    assert first.has_more
+    assert [%{command: %{status: :admitted}}] = first.events
+
+    assert {:ok, rest} =
+             Arbor.Agent.conversation_events(caller, target, first.cursor,
+               session_token: token,
+               through: first.head
+             )
+
+    assert Enum.map(rest.events, & &1.command.status) == [:dispatch_started, :completed]
+    refute rest.has_more
+    assert_no_secret_leak({completed, first, rest}, [token, claim])
+
+    # Seed existing transcript rows through Persistence's public write facade.
+    # The command journal and the legacy transcript remain separate commits.
+    assert {:ok, session} =
+             Arbor.Persistence.ensure_session("agent-session-" <> target, target, [])
+
+    entries =
+      for {engagement_id, text} <- [
+            {engagement.id, "owner history"},
+            {foreign.id, "foreign history"}
+          ] do
+        %{
+          entry_type: "user",
+          role: "user",
+          content: [%{"type" => "text", "text" => text}],
+          timestamp: ~U[2026-09-26 12:00:00.000000Z],
+          metadata: %{"engagement_id" => engagement_id}
+        }
+      end
+
+    assert {:ok, 2} = Arbor.Persistence.append_session_entries(session.id, entries)
+
+    assert {:ok, own_page} =
+             Arbor.Agent.conversation_history(caller, target, session_token: token)
+
+    assert [%{content: "owner history", entry_ordinal: 1}] = own_page.entries
+
+    assert {:ok, other_page} =
+             Arbor.Agent.conversation_history(other, target, session_token: other_token)
+
+    assert [%{content: "foreign history", entry_ordinal: 2}] = other_page.entries
+
+    assert {:ok, %{events: [], head: 0}} =
+             Arbor.Agent.conversation_events(other, target, 0, session_token: other_token)
+
+    assert {:error, :not_found} =
+             Arbor.Agent.conversation_command(other, target, command.id,
+               session_token: other_token
+             )
+
+    assert :ok = Security.revoke(capability.id)
+
+    assert {:error, :unauthorized} =
+             Arbor.Agent.conversation_command(caller, target, command.id, session_token: token)
+
+    assert {:error, :unauthorized} =
+             Arbor.Agent.conversation_events(caller, target, 0, session_token: token)
+
+    assert {:error, :unauthorized} =
+             Arbor.Agent.conversation_history(caller, target, session_token: token)
+  end
+
+  @tag :conversation_ingress
+  @tag :isolated_repo
+  test "public durable admission outlives its caller and saves the scrubbed Session delivery", %{
+    target: target
+  } do
+    start_conversation_repo!()
+
+    if Process.whereis(Arbor.Agent.Orchestration.TaskSupervisor) == nil do
+      start_supervised!({Task.Supervisor, name: Arbor.Agent.Orchestration.TaskSupervisor})
+    end
+
+    caller = register_active_human!()
+    resource = "arbor://chat/agent/" <> target
+    track_grant!(caller, resource)
+    assert {:ok, token} = SessionToken.generate(caller)
+    register_agent_only(target)
+    parent = self()
+
+    {:ok, session_pid} =
+      FakeAuthSession.start_link(parent, fn _from, request ->
+        assert {:send_authenticated_message, %UserMessage{content: "durable delivery"}, receipt} =
+                 request
+
+        assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
+        send(parent, :conversation_receipt_consumed)
+
+        receive do
+          :finish_conversation ->
+            {:ok,
+             %PipelineResponse{
+               content: "saved reply",
+               raw: %{credential: token},
+               metadata: %{session_token: token}
+             }}
+        after
+          5_000 -> flunk("test failed to release the Session response")
+        end
+      end)
+
+    insert_fake_session!(target, session_pid)
+    Application.put_env(:arbor_agent, :orchestrator_session_module, __MODULE__.SessionBridge)
+    command = %{id: "caller-independent", text: "durable delivery"}
+
+    requesting_process =
+      spawn(fn ->
+        result =
+          Arbor.Agent.submit_conversation_command(caller, target, command, session_token: token)
+
+        send(parent, {:public_admission, result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:public_admission, {:ok, %{status: :admitted}}}, 5_000
+    assert_receive :conversation_receipt_consumed, 5_000
+    Process.exit(requesting_process, :kill)
+    send(session_pid, :finish_conversation)
+    completed = await_conversation_completion(caller, target, command.id, token, 100)
+    assert completed.status == :completed
+    assert completed.outcome.text == "saved reply"
+    assert_no_secret_leak(completed, [token])
+
+    assert {:ok, ^completed} =
+             Arbor.Agent.submit_conversation_command(caller, target, command,
+               session_token: token
+             )
+
+    assert {:ok, %{events: events, head: 3}} =
+             Arbor.Agent.conversation_events(caller, target, 0, session_token: token)
+
+    assert Enum.map(events, & &1.kind) == ["admitted", "dispatch_started", "settled"]
+    # Exactly one manager call reached the test Session; the retry replayed.
+    assert_receive {:auth_session_call, _, _}
+    refute_receive {:auth_session_call, _, _}, 50
+  end
+
+  defp start_conversation_repo! do
+    assert Process.whereis(Arbor.Persistence.Repo) == nil,
+           "run this SQLite fixture in its isolated checkout without a shared Repo"
+
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-conversation-public-#{System.pid()}-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    start_supervised!(
+      {Arbor.Persistence.Repo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 4,
+       busy_timeout: 5_000,
+       journal_mode: :wal}
+    )
+
+    migrations = Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+
+    assert [_ | _] =
+             Ecto.Migrator.run(Arbor.Persistence.Repo, migrations, :up, all: true, log: false)
+
+    previous = Application.fetch_env(:arbor_comms, :conversation_journal)
+
+    Application.put_env(:arbor_comms, :conversation_journal,
+      backend: Arbor.Persistence.EventLog.Ecto,
+      name: :conversation_journal,
+      opts: [repo: Arbor.Persistence.Repo]
+    )
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_comms, :conversation_journal, value)
+        :error -> Application.delete_env(:arbor_comms, :conversation_journal)
+      end
+
+      for suffix <- ["", "-wal", "-shm"], do: File.rm(database <> suffix)
+    end)
+  end
+
+  defp await_conversation_completion(_caller, _target, _id, _token, 0),
+    do: flunk("supervised delivery did not persist completion")
+
+  defp await_conversation_completion(caller, target, id, token, remaining) do
+    case Arbor.Agent.conversation_command(caller, target, id, session_token: token) do
+      {:ok, %{status: :completed} = command} ->
+        command
+
+      {:ok, %{status: status}} when status in [:admitted, :dispatch_started] ->
+        Process.sleep(20)
+        await_conversation_completion(caller, target, id, token, remaining - 1)
+
+      unexpected ->
+        flunk("unexpected delivery state: #{inspect(unexpected)}")
     end
   end
 

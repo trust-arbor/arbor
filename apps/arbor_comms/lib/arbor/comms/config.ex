@@ -105,6 +105,37 @@ defmodule Arbor.Comms.Config do
   # Durable interaction store configuration
   # ============================================================================
 
+  @doc "Returns the persistence facade used by source-owned conversation reads."
+  def conversation_persistence_module,
+    do: Application.get_env(:arbor_comms, :conversation_persistence_module, Arbor.Persistence)
+
+  @doc "Returns the explicit durable target for the conversation ingress journal."
+  def conversation_journal do
+    config = Application.get_env(:arbor_comms, :conversation_journal, [])
+
+    if is_list(config) and Keyword.keyword?(config) and
+         length(Keyword.keys(config)) == length(Enum.uniq(Keyword.keys(config))) and
+         Enum.all?(Keyword.keys(config), &(&1 in [:name, :backend, :opts])) do
+      name = Keyword.get(config, :name, :conversation_journal)
+      backend = Keyword.get(config, :backend, Arbor.Persistence.EventLog.Ecto)
+      opts = Keyword.get(config, :opts, [])
+
+      if is_atom(name) and name not in [nil, true, false] and
+           is_atom(backend) and backend not in [nil, true, false] and
+           is_list(opts) and Keyword.keyword?(opts) and
+           length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))) and
+           Enum.all?(Keyword.keys(opts), &(&1 in [:repo, :timeout_ms])) do
+        {:ok, %{name: name, backend: backend, opts: opts}}
+      else
+        {:error, :invalid_journal_config}
+      end
+    else
+      {:error, :invalid_journal_config}
+    end
+  rescue
+    _ -> {:error, :invalid_journal_config}
+  end
+
   @doc "Returns the configured durable interaction persistence backend, or nil when disabled."
   @spec durable_interaction_store_backend() :: module() | nil | term()
   def durable_interaction_store_backend do

@@ -37,6 +37,8 @@ defmodule ArborAgent.MixProject do
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
+      # L4 public conversation admission/replay facade; Agent remains L7.
+      {:arbor_comms, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},

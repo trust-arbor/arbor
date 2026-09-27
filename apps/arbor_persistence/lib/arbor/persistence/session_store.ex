@@ -16,6 +16,7 @@ defmodule Arbor.Persistence.SessionStore do
   import Ecto.Query
 
   alias Arbor.Contracts.Security.TaintEnvelope
+  alias Arbor.Persistence.ConversationPage
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
   alias Ecto.{Adapter, Adapters.SQL}
@@ -528,6 +529,74 @@ defmodule Arbor.Persistence.SessionStore do
   end
 
   # ── Dashboard display API ──────────────────────────────────────────
+
+  @doc false
+  def read_conversation_page(agent_id, engagement_id, bounds) do
+    case get_session("agent-session-#{agent_id}") do
+      {:ok, %Session{agent_id: ^agent_id} = session} ->
+        read_owned_conversation_page(session.id, engagement_id, bounds)
+
+      {:error, :not_found} ->
+        with {:ok, head} <- ConversationPage.pinned_head(0, bounds) do
+          ConversationPage.project([], bounds, head)
+        end
+
+      _ ->
+        {:error, :conversation_unavailable}
+    end
+  rescue
+    _ -> {:error, :conversation_unavailable}
+  catch
+    _, _ -> {:error, :conversation_unavailable}
+  end
+
+  defp read_owned_conversation_page(session_uuid, engagement_id, bounds) do
+    query =
+      from(e in SessionEntry,
+        where: e.session_id == ^session_uuid,
+        where: e.entry_type in ["user", "assistant"]
+      )
+      |> maybe_engagement_filter(engagement_id)
+
+    # Ordinals are monotonically assigned within an append-only session.
+    # Capturing the upper bound before reading excludes any concurrent append;
+    # no write lock or transaction spanning client page requests is necessary.
+    {minimum, maximum} =
+      Repo.one(from(e in query, select: {min(e.entry_ordinal), max(e.entry_ordinal)}))
+
+    with :ok <- valid_conversation_ordinal_range(minimum, maximum),
+         {:ok, head} <- ConversationPage.pinned_head(maximum || 0, bounds) do
+      count = bounds.limit + 1
+
+      rows =
+        Repo.all(
+          from(e in query,
+            where: e.entry_ordinal > ^bounds.after and e.entry_ordinal <= ^head,
+            order_by: [asc: e.entry_ordinal],
+            limit: ^count,
+            select: %{
+              id: e.id,
+              entry_type: e.entry_type,
+              role: e.role,
+              content: e.content,
+              timestamp: e.timestamp,
+              entry_ordinal: e.entry_ordinal
+            }
+          )
+        )
+
+      ConversationPage.project(rows, bounds, head)
+    end
+  end
+
+  defp valid_conversation_ordinal_range(nil, nil), do: :ok
+
+  defp valid_conversation_ordinal_range(minimum, maximum)
+       when is_integer(minimum) and is_integer(maximum) and minimum > 0 and
+              maximum <= @max_entry_ordinal,
+       do: :ok
+
+  defp valid_conversation_ordinal_range(_, _), do: {:error, :invalid_transcript}
 
   @doc """
   Load recent messages for dashboard display by session_id string.

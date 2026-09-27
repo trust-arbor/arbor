@@ -48,7 +48,7 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{ExternalRegistration, Lifecycle, ProfileStore, Registry}
+  alias Arbor.Agent.{ConversationFacade, ExternalRegistration, Lifecycle, ProfileStore, Registry}
 
   require Logger
 
@@ -269,6 +269,56 @@ defmodule Arbor.Agent do
              | :delivery_failed}
   def send_message_response(caller_id, target_agent_id, message, opts \\ []) do
     Arbor.Agent.MessageFacade.deliver_response(caller_id, target_agent_id, message, opts)
+  end
+
+  @doc """
+  Admit an opt-in durable chat delivery command `%{id: id, text: text}`.
+
+  Requires exactly one `:session_token` or `:signed_request` and a reusable chat
+  capability (`max_uses: nil`). Finite-use and unsupported constraints fail
+  before consuming usage/rate counters. Live access rechecks do not charge
+  constraints again. `:timeout` bounds
+  the existing Session delivery (default 30s, maximum 300s). Returns a durable
+  command receipt without waiting for the turn. Reusing the same id and exact
+  text returns its existing state; changed text conflicts. Every request is
+  authenticated before lookup. A claimed command is never redispatched, even
+  after restart. `:dispatch_started` means its outcome is unknown; `:uncertain`
+  is an immutable terminal delivery uncertainty, not permission to retry.
+
+  Session owns execution/transcript commits. Its existing steering semantics
+  remain: a delivery is not a promise of an independent Engine turn. These APIs
+  are opt-in and do not change existing UI routes or send_message behavior.
+  """
+  def submit_conversation_command(caller_id, target_agent_id, command, opts \\ []) do
+    ConversationFacade.run(:submit, caller_id, target_agent_id, command, opts)
+  end
+
+  @doc "Read one owned command with fresh proof and current release authorization."
+  def conversation_command(caller_id, target_agent_id, command_id, opts \\ []) do
+    ConversationFacade.run(:command, caller_id, target_agent_id, command_id, opts)
+  end
+
+  @doc """
+  Replay owned command-journal events after a cursor, with fresh proof.
+
+  Options besides exactly one proof: `:through` pins a replay head and `:limit`
+  bounds the page (1..100). This cursor belongs to the command journal, not the
+  legacy transcript. Read access is rechecked immediately before publication.
+  """
+  def conversation_events(caller_id, target_agent_id, cursor, opts \\ []) do
+    ConversationFacade.run(:events, caller_id, target_agent_id, cursor, opts)
+  end
+
+  @doc """
+  Read the authenticated principal's private legacy transcript page.
+
+  Options besides exactly one proof: `:after`, `:through`, and `:limit` (1..100).
+  The transcript ordinal cursor is separate from conversation_events/4 and may
+  contain gaps caused by other engagements. No caller-supplied engagement route
+  is accepted. A stored transcript is not proof that a delivery command settled.
+  """
+  def conversation_history(caller_id, target_agent_id, opts \\ []) do
+    ConversationFacade.run(:history, caller_id, target_agent_id, nil, opts)
   end
 
   # ===========================================================================

@@ -30,6 +30,7 @@ defmodule Arbor.Persistence do
   alias Arbor.Persistence.{
     AgentTelemetry,
     BufferedStore,
+    ConversationPage,
     Event,
     EventLog,
     LegacyEmbeddingStore,
@@ -358,6 +359,57 @@ defmodule Arbor.Persistence do
     with :ok <- validate_opts(opts, @load_recent_opts_allowlist),
          :ok <- validate_load_opt_values(opts) do
       SessionStore.load_recent_for_display(session_id, opts)
+    end
+  end
+
+  @doc """
+  Validate the closed transcript-page options without reading storage.
+
+  Accepts `:after` (nonnegative ordinal, default 0), `:through` (an optional
+  pinned upper ordinal), and `:limit` (1..100, default 50). Unknown, duplicate,
+  malformed, or out-of-range options return `{:error, :invalid_options}`.
+  This lets a higher boundary reject input before resolving an engagement.
+  """
+  @spec normalize_conversation_page_options(keyword()) ::
+          {:ok, map()} | {:error, :invalid_options}
+  defdelegate normalize_conversation_page_options(opts),
+    to: ConversationPage,
+    as: :normalize_options
+
+  @doc """
+  Read a strict text-only page from one engagement's legacy transcript.
+
+  This storage API is not an authentication boundary. Its caller must first
+  authenticate the principal and derive the engagement from that principal.
+  The canonical agent session is owner-checked; callers cannot supply a
+  session id. Results contain only stable entry ids, string roles, text,
+  ISO8601 timestamps and source entry ordinals. No metadata is returned.
+
+  `:after`, `:through`, and `:limit` follow
+  `normalize_conversation_page_options/1`. Engagement filtering precedes the
+  limit. Ordinal gaps are valid: this is an aggregate-session ordinal, not a
+  per-conversation revision or a command-journal cursor. Reuse the returned
+  `head` as `:through` to paginate an append-only prefix. An absent session
+  is an observed empty history; database failures are explicit errors.
+
+  Entries are limited to 256 KiB of text; the JSON-encoded result is limited
+  to 1 MiB. Oversized output returns `:page_too_large` without truncation.
+  Non-text blocks are omitted from this presentation projection. It must
+  never be reused as provenance-bearing input for cognition.
+  """
+  @spec read_conversation_page(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :invalid_options
+             | :invalid_identifier
+             | :invalid_cursor
+             | :invalid_transcript
+             | :page_too_large
+             | :conversation_unavailable}
+  def read_conversation_page(agent_id, engagement_id, opts \\ []) do
+    with {:ok, bounds} <- normalize_conversation_page_options(opts),
+         :ok <- ConversationPage.validate_identifiers(agent_id, engagement_id) do
+      SessionStore.read_conversation_page(agent_id, engagement_id, bounds)
     end
   end
 
@@ -1127,6 +1179,11 @@ defmodule Arbor.Persistence do
   # ---------------------------------------------------------------
   # EventLog operations
   # ---------------------------------------------------------------
+
+  @doc "Construct an event through the public persistence boundary; does not append it."
+  @spec new_event(String.t(), String.t(), map(), keyword()) :: Event.t()
+  def new_event(stream_id, type, data, opts \\ []),
+    do: Event.new(stream_id, type, data, opts)
 
   @doc "Append events to a stream."
   @spec append(atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::

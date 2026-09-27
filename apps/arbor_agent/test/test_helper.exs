@@ -35,5 +35,6 @@ end
 _ = Arbor.Agent.Test.RuntimeAdmissionTopology.start_fixed_production!()
 
 # :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
-# only backend-dependent tags are excluded. Fast loop: `mix test.fast`.
-ExUnit.start(exclude: [:skip, :external, :llm, :llm_local])
+# Isolated Repo fixtures own the canonical Repo name and run separately with
+# --include isolated_repo. Fast loop: `mix test.fast`.
+ExUnit.start(exclude: [:skip, :isolated_repo, :external, :llm, :llm_local])
