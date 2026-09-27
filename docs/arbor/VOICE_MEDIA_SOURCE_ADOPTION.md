@@ -2,10 +2,11 @@
 
 The two reviewed dependency forks were published with user approval on
 2026-09-27 to private sibling repositories on Arbor's existing Git host.
-The clean adoption candidate `57bca1c470a619a335b271778b51a6133ed0e909` pins
-the full commits below. It is prepared separately from the active checkout while
-root-owned baseline promotion awaits macOS administrator authentication. Public
-GitHub publication and upstream pull requests remain separate decisions. The device driver still
+Multimedia pins the full commits below, reviewed in adoption candidate
+`57bca1c470a619a335b271778b51a6133ed0e909`. Root-owned preparation and full
+candidate admission passed after the managed server stopped. Baseline activation,
+managed restart and the live contained proof remain pending. Public GitHub
+publication and upstream pull requests remain separate decisions. The device driver still
 defaults to `Arbor.Multimedia.Driver.Unavailable`.
 
 Fresh checkouts require authorized access to the LAN Forgejo host below; both
@@ -48,7 +49,7 @@ No device enumeration, permission query/request, capture or playback was called
 in this adoption qualification. Fresh contained Linux umbrella compilation and
 actual ARM64 NIF/SQLite loading also passed with only loopback and no sound
 devices. This does not invoke the native device APIs or qualify hardware. Full
-root-owned candidate admission and managed activation remain pending.
+root-owned candidate admission also passed; managed activation remains pending.
 
 ## Why immutable Git dependencies
 
@@ -94,11 +95,11 @@ The installer and full inventory were independently reviewed. Evidence and the
 literal-digest installer are in `tmp/preserved/voice-native-git-admission-20260927/`.
 The current active baseline remains the original B0 baseline. Remaining steps:
 
-1. Complete macOS administrator authentication to prepare the root-owned files.
-   Stop/drain the managed runtime, run full admission against the prepared config,
-   and activate only after acceptance. Preserve the checked predecessor config.
-2. Integrate the adoption candidate, fetch and compile the host dependencies while
-   the server is stopped, then restart through the managed lifecycle. Verify live
+1. Complete: the root-owned files and checked predecessor backup are installed.
+   The managed runtime stopped with empty task/container inventories, and full
+   candidate admission passed. Activate only the checked candidate config.
+2. The adoption candidate is integrated. Fetch and compile the host dependencies
+   while the server is stopped, then restart through the managed lifecycle. Verify live
    readiness, exact module identities and baseline/lock agreement.
 3. Execute the prepared genuine Workspace/Mix contained proof and require positive
    workspace/container cleanup. Its fixture is `e10c9c32d2c245eebb778eb4efafd5328203f608`;
