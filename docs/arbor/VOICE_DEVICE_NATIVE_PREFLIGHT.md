@@ -10,8 +10,8 @@ The existing `Arbor.Multimedia` facade remains the consumer boundary.
 The pinned Source/Sink interfaces do not expose enough evidence to meet the
 planned capture/playback contract. An Arbor owner can enforce a deadline and
 retain a cleanup fence, but cannot recover errors discarded inside a native
-callback. Prepare isolated, upstream-compatible changes before choosing their
-package source; do not patch the live dependency directory or publish a fork.
+callback. The isolated corrections and approved source adoption are recorded
+below; do not patch the live dependency directory.
 
 | Required behavior | Source finding | Smallest proposed correction |
 | --- | --- | --- |
@@ -97,9 +97,22 @@ permission support has a separate behavioral fail-before/pass-after witness.
 These final harnesses do not open devices. Bundles, full patches, regression
 logs and metadata for both dependency candidates are preserved together.
 
-The proposed portable adoption uses full immutable refs on Arbor's existing
-private Git host. See [the concrete source adoption proposal](VOICE_MEDIA_SOURCE_ADOPTION.md).
-No fork has been published or adopted into Arbor's dependencies.
+A 2026-09-27 source-identity audit found that the earlier ordinary compile logs
+used a copied dependency with pre-serialization Sink/SyncExecutor source. The
+sealed behavioral harness already compiled the exact final source directly.
+The isolated copy was refreshed from the exact Git revision and all four dev/test
+dependency/umbrella compilation checks passed again. Fresh remote-fetch adoption
+checks independently passed 60 owner/Core tests, 23 sealed plugin tests and 329
+native assertions, with all 208 tracked dependency files matched to their pins.
+The corrected report supersedes the old compile claim; both sets of logs remain
+preserved under `tmp/preserved/voice-device-prerequisites-20260927/`.
+
+The approved portable adoption uses full immutable refs on Arbor's existing
+private Git host. Both forks were published privately on 2026-09-27 and are
+pinned by the prepared adoption candidate. See [the source adoption record](VOICE_MEDIA_SOURCE_ADOPTION.md).
+The default driver remains unavailable. Fresh host and contained Linux builds
+pass; root-owned baseline admission/activation and physical device qualification
+remain distinct pending steps.
 
 A separate first BEAM ownership harness had a failed mock boundary: Mockery
 interception was not compiled into the dependency, so four attempted fake native

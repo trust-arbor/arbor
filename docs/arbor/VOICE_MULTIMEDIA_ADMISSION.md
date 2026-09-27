@@ -2,8 +2,11 @@
 
 2026-09-27 — VP-07B0 installed, activated and qualified through the live runtime.
 
-`arbor_multimedia` is an L0 facade scaffold with no device API. Its locked direct
-dependencies are Membrane Core 1.3.4, PortAudio plugin 0.19.6, and RawAudio 0.12.3.
+The original admission used `arbor_multimedia` as an L0 facade scaffold. Its
+original direct dependencies were Membrane Core 1.3.4, PortAudio plugin 0.19.6,
+and RawAudio 0.12.3. The supervised device owner is now integrated, with the
+default driver unavailable. See the [source adoption record](VOICE_MEDIA_SOURCE_ADOPTION.md)
+for the subsequent private Git pins; the original identities below remain historical evidence.
 Bundlex precompiled OS dependencies are disabled for the PortAudio plugin. The
 plugin compiles against image-owned PortAudio through pkg-config. This baseline
 admission used no microphone permission, device enumeration, capture, playback,
