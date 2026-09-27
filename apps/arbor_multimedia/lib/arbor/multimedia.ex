@@ -11,7 +11,7 @@ defmodule Arbor.Multimedia do
   The default driver fails closed until the reviewed native prerequisites are
   adopted and qualified. There is no implicit device or permission probe at boot.
   """
-  alias Arbor.Multimedia.{DeviceOwner, PcmCore, Redacted}
+  alias Arbor.Multimedia.{DeviceOwner, Fence, PcmCore, Redacted}
 
   @type audio :: %{pcm: binary(), sample_rate: pos_integer(), channels: 1, sample_format: :s16le}
 
@@ -45,7 +45,9 @@ defmodule Arbor.Multimedia do
         {:error, :cleanup_pending}
 
       :exit, {:noproc, _} ->
-        {:error, :device_unavailable}
+        if Fence.current() == nil,
+          do: {:error, :device_unavailable},
+          else: {:error, :cleanup_pending}
 
       :exit, _ ->
         {:error, :cleanup_pending}

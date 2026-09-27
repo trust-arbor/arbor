@@ -78,26 +78,28 @@ defmodule Arbor.Multimedia.DeviceOwner do
   end
 
   defp admit(state, request, spec, deadline, from) do
-    token = System.unique_integer([:positive, :monotonic])
+    fence_id = System.unique_integer([:positive, :monotonic])
+    token = make_ref()
     active = :atomics.new(1, [])
     :atomics.put(active, 1, 1)
     permit = %{active: active, deadline: deadline, owner: self(), caller: elem(from, 0)}
 
-    with :ok <- Fence.acquire(token) do
-      start_worker(state, request, spec, deadline, from, token, permit)
+    with :ok <- Fence.acquire(fence_id) do
+      start_worker(state, request, spec, deadline, from, token, fence_id, permit)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  defp start_worker(state, request, spec, deadline, from, token, permit) do
+  defp start_worker(state, request, spec, deadline, from, token, fence_id, permit) do
     case DynamicSupervisor.start_child(
            Arbor.Multimedia.DriverSupervisor,
-           {DriverWorker, {state.driver, self(), token, permit}}
+           {DriverWorker, Redacted.new({state.driver, self(), token, fence_id, permit})}
          ) do
       {:ok, worker} ->
         op = %{
           token: token,
+          fence_id: fence_id,
           permit: permit,
           request: request,
           from: from,
@@ -116,7 +118,7 @@ defmodule Arbor.Multimedia.DeviceOwner do
       {:error, _} ->
         # DriverWorker.init performs no native work, so failure before its open
         # handoff has no resource to exhaust.
-        Fence.release(token)
+        Fence.release(fence_id)
         {:reply, {:error, :device_unavailable}, state}
     end
   end
@@ -138,7 +140,7 @@ defmodule Arbor.Multimedia.DeviceOwner do
     Process.cancel_timer(op.timer)
     Process.demonitor(op.caller_ref, [:flush])
     Process.demonitor(op.worker_ref, [:flush])
-    Fence.release(op.token)
+    Fence.release(op.fence_id)
     if op.from, do: GenServer.reply(op.from, op.core.result)
     %{state | operation: nil}
   end

@@ -25,7 +25,8 @@ One absolute monotonic deadline covers admission, startup, media and cleanup.
 The default budget is the media duration plus 2 seconds. If cleanup remains
 uncertain at expiry, the caller receives `{:error, :cleanup_pending}` while the
 worker keeps custody and retries close. No new device operation is admitted.
-A VM-retained atomic fence survives coordinator/worker/application restarts;
+Private reference credentials correlate both driver notification hops; numeric fence
+identities carry no completion authority. A VM-retained atomic fence survives coordinator/worker/application restarts;
 only exact-token positive close can clear it. If handle custody itself is lost,
 the VM remains fenced. There is no public force-clear API. An internal revocable
 permit checks the deadline and caller/coordinator liveness before effects; a

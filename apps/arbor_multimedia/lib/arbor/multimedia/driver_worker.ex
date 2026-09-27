@@ -3,11 +3,13 @@ defmodule Arbor.Multimedia.DriverWorker do
   use GenServer, restart: :temporary
   alias Arbor.Multimedia.{Driver, Fence, PcmCore, Redacted}
 
-  def start_link({driver, owner, token, permit}),
-    do: GenServer.start_link(__MODULE__, {driver, owner, token, permit})
+  def start_link(%Redacted{} = bootstrap),
+    do: GenServer.start_link(__MODULE__, bootstrap)
 
   @impl true
-  def init({driver, owner, token, permit}) do
+  def init(%Redacted{value: {driver, owner, token, fence_id, permit}}) do
+    permit = Map.merge(permit, %{receiver: self(), notification: make_ref()})
+
     {:ok,
      %{
        driver: driver,
@@ -15,6 +17,7 @@ defmodule Arbor.Multimedia.DriverWorker do
        owner: owner,
        monitor: Process.monitor(owner),
        token: token,
+       fence_id: fence_id,
        handle: nil,
        opened: false,
        closing: false
@@ -42,14 +45,20 @@ defmodule Arbor.Multimedia.DriverWorker do
   def handle_info({:close, token}, %{token: token} = state), do: request_close(state)
   def handle_info(:retry_close, state), do: close(%{state | closing: false})
 
-  def handle_info({:multimedia_driver, {:closed, _}}, state) do
+  def handle_info(
+        {:multimedia_driver, notification, %Redacted{value: {:closed, _}}},
+        %{permit: %{notification: notification}} = state
+      ) do
     # Stream/pipeline notifications cannot attest cleanup. Only close/1's
     # checked return can issue a positive custody acknowledgement.
     notify(state, {:error, :invalid_media})
     {:noreply, state}
   end
 
-  def handle_info({:multimedia_driver, event}, state) do
+  def handle_info(
+        {:multimedia_driver, notification, %Redacted{value: event}},
+        %{permit: %{notification: notification}} = state
+      ) do
     notify(state, event)
     {:noreply, state}
   end
@@ -70,6 +79,10 @@ defmodule Arbor.Multimedia.DriverWorker do
     |> Map.put(:reason, :redacted)
     |> Map.put(:log, [])
   end
+
+  # init has no effects, and a still-unprocessed open message cannot execute
+  # after this normal stop. Unknown/blocked open never reaches this clause.
+  defp close(%{handle: nil, opened: false} = state), do: confirmed_close(state)
 
   defp close(%{handle: %Redacted{value: handle}} = state) do
     case safe_close(state.driver, handle) do
@@ -99,7 +112,7 @@ defmodule Arbor.Multimedia.DriverWorker do
     # Close is already proven. Release the exact fence here even when the
     # coordinating owner dies before receiving its acknowledgement.
     :atomics.put(state.permit.active, 1, 0)
-    Fence.release(state.token)
+    Fence.release(state.fence_id)
     notify(state, {:closed, :ok})
     {:stop, :normal, %{state | handle: nil}}
   end

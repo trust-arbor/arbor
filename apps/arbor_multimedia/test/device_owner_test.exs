@@ -328,6 +328,93 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
     Fence.release(winner)
   end
 
+  test "missing coordinator remains cleanup_pending while the resource worker holds custody" do
+    task = Task.async(fn -> Multimedia.play_pcm(audio()) end)
+    assert_receive {:opened, worker, _}
+    stop_supervised!(DeviceOwner)
+    assert {:error, :cleanup_pending} = Task.await(task)
+    assert {:error, :cleanup_pending} = Multimedia.devices()
+    assert Fence.current() != nil
+    finish_close(worker)
+    eventually(fn -> assert Fence.current() == nil end)
+    assert {:error, :device_unavailable} = Multimedia.devices()
+  end
+
+  test "security regression: copied occupancy identity cannot attest checked close", %{
+    owner: owner
+  } do
+    task = Task.async(fn -> Multimedia.play_pcm(audio()) end)
+    assert_receive {:opened, worker, _}
+    emit(worker, {:complete, 800})
+    assert_receive {:close_attempt, ^worker}
+    occupancy = Fence.current()
+    assert is_integer(occupancy)
+    send(owner, {:driver, occupancy, Arbor.Multimedia.Redacted.new({:closed, :ok})})
+    assert Task.yield(task, 50) == nil
+    assert Fence.current() == occupancy
+    assert Process.alive?(worker)
+    send(worker, {:close_result, :ok})
+    assert :ok = Task.await(task)
+    assert Fence.current() == nil
+  end
+
+  test "security regression: a worker PID alone cannot attest media completion" do
+    task = Task.async(fn -> Multimedia.play_pcm(audio()) end)
+    assert_receive {:opened, worker, _}
+    send(worker, {:multimedia_driver, {:complete, 800}})
+    refute_receive {:close_attempt, ^worker}, 50
+    assert Task.yield(task, 0) == nil
+    assert Fence.current() != nil
+    emit(worker, {:complete, 800})
+    finish_close(worker)
+    assert :ok = Task.await(task)
+  end
+
+  test "coordinator death before open handoff proves no effects and releases custody" do
+    dormant_owner =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    fence_id = System.unique_integer([:positive, :monotonic])
+    token = make_ref()
+    active = :atomics.new(1, [])
+    :atomics.put(active, 1, 1)
+
+    permit = %{
+      active: active,
+      owner: dormant_owner,
+      caller: self(),
+      deadline: System.monotonic_time(:millisecond) + 1_000
+    }
+
+    assert :ok = Fence.acquire(fence_id)
+
+    bootstrap =
+      Arbor.Multimedia.Redacted.new(
+        {Arbor.Multimedia.FakeDriver, dormant_owner, token, fence_id, permit}
+      )
+
+    {:ok, worker} =
+      DynamicSupervisor.start_child(
+        Arbor.Multimedia.DriverSupervisor,
+        {Arbor.Multimedia.DriverWorker, bootstrap}
+      )
+
+    monitor = Process.monitor(worker)
+    Process.exit(dormant_owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}
+    assert Fence.current() == nil
+    refute_receive {:opened, ^worker, _}
+    task = Task.async(fn -> Multimedia.devices() end)
+    assert_receive {:opened, next, _}
+    emit(next, {:devices, []})
+    finish_close(next)
+    assert {:ok, []} = Task.await(task)
+  end
+
   test "validation rejects unsafe public inputs before the fake or any native entry" do
     assert {:error, :invalid_options} =
              Multimedia.capture_pcm(duration_ms: 100, sample_rate: 8_000, module: SomeModule)
@@ -341,7 +428,25 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
     send(worker, {:close_result, :ok})
   end
 
-  defp emit(worker, event), do: send(worker, {:multimedia_driver, event})
+  defp emit(worker, event) do
+    permit =
+      Process.get({:driver_permit, worker}) ||
+        receive do
+          {:permit, permit} ->
+            Process.put({:driver_permit, worker}, permit)
+            permit
+        after
+          500 -> flunk("missing fake driver permit")
+        end
+
+    # Predecessor witness support only: the original candidate had raw driver
+    # events. Both branches remain the explicit fake, never native passthrough.
+    if function_exported?(Arbor.Multimedia.Driver, :notify, 2) do
+      Arbor.Multimedia.Driver.notify(permit, event)
+    else
+      send(worker, {:multimedia_driver, event})
+    end
+  end
 
   defp audio,
     do: %{

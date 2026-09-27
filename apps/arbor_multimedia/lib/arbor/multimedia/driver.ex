@@ -1,8 +1,8 @@
 defmodule Arbor.Multimedia.Driver do
   @moduledoc false
   # Internal, trusted application configuration only. No caller-selectable implementation.
-  # Runs inside a retained supervised DriverWorker. open/1 may block without blocking
-  # the caller deadline. Emit {:multimedia_driver, event} to that worker. Its mailbox
+  # Runs inside a retained supervised DriverWorker. open/2 may block without blocking
+  # the caller deadline. Emit events through notify/2 using the private permit. Its mailbox
   # serializes close with open; returning closed must prove no native resource remains.
   # Recheck the permit before every native create/start effect, including after
   # asynchronous permission or setup waits. A deadline cannot interrupt a NIF
@@ -14,6 +14,15 @@ defmodule Arbor.Multimedia.Driver do
     :atomics.get(permit.active, 1) == 1 and
       System.monotonic_time(:millisecond) < permit.deadline and
       Process.alive?(permit.owner) and Process.alive?(permit.caller)
+  end
+
+  def notify(permit, event) do
+    send(
+      permit.receiver,
+      {:multimedia_driver, permit.notification, Arbor.Multimedia.Redacted.new(event)}
+    )
+
+    :ok
   end
 end
 
