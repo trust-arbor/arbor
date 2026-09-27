@@ -1081,6 +1081,12 @@ compile or API work behind a delayed factory invoked from the test process, keep
 assertion against the missing or fixed public API, and require candidate success plus ordinary
 parent test failure (found 2026-09-01 during G5B1 exact-two-revision verification).
 
+Build callback test state through the public initializer instead of duplicating
+private state fields. New lifecycle fields can make a handwritten fixture fail
+with `KeyError` before the intended security assertion; initialize while the
+dependency is available, then remove it to exercise fail-closed behavior (found
+2026-09-27 extending the bounded Source permission regression).
+
 <!-- applied-learning: source-corpus-tests-must-not-require-ambient-git-metadata -->
 <a id="applied-learning-source-corpus-tests-must-not-require-ambient-git-metadata"></a>
 **Source-corpus tests must not require ambient Git metadata.** Immutable

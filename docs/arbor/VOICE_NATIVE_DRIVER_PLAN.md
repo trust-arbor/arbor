@@ -42,11 +42,59 @@ This is host compiler evidence, not renewed Linux admission or device execution.
 A complete Git bundle preserves the candidate and regression history in the
 evidence directory.
 
-The next plugin slice is the no-effect startup registration/custody ACK and
-native payload/completion correlation described below. Permission status queries
-still precede the executor gate in the current elements. Bounded enumeration,
-dormant NativeSession activation and actual capture/playback integration also
-remain open. None of the fake-native results establish physical audio behavior.
+## Startup custody and native correlation — 2026-09-27
+
+Local PortAudio candidate `ba9030b7e1291b6d035a3cd5c2c763c336acdf65`
+implements the next prerequisite. Bounded Source/Sink can enter setup without
+permission queries or native effects, report their actual PID through a public
+parent notification, and wait for the host to record custody and bind a lease.
+The matching ACK admits one constructor for one immutable stream token. Darwin
+Source permission status runs through the executor with fresh lease checks
+before and after the query, including the query immediately before open.
+
+Native producers copy a private 32-byte token into stable stream storage and
+include it on capture payload, completion and Sink demand messages, including
+initial demand. Elements reject raw, stale, malformed and wrong-phase evidence;
+capture accepts the final bounded payload even when completion arrives first.
+Legacy option/message behavior remains available. Both elements enable sensitive
+Core diagnostics; the host pipeline must do so too, before accepting child specs.
+The concrete protocol is in the fork's `BOUNDED_AUDIO.md`.
+
+Review also repaired unchecked capture-buffer allocation and a retained failed
+Sink constructor that could otherwise accept later write/start. The candidate
+passes 652 native assertions under ASan/UBSan and 86 sealed Elixir tests: 27
+compatibility/ownership, 35 executor lease/startup and 24 actual-Core lifecycle.
+Those lifecycle tests include public PID registration, owner death before ACK,
+owner death during blocked open with positive closure of the late handle, both
+capture arrival orders, and rejected uncorrelated completion. Immediate
+test-bearing predecessor `8ed13f3871e595ae0088cbef1724ca29230d5a11` of the
+implementation commit `bb1288622e37fcd2255cb15e140c26157d45781e` fails
+97 native assertions, 20 element tests and 12 executor tests. A supplementary
+test overlay observes the predecessor forwarding raw PCM/completion before
+unsupported correlated traffic can terminate it; the fixed candidate passes.
+The final commit adds project formatting and clarifies that completion is
+deduplicated; PCM has aggregate bounds, not per-buffer sequence/replay detection.
+
+Using sensitive elements exposed a Core diagnostics bug: intentional normal
+termination was converted to a component failure. Separate local Core candidate
+`c2e9c7aff031dd600d2318b72193a4825b0da95f` preserves graceful OTP exits,
+redacts shutdown tuple payloads, and keeps errors/throws abnormal. It passes 39
+tests including existing raw Logger privacy coverage. Immediate test-bearing
+parent `3538da75062c3bce7833cb5297f6a12b5812fe99` fails seven of the 12 new
+termination cases. The two candidates also pass the 24-case joint startup suite.
+
+Evidence and complete source bundles are preserved in
+`tmp/preserved/voice-native-startup-correlation-20260927/`, with the separate Core
+review in `tmp/preserved/membrane-sensitive-termination-20260927/`. Actual native
+and dependency compilation passes with warnings as errors in isolated dev/test
+builds, separately from fake-native execution. Both source inventories and fresh
+BEAM compile-source paths are checked against the exact candidate refs.
+Neither candidate is published or adopted into Arbor; active pins and the Linux
+baseline remain unchanged. No physical audio is enabled by this work.
+
+The next implementation slice is bounded device enumeration. Dormant
+NativeSession activation and actual capture/playback integration remain open.
+None of the fake-native results establish physical audio behavior.
 
 ## Minimal host structure
 
@@ -75,7 +123,11 @@ Its custom collector/binary-source modules also opt into sensitive diagnostics;
 Core inheritance protects the dependency Source/Sink and their owned utilities.
 No PCM or credentials go into names, Logger metadata or printed errors.
 
-## Required prerequisite follow-up: element lease and startup custody
+## Implemented local prerequisite: element lease and startup custody
+
+This section records the design now implemented by the two local PortAudio
+slices above. References to the published implementation describe the earlier
+adopted baseline, not the new local candidate.
 
 The published executor serializes native operations and rejects dead/fenced
 owners. It does not know Arbor's deadline or revocation flag. Checking before
@@ -116,15 +168,15 @@ its public API. Public parent callbacks expose child names, not a documented PID
 lookup. `handle_child_setup_completed` is too late to make the existing Source
 initialization permission query safe.
 
-Split **bounded Source open and start**. Its current Native.create calls both
-`init_pa` and `start_pa`; if opening blocks until after expiry, one pre-create
+Split **bounded Source open and start**. The published baseline's bounded
+Native.create calls both `init_pa` and `start_pa`; if opening blocks until after expiry, one pre-create
 lease check does not prevent the later start. Sink already has a separate start.
 Initialize callback storage before either phase, then recheck the lease before
 Source.Native.start. An already-entered Pa_OpenStream/Pa_StartStream NIF still
 cannot be forcibly cancelled; report pending cleanup and retain custody.
 
 The callback/parent evidence must carry private per-operation correlation all
-the way from the producing stream. The current raw
+the way from the producing stream. The published baseline's raw
 `{:portaudio_capture_finished, disposition, frames}`,
 `{:portaudio_playback_finished, disposition, frames}`, and capture payload
 messages do not themselves authenticate their producer. Rewrapping a message in
@@ -220,9 +272,11 @@ Until this API is qualified, native enumeration remains unavailable.
 
 ## Implementation and acceptance sequence
 
-1. Make a separate reviewed plugin follow-up for gated startup/leases, public
-   correlated element registration, bounded Source open/start, and native event
-   correlation. Preserve the already-published commits; do not rewrite them.
+1. Local implementation complete: separate reviewed plugin follow-ups for gated
+   startup/leases, public correlated element registration, bounded Source open/start, and native event
+   correlation, plus the Core graceful-termination correction. Publication and
+   renewed dependency admission remain separate. Preserve the already-published
+   commits.
 2. Add bounded enumeration ownership independently with fake native allocation,
    initialization, pointer/error, oversized-count/name, and failed-termination
    cases. Keep the old listing API out of Arbor's device path.

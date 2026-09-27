@@ -2583,7 +2583,7 @@
       "anchor": "applied-learning-secret-bearing-genservers-need-explicit-status-redaction",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing verified-request and execution-permit brokers).",
-      "content_sha256": "e77f7134503759b133b37cffa51f227d0b4203ad9930239d216b134c6189fecb",
+      "content_sha256": "df002ae38b8573b69dc9db6b229765e725520880cb72e75d7ee6cf626efef7c5",
       "always_loaded": false
     },
     {
@@ -3531,7 +3531,7 @@
       "anchor": "applied-learning-an-operation-deadline-never-authorizes-abandoning-owned-cleanup",
       "source_date": "2026-07-14",
       "source_incident": "confirmed 2026-07-14 designing the Apple Container unit worker).",
-      "content_sha256": "af07711704e7863a8c934bd1bd6c53fc342a7b131b0d2a28b6c41f2f3e422147",
+      "content_sha256": "96750ff1f3ef5405c608042fba1bef4d92aecea6694daa2410f2a97796f2e8e6",
       "always_loaded": false
     },
     {
@@ -8786,7 +8786,7 @@
       "source_date": "2026-09-01",
       "source_incident": "found 2026-09-01 during G5B1 exact-two-revision verification",
       "always_loaded": false,
-      "content_sha256": "3dd52a778b9a3d0401f59998db1e5be092e2d38dcc00f77481e7bb5bed25734f"
+      "content_sha256": "3d7d3b562be9fe9ddd2ec24abd4c0be410877001de495d9a7f1e675fb567b04a"
     },
     {
       "source_ordinal": 712,

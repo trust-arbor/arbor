@@ -111,6 +111,13 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <a id="applied-learning-secret-bearing-genservers-need-explicit-status-redaction"></a>
 **Secret-bearing GenServers need explicit status redaction.** Redacted struct `Inspect` implementations do not protect a broker whose raw state map uses bearer tokens as keys or stores session/root private keys. Implement bounded `format_status/2`, keep secrets out of crash metadata and error tuples, and regress `:sys`/status formatting for every authority owner (found 2026-07-11 reviewing verified-request and execution-permit brokers).
 
+Sensitive exception redaction must preserve OTP graceful exit classes. Keep exits
+with `:normal` and `:shutdown` unchanged, redact only the private payload in
+`{:shutdown, reason}`, and keep throws/errors abnormal even when their payload
+looks graceful. Regress actual component and owned-supervisor exit reasons plus
+raw Logger privacy; a sanitized normal exit must not become a failure (found
+2026-09-27 during Membrane gated startup qualification).
+
 <!-- applied-learning: format-status-2-does-not-make-secret-bearing-genserver-state-private -->
 <a id="applied-learning-format-status-2-does-not-make-secret-bearing-genserver-state-private"></a>
 **`format_status/2` does not make secret-bearing GenServer state private.** It can redact crash/status formatting, but local code can still call `:sys.get_state/1` and receive the raw state. Do not retain bearer tokens or private authority in long-lived GenServer state at all; keep them in a private owner/ETS boundary or consume them entirely inside the exact request process (found 2026-07-11 probing the MCP verified-request handler).
@@ -178,6 +185,13 @@ owner qualification, 2026-09-08).
 <!-- applied-learning: an-operation-deadline-never-authorizes-abandoning-owned-cleanup -->
 <a id="applied-learning-an-operation-deadline-never-authorizes-abandoning-owned-cleanup"></a>
 **An operation deadline never authorizes abandoning owned cleanup.** Stop admitting setup or candidate work once the original absolute budget expires, but retain a supervised cleanup owner and retry bounded teardown until positive absence is proven. This may outlive the caller's operation budget, as the materializer already does; returning on the deadline while a named containment unit may remain would turn timeout into a containment bypass (confirmed 2026-07-14 designing the Apple Container unit worker).
+
+Register each effect-capable child through a public no-effect startup handshake
+and bind custody before acknowledging setup. Attach private stream correlation
+at the native producer before its first notification, including initial demand;
+wrapping uncorrelated evidence later cannot establish provenance. Completion can
+precede queued capture payload, so retain the bounded payload path until the host
+joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
 
 <!-- applied-learning: a-supervised-genserver-cannot-defer-parent-shutdown-from-handle-info-2 -->
 <a id="applied-learning-a-supervised-genserver-cannot-defer-parent-shutdown-from-handle-info-2"></a>
