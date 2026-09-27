@@ -99,6 +99,13 @@ sent, and conflicting declarations are ignored. The Session crash regression
 also fails there because its fixture secret appears in the current-message log.
 These are behavior counterexamples, not missing-new-helper failures.
 
+An independent checkout combining this slice with conversation convergence
+`11d209431` passed test compilation with warnings as errors, the focused
+82-test ownership/codec lane and the complete 482-test Voice suite. The first
+full replay exposed a 100 ms ExUnit scheduler wait in the existing transport
+probe. Its report wait is now 1 second; the deterministic 100 ms fake-clock
+deadline and exact unconsumed-message assertion are unchanged.
+
 Evidence logs: `/private/tmp/voice-pcm-full.log`,
 `/private/tmp/voice-pcm-xai-final.log`, `/private/tmp/voice-pcm-spec.log`,
 `/private/tmp/voice-pcm-baseline-xai.log` and

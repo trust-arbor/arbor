@@ -688,8 +688,10 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         send(test_pid, {:probe_result, result, leftover_probes})
       end)
 
-    assert_receive {:probe_result, {:error, :timeout}, 3}
-    assert_receive {:DOWN, ^mon, :process, ^receiver, :normal}
+    # The fake clock proves the 100ms protocol budget independently of VM
+    # scheduling; allow the monitored process to report under parallel builds.
+    assert_receive {:probe_result, {:error, :timeout}, 3}, 1_000
+    assert_receive {:DOWN, ^mon, :process, ^receiver, :normal}, 1_000
   end
 
   # ── recv/2 accumulator + backend-level deadline ──
