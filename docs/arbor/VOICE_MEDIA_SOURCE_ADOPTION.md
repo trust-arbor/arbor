@@ -3,9 +3,9 @@
 The two reviewed dependency forks were published with user approval on
 2026-09-27 to private sibling repositories on Arbor's existing Git host.
 Multimedia pins the full commits below, reviewed in adoption candidate
-`57bca1c470a619a335b271778b51a6133ed0e909`. Root-owned preparation and full
-candidate admission passed after the managed server stopped. Baseline activation,
-managed restart and the live contained proof remain pending. Public GitHub
+`57bca1c470a619a335b271778b51a6133ed0e909` and integrated as `b8ab4f364`.
+Root-owned preparation, full candidate admission, baseline activation, managed
+restart and the live contained proof all passed on 2026-09-27. Public GitHub
 publication and upstream pull requests remain separate decisions. The device driver still
 defaults to `Arbor.Multimedia.Driver.Unavailable`.
 
@@ -49,7 +49,7 @@ No device enumeration, permission query/request, capture or playback was called
 in this adoption qualification. Fresh contained Linux umbrella compilation and
 actual ARM64 NIF/SQLite loading also passed with only loopback and no sound
 devices. This does not invoke the native device APIs or qualify hardware. Full
-root-owned candidate admission also passed; managed activation remains pending.
+root-owned candidate admission, managed activation and the live proof also passed.
 
 ## Why immutable Git dependencies
 
@@ -81,36 +81,65 @@ The new Linux source tree contains 6,921 entries and 82,840,004 regular-file byt
 The runtime image derives from the exact original native-equipped image and
 changes only the source/lock labels; its native system inputs remain unchanged.
 
-| Prepared baseline input | Exact identity |
+| Active baseline input | Exact identity |
 | --- | --- |
 | Lock SHA-256 | `e4378b2578fc7041948225bef442a244ec29717af672bedc32c3181fc89c9365` |
 | Source tree SHA-256 | `5464f8ddcd0439b729ee2d585a6e892eb75b8d1109ef74e07ab0508fb4067a71` |
 | Image index | `sha256:471c256a63697eed1eee27698c5806c4a783fb50011c11b52235666ce7ad73ac` |
 | Image manifest | `sha256:e9da3b58c374f09a39826640a58ed2f04b6044fa844bf710bd27eef3c5e144f0` |
 | Manifest file SHA-256 | `83423d84dc015339f39e216d82162e95e304e0e3abf91b628857fc8ccd12389c` |
-| Candidate config SHA-256 | `d3cd16c0f033ef09d0d8de81094dd9c9d02fe40c8e576c2934bd8aae4620418a` |
+| Active/candidate config SHA-256 | `d3cd16c0f033ef09d0d8de81094dd9c9d02fe40c8e576c2934bd8aae4620418a` |
 | Installer SHA-256 | `48f0843a7d74477c71563ba6e6d5868c72472c1774e75ff9af3354ff5ab9c245` |
 
 The installer and full inventory were independently reviewed. Evidence and the
 literal-digest installer are in `tmp/preserved/voice-native-git-admission-20260927/`.
-The current active baseline remains the original B0 baseline. Remaining steps:
+The new baseline is active. Its checked predecessor config remains at
+`/usr/local/etc/arbor/apple-container.json.pre-e4378b25-5464f8dd` (SHA-256
+`aa0e87d2948bc16bd8b3ccad8d4d1ba3e29586d054039d2381f30dd000a92f4d`).
+Config rollback also requires coordinating the repository lock and live runtime;
+it is not a code rollback.
 
-1. Complete: the root-owned files and checked predecessor backup are installed.
-   The managed runtime stopped with empty task/container inventories, and full
-   candidate admission passed. Activate only the checked candidate config.
-2. The adoption candidate is integrated. Fetch and compile the host dependencies
-   while the server is stopped, then restart through the managed lifecycle. Verify live
-   readiness, exact module identities and baseline/lock agreement.
-3. Execute the prepared genuine Workspace/Mix contained proof and require positive
-   workspace/container cleanup. Its fixture is `e10c9c32d2c245eebb778eb4efafd5328203f608`;
-   this test has been prepared, not executed. Config rollback also requires
-   coordinating the repository lock and live runtime; it is not a code rollback.
-4. Complete the separately reviewed [native driver follow-up](VOICE_NATIVE_DRIVER_PLAN.md):
+The managed runtime stopped after complete empty volatile-task and contained-unit
+inventories. Main fetched the exact pins without lock drift and compiled with
+warnings as errors while stopped. The restart reported 26 umbrella apps ready at
+`arbor_dev_045c@127.0.0.1`, PID 50229, and Gateway health returned OK. Live media
+and Shell module MD5s matched disk; all 208 fetched tracked source files matched
+the published refs. The ordinary 30-second readiness probe passed in 14.425
+seconds, a single-host observation rather than a load guarantee.
+
+The genuine Workspace/Mix proof completed at `2026-09-27T22:44:33Z`, task
+`native_git_audio_admission_20260927_cee6f4ccc2e67a96`, fixture
+`39417f826282efc02f1f62daf23df6ac637df3f5`, tree
+`aa859f75fc87486ca016952a684312140268e9d8`. Both the complete umbrella build and
+one no-device test passed with exact fixture identities. The test verified all
+208 tracked dependency files and compile-source paths, bounded API exports,
+sensitive diagnostics, all three Linux ARM64 NIFs, sqlite_vec `v0.1.5`, loopback
+only and no sound devices. Multimedia/PortAudio applications stayed stopped in
+the test VM. The exact completed-suite artifact records one pass, zero failures,
+zero skips/exclusions; owned workspace removal and complete empty scoped container
+inventory prove cleanup. See `live-contained-proof.json` in the evidence package.
+
+The first prepared command, `test --no-start`, was rejected during source review
+before execution because containment does not admit that argv. The corrected
+proof uses the existing owner-issued `run --no-start` runner/result projection,
+with reviewed fixture runner bytes bound by Git blob and SHA-256, and retains
+`--no-start` in the nested test. No production command policy changed. Positive
+and failing runner probes verified completed counts and proper failure exit.
+Original preparation and its review remain preserved.
+
+A separate global coding-resource inventory timed out while synchronously
+observing retained Git identities. This was not treated as resource absence, and
+the planned restart was not claimed to fix it. The source-linked follow-up is
+recorded in `.arbor/roadmap/0-inbox/coding-resource-inventory-latency.md`.
+
+Remaining device work:
+
+1. Complete the separately reviewed [native driver follow-up](VOICE_NATIVE_DRIVER_PLAN.md):
    executor-enforced deadlines/revocation, gated element custody, Source open/start
    separation, native event correlation, bounded enumeration and dormant driver
    activation. Preserve the published prerequisite tips and use new immutable refs
    for follow-up changes. Renew admission when those sources change.
-5. Qualify explicit physical capture/playback and the bounded Voice session journey
+2. Qualify explicit physical capture/playback and the bounded Voice session journey
    before returning to the assistant-ui comparison. Keep the default driver
    unavailable until the device implementation is qualified.
 
