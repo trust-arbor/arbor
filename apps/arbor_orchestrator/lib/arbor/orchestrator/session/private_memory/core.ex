@@ -14,6 +14,32 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory.Core do
   def sources(rows, session_id) when is_list(rows) do
     rows
     |> Enum.take(@max_rows)
+    |> grouped_sources(session_id)
+  end
+
+  def sources(_, _), do: []
+
+  # Cognitive reconciliation retains blocks rather than the display reader's
+  # text projection. Reuse the same proof/pair rules, including ordinal
+  # adjacency, while rejecting every unmatched proof-bearing row.
+  def coherent_transcript_sources?(rows, session_id) when is_list(rows) do
+    proof_rows = Enum.filter(rows, &Map.has_key?(&1.metadata, @proof_key))
+
+    projected =
+      Enum.map(proof_rows, fn row ->
+        content =
+          row.content
+          |> Enum.filter(&(Map.get(&1, "type") == "text"))
+          |> Enum.map_join("\n", &Map.get(&1, "text", ""))
+
+        %{row | content: content}
+      end)
+
+    length(proof_rows) == 2 * length(grouped_sources(projected, session_id))
+  end
+
+  defp grouped_sources(rows, session_id) do
+    rows
     |> Enum.reduce(%{}, fn row, grouped ->
       with true <- is_map(row),
            metadata when is_map(metadata) <- Map.get(row, :metadata),
@@ -30,8 +56,6 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory.Core do
     |> Enum.sort_by(fn {source_id, _rows} -> source_id end)
     |> Enum.flat_map(fn {_id, pair} -> complete_source(pair) end)
   end
-
-  def sources(_, _), do: []
 
   defp complete_source([first, second]) do
     pair = Enum.sort_by([first, second], &role/1)

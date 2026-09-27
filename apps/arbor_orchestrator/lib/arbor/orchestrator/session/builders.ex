@@ -357,8 +357,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
              message,
              commit.assistant_message.content
            ),
-         {:ok, 2} <-
-           Persistence.persist_turn_entries(
+         {:ok, entries} <-
+           Persistence.persist_identified_turn(
              state,
              commit.user_msg,
              commit.assistant_message,
@@ -367,7 +367,27 @@ defmodule Arbor.Orchestrator.Session.Builders do
              assistant_completed_at: commit.assistant_completed_at,
              private_memory_source: source
            ) do
+      [user_entry, assistant_entry] = entries
+      user_msg = Map.put(commit.user_msg, "id", user_entry.id)
+
+      assistant_msg =
+        if commit.assistant_msg, do: Map.put(commit.assistant_msg, "id", assistant_entry.id)
+
+      commit = %{
+        commit
+        | user_msg: user_msg,
+          assistant_msg: assistant_msg,
+          messages: history ++ [user_msg] ++ List.wrap(assistant_msg)
+      }
+
       state = adopt_turn_commit(state, commit)
+
+      state =
+        Arbor.Orchestrator.Session.Transcript.track_commit(state, entries, [
+          user_msg,
+          assistant_msg
+        ])
+
       turn = Map.get(state, :private_memory_turn)
 
       state =

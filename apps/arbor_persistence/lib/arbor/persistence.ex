@@ -346,6 +346,22 @@ defmodule Arbor.Persistence do
     SessionStore.append_entries(session_uuid, entries)
   end
 
+  @doc "Assign source-owned stable IDs before an acknowledged session-entry append."
+  def identify_session_entries(entries), do: SessionStore.identify_entries(entries)
+
+  @doc """
+  Read a bounded cognitive transcript with full content blocks and verified or
+  conservatively unlabeled provenance. The exact session owner and named
+  engagement are mandatory. Unlike display history, failures are explicit.
+
+  An omitted `:after` bootstraps the most recent `:limit` entries (maximum 1000),
+  reporting `truncated`. Subsequent reads use the returned cursor as `:after`;
+  `:through` pins a page to an earlier observed head. A caller must handle
+  `has_more` explicitly and must not mistake an incomplete delta for freshness.
+  """
+  def read_session_transcript(session_id, agent_id, engagement_id, opts \\ []),
+    do: SessionStore.read_session_transcript(session_id, agent_id, engagement_id, opts)
+
   @doc """
   Load recent display-ready session messages, optionally filtered to one
   engagement. `opts` accepts only `:limit` (a positive integer, capped at

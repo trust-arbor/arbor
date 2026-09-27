@@ -212,6 +212,9 @@ defmodule Arbor.Orchestrator.Session do
     current_engagement_id: nil,
     transcripts: %{},
     compactors: %{},
+    # Per-engagement source cursor and bounded unobserved local suffix. Private,
+    # process-local; a checkpoint cannot assert durable synchronization.
+    transcript_sync: %{},
     turn_queue: [],
     # Bounded task-id cancellation tombstones: reject a later send_message that
     # still carries a cancelled async-task id (race: cancel before Session sees
@@ -2361,9 +2364,12 @@ defmodule Arbor.Orchestrator.Session do
   # transcript and compactor under its id, then restore the target pair. nil is
   # the real default engagement, so it follows the same switching rules as a
   # named engagement and is a no-op only while already active.
-  defp maybe_switch_engagement(%{current_engagement_id: target} = state, target), do: state
+  defp maybe_switch_engagement(state, target, recover? \\ true)
 
-  defp maybe_switch_engagement(state, target) do
+  defp maybe_switch_engagement(%{current_engagement_id: target} = state, target, _recover?),
+    do: state
+
+  defp maybe_switch_engagement(state, target, recover?) do
     stashed = Map.put(state.transcripts, state.current_engagement_id, state.messages)
     stashed_compactors = stash_active_compactor(state)
 
@@ -2376,7 +2382,10 @@ defmodule Arbor.Orchestrator.Session do
         # the durable store (entries stamped with this engagement_id) so a resumed
         # conversation isn't empty after a restart / on a fresh device. Returns []
         # for a brand-new engagement or if the store is unavailable.
-        {Persistence.load_engagement_transcript(state, target), stashed}
+        messages =
+          if recover?, do: Persistence.load_engagement_transcript(state, target), else: []
+
+        {messages, stashed}
       end
 
     {target_compactor, stashed_compactors} =
@@ -2415,20 +2424,36 @@ defmodule Arbor.Orchestrator.Session do
   # task). On auth failure the caller is told and the session stays idle.
   # `turn_authority` is process-local only and never enters builders/engine.
   defp start_turn(user_message, turn_authority, from, state) do
-    case revalidate_private_engagement(user_message, turn_authority, state) do
-      :ok ->
-        case do_start_turn(user_message, turn_authority, from, state) do
-          {:noreply, %{turn_in_flight: true}} = started ->
-            started
+    with :ok <- revalidate_private_engagement(user_message, turn_authority, state),
+         {:ok, refreshed} <- refresh_private_transcript(user_message, turn_authority, state),
+         :ok <- revalidate_private_engagement(user_message, turn_authority, refreshed) do
+      case do_start_turn(user_message, turn_authority, from, refreshed) do
+        {:noreply, %{turn_in_flight: true}} = started ->
+          started
 
-          {:noreply, refused_state} ->
-            {:noreply, PrivateMemory.close(refused_state, turn_authority)}
-        end
+        {:noreply, refused_state} ->
+          {:noreply, PrivateMemory.close(refused_state, turn_authority)}
+      end
+    else
+      {:error, reason} ->
+        reason =
+          if reason == :transcript_unavailable,
+            do: reason,
+            else: :private_memory_admission_unavailable
 
-      {:error, _} ->
-        safe_reply(from, {:error, :private_memory_admission_unavailable})
+        safe_reply(from, {:error, reason})
         {:noreply, PrivateMemory.close(state, turn_authority)}
     end
+  end
+
+  defp refresh_private_transcript(_message, nil, state), do: {:ok, state}
+
+  defp refresh_private_transcript(message, authority, state) do
+    staged = maybe_switch_engagement(state, message.engagement_id, false)
+
+    Arbor.Orchestrator.Session.Transcript.refresh(staged, fn ->
+      revalidate_private_engagement(message, authority, staged)
+    end)
   end
 
   defp revalidate_private_engagement(_message, nil, _state), do: :ok
@@ -3058,6 +3083,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_authority: nil,
         private_memory_admissions: %{},
         private_memory_turn: nil,
+        transcript_sync: %{},
         turn_egress_fence: nil,
         turn_token: nil,
         steering_boundaries: nil,

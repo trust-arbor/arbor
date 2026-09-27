@@ -399,6 +399,28 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     |> Enum.reduce(Map.put(base, :turn_authority, nil), fn {key, value}, state ->
       Map.put(state, key, value)
     end)
+    |> then(fn state ->
+      %{
+        state
+        | adapters: Map.put_new(state.adapters, :read_session_transcript, &empty_transcript/4)
+      }
+    end)
+  end
+
+  # These ingress/terminal fixtures admit one turn from a known-empty source.
+  # Durable multi-turn reconciliation is qualified with the real SQLite journey.
+  defp empty_transcript(session_id, agent_id, engagement_id, []) do
+    {:ok,
+     %{
+       session_id: session_id,
+       agent_id: agent_id,
+       engagement_id: engagement_id,
+       head: 0,
+       cursor: 0,
+       entries: [],
+       has_more: false,
+       truncated: false
+     }}
   end
 
   defp authority!(human_id) do
@@ -925,6 +947,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
         signer: ctx.agent_signer,
         config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
         adapters: %{
+          read_session_transcript: &empty_transcript/4,
           ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
           append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
         }
@@ -2154,8 +2177,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
                signer: ctx.agent_signer,
                config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
                adapters: %{
+                 read_session_transcript: &empty_transcript/4,
                  ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
-                 load_session_messages: fn _, _ -> [] end,
                  append_session_entries: fn _id, entries ->
                    send(recipient, {:completion_append, self(), entries})
 

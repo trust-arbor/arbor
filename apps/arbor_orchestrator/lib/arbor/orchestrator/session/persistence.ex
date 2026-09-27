@@ -53,7 +53,18 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     |> maybe_restore(:turn_count, cp_get(data, "turn_count"))
     |> maybe_restore_cognitive_mode(cp_get(data, "cognitive_mode"))
     |> drop_active_engagement_stash()
+    |> invalidate_transcript_anchor()
     |> sync_checkpoint_to_session_state()
+  end
+
+  defp invalidate_transcript_anchor(state) do
+    case Map.fetch(state, :transcript_sync) do
+      {:ok, anchors} ->
+        %{state | transcript_sync: Map.put(anchors, state.current_engagement_id, :unanchored)}
+
+      :error ->
+        state
+    end
   end
 
   # Fetch checkpoint value supporting both "session.X" and "X" key formats
@@ -248,6 +259,16 @@ defmodule Arbor.Orchestrator.Session.Persistence do
       {:error, :turn_persistence_unavailable} = error ->
         Logger.warning("[Session] Turn persistence failed reason=turn_persistence_unavailable")
         error
+    end
+  end
+
+  @doc false
+  def persist_identified_turn(state, user_msg, assistant_message, run_result, opts) do
+    with {:ok, entries} <-
+           build_turn_entry_pair(state, user_msg, assistant_message, run_result, opts),
+         {:ok, identified} <- Arbor.Persistence.identify_session_entries(entries),
+         {:ok, 2} <- await_turn_persistence(state, identified) do
+      {:ok, identified}
     end
   end
 

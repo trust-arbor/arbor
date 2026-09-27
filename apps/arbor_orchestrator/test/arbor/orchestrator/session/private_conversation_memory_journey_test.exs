@@ -448,17 +448,76 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     drain_embeddings()
 
     second = start_session!(ctx, ctx.owner, ctx.session_id)
-    assert {:ok, _} = turn(second, ctx.owner, "Start a fresh complete conversation")
-    assert_receive {:model_request, messages, _}
-    refute inspect(messages) =~ @sentinel
+
+    assert {:error, :transcript_unavailable} =
+             turn(second, ctx.owner, "Start a fresh complete conversation")
+
+    refute_receive {:model_request, _, _}, 50
 
     refute drain_embeddings()
            |> Enum.any?(&Enum.any?(&1, fn text -> String.contains?(text, @sentinel) end))
 
-    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 3
+    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 1
 
-    assert {:ok, [_]} =
+    assert {:ok, []} =
              Arbor.Persistence.list_vector_records(ctx.owner.agent.agent_id, limit: 100)
+  end
+
+  test "a valid attested pair split by the recent bootstrap limit uses one scoped validation witness",
+       ctx do
+    first = start_session!(ctx, ctx.owner, ctx.session_id)
+    assert {:ok, _} = turn(first, ctx.owner, @sentinel)
+    assert_receive {:model_request, _, _}
+    :ok = GenServer.stop(first)
+
+    {:ok, engagement} =
+      Arbor.Comms.resolve_user_engagement(ctx.owner.agent.agent_id, ctx.owner.human.agent_id)
+
+    {:ok, persisted} = Arbor.Persistence.ensure_session(ctx.session_id, ctx.owner.agent.agent_id)
+
+    entries =
+      for index <- 1..999 do
+        %{
+          entry_type: "user",
+          role: "user",
+          content: [%{"type" => "text", "text" => "boundary row #{index}"}],
+          metadata: %{"engagement_id" => engagement.id},
+          timestamp: DateTime.utc_now()
+        }
+      end
+
+    assert {:ok, 999} = Arbor.Persistence.append_session_entries(persisted.id, entries)
+
+    # The public reader remains row-paginated even when a page contains half a pair.
+    assert {:ok, %{entries: [%{role: "assistant", entry_ordinal: 2}]}} =
+             Arbor.Persistence.read_session_transcript(
+               ctx.session_id,
+               ctx.owner.agent.agent_id,
+               engagement.id, after: 1, through: 2, limit: 1)
+
+    observer = self()
+
+    reader = fn session_id, agent_id, engagement_id, opts ->
+      send(observer, {:bootstrap_read, session_id, agent_id, engagement_id, opts})
+      Arbor.Persistence.read_session_transcript(session_id, agent_id, engagement_id, opts)
+    end
+
+    second = start_session!(ctx, ctx.owner, ctx.session_id, read_session_transcript: reader)
+    assert {:ok, _} = turn(second, ctx.owner, "Continue from the bounded transcript")
+    assert_receive {:model_request, _, _}
+    assert_receive {:bootstrap_read, session_id, agent_id, engagement_id, []}
+
+    assert {session_id, agent_id, engagement_id} ==
+             {ctx.session_id, ctx.owner.agent.agent_id, engagement.id}
+
+    assert_receive {:bootstrap_read, ^session_id, ^agent_id, ^engagement_id,
+                    [after: 0, through: 1, limit: 1]}
+
+    refute_receive {:bootstrap_read, _, _, _, _}, 50
+    state = Session.get_state(second)
+    assert length(state.messages) == 1_002
+    assert hd(state.messages)["entry_ordinal"] == 2
+    assert state.session_state.messages == state.messages
   end
 
   test "enabled source attestation failure refuses append; explicit disabled mode performs no automatic embedding",

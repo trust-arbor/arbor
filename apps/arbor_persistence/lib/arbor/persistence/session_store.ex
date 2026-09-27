@@ -3,9 +3,9 @@ defmodule Arbor.Persistence.SessionStore do
   Persistence context for agent sessions and session entries.
 
   Sessions are append-only life logs — each turn, heartbeat, or tool
-  interaction creates a new SessionEntry row. No ETS caching is needed
-  since sessions are write-heavy and reads are infrequent (primarily
-  on restart recovery and JSONL export).
+  interaction creates a new SessionEntry row. Authenticated interactive turns
+  reconcile bounded ordinal deltas so other channels' acknowledged entries
+  become cognitive input without restarting the Session.
 
   ## JSONL Export
 
@@ -19,6 +19,7 @@ defmodule Arbor.Persistence.SessionStore do
   alias Arbor.Persistence.ConversationPage
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
+  alias Arbor.Persistence.SessionTranscript
   alias Ecto.{Adapter, Adapters.SQL}
 
   require Logger
@@ -177,6 +178,77 @@ defmodule Arbor.Persistence.SessionStore do
   end
 
   # ── Session entries ────────────────────────────────────────────────
+
+  @doc false
+  def identify_entries(entries) when is_list(entries) do
+    if proper_list?(entries) and Enum.all?(entries, &is_map/1) do
+      {:ok, Enum.map(entries, &Map.put(&1, :id, Ecto.UUID.generate()))}
+    else
+      {:error, :invalid_entries}
+    end
+  end
+
+  def identify_entries(_), do: {:error, :invalid_entries}
+
+  @doc false
+  def read_session_transcript(session_id, agent_id, engagement_id, opts)
+      when is_binary(session_id) and is_binary(agent_id) and is_binary(engagement_id) do
+    scope = %{session_id: session_id, agent_id: agent_id, engagement_id: engagement_id}
+
+    with true <- Regex.match?(~r/^eng_[0-9a-f]{32}$/, engagement_id),
+         {:ok, bounds} <- SessionTranscript.options(opts) do
+      case get_session(session_id) do
+        {:ok, %Session{agent_id: ^agent_id, id: session_uuid}} ->
+          read_owned_transcript(session_uuid, scope, bounds)
+
+        {:error, :not_found} ->
+          with {:ok, head} <- SessionTranscript.head(0, bounds),
+               do: SessionTranscript.project([], scope, bounds, head)
+
+        _ ->
+          {:error, :transcript_owner_mismatch}
+      end
+    else
+      false -> {:error, :invalid_transcript_scope}
+      error -> error
+    end
+  rescue
+    _ -> {:error, :transcript_unavailable}
+  catch
+    _, _ -> {:error, :transcript_unavailable}
+  end
+
+  def read_session_transcript(_, _, _, _), do: {:error, :invalid_transcript_scope}
+
+  defp read_owned_transcript(session_uuid, scope, bounds) do
+    query =
+      from(e in SessionEntry,
+        where: e.session_id == ^session_uuid and e.entry_type in ["user", "assistant"]
+      )
+      |> maybe_engagement_filter(scope.engagement_id)
+
+    {minimum, maximum} =
+      Repo.one(from(e in query, select: {min(e.entry_ordinal), max(e.entry_ordinal)}),
+        timeout: 5_000
+      )
+
+    with :ok <- valid_conversation_ordinal_range(minimum, maximum),
+         {:ok, head} <- SessionTranscript.head(maximum || 0, bounds) do
+      count = bounds.limit + 1
+      query = from(e in query, where: e.entry_ordinal <= ^head, limit: ^count)
+
+      query =
+        if is_nil(bounds.after),
+          do: from(e in query, order_by: [desc: e.entry_ordinal]),
+          else:
+            from(e in query,
+              where: e.entry_ordinal > ^bounds.after,
+              order_by: [asc: e.entry_ordinal]
+            )
+
+      query |> Repo.all(timeout: 5_000) |> SessionTranscript.project(scope, bounds, head)
+    end
+  end
 
   @doc """
   Append a single entry to a session.
