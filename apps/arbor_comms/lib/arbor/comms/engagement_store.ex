@@ -170,6 +170,12 @@ defmodule Arbor.Comms.EngagementStore do
 
     # Atomic test-and-set: only the first caller to claim the index slot wins.
     if :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id}) do
+      :telemetry.execute(
+        [:arbor, :comms, :engagement, :resolution_claim],
+        %{count: 1},
+        %{agent_id: agent_id, engagement_id: engagement.id}
+      )
+
       :ets.insert(@table, {engagement.id, engagement})
       durable_upsert(engagement)
       {:ok, engagement}
