@@ -157,3 +157,10 @@ The predecessor `6c03e94797a8d43be23a652beed266a14e4dcdca` was built independent
 The same 11 applicable binding/pair-ack security witnesses fail through old public
 admissions or replies; none rely on an undefined new audio API. Fixture SQLite
 paths include the OS process id to keep concurrent independent BEAMs isolated.
+
+Independent integration acceptance at `2c5ae98b4` combined this slice with the
+native dependency scaffold, transcript freshness and source engagement fence.
+An isolated checkout with private dependencies/build output passed test
+warnings-as-errors compilation, all 513 Voice tests, and the separate 15-case
+real Security/SQLite journey. This verifies the integrated source; the running
+Arbor instance, native baseline activation and sound devices were unchanged.

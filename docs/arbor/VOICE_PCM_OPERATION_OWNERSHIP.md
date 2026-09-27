@@ -1,8 +1,11 @@
 # VP-07A0: bounded PCM operation ownership
 
-Design checkpoint, 2026-09-27. This prerequisite adds no public audio-turn or
-device API. `Arbor.Voice` remains unchanged. The internal Session send seam proves
-one backend send, not a completed conversational turn or transcript.
+Historical A0 checkpoint, 2026-09-27. This prerequisite added no public audio-turn
+or device API; its internal Session send seam proved one backend send, not a
+completed conversational turn or transcript. The subsequent
+[implemented A1 lifecycle](VOICE_PCM_TURN_OWNERSHIP.md) adds the authenticated
+public audio turn and an explicitly owned receive phase. The A0 close disposition
+below remains the default for its internal send-only operation.
 
 ## Authority and wire format
 

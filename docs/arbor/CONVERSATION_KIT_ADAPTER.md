@@ -1,7 +1,7 @@
 # Standalone ConversationKit Arbor adapter
 
 The consumer integration lives in the independently versioned
-[`conversation-adapter-20260927` artifact](../../tmp/preserved/conversation-adapter-20260927/README.md).
+[`conversation-adapter-requalified-20260927` artifact](../../tmp/preserved/conversation-adapter-requalified-20260927/README.md).
 Its three packages separate generic conversation display, Arbor authentication
 and replay, and native LiveView/Breeze interfaces. The isolated Arbor fixture
 imports those external packages through test-only path dependencies.
@@ -77,15 +77,24 @@ The package retains growing history in memory and the host journal currently
 reconstructs its prefix: large-history indexing, retention and windowed rendering
 need a later performance slice.
 
-Standalone source revision `ec7b6d693cc558a0857da193fa21dd760ad35552` passed
-independent acceptance against Arbor `dfda6244657058da05565e83f0d620f86dbe4f6f`:
-17 core, 27 adapter, 17 renderer and 6 real-host integration tests (67 total).
-Compilation treated warnings as errors. Actual browser and PTY checks exchanged
-Unicode messages in both directions and preserved a browser draft through
-disconnect/reconnect. The temporary qualification process exited cleanly.
+Standalone source revision `898c3bfc2a8fb5d04fc4667bc6a481bc8e93a5ec` passed
+requalification against Arbor `51b2d08e8`, including canonical-owner convergence,
+transcript freshness and the source engagement fence: 17 core, 32 adapter,
+22 renderer and 8 real-host tests (79 total). All four warnings-as-errors builds
+passed. The host patch changes only test fixtures and their dependencies.
 
-See the artifact README for reproducible commands and validation evidence. The
-verified `conversation-kit-arbor-source.tar.gz` in the artifact directory includes
-committed source, the host qualification patch, test reports and browser/PTY
-evidence. No library has been published and no existing Arbor UI route has been
-migrated by this experiment.
+Repeated failed initial reconnects now remain visibly unavailable until source
+synchronization succeeds. The new regression fails behaviorally on the previous
+package. Previously attached clients retain verified cache on a transient read
+failure. Actual browser and Breeze PTY checks exchanged Unicode messages in both
+directions and preserved a browser draft through disconnect/reconnect. The
+temporary qualification listener exited cleanly.
+
+The [current-host report](../../tmp/preserved/conversation-adapter-requalified-20260927/integration/CURRENT_HOST_QUALIFICATION.md)
+contains reproducible commands and explicit limitations. Its separate
+`host-current.patch`, source hashes, fixture bundle, test logs and PTY evidence
+are preserved with the artifact. The older `host.patch` and preparation script
+target the historical host and must not be applied to the current baseline.
+No library has been published and no existing Arbor UI route has been migrated
+by this experiment. Audio and the final assistant-ui comparison remain separate
+qualification work.
