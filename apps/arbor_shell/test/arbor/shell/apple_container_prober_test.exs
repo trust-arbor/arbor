@@ -124,6 +124,7 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       :persistent_term.put({__MODULE__, :bindings_calls}, 0)
       :persistent_term.put({__MODULE__, :policy_calls}, 0)
       :persistent_term.put({__MODULE__, :plan_calls}, 0)
+      :persistent_term.put({__MODULE__, :combined_calls}, 0)
       :persistent_term.put({__MODULE__, :advance_on}, %{})
       :persistent_term.put({__MODULE__, :verify_order}, [])
     end
@@ -244,7 +245,10 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       :persistent_term.put({__MODULE__, :policy_calls}, n)
       log_event({:checkout_policy, n})
       maybe_advance_checkout(:checkout_policy, n)
+      policy_result(n)
+    end
 
+    defp policy_result(n) do
       case :persistent_term.get({__MODULE__, :checkout_policy_mode}, :ok) do
         :ok ->
           {:ok, :persistent_term.get({__MODULE__, :policy})}
@@ -271,7 +275,10 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       :persistent_term.put({__MODULE__, :plan_calls}, n)
       log_event({:checkout_plan, n})
       maybe_advance_checkout(:checkout_plan, n)
+      plan_result(n)
+    end
 
+    defp plan_result(n) do
       case :persistent_term.get({__MODULE__, :checkout_plan_mode}, :ok) do
         :ok ->
           {:ok, :persistent_term.get({__MODULE__, :plan})}
@@ -291,6 +298,21 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
         :error ->
           {:error, :linux_dependency_baseline_unavailable}
+      end
+    end
+
+    # Keep the two legacy callbacks above as predecessor witnesses: the same
+    # fixture must expose the duplicate scan cost when run against old production.
+    def checkout_image_policy_and_receipt do
+      maybe_callback()
+      n = :persistent_term.get({__MODULE__, :combined_calls}, 0) + 1
+      :persistent_term.put({__MODULE__, :combined_calls}, n)
+      log_event({:checkout_policy_and_receipt, n})
+      maybe_advance_checkout(:checkout_policy_and_receipt, n)
+
+      with {:ok, policy} <- policy_result(n),
+           {:ok, plan} <- plan_result(n) do
+        {:ok, policy, plan["receipt"]}
       end
     end
 
@@ -661,6 +683,44 @@ defmodule Arbor.Shell.AppleContainerProberTest do
                "/usr/bin/id",
                "/usr/bin/sw_vers"
              ]
+    end
+
+    @tag :receipt_scan_regression
+    test "admission avoids duplicate baseline scans within the unchanged deadline" do
+      # Each checkout freshly verifies the same baseline. Legacy admission paid
+      # twice at both ends; the combined authority call pays once at each end.
+      for operation <- [:checkout_policy, :checkout_plan, :checkout_policy_and_receipt] do
+        FakeRuntime.set_advance_on_after(operation, 5_000, 0)
+      end
+
+      assert {:ok, _} = Prober.probe_for_test(15_000, runtime: FakeRuntime)
+      assert FakeRuntime.monotonic_ms() == 1_010_000
+      events = FakeRuntime.events()
+
+      assert Enum.filter(events, &match?({:checkout_policy_and_receipt, _}, &1)) ==
+               [{:checkout_policy_and_receipt, 1}, {:checkout_policy_and_receipt, 2}]
+
+      refute Enum.any?(events, &match?({:checkout_plan, _}, &1))
+      refute Enum.any?(events, &match?({:checkout_policy, _}, &1))
+
+      initial = Enum.find_index(events, &(&1 == {:checkout_policy_and_receipt, 1}))
+      final = Enum.find_index(events, &(&1 == {:checkout_policy_and_receipt, 2}))
+      run_positions = for {{:run, _, _}, index} <- Enum.with_index(events), do: index
+      assert initial < Enum.min(run_positions)
+      assert final > Enum.max(run_positions)
+      assert {:checkout_bindings, 2} in events
+      assert length(FakeRuntime.verify_order()) == 5
+      assert Enum.all?(FakeRuntime.runs(), &(&1.opts[:timeout] == 10_000))
+    end
+
+    test "combined final receipt checkout cannot outlive the probe deadline" do
+      FakeRuntime.set_advance_on_after(:checkout_policy_and_receipt, 30_000, 1)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(30_000, runtime: FakeRuntime)
+
+      assert {:checkout_policy_and_receipt, 2} in FakeRuntime.events()
+      assert FakeRuntime.verify_order() == []
     end
 
     test "every run uses cwd root, clear_env, remaining timeout, and bounded output" do
