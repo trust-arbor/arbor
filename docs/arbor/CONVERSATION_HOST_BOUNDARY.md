@@ -114,3 +114,7 @@ transport adapter must bind authenticated connection identity to these methods
 and map the returned semantic data into its presentation model. Network
 endpoints, live subscriptions, actual audio and DASP protocol conformance are
 separate integrations.
+
+The [standalone ConversationKit adapter experiment](CONVERSATION_KIT_ADAPTER.md)
+consumes these methods from independent LiveView and Breeze clients and qualifies
+them against a real Session executing a deterministic local DOT pipeline.
