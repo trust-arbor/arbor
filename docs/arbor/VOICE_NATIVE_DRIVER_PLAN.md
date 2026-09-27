@@ -1,11 +1,50 @@
 # Concrete bounded multimedia driver follow-up
 
-Source review, 2026-09-27. Design only; no source change or native operation was
-performed. Arbor base: `91e01de3802a1297205cc3c9d457ddea704c3db2`.
+Initial source review, 2026-09-27. Arbor design base:
+`91e01de3802a1297205cc3c9d457ddea704c3db2`.
 Reviewed PortAudio fork: `3ecfad95d64b0edde79219c37934ac660083d9a6`.
 Reviewed sensitive Core: `bc01d4f7d08522a5e5028078a082a311161b7b9c`.
 These published prerequisites retain their exact scope. The default Arbor driver
 stays `Unavailable` until the follow-up and renewed admission are qualified.
+
+## First implementation slice — 2026-09-27
+
+The local PortAudio follow-up implements immutable executor leases and separate
+bounded Source open/start. A leased effect addresses its pinned executor
+PID/generation, checks deadline/revocation after queueing, and cannot fall back
+to the unrestricted legacy path after executor replacement. Unbounded
+inline-start constructors are excluded from leased admission. Caller/custodian
+death retains checked cleanup; resource destruction remains available after
+revocation. Source/Sink carry the pinned identity into their native operations
+and cleanup callbacks.
+
+This is isolated fork candidate
+`a24bb59d5fa906e0b8f073d2c15ea697fa05dd8d`, not an Arbor dependency update. Its
+immediate test-bearing predecessor is `54610f666bbeb87995a0b59da50182e4904d6c20`
+in `tmp/worktrees/portaudio-lease-source-20260927`. Qualification records live in
+`tmp/preserved/voice-native-lease-source-20260927/`. The published Core and
+PortAudio pins and the active Linux baseline retain their earlier scope.
+
+The fixed candidate passes 396 native fake assertions under ASan/UBSan and
+49 sealed Elixir tests (27 element/ownership, 22 executor lease). Independent
+exact-parent runs fail two premature native start/payload assertions, four
+element tests and 20 lease tests behaviorally; no missing-function failure is
+used as a witness. The public lease APIs and actual Source/Sink callbacks are
+exercised with real Native modules removed from the test VM code path. There is
+no automatic deadline timer stopping an already-running stream: the host still
+owns revocation/close and the device fence.
+
+The actual Unifex/C/Objective-C dependency and Arbor multimedia app also compile
+with warnings as errors in both development and test environments in an isolated
+Arbor checkout. This is host compiler evidence, not renewed Linux admission or
+device execution. A complete Git bundle preserves the candidate and regression
+history in the evidence directory.
+
+The next plugin slice is the no-effect startup registration/custody ACK and
+native payload/completion correlation described below. Permission status queries
+still precede the executor gate in the current elements. Bounded enumeration,
+dormant NativeSession activation and actual capture/playback integration also
+remain open. None of the fake-native results establish physical audio behavior.
 
 ## Minimal host structure
 

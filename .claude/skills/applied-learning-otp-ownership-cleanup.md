@@ -26,6 +26,11 @@ temporary lease can die while its owner remains alive, after which treating `:no
 success permanently detaches live authority from revocation. Address leases by a stable
 registry key, restart them with recoverable cleanup state, and stop only after authority,
 capability, trust, and identity cleanup has succeeded or reached an explicit terminal policy.
+Opt-in admission must pin that identity on every effect request. If a replacement
+executor forgets its bindings, a call through its registered name can silently
+become an unrestricted legacy call. Keep leased calls on the pinned PID/generation
+and recheck after queueing and between blocking open/start phases (2026-09-27
+bounded media lease review).
 
 <!-- applied-learning: cancellation-and-verification-must-not-reuse-mutating-scope-allocators -->
 <a id="applied-learning-cancellation-and-verification-must-not-reuse-mutating-scope-allocators"></a>
