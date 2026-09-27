@@ -248,6 +248,11 @@ Tests that assert an exact launched budget at a deadline boundary must inject th
 <!-- applied-learning: umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app -->
 <a id="applied-learning-umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app"></a>
 **Umbrella runtime config must not execute modules from an optional child app.** `config/runtime.exs` is evaluated when a lower-level child runs independently, so calling `Arbor.Agent.Config` there made `arbor_security` fail before its tests because `arbor_agent` was not compiled or loaded. Keep runtime config data-only; validate an app-specific environment selector inside that app's startup boundary, where the module and its dependencies are guaranteed to exist (found 2026-07-11 running the isolated Security suite).
+A `mix run --no-start` inspection still evaluates runtime config. For compiled-code
+introspection in an isolated leaf, isolate its operator-state home and relevant
+external config selectors instead of starting unrelated apps to satisfy a
+host-specific loader. Check the pinned Mix parser before assuming a flag can
+skip runtime config (reinforced 2026-09-27 during native source inspection).
 
 <!-- applied-learning: compile-env-reads-must-target-the-exact-runtime-invariant -->
 <a id="applied-learning-compile-env-reads-must-target-the-exact-runtime-invariant"></a>

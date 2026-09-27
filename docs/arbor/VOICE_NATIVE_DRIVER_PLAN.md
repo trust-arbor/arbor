@@ -36,9 +36,11 @@ owns revocation/close and the device fence.
 
 The actual Unifex/C/Objective-C dependency and Arbor multimedia app also compile
 with warnings as errors in both development and test environments in an isolated
-Arbor checkout. This is host compiler evidence, not renewed Linux admission or
-device execution. A complete Git bundle preserves the candidate and regression
-history in the evidence directory.
+Arbor checkout. Both environments verify fresh compile-source paths for 11
+modules, the new native start/lease exports, and stopped media applications.
+This is host compiler evidence, not renewed Linux admission or device execution.
+A complete Git bundle preserves the candidate and regression history in the
+evidence directory.
 
 The next plugin slice is the no-effect startup registration/custody ACK and
 native payload/completion correlation described below. Permission status queries

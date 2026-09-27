@@ -2619,7 +2619,7 @@
       "anchor": "applied-learning-umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 running the isolated Security suite).",
-      "content_sha256": "c7fb55245097faedb3a2335be4145190793050cdf927e86b70b745cdf7146b9b",
+      "content_sha256": "3f871b51a17cb3cbc08174a3c725349c609a366ca48ef4f5f33aa13890ee0c48",
       "always_loaded": false
     },
     {
