@@ -22,10 +22,12 @@ One new umbrella app, `arbor_voice` (L8; deps: contracts, common, signals,
 persistence, comms, llm, ai, orchestrator, agent), is the engagement-substrate
 consumer for voice — the headless sibling of `arbor_dashboard`. `Arbor.Voice.Session`
 owns a realtime backend session (xAI Realtime first, behind
-`Arbor.Voice.RealtimeBackend`), resolves the same `:user`-scoped engagement ChatLive
-uses, mirrors every voice turn into the durable engagement transcript, renders all
-speech through `Arbor.Voice.Speakable`, and exposes tools to the front-desk voice model
-(`consult_agent`, managed task dispatch, and status). The phone path (Phase 2) reuses
+`Arbor.Voice.RealtimeBackend`), resolves the canonical owner's private `:user`-scoped
+engagement shared with ChatLive, mirrors completed voice turns into its durable
+transcript, and renders speech through `Arbor.Voice.Speakable`. The default
+`PrivateConversation` catalog exposes only `consult_agent`; explicit `FrontDesk`
+retains managed dispatch outside the bounded private-continuity qualification.
+The phone path (Phase 2) reuses
 phone voice operations exposed through the public `Arbor.Comms` facade as a text
 transport — raw audio never leaves the phone.
 
@@ -37,9 +39,13 @@ transport — raw audio never leaves the phone.
 
 - **VOICE-2** (MUST, planned): The voice interface MUST resolve its engagement through
   the public `Arbor.Comms` facade with `scope: :user`, `visibility: :private`, and
-  `owner_tenant: user_id`, then tag every `UserMessage` via
-  `UserMessage.with_engagement/2`. The `user_id` MUST be the same identifier the
-  dashboard uses for this human, so voice and dashboard resolve to the same engagement.
+  `owner_tenant: canonical_owner_id`, using the canonical owner established by
+  Security for the authenticated subject. The original subject MUST remain the
+  proof subject and hold its own chat authority. Linked Voice and dashboard subjects
+  MAY differ while resolving to the same canonical owner and private engagement.
+  Voice-owned transcript messages MUST carry that resolved engagement via
+  `UserMessage.with_engagement/2`; Agent consultation follows the route-free
+  source-admission boundary in VOICE-9.
 
 - **VOICE-3** (MUST, planned): Both sides of every completed voice turn (user transcript and
   spoken/assistant text, including delegation summaries) MUST be durably recorded as
@@ -74,9 +80,14 @@ transport — raw audio never leaves the phone.
 
 ## Turn loop & tools
 
-- **VOICE-9** (MUST): The `consult_agent` tool MUST post the engagement-tagged
-  `UserMessage` through a public agent/orchestrator facade to the target agent's live
-  Session path and return the agent's reply text to the backend as the tool output.
+- **VOICE-9** (MUST): The `consult_agent` tool MUST post a route-free voice
+  `UserMessage` through the public `Arbor.Agent` facade to the target agent's live
+  Session path, preserving the original authenticated subject and HMAC session proof.
+  The call MUST carry the Voice binding's `expected_engagement_id` as a compare-only
+  fence; Agent/Security source admission resolves and checks the canonical owner and
+  engagement. Caller-supplied message routing metadata MUST NOT establish that
+  authority. The agent's reply text may return to the backend as tool output only
+  while the pinned Voice conversation authority remains current.
 
 - **VOICE-10** (MUST): Delegation MUST use Arbor's managed, owner-scoped
   orchestration facades. Long-running coding work MUST use a version-2 structured
