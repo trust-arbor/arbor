@@ -14,6 +14,13 @@ Guest toolchain roots match `OciPlanCore`:
 
 The Arbor Mix wrapper is **not** in this image. Production create argv bind-mounts the host wrapper at `/arbor/bin/mix`.
 
+The image builds checksum-pinned PortAudio 19.7.0 against pinned Debian ALSA and
+pkgconf packages. Bundlex uses this pkg-config installation; the repository
+disables the PortAudio plugin's precompiled OS dependency downloads. Existing
+Exqlite and lazy_html archives are checksum-pinned in the image-owned NIF cache.
+See [native admission evidence](../../docs/arbor/VOICE_MULTIMEDIA_ADMISSION.md)
+for the qualified ARM64 image, dependency receipt and pending live activation.
+
 `git` is installed so Mix can run `Mix.SCM.Git.lock_status` against git-dep
 checkouts in the sources-only baseline (`jido_sandbox/.git` and similar). The
 baseline tree pin is unchanged; only the image needs rebuild/activate.

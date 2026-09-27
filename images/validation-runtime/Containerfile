@@ -111,6 +111,27 @@ RUN apt-get update \
     && pkg-config --exists portaudio-2.0 \
     && rm -rf /tmp/portaudio /tmp/portaudio.tar.gz
 
+# Existing locked NIF consumers also need their checksum-verified cache when a
+# disposable dependency copy is compiled without networking. These hashes are
+# from the locked packages' checksum.exs; PortAudio itself is built above.
+RUN case "${ARBOR_VALIDATION_PLATFORM}" in \
+      linux/arm64) native_arch=aarch64; \
+        sqlite_sha=3c0aceec132bf3d465a39e8762879afb5407040d5f8df26956b7c51e1e44f2f3; \
+        html_sha=4f432f842faa84273e879d503cb10e88f9a391606ef7a1a86502f14e3b93bc8a ;; \
+      linux/amd64) native_arch=x86_64; \
+        sqlite_sha=e3627fce78c2ce7f14fd5393e337e7997a1bd0d63390fecdb4b3b75f2d226d50; \
+        html_sha=ee887e5fc01e4a534b5ab13caaaf2c5b978c84bb5cd40e11e75cfdaec683ea09 ;; \
+      *) exit 1 ;; \
+    esac \
+    && sqlite_archive="exqlite-nif-2.17-${native_arch}-linux-gnu-0.34.0.tar.gz" \
+    && html_archive="lazy_html-nif-2.16-${native_arch}-linux-gnu-0.1.8.tar.gz" \
+    && curl -fsSL "https://github.com/elixir-sqlite/exqlite/releases/download/v0.34.0/${sqlite_archive}" \
+      -o "${ELIXIR_MAKE_CACHE_DIR}/${sqlite_archive}" \
+    && echo "${sqlite_sha}  ${ELIXIR_MAKE_CACHE_DIR}/${sqlite_archive}" | sha256sum -c - \
+    && curl -fsSL "https://github.com/dashbitco/lazy_html/releases/download/v0.1.8/${html_archive}" \
+      -o "${ELIXIR_MAKE_CACHE_DIR}/${html_archive}" \
+    && echo "${html_sha}  ${ELIXIR_MAKE_CACHE_DIR}/${html_archive}" | sha256sum -c -
+
 LABEL org.arbor.validation.schema="1" \
       org.arbor.validation.role="spawn-containment" \
       org.arbor.validation.platform="${ARBOR_VALIDATION_PLATFORM}" \
