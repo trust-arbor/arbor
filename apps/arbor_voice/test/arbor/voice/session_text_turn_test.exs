@@ -496,7 +496,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     @tag spec: "VOICE-5"
     test "security regression: oversized output_audio ends the turn with :turn_failed" do
       ctx = turn_opts()
-      over = :binary.copy(<<0>>, TurnCore.max_audio_bytes() + 1)
+      over = :binary.copy(<<0>>, TurnCore.max_audio_bytes() + 2)
 
       ControllableTurnBackend.enqueue([
         {:output_audio, over},

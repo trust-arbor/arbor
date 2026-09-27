@@ -68,6 +68,20 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
       {:ok, state}
     end
 
+    def send_frame(state, %{"type" => "session.update", "session" => config} = frame, _deadline) do
+      {:ok, state} = send_frame(state, frame)
+      [{:frames, frames}] = :ets.lookup(@table, :frames)
+
+      :ets.insert(
+        @table,
+        {:frames, [%{"type" => "session.updated", "session" => config} | frames]}
+      )
+
+      {:ok, state}
+    end
+
+    def send_frame(state, frame, _deadline), do: send_frame(state, frame)
+
     def recv_frame(state, _timeout) do
       ensure!()
 

@@ -71,6 +71,27 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
       {:ok, state}
     end
 
+    def send_frame(state, frame, _deadline) do
+      case frame do
+        %{"type" => "session.update", "session" => session} ->
+          key = :frames
+
+          frames =
+            case :ets.lookup(@table, key) do
+              [{^key, frames}] -> frames
+              _ -> []
+            end
+
+          ack = %{"type" => "session.updated", "session" => session}
+          :ets.insert(@table, {key, [ack | frames]})
+
+        _ ->
+          :ok
+      end
+
+      send_frame(state, frame)
+    end
+
     def recv_frame(state, _timeout) do
       ensure!()
 

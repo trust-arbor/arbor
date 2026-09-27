@@ -66,6 +66,26 @@ defmodule Arbor.Voice.SessionTest do
     :ok
   end
 
+  test "security regression: Session crash reports redact the current message and reason" do
+    ctx = lifecycle_opts()
+    {user_id, agent_id} = unique_ids()
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+    assert [{session, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+    secret = "current-message-secret-never-log"
+    owner = :sys.get_state(session).owner
+    owner_ref = Process.monitor(owner)
+    :sys.replace_state(session, &Map.delete(&1, :turn))
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _} = Arbor.Voice.Session.text_turn(session, secret)
+        assert_receive {:DOWN, ^owner_ref, :process, ^owner, _}, 2_000
+      end)
+
+    refute log =~ secret
+    assert log =~ "redacted"
+  end
+
   test "public stop timeout covers owner close, death confirmation, and scheduling margin" do
     assert Arbor.Voice.Session.stop_call_timeout_ms() >=
              Arbor.Voice.ResourceOwner.close_call_timeout_ms() + 10_000

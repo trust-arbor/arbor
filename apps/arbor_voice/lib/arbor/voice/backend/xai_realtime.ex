@@ -18,11 +18,26 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   alias Arbor.LLM.OAuth
   alias Arbor.Voice.Backend.XaiRealtime.Transport
+  alias Arbor.Voice.{BackendWorker, PcmFormat}
 
   @default_host "api.x.ai"
   @default_port 443
   @default_path "/v1/realtime?model=grok-voice-latest"
   @authorization_error :xai_effect_not_authorized
+  @send_timeout_ms 30_000
+  @max_output_bytes 65_536
+  @alternate_format_fields [
+    "audio_format",
+    "encoding",
+    "sample_rate",
+    "channels",
+    "sample_format",
+    "rate",
+    "input_audio_format",
+    "output_audio_format",
+    "input_format",
+    "output_format"
+  ]
   @effects [
     :connect,
     :configure,
@@ -64,7 +79,15 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
     @moduledoc false
     @derive {Inspect, except: [:transport_state, :effect_authorizer, :acc]}
     @enforce_keys [:transport_mod, :transport_state, :clock_fun, :effect_authorizer]
-    defstruct [:transport_mod, :transport_state, :clock_fun, :effect_authorizer, acc: ""]
+    defstruct [
+      :transport_mod,
+      :transport_state,
+      :clock_fun,
+      :effect_authorizer,
+      input_format: nil,
+      output_format: nil,
+      acc: ""
+    ]
   end
 
   # ── open/1 ──
@@ -134,32 +157,113 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   @impl true
   def configure(%Session{} = session, config) do
-    payload =
-      %{"turn_detection" => nil}
-      |> maybe_put("instructions", Map.get(config, :instructions))
-      |> maybe_put("tools", Map.get(config, :tools))
-      |> put_media(Map.get(config, :audio))
+    with {:ok, requested} <- PcmFormat.configured_formats(config),
+         :ok <- PcmFormat.matches_request(requested, configured_meta()) do
+      deadline = send_deadline(session)
 
-    put_frame(session, :configure, %{"type" => "session.update", "session" => payload})
+      payload =
+        %{"turn_detection" => nil}
+        |> maybe_put("instructions", Map.get(config, :instructions))
+        |> maybe_put("tools", Map.get(config, :tools))
+        |> put_media(Map.get(config, :audio))
+
+      session = %{session | input_format: nil, output_format: nil}
+
+      case send_frames(
+             session,
+             [{:configure, %{"type" => "session.update", "session" => payload}}],
+             deadline
+           ) do
+        {:ok, latest} -> await_configuration(latest, deadline)
+        error -> error
+      end
+    end
   end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  # Proven nested shape from the prototype's audio_session_update/0: PCM16
-  # 16kHz in / 24kHz out, with an optional :voice override. Does not assume
-  # the provider honors a text-only request -- the 2026-08-02 live run
-  # returned audio plus transcript events for a text-mode session.
-  defp put_media(payload, audio) when is_map(audio) do
-    voice = Map.get(audio, :voice) || Map.get(audio, "voice") || "ara"
+  # Explicit PCM16/JSON in both modes. Provider defaults are 24kHz in/out;
+  # configure/2 only admits our 16kHz/24kHz profile after session.updated.
+  defp put_media(payload, audio) do
+    voice = if is_map(audio), do: Map.get(audio, :voice, "ara"), else: "ara"
 
-    Map.put(payload, "audio", %{
-      "input" => %{"format" => %{"type" => "audio/pcm", "rate" => 16_000}, "transcription" => %{}},
-      "output" => %{"format" => %{"type" => "audio/pcm", "rate" => 24_000}, "voice" => voice}
+    payload
+    |> Map.put("voice", voice)
+    |> Map.put("audio", %{
+      "input" => %{
+        "format" => %{"type" => "audio/pcm", "rate" => 16_000},
+        "transport" => "json",
+        "transcription" => %{}
+      },
+      "output" => %{"format" => %{"type" => "audio/pcm", "rate" => 24_000}, "transport" => "json"}
     })
+    |> then(fn payload ->
+      if is_map(audio), do: payload, else: Map.put(payload, "modalities", ["text"])
+    end)
   end
 
-  defp put_media(payload, _audio), do: Map.put(payload, "modalities", ["text"])
+  defp await_configuration(session, deadline) do
+    with remaining when is_integer(remaining) <- remaining_budget(deadline, session.clock_fun),
+         {:ok, tstate, frame} <-
+           session.transport_mod.recv_frame(session.transport_state, remaining) do
+      latest = %{session | transport_state: tstate}
+
+      case {send_budget(latest, deadline), frame} do
+        {:ok, %{"type" => "session.updated"}} ->
+          if confirmed_formats?(frame) do
+            {:ok,
+             %{
+               latest
+               | input_format: PcmFormat.mono_s16le(16_000),
+                 output_format: PcmFormat.mono_s16le(24_000)
+             }}
+          else
+            configuration_error(latest, :xai_audio_protocol_error)
+          end
+
+        {:ok, %{"type" => "session.created", "session" => initial}} when is_map(initial) ->
+          # Provider defaults precede our update (currently 24k/24k). They are
+          # control data only, never authority to accept or emit PCM.
+          await_configuration(latest, deadline)
+
+        {:ok, %{"type" => "conversation.created"}} ->
+          await_configuration(latest, deadline)
+
+        {{:error, :timeout}, _} ->
+          configuration_error(latest, :timeout)
+
+        _ ->
+          configuration_error(latest, :xai_audio_protocol_error)
+      end
+    else
+      :timeout -> configuration_error(session, :timeout)
+      {:error, :timeout} -> configuration_error(session, :timeout)
+      _ -> configuration_error(session, :xai_transport_failed)
+    end
+  rescue
+    _ -> configuration_error(session, :xai_transport_failed)
+  catch
+    _, _ -> configuration_error(session, :xai_transport_failed)
+  end
+
+  defp configuration_error(session, reason) do
+    close(session)
+    {:error, reason, session}
+  end
+
+  defp confirmed_formats?(
+         %{"session" => %{"audio" => %{"input" => input, "output" => output}}} = frame
+       )
+       when is_map(input) and is_map(output) do
+    validate_session_formats(frame) == :ok and
+      input["format"] == %{"type" => "audio/pcm", "rate" => 16_000} and
+      output["format"] == %{"type" => "audio/pcm", "rate" => 24_000} and
+      Map.get(input, "transport", "json") == "json" and
+      Map.get(output, "transport", "json") == "json"
+  end
+
+  defp confirmed_formats?(_), do: false
 
   # ── send_text/2, send_audio/2, send_tool_result/3 ──
 
@@ -182,16 +286,35 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   @impl true
   def send_audio(%Session{} = session, pcm) when is_binary(pcm) do
-    send_frames(session, [
-      {:audio_append,
-       %{
-         "type" => "input_audio_buffer.append",
-         "audio" => Base.encode64(pcm)
-       }},
-      {:audio_commit, %{"type" => "input_audio_buffer.commit"}},
-      {:audio_response, %{"type" => "response.create"}}
-    ])
+    # Start the one budget before validation/base64 allocation. Every subsequent
+    # frame and physical write uses this same deadline, including worker limits.
+    deadline = send_deadline(session)
+
+    with :ok <- PcmFormat.validate_pcm(pcm),
+         :ok <- require_audio_configuration(session),
+         :ok <- send_budget(session, deadline) do
+      send_frames(
+        session,
+        [
+          {:audio_append,
+           %{
+             "type" => "input_audio_buffer.append",
+             "audio" => Base.encode64(pcm)
+           }},
+          {:audio_commit, %{"type" => "input_audio_buffer.commit"}},
+          {:audio_response, %{"type" => "response.create"}}
+        ],
+        deadline
+      )
+    end
   end
+
+  def send_audio(%Session{}, _pcm), do: {:error, :invalid_audio}
+
+  defp require_audio_configuration(%Session{input_format: input, output_format: output})
+       when is_map(input) and is_map(output), do: :ok
+
+  defp require_audio_configuration(_), do: {:error, :audio_not_configured}
 
   @impl true
   def send_tool_result(%Session{} = session, call_id, output) do
@@ -210,9 +333,12 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   # backend session in a private third tuple element. ResourceOwner consumes
   # and redacts it, marks the connection poisoned, and closes this latest
   # transport state; public Voice callers still receive only a stable atom.
-  defp send_frames(%Session{} = session, frames) when is_list(frames) do
+  defp send_frames(%Session{} = session, frames),
+    do: send_frames(session, frames, send_deadline(session))
+
+  defp send_frames(%Session{} = session, frames, deadline) when is_list(frames) do
     Enum.reduce_while(frames, {:ok, session, false}, fn {effect, frame}, {:ok, latest, sent?} ->
-      case put_frame(latest, effect, frame) do
+      case put_frame(latest, effect, frame, deadline) do
         {:ok, next} ->
           {:cont, {:ok, next, true}}
 
@@ -221,6 +347,9 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
         {:error, reason} ->
           {:halt, {:error, reason}}
+
+        {:error, reason, latest} ->
+          {:halt, {:error, reason, latest}}
       end
     end)
     |> case do
@@ -229,18 +358,58 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
     end
   end
 
-  defp put_frame(%Session{} = session, effect, frame) when effect in @effects do
-    with :ok <- authorize_effect(session.effect_authorizer, effect) do
-      case session.transport_mod.send_frame(session.transport_state, frame) do
-        {:ok, tstate} -> {:ok, %{session | transport_state: tstate}}
-        {:error, :session_closed} -> {:error, :session_closed}
-        {:error, _reason} -> {:error, :xai_transport_failed}
+  defp put_frame(%Session{} = session, effect, frame, deadline) when effect in @effects do
+    with :ok <- send_budget(session, deadline),
+         :ok <- authorize_effect(session.effect_authorizer, effect),
+         :ok <- send_budget(session, deadline) do
+      case session.transport_mod.send_frame(session.transport_state, frame, deadline) do
+        {:ok, tstate} ->
+          latest = %{session | transport_state: tstate}
+
+          case send_budget(latest, deadline) do
+            :ok -> {:ok, latest}
+            {:error, reason} -> {:error, reason, latest}
+          end
+
+        {:error, :session_closed} ->
+          {:error, :session_closed}
+
+        {:error, :timeout} ->
+          close(session)
+          {:error, :timeout}
+
+        {:error, _reason} ->
+          {:error, :xai_transport_failed}
+
+        {:error, reason, tstate} ->
+          latest = %{session | transport_state: tstate}
+          close(latest)
+          safe_reason = if reason == :timeout, do: :timeout, else: :xai_transport_failed
+          {:error, safe_reason, latest}
       end
     end
   rescue
     _exception -> {:error, :xai_transport_failed}
   catch
     _kind, _reason -> {:error, :xai_transport_failed}
+  end
+
+  defp send_deadline(session) do
+    local = session.clock_fun.() + @send_timeout_ms
+
+    case BackendWorker.operation_deadline() do
+      {:ok, deadline} -> min(local, deadline)
+      {:error, :no_operation} -> local
+    end
+  end
+
+  defp send_budget(session, deadline) do
+    if deadline > session.clock_fun.() do
+      :ok
+    else
+      close(session)
+      {:error, :timeout}
+    end
   end
 
   defp authorize_effect(authorizer, effect)
@@ -289,8 +458,17 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
         session = %{session | transport_state: tstate}
 
         case map_event(session, frame) do
-          :skip -> recv_loop(session, deadline)
-          {:ok, session, event} -> {:ok, session, event}
+          :skip ->
+            recv_loop(session, deadline)
+
+          {:ok, session, event} ->
+            {:ok, session, event}
+
+          {:error, reason} ->
+            # recv advanced the opaque transport handle. Close that exact handle
+            # before returning the bounded error; the owner will also retire it.
+            close(session)
+            {:error, reason}
         end
 
       {:error, reason} when reason in [:timeout, :session_closed] ->
@@ -320,13 +498,23 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   end
 
   defp map_event(session, %{"type" => "response.output_audio.delta"} = frame) do
-    pcm =
-      case Base.decode64(frame["delta"] || "") do
-        {:ok, bin} -> bin
-        :error -> <<>>
-      end
+    with :ok <- require_audio_configuration(session),
+         :ok <- validate_delta_format(frame),
+         encoded when is_binary(encoded) <- frame["delta"],
+         true <- byte_size(encoded) <= div(@max_output_bytes + 2, 3) * 4,
+         {:ok, pcm} <- PcmFormat.decode_base64(encoded),
+         true <- byte_size(pcm) <= @max_output_bytes do
+      {:ok, session, {:output_audio, pcm}}
+    else
+      _ -> {:error, :xai_audio_protocol_error}
+    end
+  end
 
-    {:ok, session, {:output_audio, pcm}}
+  defp map_event(_session, %{"type" => type})
+       when type in ["session.created", "session.updated"] do
+    # Only configure/2 owns acknowledgement. Unsolicited updates cannot silently
+    # change the codec or sample rate of an admitted audio session.
+    {:error, :xai_audio_protocol_error}
   end
 
   defp map_event(session, %{"type" => type, "delta" => delta})
@@ -357,6 +545,70 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defp map_event(_session, _frame), do: :skip
 
+  defp validate_delta_format(frame) do
+    # Alternate, incomplete declarations cannot silently override the source's
+    # reviewed PCM contract. Standard delta frames usually omit format entirely.
+    if alternate_format?(frame) do
+      :error
+    else
+      validate_optional_wire_format(frame, 24_000)
+    end
+  end
+
+  defp validate_session_formats(%{"session" => session}) when is_map(session) do
+    if alternate_format?(session) or Map.has_key?(session, "format") do
+      :error
+    else
+      case Map.fetch(session, "audio") do
+        :error -> :ok
+        {:ok, audio} when is_map(audio) -> validate_audio_formats(audio)
+        _ -> :error
+      end
+    end
+  end
+
+  defp validate_session_formats(_), do: :error
+
+  defp validate_audio_formats(audio) do
+    if alternate_format?(audio) or Map.has_key?(audio, "format"),
+      do: :error,
+      else: validate_directional_formats(audio)
+  end
+
+  defp validate_directional_formats(audio) do
+    Enum.reduce_while([{"input", 16_000}, {"output", 24_000}], :ok, fn {key, rate}, :ok ->
+      case Map.fetch(audio, key) do
+        :error ->
+          {:cont, :ok}
+
+        {:ok, value} when is_map(value) ->
+          result =
+            if alternate_format?(value),
+              do: :error,
+              else: validate_optional_wire_format(value, rate)
+
+          case result do
+            :ok -> {:cont, :ok}
+            :error -> {:halt, :error}
+          end
+
+        _ ->
+          {:halt, :error}
+      end
+    end)
+  end
+
+  defp alternate_format?(container),
+    do: Enum.any?(@alternate_format_fields, &Map.has_key?(container, &1))
+
+  defp validate_optional_wire_format(container, rate) do
+    case Map.fetch(container, "format") do
+      :error -> :ok
+      {:ok, %{"type" => "audio/pcm", "rate" => ^rate} = format} when map_size(format) == 2 -> :ok
+      _ -> :error
+    end
+  end
+
   defp decode_tool_arguments(bin) when is_binary(bin) do
     case Jason.decode(bin) do
       {:ok, %{} = map} -> {:ok, map}
@@ -379,7 +631,20 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   end
 
   @impl true
-  def meta(%Session{}) do
-    %{backend: :xai_realtime, mode: :cloud, input_rate: 16_000, output_rate: 24_000}
+  def meta(%Session{} = session),
+    do: %{
+      backend: :xai_realtime,
+      mode: :cloud,
+      input_format: session.input_format,
+      output_format: session.output_format
+    }
+
+  defp configured_meta do
+    %{
+      backend: :xai_realtime,
+      mode: :cloud,
+      input_format: PcmFormat.mono_s16le(16_000),
+      output_format: PcmFormat.mono_s16le(24_000)
+    }
   end
 end

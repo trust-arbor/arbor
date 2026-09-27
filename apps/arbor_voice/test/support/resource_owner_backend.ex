@@ -186,8 +186,8 @@ defmodule Arbor.Voice.Test.ResourceOwnerBackend do
     %{
       backend: :resource_owner_backend,
       mode: :cloud,
-      input_rate: 16_000,
-      output_rate: 24_000
+      input_format: Arbor.Voice.PcmFormat.mono_s16le(16_000),
+      output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
     }
   end
 

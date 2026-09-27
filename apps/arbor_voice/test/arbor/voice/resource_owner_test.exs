@@ -45,20 +45,25 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     end
 
     def meta(_session),
-      do: %{backend: :configure_latest, mode: :local, input_rate: nil, output_rate: nil}
+      do: %{backend: :configure_latest, mode: :local, input_format: nil, output_format: nil}
   end
 
   defmodule BadMetaBackend do
     @behaviour Arbor.Voice.RealtimeBackend
 
     def egress_route, do: :none
-    def open(_opts), do: {:ok, %{}}
+    def open(opts), do: {:ok, %{parent: Keyword.fetch!(opts, :parent)}}
     def configure(session, _config), do: {:ok, session}
     def send_text(session, _text), do: {:ok, session}
     def send_audio(session, _chunk), do: {:ok, session}
     def send_tool_result(session, _call_id, _output), do: {:ok, session}
     def recv(session, _timeout), do: {:ok, session, {:turn_done, %{text: ""}}}
-    def close(_session), do: :ok
+
+    def close(session) do
+      send(session.parent, :bad_metadata_backend_closed)
+      :ok
+    end
+
     def meta(_session), do: %{backend: :bad, mode: :invalid}
   end
 
@@ -75,7 +80,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     def close(_session), do: :ok
 
     def meta(_session),
-      do: %{backend: :open_failure, mode: :local, input_rate: nil, output_rate: nil}
+      do: %{backend: :open_failure, mode: :local, input_format: nil, output_format: nil}
   end
 
   defmodule TimeoutBackend do
@@ -105,7 +110,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     end
 
     def meta(_session),
-      do: %{backend: :timeout, mode: :local, input_rate: nil, output_rate: nil}
+      do: %{backend: :timeout, mode: :local, input_format: nil, output_format: nil}
   end
 
   defmodule ForgedCallBackend do
@@ -126,7 +131,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     def close(_session), do: :ok
 
     def meta(_session),
-      do: %{backend: :forged, mode: :local, input_rate: nil, output_rate: nil}
+      do: %{backend: :forged, mode: :local, input_format: nil, output_format: nil}
   end
 
   defmodule EffectTrust do
@@ -189,7 +194,12 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     end
 
     def meta(_session),
-      do: %{backend: :effect, mode: :cloud, input_rate: 16_000, output_rate: 24_000}
+      do: %{
+        backend: :effect,
+        mode: :cloud,
+        input_format: Arbor.Voice.PcmFormat.mono_s16le(16_000),
+        output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
+      }
 
     defp operation(session, operation, expected) do
       effects =
@@ -238,7 +248,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     after_text = Backend.session_handle(self())
     refute configured == after_text
 
-    assert :ok = ResourceOwner.send_audio(owner, <<1, 2, 3>>)
+    assert :ok = ResourceOwner.send_audio(owner, <<1, 2, 3, 4>>)
 
     assert {:ok, first_request} =
              ResourceOwner.send_tool_result_request(owner, "call-1", "output-1")
@@ -294,11 +304,12 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   end
 
   @tag :security_regression
-  test "malformed metadata retires the worker before returning" do
-    assert {:ok, owner} = ResourceOwner.start(self(), BadMetaBackend, [], @default_opts)
-    assert {:error, :invalid_backend_meta} = ResourceOwner.meta(owner)
-    assert %{worker: nil, poisoned: true, phase: :terminal} = :sys.get_state(owner)
-    assert :ok = ResourceOwner.close(owner)
+  test "malformed metadata retires the worker before admitting a ready owner" do
+    assert {:error, {:handoff_accepted, :start_failed}} =
+             ResourceOwner.start(self(), BadMetaBackend, [parent: self()], @default_opts)
+
+    assert_receive :bad_metadata_backend_closed
+    refute_receive :bad_metadata_backend_closed
   end
 
   @tag :security_regression

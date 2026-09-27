@@ -4,6 +4,7 @@ defmodule Arbor.Voice.BackendWorker do
   use GenServer
 
   alias Arbor.Voice.Redacted
+  alias Arbor.Voice.PcmFormat
 
   @result_tag :voice_backend_operation_result
 
@@ -33,7 +34,6 @@ defmodule Arbor.Voice.BackendWorker do
   @max_identifier_bytes 256
   @min_completed_at -9_223_372_036_854_775_808
   @max_completed_at 9_223_372_036_854_775_807
-  @max_rate 4_294_967_295
 
   @operations [
     :open,
@@ -364,6 +364,14 @@ defmodule Arbor.Voice.BackendWorker do
   def new_operation_token, do: make_ref()
 
   @doc false
+  def operation_deadline do
+    case Process.get(operation_context_key()) do
+      %{deadline_ms: deadline} when is_integer(deadline) -> {:ok, deadline}
+      _ -> {:error, :no_operation}
+    end
+  end
+
+  @doc false
   @spec max_deadline_distance_ms() :: pos_integer()
   def max_deadline_distance_ms, do: @max_deadline_distance_ms
 
@@ -680,10 +688,22 @@ defmodule Arbor.Voice.BackendWorker do
 
   @impl true
   def format_status(%{state: %State{} = state} = status) do
-    %{status | state: public_state(state), message: :redacted, log: :redacted}
+    status
+    |> Map.put(:state, public_state(state))
+    |> Map.put(:message, :redacted)
+    |> Map.put(:log, :redacted)
+    |> Map.put(:reason, :redacted)
   end
 
-  def format_status(status), do: status
+  def format_status(status) when is_map(status),
+    do:
+      status
+      |> Map.put(:state, :redacted)
+      |> Map.put(:message, :redacted)
+      |> Map.put(:log, :redacted)
+      |> Map.put(:reason, :redacted)
+
+  def format_status(_), do: :redacted
 
   defp execute_with_watchdog(state, deadline_timer) do
     Process.put(operation_context_key(), %{
@@ -727,6 +747,7 @@ defmodule Arbor.Voice.BackendWorker do
      %{
        state
        | phase: :awaiting_ack,
+         operation_args: nil,
          session: Redacted.new(session),
          completion: completion,
          terminal: terminal,
@@ -1004,7 +1025,7 @@ defmodule Arbor.Voice.BackendWorker do
     do: bounded_utf8?(text, @max_text_bytes)
 
   defp valid_operation_args?(:send_audio, [audio]),
-    do: is_binary(audio) and byte_size(audio) <= @max_audio_bytes
+    do: PcmFormat.validate_pcm(audio) == :ok
 
   defp valid_operation_args?(:send_tool_result, [call_id, output]),
     do:
@@ -1120,25 +1141,10 @@ defmodule Arbor.Voice.BackendWorker do
   end
 
   defp bounded_binary_event(event, binary) do
-    if byte_size(binary) <= @max_result_binary_bytes, do: {:ok, event}, else: :error
+    if PcmFormat.validate_pcm(binary) == :ok, do: {:ok, event}, else: :error
   end
 
-  defp valid_meta?(
-         %{backend: backend, mode: mode, input_rate: input_rate, output_rate: output_rate} = meta
-       ) do
-    exact_keys? =
-      meta
-      |> Map.keys()
-      |> MapSet.new()
-      |> MapSet.equal?(MapSet.new([:backend, :mode, :input_rate, :output_rate]))
-
-    exact_keys? and is_atom(backend) and not is_nil(backend) and mode in [:cloud, :local] and
-      valid_rate?(input_rate) and valid_rate?(output_rate)
-  end
-
-  defp valid_meta?(_meta), do: false
-  defp valid_rate?(nil), do: true
-  defp valid_rate?(rate), do: is_integer(rate) and rate > 0 and rate <= @max_rate
+  defp valid_meta?(meta), do: PcmFormat.validate_meta(meta) == :ok
 
   defp boundary_secret(%Credential{} = credential, worker) do
     cond do

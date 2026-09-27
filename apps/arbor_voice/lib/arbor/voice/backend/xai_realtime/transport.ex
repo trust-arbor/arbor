@@ -4,10 +4,11 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
   # Real Mint/Mint.WebSocket transport for Arbor.Voice.Backend.XaiRealtime,
   # extracted from Arbor.Agent.Prototypes.XaiVoiceOrchestrator's verified
   # connect/await_upgrade/send_json/recv_event. A behaviour-less 4-function
-  # contract (connect/1, send_frame/2, recv_frame/2, close/1) so tests can
+  # contract (connect/1, send_frame/3, recv_frame/2, close/1) so tests can
   # swap in a scripted fake via opts.
 
   @default_recv_timeout 90_000
+  @default_send_timeout 30_000
 
   @spec connect(keyword()) :: {:ok, map()} | {:error, term()}
   def connect(opts) do
@@ -18,7 +19,11 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
     clock_fun = Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end)
     upgrade_deadline = clock_fun.() + @default_recv_timeout
 
-    with {:ok, conn} <- Mint.HTTP.connect(:https, host, port, protocols: [:http1]),
+    with {:ok, conn} <-
+           Mint.HTTP.connect(:https, host, port,
+             protocols: [:http1],
+             transport_opts: [send_timeout: @default_send_timeout, send_timeout_close: true]
+           ),
          {:ok, conn, ref} <-
            Mint.WebSocket.upgrade(:wss, conn, path, [{"authorization", "Bearer " <> token}]),
          {:ok, conn, status, headers} <-
@@ -91,12 +96,70 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
   end
 
   @spec send_frame(map(), map()) :: {:ok, map()} | {:error, term()}
-  def send_frame(state, frame) do
-    with {:ok, ws, data} <- Mint.WebSocket.encode(state.ws, {:text, Jason.encode!(frame)}),
-         {:ok, conn} <- Mint.WebSocket.stream_request_body(state.conn, state.ref, data) do
-      {:ok, %{state | ws: ws, conn: conn}}
+  def send_frame(state, frame),
+    do: send_frame(state, frame, state.clock_fun.() + @default_send_timeout)
+
+  @spec send_frame(map(), map(), integer()) ::
+          {:ok, map()} | {:error, term()} | {:error, term(), map()}
+  def send_frame(state, frame, deadline) when is_integer(deadline) do
+    with :ok <- send_budget(state, deadline),
+         {:ok, json} <- Jason.encode(frame),
+         :ok <- send_budget(state, deadline),
+         {:ok, ws, data} <- Mint.WebSocket.encode(state.ws, {:text, json}),
+         :ok <- set_send_budget(state, deadline),
+         :ok <- send_budget(state, deadline) do
+      write_frame(%{state | ws: ws}, data, deadline)
     else
+      {:error, reason} -> {:error, reason}
       {:error, _state, reason} -> {:error, reason}
+    end
+  end
+
+  def send_frame(_state, _frame, _deadline), do: {:error, :invalid_timeout}
+
+  defp send_budget(state, deadline) do
+    case remaining_budget(deadline, state.clock_fun) do
+      :timeout ->
+        close(state)
+        {:error, :timeout}
+
+      _remaining ->
+        :ok
+    end
+  end
+
+  defp set_send_budget(state, deadline) do
+    case remaining_budget(deadline, state.clock_fun) do
+      :timeout ->
+        close(state)
+        {:error, :timeout}
+
+      remaining ->
+        # The provider route is HTTPS-only. This bounds real SSL backpressure;
+        # BackendWorker's independent watchdog also covers encoding and faults.
+        :ssl.setopts(Mint.HTTP.get_socket(state.conn),
+          send_timeout: remaining,
+          send_timeout_close: true
+        )
+    end
+  end
+
+  defp write_frame(state, data, deadline) do
+    case Mint.WebSocket.stream_request_body(state.conn, state.ref, data) do
+      {:ok, conn} ->
+        latest = %{state | conn: conn}
+
+        case send_budget(latest, deadline) do
+          :ok -> {:ok, latest}
+          {:error, reason} -> {:error, reason, latest}
+        end
+
+      {:error, conn, reason} ->
+        latest = %{state | conn: conn}
+        # The write may be partial even on the first frame. Fence that transport
+        # immediately and retain the latest handle for owner-driven cleanup.
+        close(latest)
+        {:error, reason, latest}
     end
   end
 

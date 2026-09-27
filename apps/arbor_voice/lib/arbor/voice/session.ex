@@ -10,6 +10,7 @@ defmodule Arbor.Voice.Session do
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
   alias Arbor.Voice.EgressAuthority
+  alias Arbor.Voice.PcmFormat
   alias Arbor.Voice.Redacted
   alias Arbor.Voice.ResourceOwner
   alias Arbor.Voice.Session.ManagedDispatchCore
@@ -94,6 +95,15 @@ defmodule Arbor.Voice.Session do
     :exit, {:noproc, _} -> {:error, :not_found}
     :exit, {:normal, _} -> {:error, :session_stopped}
     :exit, _ -> {:error, :not_found}
+  end
+
+  # VP-07A0 prerequisite only. Success acknowledges a bounded byte handoff and
+  # closes the session; it does not produce or persist a conversation turn.
+  @doc false
+  def send_audio_once(pid, format, pcm, timeout_ms \\ 30_000) when is_pid(pid) do
+    GenServer.call(pid, {:audio_send_once, format, pcm, timeout_ms}, :infinity)
+  catch
+    :exit, _ -> {:error, :session_stopped}
   end
 
   defp via(session_key), do: {:via, Registry, {@registry, session_key}}
@@ -303,6 +313,7 @@ defmodule Arbor.Voice.Session do
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
+          audio_operation: nil,
           # A disclosure minted before owner registration/activation failed.
           # Retained only until direct cleanup succeeds or authoritative close
           # transfers it to ResourceOwner.
@@ -801,6 +812,7 @@ defmodule Arbor.Voice.Session do
 
     state = state |> Map.put(:closing, true) |> cancel_hard_timer()
     {state, cleanup_result} = settle_and_close(state)
+    state = reply_audio_operation(state, cleanup_result, :session_stopped)
 
     case cleanup_result do
       :ok ->
@@ -828,7 +840,7 @@ defmodule Arbor.Voice.Session do
   def handle_call({:text_turn, user_text}, from, %{lifecycle: :ready, closing: false} = state)
       when is_binary(user_text) do
     # In-flight turn is always a map; nil means idle.
-    if is_map(state.turn) do
+    if is_map(state.turn) or is_map(state.audio_operation) do
       {:reply, {:error, :busy}, state}
     else
       case begin_text_turn(state, from, user_text) do
@@ -856,6 +868,24 @@ defmodule Arbor.Voice.Session do
     {:reply, {:error, :not_found}, state}
   end
 
+  def handle_call(
+        {:audio_send_once, format, pcm, timeout_ms},
+        from,
+        %{lifecycle: :ready, closing: false} = state
+      ) do
+    cond do
+      is_map(state.turn) or is_map(state.audio_operation) ->
+        {:reply, {:error, :busy}, state}
+
+      PcmFormat.validate(format) != :ok or PcmFormat.validate_pcm(pcm) != :ok or
+          not (is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= 60_000) ->
+        {:reply, {:error, :invalid_audio}, state}
+
+      true ->
+        begin_audio_operation(state, from, format, pcm, timeout_ms)
+    end
+  end
+
   def handle_call(_request, _from, state) do
     {:reply, {:error, :unsupported}, state}
   end
@@ -873,6 +903,7 @@ defmodule Arbor.Voice.Session do
 
     state = %{state | closing: true, timer_ref: nil}
     {state, cleanup_result} = settle_and_close(state)
+    state = reply_audio_operation(state, cleanup_result, :budget_exhausted)
 
     case cleanup_result do
       :ok ->
@@ -897,6 +928,25 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info(:hard_timeout, state), do: {:noreply, state}
+
+  def handle_info(
+        {:voice_audio_operation_result, _, _, _} = message,
+        %{audio_operation: %{ticket: ticket}} = state
+      ) do
+    case ResourceOwner.audio_result(message, ticket) do
+      {:ok, result, close_result} ->
+        state = state |> cancel_hard_timer() |> Map.put(:closing, true)
+        reply = if close_result == :ok, do: result, else: {:error, :cleanup_pending}
+        safe_reply(state.audio_operation.from, reply)
+        state = clear_audio_operation(state)
+        safe_emit(state, :stop)
+        reason = if close_result == :ok, do: :normal, else: @cleanup_pending_stop_reason
+        {:stop, reason, %{state | lifecycle: :closed}}
+
+      :no_result ->
+        {:noreply, state}
+    end
+  end
 
   def handle_info({:turn_poll, generation}, %{lifecycle: :ready, closing: false} = state) do
     case state.turn do
@@ -968,6 +1018,17 @@ defmodule Arbor.Voice.Session do
   def handle_info({:tool_progress, _gen, _id, _token}, state), do: {:noreply, state}
 
   def handle_info(
+        {:DOWN, ref, :process, caller, _reason},
+        %{audio_operation: %{caller_ref: ref, caller: caller}} = state
+      ) do
+    state = state |> cancel_hard_timer() |> Map.put(:closing, true)
+    {state, cleanup_result} = settle_and_close(state)
+    state = clear_audio_operation(state)
+    reason = if cleanup_result == :ok, do: :normal, else: @cleanup_pending_stop_reason
+    {:stop, reason, %{state | lifecycle: :closed}}
+  end
+
+  def handle_info(
         {:DOWN, ref, :process, owner, _reason},
         %{owner_ref: ref, owner: owner} = state
       ) do
@@ -993,9 +1054,27 @@ defmodule Arbor.Voice.Session do
 
   def handle_info({:DOWN, _mon, :process, _pid, _reason}, state), do: {:noreply, state}
 
+  def handle_info(message, %{audio_operation: %{request_id: request_id}} = state)
+      when not is_nil(request_id) do
+    case :gen_server.check_response(message, request_id) do
+      {:reply, :ok} ->
+        {:noreply, put_in(state.audio_operation.request_id, nil)}
+
+      {:reply, _failure} ->
+        finish_failed_audio_handoff(state)
+
+      {:error, _failure} ->
+        finish_failed_audio_handoff(state)
+
+      :no_reply ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp handle_resource_owner_down(state) do
+    state = reply_audio_operation(state, {:error, :cleanup_pending}, :session_stopped)
     turn = state.turn
 
     state =
@@ -1131,6 +1210,88 @@ defmodule Arbor.Voice.Session do
         {:error, :turn_failed, state}
     end
   end
+
+  defp begin_audio_operation(state, from, format, pcm, timeout_ms) do
+    case prepare_turn_authority(state) do
+      {:ok, _lease} ->
+        result =
+          try do
+            with {:ok, ticket} <-
+                   state.resource_owner.reserve_audio(
+                     state.owner,
+                     format,
+                     byte_size(pcm),
+                     timeout_ms
+                   ),
+                 {:ok, request_id} <- state.resource_owner.handoff_audio(state.owner, ticket, pcm) do
+              {:ok, ticket, request_id}
+            end
+          catch
+            _, _ -> {:error, :audio_failed}
+          end
+
+        case result do
+          {:ok, ticket, request_id} ->
+            {caller, _tag} = from
+
+            operation = %{
+              ticket: ticket,
+              request_id: request_id,
+              from: from,
+              caller: caller,
+              caller_ref: Process.monitor(caller)
+            }
+
+            {:noreply, %{state | audio_operation: operation}}
+
+          _ ->
+            {state, cleanup} = close_session_without_turn(state, :audio_failed, nil)
+            audio_start_failure(state, cleanup)
+        end
+
+      {:error, _, {:fatal, provisional}} ->
+        {state, cleanup} = close_session_without_turn(state, :audio_failed, provisional)
+        audio_start_failure(state, cleanup)
+
+      _ ->
+        {:reply, {:error, :audio_failed}, state}
+    end
+  end
+
+  defp audio_start_failure(state, :ok),
+    do: {:stop, :normal, {:error, :audio_failed}, state}
+
+  defp audio_start_failure(state, _cleanup) do
+    if session_owned_provisional_cleanup?(state) do
+      {:reply, {:error, :cleanup_pending}, schedule_provisional_cleanup_retry(state)}
+    else
+      {:stop, @cleanup_pending_stop_reason, {:error, :cleanup_pending}, state}
+    end
+  end
+
+  defp finish_failed_audio_handoff(state) do
+    {state, cleanup} = close_session_without_turn(state, :audio_failed, nil)
+    state = reply_audio_operation(state, cleanup, :audio_failed)
+    reason = if cleanup == :ok, do: :normal, else: @cleanup_pending_stop_reason
+    {:stop, reason, state}
+  end
+
+  defp reply_audio_operation(%{audio_operation: operation} = state, cleanup, reason)
+       when is_map(operation) do
+    reason = if cleanup == :ok, do: reason, else: :cleanup_pending
+    safe_reply(operation.from, {:error, reason})
+    clear_audio_operation(state)
+  end
+
+  defp reply_audio_operation(state, _cleanup, _reason), do: state
+
+  defp clear_audio_operation(%{audio_operation: operation} = state) when is_map(operation) do
+    Process.demonitor(operation.caller_ref, [:flush])
+    if operation.request_id, do: :gen_server.receive_response(operation.request_id, 0)
+    %{state | audio_operation: nil}
+  end
+
+  defp clear_audio_operation(state), do: state
 
   defp prepare_turn_authority(state) do
     session_authority = Redacted.value(state.egress_authority)
@@ -2206,17 +2367,35 @@ defmodule Arbor.Voice.Session do
   end
 
   defp close_owner_authoritatively(state) do
-    if resource_owner_down?(state) do
-      {:error, :cleanup_pending}
-    else
-      close_result = safe_close_resource_owner(state.resource_owner, state.owner)
+    close_result =
+      if resource_owner_down?(state),
+        do: {:error, :cleanup_pending},
+        else: safe_close_resource_owner(state.resource_owner, state.owner)
 
-      case {close_result, owner_close_outcome(state.owner, state.owner_ref, close_result)} do
-        {:ok, :dead} -> :ok
-        _pending -> {:error, :cleanup_pending}
-      end
+    # A one-shot send can have finished its acknowledged cleanup just before
+    # stop/death/timeout enters this handler. Only its exact private ticket
+    # supplies positive close evidence; a bare owner DOWN still never does.
+    close_result = if close_result == :ok, do: :ok, else: completed_audio_close(state)
+
+    case {close_result, owner_close_outcome(state.owner, state.owner_ref, close_result)} do
+      {:ok, :dead} -> :ok
+      _pending -> {:error, :cleanup_pending}
     end
   end
+
+  defp completed_audio_close(%{audio_operation: %{ticket: ticket}}) do
+    receive do
+      {:voice_audio_operation_result, ^ticket, result, :ok} = message ->
+        case ResourceOwner.audio_result(message, ticket) do
+          {:ok, ^result, :ok} -> :ok
+          _ -> {:error, :cleanup_pending}
+        end
+    after
+      0 -> {:error, :cleanup_pending}
+    end
+  end
+
+  defp completed_audio_close(_state), do: {:error, :cleanup_pending}
 
   defp resource_owner_down?(%{owner: owner}) when is_pid(owner),
     do: not Process.alive?(owner)
@@ -2354,10 +2533,17 @@ defmodule Arbor.Voice.Session do
   def format_status(status) do
     case status do
       %{state: state} when is_map(state) ->
-        %{status | state: redacted_genserver_state(state)}
+        status
+        |> Map.put(:state, redacted_genserver_state(state))
+        |> Map.put(:message, :redacted)
+        |> Map.put(:log, [])
+        |> Map.put(:reason, :redacted)
 
-      other ->
-        other
+      other when is_map(other) ->
+        %{state: :redacted, message: :redacted, log: [], reason: :redacted}
+
+      _ ->
+        :redacted
     end
   end
 
@@ -2378,7 +2564,7 @@ defmodule Arbor.Voice.Session do
     }
   end
 
-  defp redacted_genserver_state(other), do: other
+  defp redacted_genserver_state(_other), do: :redacted
 
   # Forced Session death must rely solely on ResourceOwner monitor cleanup.
   # Deliberately no terminate/2 settlement or backend close — VOICE-7.

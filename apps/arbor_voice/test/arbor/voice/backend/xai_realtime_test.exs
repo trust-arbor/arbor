@@ -24,6 +24,8 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
 
     def send_frame(state, _frame), do: {:ok, state}
 
+    def send_frame(state, frame, _deadline), do: send_frame(state, frame)
+
     def recv_frame(%{mode: :recv_error, token: token}, _timeout),
       do: {:error, {:echoed_token, token}}
 
@@ -358,7 +360,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
            ]
 
     reset_events(key)
-    {:ok, session} = XaiRealtime.send_audio(session, <<1, 2, 3>>)
+    {:ok, session} = XaiRealtime.send_audio(session, <<1, 2>>)
 
     assert events(key) == [
              {:authorize, :audio_append, route},
@@ -510,7 +512,8 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     route = XaiRealtime.egress_route()
 
     authorizer = fn
-      effect, received_route when effect in [:connect, :audio_append, :audio_commit] ->
+      effect, received_route
+      when effect in [:connect, :configure, :audio_append, :audio_commit] ->
         record_event(key, {:authorize, effect, received_route})
         :allow
 
@@ -529,6 +532,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         oauth_resolver: &stub_resolver/1
       )
 
+    {:ok, session} = XaiRealtime.configure(session, %{})
     reset_events(key)
 
     assert {:error, :xai_effect_not_authorized, latest_session} =
@@ -770,7 +774,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       },
       %{"type" => "response.output_audio_transcript.delta", "delta" => "Hi "},
       %{"type" => "response.output_text.delta", "delta" => "friend"},
-      %{"type" => "response.output_audio.delta", "delta" => Base.encode64(<<1, 2, 3>>)},
+      %{"type" => "response.output_audio.delta", "delta" => Base.encode64(<<1, 2>>)},
       %{"type" => "response.done", "response" => %{"id" => "r1"}},
       %{"type" => "error", "error" => %{"message" => "boom"}}
     ]
@@ -783,10 +787,11 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         oauth_resolver: &stub_resolver/1
       )
 
+    {:ok, session} = XaiRealtime.configure(session, %{})
     assert {:ok, session, {:input_transcript, "hello there"}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, session, {:output_text_delta, "Hi "}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, session, {:output_text_delta, "friend"}} = XaiRealtime.recv(session, 1_000)
-    assert {:ok, session, {:output_audio, <<1, 2, 3>>}} = XaiRealtime.recv(session, 1_000)
+    assert {:ok, session, {:output_audio, <<1, 2>>}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, session, {:turn_done, %{text: "Hi friend"}}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, _session, {:error, %{"message" => "boom"}}} = XaiRealtime.recv(session, 1_000)
   end

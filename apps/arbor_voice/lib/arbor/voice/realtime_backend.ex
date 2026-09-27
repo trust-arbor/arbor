@@ -125,9 +125,10 @@ defmodule Arbor.Voice.RealtimeBackend do
   @callback send_text(session(), String.t()) :: send_result()
 
   @doc """
-  Sends a chunk of PCM16 audio input (rate per meta/1's input_rate).
-  Callers stream this incrementally as microphone audio arrives; a backend
-  buffers/frames it per its own protocol.
+  Sends one nonempty bounded PCM input with the exact `meta/1` input format.
+  Input is mono signed 16-bit little-endian PCM, at most 2 MiB and an even
+  byte length. ResourceOwner's operation deadline includes framing and socket
+  backpressure. This callback does not define a public streaming API.
 
   Returns `{:error, :session_closed}`, `{:error, :invalid_audio}` when the
   chunk fails backend-specific format validation, or `{:error, term()}` for
@@ -172,14 +173,16 @@ defmodule Arbor.Voice.RealtimeBackend do
   @doc """
   Returns metadata about this session's backend: which backend
   module/family it is, whether it runs :cloud or :local (feeds VOICE-23's
-  user-visible cue), and the PCM sample rates the caller must
-  produce/consume for send_audio/2 and :output_audio events. Rates are nil
-  for a text-only backend/session.
+  user-visible cue), and exact closed PCM descriptors for input and output.
+  Both descriptors are nil when no PCM format is admitted (text-only or not yet
+  provider-confirmed). Configuration must establish provider confirmation before
+  reporting a PCM descriptor. Requested modes alone cannot establish the
+  provider's output encoding.
   """
   @callback meta(session()) :: %{
               backend: atom(),
               mode: :cloud | :local,
-              input_rate: pos_integer() | nil,
-              output_rate: pos_integer() | nil
+              input_format: Arbor.Voice.PcmFormat.t() | nil,
+              output_format: Arbor.Voice.PcmFormat.t() | nil
             }
 end

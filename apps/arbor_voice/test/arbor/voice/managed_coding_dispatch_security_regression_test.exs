@@ -94,6 +94,27 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
       {:ok, state}
     end
 
+    def send_frame(state, frame, _deadline) do
+      case frame do
+        %{"type" => "session.update", "session" => session} ->
+          key = {:frames, state.generation}
+
+          frames =
+            case :ets.lookup(@table, key) do
+              [{^key, frames}] -> frames
+              _ -> []
+            end
+
+          ack = %{"type" => "session.updated", "session" => session}
+          :ets.insert(@table, {key, [ack | frames]})
+
+        _ ->
+          :ok
+      end
+
+      send_frame(state, frame)
+    end
+
     def recv_frame(%{generation: generation} = state, _timeout) do
       ensure!()
       key = {:frames, generation}

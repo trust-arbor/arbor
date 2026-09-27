@@ -806,7 +806,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
           %{backend: :controllable, mode: :invalid}
 
         _ ->
-          %{backend: :controllable, mode: :local, input_rate: nil, output_rate: nil}
+          %{backend: :controllable, mode: :local, input_format: nil, output_format: nil}
       end
     end
   end
@@ -993,7 +993,12 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     @impl true
     def meta(_session) do
-      %{backend: :controllable_turn, mode: :local, input_rate: nil, output_rate: nil}
+      %{
+        backend: :controllable_turn,
+        mode: :local,
+        input_format: Arbor.Voice.PcmFormat.mono_s16le(16_000),
+        output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
+      }
     end
   end
 

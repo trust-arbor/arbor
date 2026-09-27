@@ -120,7 +120,13 @@ defmodule Arbor.Voice.BackendWorkerTest do
     @impl true
     def meta(session) do
       send(session.parent, {:backend_called, :meta, self(), session.version})
-      %{backend: :test_backend, mode: :cloud, input_rate: 16_000, output_rate: 24_000}
+
+      %{
+        backend: :test_backend,
+        mode: :cloud,
+        input_format: Arbor.Voice.PcmFormat.mono_s16le(16_000),
+        output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
+      }
     end
 
     @impl true
@@ -193,11 +199,17 @@ defmodule Arbor.Voice.BackendWorkerTest do
     operations = [
       {:configure, [%{instructions: "hello"}], 0, :ok},
       {:send_text, ["text"], 1, :ok},
-      {:send_audio, [<<1, 2, 3>>], 2, :ok},
+      {:send_audio, [<<1, 2, 3, 4>>], 2, :ok},
       {:send_tool_result, ["call_1", "output"], 3, :ok},
       {:recv, [50], 4, {:ok, {:turn_done, %{text: "done"}}}},
       {:meta, [], 5,
-       {:ok, %{backend: :test_backend, mode: :cloud, input_rate: 16_000, output_rate: 24_000}}}
+       {:ok,
+        %{
+          backend: :test_backend,
+          mode: :cloud,
+          input_format: Arbor.Voice.PcmFormat.mono_s16le(16_000),
+          output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
+        }}}
     ]
 
     Enum.each(operations, fn {operation, args, version, expected} ->
@@ -503,8 +515,8 @@ defmodule Arbor.Voice.BackendWorkerTest do
         %{
           backend: :test_backend,
           mode: :cloud,
-          input_rate: huge_integer,
-          output_rate: 24_000
+          input_format: Arbor.Voice.PcmFormat.mono_s16le(huge_integer),
+          output_format: Arbor.Voice.PcmFormat.mono_s16le(24_000)
         }
       })
       |> sign_result(credential)

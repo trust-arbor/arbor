@@ -18,6 +18,7 @@ defmodule Arbor.Voice.ResourceOwner do
   alias Arbor.Voice.CleanupLease
   alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.RealtimeBackend
+  alias Arbor.Voice.PcmFormat
   alias Arbor.Voice.Redacted
 
   @resource_supervisor Arbor.Voice.ResourceSupervisor
@@ -47,6 +48,16 @@ defmodule Arbor.Voice.ResourceOwner do
   @startup_grace_ms 2_000
   @route_cleanup_key :voice_realtime_route_capability
   @result_tag :voice_backend_operation_result
+
+  defmodule AudioOperation do
+    @moduledoc false
+    @enforce_keys [:owner, :id, :generation, :token, :deadline_ms]
+    defstruct @enforce_keys
+
+    defimpl Inspect do
+      def inspect(_, _), do: "#Arbor.Voice.ResourceOwner.AudioOperation<redacted>"
+    end
+  end
 
   @defaults [
     close_timeout_ms: @default_close_timeout_ms,
@@ -183,6 +194,51 @@ defmodule Arbor.Voice.ResourceOwner do
   @spec send_audio(GenServer.server(), binary()) :: :ok | {:error, atom()}
   def send_audio(owner, chunk), do: call(owner, {:backend, :send_audio, [chunk]})
 
+  @doc false
+  def reserve_audio(owner, format, bytes, timeout_ms) do
+    with :ok <- PcmFormat.validate(format),
+         :ok <- PcmFormat.validate_byte_count(bytes),
+         true <- is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_close_timeout_ms do
+      call(owner, {:reserve_audio, format, bytes, timeout_ms})
+    else
+      _ -> {:error, :invalid_audio}
+    end
+  end
+
+  @doc false
+  def handoff_audio(owner, %AudioOperation{owner: owner} = ticket, pcm) when is_pid(owner) do
+    with :ok <- PcmFormat.validate_pcm(pcm),
+         {:ok, request} <- authenticated_request(owner, {:audio_handoff, ticket, pcm}) do
+      {:ok, :gen_server.send_request(owner, request)}
+    end
+  rescue
+    _ -> {:error, :owner_unavailable}
+  catch
+    _, _ -> {:error, :owner_unavailable}
+  end
+
+  def handoff_audio(_, _, _), do: {:error, :invalid_audio}
+
+  @doc false
+  def cancel_audio(owner, %AudioOperation{owner: owner} = ticket),
+    do: call(owner, {:cancel_audio, ticket})
+
+  def cancel_audio(_, _), do: {:error, :invalid_audio_operation}
+
+  @doc false
+  def audio_result({:voice_audio_operation_result, ticket, result, close_result}, ticket)
+      when result in [
+             :ok,
+             {:error, :audio_cancelled},
+             {:error, :owner_timeout},
+             {:error, :backend_callback_failed},
+             {:error, :backend_effect_denied}
+           ] and
+             close_result in [:ok, {:error, :cleanup_pending}],
+      do: {:ok, result, close_result}
+
+  def audio_result(_, _), do: :no_result
+
   @spec send_tool_result(GenServer.server(), String.t(), String.t()) ::
           :ok | {:error, atom()}
   def send_tool_result(owner, call_id, output),
@@ -310,6 +366,10 @@ defmodule Arbor.Voice.ResourceOwner do
         phase: :starting,
         poisoned: false,
         current: nil,
+        metadata: nil,
+        requested_formats: :unspecified,
+        audio_reservation: nil,
+        audio_completion: nil,
         deferred: :queue.new(),
         lease_request: nil,
         close_waiters: [],
@@ -386,6 +446,61 @@ defmodule Arbor.Voice.ResourceOwner do
   def handle_call(_request, _from, state),
     do: {:reply, {:error, :foreign_caller}, state}
 
+  defp dispatch_owner_request(request, from, %{phase: :closing} = state)
+       when request in [:close, {:fence_and_drain, :session}],
+       do: {:noreply, add_close_waiter(state, from)}
+
+  defp dispatch_owner_request({:audio_handoff, ticket, pcm}, _from, state) do
+    case state.audio_reservation do
+      %{ticket: ^ticket, bytes: bytes} = reservation
+      when is_binary(pcm) and byte_size(pcm) == bytes ->
+        with true <- state.phase == :open and not state.poisoned,
+             true <- worker_credential(state).generation == ticket.generation,
+             true <- now_ms() < ticket.deadline_ms,
+             :ok <- PcmFormat.validate_pcm(pcm),
+             true <- is_nil(state.current),
+             {:ok, next} <-
+               submit_operation(
+                 :send_audio,
+                 [pcm],
+                 {:audio, ticket},
+                 state,
+                 ticket.id,
+                 ticket.deadline_ms
+               ) do
+          cancel_timer(reservation.timer_ref)
+          {:reply, :ok, %{next | audio_reservation: nil}}
+        else
+          _ -> {:reply, {:error, :invalid_audio_operation}, state}
+        end
+
+      _ ->
+        {:reply, {:error, :invalid_audio_operation}, state}
+    end
+  end
+
+  defp dispatch_owner_request({:cancel_audio, ticket}, _from, state) do
+    if current_audio_ticket(state) == ticket and match?(%AudioOperation{}, ticket) do
+      {:reply, :ok, cancel_audio_operation(state, :audio_cancelled)}
+    else
+      {:reply, {:error, :invalid_audio_operation}, state}
+    end
+  end
+
+  defp dispatch_owner_request(request, from, %{audio_reservation: reservation} = state)
+       when not is_nil(reservation) do
+    if request in [:close, {:fence_and_drain, :session}] do
+      {:noreply, state |> add_close_waiter(from) |> cancel_audio_operation(:audio_cancelled)}
+    else
+      {:reply, {:error, :owner_busy}, state}
+    end
+  end
+
+  defp dispatch_owner_request(request, from, %{current: %{origin: {:audio, _}}} = state)
+       when request in [:close, {:fence_and_drain, :session}] do
+    {:noreply, state |> add_close_waiter(from) |> cancel_audio_operation(:audio_cancelled)}
+  end
+
   defp dispatch_owner_request(request, from, %{current: current} = state)
        when not is_nil(current) do
     cond do
@@ -398,10 +513,6 @@ defmodule Arbor.Voice.ResourceOwner do
       true ->
         {:noreply, enqueue_deferred(state, request, from)}
     end
-  end
-
-  defp dispatch_owner_request(:close, from, %{phase: :closing} = state) do
-    {:noreply, add_close_waiter(state, from)}
   end
 
   defp dispatch_owner_request(:close, from, state) do
@@ -484,6 +595,62 @@ defmodule Arbor.Voice.ResourceOwner do
   defp dispatch_owner_request({:backend, _operation, _args}, _from, %{poisoned: true} = state),
     do: {:reply, {:error, :owner_poisoned}, state}
 
+  defp dispatch_owner_request(
+         {:reserve_audio, format, bytes, timeout},
+         _from,
+         %{phase: :open, poisoned: false, metadata: %{input_format: format}} = state
+       ) do
+    with :ok <- PcmFormat.validate(format),
+         :ok <- PcmFormat.validate_byte_count(bytes),
+         true <- is_integer(timeout) and timeout > 0 and timeout <= @max_close_timeout_ms do
+      deadline = now_ms() + min(timeout, state.config.close_timeout_ms)
+
+      ticket = %AudioOperation{
+        owner: self(),
+        id: make_ref(),
+        generation: worker_credential(state).generation,
+        token: Redacted.new(make_ref()),
+        deadline_ms: deadline
+      }
+
+      timer =
+        Process.send_after(
+          self(),
+          {:audio_reservation_deadline, ticket.id},
+          max(1, deadline - now_ms())
+        )
+
+      {:reply, {:ok, ticket},
+       %{state | audio_reservation: %{ticket: ticket, bytes: bytes, timer_ref: timer}}}
+    else
+      _ -> {:reply, {:error, :invalid_audio}, state}
+    end
+  end
+
+  defp dispatch_owner_request({:reserve_audio, _, _, _}, _from, state),
+    do: {:reply, {:error, :invalid_audio_format}, state}
+
+  defp dispatch_owner_request({:backend, :configure, [config]}, from, state) do
+    with {:ok, requested} <- PcmFormat.configured_formats(config),
+         {:ok, next} <-
+           submit_operation(:configure, [config], {:configured, from, requested}, state) do
+      {:noreply, next}
+    else
+      _ -> {:reply, {:error, :invalid_audio_format}, state}
+    end
+  end
+
+  defp dispatch_owner_request({:backend, :send_audio, [pcm]}, from, state) do
+    with %{input_format: format} <- state.metadata,
+         :ok <- PcmFormat.validate(format),
+         :ok <- PcmFormat.validate_pcm(pcm),
+         {:ok, next} <- submit_operation(:send_audio, [pcm], {:call, from}, state) do
+      {:noreply, next}
+    else
+      _ -> {:reply, {:error, :backend_callback_failed}, state}
+    end
+  end
+
   defp dispatch_owner_request({:backend, operation, args}, from, state) do
     with :ok <- validate_operation_args(operation, args, state.config),
          {:ok, state} <- submit_operation(operation, args, {:call, from}, state) do
@@ -514,6 +681,9 @@ defmodule Arbor.Voice.ResourceOwner do
     cond do
       state.phase == :closing ->
         {:noreply, state}
+
+      not is_nil(current_audio_ticket(state)) ->
+        {:noreply, cancel_audio_operation(state, :audio_cancelled)}
 
       not is_nil(state.current) ->
         {:noreply, enqueue_internal_close(state)}
@@ -563,6 +733,20 @@ defmodule Arbor.Voice.ResourceOwner do
   def handle_info({:EXIT, pid, _reason}, %{worker: pid} = state), do: {:noreply, state}
 
   def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
+
+  def handle_info(
+        {:audio_reservation_deadline, id},
+        %{audio_reservation: %{ticket: %{id: id}}} = state
+      ),
+      do: {:noreply, cancel_audio_operation(state, :owner_timeout)}
+
+  def handle_info(
+        {:operation_deadline, token},
+        %{current: %{token: token, origin: {:audio, _}}} = state
+      ),
+      do: {:noreply, cancel_audio_operation(state, :owner_timeout)}
+
+  def handle_info(:continue_audio_close, state), do: continue_close(state)
 
   def handle_info({:operation_deadline, token}, %{current: %{token: token} = current} = state) do
     if current.status == :running do
@@ -621,6 +805,7 @@ defmodule Arbor.Voice.ResourceOwner do
   @impl true
   def terminate(_reason, state) do
     cancel_timer(Map.get(state, :close_timer_ref))
+    if state.audio_reservation, do: cancel_timer(state.audio_reservation.timer_ref)
 
     case Map.get(state, :current) do
       %{timer_ref: timer_ref} -> cancel_timer(timer_ref)
@@ -644,17 +829,32 @@ defmodule Arbor.Voice.ResourceOwner do
       deferred_count: :queue.len(state.deferred)
     }
 
-    %{status | state: public_state, message: :redacted, log: :redacted}
+    status
+    |> Map.put(:state, public_state)
+    |> Map.put(:message, :redacted)
+    |> Map.put(:log, :redacted)
+    |> Map.put(:reason, :redacted)
   end
 
-  def format_status(status), do: status
+  def format_status(status) when is_map(status),
+    do:
+      status
+      |> Map.put(:state, :redacted)
+      |> Map.put(:message, :redacted)
+      |> Map.put(:log, :redacted)
+      |> Map.put(:reason, :redacted)
+
+  def format_status(_), do: :redacted
 
   # Backend protocol
 
   defp submit_operation(operation, args, origin, state) do
     token = BackendWorker.new_operation_token()
     deadline_ms = now_ms() + state.config.close_timeout_ms
+    submit_operation(operation, args, origin, state, token, deadline_ms)
+  end
 
+  defp submit_operation(operation, args, origin, state, token, deadline_ms) do
     case BackendWorker.submit(
            state.worker,
            worker_credential(state),
@@ -793,11 +993,21 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp handle_worker_down(%{current: current} = state) do
     cancel_timer(current.timer_ref)
-    reply = current.reply || {:error, :backend_callback_failed}
-    state = %{state | current: nil, phase: :terminal}
+
+    failure =
+      if match?({:audio, _}, current.origin) and now_ms() >= current.deadline_ms,
+        do: :owner_timeout,
+        else: :backend_callback_failed
+
+    reply = current.reply || {:error, failure}
+    phase = if state.phase == :closing, do: :closing, else: :terminal
+    state = %{state | current: nil, phase: phase}
 
     case current.origin do
       :startup ->
+        startup_failure(state)
+
+      :startup_meta ->
         startup_failure(state)
 
       :close ->
@@ -806,15 +1016,80 @@ defmodule Arbor.Voice.ResourceOwner do
       {:call, from} ->
         GenServer.reply(from, reply)
         dispatch_deferred(state)
+
+      origin ->
+        complete_origin(origin, reply, state)
     end
   end
 
   defp complete_origin(:startup, :ok, state) do
-    send(state.starter_pid, {:resource_owner_started, state.startup_ref, self(), :ok})
-    {:noreply, %{state | phase: :open, starter_pid: nil, startup_ref: nil}}
+    case submit_operation(:meta, [], :startup_meta, state) do
+      {:ok, next} -> {:noreply, next}
+      _ -> startup_failure(state)
+    end
+  end
+
+  defp complete_origin(:startup_meta, {:ok, meta}, state) do
+    if PcmFormat.validate_meta(meta) == :ok do
+      send(state.starter_pid, {:resource_owner_started, state.startup_ref, self(), :ok})
+      {:noreply, %{state | metadata: meta, phase: :open, starter_pid: nil, startup_ref: nil}}
+    else
+      startup_failure(state)
+    end
   end
 
   defp complete_origin(:startup, _reply, state), do: startup_failure(state)
+  defp complete_origin(:startup_meta, _reply, state), do: startup_failure(state)
+
+  defp complete_origin({:configured, from, requested}, :ok, state) do
+    requested = if requested == :unspecified, do: state.requested_formats, else: requested
+
+    case submit_operation(:meta, [], {:configured_meta, from, requested}, state) do
+      {:ok, next} -> {:noreply, next}
+      _ -> refuse_media_outcome(from, state)
+    end
+  end
+
+  defp complete_origin({:configured_meta, from, requested}, {:ok, meta}, state) do
+    if PcmFormat.matches_request(requested, meta) == :ok do
+      GenServer.reply(from, :ok)
+      dispatch_deferred(%{state | metadata: meta, requested_formats: requested})
+    else
+      refuse_media_outcome(from, state)
+    end
+  end
+
+  defp complete_origin({:configured, from, _}, reply, state),
+    do: complete_origin({:call, from}, reply, state)
+
+  defp complete_origin({:configured_meta, from, _}, reply, state),
+    do: complete_origin({:call, from}, reply, state)
+
+  defp complete_origin({:audio, ticket}, reply, state) do
+    completion = state.audio_completion || %{ticket: ticket, result: audio_public_result(reply)}
+    state = %{state | audio_completion: completion} |> begin_close()
+    continue_close(state)
+  end
+
+  defp complete_origin({:call, from}, {:ok, %{input_format: _} = meta}, state) do
+    if PcmFormat.matches_request(state.requested_formats, meta) == :ok do
+      GenServer.reply(from, {:ok, meta})
+      dispatch_deferred(%{state | metadata: meta})
+    else
+      refuse_media_outcome(from, state)
+    end
+  end
+
+  defp complete_origin({:call, from}, {:ok, {:output_audio, pcm}} = reply, state) do
+    with %{output_format: output} <- state.metadata,
+         :ok <- PcmFormat.validate(output),
+         :ok <- PcmFormat.validate_pcm(pcm) do
+      GenServer.reply(from, reply)
+      dispatch_deferred(state)
+    else
+      _ -> refuse_media_outcome(from, state)
+    end
+  end
 
   defp complete_origin({:call, from}, reply, state) do
     GenServer.reply(from, reply)
@@ -825,6 +1100,57 @@ defmodule Arbor.Voice.ResourceOwner do
     # A close result is terminal by contract, so this clause is defensive.
     begin_close_cleanup(%{state | phase: :closing, close_error: close_error(reply)})
   end
+
+  defp refuse_media_outcome(from, state) do
+    GenServer.reply(from, {:error, :invalid_audio_format})
+    state |> poison_state() |> begin_close() |> continue_close()
+  end
+
+  defp current_audio_ticket(%{audio_reservation: %{ticket: ticket}}), do: ticket
+  defp current_audio_ticket(%{current: %{origin: {:audio, ticket}}}), do: ticket
+  defp current_audio_ticket(_), do: nil
+
+  defp cancel_audio_operation(state, reason) do
+    ticket = current_audio_ticket(state)
+    if state.audio_reservation, do: cancel_timer(state.audio_reservation.timer_ref)
+
+    state =
+      %{
+        state
+        | audio_reservation: nil,
+          audio_completion: state.audio_completion || %{ticket: ticket, result: {:error, reason}}
+      }
+      |> poison_state()
+      |> begin_close()
+
+    case state.current do
+      %{origin: {:audio, _}} = current ->
+        cancel_timer(current.timer_ref)
+        if is_pid(state.worker), do: Process.exit(state.worker, :kill)
+
+        %{
+          state
+          | current: %{current | status: :awaiting_down, reply: {:error, reason}, timer_ref: nil}
+        }
+
+      _ ->
+        send(self(), :continue_audio_close)
+        state
+    end
+  end
+
+  defp audio_public_result(:ok), do: :ok
+
+  defp audio_public_result({:error, reason})
+       when reason in [
+              :audio_cancelled,
+              :owner_timeout,
+              :backend_callback_failed,
+              :backend_effect_denied
+            ],
+       do: {:error, reason}
+
+  defp audio_public_result(_), do: {:error, :backend_callback_failed}
 
   defp authorize_effect(state, request) do
     safe_authority_call(fn ->
@@ -981,8 +1307,18 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp finish_close(reply, state) do
+    if state.audio_completion do
+      close = if reply == :ok, do: :ok, else: {:error, :cleanup_pending}
+
+      send(
+        state.owner_pid,
+        {:voice_audio_operation_result, state.audio_completion.ticket,
+         state.audio_completion.result, close}
+      )
+    end
+
     Enum.each(state.close_waiters, &GenServer.reply(&1, reply))
-    {:stop, :normal, %{state | close_waiters: [], phase: :closed}}
+    {:stop, :normal, %{state | audio_completion: nil, close_waiters: [], phase: :closed}}
   end
 
   defp close_success_reply(%{close_error: nil}), do: :ok
@@ -1024,6 +1360,7 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp deferrable_request?(:close), do: true
   defp deferrable_request?({:fence_and_drain, _scope}), do: true
+  defp deferrable_request?({:backend, :send_audio, _args}), do: false
   defp deferrable_request?({:backend, _operation, _args}), do: true
   defp deferrable_request?(_request), do: false
 

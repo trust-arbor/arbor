@@ -34,5 +34,5 @@ defmodule Arbor.Voice.Test.FakeBackend do
   def close(_session), do: :ok
 
   @impl true
-  def meta(_session), do: %{backend: :fake, mode: :local, input_rate: nil, output_rate: nil}
+  def meta(_session), do: %{backend: :fake, mode: :local, input_format: nil, output_format: nil}
 end
