@@ -69,6 +69,11 @@ without a durable synchronization anchor refuse authenticated continuation as
 `transcript_unavailable`; cached state is retained. Starting a fresh Session
 reboots from the durable source. Initial system messages are preserved.
 
+Normal Lifecycle/BranchSupervisor startup deliberately omits an aggregate
+checkpoint and remains eligible for that bootstrap. Explicit `:checkpoint`
+imports and `restore_checkpoint/2` are the unsupported unanchored case; a normal
+process restart does not require manual transcript clearing.
+
 Unauthenticated compatibility turns retain their existing behavior. Voice's
 provider history injection and token lifetime checks are separate channel work;
 this slice qualifies completed Voice/Comms pairs as input to Session cognition.
@@ -77,3 +82,9 @@ The source tests run against private SQLite. The Session journey uses actual
 receipt authentication, public Comms append, and a capturing model adapter to
 check active/stashed scopes, interleaving, repeated text, outages, provenance,
 compactor summaries, and revocation or owner changes during a read.
+
+An independent integration checkout containing the prior PCM ownership slice
+passed warnings-as-errors compilation, all 13 transcript-freshness regressions,
+and all 16 real SQLite private-memory journey tests, including restart recovery.
+The three selected predecessor counterwitnesses fail behaviorally on the prior
+production source; they do not rely on missing new helper functions.
