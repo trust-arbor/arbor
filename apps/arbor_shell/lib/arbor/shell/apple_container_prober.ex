@@ -103,8 +103,7 @@ defmodule Arbor.Shell.AppleContainerProber do
          {:ok, state} <- resolve_all_executables(state),
          {:ok, bindings} <- checkout_bindings(state),
          :ok <- match_cli_executable(state, bindings),
-         {:ok, policy} <- checkout_policy(state),
-         {:ok, receipt} <- checkout_and_normalize_receipt(state),
+         {:ok, policy, receipt} <- checkout_policy_and_receipt(state),
          {:ok, refs} <- AppleContainerAdmissionCore.execution_references(policy),
          workload_alias <- refs.image.execution_reference,
          vminit_alias <- refs.vminit.execution_reference,
@@ -232,34 +231,15 @@ defmodule Arbor.Shell.AppleContainerProber do
     end
   end
 
-  defp checkout_policy(state) do
-    case state.runtime.checkout_image_policy() do
-      {:ok, policy} when is_map(policy) -> {:ok, policy}
-      {:error, reason} -> {:error, bound_reason(reason, :image_policy_unavailable)}
-    end
-  end
+  defp checkout_policy_and_receipt(state) do
+    case state.runtime.checkout_image_policy_and_receipt() do
+      {:ok, policy, receipt} when is_map(policy) ->
+        with {:ok, receipt} <- LinuxDependencyBaselineCore.normalize_compact_receipt(receipt) do
+          {:ok, policy, receipt}
+        end
 
-  defp checkout_and_normalize_receipt(state) do
-    with {:ok, plan} <- checkout_plan(state),
-         :ok <- validate_plan_keys(plan),
-         {:ok, receipt} <-
-           LinuxDependencyBaselineCore.normalize_compact_receipt(plan["receipt"]) do
-      {:ok, receipt}
-    end
-  end
-
-  defp checkout_plan(state) do
-    case state.runtime.checkout_baseline_plan() do
-      {:ok, plan} when is_map(plan) -> {:ok, plan}
-      {:error, reason} -> {:error, bound_reason(reason, :baseline_unavailable)}
-    end
-  end
-
-  defp validate_plan_keys(plan) when is_map(plan) do
-    if is_map(plan["receipt"]) do
-      :ok
-    else
-      {:error, :invalid_baseline_plan}
+      {:error, reason} ->
+        {:error, bound_reason(reason, :image_policy_unavailable)}
     end
   end
 
@@ -613,10 +593,9 @@ defmodule Arbor.Shell.AppleContainerProber do
          {:ok, bindings2} <- checkout_bindings(state),
          :ok <- require_unchanged(bindings2, bindings, :control_plane_bindings_drift),
          :ok <- ensure_deadline(state),
-         {:ok, policy2} <- checkout_policy(state),
+         {:ok, policy2, receipt2} <- checkout_policy_and_receipt(state),
          :ok <- require_unchanged(policy2, policy, :image_policy_drift),
          :ok <- ensure_deadline(state),
-         {:ok, receipt2} <- checkout_and_normalize_receipt(state),
          :ok <- require_unchanged(receipt2, receipt, :baseline_receipt_drift),
          :ok <- ensure_deadline(state),
          :ok <- verify_all_executables(state),

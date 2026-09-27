@@ -14,7 +14,6 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.Executor
-  alias Arbor.Shell.LinuxDependencyBaselineAuthority
   alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.TrustedPath.Identity
@@ -35,7 +34,7 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
               {:ok, map()} | {:error, term()}
   @callback checkout_control_plane_bindings() :: {:ok, map()} | {:error, term()}
   @callback checkout_image_policy() :: {:ok, map()} | {:error, term()}
-  @callback checkout_baseline_plan() :: {:ok, map()} | {:error, term()}
+  @callback checkout_image_policy_and_receipt() :: {:ok, map(), map()} | {:error, term()}
   @callback verify_identity(Identity.t()) :: :ok | {:error, term()}
   @callback read_plugin_config(Identity.t()) :: {:ok, binary()} | {:error, term()}
   @callback prove_user_plugin_root_absent() :: :ok | {:error, term()}
@@ -206,11 +205,14 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   end
 
   @doc false
-  @spec checkout_baseline_plan() :: {:ok, map()} | {:error, term()}
-  def checkout_baseline_plan do
-    case LinuxDependencyBaselineAuthority.checkout_plan() do
-      {:ok, plan} when is_map(plan) -> {:ok, plan}
-      {:error, reason} -> {:error, bound_reason(reason)}
+  @spec checkout_image_policy_and_receipt() :: {:ok, map(), map()} | {:error, term()}
+  def checkout_image_policy_and_receipt do
+    case AppleContainerImagePolicyAuthority.checkout_policy_and_receipt() do
+      {:ok, policy, receipt} when is_map(policy) and is_map(receipt) ->
+        {:ok, policy, receipt}
+
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
     end
   end
 

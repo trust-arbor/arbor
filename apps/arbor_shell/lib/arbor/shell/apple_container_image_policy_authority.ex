@@ -115,6 +115,21 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
   end
 
   @doc """
+  Internal checkout of the canonical policy and freshly verified compact receipt.
+
+  Performs the same fresh baseline verification and exact startup-receipt match
+  as `checkout_policy/1`, returning both results from that single checkout.
+  Admission can consume the pair without immediately repeating the same scan.
+  Accepts only a server reference; callers cannot supply policy or evidence.
+  This is not a cache or permission to skip later effect-boundary revalidation.
+  """
+  @spec checkout_policy_and_receipt(GenServer.server()) ::
+          {:ok, map(), map()} | {:error, term()}
+  def checkout_policy_and_receipt(server \\ __MODULE__) do
+    call(server, :checkout_policy_and_receipt)
+  end
+
+  @doc """
   Redacted public status map. Never includes policy, digests, env, labels,
   toolchain, receipt, fingerprint, or config.
   """
@@ -164,12 +179,13 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
     {:reply, {:ok, render_public_status(state)}, state}
   end
 
-  def handle_call(:checkout_policy, _from, %{status: :unavailable} = state) do
+  def handle_call(request, _from, %{status: :unavailable} = state)
+      when request in [:checkout_policy, :checkout_policy_and_receipt] do
     {:reply, {:error, :apple_container_image_policy_unavailable}, state}
   end
 
   def handle_call(
-        :checkout_policy,
+        request,
         _from,
         %{
           status: :pinned,
@@ -179,10 +195,20 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
           boot_epoch: boot_epoch
         } = state
       )
-      when is_map(policy) and is_map(receipt) and is_atom(baseline_authority) do
+      when request in [:checkout_policy, :checkout_policy_and_receipt] and
+             is_map(policy) and is_map(receipt) and is_atom(baseline_authority) do
     case safe_recheckout(baseline_authority, receipt) do
-      :ok ->
-        {:reply, {:ok, shallow_policy_copy(policy)}, state}
+      {:ok, verified_receipt} ->
+        reply =
+          case request do
+            :checkout_policy ->
+              {:ok, shallow_policy_copy(policy)}
+
+            :checkout_policy_and_receipt ->
+              {:ok, shallow_policy_copy(policy), verified_receipt}
+          end
+
+        {:reply, reply, state}
 
       {:error, reason} when reason in @transient_baseline_errors ->
         {:reply, {:error, :apple_container_image_policy_unavailable}, state}
@@ -196,7 +222,8 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
     end
   end
 
-  def handle_call(:checkout_policy, _from, %{status: :pinned} = state) do
+  def handle_call(request, _from, %{status: :pinned} = state)
+      when request in [:checkout_policy, :checkout_policy_and_receipt] do
     poison_epoch(state.boot_epoch)
     bounded = :malformed_pinned_state
 
@@ -474,7 +501,7 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
          {:ok, receipt} <-
            LinuxDependencyBaselineCore.normalize_compact_receipt(plan["receipt"]) do
       if receipt === expected_receipt do
-        :ok
+        {:ok, receipt}
       else
         {:error, :baseline_receipt_drift}
       end

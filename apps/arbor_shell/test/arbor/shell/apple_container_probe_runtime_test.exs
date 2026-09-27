@@ -1,8 +1,9 @@
 defmodule Arbor.Shell.AppleContainerProbeRuntimeTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Shell.AppleContainerProbeRuntime, as: Runtime
   alias Arbor.Shell.ExecutablePolicy.Executable
+  alias Arbor.Shell.TrustedPath.Identity
 
   @moduletag :fast
 
@@ -36,7 +37,80 @@ defmodule Arbor.Shell.AppleContainerProbeRuntimeTest do
     toolchain: %{erlang: "28.4.1", elixir: "1.19.5-otp-28"}
   }
 
+  defmodule RefusingAuthority do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: opts[:name])
+    def init(opts), do: {:ok, opts}
+
+    def handle_call(:checkout_bindings, _from, state) do
+      send(state[:observer], :checked_cli_identity)
+      # Exhaust the command's 1ms budget before it could reach the Executor,
+      # even if a regression removes the image-policy check under test.
+      Process.sleep(5)
+      {:reply, {:ok, %{cli_identity: state[:identity]}}, state}
+    end
+
+    def handle_call(:checkout_policy, _from, state) do
+      send(state[:observer], :checked_image_policy)
+      {:reply, {:error, :apple_container_image_policy_unavailable}, state}
+    end
+  end
+
   describe "closed Apple Container probe command policy" do
+    test "each image inspect rechecks CLI identity and image policy at the effect boundary" do
+      executable = invalid_container_executable()
+
+      identity =
+        struct!(
+          Identity,
+          executable
+          |> Map.from_struct()
+          |> Map.delete(:name)
+          |> Map.merge(%{type: :regular, uid: 0, gid: 0, executable_required: true})
+        )
+
+      # Replace only these test-VM owners. The real Runtime API still resolves
+      # fixed authority names; no production injection seam is added.
+      authorities = [
+        Arbor.Shell.AppleContainerControlPlaneAuthority,
+        Arbor.Shell.AppleContainerImagePolicyAuthority
+      ]
+
+      for authority <- authorities do
+        :ok = Supervisor.terminate_child(Arbor.Shell.Supervisor, authority)
+
+        start_supervised!(
+          Supervisor.child_spec(
+            {RefusingAuthority, name: authority, observer: self(), identity: identity},
+            id: authority
+          )
+        )
+      end
+
+      on_exit(fn ->
+        for authority <- authorities do
+          {:ok, _pid} = Supervisor.restart_child(Arbor.Shell.Supervisor, authority)
+        end
+      end)
+
+      for reference <- [@workload_alias, @vminit_alias] do
+        assert {:error, :apple_container_image_policy_unavailable} =
+                 Runtime.run_bound(executable, ["image", "inspect", reference],
+                   cwd: "/",
+                   clear_env: true,
+                   timeout: 1,
+                   max_output_bytes: 8_192
+                 )
+
+        assert_receive :checked_cli_identity
+        assert_receive :checked_image_policy
+        refute_received :checked_cli_identity
+        refute_received :checked_image_policy
+      end
+    end
+
     test "accepts only the reviewed system JSON probes and policy-derived aliases" do
       assert :ok =
                Runtime.authorize_container_probe_args(

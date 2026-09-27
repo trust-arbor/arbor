@@ -141,6 +141,32 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
     end
   end
 
+  defmodule CountedBaselineSource do
+    @moduledoc false
+    def reset do
+      :persistent_term.put({__MODULE__, :count}, 0)
+      :persistent_term.put({__MODULE__, :result}, :ok)
+    end
+
+    def count, do: :persistent_term.get({__MODULE__, :count})
+    def drift, do: :persistent_term.put({__MODULE__, :result}, {:error, :identity_mismatch})
+    def pin(_root, _manifest, _trusted_path, _opts), do: {:ok, :private_test_binding}
+
+    def verify(:private_test_binding, _trusted_path) do
+      :persistent_term.put({__MODULE__, :count}, count() + 1)
+      :persistent_term.get({__MODULE__, :result})
+    end
+
+    def plan(:private_test_binding),
+      do: Arbor.Shell.AppleContainerImagePolicyAuthorityTest.valid_plan()
+  end
+
+  defmodule CountedBaselineAuthority do
+    @moduledoc false
+    def checkout_plan,
+      do: Arbor.Shell.LinuxDependencyBaselineAuthority.checkout_plan(__MODULE__)
+  end
+
   def valid_policy, do: @valid_policy
 
   def valid_receipt do
@@ -335,6 +361,165 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
 
       assert {:error, :apple_container_image_policy_unavailable} =
                Authority.checkout_policy(restarted)
+    end
+  end
+
+  describe "combined policy and receipt checkout" do
+    test "each combined checkout returns the exact pinned pair after one fresh source verification" do
+      baseline_key = :linux_dependency_baseline
+      previous = Application.get_env(@app, baseline_key)
+
+      Application.put_env(@app, baseline_key,
+        source_root: "/var/lib/arbor/linux-deps-source",
+        manifest_path: "/var/lib/arbor/linux-deps-manifest.json"
+      )
+
+      CountedBaselineSource.reset()
+
+      on_exit(fn ->
+        if is_nil(previous),
+          do: Application.delete_env(@app, baseline_key),
+          else: Application.put_env(@app, baseline_key, previous)
+      end)
+
+      baseline =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Arbor.Shell.LinuxDependencyBaselineAuthority,
+             name: CountedBaselineAuthority, source: CountedBaselineSource},
+            restart: :temporary
+          )
+        )
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: CountedBaselineAuthority
+        )
+
+      assert CountedBaselineSource.count() == 1
+
+      for count <- [2, 3] do
+        assert {:ok, policy, receipt} = Authority.checkout_policy_and_receipt(pid)
+        assert policy === @valid_policy
+        assert receipt === valid_receipt()
+        assert CountedBaselineSource.count() == count
+      end
+
+      baseline_ref = Process.monitor(baseline)
+      owner_ref = Process.monitor(pid)
+      CountedBaselineSource.drift()
+
+      assert {:error, {:apple_container_image_policy_drift, _}} =
+               Authority.checkout_policy_and_receipt(pid)
+
+      assert CountedBaselineSource.count() == 4
+      assert_receive {:DOWN, ^baseline_ref, :process, ^baseline, _}
+      assert_receive {:DOWN, ^owner_ref, :process, ^pid, _}
+    end
+
+    test "transient unavailability never returns a stale pair and recovery rechecks" do
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority
+        )
+
+      for reason <- [
+            :linux_dependency_baseline_unavailable,
+            :linux_dependency_baseline_authority_unavailable
+          ] do
+        FakeBaselineAuthority.set_mode({:error, reason})
+
+        assert {:error, :apple_container_image_policy_unavailable} =
+                 Authority.checkout_policy_and_receipt(pid)
+
+        assert Process.alive?(pid)
+      end
+
+      assert FakeBaselineAuthority.checkout_calls() == 3
+      FakeBaselineAuthority.set_mode(:ok)
+      assert {:ok, @valid_policy, receipt} = Authority.checkout_policy_and_receipt(pid)
+      assert receipt === valid_receipt()
+      assert FakeBaselineAuthority.checkout_calls() == 4
+    end
+
+    test "receipt drift poisons the epoch and prevents later combined checkout" do
+      boot_epoch = make_ref()
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority,
+          boot_epoch: boot_epoch
+        )
+
+      ref = Process.monitor(pid)
+      # This field is absent from policy: checking only policy-bound digests
+      # would miss the drift. The whole compact receipt must remain identical.
+      FakeBaselineAuthority.set_plan(put_in(valid_plan(), ["receipt", "entry_count"], 2))
+
+      assert {:error, {:apple_container_image_policy_drift, :baseline_receipt_drift}} =
+               Authority.checkout_policy_and_receipt(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      FakeBaselineAuthority.set_plan(valid_plan())
+
+      {:ok, restarted} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(restarted)["reason"] == "boot_epoch_poisoned"
+
+      assert {:error, :apple_container_image_policy_unavailable} =
+               Authority.checkout_policy_and_receipt(restarted)
+    end
+
+    test "malformed plans and callback failures remain closed" do
+      for mode <- [:corrupt, :raise, :throw, :exit] do
+        FakeBaselineAuthority.reset()
+
+        {:ok, pid} =
+          start_authority(
+            name: unique_name(),
+            config: FakeConfig,
+            baseline_authority: FakeBaselineAuthority
+          )
+
+        ref = Process.monitor(pid)
+        FakeBaselineAuthority.set_mode(mode)
+
+        assert {:error, {:apple_container_image_policy_drift, _}} =
+                 Authority.checkout_policy_and_receipt(pid)
+
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      end
+    end
+
+    test "combined checkout rejects caller-nominated policy or receipt" do
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority
+        )
+
+      assert {:error, :apple_container_image_policy_authority_unavailable} =
+               Authority.checkout_policy_and_receipt(%{policy: @valid_policy})
+
+      assert {:error, :unsupported_apple_container_image_policy_authority_request} =
+               GenServer.call(pid, {:checkout_policy_and_receipt, @valid_policy, valid_receipt()})
+
+      assert FakeBaselineAuthority.checkout_calls() == 1
+      assert {:ok, @valid_policy, receipt} = Authority.checkout_policy_and_receipt(pid)
+      assert receipt === valid_receipt()
     end
   end
 
