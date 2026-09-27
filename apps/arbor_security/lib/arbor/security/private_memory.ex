@@ -39,6 +39,15 @@ defmodule Arbor.Security.PrivateMemory do
     end
   end
 
+  def check_engagement(admission, engagement_id) do
+    with {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         true <- scalar?(engagement_id) do
+      DeliveryReceiptBroker.memory_check_engagement(token, engagement_id)
+    else
+      _ -> {:error, :invalid_memory_admission}
+    end
+  end
+
   def close(admission) do
     with {:ok, token} <- PrivateMemoryAdmission.token(admission),
          do: DeliveryReceiptBroker.memory_close(token)

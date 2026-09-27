@@ -2941,11 +2941,12 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp bind_and_admit_private_turn(user_message, authority, admission, from, state) do
-    case bind_authenticated_engagement(user_message, authority, state) do
-      {:ok, user_message} ->
-        state = PrivateMemory.retain(state, authority, admission)
-        admit_authenticated_turn(user_message, authority, from, state)
-
+    with {:ok, user_message} <- bind_authenticated_engagement(user_message, authority, state),
+         :ok <-
+           Arbor.Security.check_private_memory_engagement(admission, user_message.engagement_id) do
+      state = PrivateMemory.retain(state, authority, admission)
+      admit_authenticated_turn(user_message, authority, from, state)
+    else
       {:error, _} ->
         PrivateMemory.close_admission(admission)
         {:reply, {:error, :unauthenticated}, state}

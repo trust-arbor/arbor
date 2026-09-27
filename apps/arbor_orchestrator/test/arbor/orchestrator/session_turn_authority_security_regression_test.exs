@@ -2104,6 +2104,62 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
         {:turn_result, active.turn_token, active.turn_user_message, {:error, :turn_failed}}
       )
 
+  test "security regression: receipt fence denies an idle or queued private turn before effects",
+       ctx do
+    session = completion_barrier_session!(ctx)
+    {:ok, owner} = Security.resolve_conversation_owner(ctx.human_id)
+    {:ok, engagement} = Comms.resolve_user_engagement(ctx.agent_id, owner)
+    {:ok, token} = SessionToken.generate(ctx.human_id)
+    wrong = Identifiers.generate_id("eng_")
+
+    fenced_receipt = fn fence ->
+      assert {:ok, receipt} =
+               Security.authorize_and_issue_delivery_receipt(ctx.human_id, ctx.resource, :chat,
+                 session_token: token,
+                 expected_engagement_id: fence
+               )
+
+      receipt
+    end
+
+    assert {:error, :unauthenticated} =
+             Session.send_authenticated_message(
+               session,
+               user_message!(ctx.human_id, "wrong idle scope"),
+               fenced_receipt.(wrong)
+             )
+
+    refute_receive {:completion_model_blocked, _, _}, 50
+    refute_receive {:completion_append, _, _}, 50
+    assert Session.get_state(session).current_engagement_id == nil
+
+    receipt = fenced_receipt.(engagement.id)
+
+    active =
+      Task.async(fn ->
+        Session.send_authenticated_message(
+          session,
+          user_message!(ctx.human_id, "matching scope"),
+          receipt,
+          15_000
+        )
+      end)
+
+    assert_receive {:completion_model_blocked, model, model_token}, 5_000
+
+    assert {:error, :unauthenticated} =
+             Session.send_authenticated_message(
+               session,
+               user_message!(ctx.human_id, "wrong queued scope"),
+               fenced_receipt.(wrong)
+             )
+
+    assert Session.get_state(session).turn_queue == []
+    send(model, {:release_completion_model, model_token})
+    assert {:ok, _} = Task.await(active, 15_000)
+    assert Session.get_state(session).current_engagement_id == engagement.id
+  end
+
   defp completion_barrier_session!(ctx, opts \\ []) do
     ensure_event_registry!()
     put_orchestrator_cap!(ctx.agent_id)

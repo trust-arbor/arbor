@@ -38,7 +38,7 @@ defmodule Arbor.Agent.MessageFacade do
   @max_session_token_bytes 4096
   @session_token_absent :__session_token_absent__
   @proof_absent :__proof_absent__
-  @allowed_opt_keys [:timeout, :session_token, :signed_request]
+  @allowed_opt_keys [:timeout, :session_token, :signed_request, :expected_engagement_id]
   # Whole-string positive allowlist for ids interpolated into
   # arbor://chat/agent/<target>. Equivalent to
   # \A(?:agent|human)_[A-Za-z0-9_-]+\z plus the 256-byte bound.
@@ -178,7 +178,7 @@ defmodule Arbor.Agent.MessageFacade do
   @doc false
   def with_authenticated_receipt(caller, target, message, opts, continuation, collaborators)
       when is_function(continuation, 1) and is_map(collaborators) do
-    with {:ok, timeout, proof} <- validate_opts(opts),
+    with {:ok, timeout, proof, fence_opts} <- validate_opts(opts),
          :ok <- require_proof(proof),
          :ok <- validate_principal_id(caller, :invalid_caller_id),
          :ok <- validate_principal_id(target, :invalid_agent_id),
@@ -188,7 +188,8 @@ defmodule Arbor.Agent.MessageFacade do
              collaborators.issue_receipt,
              caller,
              "arbor://chat/agent/" <> target,
-             proof
+             proof,
+             fence_opts
            ) do
       secrets = secrets_for(proof, receipt)
       discard = fn -> discard_receipt(collaborators, receipt) end
@@ -306,7 +307,7 @@ defmodule Arbor.Agent.MessageFacade do
   end
 
   defp deliver_with(caller_id, target_agent_id, message, opts, mode, collaborators) do
-    with {:ok, timeout_ms, proof} <- validate_opts(opts),
+    with {:ok, timeout_ms, proof, fence_opts} <- validate_opts(opts),
          :ok <- validate_principal_id(caller_id, :invalid_caller_id),
          :ok <- validate_principal_id(target_agent_id, :invalid_agent_id),
          :ok <- validate_message_for_branch(message, caller_id, proof),
@@ -329,6 +330,7 @@ defmodule Arbor.Agent.MessageFacade do
             message,
             timeout_ms,
             proof,
+            fence_opts,
             mode,
             collaborators
           )
@@ -365,12 +367,13 @@ defmodule Arbor.Agent.MessageFacade do
          message,
          timeout_ms,
          proof,
+         fence_opts,
          mode,
          collaborators
        ) do
     resource = "arbor://chat/agent/" <> target_agent_id
 
-    case issue_receipt(collaborators.issue_receipt, caller_id, resource, proof) do
+    case issue_receipt(collaborators.issue_receipt, caller_id, resource, proof, fence_opts) do
       {:ok, receipt} ->
         secrets = secrets_for(proof, receipt)
 
@@ -427,8 +430,9 @@ defmodule Arbor.Agent.MessageFacade do
             [] ->
               with {:ok, timeout_ms} <-
                      validate_timeout(Keyword.get(opts, :timeout, @default_timeout_ms)),
-                   {:ok, proof} <- extract_proof_opt(opts) do
-                {:ok, timeout_ms, proof}
+                   {:ok, proof} <- extract_proof_opt(opts),
+                   {:ok, fence_opts} <- extract_engagement_fence(opts, proof) do
+                {:ok, timeout_ms, proof, fence_opts}
               end
 
             _unknown ->
@@ -439,6 +443,23 @@ defmodule Arbor.Agent.MessageFacade do
       _ -> {:error, :invalid_opts}
     catch
       :exit, _ -> {:error, :invalid_opts}
+    end
+  end
+
+  # A compare-only continuation fence is currently supported only with a
+  # reusable HMAC proof. Signed native envelopes do not bind this option.
+  defp extract_engagement_fence(opts, proof) do
+    case {Keyword.fetch(opts, :expected_engagement_id), proof} do
+      {:error, _} ->
+        {:ok, []}
+
+      {{:ok, id}, {:session_token, _}} when is_binary(id) ->
+        if Regex.match?(~r/\Aeng_[0-9a-f]{32}\z/, id),
+          do: {:ok, [expected_engagement_id: id]},
+          else: {:error, :invalid_opts}
+
+      _ ->
+        {:error, :invalid_opts}
     end
   end
 
@@ -599,8 +620,8 @@ defmodule Arbor.Agent.MessageFacade do
   # Forward the proof under its own option name so Security applies the right
   # verification: `:session_token` takes the HMAC path, `:signed_request` the
   # per-request Ed25519 path.
-  defp issue_receipt(issue_fun, caller_id, resource, {kind, value}) do
-    case issue_fun.(caller_id, resource, :chat, [{kind, value}]) do
+  defp issue_receipt(issue_fun, caller_id, resource, {kind, value}, fence_opts) do
+    case issue_fun.(caller_id, resource, :chat, [{kind, value} | fence_opts]) do
       {:ok, %DeliveryReceipt{} = receipt} ->
         {:ok, receipt}
 

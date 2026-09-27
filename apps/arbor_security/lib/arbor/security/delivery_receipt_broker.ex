@@ -90,8 +90,11 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     safe_call(server, :stats)
   end
 
-  def issue_conversation(principal, resource, canonical_owner) do
-    safe_call(__MODULE__, {:issue_conversation, principal, resource, canonical_owner})
+  def issue_conversation(principal, resource, canonical_owner, expected_engagement_id \\ nil) do
+    safe_call(
+      __MODULE__,
+      {:issue_conversation, principal, resource, canonical_owner, expected_engagement_id}
+    )
   end
 
   def conversation_owner(token, principal, resource),
@@ -104,6 +107,9 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
   def memory_activate(token, engagement_id),
     do: safe_call(__MODULE__, {:memory_activate, token, engagement_id})
+
+  def memory_check_engagement(token, engagement_id),
+    do: safe_call(__MODULE__, {:memory_check_engagement, token, engagement_id})
 
   def memory_scope(token), do: safe_call(__MODULE__, {:memory_scope, token})
   def memory_close(token), do: safe_call(__MODULE__, {:memory_close, token})
@@ -185,11 +191,16 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:issue_conversation, principal, resource, canonical_owner}, from, state) do
+  def handle_call(
+        {:issue_conversation, principal, resource, canonical_owner, expected_engagement_id},
+        from,
+        state
+      ) do
     case handle_call({:issue, principal, resource, :chat}, from, state) do
       {:reply, {:ok, receipt}, next} ->
         {:ok, token} = DeliveryReceipt.bearer_token(receipt)
         next = put_in(next, [:entries, token, :canonical_owner_id], canonical_owner)
+        next = put_in(next, [:entries, token, :expected_engagement_id], expected_engagement_id)
         {:reply, {:ok, receipt}, next}
 
       other ->
@@ -277,6 +288,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
             agent_id,
             sender_id,
             canonical_owner,
+            Map.get(entry, :expected_engagement_id),
             context,
             now
           )
@@ -293,7 +305,8 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     state = prune_memory_admissions(state)
 
     with {:ok, %{status: :pending} = entry} <- memory_entry(state, token, owner),
-         true <- PrivateMemory.scalar?(engagement_id) do
+         true <- PrivateMemory.scalar?(engagement_id),
+         true <- engagement_matches?(entry, engagement_id) do
       entry = %{
         entry
         | status: :active,
@@ -304,6 +317,21 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     else
       _ -> {:reply, {:error, :invalid_memory_admission}, state}
     end
+  end
+
+  def handle_call({:memory_check_engagement, token, engagement_id}, {owner, _}, state) do
+    state = prune_memory_admissions(state)
+
+    result =
+      with {:ok, entry} <- memory_entry(state, token, owner),
+           true <- PrivateMemory.scalar?(engagement_id),
+           true <- engagement_matches?(entry, engagement_id) do
+        :ok
+      else
+        _ -> {:error, :invalid_memory_admission}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:memory_binding, token}, {owner, _}, state) do
@@ -401,7 +429,16 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp create_memory_admission(state, owner, agent_id, principal_id, human_id, context, now) do
+  defp create_memory_admission(
+         state,
+         owner,
+         agent_id,
+         principal_id,
+         human_id,
+         expected_engagement_id,
+         context,
+         now
+       ) do
     token = :crypto.strong_rand_bytes(@token_bytes)
 
     if Map.has_key?(state.memory_admissions, token) do
@@ -421,6 +458,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
         monitor: ref,
         scope: scope,
         status: :pending,
+        expected_engagement_id: expected_engagement_id,
         expires_at_ms: now + state.memory_ttl_ms
       }
 
@@ -433,6 +471,12 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
       {:reply, {:ok, admission}, state}
     end
+  end
+
+  defp engagement_matches?(entry, engagement_id) do
+    expected = Map.get(entry, :expected_engagement_id)
+    bound = Map.get(entry.scope, :engagement_id)
+    (is_nil(expected) or expected == engagement_id) and (is_nil(bound) or bound == engagement_id)
   end
 
   defp memory_entry(state, token, owner) do

@@ -1271,6 +1271,87 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       refute_receive {:query_seen, _, _}, 50
     end
 
+    test "security regression: HMAC engagement fence reaches private admission without routing the envelope" do
+      caller = register_active_human!()
+      target = "agent_fenced_#{System.unique_integer([:positive])}"
+      fence = "eng_0123456789abcdef0123456789abcdef"
+      other = "eng_abcdef0123456789abcdef0123456789"
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      register_agent_only(target)
+      message = build_route_free_message(caller)
+
+      {:ok, session_pid} =
+        FakeAuthSession.start_link(self(), fn _, {_, seen, receipt} ->
+          assert seen == message
+          assert seen.engagement_id == nil
+
+          assert {:ok, admission} =
+                   Security.exchange_private_memory_receipt(receipt, target, caller, %{
+                     session_id: "fence-session",
+                     turn_id: "fence-turn"
+                   })
+
+          assert {:error, :invalid_memory_admission} =
+                   Security.check_private_memory_engagement(admission, other)
+
+          assert :ok = Security.check_private_memory_engagement(admission, fence)
+          assert :ok = Security.activate_private_memory_admission(admission, fence)
+          assert :ok = Security.close_private_memory_admission(admission)
+          {:ok, %PipelineResponse{content: "fenced reply", tool_history: [], tool_rounds: 0}}
+        end)
+
+      insert_fake_session!(target, session_pid)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, __MODULE__.SessionBridge)
+      {:ok, token} = SessionToken.generate(caller)
+
+      assert {:ok, "fenced reply"} =
+               Arbor.Agent.send_message(caller, target, message,
+                 session_token: token,
+                 expected_engagement_id: fence
+               )
+
+      assert_receive {:auth_session_call, _, {:send_authenticated_message, ^message, _}}
+      refute_receive {:query_seen, _, _}, 20
+    end
+
+    test "security regression: public facade rejects unsupported or malformed fences before receipt issuance",
+         %{target: target} do
+      caller = register_active_human!()
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      register_capture_host(target)
+      message = build_route_free_message(caller)
+      {:ok, token} = SessionToken.generate(caller)
+      {:ok, payload} = Arbor.Agent.message_request_payload(caller, target, message)
+
+      {:ok, signed} =
+        Arbor.Contracts.Security.SignedRequest.sign(
+          payload,
+          caller,
+          :crypto.strong_rand_bytes(32)
+        )
+
+      fence = "eng_0123456789abcdef0123456789abcdef"
+      issued = Arbor.Security.DeliveryReceiptBroker.stats().issued
+
+      for opts <- [
+            [expected_engagement_id: fence],
+            [signed_request: signed, expected_engagement_id: fence],
+            [session_token: token, expected_engagement_id: nil],
+            [session_token: token, expected_engagement_id: "eng_bad"],
+            [session_token: token, expected_engagement_id: fence, expected_engagement_id: fence],
+            [session_token: token, expected_engagement_id: fence, extra: true]
+          ] do
+        assert {:error, :invalid_opts} = Arbor.Agent.send_message(caller, target, message, opts)
+
+        assert {:error, :invalid_opts} =
+                 Arbor.Agent.send_message_response(caller, target, message, opts)
+      end
+
+      assert Arbor.Security.DeliveryReceiptBroker.stats().issued == issued
+      refute_receive {:auth_session_call, _, _}, 20
+      refute_receive {:query_seen, _, _}, 20
+    end
+
     test "security regression: structured response returns real Pipeline.Response" do
       n = System.unique_integer([:positive])
       caller = register_active_human!()

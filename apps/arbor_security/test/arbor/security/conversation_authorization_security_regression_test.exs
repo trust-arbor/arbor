@@ -404,6 +404,149 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
              )
   end
 
+  @fence "eng_0123456789abcdef0123456789abcdef"
+  @other_fence "eng_abcdef0123456789abcdef0123456789"
+
+  test "security regression: HMAC receipt carries a private compare-only fence through exchange and activation",
+       c do
+    grant(c, constraints: %{rate_limit: 1})
+
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_conversation_receipt(c.caller, c.resource, :chat,
+               session_token: c.token,
+               expected_engagement_id: @fence
+             )
+
+    assert {:ok, admission} =
+             Security.exchange_private_memory_receipt(receipt, c.target, c.caller, %{
+               session_id: "session_fenced",
+               turn_id: "turn_fenced"
+             })
+
+    refute inspect(admission) =~ @fence
+
+    assert {:error, :invalid_memory_admission} =
+             Security.check_private_memory_engagement(admission, @other_fence)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.activate_private_memory_admission(admission, @other_fence)
+
+    for _ <- 1..3, do: assert(:ok = Security.check_private_memory_engagement(admission, @fence))
+
+    assert {:error, :invalid_memory_admission} =
+             Task.async(fn ->
+               Security.check_private_memory_engagement(admission, @fence)
+             end)
+             |> Task.await()
+
+    assert :ok = Security.activate_private_memory_admission(admission, @fence)
+    assert :ok = Security.check_private_memory_engagement(admission, @fence)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.check_private_memory_engagement(admission, @other_fence)
+
+    assert {:error, :unauthorized} = issue(c)
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  test "security regression: invalid signed ordinary and malformed fences cannot consume allowance",
+       c do
+    grant(c, constraints: %{rate_limit: 1})
+    {:ok, signed} = SignedRequest.sign("authorize", c.caller, c.private_key)
+    before = DeliveryReceiptBroker.stats().issued
+
+    for opts <- [
+          [expected_engagement_id: @fence],
+          [signed_request: signed, expected_engagement_id: @fence],
+          [session_token: c.token, expected_engagement_id: nil],
+          [session_token: c.token, expected_engagement_id: "eng_bad"],
+          [
+            session_token: c.token,
+            expected_engagement_id: @fence,
+            expected_engagement_id: @fence
+          ],
+          [session_token: c.token, expected_engagement_id: @fence, unknown: true]
+        ] do
+      assert {:error, :unauthorized} =
+               Security.authorize_and_issue_conversation_receipt(
+                 c.caller,
+                 c.resource,
+                 :chat,
+                 opts
+               )
+
+      assert {:error, :invalid_opts} =
+               Security.authorize_and_issue_delivery_receipt(c.caller, c.resource, :chat, opts)
+    end
+
+    assert {:error, :invalid_opts} =
+             Security.authorize_and_issue_delivery_receipt(
+               c.caller,
+               "arbor://memory/read/" <> c.caller,
+               :read, session_token: c.token, expected_engagement_id: @fence)
+
+    assert DeliveryReceiptBroker.stats().issued == before
+    # Invalid fence options did not consume the signed proof nonce or rate allowance.
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_conversation_receipt(c.caller, c.resource, :chat,
+               signed_request: signed
+             )
+
+    assert :ok = Security.discard_delivery_receipt(receipt)
+    assert {:error, :unauthorized} = issue(c)
+  end
+
+  test "security regression: session continuation binds subject expiry owner and current grant without spending rate",
+       c do
+    capability = grant(c, constraints: %{rate_limit: 1})
+    other = other_human!("proof-other")
+
+    for _ <- 1..4 do
+      assert {:ok, :authorized} =
+               Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+    end
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, other.token)
+
+    {:ok, expired} = SessionToken.generate(c.caller, ttl: -1)
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, expired)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, :offline)
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{
+      c.caller => other.caller
+    })
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+
+    assert {:ok, :authorized} =
+             Security.recheck_conversation_session(c.caller, c.target, other.caller, c.token)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{})
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, other.caller, c.token)
+
+    assert {:ok, receipt} = issue(c)
+    assert :ok = Security.discard_delivery_receipt(receipt)
+
+    assert {:ok, :authorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+
+    assert {:error, :unauthorized} = issue(c)
+    assert :ok = Security.revoke(capability.id)
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+  end
+
   defp other_human!(name) do
     oidc =
       OIDCTestHelper.issue_identity(

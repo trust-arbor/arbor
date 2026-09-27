@@ -221,6 +221,10 @@ defmodule Arbor.Agent do
     opts, signals, logs, or errors)
   - `:signed_request` — alternative fresh proof of `message_request_payload/3`;
     arbitrary or modified payloads are rejected before receipt or nonce use.
+  - `:expected_engagement_id` — optional `eng_` plus 32 lowercase hexadecimal
+    digits, supported only with `:session_token`. Session compares this with its
+    source-resolved private engagement before queueing and activation; it never
+    selects a conversation. Signed and ordinary delivery reject this option.
 
   Unknown, duplicate, zero, or oversized options are rejected before effects.
   Present but invalid `:session_token` values (`nil`, empty, non-binary,

@@ -526,10 +526,10 @@ defmodule Arbor.Security do
 
   defp bounded_exact_scalar?(_value), do: false
 
-  # Delivery-receipt issue admits only cryptographic proof keys. Never silently
-  # strip. Explicitly forbidden (among others): :identity_verified,
+  # Delivery-receipt issue admits cryptographic proof keys and the HMAC-only
+  # compare fence. Never silently strip. Explicitly forbidden: :identity_verified,
   # :verify_identity (caller), :task_id, :principal_scope.
-  @issue_session_mode_keys [:session_token]
+  @issue_session_mode_keys [:session_token, :expected_engagement_id]
 
   @doc "Exchange an exact authenticated chat receipt for a pending, caller-owned memory admission."
   defdelegate exchange_private_memory_receipt(receipt, agent_id, sender_id, context),
@@ -540,6 +540,11 @@ defmodule Arbor.Security do
   defdelegate activate_private_memory_admission(admission, engagement_id),
     to: Arbor.Security.PrivateMemory,
     as: :activate
+
+  @doc "Compare a receipt-owned engagement fence with the resolved private scope without activating it."
+  defdelegate check_private_memory_engagement(admission, engagement_id),
+    to: Arbor.Security.PrivateMemory,
+    as: :check_engagement
 
   @doc "Check live receipt-derived pair scope and current chat and memory capabilities."
   defdelegate authorize_private_memory_turn(admission, operation),
@@ -597,7 +602,14 @@ defmodule Arbor.Security do
     as: :verify_relationship_snapshot
 
   @issue_signed_mode_keys [:signed_request, :signer, :session_id, :expected_resource]
-  @issue_admitted_opts [:session_token, :signed_request, :signer, :session_id, :expected_resource]
+  @issue_admitted_opts [
+    :session_token,
+    :signed_request,
+    :signer,
+    :session_id,
+    :expected_resource,
+    :expected_engagement_id
+  ]
   @max_issue_human_principal_bytes 256
 
   @doc """
@@ -608,7 +620,9 @@ defmodule Arbor.Security do
   session proof — only a Security-owned broker entry does.
 
   Exactly one active cryptographic proof mode is required:
-  - `:session_token` — human HMAC session proof (no companions)
+  - `:session_token` — human HMAC session proof; for chat-agent receipts only,
+    optional `:expected_engagement_id` is a compare-only private admission fence
+    (`eng_` plus 32 lowercase hexadecimal digits), never a routing input
   - `:signed_request` — signed request proof; optional companions `:signer`,
     `:session_id`, `:expected_resource`. After closed option validation the
     wrapper injects `verify_identity: true` so verification always runs,
@@ -642,9 +656,16 @@ defmodule Arbor.Security do
       ) do
     with :ok <- validate_issue_human_principal(principal_id),
          {:ok, safe_opts} <- validate_issue_opts(opts) do
-      if chat_agent_receipt?(resource_uri, action),
-        do: issue_chat_receipt(principal_id, resource_uri, safe_opts, :allow_pending),
-        else: issue_ordinary_receipt(principal_id, resource_uri, action, safe_opts)
+      cond do
+        chat_agent_receipt?(resource_uri, action) ->
+          issue_chat_receipt(principal_id, resource_uri, safe_opts, :allow_pending)
+
+        Keyword.has_key?(safe_opts, :expected_engagement_id) ->
+          {:error, :invalid_opts}
+
+        true ->
+          issue_ordinary_receipt(principal_id, resource_uri, action, safe_opts)
+      end
     end
   rescue
     _ -> {:error, :authorization_failed}
@@ -691,6 +712,8 @@ defmodule Arbor.Security do
   unknown constraints are refused before any usage/rate counter is consumed.
   Ordinary constraint effects occur once, after proof verification and canonical
   owner resolution. Generic chat-agent receipts share this admission policy.
+  Only HMAC requests may carry an optional `:expected_engagement_id` fence;
+  Session checks the source-resolved engagement before queueing and activation.
   """
   @spec authorize_and_issue_conversation_receipt(String.t(), String.t(), :chat, keyword()) ::
           {:ok, DeliveryReceipt.t()}
@@ -698,7 +721,11 @@ defmodule Arbor.Security do
   def authorize_and_issue_conversation_receipt(principal, resource, action, opts) do
     with :ok <- validate_conversation_authorization_request(principal, resource, action),
          true <- Keyword.keyword?(opts),
-         true <- Enum.all?(Keyword.keys(opts), &(&1 in [:session_token, :signed_request])),
+         true <-
+           Enum.all?(
+             Keyword.keys(opts),
+             &(&1 in [:session_token, :signed_request, :expected_engagement_id])
+           ),
          {:ok, proof_opts} <- validate_issue_opts(opts),
          {:ok, receipt} <- issue_chat_receipt(principal, resource, proof_opts, :deny_pending) do
       {:ok, receipt}
@@ -716,6 +743,8 @@ defmodule Arbor.Security do
   # authenticate exactly once. Reject unsupported continuations and unresolved
   # owners before the authorization effect handler spends use/rate allowances.
   defp issue_chat_receipt(principal, resource, proof_opts, approval_policy) do
+    {expected_engagement_id, proof_opts} = Keyword.pop(proof_opts, :expected_engagement_id)
+
     with :ok <- validate_conversation_authorization_request(principal, resource, :chat),
          {:ok, decision, cap, auth, safe_opts} <-
            chat_authorization_decision(principal, resource, proof_opts),
@@ -733,7 +762,12 @@ defmodule Arbor.Security do
 
       case InvocationAudit.observe_authorization(authorization, principal, resource) do
         {:ok, :authorized} ->
-          DeliveryReceiptBroker.issue_conversation(principal, resource, canonical_owner)
+          DeliveryReceiptBroker.issue_conversation(
+            principal,
+            resource,
+            canonical_owner,
+            expected_engagement_id
+          )
 
         {:ok, :pending_approval, _} ->
           {:error, :pending_approval}
@@ -831,6 +865,33 @@ defmodule Arbor.Security do
       _ -> {:error, :unauthorized}
     end
   end
+
+  @doc """
+  Recheck an admitted human conversation against its original session proof.
+
+  Verifies the exact HMAC subject and current token expiry, then checks current
+  canonical ownership and chat authority without consuming rate/use allowances.
+  This continuation issues no receipt and cannot admit a new operation.
+  """
+  @spec recheck_conversation_session(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, :authorized} | {:error, :unauthorized}
+  def recheck_conversation_session(principal, target_agent, owner, token)
+      when is_binary(token) and byte_size(token) in 1..4096 do
+    verifier = Config.session_token_module()
+
+    with {:ok, ^principal} <- verifier.verify(token),
+         {:ok, :authorized} <- recheck_conversation_owner(principal, target_agent, owner) do
+      {:ok, :authorized}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  def recheck_conversation_session(_, _, _, _), do: {:error, :unauthorized}
 
   @doc """
   Recheck current chat access after source-owned conversation authentication.
@@ -1081,7 +1142,8 @@ defmodule Arbor.Security do
         {:error, :invalid_opts}
 
       has_session ->
-        if Enum.all?(keys, &(&1 in @issue_session_mode_keys)) do
+        if Enum.all?(keys, &(&1 in @issue_session_mode_keys)) and
+             valid_issue_engagement_fence?(opts) do
           {:ok, opts}
         else
           {:error, :invalid_opts}
@@ -1097,6 +1159,14 @@ defmodule Arbor.Security do
 
       true ->
         {:error, :invalid_opts}
+    end
+  end
+
+  defp valid_issue_engagement_fence?(opts) do
+    case Keyword.fetch(opts, :expected_engagement_id) do
+      :error -> true
+      {:ok, id} when is_binary(id) -> Regex.match?(~r/\Aeng_[0-9a-f]{32}\z/, id)
+      _ -> false
     end
   end
 
