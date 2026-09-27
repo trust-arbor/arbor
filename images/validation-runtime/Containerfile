@@ -47,7 +47,10 @@ RUN apt-get update \
       libssl-dev \
       linux-libc-dev \
       m4 \
-      pkg-config \
+      pkg-config=1.8.1-1 \
+      pkgconf=1.8.1-1 \
+      pkgconf-bin=1.8.1-1 \
+      libpkgconf3=1.8.1-1 \
       unixodbc-dev \
       unzip \
       wget \
@@ -86,10 +89,36 @@ RUN apt-get update \
     && test -x /usr/bin/kill \
     && rm -rf /var/lib/apt/lists/*
 
+# VP-07B0: Bundlex uses pkg-config only; Hex checksums cannot attest a
+# secondary precompiled OS archive. Build the reviewed PortAudio release here.
+ARG PORTAUDIO_SHA256=47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      libasound2=1.2.8-1+b1 \
+      libasound2-dev=1.2.8-1+b1 \
+      libasound2-data=1.2.8-1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz \
+      -o /tmp/portaudio.tar.gz \
+    && echo "${PORTAUDIO_SHA256}  /tmp/portaudio.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/portaudio \
+    && tar -xzf /tmp/portaudio.tar.gz -C /tmp/portaudio --strip-components=1 \
+    && cd /tmp/portaudio \
+    && ./configure --prefix=/usr/local --without-jack --without-oss \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && pkg-config --exists portaudio-2.0 \
+    && rm -rf /tmp/portaudio /tmp/portaudio.tar.gz
+
 LABEL org.arbor.validation.schema="1" \
       org.arbor.validation.role="spawn-containment" \
       org.arbor.validation.platform="${ARBOR_VALIDATION_PLATFORM}" \
       org.arbor.validation.erlang="${ERLANG_VERSION}" \
       org.arbor.validation.elixir="${ELIXIR_VERSION}" \
+      org.arbor.validation.portaudio="19.7.0" \
+      org.arbor.validation.portaudio-source-sha256="${PORTAUDIO_SHA256}" \
+      org.arbor.validation.pkgconf="1.8.1-1" \
+      org.arbor.validation.alsa="1.2.8-1+b1" \
       org.arbor.validation.mix-lock-sha256="${MIX_LOCK_SHA256}" \
       org.arbor.validation.deps-tree-sha256="${DEPS_TREE_SHA256}"

@@ -1,5 +1,9 @@
 import Config
 
+# VP-07B0: Hex checksums do not attest Bundlex's secondary native archives.
+# Use the separately admitted system PortAudio library via pkg-config only.
+config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin]
+
 # Common configuration for all Arbor apps
 config :logger,
   level: :info
