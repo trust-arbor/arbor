@@ -14,13 +14,15 @@ defmodule Arbor.Comms.EngagementResolutionRegressionTest do
   test "resolution publication regression: a visible claim always names a complete record" do
     observer = self()
     agent = unique_agent()
-    worker = spawn(fn ->
-      receive do
-        :resolve ->
-          result = EngagementStore.resolve_or_create(agent, "channel", scope: :channel)
-          send(observer, {:first_result, self(), result})
-      end
-    end)
+
+    worker =
+      spawn(fn ->
+        receive do
+          :resolve ->
+            result = EngagementStore.resolve_or_create(agent, "channel", scope: :channel)
+            send(observer, {:first_result, self(), result})
+        end
+      end)
 
     handler = {__MODULE__, make_ref()}
     :ok = :telemetry.attach(handler, @claim_event, &__MODULE__.hold_claim/4, {observer, worker})
@@ -48,12 +50,16 @@ defmodule Arbor.Comms.EngagementResolutionRegressionTest do
 
   test "deterministic resolution keeps the winning record and attachments under contention" do
     agent = unique_agent()
+
     try do
       results =
         1..40
-        |> Task.async_stream(fn _ ->
-          EngagementStore.resolve_or_create(agent, "human", scope: :user, owner_tenant: "human")
-        end, max_concurrency: 40)
+        |> Task.async_stream(
+          fn _ ->
+            EngagementStore.resolve_or_create(agent, "human", scope: :user, owner_tenant: "human")
+          end,
+          max_concurrency: 40
+        )
         |> Enum.map(fn {:ok, {:ok, engagement}} -> engagement end)
 
       assert [id] = results |> Enum.map(& &1.id) |> Enum.uniq()
@@ -66,10 +72,38 @@ defmodule Arbor.Comms.EngagementResolutionRegressionTest do
     end
   end
 
+  @tag :slow
+  test "one thousand concurrent resolution batches leave exactly one record per key" do
+    agent = unique_agent()
+
+    try do
+      for iteration <- 1..1_000 do
+        ids =
+          1..12
+          |> Task.async_stream(
+            fn _ ->
+              {:ok, engagement} = EngagementStore.resolve_or_create(agent, {"stress", iteration})
+              engagement.id
+            end,
+            max_concurrency: 12
+          )
+          |> Enum.map(fn {:ok, id} -> id end)
+          |> Enum.uniq()
+
+        assert [_] = ids
+      end
+
+      assert length(EngagementStore.list_for_agent(agent)) == 1_000
+    after
+      cleanup(agent)
+    end
+  end
+
   @doc false
   def hold_claim(_event, _measurements, metadata, {observer, worker}) do
     if self() == worker do
       send(observer, {:claimed, worker, metadata.engagement_id})
+
       receive do
         :release -> :ok
       after
@@ -81,6 +115,7 @@ defmodule Arbor.Comms.EngagementResolutionRegressionTest do
   defp unique_agent, do: "resolution_#{System.unique_integer([:positive, :monotonic])}"
 
   defp cleanup(agent) do
-    for engagement <- EngagementStore.list_for_agent(agent), do: EngagementStore.delete(engagement.id)
+    for engagement <- EngagementStore.list_for_agent(agent),
+        do: EngagementStore.delete(engagement.id)
   end
 end

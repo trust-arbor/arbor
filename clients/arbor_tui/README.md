@@ -6,9 +6,8 @@ that connects to the Gateway chat WebSocket API and holds a conversation with an
 agent.
 
 It is modeled on coding-agent TUIs (Claude Code / opencode / codex): a single
-scrolling transcript, a persistent input line, and a thin status bar. The Arbor
-distinctive is that **proactive `💭` notifications** from the agent's heartbeat
-interleave into the same transcript — the continuous mind made visible.
+scrolling transcript, a persistent input line, and a thin status bar. The current
+transport shows the user's private durable conversation and command status.
 
 ## Standalone by design
 
@@ -93,9 +92,8 @@ i.e. the server-restart case.
 
 ## Slash commands
 
-Input starting with `/` is matched against a small **client-local** command set
-first; anything else is forwarded to the attached agent (the server's own
-slash-command handling, e.g. `/model`, `/status`).
+Input starting with `/` is matched against the **client-local** command set.
+Server slash commands currently report that they are unavailable.
 
 Client-local (handled by the TUI, never sent to the agent):
 
@@ -106,9 +104,10 @@ Client-local (handled by the TUI, never sent to the agent):
 | `/help`         | list the client-local commands |
 | `/quit`         | exit the TUI |
 
-Everything else — plain messages and any other `/command` — is sent to the
-attached agent. While **unattached**, sending a message or a server command
-shows "Not attached — use /agent <id> first" instead.
+Plain messages are sent to the attached agent. Server `/commands` report that
+these controls are unavailable during the authenticated transport migration.
+While **unattached**, sending a message or a server command shows
+"Not attached — use /agent <id> first" instead.
 
 ## Keys
 
@@ -132,7 +131,6 @@ which folds them through `App.update/2`.
 WSClient ──{:server_event, event}──▶ TermUI.Runtime ──▶ App.update/2 ──▶ view
    ▲                                                          │
    └──────────── WSClient.send_command/2 ◀────────────────────┘
-```
 ```
 
 ## Reconnect
@@ -159,9 +157,48 @@ sent into a dead socket — while disconnected.
 
 ## Status
 
-Scaffold complete: compiles clean (`--warnings-as-errors`), escript builds, the
-suite passes (incl. a real Ed25519 sign↔verify round-trip and WS auto-reconnect
-coverage). Auto-reconnect is **implemented** (see above). **Not yet validated
-against a live Gateway** — that's the next step (and becomes the standing
-live-transport integration test for the chat API). Layout polish (viewport
+On 2026-09-27, the standalone suite passed 100 tests. A separate real Gateway
+journey exercised signed requests, shared browser/terminal history, reconnect,
+exact retry, App rendering and revocation. See the reproducible
+[qualification](../../docs/arbor/CONVERSATION_CONVERGENCE_QUALIFICATION.md).
+That journey did not exercise a real terminal PTY. Layout polish (viewport
 scrolling, terminal-dimension-aware truncation) remains a follow-up.
+
+### Authenticated conversation transport
+
+Each conversation request is signed independently. The WebSocket upgrade proof
+is never reused. Attachment and reconnect load the authenticated user's private
+transcript through the Agent conversation API; the server chooses the engagement.
+History and command-journal pages use separate cursors and are polled with fresh
+proofs. Agent-wide signals are not used as private conversation updates.
+
+Commands keep a stable ID and exact text across connection loss. `/retry` sends
+that same command with a fresh signature; the server journal prevents redispatch
+of a claimed command. `dispatch_started` is not completion, and `uncertain` is a
+terminal unknown outcome. Pending IDs are held for this client process lifetime;
+exiting the TUI does not cancel execution. Do not retype an unresolved message as
+a new command. There is no automatic resend on reconnect.
+
+During migration, local `/help`, `/agents`, `/agent`, `/alias`, `/new`, `/start`,
+`/stop`, `/connect`, `/retry` and `/quit` remain available. Server slash commands
+(such as `/model`), turn cancellation and approval controls are explicitly
+unavailable until they have their own authenticated operation contracts. No chat
+attachment grants approval capabilities. Updates currently arrive as durable
+transcript pages rather than token deltas.
+
+The first authorized history page pins its engagement identity. Every following
+request, including reconnect and exact retry, signs that expected identity as a
+fence; it cannot select an engagement route. If linked identity ownership changes,
+the host rejects the old fence before admitting a command. The client clears its
+history, draft, pending retry and cursors and requires an explicit reconnect.
+The signed operation format is `arbor.conversation.v2`, with the expected
+engagement ID as the seventh JSON-array element (`null` on a fresh attachment).
+
+An authorization denial (including revocation) detaches the terminal and prevents
+further reads or sends. The current terminal retains content already delivered
+while authorized; revocation does not erase its local display. Ownership changes
+clear that display and the pending draft, as described above.
+
+A correlated rejection of a command's first submission restores its draft and
+releases the pending command. Rejections of reads or later retries preserve the
+earlier delivery state, since an earlier attempt may already have been admitted.

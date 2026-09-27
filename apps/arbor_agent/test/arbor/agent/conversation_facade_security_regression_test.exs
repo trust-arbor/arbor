@@ -6,7 +6,7 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
   alias Arbor.Agent.{ConversationFacade, MessageFacade}
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Pipeline.Response
-  alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Contracts.Security.{DeliveryReceipt, SignedRequest}
 
   @caller "human_conversation_test"
   @target "agent_conversation_test"
@@ -23,6 +23,7 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
            %{
              authorized: true,
              active: true,
+             canonical_owner: @caller,
              commands: %{},
              claims: %{},
              events: [],
@@ -65,6 +66,21 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
           {result, next}
         end)
       end,
+      receipt_owner: fn _receipt, caller, target ->
+        assert caller == @caller and target == @target
+
+        case Agent.get(state, & &1.canonical_owner) do
+          owner when is_binary(owner) -> {:ok, owner}
+          _ -> {:error, :unauthorized}
+        end
+      end,
+      recheck: fn caller, target, owner ->
+        assert caller == @caller and target == @target
+
+        if Agent.get(state, &(&1.authorized and &1.active and &1.canonical_owner == owner)),
+          do: {:ok, :authorized},
+          else: {:error, :unauthorized}
+      end,
       discard_receipt: fn receipt ->
         Agent.update(state, &%{&1 | discarded: [receipt | &1.discarded]})
         :ok
@@ -101,12 +117,15 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
            visibility: :private
          )}
       end,
-      recheck: fn caller, target ->
+      recheck: fn caller, target, canonical_owner ->
         assert caller == @caller and target == @target
 
-        if Agent.get(state, &(&1.authorized and &1.active)),
-          do: {:ok, :authorized},
-          else: {:error, :unauthorized}
+        if Agent.get(
+             state,
+             &(&1.authorized and &1.active and &1.canonical_owner == canonical_owner)
+           ),
+           do: {:ok, :authorized},
+           else: {:error, :unauthorized}
       end,
       admit: fn scope, command ->
         Agent.get_and_update(state, fn current ->
@@ -221,14 +240,170 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
     assert {:error, :invalid_opts} =
              request(c, :history, nil,
                session_token: "test-proof",
-               signed_request: %{nonce: "n1"}
+               signed_request: proof(:history, nil, "n1")
              )
 
-    assert {:ok, _} = request(c, :history, nil, signed_request: %{nonce: "n1"})
-    assert {:error, :unauthorized} = request(c, :history, nil, signed_request: %{nonce: "n1"})
-    assert {:ok, _} = request(c, :history, nil, signed_request: %{nonce: "n2"})
+    assert {:ok, _} = request(c, :history, nil, signed_request: proof(:history, nil, "n1"))
+
+    assert {:error, :unauthorized} =
+             request(c, :history, nil, signed_request: proof(:history, nil, "n1"))
+
+    assert {:ok, _} = request(c, :history, nil, signed_request: proof(:history, nil, "n2"))
     # One cryptographic issue call per request; release auth never reuses nonce.
     assert length(Agent.get(c.state, & &1.proofs)) == 4
+  end
+
+  test "security regression: signed proof binds operation target text command and page bounds",
+       c do
+    signed = proof(:submit, @command, "bound")
+
+    for {operation, input, opts} <- [
+          {:submit, %{@command | text: "altered"}, []},
+          {:submit, %{@command | id: "altered"}, []},
+          {:command, @command.id, []},
+          {:history, nil, []},
+          {:events, 0, [limit: 1]}
+        ] do
+      assert {:error, :unauthorized} =
+               request(c, operation, input, [signed_request: signed] ++ opts)
+    end
+
+    assert Agent.get(c.state, & &1.proofs) == []
+    assert {:ok, _} = request(c, :submit, @command, signed_request: signed)
+    assert_receive {:settled, _, _}
+
+    page_proof = proof(:history, nil, "page", after: 3, through: 10, limit: 2)
+
+    assert {:error, :unauthorized} =
+             request(c, :history, nil,
+               signed_request: page_proof,
+               after: 4,
+               through: 10,
+               limit: 2
+             )
+
+    assert {:error, :unauthorized} =
+             request(c, :history, nil,
+               signed_request: page_proof,
+               after: 3,
+               through: 11,
+               limit: 2
+             )
+
+    assert {:error, :unauthorized} =
+             request(c, :history, nil,
+               signed_request: page_proof,
+               after: 3,
+               through: 10,
+               limit: 3
+             )
+
+    assert {:error, :unauthorized} =
+             ConversationFacade.run_with(
+               :submit,
+               @caller,
+               "agent_other",
+               @command,
+               [signed_request: signed],
+               c.collaborators
+             )
+  end
+
+  test "security regression: engagement fence prevents reads and command admission after owner changes",
+       c do
+    assert {:ok, %{engagement_id: original}} = request(c, :events, 0)
+    assert original == "eng_00000000000000000000000000000001"
+    Agent.update(c.state, &%{&1 | canonical_owner: "human_new_owner"})
+
+    collaborators = %{
+      c.collaborators
+      | resolve: fn target, owner ->
+          assert owner == "human_new_owner"
+
+          {:ok,
+           Engagement.new(
+             id: "eng_00000000000000000000000000000002",
+             agent_id: target,
+             owner_tenant: owner,
+             scope: :user,
+             visibility: :private
+           )}
+        end,
+        admit: fn _, _ -> flunk("scope changed before command admission") end,
+        get: fn _, _ -> flunk("scope changed before command read") end,
+        events: fn _, _, _ -> flunk("scope changed before event read") end,
+        history: fn _, _, _ -> flunk("scope changed before transcript read") end
+    }
+
+    for {operation, input} <- [submit: @command, command: @command.id, events: 0, history: nil] do
+      assert {:error, :conversation_scope_changed} =
+               request(%{c | collaborators: collaborators}, operation, input,
+                 session_token: "test-proof",
+                 expected_engagement_id: original
+               )
+    end
+
+    assert Agent.get(c.state, & &1.commands) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+  end
+
+  test "security regression: engagement fence is bounded and signed before proof consumption",
+       c do
+    original = "eng_00000000000000000000000000000001"
+    changed = "eng_00000000000000000000000000000002"
+    signed = proof(:events, 0, "fenced", expected_engagement_id: original)
+
+    assert {:error, :unauthorized} =
+             request(c, :events, 0, signed_request: signed, expected_engagement_id: changed)
+
+    assert {:error, :unauthorized} = request(c, :events, 0, signed_request: signed)
+
+    for bad <- ["eng_wrong", String.duplicate("x", 300), %{}, 1] do
+      assert {:error, :invalid_opts} =
+               request(c, :history, nil, session_token: "test-proof", expected_engagement_id: bad)
+    end
+
+    assert Agent.get(c.state, & &1.proofs) == []
+
+    assert {:ok, %{engagement_id: ^original}} =
+             request(c, :events, 0, signed_request: signed, expected_engagement_id: original)
+  end
+
+  test "security regression: linked canonical owner scopes history but never replaces proof subject",
+       c do
+    Agent.update(c.state, &%{&1 | canonical_owner: "human_primary"})
+    parent = self()
+
+    collaborators = %{
+      c.collaborators
+      | history: fn target, owner, _page ->
+          send(parent, {:history_owner, target, owner})
+          {:ok, %{entries: [], cursor: 0, head: 0, has_more: false}}
+        end
+    }
+
+    assert {:ok, _} = request(%{c | collaborators: collaborators}, :history, nil)
+    assert_receive {:history_owner, @target, "human_primary"}
+    assert length(Agent.get(c.state, & &1.proofs)) == 1
+  end
+
+  test "security regression: unlink or resolver outage after read denies publication without rescope",
+       c do
+    Agent.update(c.state, &%{&1 | canonical_owner: "human_primary"})
+
+    for changed <- [@caller, nil] do
+      Agent.update(c.state, &%{&1 | canonical_owner: "human_primary"})
+
+      collaborators = %{
+        c.collaborators
+        | history: fn _target, "human_primary", _page ->
+            Agent.update(c.state, &%{&1 | canonical_owner: changed})
+            {:ok, %{entries: [%{content: "private"}]}}
+          end
+      }
+
+      assert {:error, :unauthorized} = request(%{c | collaborators: collaborators}, :history, nil)
+    end
   end
 
   test "security regression: public entry options cannot supply route or authorization collaborators",
@@ -336,6 +511,32 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
     assert {:ok, %{status: :completed}} = request(c, :command, @command.id)
   end
 
+  test "security regression: revocation during delivery cannot publish a completed journal reply",
+       c do
+    parent = self()
+
+    Agent.update(
+      c.state,
+      &%{
+        &1
+        | delivery: fn ->
+            send(parent, {:delivery_blocked, self()})
+
+            receive do
+              :finish -> {:ok, Response.normalize(%{text: "revoked private reply"})}
+            end
+          end
+      }
+    )
+
+    assert {:ok, %{status: :admitted}} = request(c, :submit, @command)
+    assert_receive {:delivery_blocked, worker}
+    Agent.update(c.state, &%{&1 | authorized: false})
+    send(worker, :finish)
+    assert_receive {:settled, _, %{status: :uncertain, reason: :delivery_unknown}}
+    refute inspect(Agent.get(c.state, & &1.commands)) =~ "revoked private reply"
+  end
+
   test "security regression: dispatch errors and secret-bearing replies become immutable uncertainty",
        c do
     for {id, delivery} <- [
@@ -439,6 +640,22 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
       assert {:error, :conversation_unavailable} =
                request(%{c | collaborators: collaborators}, :history, nil)
     end
+  end
+
+  defp proof(operation, input, nonce, opts \\ []) do
+    {:ok, payload} =
+      Arbor.Agent.conversation_request_payload(operation, @caller, @target, input, opts)
+
+    {:ok, request} =
+      SignedRequest.new(
+        agent_id: @caller,
+        payload: payload,
+        signature: :binary.copy(<<0>>, 64),
+        timestamp: DateTime.utc_now(),
+        nonce: binary_part(:crypto.hash(:sha256, nonce), 0, 16)
+      )
+
+    request
   end
 
   defp request(c, operation, input, opts \\ [session_token: "test-proof"]) do

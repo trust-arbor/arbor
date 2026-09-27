@@ -1649,6 +1649,7 @@ defmodule Arbor.Orchestrator.Session do
     :__struct__,
     :turn_id,
     :authenticated_principal_id,
+    :canonical_owner_id,
     :disclosure_capability_id
   ]
 
@@ -1871,15 +1872,36 @@ defmodule Arbor.Orchestrator.Session do
          state,
          engagement_id
        ) do
-    steering_authority_match?(
-      state.turn_authority,
-      queued_authority,
-      state.turn_user_message,
-      queued_message
-    )
+    current_steering_owner?(state.turn_authority, state.agent_id) and
+      current_steering_owner?(queued_authority, state.agent_id) and
+      steering_authority_match?(
+        state.turn_authority,
+        queued_authority,
+        state.turn_user_message,
+        queued_message
+      )
   end
 
   defp steering_entry_eligible?(_message, _authority, _state, _engagement_id), do: false
+
+  # Typed authenticated authority requires a source-owned private binding.
+  # Missing bindings deny; only ordinary nil-authority turns retain compatibility.
+  # Recheck before steering just as before a full turn, without consuming a nonce.
+  defp current_steering_owner?(%TurnAuthority{canonical_owner_id: nil}, _agent_id), do: false
+  defp current_steering_owner?(nil, _agent_id), do: true
+
+  defp current_steering_owner?(%TurnAuthority{} = authority, agent_id) do
+    match?(
+      {:ok, :authorized},
+      Arbor.Security.recheck_conversation_owner(
+        authority.authenticated_principal_id,
+        agent_id,
+        authority.canonical_owner_id
+      )
+    )
+  end
+
+  defp current_steering_owner?(_, _), do: false
 
   defp steering_authority_match?(nil, nil, _active_message, _queued_message), do: true
 
@@ -1906,6 +1928,7 @@ defmodule Arbor.Orchestrator.Session do
       attrs = %{
         turn_id: authority.turn_id,
         authenticated_principal_id: authority.authenticated_principal_id,
+        canonical_owner_id: authority.canonical_owner_id,
         disclosure_capability_id: authority.disclosure_capability_id
       }
 
@@ -2079,18 +2102,33 @@ defmodule Arbor.Orchestrator.Session do
     state = cleanup_turn_terminal(state, kill_task?: false, close_memory?: false)
     state = transition_phase(state, :processing, :complete, :idle)
 
-    case Builders.apply_turn_result(state, user_message.content, result,
-           user_message: user_message
-         ) do
-      {:ok, new_state} ->
-        start_private_index(user_message, result, state, new_state, completed)
+    if terminal_conversation_authorized?(state) do
+      case Builders.apply_turn_result(state, user_message.content, result,
+             user_message: user_message
+           ) do
+        {:ok, new_state} ->
+          start_private_index(user_message, result, state, new_state, completed)
 
-      {:error, persist_reason} ->
-        complete_turn_commit_failed(state, persist_reason)
+        {:error, persist_reason} ->
+          complete_turn_commit_failed(state, persist_reason)
+      end
+    else
+      complete_turn_authorization_denied(state)
     end
   end
 
   defp complete_turn_commit_acknowledged(user_message, result, state, new_state, completed) do
+    # The durable append (and optional index worker) can outlive the grant or
+    # canonical owner. A committed pair cannot be rolled back here, but it must
+    # not authorize checkpoint, success signals, or disclosure to the caller.
+    if terminal_conversation_authorized?(new_state) do
+      publish_committed_turn(user_message, result, state, new_state, completed)
+    else
+      complete_turn_authorization_denied(new_state)
+    end
+  end
+
+  defp publish_committed_turn(user_message, result, state, new_state, completed) do
     new_state = PrivateMemory.close(new_state, new_state.turn_authority)
 
     new_state =
@@ -2098,6 +2136,14 @@ defmodule Arbor.Orchestrator.Session do
       |> persist_discovered_tools(result)
       |> Builders.maybe_checkpoint()
 
+    if terminal_conversation_authorized?(new_state) do
+      release_committed_turn(user_message, result, state, new_state, completed)
+    else
+      complete_turn_authorization_denied(new_state)
+    end
+  end
+
+  defp release_committed_turn(user_message, result, state, new_state, completed) do
     response = Map.get(result.context, "session.response", "")
 
     tool_history = Map.get(result.context, "session.tool_history", [])
@@ -2161,12 +2207,57 @@ defmodule Arbor.Orchestrator.Session do
          }
        })}
 
-    reply_turn(state, reply)
+    if terminal_conversation_authorized?(new_state) do
+      reply_turn(state, reply)
 
-    # Normal completion: apply_turn_result already persisted the complete message,
-    # so just clear the turn (incl. buffer + timeout).
-    reset_and_drain(new_state)
+      # Normal completion: apply_turn_result already persisted the complete message,
+      # so just clear the turn (incl. buffer + timeout).
+      reset_and_drain(new_state)
+    else
+      complete_turn_authorization_denied(new_state)
+    end
   end
+
+  defp complete_turn_authorization_denied(state) do
+    state = cleanup_turn_terminal(state, kill_task?: false)
+    state = transition_phase(state, :processing, :complete, :idle)
+    emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
+    reply_turn(state, {:error, :unauthenticated})
+    reset_and_drain(state)
+  end
+
+  # Authenticated execution is a continuation, not a durable grant. Recheck
+  # the pinned source binding without replaying proof or allocating an
+  # engagement during terminal cleanup. Indexing may be disabled entirely.
+  defp terminal_conversation_authorized?(%{turn_authority: nil}), do: true
+
+  defp terminal_conversation_authorized?(
+         %{
+           turn_authority: %TurnAuthority{} = authority,
+           turn_user_message: %UserMessage{engagement_id: engagement_id} = message,
+           current_engagement_id: engagement_id
+         } = state
+       )
+       when is_binary(engagement_id) do
+    with {:ok, ^authority} <- canonical_turn_authority(authority),
+         true <- message.sender_id == authority.authenticated_principal_id,
+         {:ok, :authorized} <-
+           Arbor.Security.recheck_conversation_owner(
+             authority.authenticated_principal_id,
+             state.agent_id,
+             authority.canonical_owner_id
+           ) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp terminal_conversation_authorized?(_state), do: false
 
   defp complete_turn_commit_failed(state, persist_reason) do
     state = PrivateMemory.close(state, state.turn_authority)
@@ -2901,21 +2992,31 @@ defmodule Arbor.Orchestrator.Session do
 
   defp bind_authenticated_engagement(user_message, authority, state) do
     principal = authority.authenticated_principal_id
+    canonical_owner = authority.canonical_owner_id
 
-    case Arbor.Comms.resolve_user_engagement(state.agent_id, principal) do
-      {:ok,
-       %Engagement{
-         id: engagement_id,
-         agent_id: agent_id,
-         owner_tenant: owner_tenant,
-         scope: :user,
-         visibility: :private
-       }}
-      when agent_id == state.agent_id and owner_tenant == principal and is_binary(engagement_id) ->
-        {:ok, UserMessage.with_engagement(user_message, engagement_id)}
+    with true <- user_message.sender_id == principal,
+         {:ok, :authorized} <-
+           Arbor.Security.recheck_conversation_owner(principal, state.agent_id, canonical_owner),
+         {:ok, engagement} <- Arbor.Comms.resolve_user_engagement(state.agent_id, canonical_owner) do
+      case engagement do
+        %Engagement{
+          id: engagement_id,
+          agent_id: agent_id,
+          owner_tenant: owner_tenant,
+          scope: :user,
+          visibility: :private
+        }
+        when agent_id == state.agent_id and owner_tenant == canonical_owner and
+               is_binary(engagement_id) ->
+          if is_nil(user_message.engagement_id) or user_message.engagement_id == engagement_id,
+            do: {:ok, UserMessage.with_engagement(user_message, engagement_id)},
+            else: {:error, :unauthenticated}
 
-      _other ->
-        {:error, :unauthenticated}
+        _other ->
+          {:error, :unauthenticated}
+      end
+    else
+      _ -> {:error, :unauthenticated}
     end
   rescue
     _ -> {:error, :unauthenticated}
@@ -3033,7 +3134,8 @@ defmodule Arbor.Orchestrator.Session do
   defp finalize_partial(state, status, reason) do
     buf = state.streaming_buffer
 
-    if is_map(buf) and is_binary(buf.content) and buf.content != "" and
+    if terminal_conversation_authorized?(state) and
+         is_map(buf) and is_binary(buf.content) and buf.content != "" and
          not is_nil(state.turn_user_message) do
       Builders.apply_turn_interruption(state, status, reason)
     end

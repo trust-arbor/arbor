@@ -617,6 +617,10 @@ defmodule Arbor.Security do
   Public options may not select TTL, capacity, broker, clock, collaborators,
   `:identity_verified`, `:verify_identity`, `:task_id`, or `:principal_scope`.
   Modes are mutually exclusive; proof-specific companions cannot cross modes.
+  Chat-agent receipts additionally require a reusable supported chat capability
+  and resolvable canonical owner before any use/rate allowance is consumed;
+  finite-use grants return `:unsupported_conversation_capability`. Non-chat
+  receipt authorization keeps its existing behavior.
   """
   @spec authorize_and_issue_delivery_receipt(String.t(), String.t(), atom() | nil, keyword()) ::
           {:ok, DeliveryReceipt.t()}
@@ -626,6 +630,7 @@ defmodule Arbor.Security do
              | :unauthorized
              | :pending_approval
              | :authorization_failed
+             | :unsupported_conversation_capability
              | :broker_full
              | :receipt_issue_failed
              | :broker_unavailable}
@@ -637,35 +642,44 @@ defmodule Arbor.Security do
       ) do
     with :ok <- validate_issue_human_principal(principal_id),
          {:ok, safe_opts} <- validate_issue_opts(opts) do
-      case authorize(principal_id, resource_uri, action, safe_opts) do
-        {:ok, :authorized} ->
-          case DeliveryReceiptBroker.issue(principal_id, resource_uri, action) do
-            {:ok, %DeliveryReceipt{} = receipt} ->
-              {:ok, receipt}
-
-            {:error, reason}
-            when reason in [:broker_full, :receipt_issue_failed, :broker_unavailable] ->
-              {:error, reason}
-
-            _ ->
-              {:error, :broker_unavailable}
-          end
-
-        {:ok, :pending_approval, _proposal_id} ->
-          {:error, :pending_approval}
-
-        {:error, _reason} ->
-          {:error, :unauthorized}
-
-        _malformed ->
-          {:error, :authorization_failed}
-      end
+      if chat_agent_receipt?(resource_uri, action),
+        do: issue_chat_receipt(principal_id, resource_uri, safe_opts, :allow_pending),
+        else: issue_ordinary_receipt(principal_id, resource_uri, action, safe_opts)
     end
   rescue
     _ -> {:error, :authorization_failed}
   catch
     :throw, _ -> {:error, :authorization_failed}
     :exit, _ -> {:error, :authorization_failed}
+  end
+
+  defp chat_agent_receipt?("arbor://chat/agent/" <> _target, :chat), do: true
+  defp chat_agent_receipt?(_, _), do: false
+
+  defp issue_ordinary_receipt(principal_id, resource_uri, action, safe_opts) do
+    case authorize(principal_id, resource_uri, action, safe_opts) do
+      {:ok, :authorized} ->
+        case DeliveryReceiptBroker.issue(principal_id, resource_uri, action) do
+          {:ok, %DeliveryReceipt{} = receipt} ->
+            {:ok, receipt}
+
+          {:error, reason}
+          when reason in [:broker_full, :receipt_issue_failed, :broker_unavailable] ->
+            {:error, reason}
+
+          _ ->
+            {:error, :broker_unavailable}
+        end
+
+      {:ok, :pending_approval, _proposal_id} ->
+        {:error, :pending_approval}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+
+      _malformed ->
+        {:error, :authorization_failed}
+    end
   end
 
   @doc """
@@ -675,8 +689,8 @@ defmodule Arbor.Security do
   resource and action `:chat`. The selected capability must be reusable
   (`max_uses: nil`) and contain only supported chat constraints. Finite-use or
   unknown constraints are refused before any usage/rate counter is consumed.
-  Ordinary constraint effects occur once, after proof verification. The generic
-  delivery receipt API retains its existing behavior.
+  Ordinary constraint effects occur once, after proof verification and canonical
+  owner resolution. Generic chat-agent receipts share this admission policy.
   """
   @spec authorize_and_issue_conversation_receipt(String.t(), String.t(), :chat, keyword()) ::
           {:ok, DeliveryReceipt.t()}
@@ -686,18 +700,7 @@ defmodule Arbor.Security do
          true <- Keyword.keyword?(opts),
          true <- Enum.all?(Keyword.keys(opts), &(&1 in [:session_token, :signed_request])),
          {:ok, proof_opts} <- validate_issue_opts(opts),
-         {:ok, cap, auth, safe_opts} <-
-           conversation_authorization_decision(principal, resource, proof_opts),
-         :ok <- reusable_conversation_capability(cap),
-         authorization = handle_authorized(cap, auth, principal, resource, :chat, safe_opts),
-         {:ok, :authorized} <-
-           InvocationAudit.observe_authorization(
-             authorization,
-             principal,
-             resource
-           ),
-         {:ok, %DeliveryReceipt{} = receipt} <-
-           DeliveryReceiptBroker.issue(principal, resource, :chat) do
+         {:ok, receipt} <- issue_chat_receipt(principal, resource, proof_opts, :deny_pending) do
       {:ok, receipt}
     else
       {:error, :unsupported_conversation_capability} = error -> error
@@ -707,6 +710,126 @@ defmodule Arbor.Security do
     _ -> {:error, :unauthorized}
   catch
     _, _ -> {:error, :unauthorized}
+  end
+
+  # Source-owned chat admission policy shared by both receipt facades. Select and
+  # authenticate exactly once. Reject unsupported continuations and unresolved
+  # owners before the authorization effect handler spends use/rate allowances.
+  defp issue_chat_receipt(principal, resource, proof_opts, approval_policy) do
+    with :ok <- validate_conversation_authorization_request(principal, resource, :chat),
+         {:ok, decision, cap, auth, safe_opts} <-
+           chat_authorization_decision(principal, resource, proof_opts),
+         true <- decision == :authorized or approval_policy == :allow_pending,
+         :ok <- reusable_conversation_capability(cap),
+         {:ok, canonical_owner} <- resolve_conversation_owner(principal) do
+      authorization =
+        case decision do
+          :authorized ->
+            handle_authorized(cap, auth, principal, resource, :chat, safe_opts)
+
+          :requires_approval ->
+            handle_requires_approval(cap, auth, principal, resource, :chat, safe_opts)
+        end
+
+      case InvocationAudit.observe_authorization(authorization, principal, resource) do
+        {:ok, :authorized} ->
+          DeliveryReceiptBroker.issue_conversation(principal, resource, canonical_owner)
+
+        {:ok, :pending_approval, _} ->
+          {:error, :pending_approval}
+
+        _ ->
+          {:error, :unauthorized}
+      end
+    else
+      {:error, :unsupported_conversation_capability} ->
+        deny_chat_receipt(principal, resource, :unsupported_conversation_capability)
+
+      _ ->
+        deny_chat_receipt(principal, resource, :unauthorized)
+    end
+  end
+
+  # Preflight denials must retain the ordinary authorization observability and
+  # invocation audit boundary. Never pass proof-bearing options to either sink.
+  # Effect-handler denials are already recorded and do not pass through here.
+  defp deny_chat_receipt(principal, resource, reason) do
+    Events.record_authorization_denied(principal, resource, reason, [])
+
+    case InvocationAudit.observe_authorization({:error, reason}, principal, resource) do
+      {:error, ^reason} -> {:error, reason}
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Resolve a private conversation owner through the configured trusted alias resolver.
+
+  This does not authenticate or grant access. Both the exact proof subject and
+  canonical owner must remain active humans. Unconfigured, unavailable, malformed,
+  or chained resolver results fail closed; no raw-principal fallback is allowed.
+  """
+  @spec resolve_conversation_owner(String.t()) :: {:ok, String.t()} | {:error, :unauthorized}
+  def resolve_conversation_owner(principal) do
+    with :ok <- validate_issue_human_principal(principal),
+         :ok <- require_exact_active_identity(principal),
+         {:ok, owner} <- resolve_identity_alias(principal),
+         :ok <- validate_issue_human_principal(owner),
+         :ok <- require_exact_active_identity(owner),
+         {:ok, ^owner} <- resolve_identity_alias(owner) do
+      {:ok, owner}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  @doc false
+  def conversation_receipt_owner(receipt, principal, target_agent) do
+    with {:ok, token} <- DeliveryReceipt.bearer_token(receipt),
+         {:ok, owner} <-
+           DeliveryReceiptBroker.conversation_owner(
+             token,
+             principal,
+             "arbor://chat/agent/" <> target_agent
+           ),
+         {:ok, ^owner} <- resolve_conversation_owner(principal) do
+      {:ok, owner}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  @doc false
+  def private_memory_owner_binding(admission) do
+    with {:ok, token} <- Arbor.Security.Contracts.PrivateMemoryAdmission.token(admission),
+         {:ok, binding} <- DeliveryReceiptBroker.memory_binding(token),
+         {:ok, owner} <- resolve_conversation_owner(binding.authenticated_principal_id),
+         true <- owner == binding.canonical_owner_id do
+      {:ok, binding}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Recheck the exact authenticated subject's grant and its pinned conversation owner.
+
+  Alias changes, unlinking, owner revocation and resolver outages deny the
+  continuation. They never transfer grants or rescope an admitted operation.
+  """
+  @spec recheck_conversation_owner(String.t(), String.t(), String.t()) ::
+          {:ok, :authorized} | {:error, :unauthorized}
+  def recheck_conversation_owner(principal, target_agent, owner) do
+    with {:ok, ^owner} <- resolve_conversation_owner(principal),
+         {:ok, :authorized} <- recheck_conversation_access(principal, target_agent) do
+      {:ok, :authorized}
+    else
+      _ -> {:error, :unauthorized}
+    end
   end
 
   @doc """
@@ -760,6 +883,13 @@ defmodule Arbor.Security do
   # once by AuthDecision; initial admission passes the decision to the existing
   # effect handler rather than evaluating that nonce again.
   defp conversation_authorization_decision(principal, resource, opts) do
+    case chat_authorization_decision(principal, resource, opts) do
+      {:ok, :authorized, cap, auth, safe_opts} -> {:ok, cap, auth, safe_opts}
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp chat_authorization_decision(principal, resource, opts) do
     with :ok <- require_exact_active_identity(principal),
          {:ok, proof, safe_opts} <- extract_session_token(opts),
          {:ok, ^resource} <- normalize_authorization_resource_uri(resource, safe_opts),
@@ -777,8 +907,11 @@ defmodule Arbor.Security do
              :chat,
              decision_opts
            ) do
-        {:ok, :authorized, cap, auth} -> {:ok, cap, auth, safe_opts}
-        _ -> {:error, :unauthorized}
+        {:ok, decision, cap, auth} when decision in [:authorized, :requires_approval] ->
+          {:ok, decision, cap, auth, safe_opts}
+
+        _ ->
+          {:error, :unauthorized}
       end
     end
   end

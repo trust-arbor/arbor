@@ -23,10 +23,6 @@ defmodule Arbor.Agent.IdentityAliasResolver do
 
   @impl true
   def resolve(id) when is_binary(id) do
-    if IdentityAliases.available?() do
-      {:ok, IdentityAliases.resolve(id)}
-    else
-      {:error, :alias_store_unavailable}
-    end
+    IdentityAliases.resolve_strict(id)
   end
 end

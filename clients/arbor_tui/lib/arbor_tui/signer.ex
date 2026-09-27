@@ -72,6 +72,11 @@ defmodule ArborTui.Signer do
   @spec authorization_header(identity(), String.t(), String.t(), binary()) :: String.t()
   def authorization_header(identity, method, path, body \\ "") do
     payload = canonical_payload(method, path, body)
+    authorization_for_payload(identity, payload)
+  end
+
+  @doc "Sign the canonical conversation operation payload with a fresh nonce."
+  def authorization_for_payload(identity, payload) when is_binary(payload) do
     {timestamp, nonce, signature} = sign(payload, identity)
 
     envelope =

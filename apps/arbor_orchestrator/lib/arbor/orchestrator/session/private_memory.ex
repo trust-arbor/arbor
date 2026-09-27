@@ -252,20 +252,30 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
   def exchange(receipt, user_message, state) do
     turn_id = Identifiers.generate_id("turn_")
 
-    with {:ok, authority} <-
-           TurnAuthority.new(
-             turn_id: turn_id,
-             authenticated_principal_id: user_message.sender_id,
-             disclosure_capability_id: nil
-           ),
-         {:ok, admission} <-
+    with {:ok, admission} <-
            Security.exchange_private_memory_receipt(
              receipt,
              state.agent_id,
              user_message.sender_id,
              %{session_id: state.session_id, turn_id: turn_id}
            ) do
-      {:ok, authority, admission}
+      result =
+        with {:ok, binding} <- Security.private_memory_owner_binding(admission),
+             true <- binding.authenticated_principal_id == user_message.sender_id,
+             {:ok, authority} <-
+               TurnAuthority.new(
+                 turn_id: turn_id,
+                 authenticated_principal_id: binding.authenticated_principal_id,
+                 canonical_owner_id: binding.canonical_owner_id,
+                 disclosure_capability_id: nil
+               ) do
+          {:ok, authority, admission}
+        else
+          _ -> {:error, :unauthenticated}
+        end
+
+      if match?({:error, _}, result), do: close_admission(admission)
+      result
     else
       _ -> {:error, :unauthenticated}
     end

@@ -125,4 +125,139 @@ defmodule ArborTui.WSClientTest do
       assert {:detached, _} = await_status()
     end
   end
+
+  test "late receipt for retried command does not replace a newer pending command" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listener)
+    peer = spawn_link(fn -> receipt_peer(listener) end)
+    on_exit(fn -> send(peer, :stop) end)
+
+    client =
+      start_supervised!(
+        {WSClient,
+         runtime: self(),
+         identity: fake_identity(),
+         gateway_url: "ws://127.0.0.1:#{port}",
+         target_agent_id: "agent_" <> String.duplicate("a", 64)}
+      )
+
+    assert {:connecting, _} = await_status()
+    assert {:connected, _} = await_status()
+
+    send(
+      peer,
+      {:event, "conversation_history",
+       %{
+         "engagement_id" => "eng_" <> String.duplicate("b", 32),
+         "agent_id" => "agent_" <> String.duplicate("a", 64),
+         "entries" => [],
+         "cursor" => 0,
+         "has_more" => false
+       }}
+    )
+
+    assert_receive {:"$gen_cast", {:message, :root, {:server_event, {:engagement, _}}}}
+    WSClient.send_command(client, {:send, "first draft"})
+
+    assert_receive {:"$gen_cast",
+                    {:message, :root, {:server_event, {:conversation_command, first}}}}
+
+    completed = Map.put(first, "status", "completed")
+    send(peer, {:event, "conversation_command", completed})
+
+    assert_receive {:"$gen_cast",
+                    {:message, :root, {:server_event, {:conversation_command, ^completed}}}}
+
+    WSClient.send_command(client, :retry)
+    WSClient.send_command(client, {:send, "newer draft"})
+
+    assert_receive {:"$gen_cast",
+                    {:message, :root, {:server_event, {:conversation_command, newer}}}}
+
+    assert newer["id"] != first["id"]
+    assert newer["text"] == "newer draft"
+
+    send(peer, {:event, "conversation_command", completed})
+
+    refute_receive {:"$gen_cast",
+                    {:message, :root, {:server_event, {:conversation_command, ^completed}}}},
+                   100
+
+    assert :sys.get_state(client).last_command == newer
+
+    accepted = Map.put(newer, "status", "admitted")
+    send(peer, {:event, "conversation_command", accepted})
+
+    assert_receive {:"$gen_cast",
+                    {:message, :root, {:server_event, {:conversation_command, ^accepted}}}}
+
+    assert :sys.get_state(client).last_command == accepted
+  end
+
+  # A local RFC 6455 peer exercises the public client and decoded wire frames.
+  # It deliberately delays receipts; no authentication or host behavior is mocked
+  # inside WSClient itself.
+  defp receipt_peer(listener) do
+    {:ok, socket} = :gen_tcp.accept(listener)
+    :ok = :gen_tcp.close(listener)
+    request = read_upgrade(socket, "")
+    [_, key] = Regex.run(~r/sec-websocket-key: ([^\r]+)\r/i, request)
+    accept = :crypto.hash(:sha, key <> "258EAFA5-E914-47DA-95CA-C5AB0DC85B11") |> Base.encode64()
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: #{accept}\r\n\r\n"
+      )
+
+    receipt_peer_loop(socket)
+  end
+
+  defp read_upgrade(socket, buffer) do
+    if String.contains?(buffer, "\r\n\r\n") do
+      buffer
+    else
+      {:ok, data} = :gen_tcp.recv(socket, 0, 1_000)
+      read_upgrade(socket, buffer <> data)
+    end
+  end
+
+  defp receipt_peer_loop(socket) do
+    receive do
+      {:event, type, data} ->
+        json = Jason.encode!(%{type: type, data: data})
+        size = byte_size(json)
+        header = if size < 126, do: <<0x81, size>>, else: <<0x81, 126, size::16>>
+        :ok = :gen_tcp.send(socket, [header, json])
+        receipt_peer_loop(socket)
+
+      :stop ->
+        :gen_tcp.close(socket)
+    end
+  end
+
+  test "only a first definitive submit rejection releases pending admission" do
+    command = %{"id" => "stable", "text" => "hello", "status" => "transport_unknown"}
+    rejection = %{"id" => "stable", "reason" => "unsupported_conversation_capability"}
+    assert {:definite, ^command} = WSClient.classify_rejection(command, 1, rejection)
+    assert :preserve = WSClient.classify_rejection(command, 2, rejection)
+
+    assert :preserve =
+             WSClient.classify_rejection(
+               %{command | "status" => "dispatch_started"},
+               1,
+               rejection
+             )
+
+    assert :preserve =
+             WSClient.classify_rejection(%{command | "status" => "uncertain"}, 1, rejection)
+
+    assert :preserve = WSClient.classify_rejection(command, 1, %{rejection | "id" => "another"})
+
+    assert :preserve =
+             WSClient.classify_rejection(command, 1, %{
+               rejection
+               | "reason" => "conversation_unavailable"
+             })
+  end
 end

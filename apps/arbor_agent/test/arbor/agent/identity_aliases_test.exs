@@ -7,20 +7,17 @@ defmodule Arbor.Agent.IdentityAliasesTest do
   @manage_resource "arbor://identity/alias/manage"
 
   setup_all do
-    # This module authorizes via Arbor.Security with unsigned test capabilities
-    # and unsigned authorize calls, so it needs signing/strict-identity OFF. Set
-    # these explicitly rather than trusting the global default — a combined
-    # umbrella run can have them in force (the full Security tree is started),
-    # which broke the alias grant/deny tests with identity/signing errors. Tests
-    # here are async: false, so this holds; restore prior values on exit.
+    # Real grants and possession proofs exercise the same signed authority and
+    # mutation audit gates as production. These synchronous fixtures restore
+    # every temporary setting after the module completes.
     prev_security =
       for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
         {key, Application.get_env(:arbor_security, key)}
       end
 
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :capability_signing_required, true)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_security, :identity_verification, true)
 
     on_exit(fn ->
       for {key, value} <- prev_security do
@@ -103,18 +100,35 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     }
   end
 
+  test "security regression: authoritative alias resolver rejects malformed stored mapping", c do
+    alias_key = "alias:" <> c.victim_secondary
+    on_exit(fn -> Arbor.Persistence.BufferedStore.delete(alias_key, name: :arbor_user_config) end)
+
+    for malformed <- [
+          %{unexpected: "corrupt"},
+          %{primary_id: c.victim_primary},
+          %{primary_id: c.victim_primary, secondary_id: "human_other"}
+        ] do
+      assert :ok =
+               Arbor.Persistence.BufferedStore.put(
+                 alias_key,
+                 Arbor.Contracts.Persistence.Record.new(alias_key, malformed),
+                 name: :arbor_user_config
+               )
+
+      assert {:error, :identity_alias_malformed} =
+               Arbor.Agent.IdentityAliasResolver.resolve(c.victim_secondary)
+    end
+
+    assert :ok = Arbor.Persistence.BufferedStore.delete(alias_key, name: :arbor_user_config)
+    assert {:ok, id} = Arbor.Agent.IdentityAliasResolver.resolve(c.victim_secondary)
+    assert id == c.victim_secondary
+  end
+
   defp grant_manage_cap(principal) do
-    now = DateTime.utc_now()
-
-    cap = %Arbor.Contracts.Security.Capability{
-      id: "cap_alias_manage_#{principal}_#{System.unique_integer([:positive])}",
-      principal_id: principal,
-      resource_uri: @manage_resource,
-      granted_at: now,
-      expires_at: DateTime.add(now, 3600, :second)
-    }
-
-    Arbor.Security.CapabilityStore.put(cap)
+    assert {:ok, cap} = Arbor.Security.grant(principal: principal, resource: @manage_resource)
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    cap
   end
 
   defp registered_principal do
@@ -467,9 +481,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
             IdentityAliases.unlink(caller, secondary, signed_request: link_proof)
 
           link_result =
-            IdentityAliases.link(caller, other_secondary, primary,
-              signed_request: unlink_proof
-            )
+            IdentityAliases.link(caller, other_secondary, primary, signed_request: unlink_proof)
 
           {unlink_result, IdentityAliases.resolve(secondary), link_result}
         after
@@ -502,8 +514,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
             ),
             IdentityAliases.link(no_proof.agent_id, secondary, primary),
             IdentityAliases.link(wrong_mutation.agent_id, secondary, primary,
-              signed_request:
-                signed_proof(wrong_mutation, {:link, other_secondary, primary})
+              signed_request: signed_proof(wrong_mutation, {:link, other_secondary, primary})
             )
           }
         after
@@ -521,4 +532,3 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     end
   end
 end
-

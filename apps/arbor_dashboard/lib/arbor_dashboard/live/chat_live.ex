@@ -2,30 +2,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   @moduledoc """
   Agent chat interface.
 
-  Interactive conversation with Arbor agents, displaying thinking blocks,
-  recalled memories, signal emissions, and response streaming.
+  Authenticated private conversations with Arbor agents, displaying durable
+  transcript entries and command delivery state through the public Agent API.
   """
 
   use Phoenix.LiveView
-  use Arbor.Dashboard.Live.SignalSubscription
-
-  require Logger
 
   import Arbor.Web.Components
-  import Arbor.Web.Helpers
   import Arbor.Dashboard.Live.ChatLive.Components
 
-  alias Arbor.Agent.{APIAgent, BranchSupervisor, Claude, Lifecycle, Manager}
   alias Arbor.Common.CommandIntake
   alias Arbor.Contracts.Commands.{Context, Result}
-  alias Arbor.Contracts.Comms.Interaction
-  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Dashboard.ChatState
-  alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
-  alias Arbor.Dashboard.Live.ChatLive.Helpers, as: ChatHelpers
-  alias Arbor.Web.SignalLive
-
-  @chat_page_size 50
+  alias Arbor.Dashboard.Live.ChatLive.{Conversation, GroupChat}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -120,43 +109,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       |> stream(:actions, [])
       |> stream(:llm_interactions, [])
       |> stream(:approvals, [])
-
-    # Subscribe to signals with backpressure (raw mode — we use individual signals)
-    socket =
-      if connected?(socket) do
-        # Pass principal_id + session_token for restricted topic subscriptions
-        principal_id = socket.assigns[:current_agent_id]
-        session_token = socket.assigns[:session_token]
-
-        security_opts =
-          if principal_id do
-            opts = [principal_id: principal_id]
-            if session_token, do: Keyword.put(opts, :session_token, session_token), else: opts
-          else
-            []
-          end
-
-        # Grant the dashboard actor the narrow approval read authority needed
-        # by the shared orchestration facade. Per-agent answer authority is
-        # added when the LiveView connects to an agent or receives an
-        # InteractionRouter approval for a concrete agent.
-        _ = ensure_dashboard_approval_capability(socket)
-
-        # HITL router Phase 1a: register dashboard presence for this user so
-        # the InteractionRouter can target browsers, and subscribe to the
-        # per-user dashboard interaction topic. The router broadcasts
-        # {:dashboard_interaction, %Interaction{}} on this topic when an
-        # agent asks for human input and dashboard is the active channel.
-        _ = register_interaction_presence(socket)
-        _ = subscribe_to_dashboard_interactions(socket)
-
-        socket
-        |> SignalLive.subscribe_raw("agent.*")
-        |> SignalLive.subscribe_raw("memory.*")
-        |> SignalLive.subscribe_raw("security.authorization_pending", security_opts)
-      else
-        socket
-      end
+      |> Conversation.mount()
 
     # Reconnect to existing agent if one is running
     socket =
@@ -168,12 +121,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           socket
       end
 
-    # Periodic approvals re-sync — defense in depth against signal drops at
-    # the SignalLive bridge under backpressure. Every 5s, re-fetch pending
-    # approvals from the shared queue so dropped signals can't leave the user
-    # with no way to see/approve a pending tool call.
+    # Private updates only come from authenticated conversation reads.
     if connected?(socket) do
-      :timer.send_interval(5_000, :refresh_approvals)
+      :timer.send_interval(1_000, :refresh_conversation)
     end
 
     {:ok, socket}
@@ -201,25 +151,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
-  def terminate(_reason, socket) do
-    # Agent survives navigation — managed by Supervisor, not LiveView.
-    # Only unsubscribe from signals.
-    SignalLive.unsubscribe(socket)
-  end
-
-  # Phase 2c removed the "start-agent" form submission (the model
-  # dropdown). Agent startup now flows through the `/start <template>`
-  # slash command, which dispatches via `dispatch_command_action/3`
-  # using `Manager.start_or_resume/3`. See chat_live/components.ex's
-  # chat_controls/1 (no-agent state) for the user-facing surface.
-
-  @impl true
   def handle_event("stop-agent", _params, socket) do
-    if socket.assigns[:agent_id] do
-      Manager.stop_agent(socket.assigns.agent_id)
-    end
-
-    {:noreply, clear_agent_assigns(socket)}
+    {:noreply,
+     assign(socket,
+       error:
+         "Stop the agent from the Agents dashboard; private chat does not grant lifecycle authority."
+     )}
   end
 
   def handle_event("update-input", %{"message" => value}, socket) do
@@ -230,68 +167,35 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, socket}
   end
 
-  def handle_event("send-message", _params, socket) do
-    input = String.trim(socket.assigns.input)
+  def handle_event("send-message", params, socket) do
+    input = String.trim(Map.get(params, "message", socket.assigns.input))
+    socket = assign(socket, input: input)
 
     cond do
       input == "" ->
         {:noreply, socket}
 
-      # Group chat mode
-      socket.assigns.group_mode and socket.assigns.group_id ->
-        # Add user message to display
-        user_msg = %{
-          id: "msg-#{System.unique_integer([:positive])}",
-          role: :user,
-          content: input,
-          sender_name: "User",
-          sender_type: :human,
-          timestamp: DateTime.utc_now()
-        }
-
-        socket =
-          socket
-          |> stream_insert(:messages, user_msg)
-          |> assign(input: "", error: nil)
-
-        # Persist to session store
-        try do
-          if socket.assigns.group_id do
-            persist_group_message(socket.assigns.group_id, user_msg)
-          end
-        rescue
-          _ -> :ok
-        end
-
-        # Send to channel (triggers agent responses)
-        Manager.channel_send(
-          socket.assigns.group_id,
-          "human_primary",
-          "User",
-          :human,
-          input
-        )
-
-        {:noreply, socket}
+      socket.assigns.group_mode ->
+        {:noreply,
+         assign(socket,
+           error:
+             "Group chat is unavailable in this private conversation. Use the Channels dashboard."
+         )}
 
       # Single-agent mode (existing flow)
-      socket.assigns.agent_host_pid != nil ->
-        # Slash command intake — check FIRST, before the loading guard.
-        # Commands are pure and synchronous; they don't conflict with an
-        # in-flight LLM query, so we can run them immediately even when
-        # `loading` is true.
+      socket.assigns.agent_id != nil ->
+        # Local /help is available during a pending turn. Other slash commands
+        # report that their authenticated operation contract is unavailable.
         case CommandIntake.classify(input) do
           {:command, _, _} ->
             handle_slash_command(input, socket)
 
           {:prompt, _} ->
-            send_prompt(input, socket)
+            {:noreply, Conversation.submit(socket, input, params["command_id"])}
         end
 
-      # No agent connected — but slash commands can still run.
-      # Display commands like /help work without an agent context;
-      # agent-bound commands like /status correctly return "not available."
-      # Regular prompts get a helpful error pointing them at /help.
+      # Local /help works without an attached agent. Runtime commands remain
+      # unavailable, and prompts explain how to attach before sending.
       true ->
         case CommandIntake.classify(input) do
           {:command, _, _} ->
@@ -331,11 +235,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("toggle-completed-goals", _params, socket) do
-    agent_id = socket.assigns.agent_id
-    show_completed = !socket.assigns.show_completed_goals
-    goals = if agent_id, do: SignalTracker.fetch_goals(agent_id, show_completed), else: []
-
-    {:noreply, assign(socket, show_completed_goals: show_completed, agent_goals: goals)}
+    {:noreply,
+     assign(socket, show_completed_goals: !socket.assigns.show_completed_goals, agent_goals: [])}
   end
 
   def handle_event("toggle-llm-panel", _params, socket) do
@@ -343,116 +244,41 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("load-more-messages", _params, socket) do
-    agent_id = socket.assigns.agent_id
-    cursor = socket.assigns[:chat_history_cursor]
-
-    if agent_id && cursor do
-      try do
-        sess_id = "agent-session-#{agent_id}"
-
-        older =
-          load_session_history(sess_id,
-            limit: @chat_page_size,
-            before_timestamp: cursor
-          )
-
-        older_with_ids =
-          Enum.map(older, fn msg ->
-            Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
-          end)
-
-        new_cursor =
-          case older_with_ids do
-            [first | _] -> first[:timestamp]
-            [] -> cursor
-          end
-
-        socket =
-          older_with_ids
-          |> Enum.reduce(socket, fn msg, acc ->
-            stream_insert(acc, :messages, msg, at: 0)
-          end)
-          |> assign(
-            chat_history_cursor: new_cursor,
-            chat_has_more: older_with_ids != []
-          )
-
-        {:noreply, push_event(socket, "messages-loaded", %{count: length(older_with_ids)})}
-      rescue
-        _ ->
-          {:noreply, push_event(socket, "messages-loaded", %{count: 0})}
-      end
-    else
-      {:noreply, push_event(socket, "messages-loaded", %{count: 0})}
-    end
+    {:noreply,
+     socket
+     |> Conversation.refresh()
+     |> push_event("messages-loaded", %{count: 0})}
   end
 
-  def handle_event("approve-tool", %{"id" => proposal_id}, socket) do
-    case safe_answer_approval(proposal_id, :approve, socket) do
-      :ok ->
-        {:noreply, drop_approval(socket, proposal_id)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
-    end
+  def handle_event("conversation:restore", params, socket) do
+    {:noreply, Conversation.restore(socket, params)}
   end
 
-  def handle_event(
-        "always-allow-tool",
-        %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
-        socket
-      ) do
-    actor_id = approval_actor_id(socket)
-
-    # H13: gate the trust-profile mutation behind arbor://trust/auto_promote.
-    # Without this check, any actor that can approve a tool call could
-    # permanently set the agent's trust profile to :auto for any resource —
-    # a single-click silent escalation.
-    case Arbor.Dashboard.Cores.AutoPromoteGate.authorize(actor_id, agent_id) do
-      :ok ->
-        case safe_answer_approval(proposal_id, :approve, socket) do
-          :ok ->
-            Arbor.Trust.Store.always_allow(agent_id, resource)
-
-            {:noreply, drop_approval(socket, proposal_id)}
-
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
-        end
-
-      {:error, :unauthorized_auto_promote} ->
-        Logger.warning(
-          "[ChatLive] always-allow denied: #{actor_id} lacks " <>
-            "arbor://trust/auto_promote (target=#{agent_id}, resource=#{resource})"
-        )
-
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Always Allow requires the trust auto-promote capability."
-         )}
-    end
+  def handle_event("conversation:reconnect", _params, socket) do
+    {:noreply, Conversation.reconnect(socket)}
   end
 
-  def handle_event("deny-tool", %{"id" => proposal_id}, socket) do
-    case safe_answer_approval(proposal_id, :deny, socket) do
-      :ok ->
-        {:noreply, drop_approval(socket, proposal_id)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Deny failed: #{inspect(reason)}")}
-    end
+  def handle_event("conversation:retry", _params, socket) do
+    {:noreply, Conversation.retry(socket)}
   end
 
-  # Backwards-compatible event names for older approval cards. Resolution now
-  # goes through the shared orchestration facade, not InteractionRouter.
-  def handle_event("approve-interaction", %{"id" => request_id}, socket) do
-    answer_interaction(socket, request_id, :approve)
+  def handle_event("conversation:new-message", _params, socket) do
+    {:noreply, Conversation.dismiss(socket)}
   end
 
-  def handle_event("reject-interaction", %{"id" => request_id}, socket) do
-    answer_interaction(socket, request_id, :deny)
+  def handle_event(event, _params, socket)
+      when event in [
+             "approve-tool",
+             "always-allow-tool",
+             "deny-tool",
+             "approve-interaction",
+             "reject-interaction"
+           ] do
+    {:noreply,
+     assign(socket,
+       error:
+         "Approvals are unavailable in this private conversation; use an authorized approval channel."
+     )}
   end
 
   def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
@@ -468,369 +294,45 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
   end
 
-  def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("show-join-groups" = e, p, s), do: GroupChat.handle_event(e, p, s)
-
-  def handle_event("join-group" = e, p, s) do
-    {:noreply, socket} = GroupChat.handle_event(e, p, s)
-    {:noreply, maybe_connect_group_agent(socket)}
+  def handle_event(event, _params, socket)
+      when event in [
+             "show-group-modal",
+             "show-join-groups",
+             "join-group",
+             "toggle-group-agent",
+             "update-group-name",
+             "confirm-create-group",
+             "cancel-group-modal",
+             "leave-group"
+           ] do
+    {:noreply,
+     assign(socket,
+       error:
+         "Group chat is unavailable in this private conversation. Use the Channels dashboard."
+     )}
   end
-
-  def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
-
-  def handle_event("confirm-create-group" = e, p, s) do
-    {:noreply, socket} = GroupChat.handle_event(e, p, s)
-    {:noreply, maybe_connect_group_agent(socket)}
-  end
-
-  def handle_event("cancel-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("leave-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
 
   def handle_event("noop", _params, socket), do: {:noreply, socket}
 
-  # Centralized "approval consumed" cleanup. Any path that resolves an
-  # approval (approve / always-allow / deny) needs to remove it from the
-  # stream AND decrement the count AND drop it from known_approval_ids
-  # so the polling fallback doesn't re-add it.
-  defp drop_approval(socket, proposal_id) do
-    seen = socket.assigns[:known_approval_ids] || MapSet.new()
-    new_count = max((socket.assigns[:approvals_count] || 0) - 1, 0)
-
-    socket
-    |> stream_delete_by_dom_id(:approvals, "approvals-#{proposal_id}")
-    |> assign(:approvals_count, new_count)
-    |> assign(:known_approval_ids, MapSet.delete(seen, proposal_id))
-  end
-
-  # The actor identity used when answering approvals. In OIDC mode this is the
-  # human user's agent_id. In dev/no-OIDC mode it falls back to a stable
-  # "human_dashboard" principal — chat_live grants narrow approval capabilities
-  # to that principal on mount/connect.
-  #
-  # The "human_" prefix is load-bearing: AuthDecision.check_identity skips the
-  # identity-status registry lookup for human_ principals (treating them as
-  # session-authenticated). And Security.grant rejects "system" as an invalid
-  # principal_id — that was the actual reason the previous fix didn't work.
-  defp approval_actor_id(socket) do
-    socket.assigns[:current_agent_id] || "human_dashboard"
-  end
-
-  defp ensure_dashboard_approval_capability(socket, agent_id \\ nil) do
-    actor_id = approval_actor_id(socket)
-
-    resources =
-      ["arbor://approval/read"]
-      |> maybe_add_answer_scope(agent_id)
-
-    Enum.each(resources, fn resource ->
-      Arbor.Security.grant(
-        principal: actor_id,
-        resource: resource,
-        constraints: %{},
-        metadata: %{source: :chat_live, agent_id: agent_id}
-      )
-    end)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp maybe_add_answer_scope(resources, agent_id) when is_binary(agent_id) and agent_id != "",
-    do: ["arbor://approval/answer/#{agent_id}" | resources]
-
-  defp maybe_add_answer_scope(resources, _agent_id), do: resources
-
-  # HITL router Phase 1a helpers
-  # ──────────────────────────────────────────────────────────────────
-  # ChatLive is a per-user dashboard window. Presence tracking lets the
-  # InteractionRouter know this user has at least one dashboard tab open
-  # so it can route there. Subscription to the per-user topic lets the
-  # InteractionAdapter's broadcast reach this LiveView regardless of which
-  # node hosts it (PubSub is cluster-aware).
-
-  defp register_interaction_presence(socket) do
-    user_id = approval_actor_id(socket)
-    Arbor.Comms.PresenceTracker.track(self(), user_id, :dashboard, %{liveview_pid: self()})
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp subscribe_to_dashboard_interactions(socket) do
-    user_id = approval_actor_id(socket)
-    adapter = Module.concat([:Arbor, :Dashboard, :InteractionAdapter])
-
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :topic_for_user, 1) and
-         Code.ensure_loaded?(Phoenix.PubSub) do
-      topic = apply(adapter, :topic_for_user, [user_id])
-      apply(Phoenix.PubSub, :subscribe, [interaction_pubsub(), topic])
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
-  # HITL traffic is pinned to Arbor.Comms.PubSub (owned by Arbor.Comms.Application).
-  # Match the InteractionRouter / InteractionAdapter discovery so subscribe and
-  # broadcast land on the same bus regardless of app startup order.
-  defp interaction_pubsub, do: Arbor.Comms.PubSub
-
-  defp answer_interaction(socket, request_id, decision) do
-    case safe_answer_approval(request_id, decision, socket) do
-      :ok ->
-        {:noreply, drop_approval(socket, request_id)}
-
-      {:error, :not_found} ->
-        # Already resolved by another tab / expired — just drop locally.
-        {:noreply, drop_approval(socket, request_id)}
-
-      {:error, reason} ->
-        Logger.warning(
-          "[ChatLive] answer_interaction failed for #{request_id}: #{inspect(reason)}"
-        )
-
-        {:noreply, put_flash(socket, :error, "Failed to record response: #{inspect(reason)}")}
-    end
-  end
-
   @impl true
-  def handle_info({:query_result, :acp, {:ok, response}}, socket) do
-    thinking = response.thinking
+  # Legacy agent-wide response and signal payloads are not private-conversation
+  # authority. Only authenticated transcript/journal reads may populate chat.
+  def handle_info({:query_result, _runtime, _result}, socket), do: {:noreply, socket}
 
-    thinking_label =
-      case thinking do
-        nil -> "nil"
-        [] -> "[]"
-        blocks when is_list(blocks) -> "#{length(blocks)} blocks"
-        other -> inspect(other)
-      end
-
-    Logger.debug(
-      "[ChatLive] ACP response — thinking: #{thinking_label}, text_len: #{String.length(response.text || "")}"
-    )
-
-    socket =
-      socket
-      |> assign(streaming_text: "")
-      |> process_query_response(socket.assigns.agent_host_pid, response)
-
-    {:noreply, socket}
+  def handle_info(:refresh_conversation, socket) do
+    {:noreply, Conversation.refresh(socket)}
   end
 
-  def handle_info({:query_result, :arbor, {:ok, response}}, socket) do
-    model_config = socket.assigns.current_model || %{}
-
-    normalized = PipelineResponse.normalize(response)
-    text = normalized.content
-
-    # If the final response is empty but we have streamed text, use the streamed text.
-    # This preserves partial responses when the LLM stream completes without a final message.
-    text =
-      if text == "" and is_binary(socket.assigns[:streaming_text]) and
-           socket.assigns[:streaming_text] != "" do
-        socket.assigns[:streaming_text]
-      else
-        text
-      end
-
-    Logger.info(
-      "[ChatLive] API response received: " <>
-        "text=#{String.length(to_string(text))} chars, " <>
-        "type=#{response[:type]}, " <>
-        "tool_history=#{length(response[:tool_history] || [])}"
-    )
-
-    # Session path uses tool_history, legacy uses tool_calls
-    tool_uses = response[:tool_history] || response[:tool_calls] || []
-
-    # Detect empty responses (rate-limited or model error)
-    if (text == "" or text == nil) and tool_uses == [] do
-      error_msg = ChatHelpers.format_query_error(:empty_response)
-      {:noreply, assign(socket, loading: false, streaming_text: "", error: error_msg)}
-    else
-      assistant_msg = %{
-        id: "msg-#{System.unique_integer([:positive])}",
-        role: :assistant,
-        content: text,
-        tool_uses: tool_uses,
-        timestamp: DateTime.utc_now(),
-        model: "#{model_config[:provider]}:#{model_config[:id]}",
-        session_id: nil,
-        memory_count: length(response[:recalled_memories] || [])
-      }
-
-      socket =
-        socket
-        |> assign(streaming_text: "")
-        |> stream_insert(:messages, assistant_msg)
-        |> assign(loading: false, query_count: socket.assigns.query_count + 1)
-        |> add_tool_use_actions(tool_uses)
-        |> maybe_extract_api_usage(response)
-        |> maybe_add_recalled_memories_api(response)
-
-      {:noreply, socket}
-    end
-  end
-
-  def handle_info({:query_result, _runtime, {:error, reason}}, socket) do
-    error_msg = ChatHelpers.format_query_error(reason)
-    {:noreply, assign(socket, loading: false, error: error_msg)}
-  end
-
-  # Signal: agent lifecycle events (started, stopped, chat_message)
-  def handle_info({:signal_received, %{category: :agent, type: type} = signal}, socket)
-      when type in [:started, :stopped, :chat_message] do
-    handle_agent_signal(signal, socket)
-  end
-
-  # Signal: proactive agent-initiated notification (A1 notify channel). An agent
-  # surfaces a thought/progress message from a heartbeat without waiting for a
-  # turn; render it as a visually-distinct message in THIS chat only (the old 💭
-  # affordance). Scoped to the displayed agent so a chat on agent X never shows
-  # agent Y's notifications.
-  def handle_info({:signal_received, %{category: :agent, type: :notification} = signal}, socket) do
-    agent_id = socket.assigns.agent_id
-    signal_agent = get_in(signal.data, [:agent_id]) || get_in(signal.data, ["agent_id"])
-
-    if agent_id && signal_agent == agent_id do
-      text = get_in(signal.data, [:text]) || get_in(signal.data, ["text"]) || ""
-      kind = get_in(signal.data, [:kind]) || get_in(signal.data, ["kind"]) || :notification
-
-      msg = %{
-        id: "msg-#{System.unique_integer([:positive])}",
-        role: :notification,
-        kind: kind,
-        content: text,
-        timestamp: signal.timestamp || DateTime.utc_now(),
-        tool_uses: [],
-        memory_count: 0,
-        model: nil,
-        session_id: nil
-      }
-
-      {:noreply, stream_insert(socket, :messages, msg)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  # Signal: security authorization pending (tool approval requests).
-  #
-  # Only insert if the signal is for THIS chat's agent. The previous
-  # condition (`if agent_id && signal_agent`) accepted signals for any
-  # agent as long as both fields were non-nil — which meant a chat
-  # connected to agent X could see approval cards for agent Y that the
-  # user couldn't actually approve from there.
-  #
-  # When agent_id is nil (the chat hasn't connected to an agent yet),
-  # we drop the signal — the periodic polling fallback (handle_info
-  # :refresh_approvals, every 5s) will pick it up after connect.
-  def handle_info(
-        {:signal_received, %{category: :security, type: :authorization_pending} = signal},
-        socket
-      ) do
-    agent_id = socket.assigns.agent_id
-    signal_agent = get_in(signal.data, [:principal_id]) || get_in(signal.data, ["principal_id"])
-
-    if agent_id && signal_agent == agent_id do
-      _ = ensure_dashboard_approval_capability(socket, agent_id)
-      {:noreply, merge_pending_approvals(socket, agent_id)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  # HITL router Phase 1a: an agent submitted an interaction targeted at this
-  # user, and dashboard was the active channel. Add it to the approvals
-  # stream alongside any facade-fetched approvals already there. Dedup on
-  # request_id via known_approval_ids so multiple browser tabs don't double-
-  # render or duplicate when the polling fallback re-fetches.
-  def handle_info({:dashboard_interaction, %Interaction{} = interaction}, socket) do
-    agent_id = interaction.agent_id || socket.assigns[:agent_id]
-    _ = ensure_dashboard_approval_capability(socket, agent_id)
-
-    approvals = fetch_pending_approvals(socket, agent_id)
-
-    approvals =
-      if Enum.any?(approvals, &(&1.id == interaction.request_id)) do
-        approvals
-      else
-        [interaction_to_approval(interaction) | approvals]
-      end
-
-    {:noreply, insert_approvals(socket, approvals)}
-  end
-
-  # Signal: all other signals (agent activity, heartbeat, etc.)
-  def handle_info({:signal_received, signal}, socket) do
-    agent_id = socket.assigns.agent_id
-
-    # Drop high-frequency signals that don't add value to the chat UI
-    if signal.type in [:stream_delta, :stream_finish, :checkpoint_saved, :fidelity_resolved] do
-      # Only process turn stream deltas (for streaming text display).
-      # Heartbeat deltas and other high-frequency signals are dropped entirely.
-      source = get_in(signal.data, [:source]) || get_in(signal.data, ["source"])
-
-      socket =
-        if signal.type == :stream_delta and source == :turn and socket.assigns[:loading] do
-          SignalTracker.process_signal(socket, signal)
-        else
-          socket
-        end
-
-      {:noreply, socket}
-    else
-      # Backpressure: drop signals when message queue is building up
-      {:message_queue_len, queue_len} = Process.info(self(), :message_queue_len)
-
-      if agent_id && queue_len < 100 && signal_matches_agent?(signal, agent_id) do
-        signal_entry = %{
-          id: "sig-#{System.unique_integer([:positive])}",
-          category: signal.category,
-          event: signal.type,
-          timestamp: signal.timestamp,
-          metadata: signal.metadata
-        }
-
-        socket =
-          socket
-          |> stream_insert(:signals, signal_entry)
-          |> update(:signal_count, &(&1 + 1))
-          |> SignalTracker.process_signal(signal)
-
-        {:noreply, socket}
-      else
-        {:noreply, socket}
-      end
-    end
-  rescue
-    e ->
-      Logger.warning("[ChatLive] Signal handler crashed: #{Exception.message(e)}")
-      {:noreply, socket}
-  end
-
-  # Periodic re-sync of pending approvals from the shared orchestration facade.
-  # Defense against signals dropped at the bridge under backpressure.
-  def handle_info(:refresh_approvals, socket) do
-    case socket.assigns[:agent_id] do
-      nil ->
-        {:noreply, socket}
-
-      agent_id ->
-        {:noreply, merge_pending_approvals(socket, agent_id)}
-    end
-  rescue
-    _ -> {:noreply, socket}
-  end
+  # These channels do not carry a freshly authenticated private conversation
+  # scope. They cannot publish content or grant/answer approvals in this view.
+  def handle_info({:signal_received, _signal}, socket), do: {:noreply, socket}
+  def handle_info({:dashboard_interaction, _interaction}, socket), do: {:noreply, socket}
+  def handle_info(:refresh_approvals, socket), do: {:noreply, socket}
 
   # Process monitor: agent supervisor crashed or was killed
   def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
     if pid == socket.assigns[:agent_supervisor_pid] or pid == socket.assigns[:agent_host_pid] do
-      {:noreply, clear_agent_assigns(socket)}
+      {:noreply, assign(socket, agent_host_pid: nil, agent_supervisor_pid: nil)}
     else
       {:noreply, socket}
     end
@@ -838,185 +340,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  # ── Agent Lifecycle Signal Handlers ────────────────────────────────────
-
-  # Another tab started an agent — reconnect if we have none
-  defp handle_agent_signal(%{type: :started} = signal, socket) do
-    if socket.assigns[:agent_host_pid] == nil do
-      agent_id = Map.get(signal.data, :agent_id)
-      model_config = Map.get(signal.data, :model_config, %{})
-      pid = Map.get(signal.data, :pid)
-
-      if agent_id && pid && Process.alive?(pid) do
-        metadata = %{
-          model_config: model_config,
-          backend: model_config[:backend] || Map.get(model_config, :backend)
-        }
-
-        {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
-      else
-        {:noreply, socket}
-      end
-    else
-      {:noreply, socket}
-    end
-  end
-
-  # Agent was stopped (by another tab or programmatically)
-  defp handle_agent_signal(%{type: :stopped}, socket) do
-    {:noreply, clear_agent_assigns(socket)}
-  end
-
-  # External chat message (e.g., from Claude Code via Manager.chat/3)
-  defp handle_agent_signal(%{type: :chat_message} = signal, socket) do
-    role = Map.get(signal.data, :role, :assistant)
-    content = Map.get(signal.data, :content, "")
-    sender = Map.get(signal.data, :sender, "External")
-
-    msg = %{
-      id: "msg-#{System.unique_integer([:positive])}",
-      role: role,
-      content: content,
-      timestamp: DateTime.utc_now(),
-      model: if(role == :assistant, do: sender, else: nil),
-      sender: sender,
-      tool_uses: [],
-      memory_count: 0,
-      session_id: nil
-    }
-
-    socket =
-      socket
-      |> stream_insert(:messages, msg)
-      |> then(fn s ->
-        if role == :assistant do
-          assign(s, loading: false, query_count: s.assigns.query_count + 1)
-        else
-          assign(s, loading: true)
-        end
-      end)
-
-    {:noreply, socket}
-  end
-
-  # Unknown agent signal — ignore
-  defp handle_agent_signal(_signal, socket), do: {:noreply, socket}
-
-  # ── Query Response Helpers ────────────────────────────────────────────
-
-  defp process_query_response(socket, agent, response) do
-    assistant_msg = build_assistant_message(response)
-
-    socket
-    |> stream_insert(:messages, assistant_msg)
-    |> assign(loading: false, session_id: response.session_id)
-    |> add_thinking_blocks(response.thinking)
-    |> add_recalled_memories(response.recalled_memories)
-    |> add_tool_use_actions(assistant_msg.tool_uses)
-    |> extract_token_usage(response)
-    |> update_agent_state(agent)
-  end
-
-  defp build_assistant_message(response) do
-    tool_uses = response[:tool_uses] || response.tool_uses || []
-
-    %{
-      id: "msg-#{System.unique_integer([:positive])}",
-      role: :assistant,
-      content: strip_tool_output(response.text, tool_uses),
-      tool_uses: tool_uses,
-      timestamp: DateTime.utc_now(),
-      model: response.model,
-      session_id: response.session_id,
-      memory_count: length(response.recalled_memories || [])
-    }
-  end
-
-  # Strip tool call artifacts from the response text since we render them separately
-  defp strip_tool_output(text, []), do: text
-
-  defp strip_tool_output(text, _tool_uses) do
-    text
-    |> String.replace(~r/\n?⏺ [^\n]*(?:\n  [^\n]*)*/m, "")
-    |> String.trim()
-  end
-
-  defp add_thinking_blocks(socket, nil), do: socket
-  defp add_thinking_blocks(socket, []), do: socket
-
-  defp add_thinking_blocks(socket, blocks) do
-    Enum.reduce(blocks, socket, fn block, acc ->
-      entry = %{
-        id: "think-#{System.unique_integer([:positive])}",
-        text: block.text || "",
-        has_signature: block.signature != nil,
-        timestamp: DateTime.utc_now()
-      }
-
-      acc
-      |> stream_insert(:thinking, entry)
-      |> update(:thinking_count, &(&1 + 1))
-    end)
-  end
-
-  defp add_recalled_memories(socket, nil), do: socket
-  defp add_recalled_memories(socket, []), do: socket
-
-  defp add_recalled_memories(socket, memories) do
-    Enum.reduce(memories, socket, fn memory, acc ->
-      entry = %{
-        id: "mem-#{System.unique_integer([:positive])}",
-        content: memory[:content] || memory["content"] || inspect(memory),
-        score: memory[:score] || memory["score"],
-        timestamp: DateTime.utc_now()
-      }
-
-      acc
-      |> stream_insert(:memories, entry)
-      |> update(:memories_count, &(&1 + 1))
-    end)
-  end
-
-  defp add_tool_use_actions(socket, nil), do: socket
-  defp add_tool_use_actions(socket, []), do: socket
-
-  defp add_tool_use_actions(socket, tool_uses) do
-    Enum.reduce(tool_uses, socket, fn tool, acc ->
-      name = tool[:name] || tool["name"] || "unknown"
-
-      action_entry = %{
-        id: "act-#{System.unique_integer([:positive])}",
-        name: name,
-        outcome: tool_use_outcome(tool),
-        timestamp: DateTime.utc_now(),
-        input:
-          tool[:input] || tool[:arguments] || tool[:args] ||
-            tool["input"] || tool["arguments"] || tool["args"] || %{},
-        result: tool[:result] || tool["result"]
-      }
-
-      stream_insert(acc, :actions, action_entry)
-    end)
-  end
-
-  defp tool_use_outcome(tool) do
-    cond do
-      tool[:error] || tool["error"] -> :error
-      tool[:result] != nil || tool["result"] != nil -> :success
-      true -> :success
-    end
-  end
-
-  defp update_agent_state(socket, agent) do
-    socket
-    |> assign(memory_stats: get_memory_stats(agent))
-    |> assign(query_count: socket.assigns.query_count + 1)
-  end
-
   @impl true
   def render(assigns) do
     ~H"""
-    <.dashboard_header title="Agent Chat" subtitle="Interactive conversation with Claude + Memory" />
+    <.dashboard_header
+      title="Agent Chat"
+      subtitle="Private conversation with durable delivery status"
+    />
 
     <.stats_bar {assigns} />
     <.token_bar {assigns} />
@@ -1063,304 +393,32 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Slash Command Intake (added 2026-04-09 — see slash-commands.md v2) ─
 
-  # Sends a regular (non-command) prompt through the existing async query
-  # path. Extracted from handle_event("send-message") so the slash command
-  # branch and the prompt branch are visually parallel.
-  # Resolve the :user-scoped engagement for this (agent, human) pair — one
-  # continuous conversation per user↔agent that resumes across tabs/devices — and
-  # tag the message so the single-mind Session keys its transcript + persisted-entry
-  # provenance on it. Best-effort: if resolution isn't available, fall back to
-  # the agent's default conversation (engagement_id stays nil = today's behavior).
-  # Goes through the public Arbor.Comms facade (VP-04A) so dashboard and voice
-  # resolve engagements identically instead of each reaching into EngagementStore.
-  defp tag_engagement(user_message, socket) do
-    agent_id = socket.assigns[:agent_id]
-    user_id = approval_actor_id(socket)
-
-    if is_binary(agent_id) do
-      case Arbor.Comms.resolve_user_engagement(agent_id, user_id) do
-        {:ok, engagement} ->
-          Arbor.Contracts.Session.UserMessage.with_engagement(user_message, engagement.id)
-
-        _ ->
-          user_message
-      end
-    else
-      user_message
-    end
-  rescue
-    _ -> user_message
-  end
-
-  defp send_prompt(input, socket) do
-    if socket.assigns.loading do
-      Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
-      {:noreply, socket}
-    else
-      user_message =
-        Arbor.Contracts.Session.UserMessage.from_dashboard(
-          input,
-          socket.assigns[:current_agent_id]
-        )
-        |> tag_engagement(socket)
-
-      user_msg = %{
-        id: "msg-#{System.unique_integer([:positive])}",
-        role: :user,
-        content: input,
-        timestamp: user_message.sent_at
-      }
-
-      socket =
-        socket
-        |> stream_insert(:messages, user_msg)
-        |> assign(input: "", loading: true, error: nil, streaming_text: "")
-
-      # Resolve the host PID LIVE from the supervisor — the cached
-      # `agent_host_pid` assign goes stale after a rest_for_one restart
-      # (host crash → new pid), and sending to the dead one yields :noproc.
-      dispatch_query(socket.assigns.chat_runtime, live_host_pid(socket), user_message)
-
-      {:noreply, socket}
-    end
-  end
-
-  # Current host pid from the supervisor, falling back to the cached assign if the
-  # agent_id isn't known or resolution fails (preserves prior behavior).
-  defp live_host_pid(socket) do
-    case socket.assigns[:agent_id] do
-      nil -> socket.assigns[:agent_host_pid]
-      agent_id -> BranchSupervisor.host_pid(agent_id) || socket.assigns[:agent_host_pid]
-    end
-  end
-
-  # Routes a slash command through CommandIntake. Builds a typed Context
-  # from the live session state + agent registry metadata, runs the
-  # command, displays the result inline (no LLM call), and dispatches any
-  # action description the command returned.
+  # Only local /help reaches CommandIntake; runtime commands require their own
+  # authenticated operation contracts before this chat can execute them.
   defp handle_slash_command(input, socket) do
-    user_msg = %{
-      id: "msg-#{System.unique_integer([:positive])}",
-      role: :user,
-      content: input,
-      timestamp: DateTime.utc_now()
-    }
-
-    socket =
-      socket
-      |> stream_insert(:messages, user_msg)
-      |> assign(input: "", error: nil)
-
-    case build_command_context(socket) do
-      {:ok, %Context{} = context} ->
-        intake_result =
-          CommandIntake.handle(input, context, fn _prompt ->
-            # Should never reach here — classify already returned :command.
-            # Defense-in-depth fallback in case parse and classify ever drift.
-            {:fallback_unexpected, input}
-          end)
-
-        socket = handle_intake_result(intake_result, context, socket)
-        {:noreply, socket}
-
-      {:error, reason} ->
-        Logger.warning("[ChatLive] Failed to build command context: #{inspect(reason)}")
-
-        socket =
-          stream_insert_command_error(
-            socket,
-            "Couldn't build command context: #{inspect(reason)}"
-          )
-
-        {:noreply, socket}
-    end
-  end
-
-  # Builds the command Context from the LiveView's current socket assigns.
-  #
-  # ## Why we trust ONLY agent_id from the socket
-  #
-  # ChatLive's socket assigns hold several PIDs that go stale whenever the
-  # focused agent's BranchSupervisor restarts a child (which is reasonably
-  # often — any crash in the host/executor/session triggers a rest_for_one
-  # cascade and produces fresh PIDs). The LiveView never refreshes its
-  # assigns when this happens, so:
-  #
-  # - `socket.assigns.agent_host_pid` (host PID) — STALE after restart
-  # - `socket.assigns.agent_supervisor_pid` (BranchSupervisor PID) — also
-  #   STALE after restart, because the BS itself can be restarted by its
-  #   parent (e.g. when Lifecycle.start re-creates an agent)
-  # - `socket.assigns.agent_id` (the agent ID STRING) — never stale, the
-  #   agent's identity is stable across restarts
-  #
-  # So this function takes ONLY the agent_id from the socket and resolves
-  # everything else fresh through `Arbor.Agent.Registry.lookup/1`, which
-  # validates that its primary pid (the current BranchSupervisor) is alive
-  # and cleans up dead entries. From there we walk the live BranchSupervisor's
-  # children to find the current `:session` child.
-  #
-  # This pattern bypasses BOTH the dashboard's stale assigns AND the
-  # registry metadata's stale child PIDs (the BranchSupervisor-stale-PID
-  # bug tracked separately in .arbor/roadmap/0-inbox/branchsupervisor-restart-stale-registry-pids.md).
-  #
-  # ## ChatLive socket assigns — canonical reference (post-rename 2026-04-09)
-  #
-  # | Assign                              | Type               | Meaning                                          |
-  # |-------------------------------------|--------------------|--------------------------------------------------|
-  # | `socket.assigns.agent_id`           | `String.t() | nil` | Focused agent's ID string (STABLE — use this)    |
-  # | `socket.assigns.agent_host_pid`     | `pid() | nil`      | Host GenServer pid for sending :query to        |
-  # | `socket.assigns.agent_supervisor_pid` | `pid() | nil`    | BranchSupervisor pid (goes stale across restart) |
-  # | `socket.assigns.display_name`       | `String.t() | nil` | Friendly name for UI display                     |
-  # | `socket.assigns.current_agent_id`   | `String.t() | nil` | **HUMAN acting principal's ID** (LEGACY NAME — set by oidc_auth.ex; rename deferred because it crosses the auth path) |
-  #
-  # The PID assigns can go stale; only `:agent_id` is safe to trust over time.
-  # Use `current_agent_id` only when you want the *human user*, not the agent
-  # — the name is misleading and a wider rename is tracked in a follow-up.
-  defp build_command_context(socket) do
-    agent_id = socket.assigns[:agent_id]
-    user_id = socket.assigns[:current_agent_id] || "dashboard_user"
-
-    cond do
-      # No agent connected — return a system-only Context. Slash commands
-      # like /help still work; agent-bound commands (/status, /clear,
-      # /model X) will correctly return "not available in this context"
-      # via their `available?/1` checks. This is exactly the use case the
-      # Context's optional agent fields were designed for.
-      not is_binary(agent_id) ->
-        {:ok, Context.new(origin: :dashboard, user_id: user_id)}
-
-      true ->
-        build_agent_command_context(agent_id, user_id)
-    end
-  rescue
-    e -> {:error, Exception.message(e)}
-  end
-
-  defp build_agent_command_context(agent_id, user_id) do
-    with {:ok, entry} <- Arbor.Agent.Registry.lookup(agent_id),
-         {:ok, session_pid} <- find_live_session_pid(entry.pid) do
-      state = :sys.get_state(session_pid)
-      model_config = entry.metadata[:model_config] || %{}
-
-      ctx =
-        Arbor.Orchestrator.SessionCore.build_command_context(
-          state,
-          session_pid,
-          origin: :dashboard,
-          user_id: user_id,
-          model_config: model_config
-        )
-
-      {:ok, ctx}
-    end
-  end
-
-  # Walks the live BranchSupervisor's children for the current :session
-  # child. Takes the BranchSupervisor PID directly from the registry's
-  # primary pid (which lookup/1 has just validated is alive), NOT from
-  # socket assigns (which go stale).
-  defp find_live_session_pid(nil), do: {:error, :no_supervisor_pid}
-
-  defp find_live_session_pid(sup_pid) when is_pid(sup_pid) do
-    if Process.alive?(sup_pid) do
-      try do
-        case Enum.find(Supervisor.which_children(sup_pid), fn {id, _, _, _} -> id == :session end) do
-          {:session, pid, _, _} when is_pid(pid) -> {:ok, pid}
-          _ -> {:error, :no_session_child}
-        end
-      catch
-        :exit, _ -> {:error, :supervisor_call_failed}
-      end
+    if List.first(String.split(input)) == "/help" do
+      run_local_help(input, socket)
     else
-      {:error, :supervisor_dead}
+      {:noreply,
+       assign(socket,
+         error:
+           "This chat cannot authorize runtime slash commands yet. Use the agent controls; /help remains available."
+       )}
     end
   end
 
-  # Dispatches the result returned by CommandIntake.handle into the LiveView
-  # message stream, then applies any interface-relevant effects the command
-  # emitted.
-  defp handle_intake_result({:command_result, %Result{} = result}, context, socket) do
-    socket = stream_insert_command_result(socket, result)
-    socket = apply_effects(result.effects || [], socket)
+  defp run_local_help(input, socket) do
+    context = Context.new(origin: :dashboard, user_id: socket.assigns[:current_agent_id])
 
-    # Legacy :action path (clear, compact stubs) — kept until those
-    # commands migrate to the side-effect-direct shape.
-    if result.action != nil do
-      dispatch_command_action(result.action, context, socket)
-    else
-      socket
+    case CommandIntake.handle(input, context, fn _ -> {:error, :unexpected_prompt} end) do
+      {:command_result, %Result{} = result} ->
+        {:noreply,
+         socket |> stream_insert_command_result(result) |> assign(input: "", error: nil)}
+
+      _ ->
+        {:noreply, assign(socket, error: "Help is temporarily unavailable.")}
     end
   end
-
-  defp handle_intake_result({:command_error, message}, _context, socket) do
-    stream_insert_command_error(socket, message)
-  end
-
-  defp handle_intake_result(other, _context, socket) do
-    Logger.warning("[ChatLive] Unexpected intake result: #{inspect(other)}")
-    stream_insert_command_error(socket, "Unexpected command result.")
-  end
-
-  # Apply the effects list a command emitted. ChatLive recognizes the
-  # subset relevant to the LiveView UX:
-  #
-  #   - :runtime_changed — update the status row's :runtime socket assign
-  #   - :model_changed   — no socket assign today; next-turn LlmHandler picks
-  #                        up the change from Session config directly
-  #   - :agent_started   — call reconnect_to_agent/4 to bind the LiveView's
-  #                        socket to the new agent (signal subscription +
-  #                        stream init). Discord's equivalent would do its
-  #                        own per-channel binding instead.
-  #
-  # Unknown effects are silently ignored — this is the forward-compat
-  # shape that lets new effects land without breaking ChatLive's render.
-  defp apply_effects(effects, socket) when is_list(effects) do
-    Enum.reduce(effects, socket, fn
-      {:runtime_changed, runtime}, sock ->
-        assign(sock, :runtime, runtime)
-
-      {:model_changed, _model}, sock ->
-        sock
-
-      {:agent_started, %{agent_id: agent_id, pid: pid, metadata: metadata}}, sock ->
-        reconnect_to_agent(sock, agent_id, pid, metadata)
-
-      _other, sock ->
-        sock
-    end)
-  end
-
-  # Legacy action dispatch — kept for the unmigrated :clear and :compact
-  # commands. The Phase 2d-style commands (runtime, model, start) emit
-  # `effects` instead and don't reach this path.
-  defp dispatch_command_action(action, _context, socket) do
-    Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
-
-    note =
-      "(Action #{format_action(action)} acknowledged. " <>
-        "Side-effect execution is the next batch of work — the architecture is in place but Session.#{action_function(action)}/N isn't built yet.)"
-
-    stream_insert_system_note(socket, note)
-  end
-
-  defp format_action(:clear), do: ":clear"
-  defp format_action(:compact), do: ":compact"
-  defp format_action({:switch_model, name}), do: "{:switch_model, \"#{name}\"}"
-
-  defp format_action({:switch_model, name, opts}),
-    do: "{:switch_model, \"#{name}\", #{inspect(opts)}}"
-
-  defp format_action({:switch_runtime, runtime}),
-    do: "{:switch_runtime, #{inspect(runtime)}}"
-
-  defp format_action(other), do: inspect(other)
-
-  defp action_function(:clear), do: "clear"
-  defp action_function(:compact), do: "compact"
-  defp action_function({:switch_model, _}), do: "set_model"
-  defp action_function({:switch_model, _, _}), do: "set_model"
-  defp action_function({:switch_runtime, _}), do: "set_runtime"
-  defp action_function(_), do: "?"
 
   defp stream_insert_command_result(socket, %Result{text: text}) do
     msg = %{
@@ -1384,385 +442,76 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     stream_insert(socket, :messages, msg)
   end
 
-  defp stream_insert_system_note(socket, note) do
-    msg = %{
-      id: "msg-#{System.unique_integer([:positive])}",
-      role: :assistant,
-      content: note,
-      timestamp: DateTime.utc_now()
-    }
-
-    stream_insert(socket, :messages, msg)
-  end
-
   # ── Agent Lifecycle Helpers ──────────────────────────────────────────
 
-  defp dispatch_query(runtime, agent, input) do
-    lv = self()
-
-    Task.start(fn ->
-      {tag, result} = run_query(runtime, agent, input)
-      send(lv, {:query_result, tag, result})
-    end)
-  end
-
-  # :acp runtime (Claude SDK subprocess) needs the bare-string content.
-  # The UserMessage envelope's `sent_at` is dropped here because the Claude
-  # SDK doesn't have a slot for it — that path doesn't go through Arbor's
-  # Session/persistence, so the timestamp isn't used downstream anyway.
-  defp run_query(:acp, agent, %Arbor.Contracts.Session.UserMessage{} = um) do
-    run_query(:acp, agent, um.content)
-  end
-
-  defp run_query(:acp, agent, input) when is_binary(input) do
-    result =
-      try do
-        Claude.query(agent, input, timeout: :infinity, permission_mode: :bypass)
-      catch
-        :exit, reason -> {:error, {:agent_crashed, reason}}
-      end
-
-    {:acp, result}
-  end
-
-  # :arbor runtime threads the UserMessage envelope (or a bare string) all
-  # the way to Session.send_message via APIAgent.query →
-  # handle_session_query → GenServer.call.
-  defp run_query(:arbor, agent, input) do
-    result =
-      try do
-        APIAgent.query(agent, input)
-      catch
-        :exit, reason -> {:error, {:agent_crashed, reason}}
-      end
-
-    {:arbor, result}
-  end
-
-  # Nil runtime (e.g. agent not yet bound to a runtime) falls through to
-  # :arbor since that's the default.
-  defp run_query(nil, agent, input), do: run_query(:arbor, agent, input)
-
   # Find agent scoped to current user's tenant context when available.
-  # Falls back to global find_first_agent for backward compatibility.
+  # An anonymous browser never selects a global agent.
   defp find_agent_for_session(socket) do
     case Map.get(socket.assigns, :current_agent_id) do
-      nil -> Manager.find_first_agent()
-      principal_id -> Manager.find_agent_for_principal(principal_id)
+      nil -> :not_found
+      principal_id -> Arbor.Agent.find_agent_for_principal(principal_id)
     end
   end
 
-  # When joining/creating a group, connect to the first agent participant
-  # so side panels (heartbeat, thoughts, memories, goals) show agent data.
-  defp maybe_connect_group_agent(socket) do
-    if socket.assigns.group_mode do
-      agent_participant =
-        Enum.find(socket.assigns.group_participants, fn p -> p.type == :agent end)
+  # A chat capability authorizes conversation, not starting or resuming agents.
+  # Resolve private history first; never turn a URL parameter into lifecycle work.
+  defp connect_or_resume_agent(socket, agent_id) do
+    socket = socket |> assign(agent_id: agent_id) |> Conversation.connect()
 
-      case agent_participant do
-        nil ->
-          socket
-
-        %{id: agent_id} ->
-          connect_to_host_or_recover(socket, agent_id, agent_participant[:name])
-      end
+    if socket.assigns.conversation_authorized do
+      attach_running_agent(socket, agent_id)
     else
       socket
     end
   end
 
-  defp get_agent_metadata(agent_id) do
-    case Arbor.Agent.Registry.lookup(agent_id) do
-      {:ok, entry} -> entry.metadata || %{}
-      _ -> %{}
-    end
-  end
+  # A durable transcript remains readable while the runtime or its registry is
+  # down. Optional live metadata must never discard an authorized history page.
+  defp attach_running_agent(socket, agent_id) do
+    case Arbor.Agent.lookup(agent_id) do
+      {:ok, %{pid: pid, metadata: metadata}} when is_pid(pid) ->
+        metadata = metadata || %{}
+        Process.monitor(pid)
 
-  # Auto-recover a crashed host by calling Lifecycle.start (idempotent).
-  # Extracts model/provider from Registry metadata so the host restarts
-  # with the same configuration it was originally created with.
-  defp recover_host(agent_id) do
-    metadata = get_agent_metadata(agent_id)
-    model_config = metadata[:model_config] || %{}
-
-    recovery_opts = [
-      model: model_config[:id] || model_config["id"],
-      provider: model_config[:provider] || model_config["provider"]
-    ]
-
-    case Lifecycle.start(agent_id, recovery_opts) do
-      {:ok, _executor_pid} ->
-        case Lifecycle.get_host(agent_id) do
-          {:ok, host_pid} -> {:ok, host_pid, metadata}
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  # Connect to a running agent, or resume a stopped one, handling host recovery.
-  defp connect_or_resume_agent(socket, agent_id) do
-    case Arbor.Agent.running?(agent_id) do
-      true -> get_host_or_recover(socket, agent_id)
-      false -> resume_stopped_agent(socket, agent_id)
-    end
-  end
-
-  defp get_host_or_recover(socket, agent_id) do
-    case Lifecycle.get_host(agent_id) do
-      {:ok, pid} ->
-        metadata = get_agent_metadata(agent_id)
-        reconnect_to_agent(socket, agent_id, pid, metadata)
+        assign(socket,
+          agent_host_pid: metadata[:host_pid] || pid,
+          agent_supervisor_pid: pid,
+          display_name: metadata[:display_name],
+          current_model: metadata[:model_config] || %{},
+          chat_runtime: metadata[:runtime] || :arbor
+        )
 
       _ ->
-        case recover_host(agent_id) do
-          {:ok, pid, metadata} ->
-            reconnect_to_agent(socket, agent_id, pid, metadata)
-
-          {:error, reason} ->
-            assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")
-        end
+        assign(socket, error: "The agent is not running. Start it from the Agents dashboard.")
     end
-  end
-
-  defp resume_stopped_agent(socket, agent_id) do
-    case Manager.resume_agent(agent_id) do
-      {:ok, ^agent_id, pid} ->
-        metadata = get_agent_metadata(agent_id)
-        reconnect_to_agent(socket, agent_id, pid, metadata)
-
-      {:error, reason} ->
-        assign(socket, error: "Failed to resume agent: #{inspect(reason)}")
-    end
-  end
-
-  # Connect to host or fall back to metadata-only assignment for group agents.
-  defp connect_to_host_or_recover(socket, agent_id, fallback_name) do
-    case Lifecycle.get_host(agent_id) do
-      {:ok, pid} ->
-        metadata = get_agent_metadata(agent_id)
-        reconnect_to_agent(socket, agent_id, pid, metadata)
-
-      _ ->
-        case recover_host(agent_id) do
-          {:ok, pid, metadata} -> reconnect_to_agent(socket, agent_id, pid, metadata)
-          {:error, _reason} -> assign(socket, agent_id: agent_id, display_name: fallback_name)
-        end
-    end
+  rescue
+    _ ->
+      assign(socket,
+        error: "The agent runtime is unavailable. Saved conversation history remains readable."
+      )
+  catch
+    :exit, _ ->
+      assign(socket,
+        error: "The agent runtime is unavailable. Saved conversation history remains readable."
+      )
   end
 
   defp reconnect_to_agent(socket, agent_id, pid, metadata) do
-    # pid from Registry is the BranchSupervisor — monitor it for :DOWN
     Process.monitor(pid)
-
-    model_config = metadata[:model_config] || %{}
-    runtime = metadata[:runtime] || model_config[:runtime] || :arbor
-    display_name = metadata[:display_name]
-
-    # Use host_pid as the primary `agent` assign — it's the APIAgent GenServer
-    # that handles :query, :memory_stats, etc. The supervisor PID is only for monitoring.
-    host_pid = metadata[:host_pid] || pid
-    memory_stats = get_memory_stats(host_pid)
-    tokens = get_telemetry_tokens(agent_id)
+    metadata = metadata || %{}
     ChatState.touch_agent(agent_id)
-    _ = ensure_dashboard_approval_capability(socket, agent_id)
 
     socket
     |> assign(
-      # Renamed 2026-04-09: `:agent` → `:agent_host_pid`, `:supervisor_pid`
-      # → `:agent_supervisor_pid` because the old names lied about what they
-      # contained (the old `:agent` was a host pid, not an agent id; the old
-      # `:supervisor_pid` was unqualified). See feedback memory:
-      # feedback_audit_design_before_patching.md
-      agent_host_pid: host_pid,
-      agent_supervisor_pid: pid,
       agent_id: agent_id,
-      display_name: display_name,
-      error: nil,
-      memory_stats: memory_stats,
-      current_model: model_config,
-      chat_runtime: runtime
+      agent_host_pid: metadata[:host_pid] || pid,
+      agent_supervisor_pid: pid,
+      display_name: metadata[:display_name],
+      current_model: metadata[:model_config] || %{},
+      chat_runtime: metadata[:runtime] || :arbor,
+      error: nil
     )
-    |> assign(
-      query_count: 0,
-      agent_goals:
-        SignalTracker.fetch_goals(agent_id, socket.assigns[:show_completed_goals] || false),
-      llm_call_count: tokens.count,
-      last_llm_mode: nil,
-      last_llm_thinking: nil,
-      last_memory_notes: [],
-      last_concerns: [],
-      last_curiosity: [],
-      last_identity_insights: [],
-      heartbeat_count: 0,
-      memory_notes_total: 0,
-      input_tokens: tokens.input,
-      output_tokens: tokens.output,
-      cached_tokens: tokens.cached,
-      last_duration_ms: tokens.last_duration,
-      hb_input_tokens: 0,
-      hb_output_tokens: 0,
-      hb_cached_tokens: 0,
-      hb_total_cost: 0.0,
-      selected_heartbeat_model: nil
-    )
-    |> then(fn socket ->
-      # Load recent chat history from SessionStore with pagination
-      try do
-        sess_id = "agent-session-#{agent_id}"
-        history = load_session_history(sess_id, limit: @chat_page_size)
-        total = session_message_count(sess_id)
-
-        # Ensure each message has an :id field for streaming
-        history_with_ids =
-          Enum.map(history, fn msg ->
-            Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
-          end)
-
-        oldest_timestamp =
-          case history_with_ids do
-            [first | _] -> first[:timestamp]
-            [] -> nil
-          end
-
-        socket
-        |> assign(
-          chat_history_cursor: oldest_timestamp,
-          chat_has_more: total > length(history_with_ids)
-        )
-        |> stream(:messages, history_with_ids, reset: true)
-      rescue
-        _ ->
-          # Fallback to empty if history unavailable
-          socket
-          |> assign(chat_history_cursor: nil, chat_has_more: false)
-          |> stream(:messages, [], reset: true)
-      end
-    end)
-    |> assign(
-      signal_count: 0,
-      thinking_count: 0,
-      memories_count: 0,
-      llm_interactions_count: 0
-    )
-    |> stream(:signals, [], reset: true)
-    |> stream(:thinking, [], reset: true)
-    |> stream(:memories, [], reset: true)
-    |> stream(:actions, [], reset: true)
-    |> stream(:llm_interactions, [], reset: true)
-    # Seed the approvals stream from the shared orchestration facade so pending
-    # approvals from either backend that arrived before this LiveView connected
-    # (or that signal-bridge dropped
-    # under backpressure) are visible immediately. Signals continue to deliver
-    # low-latency updates; this is the polling fallback.
-    |> then(fn s ->
-      pending = fetch_pending_approvals(s, agent_id)
-
-      s
-      |> assign(:approvals_count, length(pending))
-      |> assign(:known_approval_ids, MapSet.new(Enum.map(pending, & &1.id)))
-      |> stream(:approvals, pending, reset: true)
-    end)
-  end
-
-  # Poll the shared orchestration facade for pending approvals targeting this
-  # agent. Used as a defense-in-depth fallback alongside the authorization
-  # signal subscription, which is lossy by design (subscribe_raw silently
-  # drops signals when the LiveView mailbox queue is over the bridge limit,
-  # and signals can also race with mount/reconnect timing).
-  defp fetch_pending_approvals(_socket, nil), do: []
-
-  defp fetch_pending_approvals(socket, agent_id) do
-    actor_id = approval_actor_id(socket)
-
-    case safe_orchestration_call(:list_pending_approvals, [
-           [caller_id: actor_id, agent_id: agent_id]
-         ]) do
-      {:ok, approvals} when is_list(approvals) ->
-        Enum.map(approvals, &pending_approval_to_card/1)
-
-      _ ->
-        []
-    end
-  end
-
-  defp merge_pending_approvals(socket, agent_id) do
-    socket
-    |> fetch_pending_approvals(agent_id)
-    |> then(&insert_approvals(socket, &1))
-  end
-
-  # Polling is a defense-in-depth fallback for signal drops, NOT an
-  # authoritative replacement of the stream. Earlier versions used
-  # `stream(reset: true, ...)` which wiped the panel every 5s and raced with
-  # signal arrival. Instead: insert items that aren't already in our local
-  # tracking set, and trust answer handlers to remove consumed items.
-  defp insert_approvals(socket, approvals) do
-    seen = socket.assigns[:known_approval_ids] || MapSet.new()
-
-    {socket, new_seen} =
-      Enum.reduce(approvals, {socket, seen}, fn approval, {acc_socket, acc_seen} ->
-        id = approval.id
-
-        if MapSet.member?(acc_seen, id) do
-          {acc_socket, acc_seen}
-        else
-          {
-            acc_socket
-            |> stream_insert(:approvals, approval)
-            |> update(:approvals_count, &(&1 + 1)),
-            MapSet.put(acc_seen, id)
-          }
-        end
-      end)
-
-    assign(socket, :known_approval_ids, new_seen)
-  end
-
-  defp pending_approval_to_card(approval) do
-    metadata = Map.get(approval, :metadata) || %{}
-
-    %{
-      id: Map.get(approval, :id),
-      proposer: Map.get(approval, :agent_id) || Map.get(approval, :principal_id),
-      source: Map.get(approval, :source),
-      kind: Map.get(approval, :action),
-      description: Map.get(approval, :description),
-      resource_uri: Map.get(approval, :resource_uri),
-      metadata: metadata,
-      created_at: Map.get(approval, :created_at)
-    }
-  end
-
-  defp interaction_to_approval(%Interaction{} = interaction) do
-    %{
-      id: interaction.request_id,
-      proposer: interaction.agent_id,
-      source: :interaction,
-      kind: interaction.kind,
-      description: interaction.description,
-      resource_uri: interaction.resource_uri,
-      metadata: interaction.metadata || %{},
-      created_at: interaction.submitted_at
-    }
-  end
-
-  defp clear_agent_assigns(socket) do
-    assign(socket,
-      agent_host_pid: nil,
-      agent_supervisor_pid: nil,
-      agent_id: nil,
-      display_name: nil,
-      session_id: nil,
-      memory_stats: nil,
-      agent_goals: [],
-      llm_call_count: 0,
-      heartbeat_count: 0,
-      chat_runtime: nil,
-      current_model: nil
-    )
+    |> Conversation.connect()
   end
 
   # ── Model Config Helpers ─────────────────────────────────────────────
@@ -1779,232 +528,5 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, runtime: :acp},
       %{id: "opus", label: "Opus (powerful)", provider: :anthropic, runtime: :acp}
     ]
-  end
-
-  defp maybe_extract_api_usage(socket, response) do
-    usage =
-      case response do
-        %{usage: u} when is_map(u) and map_size(u) > 0 -> u
-        _ -> response[:usage] || %{}
-      end
-
-    input =
-      usage[:input_tokens] || usage["input_tokens"] || usage[:prompt_tokens] ||
-        usage["prompt_tokens"] || 0
-
-    output =
-      usage[:output_tokens] || usage["output_tokens"] || usage[:completion_tokens] ||
-        usage["completion_tokens"] || 0
-
-    cached =
-      usage[:cache_read_tokens] || usage["cache_read_tokens"] ||
-        usage[:cache_read_input_tokens] || usage["cache_read_input_tokens"] || 0
-
-    cost = usage[:cost] || usage["cost"]
-
-    if input > 0 or output > 0 do
-      new_input = (socket.assigns[:input_tokens] || 0) + input
-      new_output = (socket.assigns[:output_tokens] || 0) + output
-      new_cached = (socket.assigns[:cached_tokens] || 0) + cached
-      new_count = (socket.assigns[:llm_call_count] || 0) + 1
-
-      cost_assigns =
-        if cost do
-          prev_cost = socket.assigns[:total_cost] || 0.0
-          [total_cost: prev_cost + cost]
-        else
-          []
-        end
-
-      assign(
-        socket,
-        [
-          input_tokens: new_input,
-          output_tokens: new_output,
-          cached_tokens: new_cached,
-          total_tokens: new_input + new_output,
-          llm_call_count: new_count
-        ] ++ cost_assigns
-      )
-    else
-      assign(socket, llm_call_count: socket.assigns.llm_call_count + 1)
-    end
-  end
-
-  defp maybe_add_recalled_memories_api(socket, response) do
-    memories = response[:recalled_memories] || []
-
-    if memories != [] do
-      Enum.reduce(memories, socket, fn memory, sock ->
-        entry = %{
-          id: "mem-#{System.unique_integer([:positive])}",
-          content: memory[:content] || memory[:text] || inspect(memory),
-          score: memory[:score] || memory[:similarity],
-          timestamp: DateTime.utc_now()
-        }
-
-        sock
-        |> stream_insert(:memories, entry)
-        |> update(:memories_count, &(&1 + 1))
-      end)
-    else
-      socket
-    end
-  end
-
-  # ── Memory Stats ────────────────────────────────────────────────────
-
-  defp get_memory_stats(agent) do
-    case GenServer.call(agent, :memory_stats) do
-      {:ok, stats} -> stats
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
-  # ── Token Tracking ─────────────────────────────────────────────────
-
-  defp extract_token_usage(socket, response) do
-    usage = Map.get(response, :usage) || %{}
-    {input, output, cached} = parse_token_counts(usage)
-    agent_id = socket.assigns.agent_id
-
-    if agent_id && (input > 0 || output > 0) do
-      apply_token_usage(socket, agent_id, input, output, cached)
-    else
-      socket
-    end
-  end
-
-  defp parse_token_counts(usage) do
-    input = usage["input_tokens"] || usage[:input_tokens] || 0
-    output = usage["output_tokens"] || usage[:output_tokens] || 0
-    cached = usage["cache_read_input_tokens"] || usage[:cache_read_input_tokens] || 0
-    {input, output, cached}
-  end
-
-  defp apply_token_usage(socket, _agent_id, input, output, cached) do
-    new_input = (socket.assigns[:input_tokens] || 0) + input
-    new_output = (socket.assigns[:output_tokens] || 0) + output
-    new_cached = (socket.assigns[:cached_tokens] || 0) + cached
-    new_count = (socket.assigns[:llm_call_count] || 0) + 1
-
-    assign(socket,
-      input_tokens: new_input,
-      output_tokens: new_output,
-      cached_tokens: new_cached,
-      llm_call_count: new_count
-    )
-  end
-
-  # ── Approval Helpers ──────────────────────────────────────────────
-
-  defp safe_answer_approval(proposal_id, decision, socket) do
-    safe_orchestration_call(:answer_approval, [
-      proposal_id,
-      decision,
-      [
-        caller_id: socket.assigns[:current_agent_id],
-        session_token: socket.assigns[:session_token],
-        note: "Answered from dashboard chat"
-      ]
-    ])
-  end
-
-  defp safe_orchestration_call(function, args) do
-    module = orchestration_mod()
-
-    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
-      apply(module, function, args)
-    else
-      {:error, :orchestration_unavailable}
-    end
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    :exit, reason -> {:error, reason}
-  end
-
-  defp orchestration_mod do
-    Application.get_env(
-      :arbor_dashboard,
-      :chat_orchestration,
-      Module.concat([:Arbor, :Agent, :Orchestration])
-    )
-  end
-
-  # ── SessionStore Helpers ─────────────────────────────────────────
-
-  defp load_session_history(session_id, opts) do
-    Arbor.Persistence.SessionStore.load_recent_for_display(session_id, opts)
-  rescue
-    _ -> []
-  catch
-    :exit, _ -> []
-  end
-
-  defp session_message_count(session_id) do
-    Arbor.Persistence.SessionStore.message_count_by_session_id(session_id)
-  rescue
-    _ -> 0
-  catch
-    :exit, _ -> 0
-  end
-
-  defp persist_group_message(group_id, msg) do
-    if Arbor.Persistence.SessionStore.available?() do
-      session_id = "group-session-#{group_id}"
-
-      session_uuid =
-        case Arbor.Persistence.SessionStore.get_session(session_id) do
-          {:ok, s} ->
-            s.id
-
-          {:error, :not_found} ->
-            case Arbor.Persistence.SessionStore.create_session(group_id, session_id: session_id) do
-              {:ok, s} -> s.id
-              _ -> nil
-            end
-        end
-
-      if session_uuid do
-        role = if msg[:role] in [:user, "user"], do: "user", else: "assistant"
-
-        content_text =
-          if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
-
-        Arbor.Persistence.SessionStore.append_entry(session_uuid, %{
-          entry_type: role,
-          role: role,
-          content: [%{"type" => "text", "text" => content_text}],
-          timestamp: msg[:timestamp] || DateTime.utc_now()
-        })
-      end
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp get_telemetry_tokens(agent_id) do
-    case Arbor.Common.AgentTelemetry.Store.get(agent_id) do
-      nil ->
-        %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
-
-      t ->
-        %{
-          input: t.session_input_tokens,
-          output: t.session_output_tokens,
-          cached: t.session_cached_tokens,
-          count: t.turn_count,
-          last_duration: List.first(t.llm_latencies || [])
-        }
-    end
-  rescue
-    _ -> %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
   end
 end

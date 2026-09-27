@@ -93,10 +93,19 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     master_key_path = Path.join(fixture_root, "master.key")
     previous_master_key_path = Application.get_env(:arbor_security, :master_key_path)
+    previous_resolver = Application.get_env(:arbor_security, :identity_alias_resolver)
+
+    Application.put_env(
+      :arbor_security,
+      :identity_alias_resolver,
+      Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
+    )
+
     previous_mode = Application.get_env(:arbor_security, :system_authority_mode)
     Application.put_env(:arbor_security, :master_key_path, master_key_path)
 
     on_exit(fn ->
+      restore_env(:identity_alias_resolver, previous_resolver)
       restore_env(:system_authority_mode, previous_mode)
       restore_env(:master_key_path, previous_master_key_path)
       stop_signing_store!()

@@ -88,4 +88,73 @@ defmodule ArborTui.ProtocolTest do
       assert Jason.decode!(Protocol.encode(:list_approvals)) == %{"type" => "list_approvals"}
     end
   end
+
+  test "conversation payload is canonical and binds target, operation, text and cursors" do
+    assert Protocol.conversation_payload(:submit, "human_owner", "agent_a", %{
+             id: "stable",
+             text: "hello"
+           }) ==
+             ~s(["arbor.conversation.v2","submit","human_owner","agent_a",["stable","hello"],[null,null,null],null])
+
+    assert Protocol.conversation_payload(:history, "human_owner", "agent_a", nil,
+             after: 12,
+             through: 99,
+             limit: 100
+           ) ==
+             ~s(["arbor.conversation.v2","history","human_owner","agent_a",null,[12,99,100],null])
+  end
+
+  test "an exact retry carries unchanged command bytes and an independently signed nonce" do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    identity = %{agent_id: "human_owner", private_key: priv}
+    command = %{id: "stable", text: "hello"}
+
+    wires =
+      for _ <- 1..2,
+          do: Protocol.signed_operation(identity, "agent_a", :submit, command) |> Jason.decode!()
+
+    assert Enum.uniq(Enum.map(wires, & &1["payload"])) |> length() == 1
+
+    auths =
+      Enum.map(wires, fn wire ->
+        "Signature " <> encoded = wire["authorization"]
+        auth = encoded |> Base.decode64!(padding: false) |> Jason.decode!()
+        nonce = Base.decode64!(auth["nonce"])
+        signature = Base.decode64!(auth["signature"])
+
+        message =
+          protocol_len(wire["payload"]) <>
+            protocol_len(identity.agent_id) <> protocol_len(auth["timestamp"]) <> nonce
+
+        assert :crypto.verify(:eddsa, :none, message, signature, [pub, :ed25519])
+        auth
+      end)
+
+    refute hd(auths)["nonce"] == List.last(auths)["nonce"]
+  end
+
+  test "ownership fence is part of the signed operation payload" do
+    old_owner =
+      Protocol.conversation_payload(
+        :submit,
+        "human_owner",
+        "agent_a",
+        %{id: "stable", text: "hello"},
+        expected_engagement_id: "eng_11111111111111111111111111111111"
+      )
+
+    new_owner =
+      Protocol.conversation_payload(
+        :submit,
+        "human_owner",
+        "agent_a",
+        %{id: "stable", text: "hello"},
+        expected_engagement_id: "eng_22222222222222222222222222222222"
+      )
+
+    refute old_owner == new_owner
+    assert List.last(Jason.decode!(old_owner)) == "eng_11111111111111111111111111111111"
+  end
+
+  defp protocol_len(binary), do: <<byte_size(binary)::32, binary::binary>>
 end

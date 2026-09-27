@@ -46,11 +46,9 @@ defmodule Arbor.Agent.IdentityAliases do
   A missing/malformed proof, a payload mismatch, and a capability denial
   are distinct `{:unauthorized_alias_management, reason}` values.
 
-  Without this gate, any code path that could call `link/3` would be able
-  to redirect a victim's future OIDC logins to an attacker-controlled
-  identity — and then receive any capabilities granted to that identity
-  (M5). This is an admin-class operation; resolve and list are read-only
-  and remain ungated.
+  Without this gate, alias mutation could redirect private conversation ownership.
+  This is an admin-class operation. Resolve and list remain read-only; resolution
+  does not authenticate a subject or transfer the primary identity's grants.
   """
 
   alias Arbor.Agent.IdentityAliasProofCore
@@ -68,8 +66,9 @@ defmodule Arbor.Agent.IdentityAliases do
   @doc """
   Link a secondary identity to a primary identity.
 
-  After linking, any OIDC login that derives `secondary_id` will be
-  treated as `primary_id`. Requires a caller-produced `SignedRequest`
+  Linking converges private conversation ownership on `primary_id`. The exact
+  authenticated subject and its capability grants remain unchanged.
+  Requires a caller-produced `SignedRequest`
   (`opts[:signed_request]`) proving possession of `caller_id`'s private
   key over this exact `link` mutation, and that principal must hold
   `arbor://identity/alias/manage` (M5).
@@ -192,6 +191,44 @@ defmodule Arbor.Agent.IdentityAliases do
       agent_id
     end
   end
+
+  @doc """
+  Resolve an alias without hiding missing or malformed storage.
+
+  Only an authoritative `:not_found` result means the identity is unlinked.
+  Availability probes followed by the display resolver are not sufficient: the
+  store can fail between the probe and read.
+  """
+  @spec resolve_strict(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def resolve_strict(id) when is_binary(id) and byte_size(id) > 0 do
+    case BufferedStore.get(@alias_prefix <> id, name: @store_name) do
+      {:ok, raw} ->
+        case unwrap_data(raw) do
+          %{primary_id: primary, secondary_id: ^id}
+          when is_binary(primary) and byte_size(primary) > 0 ->
+            {:ok, primary}
+
+          %{"primary_id" => primary, "secondary_id" => ^id}
+          when is_binary(primary) and byte_size(primary) > 0 ->
+            {:ok, primary}
+
+          _ ->
+            {:error, :identity_alias_malformed}
+        end
+
+      {:error, :not_found} ->
+        {:ok, id}
+
+      _ ->
+        {:error, :alias_store_unavailable}
+    end
+  rescue
+    _ -> {:error, :alias_store_unavailable}
+  catch
+    _, _ -> {:error, :alias_store_unavailable}
+  end
+
+  def resolve_strict(_), do: {:error, :invalid_identity}
 
   @doc """
   Remove an alias, restoring the secondary identity as independent.

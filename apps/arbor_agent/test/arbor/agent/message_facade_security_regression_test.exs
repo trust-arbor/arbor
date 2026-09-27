@@ -12,6 +12,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.SessionToken
 
+  defmodule UnlinkedIdentityResolver do
+    def resolve(id) when is_binary(id), do: {:ok, id}
+  end
+
   defmodule CaptureHost do
     @moduledoc false
     use GenServer
@@ -100,6 +104,16 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   end
 
   setup do
+    original_resolver = Application.fetch_env(:arbor_security, :identity_alias_resolver)
+    Application.put_env(:arbor_security, :identity_alias_resolver, UnlinkedIdentityResolver)
+
+    on_exit(fn ->
+      case original_resolver do
+        {:ok, value} -> Application.put_env(:arbor_security, :identity_alias_resolver, value)
+        :error -> Application.delete_env(:arbor_security, :identity_alias_resolver)
+      end
+    end)
+
     original_identity = Application.get_env(:arbor_security, :identity_verification, true)
     original_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
     original_strict = Application.get_env(:arbor_security, :strict_identity_mode, false)
@@ -351,21 +365,31 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       # branch and was told it needed an engagement_id that the authenticated
       # path then rejects. It could not reach authentication at all.
       caller = proof_caller()
+      target = proof_target()
       collab = auth_collaborators(parent: self())
+      message = proof_message(caller)
+      assert {:ok, payload} = Arbor.Agent.message_request_payload(caller, target, message)
+
+      assert {:ok, proof} =
+               Arbor.Contracts.Security.SignedRequest.sign(
+                 payload,
+                 caller,
+                 :crypto.strong_rand_bytes(32)
+               )
 
       assert {:ok, _} =
                MessageFacade.deliver_text(
                  caller,
-                 proof_target(),
-                 proof_message(caller),
-                 [signed_request: "signed-request-blob"],
+                 target,
+                 message,
+                 [signed_request: proof],
                  collab
                )
 
       # Forwarded under :signed_request so Security applies Ed25519 verification
       # rather than the HMAC session path.
       assert_received {:issue_seen, auth_opts}
-      assert Keyword.get(auth_opts, :signed_request) == "signed-request-blob"
+      assert Keyword.get(auth_opts, :signed_request) == proof
       refute Keyword.has_key?(auth_opts, :session_token)
     end
 
@@ -497,6 +521,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         flunk("ordinary authorize must not be called on auth path")
       end,
       issue_receipt: issue_receipt,
+      receipt_owner:
+        Keyword.get(opts, :receipt_owner, fn _receipt, caller, _target -> {:ok, caller} end),
+      recheck: Keyword.get(opts, :recheck, fn _caller, _target, _owner -> {:ok, :authorized} end),
       discard_receipt: discard_receipt,
       chat: fn _m, _s, _o -> flunk("ordinary chat must not be called on auth path") end,
       chat_response: fn _m, _s, _o ->
@@ -612,6 +639,46 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     end
 
     :ok
+  end
+
+  @tag :conversation_ingress
+  test "security regression: finite-use chat is rejected explicitly before Session or allowance consumption",
+       %{
+         target: target
+       } do
+    caller = register_active_human!()
+    resource = "arbor://chat/agent/" <> target
+
+    assert {:ok, cap} =
+             Security.grant(
+               principal: caller,
+               resource: resource,
+               max_uses: 1,
+               constraints: %{rate_limit: 1}
+             )
+
+    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, token} = SessionToken.generate(caller)
+
+    assert {:error, :unsupported_conversation_capability} =
+             Arbor.Agent.send_message_response(
+               caller,
+               target,
+               UserMessage.from_voice("finite turn", sender_id: caller),
+               session_token: token
+             )
+
+    assert {:error, :unsupported_conversation_capability} =
+             Arbor.Agent.submit_conversation_command(
+               caller,
+               target,
+               %{id: "finite-command", text: "finite turn"},
+               session_token: token
+             )
+
+    assert {:ok, caps} = Security.list_capabilities(caller)
+    assert Enum.any?(caps, &(&1.id == cap.id))
+    assert {:ok, :authorized} = Security.authorize(caller, resource, :chat, session_token: token)
   end
 
   @tag :conversation_ingress
@@ -1653,6 +1720,56 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                      1_000
 
       refute_receive {:agent_signal, _}, 100
+    end
+
+    test "security regression: grant revocation during public delivery suppresses response and assistant signal" do
+      caller = register_active_human!()
+      target = "agent_msgfacade_revoked_#{System.unique_integer([:positive])}"
+      resource = "arbor://chat/agent/#{target}"
+      cap = track_grant!(caller, resource)
+      register_agent_only(target)
+      ensure_signals_topology!()
+      parent = self()
+
+      {:ok, session_pid} =
+        FakeAuthSession.start_link(parent, fn _from, {_tag, _msg, receipt} ->
+          assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
+          send(parent, :revoked_delivery_blocked)
+
+          receive do
+            :finish -> {:ok, %PipelineResponse{content: "private revoked reply"}}
+          after
+            5_000 -> flunk("response barrier was not released")
+          end
+        end)
+
+      insert_fake_session!(target, session_pid)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, __MODULE__.SessionBridge)
+
+      assert {:ok, sub_ref} =
+               Arbor.Signals.subscribe(
+                 "agent.chat_message",
+                 fn signal ->
+                   send(parent, {:revoked_delivery_signal, signal})
+                   :ok
+                 end,
+                 async: false
+               )
+
+      on_exit(fn -> Arbor.Signals.unsubscribe(sub_ref) end)
+      assert {:ok, token} = SessionToken.generate(caller)
+      message = build_route_free_message(caller, content: "revocation probe")
+
+      task =
+        Task.async(fn ->
+          Arbor.Agent.send_message(caller, target, message, session_token: token, timeout: 3_000)
+        end)
+
+      assert_receive :revoked_delivery_blocked, 1_000
+      assert :ok = Security.revoke(cap.id)
+      send(session_pid, :finish)
+      assert {:error, :unauthorized} = Task.await(task)
+      refute_receive {:revoked_delivery_signal, %{data: %{role: :assistant}}}, 200
     end
 
     test "security regression: public-path bearer echo in content fails closed without signal leak" do

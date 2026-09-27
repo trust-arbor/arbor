@@ -1,5 +1,9 @@
+Code.require_file(
+  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+)
+
 defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -8,6 +12,8 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
+  alias Arbor.Security
+  alias Arbor.Security.OIDCTestHelper
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
   alias Arbor.Orchestrator.Session.TurnEgress
@@ -22,7 +28,47 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   """
 
   setup do
+    settings = [
+      identity_alias_resolver: OIDCTestHelper.UnlinkedIdentityResolver,
+      identity_verification: true,
+      capability_signing_required: true,
+      reflex_checking_enabled: false,
+      uri_registry_enforcement: false,
+      policy_enforcer_enabled: false,
+      approval_guard_enabled: false
+    ]
+
+    previous =
+      Enum.map(settings, fn {key, value} ->
+        old = Application.fetch_env(:arbor_security, key)
+        Application.put_env(:arbor_security, key, value)
+        {key, old}
+      end)
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
+        {key, :error} -> Application.delete_env(:arbor_security, key)
+      end)
+    end)
+
     unique = System.unique_integer([:positive])
+    agent_id = "agent_bounded_steering_#{unique}"
+    human = OIDCTestHelper.issue_identity()
+    assert :ok = Security.register_oidc_identity(human.identity, human.id_token, human.provider)
+
+    assert {:ok, cap} =
+             Security.grant(
+               principal: human.identity.agent_id,
+               resource: "arbor://chat/agent/" <> agent_id
+             )
+
+    on_exit(fn ->
+      Security.revoke(cap.id)
+      Security.deregister_identity(human.identity.agent_id)
+      human.cleanup.()
+    end)
+
     root = Path.join(System.tmp_dir!(), "arbor_bounded_steering_#{unique}")
     turn_path = Path.join(root, "turn.dot")
     File.mkdir_p!(root)
@@ -31,7 +77,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     {:ok, session} =
       Session.start_link(
         session_id: "session_bounded_steering_#{unique}",
-        agent_id: "agent_bounded_steering_#{unique}",
+        agent_id: agent_id,
         turn_dot: turn_path,
         config: %{"stream" => false}
       )
@@ -41,13 +87,12 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
       File.rm_rf(root)
     end)
 
-    %{session: session}
+    %{session: session, principal_id: human.identity.agent_id}
   end
 
   test "security regression: same authenticated engagement returns source-owned envelopes",
-       %{session: session} do
+       %{session: session, principal_id: principal_id} do
     engagement_id = Identifiers.generate_id("eng_")
-    principal_id = "human_bounded_same_engagement"
     active_authority = authority!(principal_id)
     queued_authority = authority!(principal_id)
     caller = live_from()
@@ -181,8 +226,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   end
 
   test "security regression: steering callback process exit reports read ambiguity" do
-    dead_session = spawn(fn -> :ok end)
-    monitor = Process.monitor(dead_session)
+    {dead_session, monitor} = spawn_monitor(fn -> :ok end)
     assert_receive {:DOWN, ^monitor, :process, ^dead_session, :normal}
 
     assert {:error, :steering_read_ambiguous} =
@@ -190,11 +234,11 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   end
 
   test "cross-engagement head is retained while an eligible later entry is accepted", %{
-    session: session
+    session: session,
+    principal_id: principal_id
   } do
     engagement_id = Identifiers.generate_id("eng_")
     foreign_engagement_id = Identifiers.generate_id("eng_")
-    principal_id = "human_bounded_queue_scan"
     active_authority = authority!(principal_id)
     foreign_from = live_from()
     eligible_from = live_from()
@@ -224,10 +268,10 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   end
 
   test "security regression: nil, principal, and extended authority mismatches remain queued", %{
-    session: session
+    session: session,
+    principal_id: principal_id
   } do
     engagement_id = Identifiers.generate_id("eng_")
-    principal_id = "human_bounded_authority"
     active_authority = authority!(principal_id)
     nil_from = live_from()
     mismatch_from = live_from()
@@ -270,6 +314,33 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     internal = :sys.get_state(session)
     assert internal.turn_queue == [nil_entry, mismatch_entry, forged_entry]
     assert internal.steer_froms == [eligible_from]
+  end
+
+  test "security regression: typed steering with missing canonical owner never takes compatibility path",
+       %{
+         session: session,
+         principal_id: principal_id
+       } do
+    engagement_id = Identifiers.generate_id("eng_")
+    bound = authority!(principal_id)
+    unbound = %{bound | canonical_owner_id: nil}
+    message = user_message("private unbound steering", engagement_id, principal_id)
+
+    for {active, queued} <- [{bound, unbound}, {unbound, bound}, {unbound, unbound}] do
+      entry = {message, queued, live_from()}
+
+      token =
+        put_active(session,
+          engagement_id: engagement_id,
+          authority: active,
+          principal_id: principal_id,
+          queue: [entry]
+        )
+
+      assert :none = take_steering(session, token, engagement_id, {make_ref(), 1})
+      assert :sys.get_state(session).turn_queue == [entry]
+      assert :sys.get_state(session).steer_froms == []
+    end
   end
 
   test "duplicate, stale, and malformed boundaries fail closed", %{session: session} do
@@ -738,6 +809,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
              TurnAuthority.new(%{
                turn_id: Identifiers.generate_id("turn_"),
                authenticated_principal_id: principal_id,
+               canonical_owner_id: principal_id,
                disclosure_capability_id: nil
              })
 

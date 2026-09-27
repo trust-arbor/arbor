@@ -34,6 +34,7 @@ defmodule ArborComms.MixProject do
       {:arbor_persistence, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.2"},
       {:req, "~> 0.5"},
       {:swoosh, "~> 1.17"},
       {:gen_smtp, "~> 1.2"},

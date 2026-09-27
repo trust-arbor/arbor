@@ -20,6 +20,9 @@ defmodule Arbor.Gateway.Chat.Protocol do
   @typedoc "A server→client event to encode."
   @type event ::
           {:engagement, %{id: String.t(), transcript: list()}}
+          | {:conversation_history, map()}
+          | {:conversation_command, map()}
+          | {:conversation_events, map()}
           | {:delta, String.t()}
           | {:message, map()}
           | {:notification, %{text: String.t(), kind: term()}}
@@ -30,6 +33,93 @@ defmodule Arbor.Gateway.Chat.Protocol do
           | {:approvals, [map()]}
           | {:approval_resolved, %{proposal_id: String.t(), status: String.t()}}
           | {:error, term()}
+
+  alias Arbor.Contracts.Security.SignedRequest
+
+  @doc "Decode an operation-bound frame without consuming its signature nonce."
+  def decode_authenticated(binary) when is_binary(binary) and byte_size(binary) <= 262_144 do
+    with {:ok, %{"payload" => payload, "authorization" => "Signature " <> encoded} = envelope} <-
+           Jason.decode(binary),
+         true <- map_size(envelope) == 2 and is_binary(payload),
+         {:ok,
+          [
+            "arbor.conversation.v2",
+            operation,
+            caller,
+            target,
+            input,
+            [after_cursor, through, limit],
+            expected_engagement_id
+          ]} <- Jason.decode(payload),
+         {:ok, operation, input} <- operation(operation, input),
+         true <- is_binary(caller) and is_binary(target),
+         {:ok, json} <- Base.decode64(encoded, padding: false),
+         {:ok,
+          %{
+            "agent_id" => ^caller,
+            "timestamp" => timestamp,
+            "nonce" => nonce,
+            "signature" => signature
+          } = auth} <- Jason.decode(json),
+         true <- map_size(auth) == 4,
+         {:ok, timestamp, 0} <- DateTime.from_iso8601(timestamp),
+         {:ok, nonce} <- Base.decode64(nonce),
+         {:ok, signature} <- Base.decode64(signature),
+         {:ok, proof} <-
+           SignedRequest.new(
+             payload: payload,
+             agent_id: caller,
+             timestamp: timestamp,
+             nonce: nonce,
+             signature: signature
+           ),
+         {:ok, opts} <- page_opts(operation, after_cursor, through, limit),
+         true <-
+           is_nil(expected_engagement_id) or
+             (is_binary(expected_engagement_id) and
+                Regex.match?(~r/\Aeng_[0-9a-f]{32}\z/, expected_engagement_id)) do
+      opts =
+        if expected_engagement_id,
+          do: Keyword.put(opts, :expected_engagement_id, expected_engagement_id),
+          else: opts
+
+      {:ok, %{operation: operation, target: target, input: input, opts: opts, proof: proof}}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  end
+
+  def decode_authenticated(_), do: {:error, :unauthorized}
+
+  defp operation("submit", [id, text]) when is_binary(id) and is_binary(text),
+    do: {:ok, :submit, %{id: id, text: text}}
+
+  defp operation("command", id) when is_binary(id), do: {:ok, :command, id}
+
+  defp operation("events", cursor) when is_integer(cursor) and cursor >= 0,
+    do: {:ok, :events, cursor}
+
+  defp operation("history", nil), do: {:ok, :history, nil}
+  defp operation(_, _), do: {:error, :invalid_operation}
+
+  defp page_opts(operation, after_cursor, through, limit) do
+    opts =
+      [after: after_cursor, through: through, limit: limit]
+      |> Enum.reject(fn {_, value} -> is_nil(value) end)
+
+    allowed =
+      case operation do
+        :history -> [:after, :through, :limit]
+        :events -> [:through, :limit]
+        _ -> []
+      end
+
+    if Enum.all?(opts, fn {key, value} -> key in allowed and is_integer(value) and value >= 0 end),
+       do: {:ok, opts},
+       else: {:error, :invalid_opts}
+  end
 
   @doc "Decode a client→server text frame into a command."
   @spec decode(binary()) :: {:ok, command()} | {:error, term()}
@@ -73,6 +163,13 @@ defmodule Arbor.Gateway.Chat.Protocol do
         transcript: transcript,
         display_name: Map.get(m, :display_name)
       })
+
+  def encode({type, page})
+      when type in [:conversation_history, :conversation_command, :conversation_events],
+      do: enc(%{type: to_string(type), data: page})
+
+  def encode({:conversation_rejected, %{id: id, reason: reason}}),
+    do: enc(%{type: "conversation_rejected", data: %{id: id, reason: stringify(reason)}})
 
   def encode({:delta, text}), do: enc(%{type: "delta", text: text})
   def encode({:message, message}), do: enc(%{type: "message", message: message})

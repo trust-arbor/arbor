@@ -6,6 +6,12 @@ defmodule Arbor.Security.OIDCTestHelper do
 
   @jwks_cache_table :arbor_oidc_jwks_cache
 
+  # Explicit fixture for tests whose owned identity universe has no aliases.
+  # Production never installs this fallback; missing resolver/store denies.
+  defmodule UnlinkedIdentityResolver do
+    def resolve(id) when is_binary(id), do: {:ok, id}
+  end
+
   def issue_identity(opts \\ []) do
     unique = System.unique_integer([:positive, :monotonic])
     issuer = Keyword.get(opts, :issuer, "https://oidc-test.arbor.local/#{unique}")

@@ -49,7 +49,10 @@ defmodule Arbor.Security.PrivateMemory do
          {:ok, scope} <- DeliveryReceiptBroker.memory_scope(token),
          :ok <- authorize_scope(scope, operation),
          {:ok, ^scope} <- DeliveryReceiptBroker.memory_scope(token) do
-      {:ok, scope}
+      # The proof subject belongs to the live admission, not the durable
+      # conversation-source scope. Recheck the complete binding above, then
+      # preserve the canonical scope consumed by signed memory sources.
+      {:ok, Map.delete(scope, :authenticated_principal_id)}
     else
       {:error, :broker_unavailable} = error -> error
       _ -> {:error, :invalid_memory_admission}
@@ -64,8 +67,10 @@ defmodule Arbor.Security.PrivateMemory do
     with {:ok, :active} <- Security.identity_status(scope.agent_id),
          {:ok, :active} <- Security.identity_status(scope.human_id),
          {:ok, :authorized} <-
-           Security.authorize(scope.human_id, "arbor://chat/agent/" <> scope.agent_id, :chat,
-             verify_identity: false
+           Security.recheck_conversation_owner(
+             scope.authenticated_principal_id,
+             scope.agent_id,
+             scope.human_id
            ),
          {:ok, :authorized} <- authorize_agent_memory(scope, operation) do
       :ok

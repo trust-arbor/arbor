@@ -59,6 +59,18 @@ defmodule Arbor.Gateway.Chat.Router do
     end
   end
 
+  # Resolve before signing a conversation operation: the exact target id is part
+  # of the signature, so the socket cannot rewrite an alias after verification.
+  get "/agents/resolve/:token" do
+    with_principal(conn, fn principal ->
+      case Agents.resolve_token(principal, token) do
+        {:ok, target} -> json(conn, 200, %{agent_id: target})
+        {:error, :not_found} -> json(conn, 404, %{error: "agent not found"})
+        {:error, {:ambiguous, _}} -> json(conn, 409, %{error: "agent name is ambiguous"})
+      end
+    end)
+  end
+
   # Signed HTTP POST: create+start a new agent from a template, granting the
   # principal chat access to it. Gated on `arbor://agent/lifecycle/create`.
   # Body: {"template": "...", "name": "..."(opt), "model": "..."(opt)}.

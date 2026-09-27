@@ -109,9 +109,11 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   end
 
   describe "when OIDC is configured with an http issuer" do
-    test "security regression: http issuer without allow_http does not redirect" do
+    test "security regression: explicitly disallowed http issuer does not redirect" do
       Application.put_env(:arbor_security, :oidc,
-        providers: [%{issuer: "http://localhost:8080", client_id: "test-client"}]
+        providers: [
+          %{issuer: "http://localhost:8080", client_id: "test-client", allow_http: false}
+        ]
       )
 
       conn =

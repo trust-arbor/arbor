@@ -173,9 +173,12 @@ defmodule Arbor.Dashboard.OidcAuth do
                ),
              {:ok, claims} <-
                TokenVerifier.verify(token_response["id_token"], provider),
-             {:ok, identity, _status} <- IdentityStore.load_or_create(claims) do
-          # Resolve identity aliases (secondary OIDC logins → primary identity)
-          agent_id = resolve_identity_alias(identity.agent_id)
+             {:ok, identity, _status} <- IdentityStore.load_or_create(claims),
+             :ok <- register_login_identity(identity, token_response["id_token"], provider),
+             {:ok, session_token} <- Arbor.Security.SessionToken.generate(identity.agent_id) do
+          # The proof authenticates the login subject. Conversation ownership
+          # resolves aliases after exact-subject authentication in Security.
+          agent_id = identity.agent_id
 
           # Ensure human has capabilities via role assignment
           ensure_role(agent_id)
@@ -188,9 +191,6 @@ defmodule Arbor.Dashboard.OidcAuth do
           # Extract display name from OIDC claims (try common claim names)
           display_name =
             claims["name"] || claims["preferred_username"] || claims["email"] || agent_id
-
-          # Generate signed session token for human identity verification
-          session_token = generate_session_token(agent_id)
 
           conn
           |> delete_session("oidc_state")
@@ -209,6 +209,10 @@ defmodule Arbor.Dashboard.OidcAuth do
             conn
             |> delete_session("oidc_state")
             |> delete_session("oidc_code_verifier")
+            |> delete_session("agent_id")
+            |> delete_session("session_token")
+            |> delete_session("user_display_name")
+            |> delete_session("local_dev_operator")
             |> send_resp(401, "Authentication failed")
             |> halt()
         end
@@ -293,23 +297,17 @@ defmodule Arbor.Dashboard.OidcAuth do
     _ -> :ok
   end
 
-  defp resolve_identity_alias(agent_id) do
-    Arbor.Agent.IdentityAliases.resolve(agent_id)
-  rescue
-    _ -> agent_id
-  catch
-    :exit, _ -> agent_id
-  end
+  defp register_login_identity(identity, id_token, provider) do
+    case Arbor.Security.register_oidc_identity(identity, id_token, provider) do
+      :ok ->
+        :ok
 
-  defp generate_session_token(agent_id) do
-    case Arbor.Security.SessionToken.generate(agent_id) do
-      {:ok, token} -> token
-      _ -> nil
+      {:error, {:already_registered, id}} when id == identity.agent_id ->
+        if Arbor.Security.identity_active?(id), do: :ok, else: {:error, :identity_inactive}
+
+      {:error, _} = error ->
+        error
     end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
   end
 
   defp oidc_provider do

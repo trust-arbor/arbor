@@ -2,10 +2,11 @@ defmodule Arbor.Security.IdentityAlias do
   @moduledoc """
   Resolve an identity to the primary it is linked to.
 
-  `mix arbor.user.link` folds several principals onto one primary account so a
-  person's grants and agents carry over when they add an OIDC login. Anything
-  that compares two principal ids for equality must resolve them first, or two
-  ids naming the SAME person compare unequal.
+  `mix arbor.user.link` associates several proof subjects with one primary
+  private-conversation owner. Resolution is an ownership input, never proof of
+  authentication or permission: grants, revocation and audit retain the exact
+  authenticated subject. Callers choose explicitly whether a comparison concerns
+  the proof subject or canonical private owner.
 
   ## Why the storage is injected
 
@@ -22,11 +23,9 @@ defmodule Arbor.Security.IdentityAlias do
   `resolve/1` returns `{:error, _}` when no resolver is configured or the store
   is unavailable. It deliberately does NOT fall back to returning the input id.
 
-  That fallback is safe in the one place it is used today — a strict ownership
-  check would simply deny — but it is unsafe by construction: any future caller
-  that treats "resolved" as "authorized" would silently grant on an outage,
-  because an unresolvable id would look like a perfectly good primary. Callers
-  must see the failure and decide.
+  An unresolvable identity must not look like an independent primary during an
+  outage. Conversation admission and continuations require successful resolution
+  and deny when it is unavailable.
   """
 
   @callback resolve(String.t()) :: {:ok, String.t()} | {:error, term()}

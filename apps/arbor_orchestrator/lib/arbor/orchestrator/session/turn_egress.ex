@@ -488,6 +488,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
         case TurnAuthority.new(
                turn_id: authority.turn_id,
                authenticated_principal_id: authority.authenticated_principal_id,
+               canonical_owner_id: authority.canonical_owner_id,
                disclosure_capability_id: cap.id
              ) do
           {:ok, bound} ->

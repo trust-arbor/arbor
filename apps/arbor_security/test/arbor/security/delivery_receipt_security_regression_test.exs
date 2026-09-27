@@ -93,6 +93,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
 
   setup do
     prev = %{
+      resolver: Application.get_env(:arbor_security, :identity_alias_resolver),
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
       strict: Application.get_env(:arbor_security, :strict_identity_mode),
       signing: Application.get_env(:arbor_security, :capability_signing_required),
@@ -103,6 +104,12 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       consensus_enabled: Application.get_env(:arbor_security, :consensus_escalation_enabled),
       consensus_module: Application.get_env(:arbor_security, :consensus_module)
     }
+
+    Application.put_env(
+      :arbor_security,
+      :identity_alias_resolver,
+      Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
+    )
 
     Application.put_env(:arbor_security, :identity_verification, true)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
@@ -124,6 +131,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
     )
 
     on_exit(fn ->
+      restore(:identity_alias_resolver, prev.resolver)
       restore(:identity_verification, prev.identity_verification)
       restore(:strict_identity_mode, prev.strict)
       restore(:capability_signing_required, prev.signing)

@@ -90,6 +90,15 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     safe_call(server, :stats)
   end
 
+  def issue_conversation(principal, resource, canonical_owner) do
+    safe_call(__MODULE__, {:issue_conversation, principal, resource, canonical_owner})
+  end
+
+  def conversation_owner(token, principal, resource),
+    do: safe_call(__MODULE__, {:conversation_owner, token, principal, resource})
+
+  def memory_binding(token), do: safe_call(__MODULE__, {:memory_binding, token})
+
   def memory_exchange(token, agent_id, sender_id, context),
     do: safe_call(__MODULE__, {:memory_exchange, token, agent_id, sender_id, context})
 
@@ -176,6 +185,40 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
+  def handle_call({:issue_conversation, principal, resource, canonical_owner}, from, state) do
+    case handle_call({:issue, principal, resource, :chat}, from, state) do
+      {:reply, {:ok, receipt}, next} ->
+        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
+        next = put_in(next, [:entries, token, :canonical_owner_id], canonical_owner)
+        {:reply, {:ok, receipt}, next}
+
+      other ->
+        other
+    end
+  end
+
+  def handle_call({:conversation_owner, token, principal, resource}, _from, state) do
+    now = state.clock.()
+
+    reply =
+      case Map.get(state.entries, token) do
+        %{
+          principal_id: ^principal,
+          resource_uri: ^resource,
+          action: :chat,
+          canonical_owner_id: owner,
+          expires_at_ms: expiry
+        }
+        when expiry > now ->
+          {:ok, owner}
+
+        _ ->
+          {:error, :invalid_receipt}
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:consume, token, resource_uri, action}, _from, state) do
     now = state.clock.()
     {entry, entries} = Map.pop(state.entries, token)
@@ -222,12 +265,23 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     now = state.clock.()
 
     case entry do
-      %{principal_id: ^sender_id, resource_uri: ^resource, action: :chat, expires_at_ms: expiry}
+      %{principal_id: ^sender_id, resource_uri: ^resource, action: :chat, expires_at_ms: expiry} =
+          entry
       when expiry > now ->
-        if map_size(state.memory_admissions) < state.max_entries do
-          create_memory_admission(state, owner, agent_id, sender_id, context, now)
+        with true <- map_size(state.memory_admissions) < state.max_entries,
+             {:ok, canonical_owner} <- Arbor.Security.resolve_conversation_owner(sender_id),
+             true <- Map.get(entry, :canonical_owner_id, canonical_owner) == canonical_owner do
+          create_memory_admission(
+            state,
+            owner,
+            agent_id,
+            sender_id,
+            canonical_owner,
+            context,
+            now
+          )
         else
-          {:reply, {:error, :broker_full}, state}
+          _ -> {:reply, {:error, :invalid_memory_admission}, state}
         end
 
       _ ->
@@ -250,6 +304,25 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     else
       _ -> {:reply, {:error, :invalid_memory_admission}, state}
     end
+  end
+
+  def handle_call({:memory_binding, token}, {owner, _}, state) do
+    state = prune_memory_admissions(state)
+
+    reply =
+      case memory_entry(state, token, owner) do
+        {:ok, %{scope: scope}} ->
+          {:ok,
+           %{
+             authenticated_principal_id: scope.authenticated_principal_id,
+             canonical_owner_id: scope.human_id
+           }}
+
+        _ ->
+          {:error, :invalid_memory_admission}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:memory_scope, token}, {owner, _}, state) do
@@ -328,14 +401,20 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp create_memory_admission(state, owner, agent_id, human_id, context, now) do
+  defp create_memory_admission(state, owner, agent_id, principal_id, human_id, context, now) do
     token = :crypto.strong_rand_bytes(@token_bytes)
 
     if Map.has_key?(state.memory_admissions, token) do
       {:reply, {:error, :receipt_issue_failed}, state}
     else
       ref = Process.monitor(owner)
-      scope = Map.merge(context, %{agent_id: agent_id, human_id: human_id})
+
+      scope =
+        Map.merge(context, %{
+          agent_id: agent_id,
+          human_id: human_id,
+          authenticated_principal_id: principal_id
+        })
 
       entry = %{
         owner: owner,

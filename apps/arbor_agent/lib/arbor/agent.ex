@@ -159,6 +159,15 @@ defmodule Arbor.Agent do
   @doc "List all profiles with auto_start: true."
   defdelegate list_auto_start_profiles(), to: ProfileStore
 
+  @doc """
+  Select a running agent associated with a principal, with a legacy first-agent fallback.
+
+  This is a selector only, not read or delivery authority. Callers must separately
+  authenticate and authorize the selected agent through the conversation APIs.
+  """
+  @spec find_agent_for_principal(String.t()) :: {:ok, String.t(), pid(), map()} | :not_found
+  defdelegate find_agent_for_principal(principal_id), to: Arbor.Agent.Manager
+
   @doc "Set auto_start flag on an agent's persisted profile."
   defdelegate set_auto_start(agent_id, enabled), to: Arbor.Agent.Manager
 
@@ -176,6 +185,20 @@ defmodule Arbor.Agent do
   # ===========================================================================
 
   @doc """
+  Build the exact signed payload for `send_message/4` or `send_message_response/4`.
+
+  This Elixir-native/RPC `arbor.message.v1` binding hashes deterministic ETF of
+  the complete native `UserMessage` envelope, including timestamp and metadata.
+  Set its final authenticated `sender_id` before calling this helper and deliver
+  that exact envelope unchanged. JSON clients should use the conversation v2
+  APIs and `conversation_request_payload/5` instead.
+  """
+  @spec message_request_payload(String.t(), String.t(), Arbor.Contracts.Session.UserMessage.t()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def message_request_payload(caller, target, message),
+    do: Arbor.Agent.MessageFacade.request_payload(caller, target, message)
+
+  @doc """
   Send one `UserMessage` to a running agent and return assistant text.
 
   Structured sibling: `send_message_response/4` (same auth/delivery branches,
@@ -183,19 +206,21 @@ defmodule Arbor.Agent do
 
   ## Branches
 
-  - **Absent `:session_token`** — ordinary compatibility path: requires an
+  - **Absent proof** — ordinary compatibility path: requires an
     engagement-tagged envelope, authorizes via `Arbor.Security.authorize/4`,
     and delivers through `Arbor.Agent.Manager.chat/3` (no turn authority).
-  - **Present `:session_token`** — authenticated path: requires
+  - **Present `:session_token` or `:signed_request`** — authenticated path: requires
     `engagement_id == nil`, exchanges the proof for a one-use delivery receipt
     inside `MessageFacade` only, and delivers through
     `Manager.chat_authenticated/4` → Session (no APIAgent fallback).
 
   ## Options
 
-  - `:timeout` — positive integer milliseconds, max `30_000` (default `30_000`)
+  - `:timeout` — positive integer milliseconds, max `300_000` (default `30_000`)
   - `:session_token` — optional human session proof (never forwarded to Manager
     opts, signals, logs, or errors)
+  - `:signed_request` — alternative fresh proof of `message_request_payload/3`;
+    arbitrary or modified payloads are rejected before receipt or nonce use.
 
   Unknown, duplicate, zero, or oversized options are rejected before effects.
   Present but invalid `:session_token` values (`nil`, empty, non-binary,
@@ -226,6 +251,7 @@ defmodule Arbor.Agent do
              | :invalid_sender
              | :invalid_engagement_id
              | :unauthorized
+             | :unsupported_conversation_capability
              | :delivery_ambiguous
              | :delivery_failed}
   def send_message(caller_id, target_agent_id, message, opts \\ []) do
@@ -242,8 +268,8 @@ defmodule Arbor.Agent do
 
   Same authorization and delivery branches as `send_message/4`:
 
-  - Absent token → ordinary `Manager.chat_response/3` map shape
-  - Present token → authenticated Session path returning
+  - Absent proof → ordinary `Manager.chat_response/3` map shape
+  - Present session token or bound signed request → authenticated Session path returning
     `%Arbor.Contracts.Pipeline.Response{}` after closed projection
 
   Options and closed error vocabulary match `send_message/4`.
@@ -265,6 +291,7 @@ defmodule Arbor.Agent do
              | :invalid_sender
              | :invalid_engagement_id
              | :unauthorized
+             | :unsupported_conversation_capability
              | :delivery_ambiguous
              | :delivery_failed}
   def send_message_response(caller_id, target_agent_id, message, opts \\ []) do
@@ -281,7 +308,11 @@ defmodule Arbor.Agent do
   the existing Session delivery (default 30s, maximum 300s). Returns a durable
   command receipt without waiting for the turn. Reusing the same id and exact
   text returns its existing state; changed text conflicts. Every request is
-  authenticated before lookup. A claimed command is never redispatched, even
+  authenticated before lookup. All conversation APIs accept an optional
+  `:expected_engagement_id` continuity fence: it is compared against the owner's
+  resolved engagement before any read or admission, never used as a route.
+  A mismatch returns `:conversation_scope_changed` and requires clearing cached
+  private data and pending commands before reconnecting. A claimed command is never redispatched, even
   after restart. `:dispatch_started` means its outcome is unknown; `:uncertain`
   is an immutable terminal delivery uncertainty, not permission to retry.
 
@@ -291,6 +322,19 @@ defmodule Arbor.Agent do
   """
   def submit_conversation_command(caller_id, target_agent_id, command, opts \\ []) do
     ConversationFacade.run(:submit, caller_id, target_agent_id, command, opts)
+  end
+
+  @doc """
+  Build the exact payload a fresh SignedRequest must bind for a conversation operation.
+
+  The versioned JSON array binds operation, original proof subject, full target,
+  input, supplied page bounds and the compare-only expected engagement fence.
+  Version 2 has seven array elements; absent page/fence values encode as null. The timeout
+  and proof are not part of this payload. Sign the returned bytes without an HTTP
+  method/path prefix; never reuse a nonce across operations or retries.
+  """
+  def conversation_request_payload(operation, caller_id, target_agent_id, input, opts \\ []) do
+    ConversationFacade.request_payload(operation, caller_id, target_agent_id, input, opts)
   end
 
   @doc "Read one owned command with fresh proof and current release authorization."
@@ -303,7 +347,9 @@ defmodule Arbor.Agent do
 
   Options besides exactly one proof: `:through` pins a replay head and `:limit`
   bounds the page (1..100). This cursor belongs to the command journal, not the
-  legacy transcript. Read access is rechecked immediately before publication.
+  legacy transcript. The result includes the authoritative `:engagement_id`,
+  including empty pages. `:expected_engagement_id` fences every continuation.
+  Read access is rechecked immediately before publication.
   """
   def conversation_events(caller_id, target_agent_id, cursor, opts \\ []) do
     ConversationFacade.run(:events, caller_id, target_agent_id, cursor, opts)
@@ -314,8 +360,8 @@ defmodule Arbor.Agent do
 
   Options besides exactly one proof: `:after`, `:through`, and `:limit` (1..100).
   The transcript ordinal cursor is separate from conversation_events/4 and may
-  contain gaps caused by other engagements. No caller-supplied engagement route
-  is accepted. A stored transcript is not proof that a delivery command settled.
+  contain gaps caused by other engagements. `:expected_engagement_id` is a
+  compare-only continuity fence; no caller-supplied engagement route is accepted. A stored transcript is not proof that a delivery command settled.
   """
   def conversation_history(caller_id, target_agent_id, opts \\ []) do
     ConversationFacade.run(:history, caller_id, target_agent_id, nil, opts)

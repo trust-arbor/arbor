@@ -3,8 +3,9 @@ defmodule ArborTui.WSClient do
   WebSocket transport to the Gateway chat API (`/api/chat/socket`).
 
   A GenServer that owns a `Mint.WebSocket` connection: it performs the HTTP/1
-  upgrade with a signed `Authorization` header (`ArborTui.Signer`), then pumps
-  frames in both directions. Decoded server events (`ArborTui.Protocol`) are
+  upgrade with a signed `Authorization` header (`ArborTui.Signer`), then signs
+  every conversation operation independently. History and journal pages are
+  polled with separate cursors and fresh one-use proofs. Decoded server events (`ArborTui.Protocol`) are
   pushed into the TermUI runtime via `TermUI.Runtime.send_message(runtime,
   :root, {:server_event, event})`; the UI sends commands back via
   `send_command/2`.
@@ -119,7 +120,14 @@ defmodule ArborTui.WSClient do
       # attach is best-effort (failure → detached, no retry); only AFTER a
       # successful attach does a later drop trigger indefinite backoff-reconnect.
       # Reset to false on init/connect_to/set_url (a fresh target).
-      attached?: false
+      attached?: false,
+      history: [],
+      history_cursor: 0,
+      engagement_id: nil,
+      event_cursor: 0,
+      poll_timer: nil,
+      last_command: nil,
+      command_attempts: 0
     }
 
     # No target yet → start IDLE: no connection until connect_to/2 sets one.
@@ -134,7 +142,9 @@ defmodule ArborTui.WSClient do
   def handle_continue(:connect, state) do
     notify(state, {:ws_status, :connecting, state.gateway_url})
 
-    case connect(state) do
+    result = with {:ok, state} <- resolve_target(state), do: connect(state)
+
+    case result do
       {:ok, state} ->
         {:noreply, state}
 
@@ -144,12 +154,58 @@ defmodule ArborTui.WSClient do
   end
 
   @impl true
-  def handle_cast({:command, command}, %{websocket: ws} = state) when ws != nil do
-    {:noreply, send_frame(state, Protocol.encode(command))}
+  def handle_cast({:command, {:send, "/" <> _}}, state) do
+    notify(
+      state,
+      {:server_event,
+       {:error,
+        "Server slash commands are unavailable during conversation migration; local /help lists supported controls."}}
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:command, {:send, text}}, %{websocket: ws, attached?: true} = state)
+      when ws != nil do
+    if state.last_command &&
+         state.last_command["status"] in ["admitted", "dispatch_started", "transport_unknown"] do
+      notify(
+        state,
+        {:server_event,
+         {:error,
+          "A delivery is still unresolved. Use /retry to query or retry that exact command."}}
+      )
+
+      {:noreply, state}
+    else
+      id = "tui_" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+      command = %{"id" => id, "text" => text, "status" => "transport_unknown"}
+      state = %{state | last_command: command, command_attempts: 1}
+      notify(state, {:server_event, {:conversation_command, command}})
+      {:noreply, send_operation(state, :submit, %{id: id, text: text})}
+    end
+  end
+
+  def handle_cast({:command, :retry}, %{websocket: ws, last_command: command} = state)
+      when ws != nil and is_map(command) do
+    # A retry preserves the exact admitted id and text, but signs a fresh proof.
+    # The host journal decides whether admission, lookup or no redispatch applies.
+    state = %{state | command_attempts: state.command_attempts + 1}
+    {:noreply, send_operation(state, :submit, %{id: command["id"], text: command["text"]})}
+  end
+
+  def handle_cast({:command, _command}, %{websocket: ws} = state) when ws != nil do
+    notify(
+      state,
+      {:server_event,
+       {:error, "This server control is unavailable on the authenticated conversation transport."}}
+    )
+
+    {:noreply, state}
   end
 
   def handle_cast({:command, _command}, state) do
-    # Not connected (or reconnecting) — drop (the UI shows the connection status).
+    notify(state, {:server_event, {:error, "Not connected; message was not sent."}})
     {:noreply, state}
   end
 
@@ -161,7 +217,16 @@ defmodule ArborTui.WSClient do
       state
       |> clear_reconnect()
       |> reset_conn()
-      |> Map.merge(%{target_agent_id: agent_id, attempt: 0, attached?: false})
+      |> Map.merge(%{
+        target_agent_id: agent_id,
+        attempt: 0,
+        attached?: false,
+        history: [],
+        history_cursor: 0,
+        engagement_id: nil,
+        event_cursor: 0,
+        last_command: nil
+      })
 
     {:noreply, _state} = handle_continue(:connect, state)
   end
@@ -177,7 +242,16 @@ defmodule ArborTui.WSClient do
       state
       |> clear_reconnect()
       |> reset_conn()
-      |> Map.merge(%{gateway_url: url, attempt: 0, attached?: false})
+      |> Map.merge(%{
+        gateway_url: url,
+        attempt: 0,
+        attached?: false,
+        history: [],
+        history_cursor: 0,
+        engagement_id: nil,
+        event_cursor: 0,
+        last_command: nil
+      })
 
     {:noreply, _state} = handle_continue(:connect, state)
   end
@@ -188,6 +262,20 @@ defmodule ArborTui.WSClient do
     # re-attaches to the same target_agent_id on success).
     {:noreply, _state} = handle_continue(:connect, %{state | reconnect_timer: nil})
   end
+
+  def handle_info(:poll_conversation, %{websocket: ws, attached?: true} = state) when ws != nil do
+    state = %{state | poll_timer: nil}
+    state = send_operation(state, :history, nil, after: state.history_cursor, limit: 100)
+
+    state =
+      if state.websocket,
+        do: send_operation(state, :events, state.event_cursor, limit: 100),
+        else: state
+
+    {:noreply, state}
+  end
+
+  def handle_info(:poll_conversation, state), do: {:noreply, %{state | poll_timer: nil}}
 
   def handle_info(message, %{conn: conn} = state) when conn != nil do
     case Mint.WebSocket.stream(conn, message) do
@@ -205,6 +293,17 @@ defmodule ArborTui.WSClient do
   def handle_info(_message, state), do: {:noreply, state}
 
   # ── Connect + upgrade ──────────────────────────────────────────────────────
+
+  defp resolve_target(state) do
+    if Regex.match?(~r/\Aagent_[0-9a-f]{64}\z/, state.target_agent_id) do
+      {:ok, state}
+    else
+      case ArborTui.AgentsClient.resolve(state.identity, state.gateway_url, state.target_agent_id) do
+        {:ok, target} -> {:ok, %{state | target_agent_id: target}}
+        error -> error
+      end
+    end
+  end
 
   defp connect(state) do
     uri = URI.parse(state.gateway_url)
@@ -270,7 +369,7 @@ defmodule ArborTui.WSClient do
         # Attach to the target agent's :user engagement immediately (a target is
         # always set on any path that reaches connect — guarded for safety).
         if state.target_agent_id do
-          send_frame(state, Protocol.encode({:attach, state.target_agent_id, nil}))
+          send_operation(state, :history, nil, after: state.history_cursor, limit: 100)
         else
           state
         end
@@ -281,6 +380,22 @@ defmodule ArborTui.WSClient do
   end
 
   # ── Outbound frames ──────────────────────────────────────────────────────
+
+  defp send_operation(%{websocket: nil} = state, _operation, _input, _opts), do: state
+
+  defp send_operation(state, operation, input, opts) do
+    opts =
+      if state.engagement_id,
+        do: Keyword.put(opts, :expected_engagement_id, state.engagement_id),
+        else: opts
+
+    send_frame(
+      state,
+      Protocol.signed_operation(state.identity, state.target_agent_id, operation, input, opts)
+    )
+  end
+
+  defp send_operation(state, operation, input), do: send_operation(state, operation, input, [])
 
   defp send_frame(%{websocket: ws, conn: conn, ref: ref} = state, payload) do
     with {:ok, ws, data} <- Mint.WebSocket.encode(ws, {:text, payload}),
@@ -297,11 +412,14 @@ defmodule ArborTui.WSClient do
 
   # ── Inbound frames ───────────────────────────────────────────────────────
 
+  # A scope-change error can be followed by already-decoded frames from the old
+  # connection in the same packet. Once detached, none may repopulate the UI.
+  defp handle_frame(_frame, %{websocket: nil} = state), do: state
+
   defp handle_frame({:text, text}, state) do
     case Protocol.decode(text) do
       {:ok, event} ->
-        notify(state, {:server_event, event})
-        mark_attach_progress(state, event)
+        handle_conversation_event(event, state)
 
       {:error, _} ->
         state
@@ -317,12 +435,151 @@ defmodule ArborTui.WSClient do
 
   defp handle_frame(_frame, state), do: state
 
-  # The server's `:engagement` event is the confirmation of a SUCCESSFUL attach
-  # (it carries the engagement transcript). Once seen, this target is considered
-  # established: a later drop now triggers indefinite backoff-reconnect (the
-  # server-restart case) instead of the best-effort give-up.
-  defp mark_attach_progress(state, {:engagement, _}), do: %{state | attached?: true}
-  defp mark_attach_progress(state, _event), do: state
+  defp handle_conversation_event({type, page}, %{engagement_id: pinned} = state)
+       when type in [:conversation_history, :conversation_events] and not is_nil(pinned) and
+              (not is_map_key(page, "engagement_id") or
+                 :erlang.map_get("engagement_id", page) != pinned) do
+    scope_changed(state)
+  end
+
+  defp handle_conversation_event({:conversation_history, page}, state) do
+    entries = Enum.uniq_by(state.history ++ page["entries"], & &1["id"])
+    history = Enum.sort_by(entries, & &1["entry_ordinal"])
+    event = %{id: page["engagement_id"], transcript: history, display_name: page["agent_id"]}
+
+    if not state.attached? do
+      notify(state, {:server_event, {:engagement, event}})
+    else
+      if history != state.history,
+        do: notify(state, {:server_event, {:conversation_history, event}})
+    end
+
+    state = %{
+      state
+      | history: history,
+        history_cursor: page["cursor"],
+        engagement_id: page["engagement_id"],
+        attached?: true
+    }
+
+    if page["has_more"] do
+      send_operation(state, :history, nil,
+        after: page["cursor"],
+        through: page["head"],
+        limit: 100
+      )
+    else
+      schedule_poll(state)
+    end
+  end
+
+  defp handle_conversation_event({:conversation_events, page}, state) do
+    state =
+      Enum.reduce(page["events"], state, fn event, acc ->
+        command = event["command"]
+
+        if acc.last_command && command["id"] == acc.last_command["id"],
+          do: handle_conversation_event({:conversation_command, command}, acc),
+          else: acc
+      end)
+
+    state = %{state | event_cursor: page["cursor"]}
+
+    if page["has_more"],
+      do: send_operation(state, :events, page["cursor"], through: page["head"], limit: 100),
+      else: schedule_poll(state)
+  end
+
+  defp handle_conversation_event({:conversation_rejected, rejection}, state) do
+    case classify_rejection(state.last_command, state.command_attempts, rejection) do
+      {:definite, command} ->
+        notify(
+          state,
+          {:server_event, {:conversation_rejected, Map.put(rejection, "text", command["text"])}}
+        )
+
+        %{state | last_command: nil, command_attempts: 0}
+
+      :preserve ->
+        notify(
+          state,
+          {:server_event,
+           {:error,
+            "Request rejected: #{rejection["reason"]}. Earlier delivery state remains unchanged."}}
+        )
+
+        state
+    end
+  end
+
+  defp handle_conversation_event(
+         {:conversation_command, %{"id" => id} = command},
+         %{last_command: %{"id" => id}} = state
+       ) do
+    if command != state.last_command,
+      do: notify(state, {:server_event, {:conversation_command, command}})
+
+    %{state | last_command: command}
+  end
+
+  # A retry response can arrive after the user has started another command.
+  # Only the current command may change the pending delivery or its UI status.
+  defp handle_conversation_event({:conversation_command, _command}, state), do: state
+
+  defp handle_conversation_event({:error, "conversation_scope_changed"}, state),
+    do: scope_changed(state)
+
+  defp handle_conversation_event({:error, reason} = event, state) do
+    notify(state, {:server_event, event})
+
+    if reason in ["unauthorized", "not_attached"],
+      do: detach(state, reason),
+      else: schedule_poll(state)
+  end
+
+  defp handle_conversation_event(event, state) do
+    notify(state, {:server_event, event})
+    state
+  end
+
+  defp scope_changed(state) do
+    notify(
+      state,
+      {:server_event,
+       {:conversation_reset,
+        "Conversation ownership changed. Draft and pending retry were cleared; reconnect explicitly."}}
+    )
+
+    state = %{
+      state
+      | history: [],
+        history_cursor: 0,
+        engagement_id: nil,
+        event_cursor: 0,
+        last_command: nil
+    }
+
+    detach(state, "Conversation ownership changed")
+  end
+
+  @doc false
+  def classify_rejection(%{"id" => id, "status" => "transport_unknown"} = command, 1, %{
+        "id" => id,
+        "reason" => reason
+      })
+      when reason in [
+             "unsupported_conversation_capability",
+             "invalid_command",
+             "command_conflict"
+           ],
+      do: {:definite, command}
+
+  def classify_rejection(_, _, _), do: :preserve
+
+  defp schedule_poll(%{poll_timer: nil, websocket: ws} = state) when ws != nil,
+    do: %{state | poll_timer: Process.send_after(self(), :poll_conversation, 1_000)}
+
+  defp schedule_poll(state), do: state
 
   defp send_control(%{websocket: ws, conn: conn, ref: ref} = state, frame) do
     with {:ok, ws, data} <- Mint.WebSocket.encode(ws, frame),
@@ -349,7 +606,17 @@ defmodule ArborTui.WSClient do
       end
     end
 
-    %{state | conn: nil, ref: nil, websocket: nil, status: nil, resp_headers: nil}
+    if state.poll_timer, do: Process.cancel_timer(state.poll_timer)
+
+    %{
+      state
+      | conn: nil,
+        ref: nil,
+        websocket: nil,
+        status: nil,
+        resp_headers: nil,
+        poll_timer: nil
+    }
   end
 
   # Funnel for every disconnect path. The behaviour forks on whether this target

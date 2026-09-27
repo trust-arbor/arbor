@@ -9,8 +9,17 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
 
   @moduletag :fast
 
+  defmodule OwnerResolver do
+    def resolve(id) do
+      {:ok,
+       Map.get(Application.get_env(:arbor_security, :private_memory_test_aliases, %{}), id, id)}
+    end
+  end
+
   setup do
     settings = [
+      identity_alias_resolver: OwnerResolver,
+      private_memory_test_aliases: %{},
       identity_verification: true,
       policy_enforcer_enabled: false,
       approval_guard_enabled: false,
@@ -91,6 +100,52 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)
+  end
+
+  test "security regression: private memory uses canonical owner with original subject authorization",
+       ctx do
+    owner =
+      Arbor.Security.OIDCTestHelper.issue_identity(subject: Identifiers.generate_id("owner_"))
+
+    assert :ok = Security.register_oidc_identity(owner.identity, owner.id_token, owner.provider)
+
+    on_exit(fn ->
+      owner.cleanup.()
+      Security.deregister_identity(owner.identity.agent_id)
+    end)
+
+    Application.put_env(:arbor_security, :private_memory_test_aliases, %{
+      ctx.human.agent_id => owner.identity.agent_id
+    })
+
+    admission = active!(ctx)
+    assert {:ok, scope} = Security.authorize_private_memory_turn(admission, :read)
+    assert scope.human_id == owner.identity.agent_id
+
+    assert Enum.sort(Map.keys(scope)) == [
+             :agent_id,
+             :engagement_id,
+             :human_id,
+             :session_id,
+             :turn_id
+           ]
+
+    Application.put_env(:arbor_security, :private_memory_test_aliases, %{})
+
+    assert {:error, :invalid_memory_admission} =
+             Security.authorize_private_memory_turn(admission, :read)
+
+    Application.put_env(:arbor_security, :private_memory_test_aliases, %{
+      ctx.human.agent_id => owner.identity.agent_id
+    })
+
+    assert {:ok, ^scope} = Security.authorize_private_memory_turn(admission, :read)
+    assert :ok = Security.revoke(ctx.chat.id)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.authorize_private_memory_turn(admission, :read)
+
+    assert :ok = Security.close_private_memory_admission(admission)
   end
 
   test "security regression: wrong sender or target spends receipt; raw and embellished claims deny",
@@ -211,6 +266,46 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
     admission = active!(ctx)
     assert {:ok, _} = Security.authorize_private_memory_turn(admission, :read)
     assert :ok = Security.suspend_identity(ctx.human.agent_id)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.authorize_private_memory_turn(admission, :read)
+
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  test "security regression: private memory continuation does not spend the chat rate allowance again",
+       ctx do
+    assert :ok = Security.revoke(ctx.chat.id)
+
+    assert {:ok, chat} =
+             Security.grant(
+               principal: ctx.human.agent_id,
+               resource: ctx.resource,
+               constraints: %{rate_limit: 1}
+             )
+
+    on_exit(fn -> Security.revoke(chat.id) end)
+
+    admission = active!(ctx)
+
+    for operation <- [:read, :write, :read, :write] do
+      assert {:ok, scope} = Security.authorize_private_memory_turn(admission, operation)
+      assert scope.human_id == ctx.human.agent_id
+    end
+
+    assert {:ok, signed} =
+             SignedRequest.sign(ctx.resource, ctx.human.agent_id, ctx.human.private_key)
+
+    assert {:error, :unauthorized} =
+             Security.authorize_and_issue_delivery_receipt(
+               ctx.human.agent_id,
+               ctx.resource,
+               :chat,
+               signed_request: signed,
+               expected_resource: ctx.resource
+             )
+
+    assert :ok = Security.revoke(chat.id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)

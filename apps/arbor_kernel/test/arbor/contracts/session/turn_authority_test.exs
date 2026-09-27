@@ -12,7 +12,7 @@ defmodule Arbor.Contracts.Session.TurnAuthorityTest do
   @valid_cap Identifiers.generate_capability_id()
 
   describe "new/1" do
-    test "constructs the exact three-field closed shape with nil disclosure" do
+    test "constructs the closed shape with optional owner and disclosure" do
       assert {:ok, auth} =
                TurnAuthority.new(
                  turn_id: @valid_turn_id,
@@ -22,14 +22,36 @@ defmodule Arbor.Contracts.Session.TurnAuthorityTest do
       assert Map.from_struct(auth) == %{
                turn_id: @valid_turn_id,
                authenticated_principal_id: @valid_human,
+               canonical_owner_id: nil,
                disclosure_capability_id: nil
              }
 
       assert Enum.sort(Map.keys(Map.from_struct(auth))) == [
                :authenticated_principal_id,
+               :canonical_owner_id,
                :disclosure_capability_id,
                :turn_id
              ]
+    end
+
+    test "binds a canonical human owner while preserving the exact proof subject" do
+      assert {:ok, auth} =
+               TurnAuthority.new(
+                 turn_id: @valid_turn_id,
+                 authenticated_principal_id: @valid_human,
+                 canonical_owner_id: "human_primary"
+               )
+
+      assert auth.authenticated_principal_id == @valid_human
+      assert auth.canonical_owner_id == "human_primary"
+      refute inspect(auth) =~ "human_primary"
+
+      assert {:error, :invalid_authenticated_principal_id} =
+               TurnAuthority.new(
+                 turn_id: @valid_turn_id,
+                 authenticated_principal_id: @valid_human,
+                 canonical_owner_id: "agent_unrelated"
+               )
     end
 
     test "accepts a canonical capability disclosure id" do
@@ -156,7 +178,7 @@ defmodule Arbor.Contracts.Session.TurnAuthorityTest do
       inspected = inspect(auth)
 
       assert inspected ==
-               "#Arbor.Contracts.Session.TurnAuthority<turn_id: [REDACTED], authenticated_principal_id: [REDACTED], disclosure_capability_id: [REDACTED]>"
+               "#Arbor.Contracts.Session.TurnAuthority<turn_id: [REDACTED], authenticated_principal_id: [REDACTED], canonical_owner_id: [REDACTED], disclosure_capability_id: [REDACTED]>"
 
       refute inspected =~ @valid_turn_id
       refute inspected =~ @valid_human
@@ -182,6 +204,7 @@ defmodule Arbor.Contracts.Session.TurnAuthorityTest do
         __struct__: TurnAuthority,
         turn_id: @valid_turn_id,
         authenticated_principal_id: @valid_human,
+        canonical_owner_id: nil,
         disclosure_capability_id: nil
       }
 

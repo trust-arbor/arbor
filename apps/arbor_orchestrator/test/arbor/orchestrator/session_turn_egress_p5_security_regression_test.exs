@@ -31,6 +31,10 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   @external_tier :external_provider
   @local_tier :on_host
 
+  defmodule IdentityOwnerResolver do
+    def resolve(principal), do: {:ok, principal}
+  end
+
   defmodule RecordingAdapter do
     @moduledoc false
     @behaviour Arbor.LLM.ProviderAdapter
@@ -687,6 +691,29 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     end
   end
 
+  @tag :conversation_convergence
+  test "security regression: external disclosure retains the admitted canonical conversation owner",
+       %{agent_id: agent_id, human_id: human_id} do
+    assert {:ok, authority} =
+             TurnAuthority.new(
+               turn_id: Identifiers.generate_id("turn_"),
+               authenticated_principal_id: human_id,
+               canonical_owner_id: "human_distinct_canonical_owner"
+             )
+
+    {bound, cap_id} =
+      issue_disclosure!(
+        %{agent_id: agent_id, session_id: "session_conversation_owner"},
+        authority,
+        external_route()
+      )
+
+    assert bound.canonical_owner_id == authority.canonical_owner_id
+    assert bound.authenticated_principal_id == authority.authenticated_principal_id
+    assert bound.turn_id == authority.turn_id
+    TurnEgress.safe_revoke_disclosure(cap_id)
+  end
+
   test "VOICE-17 security regression: authenticated external issues disclosure and admits exact route",
        %{agent_id: agent_id, human_id: human_id} do
     fence = TurnEgress.new_fence()
@@ -1051,8 +1078,24 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 lifecycle: success path revokes before public reply",
        %{agent_id: agent_id, human_id: human_id, agent_signer: signer} do
+    previous_resolver = Application.get_env(:arbor_security, :identity_alias_resolver)
+    Application.put_env(:arbor_security, :identity_alias_resolver, IdentityOwnerResolver)
+    on_exit(fn -> restore_sec(:identity_alias_resolver, previous_resolver) end)
+
     route = external_route()
-    auth0 = authority!(human_id)
+
+    assert {:ok, auth0} =
+             TurnAuthority.new(
+               turn_id: Identifiers.generate_id("turn_"),
+               authenticated_principal_id: human_id,
+               canonical_owner_id: human_id
+             )
+
+    engagement_id = Identifiers.generate_id("eng_")
+
+    message =
+      UserMessage.from_voice("ok", sender_id: human_id)
+      |> UserMessage.with_engagement(engagement_id)
 
     {bound, cap_id} =
       issue_disclosure!(%{agent_id: agent_id, session_id: "session_p5_ok"}, auth0, route)
@@ -1071,7 +1114,8 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
         turn_authority: bound,
         turn_egress_fence: fence,
         turn_token: token,
-        turn_user_message: UserMessage.from_string("ok"),
+        turn_user_message: message,
+        current_engagement_id: engagement_id,
         phase: :processing,
         turn_task_ref: make_ref(),
         turn_caller_ref: make_ref(),

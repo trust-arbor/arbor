@@ -487,8 +487,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         <.empty_state
           :if={@approvals_count == 0}
           icon="🔐"
-          title="No pending approvals"
-          hint="Tool approvals appear here when agent actions need your permission"
+          title="Approvals unavailable in private chat"
+          hint="Use an authorized approval channel"
         />
       </div>
     </div>
@@ -532,14 +532,14 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       <div
         id="messages-container"
         phx-update="stream"
-        phx-hook="InfiniteScrollUp"
+        phx-hook="ScrollToBottom"
         style="flex: 1; overflow-y: auto; padding: 0.75rem; min-height: 0;"
       >
         <div
           :if={@chat_has_more}
           style="text-align: center; padding: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.8em;"
         >
-          ↑ Scroll up to load older messages
+          Loading the next transcript page…
         </div>
         <div
           :for={{dom_id, msg} <- @streams.messages}
@@ -632,12 +632,42 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         {@error}
       </div>
 
+      <div :if={!@group_mode && @conversation_rebind_required} style="padding: 0.5rem 0.75rem;">
+        <button type="button" phx-click="conversation:reconnect">Reconnect conversation</button>
+      </div>
+
+      <div
+        :if={!@group_mode && @conversation_pending}
+        id="conversation-delivery"
+        role="status"
+        style="padding: 0.5rem 0.75rem; font-size: 0.85em;"
+      >
+        <span :if={@conversation_status == :admitted}>Message admitted; waiting for dispatch.</span>
+        <span :if={@conversation_status == :dispatch_started}>
+          Delivery started; result not yet confirmed.
+        </span>
+        <span :if={@conversation_status in [nil, :not_found, :uncertain]}>
+          Delivery is unconfirmed. Your original message and request ID are retained.
+        </span>
+        <button type="button" phx-click="conversation:retry">Check / retry original request</button>
+        <button type="button" phx-click="conversation:new-message">Start a different message</button>
+      </div>
+
       <%!-- Input area --%>
       <form
+        id="conversation-composer"
+        phx-hook="ConversationDraft"
+        data-conversation-key={
+          if @current_agent_id && @agent_id && @conversation_engagement_id,
+            do: @current_agent_id <> ":" <> @agent_id <> ":" <> @conversation_engagement_id,
+            else: ""
+        }
+        data-conversation-authorized={to_string(@conversation_authorized && !@group_mode)}
         phx-submit="send-message"
         phx-change="update-input"
         style="padding: 0.5rem 0.75rem; border-top: 1px solid var(--aw-border, #333); display: flex; gap: 0.5rem; flex-shrink: 0;"
       >
+        <input type="hidden" name="command_id" value="" />
         <input
           type="text"
           name="message"

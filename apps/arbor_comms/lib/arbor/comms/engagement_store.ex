@@ -15,7 +15,7 @@ defmodule Arbor.Comms.EngagementStore do
   for `:channel` scope (1:1), a user/tenant id for `:user` scope, etc. Keeping the
   key opaque lets the scope-policy decision live at the call site for now (it's
   one of the open design questions in the plan doc). Resolution is race-safe via
-  `:ets.insert_new` on the index.
+  one atomic `:ets.insert_new/2` of the record and its resolution key.
 
   ## Durability
 
@@ -40,7 +40,9 @@ defmodule Arbor.Comms.EngagementStore do
   alias Arbor.Contracts.Comms.Engagement
 
   @table :arbor_engagements
-  @index :arbor_engagement_index
+  # Record keys are binaries; resolution keys are tuples. Keeping both in one
+  # table lets ETS publish them atomically, including when the caller dies.
+  @index @table
 
   # ── Table owner ──
   #
@@ -138,7 +140,7 @@ defmodule Arbor.Comms.EngagementStore do
         ok
 
       {:error, :not_found} ->
-        :ets.delete(@index, {agent_id, resolution_key})
+        :ets.delete_object(@index, {{agent_id, resolution_key}, id})
         recover_or_create(agent_id, resolution_key, opts)
     end
   end
@@ -160,31 +162,50 @@ defmodule Arbor.Comms.EngagementStore do
 
   # Load a durably-recovered engagement back into the ETS cache + index.
   defp hydrate(engagement, agent_id, resolution_key) do
-    :ets.insert(@table, {engagement.id, engagement})
-    :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id})
-    {:ok, engagement}
+    publish(engagement, agent_id, resolution_key, false)
   end
 
   defp create_and_claim(agent_id, resolution_key, opts) do
-    engagement = Engagement.new(opts)
+    publish(Engagement.new(opts), agent_id, resolution_key, true)
+  end
 
-    # Atomic test-and-set: only the first caller to claim the index slot wins.
-    if :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id}) do
+  defp publish(engagement, agent_id, resolution_key, persist?) do
+    key = {agent_id, resolution_key}
+
+    # ETS inserts the entire list or nothing. No loser record can leak, no
+    # index can point at an unpublished candidate, and a caller dying between
+    # record construction and this operation leaves no orphan cache record.
+    if :ets.insert_new(@table, [{engagement.id, engagement}, {key, engagement.id}]) do
       :telemetry.execute(
         [:arbor, :comms, :engagement, :resolution_claim],
         %{count: 1},
         %{agent_id: agent_id, engagement_id: engagement.id}
       )
 
-      :ets.insert(@table, {engagement.id, engagement})
-      durable_upsert(engagement)
+      if persist?, do: durable_upsert(engagement)
       {:ok, engagement}
     else
-      # Lost the race — use whoever claimed it.
-      [{_, winner_id}] = :ets.lookup(@index, {agent_id, resolution_key})
-      get(winner_id)
+      case :ets.lookup(@index, key) do
+        [{^key, winner_id}] ->
+          resolve_existing(winner_id, agent_id, resolution_key, engagement_opts(engagement))
+
+        [] ->
+          # A deterministic/explicit id may already exist (manual put or an
+          # earlier cache version). Reuse it without overwriting attachments.
+          # Recheck after claiming to tolerate a concurrent explicit delete.
+          case get(engagement.id) do
+            {:ok, _existing} ->
+              :ets.insert_new(@index, {key, engagement.id})
+              resolve_or_create(agent_id, resolution_key, engagement_opts(engagement))
+
+            {:error, :not_found} ->
+              publish(engagement, agent_id, resolution_key, persist?)
+          end
+      end
     end
   end
+
+  defp engagement_opts(engagement), do: engagement |> Map.from_struct() |> Map.to_list()
 
   @doc "Attach a channel to an engagement (idempotent)."
   @spec attach_channel(String.t(), String.t()) ::
@@ -294,7 +315,6 @@ defmodule Arbor.Comms.EngagementStore do
 
   defp ensure_tables do
     create_table(@table)
-    create_table(@index)
     :ok
   end
 

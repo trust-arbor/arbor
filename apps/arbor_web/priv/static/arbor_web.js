@@ -45,6 +45,82 @@ ArborWebHooks.ClearOnSubmit = {
 };
 
 /**
+ * Per-tab private conversation draft and immutable pending admission. The key
+ * contains the authenticated subject and target; no authentication proof is
+ * ever exposed to the hook. Reconnection checks status, never resubmits.
+ */
+ArborWebHooks.ConversationDraft = {
+  mounted() {
+    this.key = null;
+    this.state = {draft: "", pending: null};
+    this.onInput = () => {
+      if (!this.key) return;
+      this.state.draft = this.input().value;
+      this.save();
+    };
+    this.onSubmit = () => {
+      if (!this.key) return;
+      const text = this.input().value.trim();
+      if (!text || text.startsWith("/")) return;
+      if (!this.state.pending) {
+        this.state.pending = {id: crypto.randomUUID(), text};
+      }
+      this.el.querySelector('[name="command_id"]').value = this.state.pending.id;
+      this.state.draft = this.input().value;
+      this.save();
+    };
+    this.el.addEventListener("input", this.onInput);
+    // Capture runs before LiveView serializes the form at document level.
+    this.el.addEventListener("submit", this.onSubmit, true);
+    this.handleEvent("conversation-completed", payload => {
+      if (this.state.pending?.id !== payload.id) return;
+      this.state.pending = null;
+      if (this.state.draft.trim() === payload.text) this.state.draft = "";
+      if (this.input().value.trim() === payload.text) this.input().value = "";
+      this.save();
+    });
+    this.handleEvent("conversation-clear-pending", payload => {
+      if (this.state.pending?.id !== payload.id) return;
+      this.state.pending = null;
+      this.save();
+    });
+    this.handleEvent("conversation-access-denied", () => {
+      try { if (this.key) sessionStorage.removeItem(this.key); } catch (_) {}
+      this.state = {draft: "", pending: null};
+      this.input().value = "";
+      this.key = null;
+    });
+    this.restore();
+  },
+  input() { return this.el.querySelector('[name="message"]'); },
+  save() {
+    if (!this.key) return;
+    try { sessionStorage.setItem(this.key, JSON.stringify(this.state)); } catch (_) {}
+  },
+  restore(force = false) {
+    if (this.el.dataset.conversationAuthorized !== "true") return;
+    const scope = this.el.dataset.conversationKey;
+    if (!scope) return;
+    const key = `arbor-conversation:${scope}`;
+    if (this.key === key && !force) return;
+    this.key = key;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(key));
+      this.state = saved && typeof saved.draft === "string" ? saved : {draft: "", pending: null};
+    } catch (_) { this.state = {draft: "", pending: null}; }
+    this.input().value = this.state.draft;
+    this.pushEvent("update-input", {message: this.state.draft});
+    if (this.state.pending) this.pushEvent("conversation:restore", this.state.pending);
+  },
+  updated() { this.restore(); },
+  reconnected() { this.restore(true); },
+  destroyed() {
+    this.el.removeEventListener("input", this.onInput);
+    this.el.removeEventListener("submit", this.onSubmit, true);
+  }
+};
+
+/**
  * EventTimeline - Auto-scroll to top for new events (newest-first timeline).
  *
  * Usage: <div id="timeline" phx-hook="EventTimeline">...</div>

@@ -1,509 +1,355 @@
-# End-to-end test of the chat WebSocket handler at the FRAME level: it drives the
-# real Arbor.Gateway.Chat.Socket callbacks (init/handle_in/handle_info) — exercising
-# Protocol decode → handler logic → outbound frames + the agent/signal wiring —
-# with fakes injected for the cross-app collaborators. The cowboy WS-upgrade glue
-# (WebSockAdapter) is thin framework wiring tested separately; this covers the logic.
+defmodule Arbor.Gateway.Chat.SocketTest.Host do
+  # Frame-boundary collaborator: real Ed25519 proofs and one-use nonces, with
+  # deterministic owned history and revocation. Agent/Security integration is
+  # separately qualified through their public facades, not claimed by this fake.
+  alias Arbor.Contracts.Security.SignedRequest
 
-defmodule Arbor.Gateway.Chat.SocketTest.FakeEngagementStore do
-  alias Arbor.Contracts.Comms.Engagement
-
-  def resolve_or_create(agent_id, _principal, _opts) do
-    {:ok, Engagement.new(agent_id: agent_id, id: "eng_test", scope: :user)}
-  end
-
-  def list_for_agent(agent_id) do
-    [Engagement.new(agent_id: agent_id, id: "eng_test", scope: :user, visibility: :private)]
-  end
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeManager do
-  # The turn is driven through the Session (meta[:session_pid]); the pid just
-  # needs to be live since the fake Session ignores it.
-  def find_agent(_agent_id), do: {:ok, self(), %{host_pid: self(), session_pid: self()}}
-end
-
-# Like FakeManager but returns a real BranchSupervisor-shaped supervisor pid
-# (stored in app env by the test) so the Socket's fresh-by-agent_id session
-# resolution (live_session_pid → Supervisor.which_children) walks a live tree.
-defmodule Arbor.Gateway.Chat.SocketTest.FakeManagerSupervised do
-  def find_agent(_agent_id) do
-    sup_pid = Application.fetch_env!(:arbor_gateway, :test_branch_supervisor)
-    {:ok, sup_pid, %{model_config: %{id: "gpt-test", provider: :openai}}}
-  end
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeSession do
-  def send_message(_session_pid, user_message) do
-    {:ok, %{text: "echo:" <> user_message.content, usage: %{tokens: 1}}}
-  end
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeSignals do
-  # No-op so the handler doesn't subscribe to the real bus during the test.
-  def subscribe(_pattern, _handler), do: :ok
-end
-
-# Stand-in for Arbor.Orchestrator.SessionCore.build_command_context/3 (reached
-# via runtime indirection). Returns a typed agent-bound Context so /status-style
-# commands have model/provider/session_pid to report.
-defmodule Arbor.Gateway.Chat.SocketTest.FakeSessionCore do
-  alias Arbor.Contracts.Commands.Context
-
-  def build_command_context(_state, session_pid, opts) do
-    Context.new(
-      origin: Keyword.fetch!(opts, :origin),
-      user_id: Keyword.get(opts, :user_id),
-      agent_id: "agent_a",
-      session_id: "sess_test",
-      session_pid: session_pid,
-      model: "gpt-test",
-      provider: :openai
-    )
-  end
-end
-
-# The chat gate is a capability-presence check (find_authorizing), so the fakes
-# stand in for the CapabilityStore: Allow = holds a valid cap, Deny = none.
-defmodule Arbor.Gateway.Chat.SocketTest.AllowSecurity do
-  def find_authorizing(_principal, _uri), do: {:ok, :cap}
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.DenySecurity do
-  def find_authorizing(_principal, _uri), do: {:error, :not_found}
-  # security_mod().grant/1 (ensure_approver_capability) — no-op in tests.
-  def grant(_opts), do: :ok
-end
-
-# Consensus stubs for HITL approvals. Default list_pending is empty so attach
-# stays a single (engagement) frame; a per-test override returns a pending one.
-defmodule Arbor.Gateway.Chat.SocketTest.FakeConsensus do
-  def list_pending, do: []
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeConsensusPending do
-  def list_pending,
-    do: [%{id: "irq_1", proposer: "agent_a", metadata: %{tool: "shell", args: %{"cmd" => "ls"}}}]
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeCoordinator do
-  def force_approve(_id, _actor), do: {:ok, :approved}
-  def force_reject(_id, _actor), do: {:ok, :rejected}
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeOrchestration do
-  def list_pending_approvals(_opts), do: {:ok, []}
-  def answer_approval(_id, _decision, _opts), do: :ok
-end
-
-defmodule Arbor.Gateway.Chat.SocketTest.FakeOrchestrationPending do
-  def list_pending_approvals(_opts),
-    do:
+  def conversation_history(caller, target, opts) do
+    with :ok <- authenticate(:history, caller, target, nil, opts) do
       {:ok,
-       [
-         %{
-           id: "irq_1",
-           source: :consensus,
-           agent_id: "agent_a",
-           principal_id: "agent_a",
-           resource_uri: "shell",
-           metadata: %{"cmd" => "ls"},
-           status: :pending
-         }
-       ]}
-end
+       %{
+         engagement_id: Process.get(:engagement_id, "eng_11111111111111111111111111111111"),
+         entries: [%{id: "one", role: "user", content: "owned", entry_ordinal: 1}],
+         cursor: 1,
+         head: 1,
+         has_more: false
+       }}
+    end
+  end
 
-# InteractionRouter stub — "irq_…" ids resolve here (the live node's :ask path).
-defmodule Arbor.Gateway.Chat.SocketTest.FakeInteractionRouter do
-  def respond(_request_id, _response, _metadata), do: :ok
-  def pending, do: []
-end
+  def submit_conversation_command(caller, target, command, opts) do
+    with :ok <- authenticate(:submit, caller, target, command, opts) do
+      case Process.get({:command, command.id}) do
+        nil ->
+          send(self(), {:dispatch, command.id})
+          saved = Map.put(command, :status, :dispatch_started)
+          Process.put({:command, command.id}, saved)
+          {:ok, saved}
 
-defmodule Arbor.Gateway.Chat.SocketTest.FakeInteractionRouterPending do
-  def respond(_request_id, _response, _metadata), do: :ok
+        %{text: text} = saved when text == command.text ->
+          {:ok, saved}
 
-  def pending,
-    do: [
-      %{
-        request_id: "irq_2",
-        agent_id: "agent_a",
-        kind: :approval,
-        resource_uri: "arbor://shell/exec/ls",
-        metadata: %{}
-      }
-    ]
+        _ ->
+          {:error, :command_conflict}
+      end
+    end
+  end
+
+  def conversation_command(caller, target, id, opts) do
+    with :ok <- authenticate(:command, caller, target, id, opts),
+         command when is_map(command) <- Process.get({:command, id}) do
+      {:ok, command}
+    else
+      nil -> {:error, :not_found}
+      error -> error
+    end
+  end
+
+  def conversation_events(caller, target, cursor, opts) do
+    with :ok <- authenticate(:events, caller, target, cursor, opts) do
+      {:ok,
+       %{
+         events: [],
+         cursor: 0,
+         head: 0,
+         has_more: false,
+         engagement_id: Process.get(:engagement_id, "eng_11111111111111111111111111111111")
+       }}
+    end
+  end
+
+  defp authenticate(operation, caller, target, input, opts) do
+    proof = Keyword.fetch!(opts, :signed_request)
+
+    {:ok, expected} =
+      Arbor.Agent.conversation_request_payload(
+        operation,
+        caller,
+        target,
+        input,
+        Keyword.drop(opts, [:signed_request])
+      )
+
+    pub = Process.get({:key, caller})
+
+    valid =
+      pub && proof.agent_id == caller && proof.payload == expected &&
+        not Process.get(:revoked, false) && not Process.get({:nonce, proof.nonce}, false) &&
+        :crypto.verify(:eddsa, :none, SignedRequest.signing_payload(proof), proof.signature, [
+          pub,
+          :ed25519
+        ])
+
+    if valid do
+      Process.put({:nonce, proof.nonce}, true)
+      expected = Keyword.get(opts, :expected_engagement_id)
+      actual = Process.get(:engagement_id, "eng_11111111111111111111111111111111")
+
+      cond do
+        not is_nil(expected) and expected != actual ->
+          {:error, :conversation_scope_changed}
+
+        Process.get(:unsupported_capability, false) ->
+          {:error, :unsupported_conversation_capability}
+
+        true ->
+          :ok
+      end
+    else
+      {:error, :unauthorized}
+    end
+  end
 end
 
 defmodule Arbor.Gateway.Chat.SocketTest do
   use ExUnit.Case, async: false
-
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Gateway.Chat.Socket
-
-  alias Arbor.Gateway.Chat.SocketTest.{
-    AllowSecurity,
-    FakeEngagementStore,
-    FakeManager,
-    FakeSession,
-    FakeSignals
-  }
-
   @moduletag :fast
 
   setup do
-    Application.put_env(:arbor_gateway, :chat_engagement_store, FakeEngagementStore)
-    Application.put_env(:arbor_gateway, :chat_agent_manager, FakeManager)
-    Application.put_env(:arbor_gateway, :chat_session, FakeSession)
-    Application.put_env(:arbor_gateway, :chat_signals, FakeSignals)
-    Application.put_env(:arbor_gateway, :chat_capability_store, AllowSecurity)
-
-    Application.put_env(
-      :arbor_gateway,
-      :chat_consensus,
-      Arbor.Gateway.Chat.SocketTest.FakeConsensus
-    )
-
-    Application.put_env(
-      :arbor_gateway,
-      :chat_consensus_coordinator,
-      Arbor.Gateway.Chat.SocketTest.FakeCoordinator
-    )
-
-    Application.put_env(
-      :arbor_gateway,
-      :chat_orchestration,
-      Arbor.Gateway.Chat.SocketTest.FakeOrchestration
-    )
-
-    # security_mod (grant) — DenySecurity also defines grant/1.
-    Application.put_env(
-      :arbor_gateway,
-      :chat_security,
-      Arbor.Gateway.Chat.SocketTest.DenySecurity
-    )
-
-    Application.put_env(
-      :arbor_gateway,
-      :chat_interaction_router,
-      Arbor.Gateway.Chat.SocketTest.FakeInteractionRouter
-    )
+    old = Application.get_env(:arbor_gateway, :chat_agent_facade)
+    Application.put_env(:arbor_gateway, :chat_agent_facade, __MODULE__.Host)
 
     on_exit(fn ->
-      for k <- [
-            :chat_engagement_store,
-            :chat_agent_manager,
-            :chat_session,
-            :chat_signals,
-            :chat_capability_store,
-            :chat_consensus,
-            :chat_consensus_coordinator,
-            :chat_orchestration,
-            :chat_security,
-            :chat_interaction_router,
-            :chat_session_core,
-            :test_branch_supervisor
-          ] do
-        Application.delete_env(:arbor_gateway, k)
-      end
+      if old,
+        do: Application.put_env(:arbor_gateway, :chat_agent_facade, old),
+        else: Application.delete_env(:arbor_gateway, :chat_agent_facade)
     end)
 
-    {:ok, state} = Socket.init(%{principal: "human_1"})
-    %{state: state}
+    {pub, key} = :crypto.generate_key(:eddsa, :ed25519)
+    Process.put({:key, "human_owner"}, pub)
+    {:ok, state} = Socket.init(%{principal: "human_owner"})
+    %{state: state, key: key}
   end
 
-  # Drive a text frame through the handler; return {result_tag, decoded_events, state}.
-  defp send_frame(map, state) do
-    json = Jason.encode!(map)
+  defp frame(operation, input, key, target \\ "agent_a", opts \\ []) do
+    opts =
+      if operation != :history,
+        do:
+          Keyword.put_new(opts, :expected_engagement_id, "eng_11111111111111111111111111111111"),
+        else: opts
 
-    case Socket.handle_in({json, [opcode: :text]}, state) do
-      {:push, frames, st} -> {:push, decode_frames(frames), st}
-      {:ok, st} -> {:ok, [], st}
+    {:ok, payload} =
+      Arbor.Agent.conversation_request_payload(operation, "human_owner", target, input, opts)
+
+    {:ok, proof} = SignedRequest.sign(payload, "human_owner", key)
+
+    auth = %{
+      agent_id: proof.agent_id,
+      timestamp: DateTime.to_iso8601(proof.timestamp),
+      nonce: Base.encode64(proof.nonce),
+      signature: Base.encode64(proof.signature)
+    }
+
+    Jason.encode!(%{
+      payload: payload,
+      authorization: "Signature " <> Base.encode64(Jason.encode!(auth), padding: false)
+    })
+  end
+
+  defp drive(frame, state) do
+    {:push, [{:text, json}], state} = Socket.handle_in({frame, [opcode: :text]}, state)
+    {Jason.decode!(json), state}
+  end
+
+  test "authenticated reconnect returns owned durable transcript", %{state: state, key: key} do
+    for _ <- 1..2 do
+      {event, attached} = drive(frame(:history, nil, key), state)
+
+      assert event["data"]["entries"] == [
+               %{"id" => "one", "role" => "user", "content" => "owned", "entry_ordinal" => 1}
+             ]
+
+      assert attached.agent_id == "agent_a"
     end
   end
 
-  defp decode_frames(frames) do
-    Enum.map(frames, fn {:text, json} -> Jason.decode!(json) end)
+  test "security regression: attached socket cannot submit an unsigned legacy send", %{
+    state: state
+  } do
+    {event, _} =
+      drive(Jason.encode!(%{type: "send", text: "stolen"}), %{state | agent_id: "agent_a"})
+
+    assert event == %{"type" => "error", "reason" => "unauthorized"}
+    refute_receive {:dispatch, _}
   end
 
-  defp attach(state, agent_id \\ "agent_a") do
-    {:push, [event], st} = send_frame(%{type: "attach", agent_id: agent_id}, state)
-    assert event["type"] == "engagement"
-    st
-  end
+  test "security regression: revocation after attach gates every operation", %{
+    state: state,
+    key: key
+  } do
+    {_, state} = drive(frame(:history, nil, key), state)
+    Process.put(:revoked, true)
 
-  describe "attach" do
-    test "resolves a :user engagement and replies with an engagement frame", %{state: state} do
-      {:push, [event], st} = send_frame(%{type: "attach", agent_id: "agent_a"}, state)
-
-      # The engagement frame carries the resolved agent display name so the client
-      # can label the header (no profile/registry in test → falls back to the id).
-      assert event == %{
-               "type" => "engagement",
-               "engagement_id" => "eng_test",
-               "transcript" => [],
-               "display_name" => "agent_a"
-             }
-
-      assert st.agent_id == "agent_a"
-      assert st.engagement_id == "eng_test"
-      assert st.subscribed?
-    end
-
-    test "missing agent_id → error frame", %{state: state} do
-      {:push, [event], _} = send_frame(%{type: "attach"}, state)
-      assert event["type"] == "error"
-    end
-
-    test "capability gate: an unauthorized principal cannot attach (fail-closed)", %{state: state} do
-      Application.put_env(
-        :arbor_gateway,
-        :chat_capability_store,
-        Arbor.Gateway.Chat.SocketTest.DenySecurity
-      )
-
-      {:push, [event], st} = send_frame(%{type: "attach", agent_id: "agent_a"}, state)
-
-      assert event == %{"type" => "error", "reason" => "unauthorized"}
-      # not attached / not subscribed — no reach into the agent
-      assert st.agent_id == nil
-      refute st.subscribed?
-    end
-  end
-
-  describe "slash commands (CommandIntake intake)" do
-    test "a /help command is intercepted and pushed back as a message, NOT a turn",
-         %{state: state} do
-      st = attach(state)
-
-      # /help is a system-wide command — it runs through CommandIntake and
-      # replies inline. Crucially it must NOT be forwarded to Session.send_message
-      # (which would happen via a {:query_result, _} Task message).
-      {:push, events, _st} = send_frame(%{type: "send", text: "/help"}, st)
-
-      message = Enum.find(events, &(&1["type"] == "message"))
-      assert message, "expected a message frame for /help output"
-      assert message["message"]["role"] == "system"
-      assert is_binary(message["message"]["content"])
-      assert message["message"]["content"] != ""
-
-      # The command path is synchronous (no Task) — no turn was dispatched.
-      refute_receive {:query_result, _}, 200
-    end
-
-    test "an agent-bound /status command builds the Context via SessionCore",
-         %{state: state} do
-      # Inject a fake SessionCore so the agent-bound Context path is exercised
-      # (the FakeManager pid isn't a real BranchSupervisor, so without this the
-      # builder would fall back to a system-only Context — but /status needs a
-      # session). build_command_context resolves the session fresh; here the fake
-      # short-circuits to a populated Context.
-      Application.put_env(
-        :arbor_gateway,
-        :chat_session_core,
-        Arbor.Gateway.Chat.SocketTest.FakeSessionCore
-      )
-
-      # Manager returns a live, real supervisor whose :session child is alive so
-      # live_session_pid/1 resolves a current pid (the fresh-by-agent_id path).
-      {:ok, sup_pid} =
-        Supervisor.start_link(
-          [%{id: :session, start: {Agent, :start_link, [fn -> %{} end]}}],
-          strategy: :one_for_one
+    for {operation, input} <- [
+          history: nil,
+          events: 0,
+          command: "existing",
+          submit: %{id: "new", text: "hello"}
+        ] do
+      {event, _} =
+        drive(
+          frame(operation, input, key, "agent_a",
+            expected_engagement_id: "eng_11111111111111111111111111111111"
+          ),
+          state
         )
 
-      Application.put_env(:arbor_gateway, :test_branch_supervisor, sup_pid)
+      assert event == %{"type" => "error", "reason" => "unauthorized"}
+    end
 
-      Application.put_env(
-        :arbor_gateway,
-        :chat_agent_manager,
-        Arbor.Gateway.Chat.SocketTest.FakeManagerSupervised
+    refute_receive {:dispatch, _}
+  end
+
+  test "security regression: foreign proof, replay, changed operation and target fail", %{
+    state: state,
+    key: key
+  } do
+    original =
+      frame(:history, nil, key, "agent_a",
+        expected_engagement_id: "eng_11111111111111111111111111111111"
       )
 
-      st = attach(state)
-      {:push, events, _st} = send_frame(%{type: "send", text: "/status"}, st)
+    {_, attached} = drive(original, state)
+    assert {%{"reason" => "unauthorized"}, _} = drive(original, attached)
 
-      message = Enum.find(events, &(&1["type"] == "message"))
-      assert message, "expected a message frame for /status output"
-      assert message["message"]["role"] == "system"
-      # Proves the agent-bound Context was built via SessionCore (system-only
-      # fallback would have no agent → /status would be "not available").
-      assert message["message"]["content"] =~ "Model: gpt-test"
-      refute_receive {:query_result, _}, 200
+    for payload <- [
+          [
+            "arbor.conversation.v2",
+            "events",
+            "human_owner",
+            "agent_a",
+            0,
+            [nil, nil, nil],
+            "eng_11111111111111111111111111111111"
+          ],
+          [
+            "arbor.conversation.v2",
+            "history",
+            "human_owner",
+            "agent_b",
+            nil,
+            [nil, nil, nil],
+            "eng_11111111111111111111111111111111"
+          ],
+          [
+            "arbor.conversation.v2",
+            "history",
+            "human_foreign",
+            "agent_a",
+            nil,
+            [nil, nil, nil],
+            "eng_11111111111111111111111111111111"
+          ]
+        ] do
+      # Each tamper starts from a fresh, never-consumed nonce.
+      wire =
+        frame(:history, nil, key)
+        |> Jason.decode!()
+        |> Map.put("payload", Jason.encode!(payload))
+        |> Jason.encode!()
+
+      assert {%{"type" => "error", "reason" => reason}, _} = drive(wire, attached)
+      assert reason in ["unauthorized", "conversation_scope_changed"]
     end
   end
 
-  describe "send" do
-    test "a non-command prompt still flows to Session.send_message (unchanged)",
-         %{state: state} do
-      st = attach(state)
+  test "exact retry with a fresh proof preserves command id without redispatch", %{
+    state: state,
+    key: key
+  } do
+    {_, state} = drive(frame(:history, nil, key), state)
+    command = %{id: "stable_command", text: "hello"}
+    {event, state} = drive(frame(:submit, command, key), state)
+    assert event["data"]["status"] == "dispatch_started"
+    assert_receive {:dispatch, "stable_command"}
+    assert {^event, _} = drive(frame(:submit, command, key), state)
+    refute_receive {:dispatch, _}
 
-      # send returns {:ok, _} immediately (turn runs in a Task that messages us)
-      {:ok, [], st} = send_frame(%{type: "send", text: "hello"}, st)
+    assert {%{"type" => "conversation_rejected", "data" => %{"reason" => "command_conflict"}}, _} =
+             drive(frame(:submit, %{command | text: "changed"}, key), state)
+  end
 
-      # The fallback path forwarded the prompt to FakeSession.send_message.
-      assert_receive {:query_result, {:ok, %{text: "echo:hello"}}}, 1_000
+  test "security regression: no agent-wide signals disclose messages or approvals", %{
+    state: state
+  } do
+    attached = Map.put(state, :agent_id, "agent_a")
 
-      # Feed the result back through the handler (as the live socket process would).
-      {:push, frames, _} = Socket.handle_info({:query_result, {:ok, %{text: "echo:hello"}}}, st)
-      events = decode_frames(frames)
-      types = Enum.map(events, & &1["type"])
-      assert "message" in types
-      assert "turn_complete" in types
+    assert {:ok, ^attached} =
+             Socket.handle_info(
+               {:chat_signal,
+                %{
+                  category: :agent,
+                  type: :stream_delta,
+                  data: %{agent_id: "agent_a", source: :turn, text: "another user's content"}
+                }},
+               attached
+             )
+  end
 
-      message = Enum.find(events, &(&1["type"] == "message"))
-      assert message["message"]["content"] == "echo:hello"
-    end
+  test "legacy controls fail closed and server slash commands report unavailable", %{
+    state: state,
+    key: key
+  } do
+    {_, state} = drive(frame(:history, nil, key), state)
 
-    test "strips echoed prompt-injection-defense fences from the assistant reply",
-         %{state: state} do
-      st = attach(state)
+    assert {%{"reason" => "server_commands_unavailable"}, _} =
+             drive(frame(:submit, %{id: "slash", text: "/model other"}, key), state)
 
-      # A reply the (small local) model prefixed with an echoed <data_NONCE> fence
-      # carrying junk inner content. The gateway must scrub it for every client.
-      reply = "<data_6e0f9a6584cf97da>None</data_6e0f9a6584cf97da>\n\nHi River!"
-      {:push, frames, _} = Socket.handle_info({:query_result, {:ok, %{content: reply}}}, st)
-
-      message = frames |> decode_frames() |> Enum.find(&(&1["type"] == "message"))
-      assert message["message"]["content"] == "Hi River!"
-    end
-
-    test "send before attach → :not_attached error", %{state: state} do
-      {:push, [event], _} = send_frame(%{type: "send", text: "hi"}, state)
-      assert event == %{"type" => "error", "reason" => "not_attached"}
+    for type <- ["cancel", "list_engagements", "list_approvals", "approve", "deny"] do
+      assert {%{"reason" => "unauthorized"}, _} = drive(Jason.encode!(%{type: type}), state)
     end
   end
 
-  describe "invalid frames" do
-    test "garbage → error frame", %{state: state} do
-      {:push, [event], _} =
-        case Socket.handle_in({"not json{", [opcode: :text]}, state) do
-          {:push, frames, st} -> {:push, decode_frames(frames), st}
-        end
+  test "security regression: remapped ownership rejects pending retry and requires new attachment",
+       %{state: state, key: key} do
+    {_, attached} = drive(frame(:history, nil, key), state)
+    Process.put(:engagement_id, "eng_22222222222222222222222222222222")
 
-      assert event["type"] == "error"
-    end
+    {event, invalidated} =
+      drive(frame(:submit, %{id: "pending", text: "old owner's draft"}, key), attached)
+
+    assert event == %{"type" => "error", "reason" => "conversation_scope_changed"}
+    assert invalidated.invalidated?
+    assert invalidated.engagement_id == nil
+    refute_receive {:dispatch, _}
+
+    assert {%{"reason" => "conversation_scope_changed"}, _} =
+             drive(frame(:history, nil, key), invalidated)
   end
 
-  describe "forwarded signals" do
-    test "a :notification for the attached agent becomes a notification frame", %{state: state} do
-      st = attach(state, "agent_a")
+  test "security regression: a client fence cannot replace the pinned engagement", %{
+    state: state,
+    key: key
+  } do
+    {_, attached} = drive(frame(:history, nil, key), state)
 
-      signal = %{
-        type: :notification,
-        data: %{agent_id: "agent_a", text: "thinking…", kind: :thought}
-      }
-
-      {:push, frames, _} = Socket.handle_info({:chat_signal, signal}, st)
-
-      assert [%{"type" => "notification", "text" => "thinking…", "kind" => "thought"}] =
-               decode_frames(frames)
-    end
-
-    test "a signal for a different agent is ignored", %{state: state} do
-      st = attach(state, "agent_a")
-      signal = %{type: :notification, data: %{agent_id: "agent_OTHER", text: "x", kind: :n}}
-      assert {:ok, ^st} = Socket.handle_info({:chat_signal, signal}, st)
-    end
-  end
-
-  describe "list_engagements" do
-    test "returns the agent's engagements", %{state: state} do
-      st = attach(state, "agent_a")
-      {:push, [event], _} = send_frame(%{type: "list_engagements"}, st)
-
-      assert event["type"] == "engagements"
-      assert [%{"id" => "eng_test"}] = event["engagements"]
-    end
-  end
-
-  describe "HITL approvals" do
-    test "an authorization_pending signal becomes an approval_request frame", %{state: state} do
-      st = attach(state, "agent_a")
-
-      signal = %{
-        type: :authorization_pending,
-        data: %{
-          principal_id: "agent_a",
-          proposal_id: "irq_1",
-          tool: "shell",
-          args: %{"cmd" => "ls"}
-        }
-      }
-
-      {:push, frames, _} = Socket.handle_info({:chat_signal, signal}, st)
-
-      assert [%{"type" => "approval_request", "proposal_id" => "irq_1", "tool" => "shell"}] =
-               decode_frames(frames)
-    end
-
-    test "an interaction.requested signal becomes an approval_request frame", %{state: state} do
-      st = attach(state, "agent_a")
-
-      # Set the pending interaction AFTER attach so the engagement frame stays
-      # clean; the Socket looks the interaction up when the signal arrives.
-      Application.put_env(
-        :arbor_gateway,
-        :chat_interaction_router,
-        Arbor.Gateway.Chat.SocketTest.FakeInteractionRouterPending
+    proof =
+      frame(:submit, %{id: "route", text: "do not route"}, key, "agent_a",
+        expected_engagement_id: "eng_22222222222222222222222222222222"
       )
 
-      # The interaction signal carries only ids — the Socket looks the full
-      # interaction up in the router registry to render tool + args.
-      signal = %{
-        category: :interaction,
-        type: :requested,
-        data: %{request_id: "irq_2", kind: :approval, agent_id: "agent_a"}
-      }
+    assert {%{"reason" => "conversation_scope_changed"}, _} = drive(proof, attached)
+    refute_receive {:dispatch, _}
+  end
 
-      {:push, frames, _} = Socket.handle_info({:chat_signal, signal}, st)
+  test "definitive submit rejection identifies the command while poll failures do not", %{
+    state: state,
+    key: key
+  } do
+    {_, attached} = drive(frame(:history, nil, key), state)
+    Process.put(:unsupported_capability, true)
 
-      assert [%{"type" => "approval_request", "proposal_id" => "irq_2", "tool" => tool}] =
-               decode_frames(frames)
+    assert {%{
+              "type" => "conversation_rejected",
+              "data" => %{"id" => "rejected", "reason" => "unsupported_conversation_capability"}
+            }, _} =
+             drive(frame(:submit, %{id: "rejected", text: "not admitted"}, key), attached)
 
-      assert tool == "arbor://shell/exec/ls"
-    end
+    assert {%{"type" => "error", "reason" => "unsupported_conversation_capability"}, _} =
+             drive(frame(:events, 0, key), attached)
 
-    test "approve of an irq_ id resolves through orchestration", %{state: state} do
-      st = attach(state, "agent_a")
-      {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "irq_1"}, st)
-
-      assert event == %{
-               "type" => "approval_resolved",
-               "proposal_id" => "irq_1",
-               "status" => "approve"
-             }
-    end
-
-    test "deny of an irq_ id resolves through orchestration", %{state: state} do
-      st = attach(state, "agent_a")
-      {:push, [event], _} = send_frame(%{type: "deny", proposal_id: "irq_1"}, st)
-
-      assert event["type"] == "approval_resolved"
-      assert event["status"] == "deny"
-    end
-
-    test "approve of a non-irq id resolves through orchestration", %{state: state} do
-      st = attach(state, "agent_a")
-      {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "prop_1"}, st)
-
-      assert event == %{
-               "type" => "approval_resolved",
-               "proposal_id" => "prop_1",
-               "status" => "approve"
-             }
-    end
-
-    test "list_approvals returns the agent's pending proposals", %{state: state} do
-      st = attach(state, "agent_a")
-      # Override Consensus to return a pending proposal for this agent.
-      Application.put_env(
-        :arbor_gateway,
-        :chat_orchestration,
-        Arbor.Gateway.Chat.SocketTest.FakeOrchestrationPending
-      )
-
-      {:push, [event], _} = send_frame(%{type: "list_approvals"}, st)
-
-      assert event["type"] == "approvals"
-      assert [%{"proposal_id" => "irq_1", "tool" => "shell"}] = event["approvals"]
-    end
+    refute_receive {:dispatch, _}
   end
 end

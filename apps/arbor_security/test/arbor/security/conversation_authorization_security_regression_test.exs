@@ -9,6 +9,15 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
   alias Arbor.Security.OIDCTestHelper
   alias Arbor.Security.SessionToken
 
+  defmodule OwnerResolver do
+    def resolve(id) do
+      case Application.get_env(:arbor_security, :conversation_owner_test_aliases, %{}) do
+        aliases when is_map(aliases) -> {:ok, Map.get(aliases, id, id)}
+        _ -> {:error, :alias_store_unavailable}
+      end
+    end
+  end
+
   defmodule AuthorizationFaultSink do
     def persist_security_invocation(%{"stage" => "authorization"}), do: {:error, :offline}
     def persist_security_invocation(event), do: {:ok, event["id"]}
@@ -50,6 +59,8 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
 
   setup do
     overrides = [
+      identity_alias_resolver: OwnerResolver,
+      conversation_owner_test_aliases: %{},
       identity_verification: true,
       strict_identity_mode: false,
       capability_signing_required: true,
@@ -94,26 +105,65 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
     }
   end
 
-  test "security regression: finite-use conversation rejection does not consume its only use",
+  test "security regression: both chat receipt APIs reject finite use before spending allowance",
        c do
-    capability = grant(c, max_uses: 1)
+    capability = grant(c, max_uses: 1, constraints: %{rate_limit: 1})
+    before = DeliveryReceiptBroker.stats().issued
     assert {:error, :unsupported_conversation_capability} = issue(c)
-    assert {:ok, caps} = Security.list_capabilities(c.caller)
-    assert Enum.any?(caps, &(&1.id == capability.id))
 
-    # The unchanged ordinary API can still spend that first and only use.
-    assert {:ok, receipt} =
-             Security.authorize_and_issue_delivery_receipt(
-               c.caller,
-               c.resource,
-               :chat,
+    assert {:error, :unsupported_conversation_capability} =
+             Security.authorize_and_issue_delivery_receipt(c.caller, c.resource, :chat,
                session_token: c.token
              )
 
-    assert {:ok, principal} = Security.consume_delivery_receipt(receipt, c.resource, :chat)
-    assert principal == c.caller
+    assert DeliveryReceiptBroker.stats().issued == before
+    assert {:ok, caps} = Security.list_capabilities(c.caller)
+    assert Enum.any?(caps, &(&1.id == capability.id))
+
+    # Ordinary authorization can still spend the exact first use/rate allowance.
+    assert {:ok, :authorized} =
+             Security.authorize(c.caller, c.resource, :chat, session_token: c.token)
+
     assert {:ok, caps} = Security.list_capabilities(c.caller)
     refute Enum.any?(caps, &(&1.id == capability.id))
+  end
+
+  test "security regression: non-chat finite-use delivery receipts retain ordinary behavior", c do
+    resource = "arbor://memory/read/" <> c.caller
+    cap = grant(%{c | resource: resource}, max_uses: 1)
+
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_delivery_receipt(c.caller, resource, :read,
+               session_token: c.token
+             )
+
+    assert {:ok, subject} = Security.consume_delivery_receipt(receipt, resource, :read)
+    assert subject == c.caller
+    assert {:ok, caps} = Security.list_capabilities(c.caller)
+    refute Enum.any?(caps, &(&1.id == cap.id))
+  end
+
+  test "security regression: resolver outage cannot spend a chat rate allowance", c do
+    for suffix <- ["conversation", "generic"] do
+      scoped = %{c | resource: c.resource <> "_" <> suffix}
+      grant(scoped, constraints: %{rate_limit: 1})
+
+      issue_receipt = fn ->
+        if suffix == "conversation",
+          do: issue(scoped),
+          else:
+            Security.authorize_and_issue_delivery_receipt(scoped.caller, scoped.resource, :chat,
+              session_token: scoped.token
+            )
+      end
+
+      Application.put_env(:arbor_security, :conversation_owner_test_aliases, :offline)
+      assert {:error, :unauthorized} = issue_receipt.()
+      Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{})
+      assert {:ok, receipt} = issue_receipt.()
+      assert :ok = Security.discard_delivery_receipt(receipt)
+      assert {:error, :unauthorized} = issue_receipt.()
+    end
   end
 
   test "security regression: one rate allowance survives all non-consuming continuation checks",
@@ -274,6 +324,101 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
              )
 
     assert DeliveryReceiptBroker.stats().issued == before
+  end
+
+  test "security regression: linked owner preserves exact receipt subject and does not transfer grants",
+       c do
+    grant(c)
+    secondary = other_human!("secondary")
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{
+      secondary.caller => c.caller
+    })
+
+    linked = Map.merge(c, secondary)
+
+    assert {:error, :unauthorized} = issue(linked)
+    grant(linked)
+    assert {:ok, receipt} = issue(linked)
+    assert {:ok, owner} = Security.conversation_receipt_owner(receipt, secondary.caller, c.target)
+    assert owner == c.caller
+
+    assert {:error, :unauthorized} =
+             Security.conversation_receipt_owner(receipt, c.caller, c.target)
+
+    assert {:ok, subject} = Security.consume_delivery_receipt(receipt, c.resource, :chat)
+    assert subject == secondary.caller
+
+    # The primary's token cannot authenticate the linked secondary's name.
+    assert {:error, :unauthorized} = issue(%{linked | token: c.token})
+  end
+
+  test "security regression: canonical resolution outage cannot mint raw-principal shadow receipts",
+       c do
+    grant(c)
+    before = DeliveryReceiptBroker.stats().issued
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, :offline)
+    assert {:error, :unauthorized} = issue(c)
+    assert DeliveryReceiptBroker.stats().issued == before
+    Application.delete_env(:arbor_security, :identity_alias_resolver)
+    assert {:error, :unauthorized} = issue(c)
+    Application.put_env(:arbor_security, :identity_alias_resolver, OwnerResolver)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{
+      c.caller => "human_absent_owner"
+    })
+
+    assert {:error, :unauthorized} = issue(c)
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{})
+    assert {:ok, receipt} = issue(c)
+    assert :ok = Security.discard_delivery_receipt(receipt)
+  end
+
+  test "security regression: unlink cannot rescope a pinned receipt or continuation", c do
+    owner = other_human!("primary")
+    grant(c)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{
+      c.caller => owner.caller
+    })
+
+    assert {:ok, receipt} = issue(c)
+
+    assert {:ok, :authorized} =
+             Security.recheck_conversation_owner(c.caller, c.target, owner.caller)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{})
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_owner(c.caller, c.target, owner.caller)
+
+    assert {:error, :unauthorized} =
+             Security.conversation_receipt_owner(receipt, c.caller, c.target)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.exchange_private_memory_receipt(
+               receipt,
+               c.target,
+               c.caller,
+               %{session_id: "session_pinned", turn_id: "turn_pinned"}
+             )
+  end
+
+  defp other_human!(name) do
+    oidc =
+      OIDCTestHelper.issue_identity(
+        subject: "conversation-#{name}-#{System.unique_integer([:positive])}"
+      )
+
+    assert :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
+    assert {:ok, token} = SessionToken.generate(oidc.identity.agent_id)
+
+    on_exit(fn ->
+      oidc.cleanup.()
+      Security.deregister_identity(oidc.identity.agent_id)
+    end)
+
+    %{caller: oidc.identity.agent_id, token: token, private_key: oidc.identity.private_key}
   end
 
   defp issue(c),

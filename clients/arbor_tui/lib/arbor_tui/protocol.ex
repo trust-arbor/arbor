@@ -11,6 +11,7 @@ defmodule ArborTui.Protocol do
   @type command ::
           {:attach, String.t(), String.t() | nil}
           | {:send, String.t()}
+          | :retry
           | :cancel
           | :list_engagements
           | :list_approvals
@@ -20,6 +21,9 @@ defmodule ArborTui.Protocol do
   @typedoc "A decoded server→client event."
   @type event ::
           {:engagement, %{id: String.t() | nil, transcript: list()}}
+          | {:conversation_history, map()}
+          | {:conversation_command, map()}
+          | {:conversation_events, map()}
           | {:delta, String.t()}
           | {:message, map()}
           | {:notification, %{text: String.t(), kind: String.t()}}
@@ -49,6 +53,30 @@ defmodule ArborTui.Protocol do
 
   defp enc(map), do: Jason.encode!(map)
 
+  @doc "Build the exact operation payload shared with Arbor.Agent.conversation_request_payload/5."
+  def conversation_payload(operation, caller, target, input, opts \\ []) do
+    input = if operation == :submit, do: [input.id, input.text], else: input
+
+    Jason.encode!([
+      "arbor.conversation.v2",
+      to_string(operation),
+      caller,
+      target,
+      input,
+      [Keyword.get(opts, :after), Keyword.get(opts, :through), Keyword.get(opts, :limit)],
+      Keyword.get(opts, :expected_engagement_id)
+    ])
+  end
+
+  def signed_operation(identity, target, operation, input, opts \\ []) do
+    payload = conversation_payload(operation, identity.agent_id, target, input, opts)
+
+    enc(%{
+      payload: payload,
+      authorization: ArborTui.Signer.authorization_for_payload(identity, payload)
+    })
+  end
+
   # ── Decode: server → client ──────────────────────────────────────────────
 
   @spec decode(binary()) :: {:ok, event()} | {:error, term()}
@@ -58,6 +86,18 @@ defmodule ArborTui.Protocol do
       {:error, _} -> {:error, :invalid_json}
     end
   end
+
+  defp decode_map(%{"type" => "conversation_history", "data" => page}),
+    do: {:ok, {:conversation_history, page}}
+
+  defp decode_map(%{"type" => "conversation_rejected", "data" => rejection}),
+    do: {:ok, {:conversation_rejected, rejection}}
+
+  defp decode_map(%{"type" => "conversation_command", "data" => command}),
+    do: {:ok, {:conversation_command, command}}
+
+  defp decode_map(%{"type" => "conversation_events", "data" => page}),
+    do: {:ok, {:conversation_events, page}}
 
   defp decode_map(%{"type" => "engagement"} = m),
     do:

@@ -32,6 +32,15 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   alias Arbor.Security.SessionToken
   alias Arbor.Signals
 
+  defmodule OwnerResolver do
+    def resolve(id) do
+      case Application.get_env(:arbor_security, :session_owner_test_aliases, %{}) do
+        aliases when is_map(aliases) -> {:ok, Map.get(aliases, id, id)}
+        _ -> {:error, :alias_store_unavailable}
+      end
+    end
+  end
+
   defmodule PrivateMemoryEmbedding do
     def embed(_text) do
       {:ok,
@@ -42,6 +51,32 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
          provider: :test
        }}
     end
+  end
+
+  defmodule CompletionBarrierAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    def provider, do: "lm_studio"
+
+    def complete(_request, _opts) do
+      recipient = Application.fetch_env!(:arbor_orchestrator, :_completion_barrier_recipient)
+      token = make_ref()
+      send(recipient, {:completion_model_blocked, self(), token})
+
+      receive do
+        {:release_completion_model, ^token} ->
+          {:ok,
+           %Arbor.LLM.Response{
+             text: "private completion sentinel",
+             finish_reason: :stop,
+             raw: %{}
+           }}
+      after
+        10_000 -> {:error, :completion_barrier_timeout}
+      end
+    end
+
+    def complete_single_attempt(request, opts), do: complete(request, opts)
   end
 
   defmodule PrivateMemoryToolAdapter do
@@ -128,6 +163,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
   setup do
     prev = %{
+      resolver: Application.get_env(:arbor_security, :identity_alias_resolver),
+      aliases: Application.get_env(:arbor_security, :session_owner_test_aliases),
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
       strict: Application.get_env(:arbor_security, :strict_identity_mode),
       signing: Application.get_env(:arbor_security, :capability_signing_required),
@@ -136,6 +173,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       secret: Application.get_env(:arbor_security, :session_token_secret)
     }
 
+    Application.put_env(:arbor_security, :identity_alias_resolver, OwnerResolver)
+    Application.put_env(:arbor_security, :session_owner_test_aliases, %{})
     Application.put_env(:arbor_security, :identity_verification, true)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
@@ -149,6 +188,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     )
 
     on_exit(fn ->
+      restore(:identity_alias_resolver, prev.resolver)
+      restore(:session_owner_test_aliases, prev.aliases)
       restore(:identity_verification, prev.identity_verification)
       restore(:strict_identity_mode, prev.strict)
       restore(:capability_signing_required, prev.signing)
@@ -161,13 +202,14 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     agent_id = agent.agent_id
     human_id = register_active_human!()
     resource = "arbor://chat/agent/#{agent_id}"
-    grant!(human_id, resource)
+    chat_cap = grant!(human_id, resource)
 
     %{
       agent_id: agent_id,
       agent_signer: agent.signer,
       human_id: human_id,
-      resource: resource
+      resource: resource,
+      chat_cap: chat_cap
     }
   end
 
@@ -1794,6 +1836,363 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
                Security.activate_private_memory_admission(admission, message.engagement_id)
     end
   end
+
+  test "security regression: linked proof subjects bind one engagement without rewriting senders",
+       ctx do
+    secondary = register_active_human!()
+    grant!(secondary, ctx.resource)
+
+    Application.put_env(:arbor_security, :session_owner_test_aliases, %{secondary => ctx.human_id})
+
+    {queued, first, first_authority, _admission, _from} = queue_private_turn!(ctx)
+    second_from = {self(), make_ref()}
+    second_message = user_message!(secondary, "same person on another device")
+
+    assert {:noreply, twice} =
+             Session.handle_call(
+               {:send_authenticated_message, second_message,
+                issue_receipt!(secondary, ctx.resource)},
+               second_from,
+               queued
+             )
+
+    [_, {second, second_authority, ^second_from}] = twice.turn_queue
+    assert first.engagement_id == second.engagement_id
+    assert first.sender_id == ctx.human_id
+    assert second.sender_id == secondary
+    assert first_authority.authenticated_principal_id == ctx.human_id
+    assert second_authority.authenticated_principal_id == secondary
+    assert first_authority.canonical_owner_id == ctx.human_id
+    assert second_authority.canonical_owner_id == ctx.human_id
+    assert :ok = Session.terminate(:normal, twice)
+  end
+
+  test "security regression: queued steering rechecks its pinned private owner", ctx do
+    primary = register_active_human!()
+    original_aliases = %{ctx.human_id => primary}
+
+    for aliases_after <- [original_aliases, %{}, :offline] do
+      Application.put_env(:arbor_security, :session_owner_test_aliases, original_aliases)
+      {queued, message, authority, _admission, _from} = queue_private_turn!(ctx)
+      token = make_ref()
+
+      active = %{
+        queued
+        | turn_authority: authority,
+          turn_user_message: message,
+          current_engagement_id: message.engagement_id,
+          turn_token: token
+      }
+
+      Application.put_env(:arbor_security, :session_owner_test_aliases, aliases_after)
+
+      assert {:reply, reply, after_poll} =
+               Session.handle_call(
+                 {:take_steering, token, message.engagement_id, {make_ref(), 1}},
+                 {self(), make_ref()},
+                 active
+               )
+
+      if aliases_after == original_aliases do
+        assert {:ok, [_]} = reply
+        assert after_poll.turn_queue == []
+      else
+        assert reply == :none
+        assert after_poll.turn_queue == queued.turn_queue
+      end
+
+      assert :ok = Session.terminate(:normal, after_poll)
+    end
+  end
+
+  test "security regression: queued grant revocation denies before on-host cognition with memory disabled",
+       ctx do
+    previous = Application.fetch_env(:arbor_orchestrator, :private_conversation_memory)
+    Application.put_env(:arbor_orchestrator, :private_conversation_memory, false)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} ->
+          Application.put_env(:arbor_orchestrator, :private_conversation_memory, value)
+
+        :error ->
+          Application.delete_env(:arbor_orchestrator, :private_conversation_memory)
+      end
+    end)
+
+    put_orchestrator_cap!(ctx.agent_id)
+    {queued, _message, authority, admission, {_, tag}} = queue_private_turn!(ctx)
+
+    assert {:ok, :authorized} =
+             Security.recheck_conversation_owner(
+               ctx.human_id,
+               ctx.agent_id,
+               authority.canonical_owner_id
+             )
+
+    assert :ok = Security.revoke(ctx.chat_cap.id)
+
+    assert {:error, :unauthorized} =
+             Security.recheck_conversation_owner(
+               ctx.human_id,
+               ctx.agent_id,
+               authority.canonical_owner_id
+             )
+
+    ready = %{
+      queued
+      | turn_in_flight: false,
+        config: %{"llm_provider" => "lm_studio", "llm_model" => "test"}
+    }
+
+    assert {:noreply, refused} = Session.handle_info(:drain_queue, ready)
+    assert_receive {^tag, {:error, :private_memory_admission_unavailable}}
+    refute refused.turn_in_flight
+    assert refused.turn_task_pid == nil
+    assert refused.current_engagement_id == queued.current_engagement_id
+    assert refused.turn_queue == []
+    assert {:error, _} = Security.activate_private_memory_admission(admission, "eng_other")
+    assert :ok = Session.terminate(:normal, refused)
+  end
+
+  test "security regression: queued turn keeps pinned owner when alias unlinks or resolver fails",
+       ctx do
+    primary = register_active_human!()
+
+    for aliases_after <- [%{}, :offline] do
+      Application.put_env(:arbor_security, :session_owner_test_aliases, %{ctx.human_id => primary})
+
+      {queued, _message, authority, admission, {_, tag}} = queue_private_turn!(ctx)
+      assert authority.canonical_owner_id == primary
+      Application.put_env(:arbor_security, :session_owner_test_aliases, aliases_after)
+
+      assert {:noreply, refused} =
+               Session.handle_info(:drain_queue, %{queued | turn_in_flight: false})
+
+      assert_receive {^tag, {:error, :private_memory_admission_unavailable}}
+      assert refused.turn_queue == []
+      assert {:error, _} = Security.activate_private_memory_admission(admission, "eng_other")
+      assert :ok = Session.terminate(:normal, refused)
+    end
+  end
+
+  for denial <- [:revocation, :unlink, :resolver_outage] do
+    @tag :conversation_convergence
+    test "security regression: active turn #{denial} denies commit with private memory disabled",
+         ctx do
+      denial = unquote(denial)
+      session = completion_barrier_session!(ctx)
+      task = start_completion_barrier_turn!(session, ctx)
+      assert_receive {:completion_model_blocked, model, token}, 5_000
+
+      deny_completion_binding!(ctx, denial)
+      send(model, {:release_completion_model, token})
+
+      assert {:error, :unauthenticated} = Task.await(task, 10_000)
+      refute_receive {:completion_append, _, _}, 100
+      refute_receive {:completion_success, _}, 100
+      state = Session.get_state(session)
+      refute state.turn_in_flight
+      assert state.turn_count == 0
+      assert state.messages == []
+    end
+  end
+
+  @tag :conversation_convergence
+  test "authenticated completion control persists and publishes while binding remains current",
+       ctx do
+    session = completion_barrier_session!(ctx)
+    task = start_completion_barrier_turn!(session, ctx)
+    assert_receive {:completion_model_blocked, model, token}, 5_000
+    active = :sys.get_state(session)
+    assert active.turn_authority.canonical_owner_id != nil
+    assert active.turn_user_message.engagement_id == active.current_engagement_id
+
+    assert {:ok, :authorized} =
+             Security.recheck_conversation_owner(
+               ctx.human_id,
+               ctx.agent_id,
+               active.turn_authority.canonical_owner_id
+             )
+
+    send(model, {:release_completion_model, token})
+
+    assert {:ok, response} = Task.await(task, 10_000)
+    assert response.content == "private completion sentinel"
+    assert_receive {:completion_append, _, [_user, _assistant]}, 1_000
+    assert_receive {:completion_success, _}, 1_000
+  end
+
+  @tag :conversation_convergence
+  test "security regression: revocation during append suppresses post-commit success publication",
+       ctx do
+    session = completion_barrier_session!(ctx, block_append: true)
+    task = start_completion_barrier_turn!(session, ctx)
+    assert_receive {:completion_model_blocked, model, token}, 5_000
+    send(model, {:release_completion_model, token})
+    assert_receive {:completion_append, appender, [_user, _assistant]}, 5_000
+
+    deny_completion_binding!(ctx, :revocation)
+    send(appender, :release_completion_append)
+
+    assert {:error, :unauthenticated} = Task.await(task, 10_000)
+    refute_receive {:completion_success, _}, 100
+    # The append acknowledgement is authoritative; this fence suppresses
+    # disclosure, not rollback of a pair that the store already accepted.
+    refute Session.get_state(session).turn_in_flight
+  end
+
+  for terminal <- [:cancel, :timeout, :task_down, :engine_error] do
+    @tag :conversation_convergence
+    test "security regression: #{terminal} cannot preserve a private partial after revocation",
+         ctx do
+      terminal = unquote(terminal)
+      session = completion_barrier_session!(ctx)
+      task = start_completion_barrier_turn!(session, ctx)
+      assert_receive {:completion_model_blocked, model, token}, 5_000
+      send(session, {:stream_chunk, "private partial sentinel"})
+      active = :sys.get_state(session)
+      assert active.streaming_buffer.content == "private partial sentinel"
+      deny_completion_binding!(ctx, :revocation)
+
+      terminate_completion_turn!(terminal, session, active)
+
+      assert {:error, _} = Task.await(task, 10_000)
+      send(model, {:release_completion_model, token})
+      refute_receive {:completion_append, _, _}, 150
+      refute_receive {:completion_success, _}, 100
+      refute Session.get_state(session).turn_in_flight
+    end
+  end
+
+  defp terminate_completion_turn!(:cancel, session, _active),
+    do: assert(:ok = Session.cancel_turn(session))
+
+  defp terminate_completion_turn!(:timeout, session, active),
+    do: send(session, {:turn_timeout, active.turn_task_ref})
+
+  defp terminate_completion_turn!(:task_down, _session, active),
+    do: Process.exit(active.turn_task_pid, :kill)
+
+  defp terminate_completion_turn!(:engine_error, session, active),
+    do:
+      send(
+        session,
+        {:turn_result, active.turn_token, active.turn_user_message, {:error, :turn_failed}}
+      )
+
+  defp completion_barrier_session!(ctx, opts \\ []) do
+    ensure_event_registry!()
+    put_orchestrator_cap!(ctx.agent_id)
+    primary = register_active_human!()
+    Application.put_env(:arbor_security, :session_owner_test_aliases, %{ctx.human_id => primary})
+
+    previous = Application.fetch_env(:arbor_orchestrator, :private_conversation_memory)
+
+    previous_recipient =
+      Application.fetch_env(:arbor_orchestrator, :_completion_barrier_recipient)
+
+    previous_client = Arbor.LLM.Client.default_client()
+    Application.put_env(:arbor_orchestrator, :private_conversation_memory, false)
+    Application.put_env(:arbor_orchestrator, :_completion_barrier_recipient, self())
+
+    Arbor.LLM.Client.set_default_client(
+      Arbor.LLM.Client.new(default_provider: "lm_studio")
+      |> Arbor.LLM.Client.register_adapter(CompletionBarrierAdapter)
+    )
+
+    on_exit(fn ->
+      Arbor.LLM.Client.set_default_client(previous_client)
+
+      for {key, value} <- [
+            private_conversation_memory: previous,
+            _completion_barrier_recipient: previous_recipient
+          ] do
+        case value do
+          {:ok, saved} -> Application.put_env(:arbor_orchestrator, key, saved)
+          :error -> Application.delete_env(:arbor_orchestrator, key)
+        end
+      end
+    end)
+
+    session_id = collision_resistant_session_id()
+    root = track_session_log_root!(session_id)
+    File.mkdir_p!(root)
+    path = Path.join(root, "completion-barrier.dot")
+
+    File.write!(path, """
+    digraph CompletionBarrier {
+      start [shape=Mdiamond]
+      call [type="compute", simulate="false", prompt="Reply to the user", use_tools="false"]
+      copy [type="transform", transform="identity", source_key="last_response", output_key="session.response"]
+      done [shape=Msquare]
+      start -> call -> copy -> done
+    }
+    """)
+
+    recipient = self()
+    block_append = Keyword.get(opts, :block_append, false)
+    agent_id = ctx.agent_id
+
+    assert {:ok, subscription} =
+             Signals.subscribe(
+               "agent.query_completed",
+               fn signal ->
+                 if signal.data[:agent_id] == agent_id,
+                   do: send(recipient, {:completion_success, signal})
+
+                 :ok
+               end,
+               async: false
+             )
+
+    assert {:ok, session} =
+             Session.start_link(
+               session_id: session_id,
+               agent_id: agent_id,
+               turn_dot: path,
+               signer: ctx.agent_signer,
+               config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
+               adapters: %{
+                 ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
+                 load_session_messages: fn _, _ -> [] end,
+                 append_session_entries: fn _id, entries ->
+                   send(recipient, {:completion_append, self(), entries})
+
+                   if block_append do
+                     receive do
+                       :release_completion_append -> :ok
+                     after
+                       5_000 -> raise "completion append barrier timed out"
+                     end
+                   end
+
+                   {:ok, 2}
+                 end
+               }
+             )
+
+    on_exit(fn ->
+      if Process.alive?(session), do: GenServer.stop(session)
+      Signals.unsubscribe(subscription)
+    end)
+
+    session
+  end
+
+  defp start_completion_barrier_turn!(session, ctx) do
+    receipt = issue_receipt!(ctx.human_id, ctx.resource)
+    message = user_message!(ctx.human_id, "private request sentinel")
+    Task.async(fn -> Session.send_authenticated_message(session, message, receipt, 15_000) end)
+  end
+
+  defp deny_completion_binding!(ctx, :revocation), do: Security.revoke(ctx.chat_cap.id)
+
+  defp deny_completion_binding!(_ctx, :unlink),
+    do: Application.put_env(:arbor_security, :session_owner_test_aliases, %{})
+
+  defp deny_completion_binding!(_ctx, :resolver_outage),
+    do: Application.put_env(:arbor_security, :session_owner_test_aliases, :offline)
 
   defp queue_private_turn!(ctx, opts \\ []) do
     from = Keyword.get(opts, :from, {self(), make_ref()})

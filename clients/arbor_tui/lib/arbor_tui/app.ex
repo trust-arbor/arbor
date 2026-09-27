@@ -295,12 +295,31 @@ defmodule ArborTui.App do
   defp handle_input("/alias", state), do: cmd_alias("", state)
   defp handle_input("/help", state), do: cmd_help(state)
 
+  defp handle_input("/retry", state) do
+    if connected?(state), do: WSClient.send_command(state.ws, :retry)
+    %{state | input: ""}
+  end
+
   defp handle_input(text, state) do
     # Unmatched local command, or a normal message → forward to the gateway,
     # but only when attached. (/quit is handled in update/2 before we get here.)
     cond do
       not attached?(state) ->
         %{state | input: "", messages: state.messages ++ [msg(:system, not_attached_hint())]}
+
+      String.starts_with?(text, "/") ->
+        %{
+          state
+          | input: "",
+            messages:
+              state.messages ++
+                [
+                  msg(
+                    :system,
+                    "Server slash commands are unavailable during conversation migration. Use /help for local controls."
+                  )
+                ]
+        }
 
       true ->
         if connected?(state), do: WSClient.send_command(state.ws, {:send, text})
@@ -321,6 +340,7 @@ defmodule ArborTui.App do
   end
 
   defp cmd_agent(agent_id, state) do
+    state = Map.put(state, :delivery_status, nil)
     if state.ws, do: WSClient.connect_to(state.ws, agent_id)
 
     # Switching agents is a fresh conversation — reset the transcript.
@@ -537,7 +557,8 @@ defmodule ArborTui.App do
       "  /connect <url>       change the gateway URL and reconnect",
       "  /help                this help",
       "  /quit                exit the TUI",
-      "Other /commands (e.g. /model, /status) are sent to the attached agent."
+      "  /retry               retry the same command id and text with fresh proof",
+      "Server /commands, cancel and approvals are unavailable during conversation migration."
     ]
 
     %{state | input: "", messages: state.messages ++ Enum.map(lines, &msg(:system, &1))}
@@ -688,6 +709,72 @@ defmodule ArborTui.App do
     }
   end
 
+  defp handle_event({:conversation_reset, reason}, state) do
+    state
+    |> Map.merge(%{
+      input: "",
+      draft: "",
+      history: [],
+      hist_pos: nil,
+      messages: [msg(:system, reason)],
+      engagement_id: nil,
+      pending_approvals: [],
+      streaming: nil,
+      turn: :idle
+    })
+    |> Map.put(:delivery_status, nil)
+    |> Map.put(:last_command_id, nil)
+  end
+
+  defp handle_event({:conversation_history, %{transcript: transcript}}, state),
+    do: %{state | messages: transcript_to_messages(transcript)}
+
+  defp handle_event({:conversation_rejected, rejection}, state) do
+    state
+    |> Map.merge(%{
+      turn: :idle,
+      streaming: nil,
+      input: if(state.input == "", do: rejection["text"] || "", else: state.input),
+      messages:
+        state.messages ++ [msg(:system, "Message was not admitted: #{rejection["reason"]}.")]
+    })
+    |> Map.put(:delivery_status, "rejected")
+    |> Map.put(:last_command_id, nil)
+  end
+
+  defp handle_event({:conversation_command, command}, state) do
+    status = command["status"]
+
+    notice =
+      case status do
+        "completed" ->
+          nil
+
+        "uncertain" ->
+          "Delivery outcome is uncertain; it will not be resent. Command #{command["id"]}."
+
+        "transport_unknown" ->
+          "Awaiting admission for #{command["id"]}. Reconnect or /retry preserves this command ID."
+
+        "dispatch_started" ->
+          nil
+
+        "admitted" ->
+          nil
+
+        _ ->
+          "Command status: #{status}"
+      end
+
+    turn = if status in ["completed", "uncertain"], do: :idle, else: :thinking
+    messages = if notice, do: state.messages ++ [msg(:system, notice)], else: state.messages
+
+    state
+    |> Map.put(:delivery_status, status)
+    |> Map.put(:last_command_id, command["id"])
+    |> Map.merge(%{turn: turn, streaming: nil, messages: messages})
+  end
+
   defp handle_event({:delta, text}, state) do
     %{state | streaming: (state.streaming || "") <> text, turn: :thinking}
   end
@@ -815,6 +902,11 @@ defmodule ArborTui.App do
     do: " · #{detail}"
 
   defp reconnect_hint(_), do: ""
+
+  defp turn_indicator(%{delivery_status: "uncertain"}), do: "delivery uncertain · will not resend"
+
+  defp turn_indicator(%{delivery_status: "transport_unknown"}),
+    do: "admission unknown · /retry same command"
 
   defp turn_indicator(%{turn: :thinking}), do: "◐ thinking…"
   defp turn_indicator(_), do: "ready"

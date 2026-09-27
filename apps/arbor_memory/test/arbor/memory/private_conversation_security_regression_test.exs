@@ -206,6 +206,12 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
   end
 
   setup do
+    set_env(
+      :arbor_security,
+      :identity_alias_resolver,
+      Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
+    )
+
     start_supervised!(StampAuthority)
     start_supervised!({StrictSeam, self()})
     set_env(:arbor_memory, :strict_vector_seam, StrictSeam)

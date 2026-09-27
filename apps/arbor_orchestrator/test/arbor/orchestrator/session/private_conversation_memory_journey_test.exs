@@ -69,8 +69,10 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     assert Process.whereis(Repo) == nil,
            "Run this isolated SQLite journey standalone; it must not reuse another Repo."
 
+    fixture_parent = Path.expand(System.tmp_dir!())
+
     root =
-      Path.join(System.tmp_dir!(), "arbor_private_journey_#{System.unique_integer([:positive])}")
+      Path.join(fixture_parent, "arbor_private_journey_#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(root)
     database = Path.join(root, "journey.sqlite3")
@@ -99,7 +101,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
     on_exit(fn ->
       if Process.alive?(repo_supervisor), do: Supervisor.stop(repo_supervisor)
-      if Path.dirname(root) != System.tmp_dir!(), do: raise("invalid fixture root")
+      if Path.dirname(root) != fixture_parent, do: raise("invalid fixture root")
       File.rm_rf!(root)
     end)
 

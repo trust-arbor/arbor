@@ -7,6 +7,7 @@ defmodule Arbor.Agent.ConversationFacade do
   alias Arbor.Agent.{Config, MessageFacade}
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Pipeline.Response
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Session.UserMessage
 
   @proof_keys [:session_token, :signed_request]
@@ -26,9 +27,11 @@ defmodule Arbor.Agent.ConversationFacade do
     :invalid_command,
     :invalid_cursor,
     :unauthorized,
+    :unsupported_conversation_capability,
     :not_found,
     :command_conflict,
     :conversation_unavailable,
+    :conversation_scope_changed,
     :page_too_large
   ]
 
@@ -39,15 +42,27 @@ defmodule Arbor.Agent.ConversationFacade do
   @doc false
   def run_with(operation, caller, target, input, opts, collaborators) do
     result =
-      with {:ok, auth_opts, page_opts} <- validate_opts(operation, opts),
-           :ok <- validate_input(operation, input) do
+      with {:ok, auth_opts, page_opts, expected_engagement} <- validate_opts(operation, opts),
+           :ok <- validate_input(operation, input),
+           :ok <-
+             bind_signed_request(
+               operation,
+               caller,
+               target,
+               input,
+               page_opts,
+               expected_engagement,
+               auth_opts
+             ) do
         message =
           if operation == :submit do
             %{UserMessage.from_string(input.text) | sender_id: caller}
           end
 
         collaborators.authenticate.(caller, target, message, auth_opts, fn ownership ->
-          with {:ok, scope} <- resolve_scope(collaborators, caller, target) do
+          with {:ok, scope} <- resolve_scope(collaborators, ownership.canonical_owner_id, target),
+               :ok <- check_engagement_fence(scope, expected_engagement),
+               :ok <- currently_authorized(scope, ownership, collaborators) do
             dispatch(operation, scope, input, page_opts, ownership, collaborators)
           end
         end)
@@ -59,6 +74,61 @@ defmodule Arbor.Agent.ConversationFacade do
   catch
     _, _ -> {:error, :conversation_unavailable}
   end
+
+  @doc false
+  def request_payload(operation, caller, target, input, opts) do
+    with true <- operation in [:submit, :command, :events, :history],
+         true <- valid_principal?(caller) and valid_principal?(target),
+         {:ok, _auth, page, expected_engagement} <- validate_opts(operation, opts),
+         :ok <- validate_input(operation, input) do
+      {:ok, encode_request(operation, caller, target, input, page, expected_engagement)}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_command}
+    end
+  rescue
+    _ -> {:error, :invalid_command}
+  end
+
+  defp bind_signed_request(operation, caller, target, input, page, expected_engagement, auth_opts) do
+    case Keyword.fetch(auth_opts, :signed_request) do
+      :error ->
+        :ok
+
+      {:ok, %SignedRequest{agent_id: ^caller, payload: payload}} ->
+        if payload == encode_request(operation, caller, target, input, page, expected_engagement),
+          do: :ok,
+          else: {:error, :unauthorized}
+
+      _ ->
+        {:error, :unauthorized}
+    end
+  end
+
+  defp encode_request(operation, caller, target, input, page, expected_engagement) do
+    normalized = if operation == :submit, do: [input.id, input.text], else: input
+
+    Jason.encode!([
+      "arbor.conversation.v2",
+      Atom.to_string(operation),
+      caller,
+      target,
+      normalized,
+      [Keyword.get(page, :after), Keyword.get(page, :through), Keyword.get(page, :limit)],
+      expected_engagement
+    ])
+  end
+
+  # Compare-only continuity fence: a client cannot select an engagement or gain
+  # authority by naming one. Ownership is always resolved through Security first.
+  defp check_engagement_fence(_scope, nil), do: :ok
+  defp check_engagement_fence(%{engagement_id: id}, id), do: :ok
+  defp check_engagement_fence(_, _), do: {:error, :conversation_scope_changed}
+
+  defp valid_principal?(id) when is_binary(id) and byte_size(id) in 1..256,
+    do: String.valid?(id) and Regex.match?(~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/, id)
+
+  defp valid_principal?(_), do: false
 
   # Successful payloads come only from fixed Comms projection functions, which
   # validate stored journal/history records and exclude claim tokens and private
@@ -75,7 +145,7 @@ defmodule Arbor.Agent.ConversationFacade do
     %{
       authenticate: &MessageFacade.with_authenticated_receipt/5,
       resolve: &Arbor.Comms.resolve_user_engagement/2,
-      recheck: &Arbor.Security.recheck_conversation_access/2,
+      recheck: &Arbor.Security.recheck_conversation_owner/3,
       admit: &Arbor.Comms.admit_conversation_command/2,
       get: &Arbor.Comms.get_conversation_command/2,
       claim: &Arbor.Comms.claim_conversation_command/2,
@@ -98,7 +168,7 @@ defmodule Arbor.Agent.ConversationFacade do
             {:ok, _pid} ->
               # Receipt lifetime now belongs to the worker, even if publication
               # is denied after a concurrent revocation or the caller disappears.
-              {:handoff, release({:ok, admitted}, scope, collaborators)}
+              {:handoff, release({:ok, admitted}, scope, ownership, collaborators)}
 
             _ ->
               # No claim or dispatch has occurred. A later authenticated retry
@@ -106,35 +176,53 @@ defmodule Arbor.Agent.ConversationFacade do
               {:error, :conversation_unavailable}
           end
         else
-          release({:ok, admitted}, scope, collaborators)
+          release({:ok, admitted}, scope, ownership, collaborators)
         end
 
       error ->
-        release(error, scope, collaborators)
+        release(error, scope, ownership, collaborators)
     end
   end
 
-  defp dispatch(:command, scope, id, _page, _ownership, collaborators),
-    do: release(collaborators.get.(scope, id), scope, collaborators)
+  defp dispatch(:command, scope, id, _page, ownership, collaborators),
+    do: release(collaborators.get.(scope, id), scope, ownership, collaborators)
 
-  defp dispatch(:events, scope, cursor, page, _ownership, collaborators),
-    do: release(collaborators.events.(scope, cursor, page), scope, collaborators)
+  defp dispatch(:events, scope, cursor, page, ownership, collaborators) do
+    result =
+      case collaborators.events.(scope, cursor, page) do
+        {:ok, events} when is_map(events) ->
+          {:ok, Map.put(events, :engagement_id, scope.engagement_id)}
 
-  defp dispatch(:history, scope, _input, page, _ownership, collaborators) do
+        error ->
+          error
+      end
+
+    release(result, scope, ownership, collaborators)
+  end
+
+  defp dispatch(:history, scope, _input, page, ownership, collaborators) do
     result = collaborators.history.(scope.agent_id, scope.principal_id, page)
-    release(result, scope, collaborators)
+    release(result, scope, ownership, collaborators)
   end
 
   defp execute(scope, id, ownership, collaborators) do
     # Never verify a signed nonce twice. These source-owned checks follow
     # fresh cryptographic authentication and recheck live identity/capability.
-    with :ok <- currently_authorized(scope, collaborators),
+    with :ok <- currently_authorized(scope, ownership, collaborators),
          {:ok, token} <- collaborators.claim.(scope, id) do
       outcome =
-        case currently_authorized(scope, collaborators) do
+        case currently_authorized(scope, ownership, collaborators) do
           :ok -> delivery_outcome(ownership.deliver)
           _ -> @unknown
         end
+
+      # Delivery may outlive an unlink/revocation. A claimed command is never
+      # retried automatically, but revoked output must not become a completed
+      # journal projection under the old private scope.
+      outcome =
+        if currently_authorized(scope, ownership, collaborators) == :ok,
+          do: outcome,
+          else: @unknown
 
       settle(scope, id, token, outcome, collaborators)
     end
@@ -175,12 +263,16 @@ defmodule Arbor.Agent.ConversationFacade do
     end
   end
 
-  defp release(result, scope, collaborators) do
-    with :ok <- currently_authorized(scope, collaborators), do: result
+  defp release(result, scope, ownership, collaborators) do
+    with :ok <- currently_authorized(scope, ownership, collaborators), do: result
   end
 
-  defp currently_authorized(scope, collaborators) do
-    case collaborators.recheck.(scope.principal_id, scope.agent_id) do
+  defp currently_authorized(scope, ownership, collaborators) do
+    case collaborators.recheck.(
+           ownership.authenticated_principal_id,
+           scope.agent_id,
+           scope.principal_id
+         ) do
       {:ok, :authorized} -> :ok
       _ -> {:error, :unauthorized}
     end
@@ -211,19 +303,22 @@ defmodule Arbor.Agent.ConversationFacade do
   defp validate_opts(operation, opts) when is_list(opts) do
     allowed =
       case operation do
-        :submit -> @proof_keys ++ [:timeout]
-        :command -> @proof_keys
-        :events -> @proof_keys ++ [:through, :limit]
-        :history -> @proof_keys ++ [:after, :through, :limit]
+        :submit -> @proof_keys ++ [:timeout, :expected_engagement_id]
+        :command -> @proof_keys ++ [:expected_engagement_id]
+        :events -> @proof_keys ++ [:through, :limit, :expected_engagement_id]
+        :history -> @proof_keys ++ [:after, :through, :limit, :expected_engagement_id]
       end
 
     if Keyword.keyword?(opts) and
+         not (Keyword.has_key?(opts, :session_token) and Keyword.has_key?(opts, :signed_request)) and
          length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))) and
          Enum.all?(Keyword.keys(opts), &(&1 in allowed)) do
       page = Keyword.take(opts, [:after, :through, :limit])
 
-      if valid_page?(page) do
-        {:ok, Keyword.take(opts, @proof_keys ++ [:timeout]), page}
+      expected_engagement = Keyword.get(opts, :expected_engagement_id)
+
+      if valid_page?(page) and valid_engagement_fence?(expected_engagement) do
+        {:ok, Keyword.take(opts, @proof_keys ++ [:timeout]), page, expected_engagement}
       else
         {:error, :invalid_opts}
       end
@@ -235,6 +330,13 @@ defmodule Arbor.Agent.ConversationFacade do
   end
 
   defp validate_opts(_operation, _opts), do: {:error, :invalid_opts}
+
+  defp valid_engagement_fence?(nil), do: true
+
+  defp valid_engagement_fence?(id) when is_binary(id) and byte_size(id) == 36,
+    do: Regex.match?(~r/\Aeng_[0-9a-f]{32}\z/, id)
+
+  defp valid_engagement_fence?(_), do: false
 
   defp valid_page?(page) do
     Enum.all?(page, fn

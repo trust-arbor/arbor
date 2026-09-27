@@ -30,6 +30,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     * `--auto-start` — set auto-start on creation (with start)
     * `--timeout` — response timeout in seconds (default: 300, with chat;
       capped at 300 by the authenticated delivery path)
+    * `--key-file` — local operator signing key for chat (default
+      `~/.arbor/operator.key`, created by `mix arbor.user.init`)
     * `--all` — show both running and stopped agents (with list)
     * `--yes` — skip the destroy confirmation (required when stdin is not a
       TTY, e.g. scripted or non-interactive ssh runs)
@@ -76,6 +78,7 @@ defmodule Mix.Tasks.Arbor.Agent do
     provider: :string,
     auto_start: :boolean,
     timeout: :integer,
+    key_file: :string,
     all: :boolean,
     yes: :boolean
   ]
@@ -504,24 +507,32 @@ defmodule Mix.Tasks.Arbor.Agent do
   # ── Chat ──────────────────────────────────────────────────────────────
 
   defp do_chat(ref, message, opts) do
+    key_path = Arbor.Agent.IdentityAliasProof.key_file_path(opts)
+
+    # Validate locally before opening distribution. A missing or invalid key
+    # cannot select the unauthenticated Manager compatibility route.
+    case Arbor.Security.key_file_principal(key_path) do
+      {:ok, _principal} ->
+        :ok
+
+      {:error, _reason} ->
+        Mix.shell().error(
+          "Chat requires a valid private operator key. Run mix arbor.user.init or supply --key-file <path>."
+        )
+
+        exit({:shutdown, 1})
+    end
+
     ensure_server!()
     timeout = (opts[:timeout] || @default_chat_timeout_s) * 1_000
     effective_s = div(min(timeout, @authenticated_delivery_max_ms), 1_000)
 
     case find_running(ref) do
       {:ok, agent_id, _name} ->
-        # Carry a PRINCIPAL, not just the "CLI" display label. `sender` is a
-        # signal label; `sender_id` is what `Session.authenticated_message_owner?/2`
-        # matches against `TurnAuthority.authenticated_principal_id`, and what a
-        # `human_` scoped check (e.g. an egress disclosure capability) requires.
-        # Without it a terminal turn had no principal at all while the same
-        # conversation through the dashboard did.
-        envelope =
-          Arbor.Contracts.Session.UserMessage.from_cli(message, "CLI",
-            sender_id: local_operator_principal()
-          )
+        # The locally signed proof below supplies the exact sender identity.
+        envelope = Arbor.Contracts.Session.UserMessage.from_cli(message, "CLI")
 
-        case chat_send(agent_id, envelope, timeout) do
+        case signed_chat_send(key_path, agent_id, envelope, timeout) do
           {:ok, response} ->
             Mix.shell().info(response)
 
@@ -609,20 +620,6 @@ defmodule Mix.Tasks.Arbor.Agent do
   # A session token is a stand-in for possession, useful when the holder cannot
   # sign; a one-shot command can, and gains nothing from session state it would
   # have to create, carry, and revoke.
-  defp chat_send(agent_id, envelope, timeout) do
-    key_path = Arbor.Agent.IdentityAliasProof.default_key_path()
-
-    if File.exists?(key_path) do
-      signed_chat_send(key_path, agent_id, envelope, timeout)
-    else
-      # No operator key: nothing to authenticate as. Keep the legacy path rather
-      # than failing a turn that works today for un-gated runtimes (ACP,
-      # on-host). It still cannot egress externally, which is correct — it is
-      # unauthenticated.
-      remote(Arbor.Agent.Manager, :chat, [envelope, "CLI", [agent_id: agent_id, timeout: timeout]])
-    end
-  end
-
   defp signed_chat_send(key_path, agent_id, envelope, timeout) do
     effective = min(timeout, @authenticated_delivery_max_ms)
 
@@ -632,27 +629,24 @@ defmodule Mix.Tasks.Arbor.Agent do
       )
     end
 
-    # Bind the proof to THIS turn: resource plus a digest of the content. The
-    # signature already carries a nonce and timestamp, so this is about making
-    # the payload describe what it authorizes rather than being a bare token.
-    payload =
-      "chat:" <>
-        "arbor://chat/agent/#{agent_id}:" <>
-        Base.encode16(:crypto.hash(:sha256, envelope.content || ""), case: :lower)
-
-    case remote(Arbor.Security, :sign_key_file_request, [key_path, payload]) do
-      {:ok, principal, signed} ->
-        envelope = %{envelope | sender_id: principal}
-
-        remote(Arbor.Agent, :send_message, [
-          principal,
-          agent_id,
-          envelope,
-          [timeout: effective, signed_request: signed]
-        ])
-
+    # Sign the exact final envelope using the same versioned binding the host
+    # verifies before authentication. A key replacement between reads fails.
+    with {:ok, principal} <- Arbor.Security.key_file_principal(key_path),
+         envelope = %{envelope | sender_id: principal},
+         {:ok, payload} <- Arbor.Agent.message_request_payload(principal, agent_id, envelope),
+         {:ok, ^principal, signed} <- Arbor.Security.sign_key_file_request(key_path, payload) do
+      remote(Arbor.Agent, :send_message, [
+        principal,
+        agent_id,
+        envelope,
+        [timeout: effective, signed_request: signed]
+      ])
+    else
       {:error, reason} ->
         {:error, "could not sign as the local operator using #{key_path}: #{inspect(reason)}"}
+
+      _ ->
+        {:error, "operator key changed while signing"}
     end
   end
 

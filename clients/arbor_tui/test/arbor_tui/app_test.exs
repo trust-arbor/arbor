@@ -274,16 +274,14 @@ defmodule ArborTui.AppTest do
       assert text =~ "/agent"
       assert text =~ "/connect"
       assert text =~ "/quit"
-      assert text =~ "sent to the attached agent"
+      assert text =~ "unavailable during conversation migration"
     end
 
-    test "an unknown /command while attached forwards as a chat message (not intercepted)" do
-      # ws: nil so no actual send; the behavior we assert is that it took the
-      # gateway-forward path (records a :you message + thinking turn), NOT the
-      # local-command path (which would emit a :system note only).
+    test "server slash commands explicitly report unavailable without dispatch" do
       s = up(:submit, model(%{input: "/model gpt-4", agent_id: "agent_x", status: :connected}))
-      assert %{role: :you, text: "/model gpt-4"} = List.last(s.messages)
-      assert s.turn == :thinking
+      assert %{role: :system, text: text} = List.last(s.messages)
+      assert text =~ "unavailable"
+      assert s.turn == :idle
     end
   end
 
@@ -370,5 +368,87 @@ defmodule ArborTui.AppTest do
       s = up({:server_event, {:approval_resolved, %{proposal_id: "p1", status: "approved"}}}, s)
       assert s.pending_approvals == []
     end
+  end
+
+  test "durable dispatch status is not completion and uncertainty is visible" do
+    state = model(%{turn: :thinking})
+
+    started =
+      up(
+        {:server_event,
+         {:conversation_command, %{"id" => "stable", "status" => "dispatch_started"}}},
+        state
+      )
+
+    assert started.turn == :thinking
+
+    uncertain =
+      up(
+        {:server_event, {:conversation_command, %{"id" => "stable", "status" => "uncertain"}}},
+        started
+      )
+
+    assert uncertain.turn == :idle
+    assert inspect(uncertain.messages) =~ "will not be resent"
+    assert inspect(uncertain.messages) =~ "stable"
+    refreshed = up({:server_event, {:conversation_history, %{transcript: []}}}, uncertain)
+    assert refreshed.delivery_status == "uncertain"
+    assert refreshed.last_command_id == "stable"
+  end
+
+  test "durable history refresh replaces the projection instead of appending duplicate turns" do
+    event =
+      {:server_event,
+       {:conversation_history, %{transcript: [%{"role" => "user", "content" => "hello"}]}}}
+
+    once = up(event, model())
+    twice = up(event, once)
+    assert twice.messages == once.messages
+    assert length(twice.messages) == 1
+  end
+
+  test "conversation ownership change clears history, draft and retry identity" do
+    state =
+      model(%{
+        input: "unsent draft",
+        draft: "old draft",
+        history: ["old prompt"],
+        messages: [%{role: :you, text: "private"}],
+        delivery_status: "transport_unknown",
+        last_command_id: "old"
+      })
+
+    reset =
+      up(
+        {:server_event,
+         {:conversation_reset, "Conversation ownership changed; reconnect explicitly."}},
+        state
+      )
+
+    assert reset.input == ""
+    assert reset.draft == ""
+    assert reset.history == []
+    assert reset.delivery_status == nil
+    assert reset.last_command_id == nil
+    refute inspect(reset.messages) =~ "private"
+    assert inspect(reset.messages) =~ "reconnect explicitly"
+  end
+
+  test "definitive admission rejection restores input but preserves a newer draft" do
+    rejection =
+      {:server_event,
+       {:conversation_rejected,
+        %{
+          "id" => "stable",
+          "text" => "original",
+          "reason" => "unsupported_conversation_capability"
+        }}}
+
+    restored = up(rejection, model(%{input: "", turn: :thinking}))
+    assert restored.input == "original"
+    assert restored.turn == :idle
+    assert restored.delivery_status == "rejected"
+    newer = up(rejection, model(%{input: "newer draft"}))
+    assert newer.input == "newer draft"
   end
 end

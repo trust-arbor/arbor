@@ -64,6 +64,7 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
       )
 
     previous_memory = memory_child!()
+    previous_resolver = Application.fetch_env(:arbor_security, :identity_alias_resolver)
     previous_mode = Application.fetch_env(:arbor_security, :system_authority_mode)
     previous_key = Application.fetch_env(:arbor_security, :master_key_path)
     {:ok, supervisor} = Supervisor.start_link([], strategy: :one_for_one)
@@ -73,6 +74,7 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
       stop_system_authority!()
       if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
       restore_memory_child!(previous_memory)
+      restore_env(:identity_alias_resolver, previous_resolver)
       restore_env(:system_authority_mode, previous_mode)
       restore_env(:master_key_path, previous_key)
       assert :ok = Security.TestBootstrap.restore_supervised_tree!()
@@ -84,6 +86,13 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
     remove_memory_child!(previous_memory)
     stop_system_authority!()
     remove_root_store!()
+
+    Application.put_env(
+      :arbor_security,
+      :identity_alias_resolver,
+      Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
+    )
+
     Application.put_env(:arbor_security, :system_authority_mode, :persistent)
     Application.put_env(:arbor_security, :master_key_path, Path.join(root, "master.key"))
 

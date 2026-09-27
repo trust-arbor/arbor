@@ -44,6 +44,8 @@ defmodule Arbor.Memory.PrivateConversationSQLiteTest do
     File.mkdir_p!(root)
 
     settings = [
+      {:arbor_security, :identity_alias_resolver,
+       Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver},
       {:arbor_memory, :strict_vector_seam, Arbor.Memory.StrictVectorSeam.Default},
       {:arbor_memory, :private_memory_security, Security},
       {:arbor_persistence, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto},

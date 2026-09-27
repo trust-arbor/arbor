@@ -9,6 +9,7 @@ defmodule Arbor.Agent.MessageFacade do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Session.UserMessage
 
   # The DEFAULT stays conservative. The CEILING is separate and larger: a human
@@ -42,6 +43,16 @@ defmodule Arbor.Agent.MessageFacade do
   # arbor://chat/agent/<target>. Equivalent to
   # \A(?:agent|human)_[A-Za-z0-9_-]+\z plus the 256-byte bound.
   @principal_id_re ~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/
+  @message_keys [
+    :__struct__,
+    :content,
+    :engagement_id,
+    :sender,
+    :sender_id,
+    :sent_at,
+    :transport,
+    :transport_metadata
+  ]
 
   # Denied secret-key *names* reject the channel even when the associated value
   # is blank, redacted, or nil — key presence alone fails closed.
@@ -66,10 +77,33 @@ defmodule Arbor.Agent.MessageFacade do
           | :invalid_sender
           | :invalid_engagement_id
           | :unauthorized
+          | :unsupported_conversation_capability
           | :delivery_ambiguous
           | :delivery_failed
 
   @type mode :: :text | :response
+
+  # Elixir-native/RPC envelope binding. The exact typed envelope is hashed,
+  # including metadata and timestamp; adapters must sign after setting sender_id.
+  # Cross-language JSON clients use conversation_request_payload/5 instead.
+  def request_payload(caller, target, %UserMessage{} = message) do
+    with :ok <- validate_principal_id(caller, :invalid_caller_id),
+         :ok <- validate_principal_id(target, :invalid_agent_id),
+         :ok <- validate_message_for_branch(message, caller, {:signed_request, nil}),
+         true <- Enum.sort(Map.keys(message)) == Enum.sort(@message_keys),
+         encoded = :erlang.term_to_binary(message, [:deterministic]),
+         true <- byte_size(encoded) <= 131_072 do
+      digest = Base.encode16(:crypto.hash(:sha256, encoded), case: :lower)
+      {:ok, Jason.encode!(["arbor.message.v1", caller, target, digest])}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_message}
+    end
+  rescue
+    _ -> {:error, :invalid_message}
+  end
+
+  def request_payload(_, _, _), do: {:error, :invalid_message}
 
   @type collaborators :: %{
           required(:authorize) => (String.t(), String.t(), atom(), keyword() -> term()),
@@ -180,7 +214,17 @@ defmodule Arbor.Agent.MessageFacade do
         end
 
       try do
-        case continuation.(%{deliver: deliver, discard: discard}) do
+        result =
+          with {:ok, owner} <- collaborators.receipt_owner.(receipt, caller, target) do
+            continuation.(%{
+              deliver: deliver,
+              discard: discard,
+              authenticated_principal_id: caller,
+              canonical_owner_id: owner
+            })
+          end
+
+        case result do
           {:handoff, result} ->
             result
 
@@ -252,6 +296,8 @@ defmodule Arbor.Agent.MessageFacade do
       authorize: &Arbor.Security.authorize/4,
       issue_receipt: &Arbor.Security.authorize_and_issue_delivery_receipt/4,
       discard_receipt: &Arbor.Security.discard_delivery_receipt/1,
+      receipt_owner: &Arbor.Security.conversation_receipt_owner/3,
+      recheck: &Arbor.Security.recheck_conversation_owner/3,
       chat: &Arbor.Agent.Manager.chat/3,
       chat_response: &Arbor.Agent.Manager.chat_response/3,
       chat_authenticated: &Arbor.Agent.Manager.chat_authenticated/4,
@@ -263,7 +309,8 @@ defmodule Arbor.Agent.MessageFacade do
     with {:ok, timeout_ms, proof} <- validate_opts(opts),
          :ok <- validate_principal_id(caller_id, :invalid_caller_id),
          :ok <- validate_principal_id(target_agent_id, :invalid_agent_id),
-         :ok <- validate_message_for_branch(message, caller_id, proof) do
+         :ok <- validate_message_for_branch(message, caller_id, proof),
+         :ok <- bind_message_proof(caller_id, target_agent_id, message, proof) do
       case proof do
         @proof_absent ->
           ordinary_path(
@@ -288,6 +335,17 @@ defmodule Arbor.Agent.MessageFacade do
       end
     end
   end
+
+  defp bind_message_proof(caller, target, message, {:signed_request, request}) do
+    with %SignedRequest{agent_id: ^caller, payload: payload} <- request,
+         {:ok, ^payload} <- request_payload(caller, target, message) do
+      :ok
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp bind_message_proof(_, _, _, _), do: :ok
 
   defp ordinary_path(caller_id, target_agent_id, message, timeout_ms, mode, collaborators) do
     with :ok <-
@@ -327,8 +385,8 @@ defmodule Arbor.Agent.MessageFacade do
           secrets
         )
 
-      {:error, :unauthorized} ->
-        {:error, :unauthorized}
+      {:error, reason} when reason in [:unauthorized, :unsupported_conversation_capability] ->
+        {:error, reason}
     end
   end
 
@@ -549,6 +607,9 @@ defmodule Arbor.Agent.MessageFacade do
       {:ok, _other} ->
         {:error, :unauthorized}
 
+      {:error, :unsupported_conversation_capability} = error ->
+        error
+
       {:error, _reason} ->
         {:error, :unauthorized}
 
@@ -626,16 +687,32 @@ defmodule Arbor.Agent.MessageFacade do
        ) do
     opts = [agent_id: target_agent_id, timeout: timeout_ms]
 
-    result =
-      case mode do
-        :text ->
-          collaborators.chat_authenticated.(message, caller_id, receipt, opts)
+    # Pin from the source-owned receipt before Session consumes it. Never
+    # resolve a replacement owner after delivery, even if the alias changes.
+    with {:ok, owner} <- collaborators.receipt_owner.(receipt, caller_id, target_agent_id),
+         {:ok, :authorized} <- collaborators.recheck.(caller_id, target_agent_id, owner) do
+      result =
+        case mode do
+          :text ->
+            collaborators.chat_authenticated.(message, caller_id, receipt, opts)
 
-        :response ->
-          collaborators.chat_response_authenticated.(message, caller_id, receipt, opts)
+          :response ->
+            collaborators.chat_response_authenticated.(message, caller_id, receipt, opts)
+        end
+
+      case collaborators.recheck.(caller_id, target_agent_id, owner) do
+        {:ok, :authorized} ->
+          admit_authenticated_result(result, mode, secrets, collaborators, receipt)
+
+        _ ->
+          discard_receipt(collaborators, receipt)
+          {:error, :unauthorized}
       end
-
-    admit_authenticated_result(result, mode, secrets, collaborators, receipt)
+    else
+      _ ->
+        discard_receipt(collaborators, receipt)
+        {:error, :unauthorized}
+    end
   rescue
     exception ->
       discard_receipt(collaborators, receipt)

@@ -50,6 +50,22 @@ defmodule ArborTui.AgentsClient do
     end
   end
 
+  @doc "Resolve a name, prefix or alias before binding a conversation signature."
+  def resolve(identity, gateway_url, token) do
+    path = "/api/chat/agents/resolve/" <> URI.encode(token, &URI.char_unreserved?/1)
+    {scheme, host, port} = gateway_url |> URI.parse() |> http_target()
+    headers = [{"authorization", Signer.authorization_header(identity, "GET", path, "")}]
+
+    with {:ok, conn} <- Mint.HTTP.connect(scheme, host, port, protocols: [:http1]),
+         {:ok, conn, ref} <- Mint.HTTP.request(conn, "GET", path, headers, ""),
+         {:ok, 200, body} <- recv_response(conn, ref),
+         {:ok, %{"agent_id" => target}} when is_binary(target) <- Jason.decode(body) do
+      {:ok, target}
+    else
+      _ -> {:error, :agent_resolution_failed}
+    end
+  end
+
   @doc """
   Map a gateway WS url to the `{scheme, host, port}` for the HTTP API:
   `ws`/`http` → `:http`, `wss`/`https` → `:https`, same host/port.

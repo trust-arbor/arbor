@@ -294,67 +294,137 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
           "resource" => "arbor://shell/exec/rm"
         })
 
-      assert html =~ "Always Allow requires the trust auto-promote capability.",
-             "H13 regression (behavioral): always-allow-tool must deny without auto_promote cap"
+      assert html =~ "Approvals are unavailable in this private conversation",
+             "Private chat must not turn an Always Allow event into trust mutation"
     end
   end
 
-  describe "HITL InteractionRouter integration (Phase 1a)" do
-    alias Arbor.Contracts.Comms.Interaction
-
+  describe "private chat excludes approval and group authority" do
     @tag :fast
-    test "renders pending approval from orchestration facade when dashboard_interaction arrives",
+    test "security regression: mount and crafted approval messages never grant or expose approval data",
          %{conn: conn} do
-      submitted_at = DateTime.utc_now()
-
-      Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
-        %{
-          id: "irq_phase1a_facade",
-          source: :interaction,
-          agent_id: "agent_test_phase1a",
-          principal_id: "agent_test_phase1a",
-          resource_uri: "arbor://shell/exec/mix",
-          action: :approval,
-          description: "Run mix test on the staging branch?",
-          metadata: %{},
-          created_at: submitted_at
-        }
-      ])
-
+      trace_calls_for_new_processes([{Arbor.Security, :grant, 1}])
       {:ok, view, _html} = live(conn, "/chat")
+      pid = view.pid
 
       {:ok, interaction} =
-        Interaction.new(%{
-          request_id: "irq_phase1a_facade",
+        Arbor.Contracts.Comms.Interaction.new(%{
+          request_id: "irq_private_leak",
           kind: :approval,
-          agent_id: "agent_test_phase1a",
+          agent_id: "agent_private_other",
           user_id: "human_dashboard",
-          description: "Run mix test on the staging branch?",
-          resource_uri: "arbor://shell/exec/mix",
-          metadata: %{}
+          description: "foreign private approval",
+          resource_uri: "arbor://shell/exec/private"
         })
 
-      send(view.pid, {:dashboard_interaction, interaction})
+      for _ <- 1..2, do: send(pid, {:dashboard_interaction, interaction})
+
+      send(
+        pid,
+        {:signal_received,
+         %{
+           category: :security,
+           type: :authorization_pending,
+           data: %{principal_id: "agent_private_other"}
+         }}
+      )
+
+      send(pid, :refresh_approvals)
       html = render(view)
 
-      assert_received {:list_pending_approvals, opts}
-      assert Keyword.fetch!(opts, :caller_id) == "human_dashboard"
-      assert Keyword.fetch!(opts, :agent_id) == "agent_test_phase1a"
-
-      assert html =~ interaction.agent_id,
-             "ChatLive should render the agent_id from a dashboard_interaction"
-
-      assert html =~ "arbor://shell/exec/mix"
+      trace_ref = :erlang.trace_delivered(pid)
+      assert_receive {:trace_delivered, ^pid, ^trace_ref}
+      refute html =~ "foreign private approval"
+      refute has_element?(view, "#approvals-container [phx-click=approve-tool]")
+      refute_received {:list_pending_approvals, _}
+      refute_received {:trace, ^pid, :call, {Arbor.Security, :grant, _}}
     end
 
     @tag :fast
-    test "approval card says why it is asking, what is at stake, and withholds Always Allow for one-way actions",
+    test "security regression: crafted approval events do not answer or grant trust, even with a session",
          %{conn: conn} do
+      conn =
+        init_test_session(conn, %{"agent_id" => "human_socket", "session_token" => "socket-token"})
+
+      {:ok, view, _} = live(conn, "/chat")
+
+      for event <- [
+            "approve-tool",
+            "always-allow-tool",
+            "deny-tool",
+            "approve-interaction",
+            "reject-interaction"
+          ] do
+        html =
+          render_click(view, event, %{
+            "id" => "irq_private",
+            "agent" => "agent_private",
+            "resource" => "arbor://shell/exec",
+            "caller_id" => "human_forged",
+            "session_token" => "forged-token"
+          })
+
+        assert html =~ "Approvals are unavailable in this private conversation"
+      end
+
+      refute_received {:answer_approval, _, _, _}
+      refute_received {:list_pending_approvals, _}
+    end
+
+    @tag :fast
+    test "security regression: group events cannot join create send or resume through private chat",
+         %{conn: conn} do
+      watched = [
+        {Arbor.Agent.Manager, :create_channel, 2},
+        {Arbor.Agent.Manager, :join_channel, 2},
+        {Arbor.Agent.Manager, :channel_send, 5},
+        {Arbor.Agent.Manager, :resume_agent, 1},
+        {Arbor.Agent.Lifecycle, :start, 2}
+      ]
+
+      trace_calls_for_new_processes(watched)
+      {:ok, view, _} = live(conn, "/chat")
+      pid = view.pid
+
+      for event <- [
+            "show-group-modal",
+            "show-join-groups",
+            "toggle-group-agent",
+            "update-group-name",
+            "confirm-create-group",
+            "join-group",
+            "leave-group"
+          ] do
+        html =
+          render_click(view, event, %{
+            "id" => "group_private",
+            "channel-id" => "group_private",
+            "agent-id" => "agent_private",
+            "value" => "group_private"
+          })
+
+        assert html =~ "Group chat is unavailable in this private conversation"
+      end
+
+      trace_ref = :erlang.trace_delivered(pid)
+      assert_receive {:trace_delivered, ^pid, ^trace_ref}
+
+      for {module, function, _arity} <- watched do
+        refute_received {:trace, ^pid, :call, {^module, ^function, _}}
+      end
+    end
+  end
+
+  describe "approval card presentation" do
+    @tag :fast
+    test "approval card says why it is asking, what is at stake, and withholds Always Allow for one-way actions",
+         _context do
       Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
         %{
           id: "irq_one_way",
           source: :interaction,
           agent_id: "agent_test_one_way",
+          proposer: "agent_test_one_way",
           principal_id: "agent_test_one_way",
           resource_uri: "arbor://shell/exec/rm",
           action: :approval,
@@ -381,21 +451,14 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
         }
       ])
 
-      {:ok, view, _html} = live(conn, "/chat")
+      [approval] = Application.fetch_env!(:arbor_dashboard, :chat_live_pending_approvals)
 
-      {:ok, interaction} =
-        Interaction.new(%{
-          request_id: "irq_one_way",
-          kind: :approval,
-          agent_id: "agent_test_one_way",
-          user_id: "human_dashboard",
-          description: "Authorization request for arbor://shell/exec/rm",
-          resource_uri: "arbor://shell/exec/rm",
-          metadata: %{}
+      html =
+        render_component(&Arbor.Dashboard.Live.ChatLive.Components.approvals_panel/1, %{
+          show_approvals: true,
+          approvals_count: 1,
+          streams: %{approvals: [{"approval-card", approval}]}
         })
-
-      send(view.pid, {:dashboard_interaction, interaction})
-      html = render(view)
 
       assert html =~ "Asking because your trust rule for arbor://shell is ask"
       assert html =~ "security ceiling arbor://shell: ask"
@@ -407,12 +470,13 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
 
     @tag :fast
-    test "approval card offers Always Allow for reversible actions", %{conn: conn} do
+    test "approval card offers Always Allow for reversible actions", _context do
       Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
         %{
           id: "irq_reversible",
           source: :interaction,
           agent_id: "agent_test_reversible",
+          proposer: "agent_test_reversible",
           principal_id: "agent_test_reversible",
           resource_uri: "arbor://fs/write/report.md",
           action: :approval,
@@ -425,152 +489,61 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
         }
       ])
 
-      {:ok, view, _html} = live(conn, "/chat")
+      [approval] = Application.fetch_env!(:arbor_dashboard, :chat_live_pending_approvals)
 
-      {:ok, interaction} =
-        Interaction.new(%{
-          request_id: "irq_reversible",
-          kind: :approval,
-          agent_id: "agent_test_reversible",
-          user_id: "human_dashboard",
-          description: "Authorization request for arbor://fs/write/report.md",
-          resource_uri: "arbor://fs/write/report.md",
-          metadata: %{}
+      html =
+        render_component(&Arbor.Dashboard.Live.ChatLive.Components.approvals_panel/1, %{
+          show_approvals: true,
+          approvals_count: 1,
+          streams: %{approvals: [{"approval-card", approval}]}
         })
-
-      send(view.pid, {:dashboard_interaction, interaction})
-      html = render(view)
 
       assert html =~ "reversible"
       assert html =~ "Always Allow"
       refute html =~ "one-way: confirmed each time"
     end
+  end
 
+  describe "authenticated private conversation boundary" do
     @tag :fast
-    test "approve-tool resolves through shared orchestration facade",
+    test "security regression: local console cannot select an engagement or supply browser proof",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "approve-tool", %{"id" => "prop_orchestration"})
-
-      assert is_binary(html)
-
-      assert_received {:answer_approval, "prop_orchestration", :approve, opts}
-      assert Keyword.fetch!(opts, :caller_id) == "human_dashboard"
-      assert Keyword.fetch!(opts, :session_token) == nil
-    end
-
-    @tag :fast
-    test "answer events forward only Nav identity and token, including legacy card events", %{
-      conn: conn
-    } do
-      conn =
-        init_test_session(conn, %{"agent_id" => "human_socket", "session_token" => "socket-token"})
-
-      {:ok, view, _} = live(conn, "/chat")
-
-      for {event, decision} <- [
-            {"approve-tool", :approve},
-            {"deny-tool", :deny},
-            {"approve-interaction", :approve},
-            {"reject-interaction", :deny}
-          ] do
-        render_click(view, event, %{
-          "id" => event,
-          "caller_id" => "human_forged",
-          "session_token" => "forged-token"
-        })
-
-        assert_received {:answer_approval, ^event, ^decision, opts}
-        assert Keyword.fetch!(opts, :caller_id) == "human_socket"
-        assert Keyword.fetch!(opts, :session_token) == "socket-token"
-      end
-    end
-
-    @tag :fast
-    test "duplicate dashboard_interaction with same request_id only inserts once",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      {:ok, interaction} =
-        Interaction.new(%{
-          request_id: "irq_phase1a_dedup",
-          kind: :approval,
-          agent_id: "agent_dedup_test",
-          user_id: "human_dashboard",
-          description: "duplicate test"
-        })
-
-      send(view.pid, {:dashboard_interaction, interaction})
-      send(view.pid, {:dashboard_interaction, interaction})
-      html = render(view)
-
-      # The dedup is keyed on request_id via known_approval_ids — two sends
-      # of the same Interaction must not produce two stream entries.
-      occurrences =
-        html
-        |> String.split("agent_dedup_test")
-        |> length()
-        |> Kernel.-(1)
-
-      assert occurrences >= 1, "Dashboard interaction must render at least once"
-      # The exact count depends on how many places the agent_id appears in
-      # an approval card's markup; the dedup invariant is that two sends
-      # don't double the count vs one send. Re-render once after a single
-      # send for the baseline.
-      {:ok, view2, _html} = live(conn, "/chat")
-      send(view2.pid, {:dashboard_interaction, interaction})
-      html_one = render(view2)
-
-      occurrences_one =
-        html_one
-        |> String.split("agent_dedup_test")
-        |> length()
-        |> Kernel.-(1)
-
-      assert occurrences == occurrences_one,
-             "Dedup invariant: 2 sends must match 1 send (got #{occurrences} vs #{occurrences_one})"
-    end
-
-    @tag :fast
-    test "reject-interaction for unknown request_id does not crash",
-         %{conn: conn} do
-      Application.put_env(:arbor_dashboard, :chat_live_answer_result, {:error, :not_found})
-      {:ok, view, _html} = live(conn, "/chat")
+      {:ok, view, html} = live(conn, "/chat?agent_id=agent_private_boundary")
+      assert html =~ "Sign in with a valid session"
 
       html =
-        render_click(view, "reject-interaction", %{"id" => "irq_definitely_unknown"})
+        render_submit(view, "send-message", %{
+          "message" => "must stay private",
+          "command_id" => "browser-proof-attempt",
+          "session_token" => "browser-forged-proof",
+          "caller_id" => "human_somebody_else",
+          "engagement_id" => "eng_11111111111111111111111111111111"
+        })
 
-      assert is_binary(html),
-             "reject-interaction must handle :not_found gracefully (already-resolved case)"
-
-      assert_received {:answer_approval, "irq_definitely_unknown", :deny, _opts}
+      assert html =~ "Sign in with a valid session"
+      refute has_element?(view, "#messages-container", "must stay private")
+      refute has_element?(view, "#conversation-delivery")
     end
   end
 
-  # VP-04A: tag_engagement/2 was migrated from reaching into the internal
-  # Arbor.Comms.EngagementStore module to calling the public Arbor.Comms
-  # facade (resolve_user_engagement/2). This guard is a static source scan —
-  # deliberately not a mounted-LiveView or shared-ETS-backed behavioral test —
-  # so it stays fully hermetic (no DB, no live agent, no process-wide
-  # EngagementStore state). Same technique as the AST-based
-  # apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs
-  # drift guard.
-  describe "tag_engagement/2 facade migration (VP-04A)" do
-    @tag :fast
-    test "uses the public Arbor.Comms facade and no longer references Arbor.Comms.EngagementStore" do
-      source =
-        __ENV__.file
-        |> Path.dirname()
-        |> Path.join("../../lib/arbor_dashboard/live/chat_live.ex")
-        |> Path.expand()
-        |> File.read!()
-
-      assert source =~ "Arbor.Comms.resolve_user_engagement",
-             "tag_engagement/2 must resolve engagements through the public Arbor.Comms facade"
-
-      refute source =~ "Arbor.Comms.EngagementStore",
-             "tag_engagement/2 must not reach into the internal Arbor.Comms.EngagementStore module"
+  defp trace_calls_for_new_processes(patterns) do
+    for {module, _function, _arity} = pattern <- patterns do
+      Code.ensure_loaded!(module)
+      :erlang.trace_pattern(pattern, true, [:local])
     end
+
+    tracer = self()
+    :erlang.trace(:new, true, [:call, {:tracer, tracer}])
+
+    on_exit(fn ->
+      :erlang.trace(:new, false, [:call])
+
+      for pid <- Process.list() do
+        if :erlang.trace_info(pid, :tracer) == {:tracer, tracer},
+          do: :erlang.trace(pid, false, [:call])
+      end
+
+      for pattern <- patterns, do: :erlang.trace_pattern(pattern, false, [:local])
+    end)
   end
 end
