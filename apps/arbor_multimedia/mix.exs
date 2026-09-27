@@ -25,8 +25,13 @@ defmodule Arbor.Multimedia.MixProject do
 
   defp deps do
     [
-      {:membrane_core, "~> 1.3"},
-      {:membrane_portaudio_plugin, "~> 0.19.6"},
+      {:membrane_core,
+       git: "http://10.42.42.6:3000/trust-arbor/membrane_core.git",
+       ref: "bc01d4f7d08522a5e5028078a082a311161b7b9c",
+       override: true},
+      {:membrane_portaudio_plugin,
+       git: "http://10.42.42.6:3000/trust-arbor/membrane_portaudio_plugin.git",
+       ref: "3ecfad95d64b0edde79219c37934ac660083d9a6"},
       {:membrane_raw_audio_format, "~> 0.12.3"}
     ]
   end

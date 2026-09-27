@@ -10,8 +10,8 @@ The existing `Arbor.Multimedia` facade remains the consumer boundary.
 The pinned Source/Sink interfaces do not expose enough evidence to meet the
 planned capture/playback contract. An Arbor owner can enforce a deadline and
 retain a cleanup fence, but cannot recover errors discarded inside a native
-callback. Prepare isolated, upstream-compatible changes before choosing their
-package source; do not patch the live dependency directory or publish a fork.
+callback. The isolated corrections and approved source adoption are recorded
+below; do not patch the live dependency directory.
 
 | Required behavior | Source finding | Smallest proposed correction |
 | --- | --- | --- |
@@ -97,9 +97,11 @@ permission support has a separate behavioral fail-before/pass-after witness.
 These final harnesses do not open devices. Bundles, full patches, regression
 logs and metadata for both dependency candidates are preserved together.
 
-The proposed portable adoption uses full immutable refs on Arbor's existing
-private Git host. See [the concrete source adoption proposal](VOICE_MEDIA_SOURCE_ADOPTION.md).
-No fork has been published or adopted into Arbor's dependencies.
+The approved portable adoption uses full immutable refs on Arbor's existing
+private Git host. Both forks were published privately on 2026-09-27 and are
+pinned in Multimedia's dependencies. See [the source adoption record](VOICE_MEDIA_SOURCE_ADOPTION.md).
+The default driver remains unavailable; these pins do not establish renewed
+Linux baseline admission or physical device qualification.
 
 A separate first BEAM ownership harness had a failed mock boundary: Mockery
 interception was not compiled into the dependency, so four attempted fake native
