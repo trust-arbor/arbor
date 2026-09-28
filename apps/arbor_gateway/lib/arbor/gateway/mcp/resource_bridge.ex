@@ -60,8 +60,9 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
   @doc """
   Check if an agent has the capability to read an MCP resource.
 
-  Uses Arbor.Security.authorize/3 when available, falls back to permissive
-  mode when security infrastructure isn't running (dev/test).
+  Delegates to `Arbor.Security.authorize/3`. Fails closed: when the security
+  subsystem is not loaded or its `CapabilityStore` is not running (startup,
+  restart), the call is denied rather than granted.
   """
   @spec authorize(String.t(), String.t(), String.t()) ::
           :ok | {:error, :unauthorized, String.t()}
@@ -78,7 +79,10 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
            "Agent #{agent_id} lacks capability: #{uri} (#{inspect(reason)})"}
       end
     else
-      :ok
+      # FAIL CLOSED: no security subsystem means no authorization decision, so
+      # deny. This branch used to return :ok ("permissive mode"), granting every
+      # external MCP resource read while CapabilityStore was down or restarting.
+      {:error, :unauthorized, "security subsystem unavailable; cannot authorize #{uri}"}
     end
   rescue
     # FAIL CLOSED: a crash while consulting security must DENY, never grant.
