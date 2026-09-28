@@ -212,7 +212,9 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
 
       # Call through facade — "sample_tool" returns "Processed: <input>"
       {:ok, result} =
-        Arbor.Gateway.call_mcp_tool("db_server", "sample_tool", %{"input" => "SELECT 1"})
+        Arbor.Gateway.call_mcp_tool("db_server", "sample_tool", %{"input" => "SELECT 1"},
+          skip_auth: true
+        )
 
       assert Map.has_key?(result, :value)
       assert Map.has_key?(result, :taint)
@@ -276,7 +278,7 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
 
     test "call_mcp_tool returns error for unknown server" do
       assert {:error, {:not_connected, "ghost"}} =
-               Arbor.Gateway.call_mcp_tool("ghost", "tool", %{})
+               Arbor.Gateway.call_mcp_tool("ghost", "tool", %{}, skip_auth: true)
     end
   end
 
@@ -543,7 +545,8 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
       {:ok, _} = ClientSupervisor.start_connection("taint_res", config)
       Process.sleep(500)
 
-      {:ok, result} = Arbor.Gateway.read_mcp_resource("taint_res", "file://sample_data.txt")
+      {:ok, result} =
+        Arbor.Gateway.read_mcp_resource("taint_res", "file://sample_data.txt", skip_auth: true)
 
       assert Map.has_key?(result, :value)
       assert Map.has_key?(result, :taint)
@@ -553,7 +556,7 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
 
     test "read_mcp_resource returns error for unknown server" do
       assert {:error, {:not_connected, "ghost_res"}} =
-               Arbor.Gateway.read_mcp_resource("ghost_res", "file://anything")
+               Arbor.Gateway.read_mcp_resource("ghost_res", "file://anything", skip_auth: true)
     end
 
     test "mcp_server_status includes resource count" do

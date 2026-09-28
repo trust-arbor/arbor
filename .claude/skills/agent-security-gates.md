@@ -761,6 +761,20 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   (`trust-zone-segmentation-architecture.md`). Never trust-list a node by
   hand — the module deliberately has no seam for that.
 
+## 29. `Gateway.call_mcp_tool` / `read_mcp_resource` require `:agent_id` (2026-09-27)
+
+- **What:** both facade calls capability-check the calling agent against
+  `arbor://mcp/<server>/<tool-or-resource>`. A nil or blank `:agent_id` used to
+  skip the check entirely (Imp review D2). Only the literal `skip_auth: true` is a
+  bypass now. Note that `ToolBridge`/`ResourceBridge.authorize` still allow
+  everything when `Arbor.Security.CapabilityStore` is not running (a dev/test
+  fallback), so this gate is only as strong as the security subsystem being up.
+- **Symptom:** `{:error, :missing_agent_id}` from `Arbor.Gateway.call_mcp_tool/4`
+  or `read_mcp_resource/3`.
+- **Action:** pass `agent_id:` for the principal the call acts for. Reserve
+  `skip_auth: true` for trusted system code that has already authorized the call
+  another way. Regression: `missing_agent_id_security_regression_test.exs`.
+
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
 **Do not telemetry-invert distributed security state sync.** Security observability can emit `:telemetry` and let `arbor_signals` bridge it back to signals, but nonce, capability, and identity sync are load-bearing cross-node security state. `NonceCache` uses `security.nonce_seen` to block replay against peer nodes; `CapabilityStore` uses revocation signals to evict revoked grants on peers; `Identity.Registry` uses identity lifecycle signals to keep peer caches current. Telemetry is in-process and synchronous, so it cannot replace node-hop transport. B9 extraction needs an injected sync transport (likely Phoenix.PubSub or `Arbor.Signals` behind a behaviour), not a telemetry bridge, before dropping the `arbor_signals` dependency.

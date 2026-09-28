@@ -67,9 +67,9 @@ defmodule Arbor.GatewayFacadeTest do
       assert {:error, {:not_connected, "missing"}} = result
     end
 
-    test "skips auth when no agent_id provided" do
+    test "denies when no agent_id provided (missing agent_id is not a skip)" do
       result = Gateway.call_mcp_tool("missing", "tool", %{})
-      assert {:error, {:not_connected, "missing"}} = result
+      assert {:error, :missing_agent_id} = result
     end
   end
 
@@ -96,6 +96,10 @@ defmodule Arbor.GatewayFacadeTest do
         Gateway.read_mcp_resource("missing", "file:///x", agent_id: "a1", skip_auth: true)
 
       assert {:error, {:not_connected, "missing"}} = result
+    end
+
+    test "denies when no agent_id provided (missing agent_id is not a skip)" do
+      assert {:error, :missing_agent_id} = Gateway.read_mcp_resource("missing", "file:///x")
     end
   end
 
