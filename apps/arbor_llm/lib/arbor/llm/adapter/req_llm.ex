@@ -1507,9 +1507,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     })
   end
 
-  # Error translation moved to `Arbor.LLM.Plugs.Dispatch` (Session 8,
-  # plug pipeline refactor). Adapter no longer catches dispatch
-  # exceptions directly — the Dispatch plug handles them and stamps
-  # `{:error, ProviderError | RequestTimeoutError}` on the call's
-  # result field.
+  # Error translation lives in `Arbor.LLM.Plugs.Dispatch`: every dispatch
+  # failure — non-2xx status, transport, provider exception, exit, or a local
+  # refusal of the response — is stamped on the call's result as one
+  # `{:error, %ProviderError{}}` (classified by `Arbor.LLM.ProviderErrorCore`),
+  # or `{:error, %RequestTimeoutError{}}` for a deadline expiry.
 end

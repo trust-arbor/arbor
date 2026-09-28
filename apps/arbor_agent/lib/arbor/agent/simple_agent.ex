@@ -257,13 +257,11 @@ defmodule Arbor.Agent.SimpleAgent do
         end
 
       {:error, reason} ->
-        reason_str = inspect(reason)
-
-        if String.contains?(reason_str, "context length") or
-             String.contains?(reason_str, "maximum context") do
+        if LLM.context_window_exceeded?(reason) do
           # Context window overflow — return partial result instead of error
           Logger.warning(
-            "Context overflow at turn #{state.turn}: #{String.slice(reason_str, 0, 200)}"
+            "Context overflow at turn #{state.turn}: " <>
+              String.slice(Exception.message(reason), 0, 200)
           )
 
           {:ok, build_result(nil, state, :context_overflow)}

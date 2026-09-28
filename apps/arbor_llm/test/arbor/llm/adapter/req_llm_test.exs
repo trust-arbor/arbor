@@ -22,6 +22,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
   alias Arbor.LLM.ContentPart
   alias Arbor.LLM.Deadline
   alias Arbor.LLM.Message
+  alias Arbor.LLM.ProviderError
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
 
@@ -1050,8 +1051,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       messages: [%Message{role: :user, content: "hello"}]
     }
 
-    assert Adapter.complete(request, max_response_bytes: 1_024) ==
-             {:error, {:response_bytes_exceeded, 1_024}}
+    assert {:error, %ProviderError{retryable: false, original: {:response_bytes_exceeded, 1_024}}} =
+             Adapter.complete(request, max_response_bytes: 1_024)
 
     assert_receive {:req_chunk, 1}
     assert_receive {:req_chunk, 2}

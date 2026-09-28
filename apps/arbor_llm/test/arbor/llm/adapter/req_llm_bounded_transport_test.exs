@@ -6,7 +6,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
   alias Arbor.LLM
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
   alias Arbor.LLM.Plugs.Usage.AccountedStream
-  alias Arbor.LLM.{Client, Message, OwnedStream, Request, StreamEvent}
+  alias Arbor.LLM.{Client, Message, OwnedStream, ProviderError, Request, StreamEvent}
 
   setup do
     original = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
@@ -376,7 +376,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     chunks = List.duplicate(String.duplicate("x", 128), 200)
     {url, server} = start_chunked_server(chunks, 2, "application/json")
 
-    assert {:error, {:response_bytes_exceeded, 512}} =
+    assert {:error, %ProviderError{retryable: false, original: {:response_bytes_exceeded, 512}}} =
              Adapter.embed(["hello"], "text-embedding-3-small",
                provider: "openai",
                base_url: url,
@@ -394,7 +394,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     chunks = List.duplicate(String.duplicate("x", 128), 200)
     {url, server} = start_chunked_server(chunks, 2, "application/json")
 
-    assert {:error, {:response_bytes_exceeded, 512}} =
+    assert {:error, %ProviderError{retryable: false, original: {:response_bytes_exceeded, 512}}} =
              Adapter.embed(["hello"], "operator-local-embedding",
                provider: "ollama",
                base_url: url,
@@ -415,7 +415,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
 
     {url, server} = embedding_server(reversed)
 
-    assert {:error, {:embedding_index_reordered, 0, 1}} =
+    assert {:error,
+            %ProviderError{retryable: false, original: {:embedding_index_reordered, 0, 1}}} =
              Adapter.embed(["first", "second"], "text-embedding-3-small",
                provider: "openai",
                base_url: url,
