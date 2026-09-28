@@ -775,6 +775,31 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   (`trust-zone-segmentation-architecture.md`). Never trust-list a node by
   hand — the module deliberately has no seam for that.
 
+## 28. The ACP ToolServer requires its per-session bearer token (2026-09-27)
+
+- **What:** `Arbor.AI.AcpPool.ToolServer` runs Jido actions through
+  `authorize_and_execute/4` **as the owning agent**, so reaching its port means
+  acting with that agent's capabilities. Loopback binding keeps it off the
+  network. ex_mcp's Origin check (`validate_origin: true`, empty allow-list)
+  already 403s browser pages, and CORS never emitted an allow-origin header. But
+  any local non-browser process that found the port (a port scan is enough) was
+  served with no credential (Imp review D6). Now `start/2` mints a 32-byte token,
+  `ToolServer.BearerAuth` requires `authorization: Bearer <token>` (constant-time
+  compare, 401 otherwise), CORS is off, and a loopback bind only answers loopback
+  `Host` names (421, DNS rebinding).
+- **Symptom:** a client of a ToolServer gets `401 {"error":"unauthorized"}` on
+  `initialize` or any call. A hand-built descriptor with `"headers" => []` connects
+  to nothing. A `Host` other than 127.0.0.1/localhost/::1 gets 421.
+- **Action:** build the ACP descriptor with `ToolServer.mcp_servers_entry(info)`,
+  passing the map `start/2` returned, and send its `headers` verbatim. That is the
+  only place the token should live: `AcpPool` strips `:token` from the entry it
+  keeps in pool state. Never log `mcp_servers`: the token is a live credential for
+  the session's lifetime. See gate 12 for why `ExMCP.ACP.Client` stays at an
+  `:info` floor. Codex's adapter only forwards HTTP MCP servers that pass
+  `:authorize_mcp_server` or an exact-map `:trusted_mcp_servers` match; if Arbor
+  ever configures the latter, it must include the per-session header. Regression:
+  the `security regression (Imp review D6)` block in `tool_server_test.exs`.
+
 ## 29. `Gateway.call_mcp_tool` / `read_mcp_resource` require `:agent_id` (2026-09-27)
 
 - **What:** both facade calls capability-check the calling agent against
