@@ -12,7 +12,13 @@ Not AI control. Not AI safety through constraint. A platform where humans and AI
 
 ## Status
 
-Arbor is under active development and is **not yet production-ready**. The codebase is being ported and restructured — expect incomplete features, breaking changes, and rough edges. Contributions and feedback are welcome, but please set expectations accordingly.
+Arbor is under active development (`2.0.0-dev`) and is **not yet production-ready**. Expect incomplete features, breaking changes, and rough edges. The current delivery target is one owner running several agents, with the security floor kept on every profile. See [docs/arbor/PRODUCT_PROFILES.md](docs/arbor/PRODUCT_PROFILES.md).
+
+| Doc | What it is |
+|---|---|
+| [FEATURES.md](FEATURES.md) | Capabilities that work today |
+| [VISION.md](VISION.md) | Long-term direction, and the current focus |
+| `.arbor/roadmap/` | Inbox, brainstorming, planned, in-progress, and completed work |
 
 ## How It Works
 
@@ -24,9 +30,9 @@ Arbor is built on the [BEAM](https://www.erlang.org/) — the same runtime that 
 
 **Security that enables freedom.** Zero-trust architecture with a capability-based security kernel. Every action requires an explicit, unforgeable capability grant. Convention breaks; architecture holds. This isn't about constraining AI — it's about creating boundaries safe enough that genuine autonomy is possible inside them.
 
-**Consensus governance.** A multi-perspective advisory council evaluates proposals before changes are made. Multiple LLM providers, multiple viewpoints, transparent reasoning. The system helps govern its own evolution.
+**Consensus as advice.** A multi-perspective council can evaluate a proposal. An approval on a specific capability stays with the owner. The aim is that more of the load moves to council as the system matures, and that asks become fewer.
 
-**Self-healing infrastructure.** Agents monitor, diagnose, and propose fixes for their own errors. The system stays running not through rigid constraints, but through self-correction — modeled on an immune response rather than a prison.
+**Self-healing is an aim.** Failed processes restart under supervision, and the monitor can surface anomalies. Diagnosis and repair without a person are where the system is headed, not what it guarantees today.
 
 ## Prerequisites
 

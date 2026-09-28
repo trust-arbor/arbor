@@ -255,7 +255,7 @@ Four unrelated things share the word "sandbox," which makes reasoning about this
 | `.arbor/decisions/2026-07-13-spawn-capable-shell-containment.md` | **Accepted, staged implementation.** Apple Container path — largely delivered |
 | `docs/arbor-security-design.md:102-103` | **D7** (trust-tier sandboxing) and **D8** (reflex context completeness) — both High, both "Change implementation" |
 
-**Nothing safe-shell-related sits in `2-planned/` or `3-in-progress/`.** `PLANNED.md` contains no shell item; `INPROGRESS.md` contains no shell item. `FEATURES.md:275-279, 361-376` lists shipped features and marks "container mode planned." There is **no spec domain for the shell** in `docs/specs/` — `TRUST-1.0.md` is the nearest adjacent artifact.
+**Nothing safe-shell-related sits in `2-planned/` or `3-in-progress/`.** There is **no spec domain for the shell** in `docs/specs/` — `TRUST-1.0.md` is the nearest adjacent artifact. As of 2026-09-28 the root `PLANNED.md` and `INPROGRESS.md` projections are gone; `.arbor/roadmap/` is the index, and `FEATURES.md` no longer marks container mode as only planned.
 
 ---
 
