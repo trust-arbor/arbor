@@ -14,6 +14,36 @@ defmodule Arbor.Security.AuditJournalCore do
 
   `compaction_reclaims_occupancy?/1` is entry-based: projected occupancy is
   `1 + pending_record_count`, matching compact's `used_entries`.
+  `compaction_reclaims_occupancy?/1` and `publication_relieves?/3` first
+  decide from operation statuses and counts alone (O(n) in the operation
+  count, no record decode) and decode the retained records only when that
+  count-based projection says a publication could relieve. The count-based
+  projection equals the decoded one whenever the records decode, so the
+  answers are unchanged; a refusal that nothing can relieve (a no-consumer
+  backlog) never pays for a decode of the hot set.
+
+  `reserved_entries`/`reserved_bytes` hold the records every pending v2/v3
+  operation has reserved for the rest of its lifecycle. They are derived
+  state, maintained incrementally by every transition and recomputed once by
+  compact/restore, so an admission costs O(1) in the pending count (a fold or
+  publication re-fold is linear, not quadratic, under a delivery backlog).
+
+  Terminal-identity retirement (operational profile only):
+  - Every operational compaction emits a v3 snapshot carrying
+    `retirement.retired_total` and the cold retirement-ledger binding. The
+    binding and total live only inside `state["snapshot"]`; there are no other
+    retirement keys in reducer state.
+  - `compact(state, source, retire: true, ledger: next)` drops every
+    `delivered` terminal from the hot set (they are recorded in the ledger by
+    the file layer before the publication renames, and `next` names that
+    frame); `effect_rejected` terminals and pending operations are always kept.
+    `retire: false` (the default, and every small-profile compaction) keeps
+    every terminal and carries the binding forward.
+  - `admission_floor/1` is 3 iff the installed snapshot is v3, else 1. A new
+    `prepared` whose intent version is below the floor is refused
+    `:retired_version` before any capacity check, with no state change.
+    Pending-manifest records installed by `restore/2` bypass the floor, so
+    operations pending across the cutover complete by id.
 
   Compact errors: `:malformed`, `:cross_operation`, `:record_too_large`,
   `:capacity_exhausted`. Restore adds `:pending_mismatch`.
@@ -25,6 +55,8 @@ defmodule Arbor.Security.AuditJournalCore do
   alias Arbor.Security.Contracts.AuditJournal
 
   @version 1
+  @retirement_version 3
+  @compact_opts [:retire, :ledger]
   @terminals ["effect_rejected", "delivered"]
   @pending_statuses ["prepared", "effect_applied"]
   @max_pending_age_seconds 31_536_000
@@ -43,6 +75,7 @@ defmodule Arbor.Security.AuditJournalCore do
           | :record_too_large
           | :soft_capacity_exhausted
           | :capacity_exhausted
+          | :retired_version
           | :pending_mismatch
 
   @type compact_error ::
@@ -111,17 +144,18 @@ defmodule Arbor.Security.AuditJournalCore do
   True when compacting would drop entry occupancy below the current count.
 
   Projected occupancy is `1 + pending_record_count` and must also fit the
-  hard entry cap. Does not invent a source or call `compact/2`.
+  hard entry cap. Does not invent a source or call `compact/2`. The projection
+  is counted from operation statuses first; the retained records are decoded
+  (and must compact) only when that count says compaction could reclaim.
   """
   @spec compaction_reclaims_occupancy?(term()) :: boolean()
   def compaction_reclaims_occupancy?(state) do
     with :ok <- valid_state(state),
+         true <- reclaims_entries?(state, projected_compact_entries(state["operations"])),
          {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
          {:ok, _pending_manifest, pending} <- compact_pending(pending_ops),
          {:ok, _terminal_manifest, _compacted} <- compact_terminals(terminal_ops) do
-      projected = 1 + length(pending)
-      current = state["entry_count"]
-      projected < current and projected <= limits(state).hard_entry_cap
+      reclaims_entries?(state, 1 + length(pending))
     else
       _ -> false
     end
@@ -132,18 +166,206 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   @doc """
-  Build a v1 snapshot from reducer state and a committed source binding.
+  True when publishing a compaction now could admit the refused `raw` record.
 
-  Occupancy becomes 1 (the snapshot) plus retained pending records. Terminals
-  compact to fingerprints. `snapshot_bytes` is a non-negative integer.
-  Errors: `:malformed`, `:cross_operation`, `:record_too_large`,
-  `:capacity_exhausted`.
+  - Every operational publication installs a v3 snapshot (admission floor 3),
+    so a refused v1/v2 `prepared` on the operational profile is never relieved:
+    the single retry of that exact record would be refused `:retired_version`.
+  - Otherwise, either compaction reclaims entry occupancy
+    (`compaction_reclaims_occupancy?/1`, unchanged), or, on the operational
+    profile, retiring `effective_retirable` delivered terminals brings the
+    retained-operation dimension within the refused record's class cap
+    (`soft_entry_cap` for an `authority_increase` prepared, `hard_entry_cap`
+    otherwise) AND the post-publication entry dimension (the snapshot, the
+    retained pending records and every pending reservation, plus the record)
+    fits the same cap. Retirement frees no entries, so an entry-refused pending
+    backlog is never reported as relieved just because a few delivered
+    terminals are retirable.
+
+  The caller passes `0` when the retirement ledger is paused; the value is
+  clamped to `retirable_count/1`.
+  """
+  @spec publication_relieves?(term(), term(), term()) :: boolean()
+  def publication_relieves?(state, raw, effective_retirable)
+      when is_integer(effective_retirable) and effective_retirable >= 0 do
+    not post_publication_floor_refuses?(state, raw) and
+      (compaction_reclaims_occupancy?(state) or
+         retirement_relieves?(state, raw, effective_retirable))
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  def publication_relieves?(_state, _raw, _effective_retirable), do: false
+
+  # A capacity refusal of a `prepared` is only ever for an unknown id (known ids
+  # answer :idempotent/:operation_conflict first), and an operational
+  # publication always installs floor 3.
+  defp post_publication_floor_refuses?(state, raw) do
+    with :ok <- valid_state(state),
+         :operational <- profile(state),
+         {:ok, %{"record_type" => "prepared", "intent" => %{"version" => version}}}
+         when is_integer(version) <- map_admit(AuditJournal.admit_record(raw)) do
+      version < @retirement_version
+    else
+      _ -> false
+    end
+  end
+
+  # Cheapest first: the retirable count and the retained-operation dimension
+  # are status counts, the post-publication entry projection counts pending
+  # records by status, and only a projection that fits decodes the pending
+  # records (which a compaction must be able to retain) to confirm it.
+  defp retirement_relieves?(state, raw, effective_retirable) do
+    with :ok <- valid_state(state),
+         :operational <- profile(state),
+         retirable when retirable > 0 <- min(effective_retirable, retirable_count(state)),
+         {:ok, record} <- map_admit(AuditJournal.admit_record(raw)),
+         cap = class_cap(record, limits(state)),
+         true <- map_size(state["operations"]) - retirable + new_operation_cost(record) <= cap,
+         # After the publication the hot entries are exactly the snapshot plus
+         # the pending records; kept terminals reserve nothing, so the
+         # maintained reservation (O(1)) is the pending operations' own.
+         {maintained_entries, _bytes} = prospective_reservation(state, record),
+         true <- projected_compact_entries(state["operations"]) + maintained_entries + 1 <= cap,
+         {:ok, pending_ops, _terminal_ops} <- partition_operations(state["operations"]),
+         {:ok, _manifest, pending_records} <- compact_pending(pending_ops) do
+      {reserved_entries, _bytes} =
+        prospective_reservation(%{"operations" => pending_ops}, record)
+
+      1 + length(pending_records) + reserved_entries + 1 <= cap
+    else
+      _ -> false
+    end
+  end
+
+  # The entries a compaction keeps, from statuses alone: the snapshot plus
+  # every pending operation's retained records. Equal to `1 + length(pending)`
+  # from `compact_pending/1` whenever the records decode (it admits exactly the
+  # records `pending_record_types/1` names), so it filters exactly.
+  defp projected_compact_entries(operations) do
+    Enum.reduce(operations, 1, fn
+      {_id, %{"status" => status}}, acc -> acc + length(pending_record_types(status))
+      {_id, _op}, acc -> acc
+    end)
+  end
+
+  defp reclaims_entries?(state, projected),
+    do: projected < state["entry_count"] and projected <= limits(state).hard_entry_cap
+
+  defp new_operation_cost(%{"record_type" => "prepared"}), do: 1
+  defp new_operation_cost(_record), do: 0
+
+  defp class_cap(record, limits) do
+    case capacity_class(record) do
+      :soft -> limits.soft_entry_cap
+      :reserve -> limits.hard_entry_cap
+    end
+  end
+
+  @doc """
+  Admission floor derived from the installed snapshot: 3 iff it is a v3
+  snapshot, otherwise 1. Unknown prepared records below the floor are refused
+  `:retired_version`.
+  """
+  @spec admission_floor(term()) :: 1 | 3
+  def admission_floor(%{"snapshot" => %{"version" => @retirement_version}}),
+    do: @retirement_version
+
+  def admission_floor(_state), do: 1
+
+  @doc "Delivered operations a retiring operational compaction would retire (0 on small)."
+  @spec retirable_count(term()) :: non_neg_integer()
+  def retirable_count(%{"operations" => operations} = state) when is_map(operations) do
+    if profile(state) == :operational do
+      Enum.count(operations, fn {_id, op} -> is_map(op) and op["status"] == "delivered" end)
+    else
+      0
+    end
+  end
+
+  def retirable_count(_state), do: 0
+
+  @doc "True when any pending operation carries an intent version below 3."
+  @spec legacy_pending?(term()) :: boolean()
+  def legacy_pending?(%{"operations" => operations}) when is_map(operations) do
+    Enum.any?(operations, fn {_id, op} ->
+      is_map(op) and op["status"] in @pending_statuses and legacy_intent?(op["intent"])
+    end)
+  end
+
+  def legacy_pending?(_state), do: false
+
+  defp legacy_intent?(%{"version" => version}) when is_integer(version),
+    do: version < @retirement_version
+
+  defp legacy_intent?(_intent), do: false
+
+  @doc """
+  The exact compact strings a retiring compaction would drop from the hot set.
+
+  `{:ok, %{operation_id => delivered_terminal_compact}}` on the operational
+  profile (empty on small). Strings are byte-identical to the terminals a
+  non-retiring compaction would keep; unclassifiable operations fail closed.
+  """
+  @spec retirement_batch(term()) :: {:ok, map()} | {:error, compact_error()}
+  def retirement_batch(state) do
+    with :ok <- valid_state(state) do
+      if profile(state) == :operational do
+        with {:ok, _pending_ops, terminal_ops} <- partition_operations(state["operations"]),
+             {:ok, retired_ops, _kept} <- split_retired(terminal_ops, true),
+             {:ok, manifest, _compacted} <- compact_terminals(retired_ops) do
+          {:ok, manifest}
+        end
+      else
+        {:ok, %{}}
+      end
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @doc """
+  Build a snapshot from reducer state and a committed source binding.
+
+  Same as `compact(state, source, [])`: small profile emits a v1 snapshot,
+  operational emits a non-retiring v3 snapshot that carries the prior
+  retirement accounting forward.
   """
   @spec compact(term(), term()) ::
           {:ok, state(), map(), [map()]} | {:error, compact_error()}
-  def compact(state, source) do
+  def compact(state, source), do: compact(state, source, [])
+
+  @doc """
+  Build a snapshot from reducer state, a committed source binding and options.
+
+  Occupancy becomes 1 (the snapshot) plus retained pending records. Terminals
+  compact to fingerprints. `snapshot_bytes` is a non-negative integer.
+
+  Options (operational profile; ignored for small except validation):
+  - `retire: true` drops every `delivered` terminal from the hot set and adds
+    their count to `retirement.retired_total`. Default `false`.
+  - `ledger: binding` the string-keyed ledger binding to install. When nothing
+    retires it defaults to (and must equal) the prior binding. When at least
+    one operation retires it is REQUIRED and must name exactly the next frame:
+    `frames + 1`, `tip_offset` at the prior bound end
+    (`AuditJournal.ledger_bound_size/1`) and a new `tip_digest` (the frame the
+    file layer wrote before publication). Only a genesis prior may stay at
+    genesis (explicit in-memory retirement of an ephemeral journal, which has
+    no ledger); a bound journal can never retire without advancing its ledger.
+
+  Errors: `:malformed`, `:cross_operation`, `:record_too_large`,
+  `:capacity_exhausted`.
+  """
+  @spec compact(term(), term(), term()) ::
+          {:ok, state(), map(), [map()]} | {:error, compact_error()}
+  def compact(state, source, opts) do
     with :ok <- valid_state(state),
-         {:ok, snapshot, pending, operations} <- build_compact_snapshot(state, source),
+         {:ok, plan} <- retirement_plan(state, opts),
+         {:ok, snapshot, pending, operations} <- build_compact_snapshot(state, source, plan),
          {:ok, snap_size} <- snapshot_occupancy_size(snapshot) do
       finish_compact(snapshot, pending, operations, snap_size)
     end
@@ -253,11 +475,43 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   @spec capacity(state()) :: map()
-  def capacity(state) when is_map(state) do
+  def capacity(state) when is_map(state), do: capacity(state, [])
+
+  @doc """
+  Capacity projection with retirement headroom.
+
+  `retirable_operation_count` is the raw number of delivered operations the
+  next retiring publication would retire; `remaining_increase_admissions` is
+  `soft_entry_cap - (retained - effective_retirable)`, the retained-dimension
+  headroom after that retirement.
+
+  The effective retirable count is an explicit caller input and defaults to 0
+  (conservative: headroom is only claimed when the caller knows a retiring
+  publication is reachable):
+  - `paused: false` — retirement is live: effective retirable = the raw count;
+  - `paused: true` — the retirement ledger is paused: 0;
+  - `effective_retirable: n` — `n`, clamped to `0..raw count` (ignored when
+    `paused: true`).
+
+  `reserved_entries`/`reserved_bytes` are the records every pending v2/v3
+  operation has reserved for its remaining lifecycle. They are not part of
+  `used_entries`, but every new admission is checked against
+  `used + reserved`: an increase needs `remaining_soft_entries -
+  reserved_entries >= 3` (its own prepared record plus two reserved records).
+
+  Existing fields keep their map-size definitions so an empty queue is never
+  read as capacity.
+  """
+  @spec capacity(state(), keyword()) :: map()
+  def capacity(state, opts) when is_map(state) and is_list(opts) do
     limits = limits(state)
     used_entries = Map.get(state, "entry_count", 0)
     used_bytes = Map.get(state, "byte_count", 0)
     retained = map_size(Map.get(state, "operations", %{}))
+    retirable = retirable_count(state)
+    effective = effective_retirable(retirable, opts)
+    retirement = AuditJournal.snapshot_retirement(Map.get(state, "snapshot"))
+    {reserved_entries, reserved_bytes} = capacity_reservation(state)
 
     %{
       "used_entries" => used_entries,
@@ -276,8 +530,63 @@ defmodule Arbor.Security.AuditJournalCore do
       "remaining_soft_entries" => max(0, limits.soft_entry_cap - used_entries),
       "remaining_soft_bytes" => max(0, limits.soft_byte_cap - used_bytes),
       "remaining_hard_entries" => max(0, limits.hard_entry_cap - used_entries),
-      "remaining_hard_bytes" => max(0, limits.hard_byte_cap - used_bytes)
+      "remaining_hard_bytes" => max(0, limits.hard_byte_cap - used_bytes),
+      "retirable_operation_count" => retirable,
+      "retired_operation_total" => retirement["retired_total"],
+      "retire_batch" => Map.get(limits, :retire_batch, 0),
+      "remaining_increase_admissions" => max(0, limits.soft_entry_cap - (retained - effective)),
+      "reserved_entries" => reserved_entries,
+      "reserved_bytes" => reserved_bytes
     }
+  end
+
+  @doc """
+  Readiness projection over `capacity/2` with the same `opts`: true when one
+  more `authority_increase` would pass the retained, entry and soft-byte
+  clauses of the admission check.
+
+  - retained: `remaining_increase_admissions > 0`;
+  - entries (exact): `remaining_soft_entries - reserved_entries >= 3`, the
+    increase's own prepared record plus the two records it reserves;
+  - bytes (conservative): room for a maximum-size prepared record beyond every
+    reservation.
+
+  A readiness signal only; `append/2` is always the admission decision.
+  """
+  @spec increase_headroom?(term(), keyword()) :: boolean()
+  def increase_headroom?(state, opts \\ [])
+
+  def increase_headroom?(state, opts) when is_map(state) and is_list(opts) do
+    capacity = capacity(state, opts)
+
+    capacity["remaining_increase_admissions"] > 0 and
+      capacity["remaining_soft_entries"] - capacity["reserved_entries"] >= 3 and
+      capacity["remaining_soft_bytes"] - capacity["reserved_bytes"] >=
+        limits(state).max_record_bytes
+  rescue
+    _ -> false
+  end
+
+  def increase_headroom?(_state, _opts), do: false
+
+  defp capacity_reservation(%{"operations" => operations} = state) when is_map(operations) do
+    reservation(state)
+  rescue
+    _ -> {0, 0}
+  end
+
+  defp capacity_reservation(_state), do: {0, 0}
+
+  defp effective_retirable(retirable, opts) do
+    paused = Keyword.get(opts, :paused)
+    explicit = Keyword.get(opts, :effective_retirable)
+
+    cond do
+      paused == true -> 0
+      is_integer(explicit) -> explicit |> max(0) |> min(retirable)
+      paused == false -> retirable
+      true -> 0
+    end
   end
 
   @spec pending_summary(term(), term()) :: {:ok, map()} | {:error, :malformed}
@@ -287,6 +596,14 @@ defmodule Arbor.Security.AuditJournalCore do
          {:ok, pending} <- pending_ops(state) do
       ages = Enum.map(pending, &pending_age(&1, now_unix))
 
+      prepared_ages =
+        pending
+        |> Enum.zip(ages)
+        |> Enum.flat_map(fn
+          {{_id, %{"status" => "prepared"}}, age} -> [age]
+          _other -> []
+        end)
+
       if Enum.any?(ages, &(&1 == :malformed)) do
         {:error, :malformed}
       else
@@ -294,6 +611,8 @@ defmodule Arbor.Security.AuditJournalCore do
          %{
            "pending_count" => length(pending),
            "oldest_pending_age_seconds" => Enum.max(ages, fn -> 0 end),
+           "prepared_count" => length(prepared_ages),
+           "oldest_prepared_age_seconds" => Enum.max(prepared_ages, fn -> 0 end),
            "operations" => project_pending(pending)
          }}
       end
@@ -309,7 +628,9 @@ defmodule Arbor.Security.AuditJournalCore do
       "version" => @version,
       "operations" => %{},
       "entry_count" => 0,
-      "byte_count" => 0
+      "byte_count" => 0,
+      "reserved_entries" => 0,
+      "reserved_bytes" => 0
     }
   end
 
@@ -319,6 +640,7 @@ defmodule Arbor.Security.AuditJournalCore do
          true <- is_map(state["operations"]),
          true <- is_integer(state["entry_count"]) and state["entry_count"] >= 0,
          true <- is_integer(state["byte_count"]) and state["byte_count"] >= 0,
+         :ok <- valid_reservation_fields(state),
          :ok <- valid_snapshot_fields(state) do
       :ok
     else
@@ -327,6 +649,22 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp valid_state(_state), do: {:error, :malformed}
+
+  # Derived reservation totals: absent (a hand-built state; derived on demand)
+  # or both present as non-negative integers.
+  defp valid_reservation_fields(state) do
+    case {Map.fetch(state, "reserved_entries"), Map.fetch(state, "reserved_bytes")} do
+      {:error, :error} ->
+        :ok
+
+      {{:ok, entries}, {:ok, bytes}}
+      when is_integer(entries) and entries >= 0 and is_integer(bytes) and bytes >= 0 ->
+        :ok
+
+      _invalid ->
+        {:error, :malformed}
+    end
+  end
 
   defp valid_snapshot_fields(state) do
     case Map.fetch(state, "snapshot") do
@@ -390,7 +728,10 @@ defmodule Arbor.Security.AuditJournalCore do
 
     case {existing, record_type} do
       {nil, "prepared"} ->
-        with :ok <- check_capacity(state, record, bytes, limits) do
+        # The floor is evaluated before capacity: a retired-version identity is
+        # an identity refusal, never a capacity error, and consumes nothing.
+        with :ok <- check_floor(state, record),
+             :ok <- check_capacity(state, record, bytes, limits) do
           {:ok, put_new_prepared(state, record, bytes)}
         end
 
@@ -401,6 +742,12 @@ defmodule Arbor.Security.AuditJournalCore do
         continue_operation(state, op, record, bytes, limits)
     end
   end
+
+  defp check_floor(state, %{"intent" => %{"version" => version}}) when is_integer(version) do
+    if version < admission_floor(state), do: {:error, :retired_version}, else: :ok
+  end
+
+  defp check_floor(_state, _record), do: {:error, :malformed}
 
   defp continue_operation(state, op, record, bytes, limits) do
     record_type = record["record_type"]
@@ -495,20 +842,24 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   # V1 records retain their historical replay rules. Every newly wired mutation
-  # uses V2 and reserves its remaining applied+delivered (or rejected) records
-  # before the authority effect. Finishing an admitted operation consumes its
-  # reservation instead of spending the reduction reserve a second time.
+  # uses V2/V3 and reserves its remaining applied+delivered (or rejected)
+  # records before the authority effect. Finishing an admitted operation
+  # consumes its reservation instead of spending the reduction reserve twice.
+  #
+  # The reservation after this transition: every other operation's remaining
+  # cost (the maintained total minus the target's current share) plus the
+  # target's remaining cost after it. O(1) in the pending count.
   defp prospective_reservation(state, record) do
     target = record["operation_id"]
 
     other =
-      Enum.reduce(state["operations"], {0, 0}, fn
-        {^target, _operation}, acc ->
-          acc
+      case Map.fetch(state["operations"], target) do
+        {:ok, operation} ->
+          sub_cost(reservation(state), remaining_cost(operation["intent"], operation["status"]))
 
-        {_id, operation}, acc ->
-          add_cost(acc, remaining_cost(operation["intent"], operation["status"]))
-      end)
+        :error ->
+          reservation(state)
+      end
 
     intent =
       case record["record_type"] do
@@ -519,14 +870,25 @@ defmodule Arbor.Security.AuditJournalCore do
     add_cost(other, remaining_cost(intent, record["record_type"]))
   end
 
-  defp remaining_cost(%{"version" => 2} = intent, "prepared") do
+  # The maintained reservation total; derived from the operations for a state
+  # built without it (a projection such as `%{"operations" => pending}`).
+  defp reservation(%{"reserved_entries" => entries, "reserved_bytes" => bytes})
+       when is_integer(entries) and is_integer(bytes),
+       do: {entries, bytes}
+
+  defp reservation(%{"operations" => operations}), do: reserved_cost(operations)
+
+  defp put_reservation(state, {entries, bytes}),
+    do: Map.merge(state, %{"reserved_entries" => entries, "reserved_bytes" => bytes})
+
+  defp remaining_cost(%{"version" => version} = intent, "prepared") when version in [2, 3] do
     {applied_entries, applied_bytes} = transition_cost(intent, "effect_applied")
     {delivered_entries, delivered_bytes} = transition_cost(intent, "delivered")
     {_rejected_entries, rejected_bytes} = transition_cost(intent, "effect_rejected")
     {applied_entries + delivered_entries, max(applied_bytes + delivered_bytes, rejected_bytes)}
   end
 
-  defp remaining_cost(%{"version" => 2} = intent, "effect_applied"),
+  defp remaining_cost(%{"version" => version} = intent, "effect_applied") when version in [2, 3],
     do: transition_cost(intent, "delivered")
 
   defp remaining_cost(_intent, _status), do: {0, 0}
@@ -562,16 +924,20 @@ defmodule Arbor.Security.AuditJournalCore do
   defp add_cost({entries, bytes}, {more_entries, more_bytes}),
     do: {entries + more_entries, bytes + more_bytes}
 
+  defp sub_cost({entries, bytes}, {less_entries, less_bytes}),
+    do: {entries - less_entries, bytes - less_bytes}
+
   defp reserved_cost(operations) do
     Enum.reduce(operations, {0, 0}, fn {_id, op}, acc ->
       add_cost(acc, remaining_cost(op["intent"], op["status"]))
     end)
   end
 
-  defp reserved_occupancy_exceeded?(operations, entries, bytes, limits) do
-    {reserved_entries, reserved_bytes} = reserved_cost(operations)
+  defp reserved_occupancy_exceeded?(operations, reserved, entries, bytes, limits) do
+    {reserved_entries, reserved_bytes} = reserved
 
-    (limits.hard_entry_cap == 4096 and map_size(operations) > limits.hard_entry_cap) or
+    (limits.hard_entry_cap == AuditJournal.limits(:operational).hard_entry_cap and
+       map_size(operations) > limits.hard_entry_cap) or
       occupancy_exceeded?(entries + reserved_entries, bytes + reserved_bytes, limits)
   end
 
@@ -595,12 +961,15 @@ defmodule Arbor.Security.AuditJournalCore do
       "records" => %{record["record_type"] => bytes}
     }
 
+    reserved = add_cost(reservation(state), remaining_cost(intent, "prepared"))
+
     %{
       state
       | "operations" => Map.put(state["operations"], operation_id, op),
         "entry_count" => state["entry_count"] + 1,
         "byte_count" => state["byte_count"] + byte_size(bytes)
     }
+    |> put_reservation(reserved)
   end
 
   defp put_next(state, op, record, bytes) do
@@ -613,12 +982,19 @@ defmodule Arbor.Security.AuditJournalCore do
         "records" => Map.put(op["records"], record_type, bytes)
     }
 
+    reserved =
+      state
+      |> reservation()
+      |> sub_cost(remaining_cost(op["intent"], op["status"]))
+      |> add_cost(remaining_cost(op["intent"], record_type))
+
     %{
       state
       | "operations" => Map.put(state["operations"], operation_id, updated),
         "entry_count" => state["entry_count"] + 1,
         "byte_count" => state["byte_count"] + byte_size(bytes)
     }
+    |> put_reservation(reserved)
   end
 
   defp operation_intent_digest(%{"intent_sha256" => sha256}) when is_binary(sha256), do: sha256
@@ -637,10 +1013,86 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp canonical_intent_digest(_intent), do: String.duplicate("0", 64)
 
-  defp build_compact_snapshot(state, source) do
+  defp retirement_plan(state, opts) do
+    with {:ok, retire_opt, ledger_opt} <- compact_opts(opts) do
+      retire? = retire_opt and profile(state) == :operational
+      prior = AuditJournal.snapshot_retirement(Map.get(state, "snapshot"))
+      retiring = if retire?, do: retirable_count(state), else: 0
+
+      case next_ledger_binding(prior["ledger"], ledger_opt, retiring) do
+        {:ok, ledger} ->
+          {:ok, %{retire?: retire?, retired_total: prior["retired_total"], ledger: ledger}}
+
+        :error ->
+          {:error, :malformed}
+      end
+    end
+  end
+
+  defp compact_opts(opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         true <- Enum.all?(Keyword.keys(opts), &(&1 in @compact_opts)),
+         retire when is_boolean(retire) <- Keyword.get(opts, :retire, false),
+         ledger when ledger == :carry or is_map(ledger) <- Keyword.get(opts, :ledger, :carry) do
+      {:ok, retire, ledger}
+    else
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp compact_opts(_opts), do: {:error, :malformed}
+
+  # Ledger binding rules (the binding's shape is admitted with the snapshot):
+  # - Nothing retires: the binding is carried unchanged (`ledger:` omitted or
+  #   equal to the prior binding).
+  # - Something retires: `ledger:` is REQUIRED, so no caller retires by
+  #   default without naming where the retired compact strings went. It must
+  #   name exactly the next frame, written at the prior bound end with a new
+  #   tip digest. Only a genesis prior may stay at genesis (in-memory,
+  #   ledgerless retirement of an ephemeral journal); once a journal is bound
+  #   to a real ledger every retiring compaction must advance it.
+  defp next_ledger_binding(prior, :carry, 0), do: {:ok, prior}
+  defp next_ledger_binding(prior, prior, 0), do: {:ok, prior}
+  defp next_ledger_binding(%{"frames" => 0} = genesis, genesis, _retiring), do: {:ok, genesis}
+
+  defp next_ledger_binding(prior, next, retiring) when retiring > 0 and is_map(next) do
+    if ledger_advances?(prior, next), do: {:ok, next}, else: :error
+  end
+
+  defp next_ledger_binding(_prior, _next, _retiring), do: :error
+
+  defp ledger_advances?(%{"frames" => frames, "tip_digest" => digest} = prior, %{
+         "frames" => next_frames,
+         "tip_offset" => next_offset,
+         "tip_digest" => next_digest
+       })
+       when is_integer(frames) do
+    case AuditJournal.ledger_bound_size(prior) do
+      {:ok, bound_size} ->
+        next_frames == frames + 1 and next_offset == bound_size and next_digest != digest
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp ledger_advances?(_prior, _next), do: false
+
+  defp split_retired(terminal_ops, false), do: {:ok, %{}, terminal_ops}
+
+  defp split_retired(terminal_ops, true) do
+    {retired, kept} =
+      Enum.split_with(terminal_ops, fn {_id, op} -> op["status"] == "delivered" end)
+
+    {:ok, Map.new(retired), Map.new(kept)}
+  end
+
+  defp build_compact_snapshot(state, source, plan) do
     with {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
+         {:ok, retired_ops, kept_ops} <- split_retired(terminal_ops, plan.retire?),
          {:ok, pending_manifest, pending_records} <- compact_pending(pending_ops),
-         {:ok, terminals, compacted_terminals} <- compact_terminals(terminal_ops) do
+         {:ok, terminals, compacted_terminals} <- compact_terminals(kept_ops),
+         {:ok, retired, _dropped} <- compact_terminals(retired_ops) do
       snapshot = %{
         "version" => @version,
         "kind" => AuditJournal.snapshot_kind(),
@@ -652,9 +1104,13 @@ defmodule Arbor.Security.AuditJournalCore do
       snapshot =
         if profile(state) == :operational do
           Map.merge(snapshot, %{
-            "version" => 2,
-            "kind" => AuditJournal.operational_snapshot_kind(),
-            "capacity_profile" => "operational"
+            "version" => @retirement_version,
+            "kind" => AuditJournal.snapshot_kind(@retirement_version),
+            "capacity_profile" => "operational",
+            "retirement" => %{
+              "retired_total" => plan.retired_total + map_size(retired),
+              "ledger" => plan.ledger
+            }
           })
         else
           snapshot
@@ -707,17 +1163,23 @@ defmodule Arbor.Security.AuditJournalCore do
          used_bytes,
          limits
        ) do
-    if reserved_occupancy_exceeded?(operations, used_entries, used_bytes, limits) do
+    reserved = reserved_cost(operations)
+
+    if reserved_occupancy_exceeded?(operations, reserved, used_entries, used_bytes, limits) do
       {:error, :capacity_exhausted}
     else
-      next = %{
-        "version" => @version,
-        "operations" => operations,
-        "entry_count" => used_entries,
-        "byte_count" => used_bytes,
-        "snapshot" => snapshot,
-        "snapshot_bytes" => snap_size
-      }
+      next =
+        put_reservation(
+          %{
+            "version" => @version,
+            "operations" => operations,
+            "entry_count" => used_entries,
+            "byte_count" => used_bytes,
+            "snapshot" => snapshot,
+            "snapshot_bytes" => snap_size
+          },
+          reserved
+        )
 
       next =
         if AuditJournal.snapshot_profile(snapshot) == :operational,
@@ -1269,6 +1731,7 @@ defmodule Arbor.Security.AuditJournalCore do
          {:ok, state} <- install_pending(state, supplied) do
       if reserved_occupancy_exceeded?(
            state["operations"],
+           reservation(state),
            used_entries,
            used_bytes,
            limits(state)

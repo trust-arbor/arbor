@@ -46,6 +46,7 @@ defmodule Arbor.Historian.MixProject do
       {:arbor_security, in_umbrella: true},
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.0"},
       # Dev/test
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

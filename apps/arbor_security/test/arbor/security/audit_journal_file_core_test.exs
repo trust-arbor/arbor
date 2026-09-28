@@ -620,6 +620,65 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       assert {:error, :malformed} = FileCore.candidate_basename("a/b")
     end
 
+    test "ledger_basename derives the retirement ledger from the journal basename" do
+      assert {:ok, "audit_journal.v1.retirement.v1.log"} =
+               FileCore.ledger_basename("audit_journal.v1.log")
+
+      assert {:ok, "foo.retirement.v1.log"} = FileCore.ledger_basename("foo.log")
+      assert {:ok, "a.log.retirement.v1.log"} = FileCore.ledger_basename("a.log.log")
+
+      {:ok, ledger} = FileCore.ledger_basename("audit_journal.v1.log")
+      {:ok, candidate} = FileCore.candidate_basename("audit_journal.v1.log")
+      refute ledger in ["audit_journal.v1.log", candidate]
+
+      for bad <- ["", ".", "..", "a/b", "a" <> <<0>> <> ".log", <<0xFF>>, nil, :log] do
+        assert {:error, :malformed} = FileCore.ledger_basename(bad)
+      end
+    end
+
+    test "ledger_basename is injective and never names a journal or a candidate" do
+      # `foo` and `foo.log` would both strip to `foo.retirement.v1.log`: only a
+      # `.log` basename with a non-empty stem owns a ledger.
+      assert {:error, :malformed} = FileCore.ledger_basename("foo")
+      assert {:error, :malformed} = FileCore.ledger_basename("journal")
+      assert {:error, :malformed} = FileCore.ledger_basename(".log")
+
+      # A ledger-shaped name is reserved: it owns no ledger (and
+      # AuditJournalFile.open/1 refuses it as a journal).
+      assert FileCore.ledger_basename?("x.retirement.v1.log")
+      assert FileCore.ledger_basename?("audit_journal.v1.retirement.v1.log")
+      refute FileCore.ledger_basename?("audit_journal.v1.log")
+      refute FileCore.ledger_basename?(nil)
+      assert {:error, :malformed} = FileCore.ledger_basename("x.retirement.v1.log")
+
+      names =
+        for stem <- ["a", "a.log", "foo", "foo.log", "x.retirement.v1", "audit_journal.v1", ".a"],
+            suffix <- ["", ".log", ".log.log", ".compact"],
+            do: stem <> suffix
+
+      ledgers =
+        for name <- Enum.uniq(names), {:ok, ledger} <- [FileCore.ledger_basename(name)] do
+          {:ok, candidate} = FileCore.candidate_basename(name)
+          assert FileCore.ledger_basename?(ledger)
+          refute ledger == candidate
+          {name, ledger}
+        end
+
+      assert length(ledgers) > 5
+      by_ledger = Enum.group_by(ledgers, &elem(&1, 1), &elem(&1, 0))
+      assert Enum.all?(by_ledger, fn {_ledger, owners} -> length(owners) == 1 end)
+
+      for {_name, ledger} <- ledgers do
+        # No ledger is itself an admitted journal name.
+        refute Enum.any?(ledgers, fn {journal, _} -> journal == ledger end)
+      end
+    end
+
+    test "the ledger_append phase is pre-rename: a ledger fault is never publish_uncertain" do
+      assert {:not_published, :ledger_write_failed} =
+               FileCore.classify_publish_phase(:ledger_append, :ledger_write_failed)
+    end
+
     test "leftover_action admits only regular 0600 single-link" do
       assert :unlink = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 1})
 

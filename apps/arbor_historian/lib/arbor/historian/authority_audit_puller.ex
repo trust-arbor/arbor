@@ -7,12 +7,46 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
   and fingerprinted before acknowledging the exact source intent. Append ACK
   loss is harmless: retries reuse identity and content. Failure leaves the
   source journal pending; no hot projection or new store is audit authority.
+
+  An operation whose committed EventLog content conflicts with the journal
+  intent (`:audit_content_conflict`, from the readback or from the journal's
+  acknowledgement check) or whose stream cannot be read back exactly
+  (`:audit_content_unavailable`) stays `effect_applied` in the journal and is
+  retried every poll; only an acknowledged operation can retire.
+
+  - A conflict is persistent: the durable EventLog (or the journal's
+    acknowledgement check) holds different content for the same operation
+    id, so the operation is never acknowledged, and never retired, until that
+    content is reconciled. A same-UID authority-store rollback that
+    re-presents a retired identity in a different second is the expected
+    cause (see `docs/arbor/DURABLE_CAPABILITY_MUTATION_AUDIT.md`).
+  - Unavailability is transient (a busy or disconnected store): the operation
+    delivers once the stream reads back again.
+
+  Such a stuck operation is reported once per stuck episode, not on every
+  poll: when an operation first becomes stuck (or its reason or source
+  changes) the puller emits `[:arbor, :historian, :authority_audit, :conflict]`
+  telemetry (`%{count: 1}`, metadata `operation_id`, `reason`, `source`
+  (`:event_log | :journal`)), and each delivery pass that finds newly stuck
+  operations logs one warning naming them, worded per reason. A failed
+  attempt that proves nothing about the content (a raising backend, a
+  missing or non-durable target) keeps an already-stuck operation in its
+  episode, so a flapping store cannot re-report it on every alternation. An
+  operation leaves the stuck set once it is delivered or no longer in the
+  delivery batch (no longer pending), so a recurrence is reported again. The
+  stuck set is bounded by the journal's pending set.
   """
   use GenServer
+
+  require Logger
 
   alias Arbor.Historian.Config
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
+
+  @stuck_reasons [:audit_content_conflict, :audit_content_unavailable]
+  @conflict_event [:arbor, :historian, :authority_audit, :conflict]
+  @logged_ids 5
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   def flush, do: GenServer.call(__MODULE__, :flush, 30_000)
@@ -22,7 +56,7 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
     interval = Keyword.get(opts, :poll_interval_ms, 250)
 
     if is_integer(interval) and interval in 25..60_000 do
-      state = %{interval: interval, timer: nil}
+      state = %{interval: interval, timer: nil, stuck: %{}}
       {:ok, schedule(state)}
     else
       {:stop, :invalid_poll_interval}
@@ -30,11 +64,14 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
   end
 
   @impl true
-  def handle_call(:flush, _from, state), do: {:reply, deliver(), state}
+  def handle_call(:flush, _from, state) do
+    {reply, state} = deliver(state)
+    {:reply, reply, state}
+  end
 
   @impl true
   def handle_info(:poll, state) do
-    _ = deliver()
+    {_reply, state} = deliver(state)
     {:noreply, schedule(state)}
   end
 
@@ -52,29 +89,31 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
 
   defp schedule(state), do: %{state | timer: Process.send_after(self(), :poll, state.interval)}
 
-  defp deliver do
+  defp deliver(state) do
     security = Config.security_module()
 
     # Journal-only restart must converge without restarting the live capability
     # owner. Its serialized, consumer-gated observation never replays effects.
     case security.reconcile_authority_audit() do
-      :ok -> deliver_batch(security)
-      _ -> {:error, :audit_source_unavailable}
+      :ok -> deliver_batch(security, state)
+      _ -> {{:error, :audit_source_unavailable}, state}
     end
   rescue
-    _ -> {:error, :audit_delivery_unavailable}
+    _ -> {{:error, :audit_delivery_unavailable}, state}
   catch
-    _, _ -> {:error, :audit_delivery_unavailable}
+    _, _ -> {{:error, :audit_delivery_unavailable}, state}
   end
 
-  defp deliver_batch(security) do
+  defp deliver_batch(security, state) do
     case security.authority_audit_delivery_batch() do
       {:ok, batch} when is_list(batch) ->
-        count = Enum.count(batch, &deliver_one(security, &1))
-        {:ok, %{delivered: count, pending: length(batch) - count}}
+        outcomes = Enum.map(batch, &{&1["operation_id"], deliver_one(security, &1)})
+        count = Enum.count(outcomes, fn {_id, outcome} -> outcome == :delivered end)
+        state = note_stuck(state, outcomes)
+        {{:ok, %{delivered: count, pending: length(batch) - count}}, state}
 
       _ ->
-        {:error, :audit_source_unavailable}
+        {{:error, :audit_source_unavailable}, state}
     end
   end
 
@@ -83,18 +122,97 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
          {:ok, :node_restart} <-
            Persistence.durability_class(target.name, target.backend, target.opts),
          {:ok, event} <- event(item["event"]),
-         :ok <- ensure_committed(target, event),
+         :ok <- stuck(:event_log, ensure_committed(target, event)),
          {:ok, _} <-
-           security.acknowledge_authority_audit(item["operation_id"], item["intent_sha256"]) do
-      true
+           stuck(
+             :journal,
+             security.acknowledge_authority_audit(item["operation_id"], item["intent_sha256"])
+           ) do
+      :delivered
     else
-      _ -> false
+      {:stuck, _source, _reason} = stuck -> stuck
+      _ -> :failed
     end
   rescue
-    _ -> false
+    _ -> :failed
   catch
-    _, _ -> false
+    _, _ -> :failed
   end
+
+  defp stuck(source, {:error, reason}) when reason in @stuck_reasons,
+    do: {:stuck, source, reason}
+
+  defp stuck(_source, result), do: result
+
+  # Report each stuck operation once per stuck episode. The next stuck set
+  # holds the latest batch's stuck operations plus every previously stuck
+  # operation whose attempt merely failed (no content verdict), so a delivered
+  # or no-longer-pending operation is forgotten and a recurrence reports
+  # again, while a store flapping between an error and a raise does not.
+  # Bounded by the journal's pending set.
+  defp note_stuck(%{stuck: previous} = state, outcomes) do
+    current =
+      Enum.reduce(outcomes, %{}, fn
+        {id, {:stuck, source, reason}}, acc when is_binary(id) ->
+          Map.put(acc, id, {reason, source})
+
+        {id, :failed}, acc when is_binary(id) and is_map_key(previous, id) ->
+          Map.put(acc, id, Map.fetch!(previous, id))
+
+        _outcome, acc ->
+          acc
+      end)
+
+    fresh = Enum.reject(current, fn {id, value} -> Map.get(previous, id) == value end)
+
+    Enum.each(fresh, fn {id, {reason, source}} ->
+      :telemetry.execute(@conflict_event, %{count: 1}, %{
+        operation_id: id,
+        reason: reason,
+        source: source
+      })
+    end)
+
+    if fresh != [], do: log_stuck(fresh, map_size(current))
+    %{state | stuck: current}
+  end
+
+  defp log_stuck(fresh, stuck_total) do
+    shown =
+      fresh
+      |> Enum.sort()
+      |> Enum.take(@logged_ids)
+      |> Enum.map_join(", ", fn {id, {reason, source}} -> "#{id} (#{reason}, #{source})" end)
+
+    more =
+      if length(fresh) > @logged_ids, do: " and #{length(fresh) - @logged_ids} more", else: ""
+
+    notes =
+      fresh
+      |> Enum.map(fn {_id, {reason, _source}} -> reason end)
+      |> Enum.uniq()
+      |> Enum.sort()
+      |> Enum.map_join(&reason_note/1)
+
+    Logger.warning(
+      "Historian authority audit delivery is stuck for #{length(fresh)} newly affected " <>
+        "operation(s) (#{stuck_total} stuck in total): #{shown}#{more}. The journal keeps " <>
+        "them effect_applied and they are retried every poll; only an acknowledged " <>
+        "operation retires." <> notes
+    )
+  end
+
+  defp reason_note(:audit_content_conflict),
+    do:
+      " audit_content_conflict is persistent: the durable EventLog (event_log) or the " <>
+        "journal's acknowledgement check (journal) holds different content for the same " <>
+        "operation id, for example after an authority-store rollback, so it is never " <>
+        "acknowledged and never retired until that content is reconciled."
+
+  defp reason_note(:audit_content_unavailable),
+    do:
+      " audit_content_unavailable is transient: the durable EventLog could not be read " <>
+        "back exactly; the operation delivers once the stream reads back again."
 
   defp event(raw) do
     with {:ok, timestamp, 0} <- DateTime.from_iso8601(raw["timestamp"]) do

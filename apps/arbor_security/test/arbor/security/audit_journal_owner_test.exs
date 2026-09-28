@@ -9,7 +9,6 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
   alias Arbor.Security.AuditJournalOwner, as: Owner
   alias Arbor.Security.Contracts.AuditJournal
 
-
   @digest String.duplicate("ab", 32)
   @prepared_at "2026-08-20T12:00:00Z"
   @t1 "2026-08-20T12:00:01Z"
@@ -29,8 +28,22 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
                  "pending_count",
                  "oldest_pending_age_seconds",
                  "committed_frames",
-                 "capacity"
+                 "capacity",
+                 # Terminal-identity retirement (2026-09-28): the last prepare
+                 # refusal, the bounded retirement map and the readiness
+                 # projection (status only, never the qualification snapshot).
+                 "admission_open",
+                 "last_refusal",
+                 "retirement"
                ])
+  @retirement_keys MapSet.new([
+                     "floor",
+                     "ledger_state",
+                     "ledger_frames",
+                     "prepared_count",
+                     "oldest_prepared_age_seconds",
+                     "last_error"
+                   ])
   @forbidden ~w(pid fd handle root path token core records intent capability private_key signing_key digest identity callback module backend)
 
   setup do
@@ -192,6 +205,11 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     assert {:ok, pending} = Owner.pending_operations(pid)
 
     assert MapSet.new(Map.keys(status)) == @status_keys
+    assert MapSet.new(Map.keys(status["retirement"])) == @retirement_keys
+    assert status["last_refusal"] == "none"
+    assert is_boolean(status["admission_open"])
+    assert status["retirement"]["prepared_count"] == 1
+    assert status["retirement"]["oldest_prepared_age_seconds"] in 0..31_536_000
     assert status["oldest_pending_age_seconds"] in 0..31_536_000
     assert length(pending) <= 48
     assert Jason.encode!(status)
@@ -199,6 +217,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
 
     for key <- @forbidden do
       refute Map.has_key?(status, key)
+      refute Map.has_key?(status["retirement"], key)
     end
 
     assert hd(pending)["status"] == "prepared"

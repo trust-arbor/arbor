@@ -12,14 +12,37 @@ defmodule Arbor.Security.AuditJournalFile do
   atomically renames. Directory-entry finalize keeps the existing node-restart
   durability claim when directory fsync is known-unsupported.
 
+  Retirement (operational profile, `compact(handle, retire: true)` and
+  `ensure_retirement_current/1`): delivered terminals leave the hot snapshot
+  only inside a checked publication. Whether a publication retires is decided
+  purely before any IO (`retire:` requested, operational profile, and a
+  ledger posture of `:absent | :bound | :bound_orphan`); the retired compact
+  strings are written as one frame of the cold retirement ledger
+  (`Arbor.Security.AuditRetirementLedger`) in the `:ledger_append` phase,
+  after the candidate proofs and before the source-tip proof and rename, and
+  the v3 snapshot binds that frame. A transient ledger write failure is
+  `{:not_published, :ledger_write_failed}` with nothing retired. A paused
+  ledger (`:mismatch | :ahead`) makes every publication non-retiring; it is
+  never a reason to refuse one. That includes a ledger an append proves
+  inconsistent with its binding on a live handle (for example foreign bytes
+  beyond the bound): the handle pauses exactly as a restart would classify
+  it and the same publication runs non-retiring. Promotion
+  (`ensure_capacity_profile/2`) never retires. The ledger posture is
+  computed at open and after every adopted publication; the ledger tip is
+  adopted only from the replayed published snapshot.
+
   Not a GenServer and not a generic store. Single-writer is assumed, not
   enforced. Does not claim hostile same-UID tamper resistance, host power-loss
   durability, or distributed linearizability.
   """
 
+  import Arbor.Security.AuditJournalFileProofs
+
   alias Arbor.Common.SafePath
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFileCore
+  alias Arbor.Security.AuditRetirementLedger
+  alias Arbor.Security.AuditRetirementLedgerCore
   alias Arbor.Security.Contracts.AuditJournal
 
   @allowed_opts [:root, :path]
@@ -36,6 +59,7 @@ defmodule Arbor.Security.AuditJournalFile do
     :frames,
     :file_size,
     :torn_tail,
+    :ledger,
     closed?: false
   ]
 
@@ -61,6 +85,7 @@ defmodule Arbor.Security.AuditJournalFile do
           frames: non_neg_integer(),
           file_size: non_neg_integer(),
           torn_tail: AuditJournalFileCore.torn_tail(),
+          ledger: AuditRetirementLedger.t() | nil,
           closed?: boolean()
         }
 
@@ -89,6 +114,7 @@ defmodule Arbor.Security.AuditJournalFile do
           | :pending_mismatch
           | :snapshot_not_first
           | :core_mismatch
+          | :ledger_write_failed
 
   @type publish_uncertain_reason ::
           :rename_ambiguous
@@ -121,6 +147,7 @@ defmodule Arbor.Security.AuditJournalFile do
          {:ok, root} <- fetch_root(opts),
          {:ok, root} <- validate_root(root),
          {:ok, path} <- resolve_file_path(root, opts),
+         :ok <- refuse_ledger_name(path),
          {:ok, path} <- contained_in_root(path, root),
          {:ok, _parent} <- validate_parent(path, root),
          {:ok, fd, identity} <- open_target(path, root) do
@@ -131,9 +158,9 @@ defmodule Arbor.Security.AuditJournalFile do
   def open(_opts), do: {:error, :invalid_opts}
 
   @spec close(t()) :: :ok
-  def close(%__MODULE__{fd: fd, closed?: false}) when not is_nil(fd) do
+  def close(%__MODULE__{fd: fd, closed?: false} = handle) when not is_nil(fd) do
     _ = close_io_silent(fd)
-    :ok
+    AuditRetirementLedger.close(handle.ledger)
   end
 
   def close(%__MODULE__{}), do: :ok
@@ -178,25 +205,41 @@ defmodule Arbor.Security.AuditJournalFile do
   @doc """
   Publishes a snapshot-plus-pending replacement of the bound log.
 
+  Options:
+  - `retire: true` — on the operational profile, retire every delivered
+    terminal into one cold ledger frame written before the rename. Honoured
+    only when the ledger posture is `:absent | :bound | :bound_orphan`; under
+    a paused ledger (`:mismatch | :ahead`) the publication runs non-retiring.
+    Default `false` (every terminal stays hot).
+
   Result classes:
   - `{:ok, handle}` — candidate renamed and rebound
   - `{:error, :closed}` — handle is closed or not a live file handle
   - `{:error, {:not_published, reason}}` — rename did not occur; source is intact
+    (`:ledger_write_failed` when the retirement frame could not be written
+    because of a transient fault; nothing is retired). When the failed append
+    proves the ledger inconsistent with its binding instead, the handle's
+    ledger pauses and the publication runs non-retiring (`{:ok, handle}` with
+    `ledger_state/1` `:mismatch | :ahead`).
   - `{:error, {:source_invalid, reason}}` — source identity or tip was lost before rename
   - `{:error, {:publish_uncertain, reason}}` — rename or post-rename proof is ambiguous
   """
-  @spec compact(t()) ::
+  @spec compact(t(), keyword()) ::
           {:ok, t()}
           | {:error, :closed}
           | {:error, {:not_published, not_published_reason()}}
           | {:error, {:source_invalid, source_invalid_reason()}}
           | {:error, {:publish_uncertain, publish_uncertain_reason()}}
-  def compact(%__MODULE__{closed?: true}), do: {:error, :closed}
+  def compact(handle, opts \\ [])
 
-  def compact(%__MODULE__{} = handle) do
-    case admit_compact(handle) do
+  def compact(%__MODULE__{closed?: true}, _opts), do: {:error, :closed}
+
+  def compact(%__MODULE__{} = handle, opts) do
+    case admit_compact(handle, :current, opts) do
       {:ok, ctx} ->
-        publish_compacted(handle, ctx)
+        handle
+        |> publish_compacted(ctx)
+        |> pause_after_ledger_fault(handle, ctx)
 
       {:error, :closed} = err ->
         err
@@ -206,7 +249,61 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  def compact(_handle), do: {:error, :closed}
+  def compact(_handle, _opts), do: {:error, :closed}
+
+  @doc """
+  Boot-time retirement (T1): publish a retiring compaction when the handle
+  has no torn tail, is operational, and either its snapshot predates v3
+  (admission floor below 3) or at least `retire_batch` delivered terminals
+  are retirable. Under a paused ledger the publication still runs,
+  non-retiring: a pre-v3 snapshot is replaced by a v3 snapshot and the
+  delivered terminals are kept hot (full records compacted to
+  fingerprints, which relieves entry occupancy).
+
+  Never raises. Returns:
+  - `{:ok, handle}` — published (new handle) or nothing to do (same handle)
+  - `{:not_published, reason, handle}` — nothing changed; the original handle
+    is still live
+  - `{:uncertain, reason}` — `{:publish_uncertain, r}`, `{:source_invalid, r}`
+    or `:closed`; the original handle must not be used again
+  """
+  @spec ensure_retirement_current(t()) ::
+          {:ok, t()}
+          | {:not_published, not_published_reason(), t()}
+          | {:uncertain, term()}
+  def ensure_retirement_current(%__MODULE__{closed?: false, fd: fd} = handle)
+      when not is_nil(fd) do
+    if retirement_due?(handle) do
+      handle
+      |> compact(retire: true)
+      |> retirement_result(handle)
+    else
+      {:ok, handle}
+    end
+  rescue
+    _ -> {:uncertain, :exception}
+  catch
+    _, _ -> {:uncertain, :exception}
+  end
+
+  def ensure_retirement_current(_handle), do: {:uncertain, :closed}
+
+  @doc """
+  Ledger posture of a handle: `:absent | :bound | :bound_orphan | :mismatch |
+  :ahead`.
+
+  Computed at open and after every adopted publication (and paused by a
+  publication whose append proved the ledger inconsistent). A publication
+  that ends `{:not_published, _}` returns no handle, so the kept handle
+  reports the posture of its last open or adopted publication: after an
+  unpublished attempt that left an orphan frame, an `:absent` handle still
+  reports `:absent` while a restart over the same bytes reports
+  `:bound_orphan`. Both are retiring postures and the next retiring append
+  re-classifies the bytes beyond the bound before it writes.
+  """
+  @spec ledger_state(t()) :: AuditRetirementLedgerCore.posture()
+  def ledger_state(%__MODULE__{ledger: %AuditRetirementLedger{state: state}}), do: state
+  def ledger_state(%__MODULE__{}), do: :mismatch
 
   @doc false
   def ensure_capacity_profile(%__MODULE__{} = handle, profile)
@@ -216,8 +313,11 @@ defmodule Arbor.Security.AuditJournalFile do
         {:ok, handle}
 
       {:small, :operational} ->
+        # Promotion is never retiring: it keeps every terminal hot and never
+        # touches the retirement ledger, so its fatal-on-failure posture can
+        # never be reached through a cold-file fault.
         result =
-          case admit_compact(handle, :operational) do
+          case admit_compact(handle, :operational, retire: false) do
             {:ok, ctx} -> publish_compacted(handle, ctx)
             {:error, reason} -> publish_error(handle, nil, nil, :admit, reason)
           end
@@ -238,7 +338,7 @@ defmodule Arbor.Security.AuditJournalFile do
     @spec __test_inject__(:clear) :: :ok
     def __test_inject__(:clear) do
       Process.delete(@inject_key)
-      :ok
+      AuditRetirementLedger.__test_inject__(:clear)
     end
 
     @doc false
@@ -248,6 +348,7 @@ defmodule Arbor.Security.AuditJournalFile do
             | :compact_substitute_candidate
             | :compact_rename_before_effect
             | :compact_rename_after_effect
+            | :ledger_truncate_below_bound
           ) :: :ok
     def __test_inject__(kind)
         when kind in [
@@ -258,6 +359,39 @@ defmodule Arbor.Security.AuditJournalFile do
                :compact_rename_after_effect
              ] do
       put_inject(kind, true)
+    end
+
+    # The retirement-ledger append truncates one byte below the bound (then
+    # fails its post-truncate size proof), leaving a ledger shorter than the
+    # durable binding: the next open classifies it `:mismatch`.
+    def __test_inject__(:ledger_truncate_below_bound) do
+      AuditRetirementLedger.__test_inject__(:ledger_truncate_below_bound, true)
+    end
+
+    # :ledger_create_chmod — the chmod after the ledger's exclusive create does
+    # not take (the file keeps a group/other mode) and reports `value`.
+    # :ledger_inspect_error — reading an existing ledger for classification
+    # fails with `value` (a transient IO fault).
+    # :ledger_append_delay — the ledger phase of a retiring publication sleeps
+    # `value` milliseconds before it writes (a slow publication).
+    @doc false
+    @spec __test_inject__(
+            :ledger_write_error
+            | :ledger_dir_sync
+            | :ledger_create_chmod
+            | :ledger_inspect_error
+            | :ledger_append_delay,
+            term()
+          ) :: :ok
+    def __test_inject__(kind, value)
+        when kind in [
+               :ledger_write_error,
+               :ledger_dir_sync,
+               :ledger_create_chmod,
+               :ledger_inspect_error,
+               :ledger_append_delay
+             ] do
+      AuditRetirementLedger.__test_inject__(kind, value)
     end
 
     @doc false
@@ -340,28 +474,95 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp admit_compact(handle, profile \\ :current)
-
-  defp admit_compact(%__MODULE__{} = handle, profile) do
+  # Pure admission of one publication (no IO beyond the existing source
+  # revalidation): whether it retires, the retirement batch, the ledger frame
+  # and the exact candidate bytes are all decided here, before any write.
+  defp admit_compact(%__MODULE__{} = handle, profile, opts) do
     core =
       if profile == :operational,
         do: AuditJournalCore.promote_profile(handle.core),
         else: handle.core
 
-    with :ok <- require_compact_no_torn(handle),
+    with {:ok, retire_requested?} <- compact_retire_opt(opts),
+         :ok <- require_compact_no_torn(handle),
          :ok <- compact_revalidate(handle),
          {:ok, source} <-
            AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset),
-         {:ok, compacted, snapshot, pending} <- compact_reducer(core, source),
+         {:ok, plan} <- retirement_plan(handle, core, source, retire_requested?),
+         {:ok, compacted, snapshot, pending} <- compact_reducer(core, source, plan.compact_opts),
+         :ok <- require_retired_accounting(core, snapshot, plan.retired),
          {:ok, bytes, expected} <- AuditJournalFileCore.encode_compacted(snapshot, pending) do
       {:ok,
        %{
          source: source,
          compacted: compacted,
          bytes: bytes,
-         expected: expected
+         expected: expected,
+         ledger_frame: plan.framed,
+         retired: plan.retired,
+         ledger_written: nil
        }}
     end
+  end
+
+  defp compact_retire_opt(opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         [] <- Keyword.keys(opts) -- [:retire],
+         retire when is_boolean(retire) <- Keyword.get(opts, :retire, false) do
+      {:ok, retire}
+    else
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp compact_retire_opt(_opts), do: {:error, :malformed}
+
+  # retire? = requested AND operational AND the ledger posture allows it.
+  # A paused ledger (:mismatch | :ahead) makes the publication non-retiring;
+  # it never refuses it. The frame chains from the binding the handle adopted
+  # from its replayed published snapshot; the core refuses any other tip.
+  defp retirement_plan(handle, core, source, retire_requested?) do
+    retire? =
+      retire_requested? and AuditJournalCore.profile(core) == :operational and
+        AuditRetirementLedgerCore.retiring_allowed?(ledger_state(handle))
+
+    if retire? do
+      with {:ok, retired} <- AuditJournalCore.retirement_batch(core) do
+        plan_retirement(retired, source, handle.ledger.binding)
+      end
+    else
+      {:ok, non_retiring_plan()}
+    end
+  end
+
+  defp plan_retirement(retired, _source, _bound) when map_size(retired) == 0,
+    do: {:ok, non_retiring_plan()}
+
+  defp plan_retirement(retired, source, bound) do
+    case AuditRetirementLedgerCore.frame(retired, source, bound) do
+      {:ok, framed} ->
+        {:ok,
+         %{
+           compact_opts: [retire: true, ledger: framed.next_binding],
+           framed: framed,
+           retired: retired
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp non_retiring_plan, do: %{compact_opts: [retire: false], framed: nil, retired: %{}}
+
+  # The snapshot must account for exactly the compact strings the ledger frame
+  # carries: nothing leaves the hot set without its ledger entry.
+  defp require_retired_accounting(core, snapshot, retired) do
+    prior = AuditJournal.snapshot_retirement(Map.get(core, "snapshot"))["retired_total"]
+
+    if AuditJournal.snapshot_retirement(snapshot)["retired_total"] == prior + map_size(retired),
+      do: :ok,
+      else: {:error, :malformed}
   end
 
   defp require_compact_no_torn(%__MODULE__{torn_tail: nil}), do: :ok
@@ -374,8 +575,8 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp compact_reducer(core, source) do
-    case AuditJournalCore.compact(core, source) do
+  defp compact_reducer(core, source, opts) do
+    case AuditJournalCore.compact(core, source, opts) do
       {:ok, compacted, snapshot, pending} -> {:ok, compacted, snapshot, pending}
       {:error, reason} -> {:error, reason}
     end
@@ -425,11 +626,59 @@ defmodule Arbor.Security.AuditJournalFile do
     case fill_and_prove_candidate(handle, ctx, cand_path, fd, identity) do
       :ok ->
         _ = close_io_silent(fd)
-        source_tip_then_rename(handle, ctx, cand_path, identity)
+        ledger_then_source_tip(handle, ctx, cand_path, identity)
 
       {:error, phase, reason} ->
         _ = close_io_silent(fd)
         publish_error(handle, cand_path, identity, phase, reason)
+    end
+  end
+
+  # A failed ledger append that proves the ledger inconsistent with its
+  # binding (re-inspected, never guessed from the error) pauses the handle's
+  # ledger and runs the same publication non-retiring: a paused ledger is
+  # never a reason to refuse a publication, and the handle converges to the
+  # posture a restart would report. The unpublished attempt left the source
+  # intact (not_published re-proved it) and unlinked its candidate.
+  defp pause_after_ledger_fault(
+         {:error, {:not_published, :ledger_write_failed}} = failed,
+         handle,
+         %{ledger_frame: %{}}
+       ) do
+    case AuditRetirementLedger.after_failed_append(handle.ledger, fn ->
+           hot_delivered(handle.core)
+         end) do
+      {:paused, ledger} ->
+        paused = %{handle | ledger: ledger}
+
+        case admit_compact(paused, :current, retire: false) do
+          {:ok, ctx} -> publish_compacted(paused, ctx)
+          {:error, reason} -> publish_error(paused, nil, nil, :admit, reason)
+        end
+
+      :transient ->
+        failed
+    end
+  end
+
+  defp pause_after_ledger_fault(result, _handle, _ctx), do: result
+
+  # :ledger_append runs after the candidate proofs (a candidate-side fault
+  # leaves no ledger bytes) and before the source-tip proof and rename (a
+  # published binding always names a frame that was fsynced, with its
+  # directory entry fsynced when the ledger was created). Skipped when the
+  # publication retires nothing.
+  defp ledger_then_source_tip(handle, %{ledger_frame: nil} = ctx, cand_path, identity) do
+    source_tip_then_rename(handle, ctx, cand_path, identity)
+  end
+
+  defp ledger_then_source_tip(handle, ctx, cand_path, identity) do
+    case AuditRetirementLedger.append(handle.ledger, ctx.ledger_frame.frame, ctx.retired) do
+      {:ok, written} ->
+        source_tip_then_rename(handle, %{ctx | ledger_written: written}, cand_path, identity)
+
+      {:error, _reason} ->
+        publish_error(handle, cand_path, identity, :ledger_append, :ledger_write_failed)
     end
   end
 
@@ -636,7 +885,8 @@ defmodule Arbor.Security.AuditJournalFile do
          :ok <- require_core_equal(replay.core, ctx.compacted),
          :ok <- require_replay_evidence(replay, ctx.expected) do
       _ = close_io_silent(handle.fd)
-      {:ok, build_handle(fd, handle.root, handle.path, identity, replay)}
+      published = build_handle(fd, handle.root, handle.path, identity, replay)
+      {:ok, %{published | ledger: refresh_ledger(handle.ledger, ctx, replay.core)}}
     else
       {:error, reason} ->
         _ = close_io_silent(fd)
@@ -822,29 +1072,6 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp do_fsync_directory(dir) do
-    case :file.open(String.to_charlist(dir), [:raw, :read, :directory]) do
-      {:ok, io} ->
-        try do
-          case :file.sync(io) do
-            :ok ->
-              AuditJournalFileCore.classify_dir_sync(:ok)
-
-            {:error, reason} ->
-              map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
-          end
-        after
-          _ = close_io_silent(io)
-        end
-
-      {:error, reason} ->
-        map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
-    end
-  end
-
-  defp map_dir_sync(:ok), do: :ok
-  defp map_dir_sync({:error, _reason}), do: {:error, :dir_sync_failed}
-
   defp tag_phase(_phase, :ok), do: :ok
   defp tag_phase(phase, {:error, reason}), do: {:error, phase, reason}
 
@@ -914,7 +1141,8 @@ defmodule Arbor.Security.AuditJournalFile do
               :non_canonical,
               :pending_mismatch,
               :snapshot_not_first,
-              :core_mismatch
+              :core_mismatch,
+              :ledger_write_failed
             ],
        do: reason
 
@@ -1064,7 +1292,7 @@ defmodule Arbor.Security.AuditJournalFile do
 
       case inject(:compact_dir_sync) do
         :absent ->
-          do_fsync_directory(parent)
+          fsync_directory(parent)
 
         :ok ->
           :ok
@@ -1099,7 +1327,7 @@ defmodule Arbor.Security.AuditJournalFile do
 
     defp compact_rename(from, to), do: File.rename(from, to)
 
-    defp compact_fsync_parent(handle), do: do_fsync_directory(Path.dirname(handle.path))
+    defp compact_fsync_parent(handle), do: fsync_directory(Path.dirname(handle.path))
 
     @spec compact_reopen_guard() :: :ok | {:error, atom()}
     defp compact_reopen_guard, do: :ok
@@ -1108,13 +1336,81 @@ defmodule Arbor.Security.AuditJournalFile do
   defp finish_open(fd, root, path, identity) do
     case load_replay(fd, identity) do
       {:ok, replay, identity} ->
-        {:ok, build_handle(fd, root, path, identity, replay)}
+        handle = build_handle(fd, root, path, identity, replay)
+        {:ok, %{handle | ledger: open_ledger(root, path, replay.core)}}
 
       {:error, reason} ->
         _ = close_io_silent(fd)
         {:error, reason}
     end
   end
+
+  # The ledger binding is always the one the replayed journal snapshot
+  # carries (v3 `retirement.ledger`, else genesis): the in-memory tip is never
+  # advanced by a write, only adopted from a published, replayed snapshot.
+  defp open_ledger(root, path, core) do
+    AuditRetirementLedger.open(
+      %{root: root, journal_path: path},
+      replayed_ledger_binding(core),
+      fn -> hot_delivered(core) end
+    )
+  end
+
+  defp refresh_ledger(%AuditRetirementLedger{} = prior, ctx, core) do
+    written_identity =
+      case ctx.ledger_written do
+        %AuditRetirementLedger{identity: identity} -> identity
+        nil -> nil
+      end
+
+    AuditRetirementLedger.refresh(
+      prior,
+      replayed_ledger_binding(core),
+      fn -> hot_delivered(core) end,
+      written_identity
+    )
+  end
+
+  defp refresh_ledger(_prior, _ctx, core) do
+    %AuditRetirementLedger{binding: replayed_ledger_binding(core), state: :mismatch}
+  end
+
+  defp replayed_ledger_binding(core) do
+    AuditJournal.snapshot_retirement(Map.get(core, "snapshot"))["ledger"]
+  end
+
+  defp hot_delivered(core) do
+    case AuditJournalCore.retirement_batch(core) do
+      {:ok, retired} -> retired
+      {:error, _reason} -> %{}
+    end
+  end
+
+  # Spec §6 T1: the raw retirable count, not the effective one. Under a
+  # paused ledger the publication is non-retiring (decided in :admit) and
+  # still compacts the delivered records to fingerprints.
+  defp retirement_due?(%__MODULE__{torn_tail: nil, core: core}) do
+    AuditJournalCore.profile(core) == :operational and
+      (AuditJournalCore.admission_floor(core) < 3 or
+         AuditJournalCore.retirable_count(core) >=
+           AuditJournal.limits(:operational).retire_batch)
+  end
+
+  defp retirement_due?(_handle), do: false
+
+  defp retirement_result({:ok, published}, _handle), do: {:ok, published}
+
+  defp retirement_result({:error, {:not_published, reason}}, handle),
+    do: {:not_published, reason, handle}
+
+  defp retirement_result({:error, {:publish_uncertain, _reason} = err}, _handle),
+    do: {:uncertain, err}
+
+  defp retirement_result({:error, {:source_invalid, _reason} = err}, _handle),
+    do: {:uncertain, err}
+
+  defp retirement_result({:error, :closed}, _handle), do: {:uncertain, :closed}
+  defp retirement_result(_other, _handle), do: {:uncertain, :malformed}
 
   defp build_handle(fd, root, path, identity, replay) do
     %__MODULE__{
@@ -1442,6 +1738,14 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
+  # A basename in the retirement-ledger namespace is reserved for ledgers: a
+  # journal opened there could be (or share) another journal's ledger.
+  defp refuse_ledger_name(path) do
+    if AuditJournalFileCore.ledger_basename?(Path.basename(path)),
+      do: {:error, :reserved_name},
+      else: :ok
+  end
+
   defp default_file_path(root) do
     case SafePath.safe_join(root, @default_name) do
       {:ok, path} -> {:ok, path}
@@ -1455,41 +1759,6 @@ defmodule Arbor.Security.AuditJournalFile do
       String.contains?(path, <<0>>) -> {:error, :path_escape}
       Path.type(path) != :absolute -> {:error, :relative_path}
       true -> {:ok, Path.expand(path)}
-    end
-  end
-
-  defp contained_in_root(path, root) do
-    with :ok <- require_absolute_path(path),
-         {:ok, resolved} <- resolve_within_root(path, root),
-         :ok <- require_segment_prefix(resolved, root) do
-      {:ok, resolved}
-    end
-  end
-
-  defp require_absolute_path(path) when is_binary(path) do
-    if Path.type(path) == :absolute do
-      :ok
-    else
-      {:error, :relative_path}
-    end
-  end
-
-  defp resolve_within_root(path, root) do
-    case SafePath.resolve_within(path, root) do
-      {:ok, resolved} -> {:ok, resolved}
-      {:error, :path_traversal} -> {:error, :path_escape}
-      {:error, _reason} -> {:error, :path_escape}
-    end
-  end
-
-  defp require_segment_prefix(path, root) do
-    path_segs = Path.split(path)
-    root_segs = Path.split(Path.expand(root))
-
-    if List.starts_with?(path_segs, root_segs) do
-      :ok
-    else
-      {:error, :path_escape}
     end
   end
 
@@ -1644,24 +1913,6 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp lstat_file(path) do
-    case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_rejected}
-      {:ok, %File.Stat{type: type}} when type != :regular -> {:error, :not_regular}
-      {:ok, stat} -> {:ok, stat}
-      {:error, :enoent} -> {:error, :identity_changed}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp resolve_real_path(path) do
-    case SafePath.resolve_real(path) do
-      {:ok, real} -> {:ok, real}
-      {:error, :not_found} -> {:error, :parent_missing}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp require_same_path(left, right) when left == right, do: :ok
   defp require_same_path(_left, _right), do: {:error, :symlink_rejected}
 
@@ -1676,90 +1927,10 @@ defmodule Arbor.Security.AuditJournalFile do
   defp require_owner_only_dir(%File.Stat{type: :symlink}), do: {:error, :symlink_rejected}
   defp require_owner_only_dir(_stat), do: {:error, :not_regular}
 
-  defp require_regular(%File.Stat{type: :regular}), do: :ok
-  defp require_regular(%File.Stat{type: :symlink}), do: {:error, :symlink_rejected}
-  defp require_regular(_stat), do: {:error, :not_regular}
-
-  defp require_single_link(%File.Stat{links: 1}), do: :ok
-  defp require_single_link(%File.Stat{}), do: {:error, :hardlink_rejected}
-
-  defp require_file_mode_0600(%File.Stat{type: :regular, mode: mode}) do
-    if Bitwise.band(mode, 0o777) == 0o600 do
-      :ok
-    else
-      {:error, :insecure_mode}
-    end
-  end
-
-  defp require_file_mode_0600(%File.Stat{type: :symlink}), do: {:error, :symlink_rejected}
-  defp require_file_mode_0600(_stat), do: {:error, :not_regular}
-
-  defp require_expected_size(%File.Stat{size: size}, expected) when size == expected, do: :ok
-  defp require_expected_size(_stat, _expected), do: {:error, :size_mismatch}
-
-  defp require_same_inode(identity, %File.Stat{} = stat) when is_map(identity) do
-    if identity.major_device == stat.major_device and
-         identity.minor_device == stat.minor_device and
-         identity.inode == stat.inode do
-      :ok
-    else
-      {:error, :identity_changed}
-    end
-  end
-
-  defp require_bound_identity(identity, %File.Stat{} = stat) do
-    if file_identity(stat) == identity do
-      :ok
-    else
-      {:error, :identity_changed}
-    end
-  end
-
-  defp require_stat_pair(%File.Stat{} = left, %File.Stat{} = right) do
-    if file_identity(left) == file_identity(right) do
-      :ok
-    else
-      {:error, :identity_changed}
-    end
-  end
-
-  defp file_identity(%File.Stat{} = stat) do
-    %{
-      major_device: stat.major_device,
-      minor_device: stat.minor_device,
-      inode: stat.inode,
-      uid: stat.uid,
-      gid: stat.gid,
-      mode: stat.mode,
-      links: stat.links,
-      size: stat.size
-    }
-  end
-
-  defp chmod_private(path) do
-    case File.chmod(path, 0o600) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp fstat_io(fd) do
-    case :file.read_file_info(fd, time: :posix) do
-      {:ok, info} -> {:ok, File.Stat.from_record(info)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp invalidate(%__MODULE__{fd: fd} = handle) when not is_nil(fd) do
     _ = close_io_silent(fd)
     %{handle | fd: nil, closed?: true}
   end
 
   defp invalidate(handle), do: handle
-
-  defp close_io_silent(fd) do
-    :file.close(fd)
-  catch
-    _, _ -> :ok
-  end
 end
