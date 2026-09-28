@@ -218,6 +218,55 @@ defmodule Arbor.Security.Contracts.AuditJournalV3Test do
                )
     end
 
+    test "a newer snapshot version is unsupported whatever its shape, never malformed" do
+      v2_shaped = v3_snapshot() |> Map.delete("retirement") |> Map.put("version", 4)
+
+      for snapshot <- [
+            Map.put(v3_snapshot(), "version", 4),
+            v3_snapshot()
+            |> Map.put("version", 4)
+            |> Map.put("kind", "arbor.security.audit_journal_snapshot.v4"),
+            v3_snapshot()
+            |> Map.put("version", 4)
+            |> Map.put("terminals", delivered_map(4096)),
+            v2_shaped,
+            v3_snapshot() |> Map.put("version", 4) |> Map.put("future_field", %{}),
+            Map.put(v3_snapshot(), "version", 0)
+          ] do
+        assert {:error, :unsupported_version} = AuditJournal.admit_snapshot(snapshot),
+               "expected version #{snapshot["version"]} with keys " <>
+                 "#{inspect(Map.keys(snapshot))} to be unsupported"
+
+        assert {:error, :unsupported_version} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      end
+
+      max = AuditJournal.limits().max_json_safe_int
+
+      assert {:error, :integer_out_of_range} =
+               AuditJournal.admit_snapshot(Map.put(v3_snapshot(), "version", max + 1))
+
+      assert {:error, :integer_out_of_range} =
+               AuditJournal.admit_snapshot(Map.put(v3_snapshot(), "version", -1))
+
+      # A non-integer version is not a version at all.
+      assert {:error, :malformed} =
+               AuditJournal.admit_snapshot(Map.put(v3_snapshot(), "version", "3"))
+    end
+
+    test "ledger_bound_size/1 is the end of the bound tip frame" do
+      assert AuditJournalFileCore.header_size() == 72
+      assert {:ok, 0} = AuditJournal.ledger_bound_size(AuditJournal.ledger_genesis_binding())
+      assert {:ok, 772} = AuditJournal.ledger_bound_size(binding(1, 0, 700))
+
+      assert AuditJournal.ledger_bound_size(binding(4, 900, 5)) ==
+               {:ok, 900 + AuditJournalFileCore.header_size() + 5}
+
+      assert {:error, :malformed} = AuditJournal.ledger_bound_size(binding(1, 0, 0))
+      assert {:error, :malformed} = AuditJournal.ledger_bound_size(binding(1, -1, 5))
+      assert {:error, :malformed} = AuditJournal.ledger_bound_size(%{"frames" => 1})
+      assert {:error, :malformed} = AuditJournal.ledger_bound_size(:nope)
+    end
+
     test "ledger frames are bounded by the JSON-safe range, not the 4096 journal frame bound" do
       for frames <- [4097, 10_000_000] do
         snapshot = v3_snapshot(retirement(frames, binding(frames, 99_999, 512)))

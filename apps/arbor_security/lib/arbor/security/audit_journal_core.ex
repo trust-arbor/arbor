@@ -20,11 +20,12 @@ defmodule Arbor.Security.AuditJournalCore do
     `retirement.retired_total` and the cold retirement-ledger binding. The
     binding and total live only inside `state["snapshot"]`; there are no other
     retirement keys in reducer state.
-  - `compact(state, source, retire: true)` drops every `delivered` terminal from
-    the hot set (they are recorded in the ledger by the file layer before the
-    publication renames); `effect_rejected` terminals and pending operations are
-    always kept. `retire: false` (the default, and every small-profile
-    compaction) keeps every terminal and carries the binding forward.
+  - `compact(state, source, retire: true, ledger: next)` drops every
+    `delivered` terminal from the hot set (they are recorded in the ledger by
+    the file layer before the publication renames, and `next` names that
+    frame); `effect_rejected` terminals and pending operations are always kept.
+    `retire: false` (the default, and every small-profile compaction) keeps
+    every terminal and carries the binding forward.
   - `admission_floor/1` is 3 iff the installed snapshot is v3, else 1. A new
     `prepared` whose intent version is below the floor is refused
     `:retired_version` before any capacity check, with no state change.
@@ -153,17 +154,29 @@ defmodule Arbor.Security.AuditJournalCore do
   @doc """
   True when publishing a compaction now could admit the refused `raw` record.
 
-  Either compaction reclaims entry occupancy (`compaction_reclaims_occupancy?/1`)
-  or, on the operational profile, retiring `effective_retirable` delivered
-  terminals brings the retained-operation dimension within the refused
-  record's class cap (`soft_entry_cap` for an `authority_increase` prepared,
-  `hard_entry_cap` otherwise). The caller passes `0` when the retirement ledger
-  is paused; the value is clamped to `retirable_count/1`.
+  - Every operational publication installs a v3 snapshot (admission floor 3),
+    so a refused v1/v2 `prepared` on the operational profile is never relieved:
+    the single retry of that exact record would be refused `:retired_version`.
+  - Otherwise, either compaction reclaims entry occupancy
+    (`compaction_reclaims_occupancy?/1`, unchanged), or, on the operational
+    profile, retiring `effective_retirable` delivered terminals brings the
+    retained-operation dimension within the refused record's class cap
+    (`soft_entry_cap` for an `authority_increase` prepared, `hard_entry_cap`
+    otherwise) AND the post-publication entry dimension (the snapshot, the
+    retained pending records and every pending reservation, plus the record)
+    fits the same cap. Retirement frees no entries, so an entry-refused pending
+    backlog is never reported as relieved just because a few delivered
+    terminals are retirable.
+
+  The caller passes `0` when the retirement ledger is paused; the value is
+  clamped to `retirable_count/1`.
   """
   @spec publication_relieves?(term(), term(), term()) :: boolean()
   def publication_relieves?(state, raw, effective_retirable)
       when is_integer(effective_retirable) and effective_retirable >= 0 do
-    compaction_reclaims_occupancy?(state) or retirement_relieves?(state, raw, effective_retirable)
+    not post_publication_floor_refuses?(state, raw) and
+      (compaction_reclaims_occupancy?(state) or
+         retirement_relieves?(state, raw, effective_retirable))
   rescue
     _ -> false
   catch
@@ -172,13 +185,37 @@ defmodule Arbor.Security.AuditJournalCore do
 
   def publication_relieves?(_state, _raw, _effective_retirable), do: false
 
+  # A capacity refusal of a `prepared` is only ever for an unknown id (known ids
+  # answer :idempotent/:operation_conflict first), and an operational
+  # publication always installs floor 3.
+  defp post_publication_floor_refuses?(state, raw) do
+    with :ok <- valid_state(state),
+         :operational <- profile(state),
+         {:ok, %{"record_type" => "prepared", "intent" => %{"version" => version}}}
+         when is_integer(version) <- map_admit(AuditJournal.admit_record(raw)) do
+      version < @retirement_version
+    else
+      _ -> false
+    end
+  end
+
   defp retirement_relieves?(state, raw, effective_retirable) do
     with :ok <- valid_state(state),
          :operational <- profile(state),
-         {:ok, record} <- map_admit(AuditJournal.admit_record(raw)) do
+         {:ok, record} <- map_admit(AuditJournal.admit_record(raw)),
+         {:ok, pending_ops, _terminal_ops} <- partition_operations(state["operations"]),
+         {:ok, _manifest, pending_records} <- compact_pending(pending_ops) do
+      cap = class_cap(record, limits(state))
       retirable = min(effective_retirable, retirable_count(state))
-      retained = map_size(state["operations"]) + new_operation_cost(record)
-      retirable > 0 and retained - retirable <= class_cap(record, limits(state))
+      retained = map_size(state["operations"]) - retirable + new_operation_cost(record)
+
+      # After the publication the hot entries are exactly the snapshot plus the
+      # pending records; kept terminals reserve nothing.
+      {reserved_entries, _bytes} =
+        prospective_reservation(%{"operations" => pending_ops}, record)
+
+      entries = 1 + length(pending_records) + reserved_entries
+      retirable > 0 and retained <= cap and entries + 1 <= cap
     else
       _ -> false
     end
@@ -278,11 +315,14 @@ defmodule Arbor.Security.AuditJournalCore do
   Options (operational profile; ignored for small except validation):
   - `retire: true` drops every `delivered` terminal from the hot set and adds
     their count to `retirement.retired_total`. Default `false`.
-  - `ledger: binding` the string-keyed ledger binding to install. Defaults to
-    the prior binding. It must equal the prior binding unless the compaction
-    retires at least one operation, in which case it may name exactly one more
-    frame (the frame the file layer wrote) or stay unchanged (in-memory
-    retirement with no ledger).
+  - `ledger: binding` the string-keyed ledger binding to install. When nothing
+    retires it defaults to (and must equal) the prior binding. When at least
+    one operation retires it is REQUIRED and must name exactly the next frame:
+    `frames + 1`, `tip_offset` at the prior bound end
+    (`AuditJournal.ledger_bound_size/1`) and a new `tip_digest` (the frame the
+    file layer wrote before publication). Only a genesis prior may stay at
+    genesis (explicit in-memory retirement of an ephemeral journal, which has
+    no ledger); a bound journal can never retire without advancing its ledger.
 
   Errors: `:malformed`, `:cross_operation`, `:record_too_large`,
   `:capacity_exhausted`.
@@ -410,10 +450,18 @@ defmodule Arbor.Security.AuditJournalCore do
   `retirable_operation_count` is the raw number of delivered operations the
   next retiring publication would retire; `remaining_increase_admissions` is
   `soft_entry_cap - (retained - effective_retirable)`, the retained-dimension
-  headroom after that retirement. Options: `paused: true` (the retirement
-  ledger is paused, so nothing will retire: effective retirable 0) or
-  `effective_retirable: n` (clamped to the raw count). Existing fields keep
-  their map-size definitions so an empty queue is never read as capacity.
+  headroom after that retirement.
+
+  The effective retirable count is an explicit caller input and defaults to 0
+  (conservative: headroom is only claimed when the caller knows a retiring
+  publication is reachable):
+  - `paused: false` — retirement is live: effective retirable = the raw count;
+  - `paused: true` — the retirement ledger is paused: 0;
+  - `effective_retirable: n` — `n`, clamped to `0..raw count` (ignored when
+    `paused: true`).
+
+  Existing fields keep their map-size definitions so an empty queue is never
+  read as capacity.
   """
   @spec capacity(state(), keyword()) :: map()
   def capacity(state, opts) when is_map(state) and is_list(opts) do
@@ -451,15 +499,14 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp effective_retirable(retirable, opts) do
+    paused = Keyword.get(opts, :paused)
+    explicit = Keyword.get(opts, :effective_retirable)
+
     cond do
-      Keyword.get(opts, :paused, false) == true ->
-        0
-
-      is_integer(Keyword.get(opts, :effective_retirable)) ->
-        opts |> Keyword.fetch!(:effective_retirable) |> max(0) |> min(retirable)
-
-      true ->
-        retirable
+      paused == true -> 0
+      is_integer(explicit) -> explicit |> max(0) |> min(retirable)
+      paused == false -> retirable
+      true -> 0
     end
   end
 
@@ -844,13 +891,14 @@ defmodule Arbor.Security.AuditJournalCore do
     with {:ok, retire_opt, ledger_opt} <- compact_opts(opts) do
       retire? = retire_opt and profile(state) == :operational
       prior = AuditJournal.snapshot_retirement(Map.get(state, "snapshot"))
-      ledger = if ledger_opt == :carry, do: prior["ledger"], else: ledger_opt
       retiring = if retire?, do: retirable_count(state), else: 0
 
-      if ledger_advance_ok?(prior["ledger"], ledger, retiring) do
-        {:ok, %{retire?: retire?, retired_total: prior["retired_total"], ledger: ledger}}
-      else
-        {:error, :malformed}
+      case next_ledger_binding(prior["ledger"], ledger_opt, retiring) do
+        {:ok, ledger} ->
+          {:ok, %{retire?: retire?, retired_total: prior["retired_total"], ledger: ledger}}
+
+        :error ->
+          {:error, :malformed}
       end
     end
   end
@@ -868,15 +916,41 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp compact_opts(_opts), do: {:error, :malformed}
 
-  # A binding changes only when this compaction retires something, and then by
-  # exactly one ledger frame. Its shape is admitted with the snapshot.
-  defp ledger_advance_ok?(prior, prior, _retiring), do: true
+  # Ledger binding rules (the binding's shape is admitted with the snapshot):
+  # - Nothing retires: the binding is carried unchanged (`ledger:` omitted or
+  #   equal to the prior binding).
+  # - Something retires: `ledger:` is REQUIRED, so no caller retires by
+  #   default without naming where the retired compact strings went. It must
+  #   name exactly the next frame, written at the prior bound end with a new
+  #   tip digest. Only a genesis prior may stay at genesis (in-memory,
+  #   ledgerless retirement of an ephemeral journal); once a journal is bound
+  #   to a real ledger every retiring compaction must advance it.
+  defp next_ledger_binding(prior, :carry, 0), do: {:ok, prior}
+  defp next_ledger_binding(prior, prior, 0), do: {:ok, prior}
+  defp next_ledger_binding(%{"frames" => 0} = genesis, genesis, _retiring), do: {:ok, genesis}
 
-  defp ledger_advance_ok?(%{"frames" => frames}, %{"frames" => next_frames}, retiring)
-       when is_integer(frames) and retiring > 0,
-       do: next_frames == frames + 1
+  defp next_ledger_binding(prior, next, retiring) when retiring > 0 and is_map(next) do
+    if ledger_advances?(prior, next), do: {:ok, next}, else: :error
+  end
 
-  defp ledger_advance_ok?(_prior, _next, _retiring), do: false
+  defp next_ledger_binding(_prior, _next, _retiring), do: :error
+
+  defp ledger_advances?(%{"frames" => frames, "tip_digest" => digest} = prior, %{
+         "frames" => next_frames,
+         "tip_offset" => next_offset,
+         "tip_digest" => next_digest
+       })
+       when is_integer(frames) do
+    case AuditJournal.ledger_bound_size(prior) do
+      {:ok, bound_size} ->
+        next_frames == frames + 1 and next_offset == bound_size and next_digest != digest
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp ledger_advances?(_prior, _next), do: false
 
   defp split_retired(terminal_ops, false), do: {:ok, %{}, terminal_ops}
 

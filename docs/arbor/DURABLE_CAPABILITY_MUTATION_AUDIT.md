@@ -9,8 +9,9 @@ replace either store or claim coverage of every Security authority owner.
 CapabilityStore prepares a version-3 intent before a new or changed capability
 can be written or published live (since 2026-09-28; version 3 carries the same
 facts as the earlier version 2 under its own identity domain, so the two
-identities of identical facts never collide). The intent identifies the exact store key,
-Record ID, generation, revision, and digest of the complete serialized capability.
+identities of identical facts never collide). The intent identifies the exact
+store key, Record ID, generation, revision, and digest of the complete
+serialized capability.
 Its operation ID is stable over those mutation facts; observation time and
 optional correlation fields do not create a second mutation identity. The first
 prepared canonical payload remains immutable.

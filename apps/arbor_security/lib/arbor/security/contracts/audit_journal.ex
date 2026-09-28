@@ -68,6 +68,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
                            ),
                            case: :lower
                          )
+  # Ledger frames use the journal frame format, whose fixed header is 72 bytes
+  # (`AuditJournalFileCore.header_size/0`); pinned by a test.
+  @ledger_frame_header_bytes 72
   @record_domain "arbor.security.authority_mutation_record.v1" <> <<0>>
 
   @operations ["capability_grant", "capability_revoke"]
@@ -272,6 +275,21 @@ defmodule Arbor.Security.Contracts.AuditJournal do
       "tip_digest" => @ledger_genesis_digest
     }
   end
+
+  @doc """
+  Byte size of the ledger prefix a binding covers: 0 at genesis, otherwise the
+  end of the bound tip frame (`tip_offset + 72 + tip_len`). The next ledger
+  frame is written at exactly this offset.
+  """
+  @spec ledger_bound_size(term()) :: {:ok, non_neg_integer()} | {:error, :malformed}
+  def ledger_bound_size(%{"frames" => 0}), do: {:ok, 0}
+
+  def ledger_bound_size(%{"frames" => frames, "tip_offset" => offset, "tip_len" => len})
+      when is_integer(frames) and frames > 0 and is_integer(offset) and offset >= 0 and
+             is_integer(len) and len > 0,
+      do: {:ok, offset + @ledger_frame_header_bytes + len}
+
+  def ledger_bound_size(_binding), do: {:error, :malformed}
 
   @doc """
   Retirement accounting carried by an admitted snapshot.
@@ -565,6 +583,13 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   # ---------------------------------------------------------------------------
   # Snapshot
   # ---------------------------------------------------------------------------
+
+  # A snapshot from a newer (or unknown) format is reported as such whatever
+  # its shape, so a journal written by a later release is diagnosed as too new
+  # rather than corrupt. Constant work: only the version field is read.
+  defp do_admit_snapshot(%{"version" => version})
+       when is_integer(version) and version not in [1, 2, 3],
+       do: admit_version(version)
 
   # Snapshot v3 is modeled on the v2 clause: exact keys, no structural
   # `budget_ok` (a 4096-entry manifest far exceeds its 64-node budget), and the

@@ -70,15 +70,17 @@ defmodule Arbor.Security.AuditRetirementSecurityRegressionTest do
 
     assert {:ok, compacted, snapshot, []} = Core.compact(restored, @source)
     assert {:ok, ^compacted} = Core.restore(snapshot, [])
-    capacity = Core.capacity(compacted)
 
     # Parent 52a2cc3fa: {:error, :capacity_exhausted} (v2 snapshot, no floor).
+    # The refusal reason is the proof of ordering: a full journal answers the
+    # identity refusal, never the capacity one, so the owner never publishes or
+    # counts capacity for it (the durable-owner test below pins "nothing
+    # written" through the public boundary).
     assert {:error, :retired_version} =
              Core.append(compacted, record(revoke_intent(2, 1), "prepared"))
 
     assert snapshot["version"] == 3
     assert {:error, :retired_version} = Core.append(compacted, record(intent(2, 2), "prepared"))
-    assert Core.capacity(compacted) == capacity
 
     # Admissible versions still meet the unchanged capacity clauses.
     assert {:error, :capacity_exhausted} =
@@ -114,7 +116,14 @@ defmodule Arbor.Security.AuditRetirementSecurityRegressionTest do
     assert map_size(kept["operations"]) == 7
     assert {:ok, ^kept, ^kept_snapshot, _} = Core.compact(state, @source, retire: false)
 
-    assert {:ok, retired, snapshot, pending} = Core.compact(state, @source, retire: true)
+    # Retiring always names where the retired compact strings went: omitting
+    # the ledger binding is refused, never a silent ledgerless retirement.
+    assert {:error, :malformed} = Core.compact(state, @source, retire: true)
+    genesis = AuditJournal.ledger_genesis_binding()
+
+    assert {:ok, retired, snapshot, pending} =
+             Core.compact(state, @source, retire: true, ledger: genesis)
+
     assert snapshot["kind"] == "arbor.security.audit_journal_snapshot.v3"
     assert snapshot["retirement"]["retired_total"] == 4
     assert snapshot["retirement"]["ledger"] == AuditJournal.ledger_genesis_binding()
@@ -151,13 +160,19 @@ defmodule Arbor.Security.AuditRetirementSecurityRegressionTest do
     assert map_size(carried_snapshot["terminals"]) == 3
     assert Core.retirable_count(carried) == 2
 
-    assert {:ok, again, again_snapshot, []} = Core.compact(carried, @source, retire: true)
+    assert {:ok, again, again_snapshot, []} =
+             Core.compact(carried, @source, retire: true, ledger: genesis)
+
     assert again_snapshot["retirement"]["retired_total"] == 6
     assert Map.keys(again["operations"]) == [rejected["operation_id"]]
     assert {:ok, ^again} = Core.restore(again_snapshot, [])
   end
 
-  test "security regression: v3 identity survives observation-time changes and differs from the v2 identity of identical facts" do
+  # The next two tests are security invariants of the NEW v3 identity. On the
+  # parent 52a2cc3fa they fail only because v3 does not exist there
+  # (:unsupported_version), not because of a parent bug; mutation proofs (v3
+  # identity falling back to the v1 rule, v3 reserving nothing) turn them red.
+  test "security invariant: v3 identity survives observation-time changes and differs from the v2 identity of identical facts" do
     assert {:ok, first} = AuditJournal.admit_intent(facts(3, 1))
 
     assert {:ok, retry} =
@@ -186,7 +201,7 @@ defmodule Arbor.Security.AuditRetirementSecurityRegressionTest do
     refute other["operation_id"] == first["operation_id"]
   end
 
-  test "security regression: admitted v3 grant lifecycles cannot consume the reduction reserve" do
+  test "security invariant: admitted v3 grant lifecycles cannot consume the reduction reserve" do
     {:ok, empty} = Core.new()
 
     {state, admitted} =

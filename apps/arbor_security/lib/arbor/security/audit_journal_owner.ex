@@ -45,6 +45,7 @@ defmodule Arbor.Security.AuditJournalOwner do
            | :record_too_large
            | :soft_capacity_exhausted
            | :capacity_exhausted
+           | :retired_version
            | {:not_committed, term()}
            | {:commit_uncertain, term()}}
 

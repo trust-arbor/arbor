@@ -81,6 +81,16 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       assert Core.legacy_pending?(with_legacy)
       refute Core.legacy_pending?(fold_all(state, [record(intent(3, 5), "prepared")]))
 
+      # The cutover case that matters most: a v2 op applied and waiting for the
+      # consumer ACK is still legacy-pending, until it is delivered.
+      awaiting_ack = fold_all(with_legacy, [record(p2, "effect_applied")])
+      assert Core.legacy_pending?(awaiting_ack)
+      refute Core.legacy_pending?(fold_all(awaiting_ack, [record(p2, "delivered")]))
+
+      v1_applied = fold_all(state, [record(intent(1, 6), "prepared")])
+      v1_applied = fold_all(v1_applied, [record(intent(1, 6), "effect_applied")])
+      assert Core.legacy_pending?(v1_applied)
+
       assert {:ok, batch} = Core.retirement_batch(state)
       assert Map.keys(batch) |> Enum.sort() == Enum.sort([d1["operation_id"], d2["operation_id"]])
 
@@ -151,6 +161,81 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       assert Core.publication_relieves?(state, raw, 0)
     end
 
+    test "false for a refused v1/v2 prepared on the operational profile (the retry would meet floor 3)" do
+      # Live shape before cutover: v2 snapshot (floor 1), 4096 delivered.
+      {:ok, v2} = Core.restore(v2_snapshot(delivered_terminals(4096)), [])
+      assert Core.admission_floor(v2) == 1
+
+      for version <- [1, 2] do
+        raw = record(revoke_intent(version, 1), "prepared")
+        assert {:error, :capacity_exhausted} = Core.append(v2, raw)
+        refute Core.publication_relieves?(v2, raw, 4096)
+      end
+
+      # The v3 producer shape is relieved by the same publication ...
+      raw = record(revoke_intent(3, 1), "prepared")
+      assert {:error, :capacity_exhausted} = Core.append(v2, raw)
+      assert Core.publication_relieves?(v2, raw, 4096)
+
+      # ... and the retry really is admitted after it.
+      {:ok, published, _snapshot, []} =
+        Core.compact(v2, @source, retire: true, ledger: AuditJournal.ledger_genesis_binding())
+
+      assert {:ok, _} = Core.append(published, raw)
+
+      assert {:error, :retired_version} =
+               Core.append(published, record(revoke_intent(2, 1), "prepared"))
+
+      # Small-profile publications keep floor 1, so no floor exception applies.
+      {:ok, small} = Core.new()
+      small = fold_all(small, lifecycle(intent(2, 9)))
+      assert Core.publication_relieves?(small, record(intent(2, 10), "prepared"), 0)
+    end
+
+    test "false under a pending backlog refused by the entry clause" do
+      # Sink outage shape: prepared increases pile up (nothing delivered), the
+      # entry dimension (records + reservations) refuses the next increase and
+      # a publication cannot reclaim anything.
+      backlog = for n <- 1..1023, do: intent(3, n)
+      state = restore_pending(backlog, delivered_terminals(0))
+      raw = record(intent(3, 5000), "prepared")
+      assert {:error, :soft_capacity_exhausted} = Core.append(state, raw)
+      assert Core.retirable_count(state) == 0
+      refute Core.compaction_reclaims_occupancy?(state)
+      refute Core.publication_relieves?(state, raw, 0)
+      refute Core.publication_relieves?(state, raw, 4096)
+
+      # Same backlog plus a few ACKed operations: retiring them frees retained
+      # slots but no entries, so the retry would still be refused.
+      with_delivered = restore_pending(backlog, delivered_terminals(5))
+      assert {:error, :soft_capacity_exhausted} = Core.append(with_delivered, raw)
+      assert Core.retirable_count(with_delivered) == 5
+      refute Core.publication_relieves?(with_delivered, raw, 5)
+
+      {:ok, published, _snapshot, _pending} =
+        Core.compact(
+          with_delivered,
+          @source,
+          retire: true,
+          ledger: AuditJournal.ledger_genesis_binding()
+        )
+
+      assert {:error, :soft_capacity_exhausted} = Core.append(published, raw)
+    end
+
+    test "continuation records are relieved only when the publication frees entries, never by retirement alone" do
+      # v1 operations reserve nothing, so their continuations can meet the hard
+      # entry cap; retiring the one delivered terminal frees a retained slot but
+      # no entry, so the single retry would be refused again.
+      backlog = for n <- 1..4095, do: intent(1, n)
+      state = restore_pending(backlog, delivered_terminals(1))
+      raw = record(hd(backlog), "effect_applied")
+      assert {:error, :capacity_exhausted} = Core.append(state, raw)
+      assert Core.retirable_count(state) == 1
+      refute Core.compaction_reclaims_occupancy?(state)
+      refute Core.publication_relieves?(state, raw, 1)
+    end
+
     test "small profile never relieves by retirement and malformed inputs are false" do
       {:ok, small} = Core.new()
       raw = record(intent(3, 1), "prepared")
@@ -176,13 +261,22 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       assert small_cap["remaining_increase_admissions"] == 32
     end
 
-    test "remaining_increase_admissions counts retirable terminals unless paused" do
+    test "remaining_increase_admissions claims retirement headroom only on explicit input" do
       state = restore_terminals(3000, 50)
+
+      # Default (capacity/1, what the slice-1 owner status reports): no
+      # retiring publication is known to be reachable, so no headroom is
+      # claimed for the 3000 retirable terminals.
       cap = Core.capacity(state)
       assert cap["retained_operation_count"] == 3050
       assert cap["remaining_retained_increase_operations"] == 22
       assert cap["retirable_operation_count"] == 3000
-      assert cap["remaining_increase_admissions"] == 3072 - 50
+      assert cap["remaining_increase_admissions"] == 22
+      assert Core.capacity(state, []) == cap
+
+      live = Core.capacity(state, paused: false)
+      assert live["retirable_operation_count"] == 3000
+      assert live["remaining_increase_admissions"] == 3072 - 50
 
       paused = Core.capacity(state, paused: true)
       assert paused["retirable_operation_count"] == 3000
@@ -193,12 +287,25 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       assert Core.capacity(state, effective_retirable: 10_000)["remaining_increase_admissions"] ==
                3072 - 50
 
-      assert Core.capacity(state, []) == Core.capacity(state)
+      assert Core.capacity(state, effective_retirable: -5)["remaining_increase_admissions"] == 22
+
+      # A paused ledger wins over any claimed count.
+      assert Core.capacity(state, paused: true, effective_retirable: 3000)[
+               "remaining_increase_admissions"
+             ] == 22
+
+      # The exhausted live shape reports zero increase headroom by default.
+      exhausted = restore_terminals(4096, 0)
+      assert Core.capacity(exhausted)["remaining_increase_admissions"] == 0
+      assert Core.capacity(exhausted, paused: false)["remaining_increase_admissions"] == 3072
     end
 
     test "after a retiring compaction the totals and headroom reflect the retirement" do
       state = restore_terminals(40, 2)
-      {:ok, retired, _snapshot, []} = Core.compact(state, @source, retire: true)
+
+      {:ok, retired, _snapshot, []} =
+        Core.compact(state, @source, retire: true, ledger: AuditJournal.ledger_genesis_binding())
+
       cap = Core.capacity(retired)
       assert cap["retired_operation_total"] == 40
       assert cap["retirable_operation_count"] == 0
@@ -248,13 +355,16 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       genesis = AuditJournal.ledger_genesis_binding()
       next = binding(1, 0, 700)
 
+      # Retiring requires an explicit binding: no silent ledgerless default.
+      assert {:error, :malformed} = Core.compact(state, @source, retire: true)
+
       assert {:ok, bound, snapshot, []} =
                Core.compact(state, @source, retire: true, ledger: next)
 
       assert snapshot["retirement"] == %{"retired_total" => 3, "ledger" => next}
       assert {:ok, ^bound} = Core.restore(snapshot, [])
 
-      # In-memory retirement keeps genesis.
+      # In-memory retirement from genesis keeps genesis, but only explicitly.
       assert {:ok, _, genesis_snapshot, []} =
                Core.compact(state, @source, retire: true, ledger: genesis)
 
@@ -263,16 +373,22 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       # Non-retiring or nothing-to-retire compactions must carry the binding.
       assert {:error, :malformed} = Core.compact(state, @source, ledger: next)
       assert {:error, :malformed} = Core.compact(state, @source, retire: false, ledger: next)
+      assert Core.retirable_count(bound) == 0
 
       assert {:error, :malformed} =
                Core.compact(bound, @source, retire: true, ledger: binding(2, 772, 5))
 
       assert {:ok, _, carried, []} = Core.compact(bound, @source)
       assert carried["retirement"]["ledger"] == next
+      assert {:ok, _, ^carried, []} = Core.compact(bound, @source, retire: true)
+      assert {:ok, _, ^carried, []} = Core.compact(bound, @source, retire: true, ledger: next)
 
-      # Skipping a frame or an inadmissible binding is refused.
+      # Skipping a frame, a rewound offset or an inadmissible binding is refused.
       assert {:error, :malformed} =
                Core.compact(state, @source, retire: true, ledger: binding(2, 50, 5))
+
+      assert {:error, :malformed} =
+               Core.compact(state, @source, retire: true, ledger: binding(1, 5, 700))
 
       assert {:error, :malformed} =
                Core.compact(
@@ -289,6 +405,80 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       assert small_snapshot["version"] == 1
       refute Map.has_key?(small_snapshot, "retirement")
       assert {:error, :malformed} = Core.compact(small, @source, retire: true, ledger: next)
+    end
+
+    test "a journal bound to a real ledger can never retire without advancing it contiguously" do
+      genesis = AuditJournal.ledger_genesis_binding()
+      first = binding(1, 0, 700)
+
+      {:ok, bound, _snapshot, []} =
+        Core.compact(restore_terminals(2, 0), @source, retire: true, ledger: first)
+
+      more = fold_all(bound, lifecycle(intent(3, 1)))
+      assert Core.retirable_count(more) == 1
+      {:ok, bound_size} = AuditJournal.ledger_bound_size(first)
+      assert bound_size == 0 + FileCore.header_size() + 700
+
+      # Omitted, unchanged, reset-to-genesis, rewound, gapped or same-digest
+      # bindings would drop the new terminal from the hot set with no ledger
+      # frame recording it.
+      fresh = fn frames, offset, len ->
+        Map.put(binding(frames, offset, len), "tip_digest", String.duplicate("7e", 32))
+      end
+
+      for ledger <- [
+            nil,
+            first,
+            genesis,
+            fresh.(2, 5, 1),
+            fresh.(2, bound_size + 1, 10),
+            fresh.(2, bound_size - 1, 10),
+            fresh.(3, bound_size, 10),
+            binding(2, bound_size, 10)
+          ] do
+        opts = if ledger, do: [retire: true, ledger: ledger], else: [retire: true]
+
+        assert {:error, :malformed} = Core.compact(more, @source, opts),
+               "expected #{inspect(ledger)} to be refused"
+      end
+
+      second = fresh.(2, bound_size, 410)
+
+      assert {:ok, advanced, snapshot, []} =
+               Core.compact(more, @source, retire: true, ledger: second)
+
+      assert snapshot["retirement"] == %{"retired_total" => 3, "ledger" => second}
+      assert {:ok, ^advanced} = Core.restore(snapshot, [])
+      assert AuditJournal.ledger_bound_size(second) == {:ok, 772 + 72 + 410}
+
+      # Non-retiring publications of a bound journal carry it unchanged.
+      assert {:ok, _, kept, []} = Core.compact(more, @source)
+      assert kept["retirement"] == %{"retired_total" => 2, "ledger" => first}
+    end
+
+    test "compact refuses more than 4096 retained operations unless retirement relieves them" do
+      # 97 pending + 3999 delivered + one injected rejected terminal: each
+      # manifest is admissible on its own, only the retained total exceeds the
+      # operational bound (a shape no append can reach; it pins the
+      # profile-derived retained bound on the compaction path).
+      full = restore_pending(for(n <- 1..97, do: intent(1, n)), delivered_terminals(3999))
+      assert map_size(full["operations"]) == 4096
+      rejected = restore_terminals(0, 1)
+      over = Map.update!(full, "operations", &Map.merge(&1, rejected["operations"]))
+      assert map_size(over["operations"]) == 4097
+
+      assert {:error, :capacity_exhausted} = Core.compact(over, @source)
+      assert {:error, :capacity_exhausted} = Core.compact(over, @source, retire: false)
+
+      assert {:ok, relieved, snapshot, pending} =
+               Core.compact(over, @source,
+                 retire: true,
+                 ledger: AuditJournal.ledger_genesis_binding()
+               )
+
+      assert snapshot["retirement"]["retired_total"] == 3999
+      assert map_size(relieved["operations"]) == 98
+      assert length(pending) == 97
     end
 
     test "restore still refuses more than 4096 retained operations (profile-derived bound)" do
@@ -330,7 +520,9 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
         |> fold_all(lifecycle(intent(3, 1)))
         |> fold_all([record(pending, "prepared")])
 
-      {:ok, compacted, snapshot, pending_records} = Core.compact(state, @source, retire: true)
+      {:ok, compacted, snapshot, pending_records} =
+        Core.compact(state, @source, retire: true, ledger: AuditJournal.ledger_genesis_binding())
+
       assert {:ok, bytes, replay} = FileCore.encode_compacted(snapshot, pending_records)
       assert FileCore.core_match?(replay.core, compacted)
       assert replay.frames == 2
@@ -342,6 +534,108 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
       {:ok, empty} = FileCore.new()
       assert {:ok, again} = FileCore.consume(empty, bytes)
       assert FileCore.core_match?(again.core, compacted)
+    end
+  end
+
+  describe "mixed snapshots at replay" do
+    test "a v1/v2 prepared frame after a v3 snapshot fails the open closed with :retired_version" do
+      {:ok, v3_snapshot_frame, v3_replay} = FileCore.encode_compacted(restore_snapshot(%{}), [])
+      assert Core.admission_floor(v3_replay.core) == 3
+
+      for version <- [1, 2] do
+        tail = frame(record(intent(version, 1), "prepared"), v3_replay.digest)
+        {:ok, empty} = FileCore.new()
+
+        assert {:error, :retired_version} =
+                 FileCore.consume(empty, v3_snapshot_frame <> tail)
+      end
+
+      # A v3 tail frame folds at floor 3.
+      tail = frame(record(intent(3, 1), "prepared"), v3_replay.digest)
+      {:ok, empty} = FileCore.new()
+      assert {:ok, replay} = FileCore.consume(empty, v3_snapshot_frame <> tail)
+      assert replay.frames == 2
+      assert Core.capacity(replay.core)["retained_operation_count"] == 1
+
+      # A pre-cutover v2 snapshot still folds legacy tails at floor 1.
+      {:ok, v2_frame, v2_replay} = FileCore.encode_compacted(v2_snapshot(%{}), [])
+      tail = frame(record(intent(2, 1), "prepared"), v2_replay.digest)
+      {:ok, empty} = FileCore.new()
+      assert {:ok, legacy} = FileCore.consume(empty, v2_frame <> tail)
+      assert Core.admission_floor(legacy.core) == 1
+      assert Core.capacity(legacy.core)["retained_operation_count"] == 1
+    end
+
+    test "a v1 operation pending across the v3 cutover completes by id and replays idempotently" do
+      {:ok, op} = Core.new(:operational)
+      v1 = intent(1, 1)
+      v2 = intent(2, 2)
+      state = fold_all(op, [record(v1, "prepared"), record(v2, "prepared")])
+
+      {:ok, compacted, snapshot, pending} = Core.compact(state, @source)
+      assert snapshot["version"] == 3
+      assert {:ok, restored} = Core.restore(snapshot, pending)
+      assert Core.admission_floor(restored) == 3
+      assert Core.legacy_pending?(restored)
+
+      # Exact re-append of the retained prepared bytes is idempotent, not a
+      # floor refusal; a new v1/v2 identity is refused.
+      assert {:ok, ^restored, :idempotent} = Core.append(restored, record(v1, "prepared"))
+      assert {:ok, ^compacted, :idempotent} = Core.append(compacted, record(v2, "prepared"))
+      assert {:error, :retired_version} = Core.append(restored, record(intent(1, 3), "prepared"))
+
+      done =
+        fold_all(restored, [
+          record(v1, "effect_applied"),
+          record(v1, "delivered"),
+          record(v2, "effect_applied"),
+          record(v2, "delivered")
+        ])
+
+      refute Core.legacy_pending?(done)
+      assert Core.retirable_count(done) == 2
+      assert {:ok, ^done, :idempotent} = Core.append(done, record(v1, "prepared"))
+    end
+  end
+
+  describe "v3 identity at the record boundary" do
+    test "a v3 intent can never claim its v2 twin's identity" do
+      v3 = intent(3, 1)
+      v2 = intent(2, 1)
+      {:ok, alias_id} = AuditJournal.legacy_alias_operation_id(v3)
+      assert alias_id == v2["operation_id"]
+
+      # Supplied operation_id mismatch at the intent contract.
+      assert {:error, :operation_id_mismatch} =
+               AuditJournal.admit_intent(Map.put(facts(3, 1), "operation_id", alias_id))
+
+      {:ok, state} = Core.new(:operational)
+      {:ok, state} = Core.append(state, record(v2, "prepared"))
+
+      # A record under the v2 identity wrapping the v3 intent (with or without
+      # the intent also claiming it) is cross-operation, never a continuation
+      # or duplicate of the pending v2 operation.
+      wrapped = Map.put(record(v3, "prepared"), "operation_id", alias_id)
+      assert {:error, :cross_operation} = Core.append(state, wrapped)
+
+      forged = put_in(wrapped, ["intent", "operation_id"], alias_id)
+      assert {:error, :cross_operation} = Core.append(state, forged)
+
+      # A v3 record whose intent claims a different v3 identity.
+      other = intent(3, 2)
+
+      forged_v3 =
+        put_in(record(v3, "prepared"), ["intent", "operation_id"], other["operation_id"])
+
+      assert {:error, :cross_operation} = Core.append(state, forged_v3)
+
+      # Version/kind mismatch inside the wrapped intent is malformed.
+      mixed = put_in(record(v3, "prepared"), ["intent", "kind"], AuditJournal.intent_kind(2))
+      assert {:error, :malformed} = Core.append(state, mixed)
+
+      # The genuine v3 record is a new operation next to the v2 one.
+      assert {:ok, both} = Core.append(state, record(v3, "prepared"))
+      assert Core.capacity(both)["retained_operation_count"] == 2
     end
   end
 
@@ -409,6 +703,24 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
     state
   end
 
+  defp restore_pending(intents, terminals) do
+    records =
+      intents
+      |> Enum.map(&record(&1, "prepared"))
+      |> Enum.sort_by(& &1["operation_id"])
+
+    manifest =
+      Map.new(records, fn record ->
+        {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+        {:ok, sha} = AuditJournal.record_fingerprint(bytes)
+        {record["operation_id"], "prepared:" <> sha}
+      end)
+
+    snapshot = terminals |> restore_snapshot() |> Map.put("pending_manifest", manifest)
+    {:ok, state} = Core.restore(snapshot, records)
+    state
+  end
+
   defp v2_snapshot(terminals) do
     %{
       "version" => 2,
@@ -451,6 +763,12 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
 
   defp sha(term),
     do: :crypto.hash(:sha256, :erlang.term_to_binary(term)) |> Base.encode16(case: :lower)
+
+  defp frame(record, predecessor) do
+    {:ok, payload} = AuditJournal.canonical_record_bytes(record)
+    {:ok, bytes, _digest} = FileCore.encode_frame(payload, predecessor)
+    bytes
+  end
 
   defp fold_all(state, records) do
     Enum.reduce(records, state, fn record, acc ->
