@@ -20,13 +20,16 @@ defmodule Arbor.Security.AuditJournalFile do
   strings are written as one frame of the cold retirement ledger
   (`Arbor.Security.AuditRetirementLedger`) in the `:ledger_append` phase,
   after the candidate proofs and before the source-tip proof and rename, and
-  the v3 snapshot binds that frame. A ledger write failure is
+  the v3 snapshot binds that frame. A transient ledger write failure is
   `{:not_published, :ledger_write_failed}` with nothing retired. A paused
   ledger (`:mismatch | :ahead`) makes every publication non-retiring; it is
-  never a reason to refuse one. Promotion (`ensure_capacity_profile/2`) never
-  retires. The ledger posture is computed at open and after every adopted
-  publication; the ledger tip is adopted only from the replayed published
-  snapshot.
+  never a reason to refuse one. That includes a ledger an append proves
+  inconsistent with its binding on a live handle (for example foreign bytes
+  beyond the bound): the handle pauses exactly as a restart would classify
+  it and the same publication runs non-retiring. Promotion
+  (`ensure_capacity_profile/2`) never retires. The ledger posture is
+  computed at open and after every adopted publication; the ledger tip is
+  adopted only from the replayed published snapshot.
 
   Not a GenServer and not a generic store. Single-writer is assumed, not
   enforced. Does not claim hostile same-UID tamper resistance, host power-loss
@@ -144,6 +147,7 @@ defmodule Arbor.Security.AuditJournalFile do
          {:ok, root} <- fetch_root(opts),
          {:ok, root} <- validate_root(root),
          {:ok, path} <- resolve_file_path(root, opts),
+         :ok <- refuse_ledger_name(path),
          {:ok, path} <- contained_in_root(path, root),
          {:ok, _parent} <- validate_parent(path, root),
          {:ok, fd, identity} <- open_target(path, root) do
@@ -212,8 +216,11 @@ defmodule Arbor.Security.AuditJournalFile do
   - `{:ok, handle}` — candidate renamed and rebound
   - `{:error, :closed}` — handle is closed or not a live file handle
   - `{:error, {:not_published, reason}}` — rename did not occur; source is intact
-    (`:ledger_write_failed` when the retirement frame could not be written;
-    nothing is retired)
+    (`:ledger_write_failed` when the retirement frame could not be written
+    because of a transient fault; nothing is retired). When the failed append
+    proves the ledger inconsistent with its binding instead, the handle's
+    ledger pauses and the publication runs non-retiring (`{:ok, handle}` with
+    `ledger_state/1` `:mismatch | :ahead`).
   - `{:error, {:source_invalid, reason}}` — source identity or tip was lost before rename
   - `{:error, {:publish_uncertain, reason}}` — rename or post-rename proof is ambiguous
   """
@@ -230,7 +237,9 @@ defmodule Arbor.Security.AuditJournalFile do
   def compact(%__MODULE__{} = handle, opts) do
     case admit_compact(handle, :current, opts) do
       {:ok, ctx} ->
-        publish_compacted(handle, ctx)
+        handle
+        |> publish_compacted(ctx)
+        |> pause_after_ledger_fault(handle, ctx)
 
       {:error, :closed} = err ->
         err
@@ -246,8 +255,10 @@ defmodule Arbor.Security.AuditJournalFile do
   Boot-time retirement (T1): publish a retiring compaction when the handle
   has no torn tail, is operational, and either its snapshot predates v3
   (admission floor below 3) or at least `retire_batch` delivered terminals
-  are retirable (0 while the ledger is paused). Under a paused ledger a
-  pre-v3 snapshot is still replaced by a non-retiring v3 snapshot.
+  are retirable. Under a paused ledger the publication still runs,
+  non-retiring: a pre-v3 snapshot is replaced by a v3 snapshot and the
+  delivered terminals are kept hot (full records compacted to
+  fingerprints, which relieves entry occupancy).
 
   Never raises. Returns:
   - `{:ok, handle}` — published (new handle) or nothing to do (same handle)
@@ -277,7 +288,19 @@ defmodule Arbor.Security.AuditJournalFile do
 
   def ensure_retirement_current(_handle), do: {:uncertain, :closed}
 
-  @doc "Ledger posture of a handle: `:absent | :bound | :bound_orphan | :mismatch | :ahead`."
+  @doc """
+  Ledger posture of a handle: `:absent | :bound | :bound_orphan | :mismatch |
+  :ahead`.
+
+  Computed at open and after every adopted publication (and paused by a
+  publication whose append proved the ledger inconsistent). A publication
+  that ends `{:not_published, _}` returns no handle, so the kept handle
+  reports the posture of its last open or adopted publication: after an
+  unpublished attempt that left an orphan frame, an `:absent` handle still
+  reports `:absent` while a restart over the same bytes reports
+  `:bound_orphan`. Both are retiring postures and the next retiring append
+  re-classifies the bytes beyond the bound before it writes.
+  """
   @spec ledger_state(t()) :: AuditRetirementLedgerCore.posture()
   def ledger_state(%__MODULE__{ledger: %AuditRetirementLedger{state: state}}), do: state
   def ledger_state(%__MODULE__{}), do: :mismatch
@@ -345,9 +368,22 @@ defmodule Arbor.Security.AuditJournalFile do
       AuditRetirementLedger.__test_inject__(:ledger_truncate_below_bound, true)
     end
 
+    # :ledger_create_chmod — the chmod after the ledger's exclusive create does
+    # not take (the file keeps a group/other mode) and reports `value`.
+    # :ledger_inspect_error — reading an existing ledger for classification
+    # fails with `value` (a transient IO fault).
     @doc false
-    @spec __test_inject__(:ledger_write_error | :ledger_dir_sync, term()) :: :ok
-    def __test_inject__(kind, value) when kind in [:ledger_write_error, :ledger_dir_sync] do
+    @spec __test_inject__(
+            :ledger_write_error | :ledger_dir_sync | :ledger_create_chmod | :ledger_inspect_error,
+            term()
+          ) :: :ok
+    def __test_inject__(kind, value)
+        when kind in [
+               :ledger_write_error,
+               :ledger_dir_sync,
+               :ledger_create_chmod,
+               :ledger_inspect_error
+             ] do
       AuditRetirementLedger.__test_inject__(kind, value)
     end
 
@@ -590,6 +626,35 @@ defmodule Arbor.Security.AuditJournalFile do
         publish_error(handle, cand_path, identity, phase, reason)
     end
   end
+
+  # A failed ledger append that proves the ledger inconsistent with its
+  # binding (re-inspected, never guessed from the error) pauses the handle's
+  # ledger and runs the same publication non-retiring: a paused ledger is
+  # never a reason to refuse a publication, and the handle converges to the
+  # posture a restart would report. The unpublished attempt left the source
+  # intact (not_published re-proved it) and unlinked its candidate.
+  defp pause_after_ledger_fault(
+         {:error, {:not_published, :ledger_write_failed}} = failed,
+         handle,
+         %{ledger_frame: %{}}
+       ) do
+    case AuditRetirementLedger.after_failed_append(handle.ledger, fn ->
+           hot_delivered(handle.core)
+         end) do
+      {:paused, ledger} ->
+        paused = %{handle | ledger: ledger}
+
+        case admit_compact(paused, :current, retire: false) do
+          {:ok, ctx} -> publish_compacted(paused, ctx)
+          {:error, reason} -> publish_error(paused, nil, nil, :admit, reason)
+        end
+
+      :transient ->
+        failed
+    end
+  end
+
+  defp pause_after_ledger_fault(result, _handle, _ctx), do: result
 
   # :ledger_append runs after the candidate proofs (a candidate-side fault
   # leaves no ledger bytes) and before the source-tip proof and rename (a
@@ -1314,19 +1379,17 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp retirement_due?(%__MODULE__{torn_tail: nil, core: core} = handle) do
+  # Spec §6 T1: the raw retirable count, not the effective one. Under a
+  # paused ledger the publication is non-retiring (decided in :admit) and
+  # still compacts the delivered records to fingerprints.
+  defp retirement_due?(%__MODULE__{torn_tail: nil, core: core}) do
     AuditJournalCore.profile(core) == :operational and
       (AuditJournalCore.admission_floor(core) < 3 or
-         effective_retirable(handle) >= AuditJournal.limits(:operational).retire_batch)
+         AuditJournalCore.retirable_count(core) >=
+           AuditJournal.limits(:operational).retire_batch)
   end
 
   defp retirement_due?(_handle), do: false
-
-  defp effective_retirable(handle) do
-    if AuditRetirementLedgerCore.retiring_allowed?(ledger_state(handle)),
-      do: AuditJournalCore.retirable_count(handle.core),
-      else: 0
-  end
 
   defp retirement_result({:ok, published}, _handle), do: {:ok, published}
 
@@ -1666,6 +1729,14 @@ defmodule Arbor.Security.AuditJournalFile do
       {:ok, _other} ->
         {:error, :invalid_opts}
     end
+  end
+
+  # A basename in the retirement-ledger namespace is reserved for ledgers: a
+  # journal opened there could be (or share) another journal's ledger.
+  defp refuse_ledger_name(path) do
+    if AuditJournalFileCore.ledger_basename?(Path.basename(path)),
+      do: {:error, :reserved_name},
+      else: :ok
   end
 
   defp default_file_path(root) do

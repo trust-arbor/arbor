@@ -175,6 +175,34 @@ defmodule Arbor.Security.AuditJournalFileRetirementTest do
       refute File.exists?(ledger_path(root))
     end
 
+    test "security invariant: journal and ledger names never collide", %{root: root} do
+      # A journal at a ledger-shaped name is refused before any file exists.
+      reserved = Path.join(root, "custom.retirement.v1.log")
+      assert {:error, :reserved_name} = AuditJournalFile.open(root: root, path: reserved)
+      refute File.exists?(reserved)
+
+      {:ok, dotlog} = AuditJournalFile.open(root: root, path: Path.join(root, "custom.log"))
+      {:ok, dotlog} = AuditJournalFile.ensure_capacity_profile(dotlog, :operational)
+      dotlog = deliver(dotlog, 3, 1..2)
+      assert {:ok, dotlog} = AuditJournalFile.compact(dotlog, retire: true)
+      ledger = File.read!(reserved)
+
+      # `custom` would strip to the same ledger name: it owns no ledger, its
+      # retirement is paused, and it never reads or writes custom.log's.
+      {:ok, bare} = AuditJournalFile.open(root: root, path: Path.join(root, "custom"))
+      assert AuditJournalFile.ledger_state(bare) == :mismatch
+      assert bare.ledger.detail == :unsupported_journal_name
+      {:ok, bare} = AuditJournalFile.ensure_capacity_profile(bare, :operational)
+      bare = deliver(bare, 3, 1..2)
+      assert {:ok, bare} = AuditJournalFile.compact(bare, retire: true)
+      assert Core.retirable_count(bare.core) == 2
+      assert retired_total(bare) == 0
+      assert File.read!(reserved) == ledger
+      assert AuditJournalFile.ledger_state(dotlog) == :bound
+      assert :ok = AuditJournalFile.close(bare)
+      assert :ok = AuditJournalFile.close(dotlog)
+    end
+
     test "security invariant: promotion keeps every delivered terminal hot and never touches the ledger",
          %{root: root} do
       {:ok, small} = AuditJournalFile.open(root: root)
@@ -398,13 +426,25 @@ defmodule Arbor.Security.AuditJournalFileRetirementTest do
 
       AuditJournalFile.__test_inject__(:ledger_truncate_below_bound)
 
-      assert {:error, {:not_published, :ledger_write_failed}} =
-               AuditJournalFile.compact(first, retire: true)
-
+      # The append leaves the ledger below its bound and fails. Re-inspection
+      # proves the ledger no longer covers its binding, so the live handle
+      # pauses (as a restart would classify it) and the same publication runs
+      # non-retiring: a paused ledger never refuses a publication.
+      assert {:ok, paused} = AuditJournalFile.compact(first, retire: true)
       AuditJournalFile.__test_inject__(:clear)
+      assert AuditJournalFile.ledger_state(paused) == :mismatch
+      assert paused.ledger.detail == :below_bound
+      assert ledger_binding(paused) == bound
+      assert retired_total(paused) == 3
+      assert Core.retirable_count(paused.core) == 2
       assert File.stat!(ledger_path(root)).size == bound_size - 1
       short = File.read!(ledger_path(root))
-      assert :ok = AuditJournalFile.close(first)
+
+      assert {:ok, again} = AuditJournalFile.compact(paused, retire: true)
+      assert AuditJournalFile.ledger_state(again) == :mismatch
+      assert Core.retirable_count(again.core) == 2
+      assert File.read!(ledger_path(root)) == short
+      assert :ok = AuditJournalFile.close(again)
 
       assert {:ok, reopened} = AuditJournalFile.open(root: root)
       assert AuditJournalFile.ledger_state(reopened) == :mismatch
@@ -461,20 +501,161 @@ defmodule Arbor.Security.AuditJournalFileRetirementTest do
       assert File.read!(ledger_path(root)) == ahead
     end
 
-    test "security invariant: a live handle refuses to overwrite foreign bytes that appear beyond the bound",
+    test "security invariant: a live handle never overwrites foreign bytes that appear beyond the bound; it pauses and publishes non-retiring",
          %{root: root} do
       {handle, _batch} = retiring_fixture(root)
       assert {:ok, first} = AuditJournalFile.compact(handle, retire: true)
+      bound = ledger_binding(first)
       first = deliver(first, 3, 4..4)
-      {:ok, foreign} = LedgerCore.frame(delivered_terminals(1..1), @source, ledger_binding(first))
+      {:ok, foreign} = LedgerCore.frame(delivered_terminals(1..1), @source, bound)
       File.write!(ledger_path(root), foreign.frame, [:append])
       ahead = File.read!(ledger_path(root))
+      assert AuditJournalFile.ledger_state(first) == :bound
+
+      # The append refuses the non-orphan tail; the handle pauses :ahead and the
+      # same publication still runs (occupancy relief), keeping delivered hot.
+      assert {:ok, paused} = AuditJournalFile.compact(first, retire: true)
+      assert AuditJournalFile.ledger_state(paused) == :ahead
+      assert paused.ledger.detail == :beyond_bound
+      assert ledger_binding(paused) == bound
+      assert Core.retirable_count(paused.core) == 1
+      assert File.read!(ledger_path(root)) == ahead
+
+      # Every later retiring request on the live handle stays non-retiring.
+      paused = deliver(paused, 3, 5..5)
+      assert {:ok, again} = AuditJournalFile.compact(paused, retire: true)
+      assert AuditJournalFile.ledger_state(again) == :ahead
+      assert Core.retirable_count(again.core) == 2
+      assert ledger_binding(again) == bound
+      assert File.read!(ledger_path(root)) == ahead
+      assert :ok = AuditJournalFile.close(again)
+
+      assert {:ok, reopened} = AuditJournalFile.open(root: root)
+      assert AuditJournalFile.ledger_state(reopened) == :ahead
+      assert :ok = AuditJournalFile.close(reopened)
+    end
+
+    test "a transient write fault on a bound ledger is not_published and the handle keeps retiring",
+         %{root: root} do
+      {handle, _batch} = retiring_fixture(root)
+      assert {:ok, first} = AuditJournalFile.compact(handle, retire: true)
+      first = deliver(first, 3, 4..5)
+      ledger = File.read!(ledger_path(root))
+      journal = File.read!(journal_path(root))
+
+      AuditJournalFile.__test_inject__(:ledger_write_error, :eio)
 
       assert {:error, {:not_published, :ledger_write_failed}} =
                AuditJournalFile.compact(first, retire: true)
 
-      assert File.read!(ledger_path(root)) == ahead
-      assert Core.retirable_count(first.core) == 1
+      AuditJournalFile.__test_inject__(:clear)
+
+      assert File.read!(ledger_path(root)) == ledger
+      assert File.read!(journal_path(root)) == journal
+      refute_candidate(root)
+      assert AuditJournalFile.ledger_state(first) == :bound
+
+      assert {:ok, second} = AuditJournalFile.compact(first, retire: true)
+      assert ledger_binding(second)["frames"] == 2
+      assert Core.retirable_count(second.core) == 0
+      assert AuditJournalFile.ledger_state(second) == :bound
+    end
+
+    test "a transient read fault after an adopted publication never pauses retirement", %{
+      root: root
+    } do
+      {handle, batch} = retiring_fixture(root)
+      AuditJournalFile.__test_inject__(:ledger_inspect_error, :emfile)
+
+      # A publication that wrote a frame is :bound by its own append proof.
+      assert {:ok, first} = AuditJournalFile.compact(handle, retire: true)
+      assert_retired(first, root, batch)
+
+      # A non-retiring publication re-inspects the ledger; the IO fault is not
+      # evidence of a mismatch, so the retiring posture is kept.
+      first = deliver(first, 3, 4..4)
+      assert {:ok, carried} = AuditJournalFile.compact(first)
+      assert AuditJournalFile.ledger_state(carried) == :bound
+      AuditJournalFile.__test_inject__(:clear)
+
+      assert {:ok, second} = AuditJournalFile.compact(carried, retire: true)
+      assert ledger_binding(second)["frames"] == 2
+      assert Core.retirable_count(second.core) == 0
+      assert :ok = AuditJournalFile.close(second)
+
+      # At open an unreadable ledger still pauses (restart-only), fail closed.
+      AuditJournalFile.__test_inject__(:ledger_inspect_error, :eio)
+      assert {:ok, reopened} = AuditJournalFile.open(root: root)
+      AuditJournalFile.__test_inject__(:clear)
+      assert AuditJournalFile.ledger_state(reopened) == :mismatch
+      assert :ok = AuditJournalFile.close(reopened)
+    end
+
+    test "a ledger create whose chmod does not take leaves no file behind and the next publication retires",
+         %{root: root} do
+      {handle, batch} = retiring_fixture(root)
+      AuditJournalFile.__test_inject__(:ledger_create_chmod, :eperm)
+
+      assert {:error, {:not_published, :ledger_write_failed}} =
+               AuditJournalFile.compact(handle, retire: true)
+
+      AuditJournalFile.__test_inject__(:clear)
+      refute File.exists?(ledger_path(root))
+      refute_candidate(root)
+
+      assert {:ok, published} = AuditJournalFile.compact(handle, retire: true)
+      assert_retired(published, root, batch)
+    end
+
+    for prefix <- [:genesis, :bound] do
+      test "security invariant: a torn frame prefix at the #{prefix} offset opens :bound_orphan and the next retiring publication truncates and rewrites it",
+           %{root: root} do
+        {handle, _batch} = retiring_fixture(root)
+
+        handle =
+          case unquote(prefix) do
+            :genesis ->
+              handle
+
+            :bound ->
+              {:ok, first} = AuditJournalFile.compact(handle, retire: true)
+              deliver(first, 3, 4..5)
+          end
+
+        bound = ledger_binding(handle)
+        {:ok, bound_size} = AuditJournal.ledger_bound_size(bound)
+        bound_bytes = if bound_size == 0, do: "", else: File.read!(ledger_path(root))
+        assert byte_size(bound_bytes) == bound_size
+
+        # An interrupted pwrite: a frame chained from the tip, cut mid-payload.
+        {:ok, next} = LedgerCore.frame(delivered_terminals(1..2), @source, bound)
+        torn = binary_part(next.frame, 0, 72 + div(byte_size(next.payload), 2))
+        File.write!(ledger_path(root), bound_bytes <> torn)
+        File.chmod!(ledger_path(root), 0o600)
+        assert :ok = AuditJournalFile.close(handle)
+
+        assert {:ok, reopened} = AuditJournalFile.open(root: root)
+        assert AuditJournalFile.ledger_state(reopened) == :bound_orphan
+        assert ledger_binding(reopened) == bound
+        {:ok, batch} = Core.retirement_batch(reopened.core)
+        assert map_size(batch) == if(unquote(prefix) == :genesis, do: 3, else: 2)
+
+        assert {:ok, published} = AuditJournalFile.compact(reopened, retire: true)
+        frames = decode_ledger(root)
+        written = List.last(frames)
+        assert written.offset == bound_size
+        assert written.batch["retired"] == batch
+        assert File.read!(ledger_path(root)) |> binary_part(0, bound_size) == bound_bytes
+        assert File.stat!(ledger_path(root)).size == bound_size + 72 + written.len
+        assert ledger_binding(published)["frames"] == bound["frames"] + 1
+        assert AuditJournalFile.ledger_state(published) == :bound
+        assert Core.retirable_count(published.core) == 0
+        assert :ok = AuditJournalFile.close(published)
+
+        assert {:ok, again} = AuditJournalFile.open(root: root)
+        assert AuditJournalFile.ledger_state(again) == :bound
+        assert :ok = AuditJournalFile.close(again)
+      end
     end
 
     test "security invariant: a binding naming frames with the ledger absent is :mismatch and the ledger is never re-created",
@@ -674,6 +855,74 @@ defmodule Arbor.Security.AuditJournalFileRetirementTest do
                AuditJournalFile.append(done, record(intent(2, 9), "prepared"))
     end
 
+    test "security invariant: v2 frames trailing a v2 snapshot fold at floor 1 and T1 cuts them over by status",
+         %{root: root} do
+      write_journal(root, v2_snapshot(delivered_terminals(1..2)), [])
+      delivered = intent(2, 20)
+      applied = intent(2, 21)
+      prepared = intent(2, 22)
+
+      {:ok, legacy} = AuditJournalFile.open(root: root)
+      assert Core.admission_floor(legacy.core) == 1
+
+      legacy =
+        append_all(
+          legacy,
+          lifecycle(delivered) ++
+            [
+              record(applied, "prepared"),
+              record(applied, "effect_applied"),
+              record(prepared, "prepared")
+            ]
+        )
+
+      assert :ok = AuditJournalFile.close(legacy)
+
+      # Reopen replays the tail frames through the fold at the v2 floor.
+      assert {:ok, handle} = AuditJournalFile.open(root: root)
+      assert handle.core["snapshot"]["version"] == 2
+      assert AuditJournalFile.evidence(handle).committed_frames == 7
+      assert FileCore.core_match?(handle.core, legacy.core)
+      {:ok, batch} = Core.retirement_batch(handle.core)
+      assert map_size(batch) == 3
+      assert Map.has_key?(batch, delivered["operation_id"])
+
+      assert {:ok, cut} = AuditJournalFile.ensure_retirement_current(handle)
+      snapshot = cut.core["snapshot"]
+      assert snapshot["version"] == 3
+      assert snapshot["terminals"] == %{}
+
+      assert Enum.sort(Map.keys(snapshot["pending_manifest"])) ==
+               Enum.sort([applied["operation_id"], prepared["operation_id"]])
+
+      assert [frame] = decode_ledger(root)
+      assert frame.batch["retired"] == batch
+      assert retired_total(cut) == 3
+      assert Core.admission_floor(cut.core) == 3
+
+      # The folded v2 pending operations complete by id; retired and new v2
+      # identities are below the floor.
+      cut =
+        append_all(cut, [
+          record(applied, "delivered"),
+          record(prepared, "effect_applied"),
+          record(prepared, "delivered")
+        ])
+
+      assert {:error, :retired_version} =
+               AuditJournalFile.append(cut, record(delivered, "prepared"))
+
+      assert {:error, :retired_version} =
+               AuditJournalFile.append(cut, record(intent(2, 23), "prepared"))
+
+      assert :ok = AuditJournalFile.close(cut)
+
+      assert {:ok, reopened} = AuditJournalFile.open(root: root)
+      assert AuditJournalFile.ledger_state(reopened) == :bound
+      assert Core.retirable_count(reopened.core) == 2
+      assert :ok = AuditJournalFile.close(reopened)
+    end
+
     test "security invariant: the live exhausted shape (v2, 4096 delivered, nothing pending) retires into ledger frame 1 at T1",
          %{root: root} do
       terminals = delivered_terminals(1..4096)
@@ -787,6 +1036,34 @@ defmodule Arbor.Security.AuditJournalFileRetirementTest do
       assert Core.admission_floor(published.core) == 3
       assert map_size(published.core["snapshot"]["terminals"]) == 3
       assert retired_total(published) == 0
+      assert File.read!(ledger_path(root)) == "stale ledger bytes"
+    end
+  end
+
+  describe "ensure_retirement_current/1 (T1) under a paused ledger" do
+    test "a v3 journal with retire_batch delivered terminals still publishes, non-retiring", %{
+      root: root
+    } do
+      write_journal(root, v3_snapshot(delivered_terminals(1..511)), [])
+      plant_ledger(root, "stale ledger bytes")
+
+      assert {:ok, handle} = AuditJournalFile.open(root: root)
+      assert AuditJournalFile.ledger_state(handle) == :ahead
+      handle = deliver(handle, 3, 1..1)
+      assert Core.retirable_count(handle.core) == 512
+      frames_before = AuditJournalFile.evidence(handle).committed_frames
+      assert frames_before == 4
+
+      # Spec T1 uses the raw retirable count: the publication runs, and the
+      # paused ledger makes it non-retiring (tail folded, terminals kept hot).
+      assert {:ok, published} = AuditJournalFile.ensure_retirement_current(handle)
+      refute published == handle
+      assert AuditJournalFile.evidence(published).committed_frames == 1
+      assert Core.retirable_count(published.core) == 512
+      assert map_size(published.core["snapshot"]["terminals"]) == 512
+      assert retired_total(published) == 0
+      assert ledger_binding(published) == AuditJournal.ledger_genesis_binding()
+      assert AuditJournalFile.ledger_state(published) == :ahead
       assert File.read!(ledger_path(root)) == "stale ledger bytes"
     end
   end

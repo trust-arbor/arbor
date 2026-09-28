@@ -22,7 +22,15 @@ defmodule Arbor.Security.AuditRetirementLedger do
     one candidate frame at the bound offset.
   - `refresh/4` recomputes the posture after an adopted publication. The
     binding is always the one the replayed published snapshot carries; a
-    paused posture only changes by restart.
+    paused posture only changes by restart. A publication that wrote a frame
+    is `:bound` by construction (`append/3` proved the new bound); otherwise
+    the file is re-inspected, and only a finding that proves the ledger
+    inconsistent with its binding pauses it (an IO error keeps the posture:
+    the next append re-proves everything before it writes).
+  - `after_failed_append/2` re-inspects the ledger after a failed append and
+    says whether the failure proved the ledger inconsistent with its binding
+    (`{:paused, ledger}`: the publication then runs non-retiring) or was a
+    transient fault (`:transient`).
 
   No file descriptor is held between calls: each open/append re-opens the
   path through the same containment and identity proofs and closes it before
@@ -31,7 +39,13 @@ defmodule Arbor.Security.AuditRetirementLedger do
 
   Single-writer is assumed (the journal owner), not enforced. Does not claim
   hostile same-UID tamper resistance or host power-loss durability beyond the
-  journal's own claims.
+  journal's own claims. Crash window (the same one the journal's compaction
+  candidate has): the ledger is created with the process umask and chmodded
+  to 0600 immediately after; a BEAM crash between the two leaves an empty
+  non-0600 ledger that the next open classifies `:mismatch`
+  (`:insecure_mode`) until a human moves it aside. It is never adopted: a
+  non-0600 file may already be open for writing by another principal. A
+  create whose proofs fail without a crash unlinks the empty file it made.
   """
 
   import Arbor.Security.AuditJournalFileProofs
@@ -83,10 +97,20 @@ defmodule Arbor.Security.AuditRetirementLedger do
 
   @doc """
   Recompute the posture after an adopted publication whose replayed snapshot
-  binds `binding`. `written_identity` is the identity `append/3` proved when
-  the publication wrote a frame (else `nil`: the prior identity is expected).
-  A paused posture (`:mismatch | :ahead`) is kept: it changes only by restart
-  after the journal/ledger pair is repaired.
+  binds `binding`.
+
+  - A paused posture (`:mismatch | :ahead`) is kept: it changes only by
+    restart after the journal/ledger pair is repaired.
+  - `written_identity` is the identity `append/3` proved when the
+    publication wrote a frame. The replayed binding names exactly that frame
+    (the candidate replay is core-equal to the compaction that was given its
+    binding) and `append/3` proved the file ends at the new bound, so the
+    posture is `:bound` without another read.
+  - Otherwise (nothing written; the binding is carried unchanged) the file is
+    re-inspected against the recorded identity. A finding that proves the
+    ledger inconsistent with its binding pauses it; an IO error or racing
+    read keeps the prior posture, because one transient fault after a
+    successful publication must not pause retirement for the handle's life.
   """
   @spec refresh(t(), map(), hot(), map() | nil) :: t()
   def refresh(%__MODULE__{} = prior, binding, hot, written_identity) do
@@ -97,12 +121,39 @@ defmodule Arbor.Security.AuditRetirementLedger do
       is_nil(prior.path) ->
         paused(%{prior | binding: binding}, :mismatch, :path_escape)
 
+      is_map(written_identity) ->
+        %{prior | binding: binding, identity: written_identity, state: :bound, detail: :none}
+
       true ->
-        expected = written_identity || prior.identity
-        fresh = %{prior | binding: binding, identity: nil, state: :mismatch, detail: :none}
-        inspect_file(fresh, hot, expected)
+        inspected = reinspect(%{prior | binding: binding}, hot)
+        if proven?(inspected), do: inspected, else: %{prior | binding: binding}
     end
   end
+
+  @doc """
+  Re-inspect the ledger after `append/3` failed, against the same binding
+  and recorded identity.
+
+  Returns `{:paused, ledger}` when the ledger is now proven inconsistent with
+  its binding (a file-rule, identity, bound, tip or tail finding: what a
+  restart would also classify `:mismatch | :ahead`). The caller then runs the
+  publication non-retiring with the paused ledger. Returns `:transient` when
+  the ledger still classifies as retiring-allowed or could not be read (an
+  IO fault): the attempt stays `:ledger_write_failed` and the next one
+  re-proves everything.
+  """
+  @spec after_failed_append(t(), hot()) :: {:paused, t()} | :transient
+  def after_failed_append(%__MODULE__{path: path, state: state} = ledger, hot)
+      when is_binary(path) do
+    inspected = reinspect(ledger, hot)
+
+    if LedgerCore.retiring_allowed?(state) and LedgerCore.paused?(inspected.state) and
+         proven?(inspected),
+       do: {:paused, inspected},
+       else: :transient
+  end
+
+  def after_failed_append(_ledger, _hot), do: :transient
 
   @doc """
   Append one frame (built by `AuditRetirementLedgerCore.frame/3` from this
@@ -145,6 +196,35 @@ defmodule Arbor.Security.AuditRetirementLedger do
   @spec state(t()) :: LedgerCore.posture()
   def state(%__MODULE__{state: state}), do: state
 
+  # Findings that prove the ledger inconsistent with its binding. Anything
+  # else (an IO error, a short racing read, an exception) is unknown.
+  @proven_details [
+    :ledger_missing,
+    :identity_changed,
+    :symlink_rejected,
+    :not_regular,
+    :hardlink_rejected,
+    :insecure_mode,
+    :path_escape,
+    :unsupported_journal_name,
+    :below_bound,
+    :size_mismatch,
+    :digest_mismatch,
+    :predecessor_mismatch,
+    :malformed_header,
+    :oversized_frame,
+    :malformed,
+    :beyond_bound
+  ]
+
+  defp proven?(%__MODULE__{state: state, detail: detail}),
+    do: LedgerCore.retiring_allowed?(state) or detail in @proven_details
+
+  defp reinspect(ledger, hot) do
+    fresh = %{ledger | identity: nil, state: :mismatch, detail: :none}
+    inspect_file(fresh, hot, ledger.identity)
+  end
+
   if Mix.env() == :test do
     @inject_key {__MODULE__, :inject}
 
@@ -157,11 +237,21 @@ defmodule Arbor.Security.AuditRetirementLedger do
 
     @doc false
     @spec __test_inject__(
-            :ledger_write_error | :ledger_truncate_below_bound | :ledger_dir_sync,
+            :ledger_write_error
+            | :ledger_truncate_below_bound
+            | :ledger_dir_sync
+            | :ledger_create_chmod
+            | :ledger_inspect_error,
             term()
           ) :: :ok
     def __test_inject__(key, value)
-        when key in [:ledger_write_error, :ledger_truncate_below_bound, :ledger_dir_sync] do
+        when key in [
+               :ledger_write_error,
+               :ledger_truncate_below_bound,
+               :ledger_dir_sync,
+               :ledger_create_chmod,
+               :ledger_inspect_error
+             ] do
       current = Process.get(@inject_key, %{})
       Process.put(@inject_key, Map.put(current, key, value))
       :ok
@@ -190,10 +280,32 @@ defmodule Arbor.Security.AuditRetirementLedger do
         reason -> map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
       end
     end
+
+    # A chmod that does not take: the created file keeps a group/other mode.
+    defp chmod_created(path) do
+      case inject(:ledger_create_chmod) do
+        :absent ->
+          chmod_private(path)
+
+        reason ->
+          _ = File.chmod(path, 0o644)
+          {:error, reason}
+      end
+    end
+
+    # A transient read fault while inspecting an existing ledger.
+    defp open_for_inspect(path) do
+      case inject(:ledger_inspect_error) do
+        :absent -> open_file(path, [:raw, :binary, :read])
+        reason -> {:error, reason}
+      end
+    end
   else
     defp pwrite_frame(fd, offset, frame), do: do_pwrite(fd, offset, frame)
     defp truncate_target(bound), do: {bound, false}
     defp sync_parent(dir), do: fsync_directory(dir)
+    defp chmod_created(path), do: chmod_private(path)
+    defp open_for_inspect(path), do: open_file(path, [:raw, :binary, :read])
   end
 
   # ---------------------------------------------------------------------------
@@ -203,12 +315,18 @@ defmodule Arbor.Security.AuditRetirementLedger do
   defp ledger_path(root, journal_path) do
     parent = Path.dirname(journal_path)
 
-    with {:ok, name} <- AuditJournalFileCore.ledger_basename(Path.basename(journal_path)),
+    with {:ok, name} <- ledger_name(journal_path),
          {:ok, joined} <- safe_join(parent, name) do
       contained_in_root(joined, root)
-    else
-      {:error, :malformed} -> {:error, :path_escape}
-      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A journal basename without a ledger name (no `.log` suffix) has no
+  # ledger: its retirement is paused, never shared with a sibling's ledger.
+  defp ledger_name(journal_path) do
+    case AuditJournalFileCore.ledger_basename(Path.basename(journal_path)) do
+      {:ok, name} -> {:ok, name}
+      {:error, _reason} -> {:error, :unsupported_journal_name}
     end
   end
 
@@ -265,7 +383,7 @@ defmodule Arbor.Security.AuditRetirementLedger do
          :ok <- require_file_mode_0600(lstat),
          {:ok, real} <- resolve_real_path(ledger.path),
          {:ok, _contained} <- contained_in_root(real, ledger.root),
-         {:ok, fd} <- open_file(ledger.path, [:raw, :binary, :read]) do
+         {:ok, fd} <- open_for_inspect(ledger.path) do
       try do
         classify_open_fd(ledger, fd, lstat, hot, expected_identity)
       after
@@ -344,7 +462,7 @@ defmodule Arbor.Security.AuditRetirementLedger do
   end
 
   defp finish_ledger_create(fd, path) do
-    with :ok <- chmod_private(path),
+    with :ok <- chmod_created(path),
          {:ok, stat} <- fstat_io(fd),
          :ok <- require_regular(stat),
          :ok <- require_single_link(stat),
@@ -354,8 +472,34 @@ defmodule Arbor.Security.AuditRetirementLedger do
       {:ok, fd, file_identity(stat)}
     else
       {:error, reason} ->
+        created = created_identity(fd)
         _ = close_io_silent(fd)
+        unlink_created_if_ours(path, created)
         {:error, io_reason(reason)}
+    end
+  end
+
+  defp created_identity(fd) do
+    case fstat_io(fd) do
+      {:ok, stat} -> file_identity(stat)
+      {:error, _reason} -> nil
+    end
+  end
+
+  # An exclusive create whose proofs failed must not leave its file behind
+  # (with the umask mode after a failed chmod it would pause retirement
+  # until a human moved it aside). Only the empty single-link file at the
+  # inode this call created is removed: it holds no evidence.
+  defp unlink_created_if_ours(_path, nil), do: :ok
+
+  defp unlink_created_if_ours(path, created) do
+    with {:ok, %File.Stat{type: :regular, links: 1, size: 0} = stat} <-
+           File.lstat(path, time: :posix),
+         :ok <- require_same_inode(created, stat) do
+      _ = File.rm(path)
+      :ok
+    else
+      _other -> :ok
     end
   end
 

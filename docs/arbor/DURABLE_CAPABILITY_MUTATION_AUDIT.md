@@ -95,13 +95,24 @@ The durable journal file can retire them (since 2026-09-28): a retiring
 publication first writes the exact compact strings it removes from the hot
 snapshot as one fsynced frame of a cold, append-only retirement ledger next to
 the journal (`audit_journal.v1.retirement.v1.log`, mode 0600), then binds that
-frame in the v3 snapshot it renames into place. A ledger write failure leaves
-the journal unchanged and retires nothing. A ledger that does not match its
-binding (`mismatch`) or holds unexpected frames beyond it (`ahead`) is never
-overwritten; publications then keep every delivered identity hot. The journal
+frame in the v3 snapshot it renames into place. A transient ledger write
+failure leaves the journal unchanged and retires nothing. A ledger that does not match its
+binding (`mismatch`) or holds unexpected frames beyond it (`ahead`), whether
+found at open or by a failed append, is never overwritten; publications then
+keep every delivered identity hot and are never refused for it. Each journal
+file owns exactly one ledger name (a journal basename must end in `.log` to
+own one; ledger-shaped basenames are refused as journals). The journal
 owner does not request retiring publications yet, so until that slice lands
-delivered identities remain retained as described above. Retirement must not
-silently treat a retired identity as new or delete protected audit history.
+delivered identities remain retained as described above.
+
+Retirement never deletes protected audit history, and a retired v1/v2 identity
+is refused `:retired_version`, never admitted as new. A retired v3 identity is
+not remembered in the hot set: it can be admitted again as a new operation,
+but only if identical facts are re-presented through a same-UID rollback of
+the authority store or an in-BEAM raw journal append (the production facade
+cannot reach it against a monotonic store). The ledger keeps the original
+compact evidence so such a recurrence is detectable offline (see the residuals
+section of the roadmap item above).
 
 ## Coverage and limits
 

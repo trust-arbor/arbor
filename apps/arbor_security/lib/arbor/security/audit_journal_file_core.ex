@@ -288,32 +288,54 @@ defmodule Arbor.Security.AuditJournalFileCore do
 
   def candidate_basename(_name), do: {:error, :malformed}
 
+  @ledger_suffix ".retirement.v1.log"
+
   @doc """
   Basename of the cold retirement ledger that belongs to a journal file.
 
-  Strips one trailing `.log` from the journal basename and appends
+  Strips the trailing `.log` from the journal basename and appends
   `.retirement.v1.log`: `audit_journal.v1.log` becomes
   `audit_journal.v1.retirement.v1.log`, and an explicit `foo.log` journal
   gets `foo.retirement.v1.log`. The ledger lives in the journal's own
-  directory, so two journals under one root never share a ledger.
+  directory.
+
+  The mapping is injective and its image is disjoint from every journal
+  name, so two journals under one root never share a ledger and no journal
+  file is ever another journal's ledger:
+
+  - only a basename ending in `.log` with a non-empty stem has a ledger
+    (`foo` and `foo.log` would otherwise both map to `foo.retirement.v1.log`);
+  - a ledger-shaped basename (`ledger_basename?/1`) has no ledger of its own,
+    and `AuditJournalFile.open/1` refuses it as a journal.
+
+  Any other name is `{:error, :malformed}` (the journal then has no ledger
+  and its retirement is paused).
   """
   @spec ledger_basename(term()) :: {:ok, String.t()} | {:error, :malformed}
   def ledger_basename(name) when is_binary(name) do
     cond do
-      name in ["", ".", ".."] -> {:error, :malformed}
-      not String.valid?(name) -> {:error, :malformed}
-      String.contains?(name, <<0>>) -> {:error, :malformed}
-      String.contains?(name, "/") -> {:error, :malformed}
-      true -> {:ok, strip_log_suffix(name) <> ".retirement.v1.log"}
+      not plain_basename?(name) -> {:error, :malformed}
+      ledger_basename?(name) -> {:error, :malformed}
+      name == ".log" -> {:error, :malformed}
+      not String.ends_with?(name, ".log") -> {:error, :malformed}
+      true -> {:ok, binary_part(name, 0, byte_size(name) - 4) <> @ledger_suffix}
     end
   end
 
   def ledger_basename(_name), do: {:error, :malformed}
 
-  defp strip_log_suffix(name) do
-    if String.ends_with?(name, ".log"),
-      do: binary_part(name, 0, byte_size(name) - 4),
-      else: name
+  @doc """
+  True for a basename in the retirement-ledger namespace (ends in
+  `.retirement.v1.log`). Such a name is reserved for ledgers: it is never a
+  journal and never owns a ledger.
+  """
+  @spec ledger_basename?(term()) :: boolean()
+  def ledger_basename?(name) when is_binary(name), do: String.ends_with?(name, @ledger_suffix)
+  def ledger_basename?(_name), do: false
+
+  defp plain_basename?(name) do
+    name not in ["", ".", ".."] and String.valid?(name) and not String.contains?(name, <<0>>) and
+      not String.contains?(name, "/")
   end
 
   @spec leftover_action(term()) :: :unlink | {:error, atom()}
