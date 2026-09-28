@@ -639,6 +639,113 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
     end
   end
 
+  describe "reservation accounting" do
+    @reservation_keys ["reserved_entries", "reserved_bytes"]
+
+    test "the maintained reservation equals a from-scratch derivation through every transition, compaction and restore" do
+      {:ok, fresh} = Core.new(:operational)
+
+      steps =
+        Enum.flat_map(1..24, fn n ->
+          version = Enum.at([1, 2, 3], rem(n, 3))
+          grant = intent(version, n)
+          revoke = revoke_intent(max(version, 2), 100 + n)
+
+          case rem(n, 4) do
+            0 -> lifecycle(grant)
+            1 -> [record(grant, "prepared")]
+            2 -> [record(grant, "prepared"), record(grant, "effect_applied")]
+            3 -> [record(revoke, "prepared"), rejected_record(revoke)]
+          end
+        end)
+
+      state =
+        Enum.reduce(steps, fresh, fn step, acc ->
+          next = fold_all(acc, [step])
+          assert reservation(next) == derived_reservation(next)
+          next
+        end)
+
+      assert reservation(state) != {0, 0}
+
+      for opts <- [[retire: false], [retire: true, ledger: binding(1, 0, 900)]] do
+        assert {:ok, compacted, snapshot, pending} = Core.compact(state, @source, opts)
+        assert reservation(compacted) == derived_reservation(compacted)
+        assert reservation(compacted) == reservation(state)
+        assert {:ok, restored} = Core.restore(snapshot, pending)
+        assert FileCore.core_match?(restored, compacted)
+      end
+    end
+
+    # The admission check used to re-derive every pending operation's
+    # remaining cost (canonical record encodes) on every append, so a fold or
+    # a publication re-fold under a delivery backlog was quadratic in the
+    # pending count (a ~10 s first publication after a sink outage).
+    test "an admission costs the same number of canonical encodes whatever the pending count" do
+      small = encodes_for_next_append(8)
+      large = encodes_for_next_append(400)
+      assert small > 0
+      assert large == small
+    end
+  end
+
+  describe "readiness projection" do
+    test "increase_headroom? flips exactly when the next increase is refused by the entry clause" do
+      {:ok, fresh} = Core.new()
+      # A rejected operation first: each prepared-only increase lowers
+      # `remaining_soft_entries - reserved_entries` by 3, and the rejection
+      # shifts it by one, so the walk passes through exactly 3 (the last
+      # admissible value) instead of skipping from 5 to 2.
+      rejected = revoke_intent(3, 999)
+      start = fold_all(fresh, [record(rejected, "prepared"), rejected_record(rejected)])
+      capacity = Core.capacity(start, paused: true)
+      assert rem(capacity["remaining_soft_entries"] - capacity["reserved_entries"], 3) == 0
+
+      outcome =
+        Enum.reduce_while(1..40, start, fn n, acc ->
+          ready? = Core.increase_headroom?(acc, paused: true)
+
+          case Core.append(acc, record(intent(3, n), "prepared")) do
+            {:ok, next} ->
+              assert ready?, "headroom false but increase #{n} admitted"
+              {:cont, next}
+
+            {:error, :soft_capacity_exhausted} ->
+              refute ready?, "headroom true but increase #{n} refused"
+              {:halt, {:refused_at, n, acc}}
+          end
+        end)
+
+      assert {:refused_at, n, refused} = outcome
+      assert n > 1
+      capacity = Core.capacity(refused, paused: true)
+      assert capacity["remaining_soft_entries"] - capacity["reserved_entries"] == 0
+    end
+
+    test "increase_headroom? keeps room for a maximum-size record in the soft byte dimension" do
+      {:ok, fresh} = Core.new()
+      max_record = AuditJournal.limits().max_record_bytes
+      soft_bytes = AuditJournal.limits().soft_byte_cap
+
+      # Entries are plentiful; only the byte dimension is close to its cap.
+      roomy = Map.put(fresh, "byte_count", soft_bytes - max_record)
+      tight = Map.put(fresh, "byte_count", soft_bytes - max_record + 1)
+      assert Core.increase_headroom?(roomy, paused: true)
+      refute Core.increase_headroom?(tight, paused: true)
+
+      # Conservative by design: a normal-size increase still fits.
+      assert {:ok, _} = Core.append(tight, record(intent(3, 1), "prepared"))
+    end
+
+    test "increase_headroom? is false without retained headroom and for a malformed state" do
+      state = restore_terminals(0, 3072)
+      refute Core.increase_headroom?(state, paused: true)
+      assert Core.capacity(state, paused: true)["remaining_increase_admissions"] == 0
+      refute Core.increase_headroom?(nil)
+      refute Core.increase_headroom?(%{"operations" => :bad})
+    end
+  end
+
   describe "producer" do
     test "CapabilityAuditCore emits v3 intents that a floor-3 journal admits" do
       cap_id = "cap_" <> String.duplicate("c", 32)
@@ -682,6 +789,55 @@ defmodule Arbor.Security.AuditJournalCoreRetirementTest do
   end
 
   # ---------------------------------------------------------------------------
+
+  defp reservation(state) do
+    capacity = Core.capacity(state)
+    {capacity["reserved_entries"], capacity["reserved_bytes"]}
+  end
+
+  # The same projection over a state stripped of its maintained totals: the
+  # core then derives the reservation from the operations themselves.
+  defp derived_reservation(state), do: reservation(Map.drop(state, @reservation_keys))
+
+  defp encodes_for_next_append(pending) do
+    {:ok, fresh} = Core.new(:operational)
+
+    state =
+      fold_all(
+        fresh,
+        Enum.flat_map(1..pending, fn n ->
+          grant = intent(3, n)
+          [record(grant, "prepared"), record(grant, "effect_applied")]
+        end)
+      )
+
+    next = record(intent(3, 10_000), "prepared")
+    mfa = {AuditJournal, :canonical_record_bytes, 1}
+    test_pid = self()
+
+    pid =
+      spawn(fn ->
+        receive do
+          :go -> send(test_pid, {:appended, self(), Core.append(state, next)})
+        end
+      end)
+
+    :erlang.trace_pattern(mfa, true, [:global])
+    :erlang.trace(pid, true, [:call, {:tracer, self()}])
+    send(pid, :go)
+    assert_receive {:appended, ^pid, {:ok, _}}, 30_000
+    :erlang.trace_pattern(mfa, false, [:global])
+    count_calls(pid, mfa, 0)
+  end
+
+  defp count_calls(pid, {m, f, a} = mfa, count) do
+    receive do
+      {:trace, ^pid, :call, {^m, ^f, args}} when length(args) == a ->
+        count_calls(pid, mfa, count + 1)
+    after
+      100 -> count
+    end
+  end
 
   defp restore_snapshot(terminals) do
     %{

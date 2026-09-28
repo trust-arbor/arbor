@@ -3,7 +3,8 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
   Owner-level acceptance of terminal-identity retirement (Floor-and-Ledger v3,
   slice 3): the T1/T2/T3 triggers, the publication backoff, the paused-ledger
   posture, cutover continuity, partial acknowledgements, a sink outage,
-  status and `admission_open`.
+  status and `admission_open` (status-only readiness; never part of the
+  qualification policy snapshot).
 
   New-API tests: on the parent 52a2cc3fa they fail by absence (no test-only
   owner arities, no retirement status, no ledger). The exact-parent
@@ -96,6 +97,11 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert status["retirement"]["last_error"] == "ledger_write_failed"
       assert status["retirement"]["floor"] == 1
       assert status["capacity"]["retained_operation_count"] == 4096
+      # A failed retiring attempt claims no retirement headroom: status and
+      # readiness report what the next grant actually meets.
+      assert status["capacity"]["retirable_operation_count"] == 4096
+      assert status["capacity"]["remaining_increase_admissions"] == 0
+      assert status["admission_open"] == false
 
       # Inside the backoff window T3 does not publish.
       assert {:error, :capacity_exhausted} = Owner.prepare(name, grant(1))
@@ -123,6 +129,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert status["retirement"]["ledger_state"] == "bound"
       assert status["retirement"]["last_error"] == "none"
       assert status["capacity"]["retained_operation_count"] == 1
+      assert status["admission_open"] == true
     end
 
     test "an ambiguous boot publication serves poisoned and never stops the owner" do
@@ -191,9 +198,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert status["capacity"]["remaining_increase_admissions"] == 3072 - 3
       assert File.read!(ledger_path(root)) == "stale ledger bytes"
 
-      with_registered_owner(name, fn ->
-        refute admission_open?()
-      end)
+      refute admission_open?(name)
     end
   end
 
@@ -344,7 +349,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert [{_, %{ledger_state: :mismatch, occasion: :open}}] = drain(@paused_event)
       assert status!(restarted)["retirement"]["ledger_state"] == "mismatch"
 
-      with_registered_owner(restarted, fn -> refute admission_open?() end)
+      refute admission_open?(restarted)
     end
 
     test "under a paused ledger the 4096-retained endpoint refuses reductions instead of retiring" do
@@ -418,6 +423,29 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert status!(name)["capacity"]["retirable_operation_count"] == 515
     end
 
+    test "T2 is skipped inside an active publication backoff window" do
+      root = unique_root()
+      register_consumer!()
+      write_journal(root, v3_snapshot(%{}, delivered_terminals(1..511)))
+      {name, pid} = start_owner(root)
+      assert :sys.get_state(pid).t2_armed_at == 512
+
+      # A window armed by an earlier unpublished attempt. Every real arming
+      # path also re-arms T2 at retirable + 512, so the window is set directly
+      # to pin the skip itself.
+      set_backoff(pid, 60_000)
+      lifecycle!(name, grant(1))
+      _ = status!(name)
+      assert [] = drain(@retired_event) ++ drain(@failed_event)
+      assert status!(name)["capacity"]["retirable_operation_count"] == 512
+
+      # Once the window has lapsed the next acknowledgement publishes.
+      set_backoff(pid, -1)
+      lifecycle!(name, grant(2))
+      _ = status!(name)
+      assert [{%{count: 513}, %{trigger: :acknowledge}}] = drain(@retired_event)
+    end
+
     @tag :slow
     @tag timeout: 900_000
     test "sustained distinct v3 lifecycles beyond 4096 with immediate acknowledgements" do
@@ -475,73 +503,66 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     test "without acknowledgements pending grows until the entry clause refuses; acknowledging reopens admission" do
       root = unique_root()
       {name, _pid} = start_owner(root)
+      assert admission_open?(name)
 
-      with_registered_owner(name, fn name ->
-        assert admission_open?()
+      applied =
+        Enum.reduce_while(1..1400, [], fn n, acc ->
+          intent = grant(n)
 
-        applied =
-          Enum.reduce_while(1..1400, [], fn n, acc ->
-            intent = grant(n)
+          case Owner.prepare(name, intent) do
+            {:ok, _, "prepared"} ->
+              {:ok, :committed} = Owner.observe(name, intent["operation_id"], :applied)
+              {:cont, [intent | acc]}
 
-            case Owner.prepare(name, intent) do
-              {:ok, _, "prepared"} ->
-                {:ok, :committed} = Owner.observe(name, intent["operation_id"], :applied)
-                {:cont, [intent | acc]}
+            {:error, :soft_capacity_exhausted} ->
+              {:halt, Enum.reverse(acc)}
+          end
+        end)
 
-              {:error, :soft_capacity_exhausted} ->
-                {:halt, Enum.reverse(acc)}
-            end
-          end)
+      assert length(applied) in 1020..1025
+      assert [] = drain(@retired_event) ++ drain(@failed_event)
 
-        assert length(applied) in 1020..1025
-        assert [] = drain(@retired_event) ++ drain(@failed_event)
+      status = status!(name)
+      assert status["last_refusal"] == "soft_capacity_exhausted"
+      assert status["pending_count"] == length(applied)
+      assert status["capacity"]["retirable_operation_count"] == 0
+      assert status["capacity"]["remaining_increase_admissions"] > 0
+      capacity = status["capacity"]
+      # Exactly the entry clause: one more increase needs 3 entries.
+      assert capacity["remaining_soft_entries"] - capacity["reserved_entries"] < 3
+      refute admission_open?(name)
 
-        status = status!(name)
-        assert status["last_refusal"] == "soft_capacity_exhausted"
-        assert status["pending_count"] == length(applied)
-        assert status["capacity"]["retirable_operation_count"] == 0
-        assert status["capacity"]["remaining_increase_admissions"] > 0
-        capacity = status["capacity"]
-        assert capacity["remaining_soft_entries"] - capacity["reserved_entries"] <= 3
-        refute admission_open?()
+      register_consumer!()
+      {:ok, batch} = Owner.delivery_batch(name)
 
-        register_consumer!()
-        {:ok, batch} = Owner.delivery_batch(name)
+      # The 512th acknowledgement triggers T2 after its reply; the next one
+      # waits for the publication. Reservation accounting is incremental, so
+      # a publication re-folding ~1000 pending operations stays well inside
+      # the 5 s call timeout: no queued acknowledgement may time out.
+      replies =
+        batch
+        |> Enum.take(600)
+        |> Enum.map(fn item ->
+          Owner.acknowledge_delivery(name, item["operation_id"], item["intent_sha256"])
+        end)
 
-        # The 512th acknowledgement triggers T2 after its reply. The first
-        # publication after an outage re-folds a journal holding ~1000
-        # pending operations and can outlast the 5 s call timeout: an
-        # acknowledgement queued behind it then answers
-        # {:commit_uncertain, :timeout} (a false "pending" for the puller)
-        # but still commits when the owner reaches it.
-        replies =
-          batch
-          |> Enum.take(600)
-          |> Enum.map(fn item ->
-            Owner.acknowledge_delivery(name, item["operation_id"], item["intent_sha256"])
-          end)
+      assert Enum.all?(replies, &(&1 == {:ok, :committed}))
 
-        assert Enum.all?(
-                 replies,
-                 &(&1 in [{:ok, :committed}, {:error, {:commit_uncertain, :timeout}}])
-               )
+      assert [{%{count: 512, duration_ms: ms}, %{trigger: :acknowledge}}] =
+               drain(@retired_event, [], 30_000)
 
-        assert Enum.take(replies, 512) |> Enum.all?(&(&1 == {:ok, :committed}))
+      IO.puts(
+        "\n[audit retirement sink outage] pending=#{length(applied)} first T2 publication " <>
+          "duration_ms=#{ms}"
+      )
 
-        assert [{%{count: 512, duration_ms: ms}, %{trigger: :acknowledge}}] =
-                 drain(@retired_event, [], 30_000)
+      assert ms < 5_000
 
-        IO.puts(
-          "\n[audit retirement sink outage] pending=#{length(applied)} first T2 publication " <>
-            "duration_ms=#{ms} timed_out_acks=#{Enum.count(replies, &(&1 != {:ok, :committed}))}"
-        )
-
-        status = status!(name)
-        assert status["capacity"]["retired_operation_total"] == 512
-        assert status["pending_count"] == length(applied) - 600
-        assert admission_open?()
-        assert {:ok, _, "prepared"} = Owner.prepare(name, grant(5000))
-      end)
+      status = status!(name)
+      assert status["capacity"]["retired_operation_total"] == 512
+      assert status["pending_count"] == length(applied) - 600
+      assert admission_open?(name)
+      assert {:ok, _, "prepared"} = Owner.prepare(name, grant(5000))
     end
   end
 
@@ -592,6 +613,32 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     end
   end
 
+  describe "before cutover (spec section 7 row C)" do
+    # Section 4.3 is normative: the gated alias continues PENDING v1/v2
+    # operations only. Before the cutover publication lands (here: T1 kept
+    # failing), a v3 prepare with the same facts as a hot DELIVERED v2
+    # operation is therefore a new identity, the stated raw/rollback residual
+    # of section 11 (the facade cannot present it against a monotonic store:
+    # the live record short-circuits and a revoked one changes the facts). The
+    # v2 identity itself is refused as terminal.
+    test "a v3 twin of a hot delivered v2 operation is a new identity; the v2 prepare is terminal" do
+      root = unique_root()
+      v2 = intent(2, 1)
+      write_v2_journal(root, %{}, v2_lifecycle(v2))
+      {name, _pid} = start_owner(root, inject: [ledger_write_error: :eio])
+
+      assert [{_, %{trigger: :boot, reason: :ledger_write_failed}}] = drain(@failed_event)
+      assert status!(name)["retirement"]["floor"] == 1
+      assert status!(name)["capacity"]["retirable_operation_count"] == 1
+
+      assert {:error, :operation_terminal} = Owner.prepare(name, v2)
+      twin = intent(3, 1)
+      assert {:ok, admitted, "prepared"} = Owner.prepare(name, twin)
+      assert admitted["operation_id"] == twin["operation_id"]
+      refute admitted["operation_id"] == v2["operation_id"]
+    end
+  end
+
   describe "status and readiness" do
     test "a fresh operational journal is open for admission with the retirement map" do
       {name, _pid} = start_owner(unique_root())
@@ -607,7 +654,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
                "last_error" => "none"
              }
 
-      with_registered_owner(name, fn -> assert admission_open?() end)
+      assert admission_open?(name)
     end
 
     test "admission is closed when no increase can be admitted by the retained dimension" do
@@ -615,7 +662,81 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       write_journal(root, v3_snapshot(rejected_terminals(1..3072), %{}))
       {name, _pid} = start_owner(root)
       assert status!(name)["capacity"]["remaining_increase_admissions"] == 0
-      with_registered_owner(name, fn -> refute admission_open?() end)
+      refute admission_open?(name)
+    end
+
+    # Decision H9: expose readiness, never gate qualification on it. The
+    # execution policy snapshot is digested into the SecurityQualification
+    # profile fingerprint, so a readiness field there would change the
+    # fingerprint (and the exact approval URI) whenever a delivery backlog
+    # closed admission. Fails on ed9712a1b, which put `admission_open` into
+    # the snapshot's authority-journal identity; passes on the parent
+    # 52a2cc3fa, which had no readiness field.
+    test "security regression: journal admission readiness never changes the qualification policy snapshot" do
+      # A fresh journal (open) and one whose retained dimension admits no
+      # increase (closed), both serving.
+      {open, _pid} = start_owner(unique_root())
+      closed_root = unique_root()
+      write_journal(closed_root, v3_snapshot(rejected_terminals(1..3072), %{}))
+      {closed, _pid} = start_owner(closed_root)
+
+      open_snapshot = with_registered_owner(open, fn -> Security.execution_policy_snapshot() end)
+
+      closed_snapshot =
+        with_registered_owner(closed, fn -> Security.execution_policy_snapshot() end)
+
+      assert {:ok, identity} = open_snapshot.authority_journal
+      refute Map.has_key?(identity, "admission_open")
+      assert open_snapshot == closed_snapshot
+
+      assert :erlang.term_to_binary(open_snapshot, [:deterministic]) ==
+               :erlang.term_to_binary(closed_snapshot, [:deterministic])
+
+      # Readiness itself is still exposed, in status.
+      assert admission_open?(open)
+      refute admission_open?(closed)
+    end
+
+    test "admission_open follows the exact entry clause of the next increase" do
+      root = unique_root()
+      {name, _pid} = start_owner(root)
+
+      # Prepared-only increases: each writes 1 entry and reserves 2, lowering
+      # `remaining_soft_entries - reserved_entries` by 3. One rejected
+      # operation first shifts that value by one so the walk passes through
+      # exactly 3 (the last admissible value). Readiness must flip exactly
+      # when the core starts refusing the next increase.
+      rejected = grant(0)
+      assert {:ok, _, "prepared"} = Owner.prepare(name, rejected)
+
+      assert {:ok, :committed} =
+               Owner.observe(name, rejected["operation_id"], {:rejected, "before_mismatch"})
+
+      capacity = status!(name)["capacity"]
+      assert rem(capacity["remaining_soft_entries"] - capacity["reserved_entries"], 3) == 0
+
+      outcome =
+        Enum.reduce_while(1..1100, :open, fn n, :open ->
+          ready? = admission_open?(name)
+
+          case Owner.prepare(name, grant(n)) do
+            {:ok, _, "prepared"} ->
+              assert ready?, "admission_open was false but increase #{n} was admitted"
+              {:cont, :open}
+
+            {:error, :soft_capacity_exhausted} ->
+              refute ready?, "admission_open was true but increase #{n} was refused"
+              {:halt, {:refused_at, n}}
+          end
+        end)
+
+      assert {:refused_at, n} = outcome
+      assert n in 1020..1025
+      # The refused call's T3 compaction reclaims the rejected operation's two
+      # records, which still leaves less than one increase.
+      capacity = status!(name)["capacity"]
+      assert (capacity["remaining_soft_entries"] - capacity["reserved_entries"]) in 0..2
+      refute admission_open?(name)
     end
 
     test "prepare refuses every terminal identity and records the refusal" do
@@ -674,7 +795,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
 
   # Swap the registered owner so the arity-0 facade (and
   # execution_policy_snapshot) read this journal; `fun` receives the
-  # registered name to address it by.
+  # registered name to address it by. Returns `fun`'s result.
   defp with_registered_owner(name, fun) when is_function(fun, 1) do
     original = Process.whereis(Owner)
     pid = Process.whereis(name)
@@ -748,12 +869,15 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     name
   end
 
-  defp admission_open? do
-    assert {:ok, identity} = Security.execution_policy_snapshot().authority_journal
-    identity["admission_open"]
-  end
+  defp admission_open?(name), do: status!(name)["admission_open"]
 
   defp wait_backoff, do: Process.sleep(5_100)
+
+  defp set_backoff(pid, from_now_ms) do
+    :sys.replace_state(pid, fn state ->
+      %{state | publication_backoff_until: System.monotonic_time(:millisecond) + from_now_ms}
+    end)
+  end
 
   defp drain(event, acc \\ [], wait \\ 50) do
     receive do
@@ -959,6 +1083,27 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       "occurred_at" => intent["prepared_at"],
       "intent" => intent
     }
+  end
+
+  defp v2_lifecycle(intent) do
+    base = %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => intent["prepared_at"]
+    }
+
+    [
+      record(intent, "prepared"),
+      Map.merge(base, %{
+        "record_type" => "effect_applied",
+        "observation" => %{
+          "kind" => "applied",
+          "after_fingerprint" => intent["after_fingerprint"]
+        }
+      }),
+      Map.put(base, "record_type", "delivered")
+    ]
   end
 
   defp digest(intent) do

@@ -45,6 +45,17 @@ defmodule Arbor.Security.AuditJournalOwner do
   reported in status; publications keep running non-retiring and retirement
   headroom counts as zero.
 
+  Status claims retirement headroom (`capacity.remaining_increase_admissions`)
+  only while retirement is live and healthy: a durable operational journal,
+  ledger not paused, and no failed last retiring attempt
+  (`retirement.last_error == "none"`). Top-level `admission_open` is the
+  readiness projection `serving and ledger not paused and
+  AuditJournalCore.increase_headroom?/2` under that headroom. It is a signal
+  for operators, never an admission decision, and it is deliberately NOT part
+  of `Arbor.Security.execution_policy_snapshot/0`: that snapshot is digested
+  into the security-qualification fingerprint, so a load-dependent field there
+  would un-qualify sessions whenever a delivery backlog closed admission.
+
   `prepare` answers `{:error, :operation_terminal}` for every terminal
   identity (compacted or not), continues a pending v1/v2 operation when a v3
   intent of identical facts arrives (only while such an operation is
@@ -700,6 +711,14 @@ defmodule Arbor.Security.AuditJournalOwner do
     state.mode == :durable and operational?(state) and not paused?(state)
   end
 
+  # Status and readiness additionally require the last retiring attempt to
+  # have succeeded: while a fault keeps publications from landing, retirable
+  # identities are not headroom. T3 keeps using `effective_retirable/1` so it
+  # still retries after the backoff and recovers from a transient fault.
+  defp status_retirement_live?(state) do
+    retiring?(state) and state.retirement_error == :none
+  end
+
   defp effective_retirable(state) do
     if retiring?(state), do: AuditJournalCore.retirable_count(state.core), else: 0
   end
@@ -841,6 +860,7 @@ defmodule Arbor.Security.AuditJournalOwner do
       {:ok, summary} ->
         shown = AuditJournalCore.show(state.core)
         availability = state.availability
+        headroom_opts = [paused: not status_retirement_live?(state)]
 
         {:ok,
          %{
@@ -858,7 +878,10 @@ defmodule Arbor.Security.AuditJournalOwner do
            "pending_count" => summary["pending_count"],
            "oldest_pending_age_seconds" => summary["oldest_pending_age_seconds"],
            "committed_frames" => state.committed_frames,
-           "capacity" => AuditJournalCore.capacity(state.core, paused: not retiring?(state)),
+           "capacity" => AuditJournalCore.capacity(state.core, headroom_opts),
+           "admission_open" =>
+             availability == :serving and not paused?(state) and
+               AuditJournalCore.increase_headroom?(state.core, headroom_opts),
            "last_refusal" => Atom.to_string(state.last_refusal),
            "retirement" => %{
              "floor" => AuditJournalCore.admission_floor(state.core),

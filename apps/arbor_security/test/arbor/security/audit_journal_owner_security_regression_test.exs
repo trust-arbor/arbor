@@ -35,7 +35,9 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
                  "committed_frames",
                  "capacity",
                  # Terminal-identity retirement (2026-09-28): the last prepare
-                 # refusal and the bounded retirement map.
+                 # refusal, the bounded retirement map and the readiness
+                 # projection (status only, never the qualification snapshot).
+                 "admission_open",
                  "last_refusal",
                  "retirement"
                ])
@@ -64,6 +66,8 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert status["last_refusal"] in ~w(none soft_capacity_exhausted capacity_exhausted retired_version operation_terminal)
 
     assert status["retirement"]["ledger_state"] in ~w(none absent bound bound_orphan mismatch ahead)
+
+    assert is_boolean(status["admission_open"])
 
     assert is_list(pending)
     assert length(pending) <= 48

@@ -33,6 +33,7 @@ defmodule Arbor.Security.AuditOperationalCapacitySecurityRegressionTest do
     assert status["retirement"]["ledger_frames"] == 0
     assert status["retirement"]["last_error"] == "none"
     assert status["last_refusal"] == "none"
+    assert status["admission_open"] == true
     assert status["capacity"]["retired_operation_total"] == 0
     assert status["capacity"]["retire_batch"] == 512
     assert status["capacity"]["remaining_increase_admissions"] == 3072

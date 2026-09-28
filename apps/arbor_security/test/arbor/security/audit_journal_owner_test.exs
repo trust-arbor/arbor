@@ -30,7 +30,9 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
                  "committed_frames",
                  "capacity",
                  # Terminal-identity retirement (2026-09-28): the last prepare
-                 # refusal and the bounded retirement map.
+                 # refusal, the bounded retirement map and the readiness
+                 # projection (status only, never the qualification snapshot).
+                 "admission_open",
                  "last_refusal",
                  "retirement"
                ])
@@ -205,6 +207,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     assert MapSet.new(Map.keys(status)) == @status_keys
     assert MapSet.new(Map.keys(status["retirement"])) == @retirement_keys
     assert status["last_refusal"] == "none"
+    assert is_boolean(status["admission_open"])
     assert status["retirement"]["prepared_count"] == 1
     assert status["retirement"]["oldest_prepared_age_seconds"] in 0..31_536_000
     assert status["oldest_pending_age_seconds"] in 0..31_536_000

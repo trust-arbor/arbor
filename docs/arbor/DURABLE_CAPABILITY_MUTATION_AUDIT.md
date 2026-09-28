@@ -137,30 +137,63 @@ ledger is paused, starts a 5-second backoff in which T2 is skipped and T3
 answers the capacity refusal without publishing. A paused ledger is logged as an
 error once and reported; retirement headroom then counts as zero.
 
-Publication time grows with the pending set (each publication re-folds the
-journal, and each fold step re-reserves every pending operation's remaining
-records). Measured on the development laptop on 2026-09-28: about 0.5-0.9 s per
-512-identity T2 publication with nothing pending, and about 10 s for the first
-T2 publication after a sink outage left about 1000 operations pending. A call
-that waits longer than the 5-second journal call timeout answers
-`{:commit_uncertain, :timeout}` (for the Historian puller a false "pending"; the
-queued acknowledgement still commits), a grant `:audit_unavailable`, and a
-revoke executes `:degraded` while its queued prepare still lands.
+Every publication re-folds the journal several times (candidate encoding,
+candidate proof, source-tip proof, published replay), so its time is linear in
+the hot set plus the pending records. The reducer keeps the pending operations'
+reserved records as a running total, so each fold step's admission check is
+O(1) in the pending count. (Before this, each step re-derived every pending
+operation's reservation: the first publication after a sink outage that left
+about 1000 operations pending took about 10 s, and appends under that backlog
+about 12 ms each.) Measured on the development laptop on 2026-09-28: about
+0.45-0.8 s per 512-identity T2 publication with nothing pending, and about
+1.3 s for the first T2 after a sink outage left 1023 operations pending (the
+most the entry clause admits). A call that still waits longer than the
+5-second journal call timeout answers `{:commit_uncertain, :timeout}` (for the
+Historian puller a false "pending"; the queued acknowledgement still commits),
+a grant `:audit_unavailable`, and a revoke executes `:degraded` while its queued
+prepare still lands. If a publication's `duration_ms` (logged and in the
+`[:arbor, :security, :audit_journal, :retired]` telemetry) approaches that
+timeout, investigate the disk before anything else.
 
 `Security.audit_journal_status/0` reports the retirement state: under
 `capacity`, `retirable_operation_count`, `retired_operation_total`,
 `retire_batch`, `remaining_increase_admissions` (increase headroom after the
-retirement the next refusal would perform) and `reserved_entries`/
-`reserved_bytes`; a top-level `last_refusal`; and a `retirement` map with the
-admission `floor`, the `ledger_state`, `ledger_frames`, `prepared_count`,
-`oldest_prepared_age_seconds` and the last retirement `last_error`. The
-`ledger_state` is the one of the handle's last open or adopted publication: after
-an unpublished attempt that left an orphan frame a live owner may report
-`absent` while a restart over the same bytes reports `bound_orphan`; both
-retire. `Security.execution_policy_snapshot/0` carries an `admission_open`
-readiness signal in its authority-journal identity (serving, increase headroom,
-reservation-aware entry headroom, ledger not paused). It is not the admission
-decision and does not gate session qualification.
+retirement the next refusal would perform; retirement counts as zero while the
+ledger is paused or the last retiring attempt failed) and `reserved_entries`/
+`reserved_bytes`; a top-level `last_refusal`; a top-level `admission_open`; and
+a `retirement` map with the admission `floor`, the `ledger_state`,
+`ledger_frames`, `prepared_count`, `oldest_prepared_age_seconds` and the last
+retirement `last_error`. The `ledger_state` is the one of the handle's last open
+or adopted publication: after an unpublished attempt that left an orphan frame a
+live owner may report `absent` while a restart over the same bytes reports
+`bound_orphan`; both retire.
+
+`admission_open` is a readiness signal, never the admission decision: true when
+the journal is serving, the ledger is not paused, and one more increase would
+pass the retained (`remaining_increase_admissions > 0`), entry
+(`remaining_soft_entries - reserved_entries >= 3`, the increase's own record
+plus the two it reserves) and soft-byte (room for a maximum-size record beyond
+reservations) clauses. It lives in status only. It is deliberately not part of
+`Security.execution_policy_snapshot/0`: that snapshot is digested into the
+security-qualification profile fingerprint (and so into the exact approval
+capability), and a load-dependent field there would un-qualify every qualified
+session whenever a delivery backlog closed admission. Decision H9 is "expose,
+do not gate"; whether qualification should gate on readiness is a separate
+roadmap item.
+
+Before the cutover publication lands (for example while T1 keeps failing), a
+v3 prepare with the same facts as a hot delivered v1/v2 operation is a new
+identity, not `:operation_terminal`: the cutover alias continues pending
+operations only. The facade cannot present such a prepare against a monotonic
+store; it is the raw/rollback residual below.
+
+The previous release cannot read a journal once this code has started on it:
+its snapshot rules refuse the v3 snapshot (exact-parent proof against
+52a2cc3fa on 2026-09-28: frame admission, snapshot admission and open all
+`:malformed`; a v3 intent record `:unsupported_version`). Rolling back code
+therefore means stopping the node, moving the journal/ledger pair aside (never
+deleting it) and restoring the pre-cutover journal copy; everything journaled
+since the cutover is then absent from the restored journal.
 
 Retirement never deletes protected audit history, and a retired v1/v2 identity
 is refused `:retired_version`, never admitted as new. A retired v3 identity is

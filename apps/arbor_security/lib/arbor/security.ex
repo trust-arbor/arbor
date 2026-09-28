@@ -214,39 +214,17 @@ defmodule Arbor.Security do
 
   def execution_capability_snapshot(_), do: {:error, :capability_profile_unavailable}
 
-  # `admission_open` is a readiness signal for operators and qualification
-  # evidence, not the admission decision (the journal core decides every
-  # admission). It does not gate `SecurityQualification.enforcing_policy?`.
+  # Only configuration-stable journal fields. This snapshot is digested into
+  # the security-qualification fingerprint (SecurityQualification.capture/2),
+  # so load-dependent readiness such as the journal's `admission_open` stays in
+  # `audit_journal_status/0`: a delivery backlog must never change a qualified
+  # profile's identity.
   defp qualification_journal_identity do
     case audit_journal_status() do
-      {:ok, status} ->
-        {:ok,
-         status
-         |> Map.take(~w(mode durability serving poisoned torn_tail))
-         |> Map.put("admission_open", audit_admission_open?(status))}
-
-      _ ->
-        {:error, :journal_unavailable}
+      {:ok, status} -> {:ok, Map.take(status, ~w(mode durability serving poisoned torn_tail))}
+      _ -> {:error, :journal_unavailable}
     end
   end
-
-  # Entry headroom is reservation-aware: `remaining_soft_entries` counts only
-  # written entries, while every admission is checked against written plus
-  # the records pending operations have reserved.
-  defp audit_admission_open?(%{"serving" => true} = status) do
-    capacity = Map.get(status, "capacity", %{})
-    ledger_state = get_in(status, ["retirement", "ledger_state"])
-
-    with increases when is_integer(increases) <- capacity["remaining_increase_admissions"],
-         soft when is_integer(soft) <- capacity["remaining_soft_entries"],
-         reserved when is_integer(reserved) <- capacity["reserved_entries"] do
-      increases > 0 and soft - reserved > 3 and ledger_state not in ["mismatch", "ahead"]
-    else
-      _ -> false
-    end
-  end
-
-  defp audit_admission_open?(_status), do: false
 
   defp qualification_approval_resource?(uri) when is_binary(uri),
     do:
@@ -3565,11 +3543,21 @@ defmodule Arbor.Security do
     next retiring publication would retire), `"retired_operation_total"`,
     `"retire_batch"` and `"remaining_increase_admissions"` (increase headroom
     after that retirement; retirement counts as zero while the ledger is
-    paused or where no retiring publication exists, i.e. ephemeral and small
-    journals), plus `"reserved_entries"`/`"reserved_bytes"` (records pending
-    operations have reserved; every admission is checked against written
-    plus reserved). The existing map-size fields are unchanged, so an empty
-    queue is never read as capacity.
+    paused, while the last retiring publication attempt has failed
+    (`retirement.last_error` not `"none"`), or where no retiring publication
+    exists, i.e. ephemeral and small journals), plus
+    `"reserved_entries"`/`"reserved_bytes"` (records pending operations have
+    reserved; every admission is checked against written plus reserved). The
+    existing map-size fields are unchanged, so an empty queue is never read as
+    capacity.
+  - `"admission_open"`: readiness, not the admission decision. True when the
+    journal is serving, the ledger is not paused, and one more increase
+    would pass the retained (`remaining_increase_admissions > 0`), entry
+    (`remaining_soft_entries - reserved_entries >= 3`) and soft-byte (room for
+    a maximum-size record beyond reservations) clauses. It is intentionally
+    absent from `execution_policy_snapshot/0`, whose digest binds security
+    qualification: a Historian backlog must not un-qualify sessions (decision
+    H9: expose, do not gate).
   - `"last_refusal"`: the last prepare refusal since the owner started,
     `"none" | "soft_capacity_exhausted" | "capacity_exhausted" |
     "retired_version" | "operation_terminal"`.

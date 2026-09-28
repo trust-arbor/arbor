@@ -360,6 +360,45 @@ defmodule Arbor.Security.Contracts.AuditJournalV3Test do
     end
   end
 
+  describe "rollback window" do
+    # The previous release (52a2cc3fa) dispatched snapshots through exactly two
+    # clauses: the exact-six-key v2 clause (unchanged here apart from naming
+    # its key list) and the generic v1 clause. These assertions pin that
+    # neither can read a v3 snapshot, so the rollback window closes at the
+    # first start of the new code (spec section 10). Exact-parent proof run on
+    # 52a2cc3fa (2026-09-28) against a journal written by this code:
+    # AuditJournalFileCore.admit_payload of the v3 snapshot frame, parent
+    # AuditJournal.admit_snapshot and AuditJournalFile.open all returned
+    # {:error, :malformed}; a v3 intent prepared record was
+    # {:error, :unsupported_version}.
+    test "the v2 and v1 snapshot clauses refuse a v3 snapshot object" do
+      v3 = v3_snapshot(retirement(4096, binding(1, 0, 900)))
+      assert {:ok, _} = AuditJournal.admit_snapshot(v3)
+
+      as_v2 = Map.put(v3, "version", 2)
+      assert {:error, _} = AuditJournal.admit_snapshot(as_v2)
+
+      assert {:error, _} =
+               as_v2
+               |> Map.put("kind", AuditJournal.operational_snapshot_kind())
+               |> AuditJournal.admit_snapshot()
+
+      # Control: the `retirement` member alone is what the v2 clause refuses.
+      assert {:ok, _} =
+               as_v2
+               |> Map.put("kind", AuditJournal.operational_snapshot_kind())
+               |> Map.delete("retirement")
+               |> AuditJournal.admit_snapshot()
+
+      assert {:error, _} = AuditJournal.admit_snapshot(Map.put(v3, "version", 1))
+
+      assert {:error, _} =
+               v3
+               |> Map.merge(%{"version" => 1, "kind" => AuditJournal.snapshot_kind()})
+               |> AuditJournal.admit_snapshot()
+    end
+  end
+
   describe "retirement batch" do
     test "admits 4096 delivered entries and bounds canonical bytes by the payload limit" do
       batch = batch(delivered_map(4096))

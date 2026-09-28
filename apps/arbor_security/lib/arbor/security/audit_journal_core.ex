@@ -15,6 +15,12 @@ defmodule Arbor.Security.AuditJournalCore do
   `compaction_reclaims_occupancy?/1` is entry-based: projected occupancy is
   `1 + pending_record_count`, matching compact's `used_entries`.
 
+  `reserved_entries`/`reserved_bytes` hold the records every pending v2/v3
+  operation has reserved for the rest of its lifecycle. They are derived
+  state, maintained incrementally by every transition and recomputed once by
+  compact/restore, so an admission costs O(1) in the pending count (a fold or
+  publication re-fold is linear, not quadratic, under a delivery backlog).
+
   Terminal-identity retirement (operational profile only):
   - Every operational compaction emits a v3 snapshot carrying
     `retirement.retired_total` and the cold retirement-ledger binding. The
@@ -507,8 +513,37 @@ defmodule Arbor.Security.AuditJournalCore do
     }
   end
 
-  defp capacity_reservation(%{"operations" => operations}) when is_map(operations) do
-    reserved_cost(operations)
+  @doc """
+  Readiness projection over `capacity/2` with the same `opts`: true when one
+  more `authority_increase` would pass the retained, entry and soft-byte
+  clauses of the admission check.
+
+  - retained: `remaining_increase_admissions > 0`;
+  - entries (exact): `remaining_soft_entries - reserved_entries >= 3`, the
+    increase's own prepared record plus the two records it reserves;
+  - bytes (conservative): room for a maximum-size prepared record beyond every
+    reservation.
+
+  A readiness signal only; `append/2` is always the admission decision.
+  """
+  @spec increase_headroom?(term(), keyword()) :: boolean()
+  def increase_headroom?(state, opts \\ [])
+
+  def increase_headroom?(state, opts) when is_map(state) and is_list(opts) do
+    capacity = capacity(state, opts)
+
+    capacity["remaining_increase_admissions"] > 0 and
+      capacity["remaining_soft_entries"] - capacity["reserved_entries"] >= 3 and
+      capacity["remaining_soft_bytes"] - capacity["reserved_bytes"] >=
+        limits(state).max_record_bytes
+  rescue
+    _ -> false
+  end
+
+  def increase_headroom?(_state, _opts), do: false
+
+  defp capacity_reservation(%{"operations" => operations} = state) when is_map(operations) do
+    reservation(state)
   rescue
     _ -> {0, 0}
   end
@@ -566,7 +601,9 @@ defmodule Arbor.Security.AuditJournalCore do
       "version" => @version,
       "operations" => %{},
       "entry_count" => 0,
-      "byte_count" => 0
+      "byte_count" => 0,
+      "reserved_entries" => 0,
+      "reserved_bytes" => 0
     }
   end
 
@@ -576,6 +613,7 @@ defmodule Arbor.Security.AuditJournalCore do
          true <- is_map(state["operations"]),
          true <- is_integer(state["entry_count"]) and state["entry_count"] >= 0,
          true <- is_integer(state["byte_count"]) and state["byte_count"] >= 0,
+         :ok <- valid_reservation_fields(state),
          :ok <- valid_snapshot_fields(state) do
       :ok
     else
@@ -584,6 +622,22 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp valid_state(_state), do: {:error, :malformed}
+
+  # Derived reservation totals: absent (a hand-built state; derived on demand)
+  # or both present as non-negative integers.
+  defp valid_reservation_fields(state) do
+    case {Map.fetch(state, "reserved_entries"), Map.fetch(state, "reserved_bytes")} do
+      {:error, :error} ->
+        :ok
+
+      {{:ok, entries}, {:ok, bytes}}
+      when is_integer(entries) and entries >= 0 and is_integer(bytes) and bytes >= 0 ->
+        :ok
+
+      _invalid ->
+        {:error, :malformed}
+    end
+  end
 
   defp valid_snapshot_fields(state) do
     case Map.fetch(state, "snapshot") do
@@ -764,17 +818,21 @@ defmodule Arbor.Security.AuditJournalCore do
   # uses V2/V3 and reserves its remaining applied+delivered (or rejected)
   # records before the authority effect. Finishing an admitted operation
   # consumes its reservation instead of spending the reduction reserve twice.
+  #
+  # The reservation after this transition: every other operation's remaining
+  # cost (the maintained total minus the target's current share) plus the
+  # target's remaining cost after it. O(1) in the pending count.
   defp prospective_reservation(state, record) do
     target = record["operation_id"]
 
     other =
-      Enum.reduce(state["operations"], {0, 0}, fn
-        {^target, _operation}, acc ->
-          acc
+      case Map.fetch(state["operations"], target) do
+        {:ok, operation} ->
+          sub_cost(reservation(state), remaining_cost(operation["intent"], operation["status"]))
 
-        {_id, operation}, acc ->
-          add_cost(acc, remaining_cost(operation["intent"], operation["status"]))
-      end)
+        :error ->
+          reservation(state)
+      end
 
     intent =
       case record["record_type"] do
@@ -784,6 +842,17 @@ defmodule Arbor.Security.AuditJournalCore do
 
     add_cost(other, remaining_cost(intent, record["record_type"]))
   end
+
+  # The maintained reservation total; derived from the operations for a state
+  # built without it (a projection such as `%{"operations" => pending}`).
+  defp reservation(%{"reserved_entries" => entries, "reserved_bytes" => bytes})
+       when is_integer(entries) and is_integer(bytes),
+       do: {entries, bytes}
+
+  defp reservation(%{"operations" => operations}), do: reserved_cost(operations)
+
+  defp put_reservation(state, {entries, bytes}),
+    do: Map.merge(state, %{"reserved_entries" => entries, "reserved_bytes" => bytes})
 
   defp remaining_cost(%{"version" => version} = intent, "prepared") when version in [2, 3] do
     {applied_entries, applied_bytes} = transition_cost(intent, "effect_applied")
@@ -828,14 +897,17 @@ defmodule Arbor.Security.AuditJournalCore do
   defp add_cost({entries, bytes}, {more_entries, more_bytes}),
     do: {entries + more_entries, bytes + more_bytes}
 
+  defp sub_cost({entries, bytes}, {less_entries, less_bytes}),
+    do: {entries - less_entries, bytes - less_bytes}
+
   defp reserved_cost(operations) do
     Enum.reduce(operations, {0, 0}, fn {_id, op}, acc ->
       add_cost(acc, remaining_cost(op["intent"], op["status"]))
     end)
   end
 
-  defp reserved_occupancy_exceeded?(operations, entries, bytes, limits) do
-    {reserved_entries, reserved_bytes} = reserved_cost(operations)
+  defp reserved_occupancy_exceeded?(operations, reserved, entries, bytes, limits) do
+    {reserved_entries, reserved_bytes} = reserved
 
     (limits.hard_entry_cap == AuditJournal.limits(:operational).hard_entry_cap and
        map_size(operations) > limits.hard_entry_cap) or
@@ -862,12 +934,15 @@ defmodule Arbor.Security.AuditJournalCore do
       "records" => %{record["record_type"] => bytes}
     }
 
+    reserved = add_cost(reservation(state), remaining_cost(intent, "prepared"))
+
     %{
       state
       | "operations" => Map.put(state["operations"], operation_id, op),
         "entry_count" => state["entry_count"] + 1,
         "byte_count" => state["byte_count"] + byte_size(bytes)
     }
+    |> put_reservation(reserved)
   end
 
   defp put_next(state, op, record, bytes) do
@@ -880,12 +955,19 @@ defmodule Arbor.Security.AuditJournalCore do
         "records" => Map.put(op["records"], record_type, bytes)
     }
 
+    reserved =
+      state
+      |> reservation()
+      |> sub_cost(remaining_cost(op["intent"], op["status"]))
+      |> add_cost(remaining_cost(op["intent"], record_type))
+
     %{
       state
       | "operations" => Map.put(state["operations"], operation_id, updated),
         "entry_count" => state["entry_count"] + 1,
         "byte_count" => state["byte_count"] + byte_size(bytes)
     }
+    |> put_reservation(reserved)
   end
 
   defp operation_intent_digest(%{"intent_sha256" => sha256}) when is_binary(sha256), do: sha256
@@ -1054,17 +1136,23 @@ defmodule Arbor.Security.AuditJournalCore do
          used_bytes,
          limits
        ) do
-    if reserved_occupancy_exceeded?(operations, used_entries, used_bytes, limits) do
+    reserved = reserved_cost(operations)
+
+    if reserved_occupancy_exceeded?(operations, reserved, used_entries, used_bytes, limits) do
       {:error, :capacity_exhausted}
     else
-      next = %{
-        "version" => @version,
-        "operations" => operations,
-        "entry_count" => used_entries,
-        "byte_count" => used_bytes,
-        "snapshot" => snapshot,
-        "snapshot_bytes" => snap_size
-      }
+      next =
+        put_reservation(
+          %{
+            "version" => @version,
+            "operations" => operations,
+            "entry_count" => used_entries,
+            "byte_count" => used_bytes,
+            "snapshot" => snapshot,
+            "snapshot_bytes" => snap_size
+          },
+          reserved
+        )
 
       next =
         if AuditJournal.snapshot_profile(snapshot) == :operational,
@@ -1616,6 +1704,7 @@ defmodule Arbor.Security.AuditJournalCore do
          {:ok, state} <- install_pending(state, supplied) do
       if reserved_occupancy_exceeded?(
            state["operations"],
+           reservation(state),
            used_entries,
            used_bytes,
            limits(state)
