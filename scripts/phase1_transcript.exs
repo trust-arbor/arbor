@@ -2,6 +2,8 @@ Application.ensure_all_started(:jason)
 Application.ensure_all_started(:req)
 Application.ensure_all_started(:req_llm)
 
+repo_root = System.get_env("ARBOR_ROOT") || File.cwd!()
+
 task = """
 You are analyzing the Arbor codebase — an Elixir umbrella project for AI agent orchestration.
 
@@ -20,7 +22,7 @@ Finally, write a comprehensive architecture summary explaining:
 
 Be thorough — read every file, do not skip any. This is for documentation purposes.
 
-Working directory: /Users/azmaveth/code/trust-arbor/arbor
+Working directory: #{repo_root}
 """
 
 IO.puts("[Phase 1] Starting SimpleAgent transcript generation...")
@@ -34,7 +36,7 @@ result =
     provider: :openrouter,
     model: "openai/gpt-oss-120b:free",
     max_turns: 50,
-    working_dir: "/Users/azmaveth/code/trust-arbor/arbor",
+    working_dir: repo_root,
     context_management: :none
   )
 
@@ -88,7 +90,9 @@ case result do
 
     path =
       Path.join([
-        "/Users/azmaveth/code/trust-arbor/arbor/.arbor/evals",
+        repo_root,
+        ".arbor",
+        "evals",
         "phase1-transcript-#{System.os_time(:second)}.json"
       ])
 

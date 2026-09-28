@@ -1,5 +1,9 @@
 # Session-as-DOT Spike Results
 
+> **Historical (2026-02-11).** Session-as-DOT is the production Session path.
+> Keep this note for provenance. Do not treat the listed gaps as current —
+> verify against `apps/arbor_orchestrator` before designing from them.
+
 **Spike Duration**: 1.5 days (of 2-3 day budget)
 **Date**: 2026-02-11
 **Verdict**: **VIABLE** — proceed to Phase 1 contracts

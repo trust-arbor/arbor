@@ -1,21 +1,28 @@
-# ArborCartographer
+# Arbor Cartographer
 
-**TODO: Add description**
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `arbor_cartographer` to your list of dependencies in `mix.exs`:
+Hardware capability-aware scheduling for distributed Arbor agents
+(`Arbor.Cartographer`). Nodes advertise CPU, memory, GPU, and custom
+tags; callers ask for a capable node and deploy to it.
 
 ```elixir
-def deps do
-  [
-    {:arbor_cartographer, "~> 0.1.0"}
-  ]
-end
+{:ok, _} = Arbor.Cartographer.start_link()
+
+{:ok, nodes} = Arbor.Cartographer.find_capable_nodes([:gpu])
+
+{:ok, pid} = Arbor.Cartographer.deploy(MyLLMAgent,
+  needs: [:gpu, :high_memory],
+  args: [model: "llama-3-70b"]
+)
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/arbor_cartographer>.
+Current implementation is local-only (hardware detection, capability
+registration, load monitoring). Cluster routing via eigr/mesh is planned,
+not wired. See `Arbor.Contracts.Libraries.Cartographer` for the API
+contract.
 
+This is an umbrella app (L1) with a single in-umbrella dependency:
+`arbor_kernel`.
+
+## License
+
+MIT

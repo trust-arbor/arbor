@@ -14,6 +14,9 @@ attacksurface.*.md
 **/cover/
 /doc/
 erl_crash.dump
+core
+core.*
+*.core
 *.ez
 *.beam
 *.tar
