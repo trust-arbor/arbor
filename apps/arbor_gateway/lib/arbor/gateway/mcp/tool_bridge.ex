@@ -73,7 +73,7 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
     uri = capability_uri(server_name, tool_name)
 
     if security_available?() do
-      case apply(security_module(), :authorize, [agent_id, uri, %{action: :execute}]) do
+      case apply(security_module(), :authorize, [agent_id, uri, :execute]) do
         {:ok, _} ->
           :ok
 

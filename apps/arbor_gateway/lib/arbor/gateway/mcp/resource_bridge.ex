@@ -70,7 +70,7 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
     uri = capability_uri(server_name, resource_name)
 
     if security_available?() do
-      case apply(security_module(), :authorize, [agent_id, uri, %{action: :read}]) do
+      case apply(security_module(), :authorize, [agent_id, uri, :read]) do
         {:ok, _} ->
           :ok
 
