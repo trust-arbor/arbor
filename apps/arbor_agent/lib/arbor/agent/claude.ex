@@ -459,7 +459,9 @@ defmodule Arbor.Agent.Claude do
     # Capability-derived tool exposure: the CLI subprocess gets an MCP
     # endpoint listing only actions the agent could actually run, instead
     # of the full action surface filtered after the fact at execute time.
-    # AcpPool.ToolServer + ex_mcp's mcpServers field wire the rest.
+    # AcpPool.ToolServer serves them. The Claude CLI ignores session/new
+    # mcpServers, so AcpSession delivers the descriptor at launch via a
+    # private --mcp-config file (AcpSession.McpLaunchCore).
     tool_modules =
       case state.id do
         id when is_binary(id) and id != "" ->

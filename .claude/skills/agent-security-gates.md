@@ -280,6 +280,10 @@ another one. It doubles as user documentation — anyone standing up agents need
   explicit scoped ToolServer. Force provider logs into the private runtime at warning
   verbosity, and keep `ExMCP.ACP.Client` at an `:info` module-level floor because
   its debug fallback includes complete unsupported notification payloads.
+- **Claude sessions are strict (2026-09-27).** Every ClaudeSDK launch gets
+  `--strict-mcp-config`, so servers from the user's own Claude configuration
+  never join, even when the bound list is empty (see gate 28). Codex still reads
+  `~/.codex/config.toml`; RuntimeHome has no private Codex home yet.
 
 ## 13. Cluster security-sync is optional until subscribers are configured
 
@@ -794,11 +798,28 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   passing the map `start/2` returned, and send its `headers` verbatim. That is the
   only place the token should live: `AcpPool` strips `:token` from the entry it
   keeps in pool state. Never log `mcp_servers`: the token is a live credential for
-  the session's lifetime. See gate 12 for why `ExMCP.ACP.Client` stays at an
-  `:info` floor. Codex's adapter only forwards HTTP MCP servers that pass
-  `:authorize_mcp_server` or an exact-map `:trusted_mcp_servers` match; if Arbor
-  ever configures the latter, it must include the per-session header. Regression:
-  the `security regression (Imp review D6)` block in `tool_server_test.exs`.
+  the session's lifetime. `AcpSession.format_status/1` redacts header and env
+  values in the bound list. See gate 12 for why `ExMCP.ACP.Client` stays at an
+  `:info` floor. Regression: the `security regression (Imp review D6)` block in
+  `tool_server_test.exs`.
+- **Adapter-backed providers need launch-time delivery (fixed 2026-09-27).** Native
+  ACP agents read `mcpServers` from `session/new`. ex_mcp 1.3.0's ClaudeSDK adapter
+  ignores it there, so Claude never saw the ToolServer. The Codex/ZCode adapters
+  refuse any MCP server that isn't authorized, so `session/new` failed outright
+  once a ToolServer was bound. `AcpSession.McpLaunchCore` now handles both, keyed
+  on the client's `:adapter`:
+  - Claude: writes the servers to a 0600 `claude-mcp-config.json` in the private
+    runtime home and passes `--mcp-config <path>` plus `--strict-mcp-config`.
+    Never the JSON itself, since argv is visible to `ps`. It also appends
+    `mcp__<name>` to `allowed_tools` after the tool-profile merge, because the
+    ToolServer authorizes each call itself.
+  - Codex/ZCode: `trusted_mcp_servers` is set to exactly the bound list, and any
+    `:authorize_mcp_server` is dropped.
+  - Pi and other adapters: fail the launch with `{:acp_mcp_servers_unsupported, adapter}`.
+  Symptom of the old gap: a Claude ACP agent with `tool_modules` had no
+  `mcp__arbor-tools__*` tools, and a Codex one failed with "MCP server is not
+  authorized". Tests: `mcp_launch_core_test.exs` and the "adapter-backed providers
+  receive the bound ToolServer" block in `acp_session_test.exs`.
 
 ## 29. `Gateway.call_mcp_tool` / `read_mcp_resource` require `:agent_id` (2026-09-27)
 
