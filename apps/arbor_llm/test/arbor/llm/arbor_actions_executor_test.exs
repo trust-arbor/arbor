@@ -2,6 +2,7 @@ defmodule Arbor.LLM.ArborActionsExecutorTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.LLM.ArborActionsExecutor
 
   # Arbor.Actions is only available when running in the umbrella context.
@@ -83,11 +84,16 @@ defmodule Arbor.LLM.ArborActionsExecutorTest do
       end
     end
 
-    test "returns error for unknown action" do
+    test "returns a refused call failure for an unknown action" do
       result = ArborActionsExecutor.execute("nonexistent", %{}, ".")
 
       if @actions_available do
-        assert {:error, "Unknown action: nonexistent"} = result
+        assert {:error,
+                %CallFailure{
+                  outcome: :refused,
+                  message: "Unknown action: nonexistent",
+                  tool: "nonexistent"
+                }} = result
       else
         assert {:error, "Arbor.Actions not available"} = result
       end
@@ -127,9 +133,9 @@ defmodule Arbor.LLM.ArborActionsExecutorTest do
           assert is_binary(content)
           assert content =~ "defp deps"
 
-        {:error, reason} ->
+        {:error, %CallFailure{message: message}} ->
           # Authorization failure or unavailability is acceptable, but NOT a nil path error
-          refute reason =~ "nil"
+          refute message =~ "nil"
       end
     end
 
@@ -141,7 +147,7 @@ defmodule Arbor.LLM.ArborActionsExecutorTest do
 
       case result do
         {:ok, text} -> assert is_binary(text)
-        {:error, msg} -> assert is_binary(msg)
+        {:error, %CallFailure{message: msg}} -> assert is_binary(msg)
       end
     end
   end

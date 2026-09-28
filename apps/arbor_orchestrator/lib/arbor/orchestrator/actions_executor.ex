@@ -25,6 +25,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   alias Arbor.Actions.Taint, as: ActionTaint
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
@@ -45,7 +46,30 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   @spec execute(String.t(), map(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
   def execute(name, args, workdir, opts \\ []) do
-    execute_with_result_mode(name, args, workdir, opts, :formatted)
+    name
+    |> execute_with_result_mode(args, workdir, opts, :formatted)
+    |> failure_message()
+  end
+
+  @doc """
+  Execute an action like `execute/4`, returning a failure as a classified
+  `Arbor.Contracts.Tool.CallFailure` instead of a string.
+
+  The outcome comes from the action admission boundary
+  (`Arbor.Actions.authorize_and_execute_with_outcome/4`): `:refused` when the
+  call never entered the action (resolution, binding, signing, caller
+  authority, authorization, taint and approval gates), `:failed` when the
+  action ran and returned an error, and `:unknown` when it ran and raised,
+  threw, exited or timed out. `idempotency` carries the action's declared
+  replay class so a caller can tell whether repeating an `:unknown` call is
+  safe. The message is the same bounded text `execute/4` returns.
+  """
+  @spec execute_classified(String.t(), map(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, CallFailure.t()}
+  def execute_classified(name, args, workdir, opts \\ []) do
+    name
+    |> execute_with_result_mode(args, workdir, opts, :formatted)
+    |> classified_failure(name)
   end
 
   @doc """
@@ -58,7 +82,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   @spec execute_structured(String.t(), map(), String.t(), keyword()) ::
           {:ok, term()} | {:error, String.t()}
   def execute_structured(name, args, workdir, opts \\ []) do
-    execute_with_result_mode(name, args, workdir, opts, :structured)
+    name
+    |> execute_with_result_mode(args, workdir, opts, :structured)
+    |> failure_message()
   end
 
   @doc false
@@ -90,7 +116,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   @spec execute_bound(String.t(), map(), String.t(), map(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
   def execute_bound(name, args, workdir, binding, opts \\ []) do
-    execute_bound_with_result_mode(name, args, workdir, binding, opts, :formatted)
+    name
+    |> execute_bound_with_result_mode(args, workdir, binding, opts, :formatted)
+    |> failure_message()
   end
 
   @doc false
@@ -327,7 +355,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
         :ok ->
-          with_signing_boundary(opts, fn boundary_ref ->
+          with_signing_boundary(opts, name, fn boundary_ref ->
             with {:ok, nested_engine_opts} <-
                    nested_engine_opts(opts, action_module, boundary_ref),
                  {:ok, signed_request} <-
@@ -429,7 +457,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          boundary,
          result_mode
        ) do
-    result = Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
+    %{result: result, outcome: outcome} =
+      Arbor.Actions.authorize_and_execute_with_outcome(agent_id, action_module, params, context)
 
     case result do
       {:ok, :pending_approval, proposal_id} ->
@@ -456,6 +485,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             {:unauthorized, detail} ->
               "Action #{name} unauthorized: #{detail}"
 
+            {:action_interrupted, _kind, detail} ->
+              interrupted_message(name, outcome, detail)
+
             reason when is_binary(reason) ->
               reason
 
@@ -463,9 +495,38 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               "Action #{name} failed: #{inspect(reason)}"
           end
 
-        {:error, msg}
+        {:error, call_failure(outcome, msg, name, action_module, params)}
     end
   end
+
+  defp interrupted_message(name, :refused, detail),
+    do: "Action #{name} failed before it ran: #{detail}"
+
+  defp interrupted_message(name, _outcome, detail),
+    do: "Action #{name} was interrupted while running: #{detail}"
+
+  # The admission boundary decided the outcome; the executor only attaches the
+  # tool name and the action's declared replay class.
+  defp call_failure(outcome, message, name, action_module, params) do
+    CallFailure.new!(
+      outcome: outcome || :unknown,
+      message: message,
+      tool: name,
+      idempotency: Arbor.Actions.execution_idempotency(action_module, params)
+    )
+  end
+
+  # Internal failures are either a bounded string (the call was refused before
+  # it reached action admission) or a CallFailure from the admission boundary.
+  defp failure_message({:error, %CallFailure{message: message}}), do: {:error, message}
+  defp failure_message(result), do: result
+
+  defp classified_failure({:error, %CallFailure{}} = failure, _name), do: failure
+
+  defp classified_failure({:error, message}, name) when is_binary(message),
+    do: {:error, CallFailure.new!(outcome: :refused, message: message, tool: name)}
+
+  defp classified_failure(result, _name), do: result
 
   defp verify_pinned_action(action_module, action_name, opts) do
     bindings = Keyword.get(opts, :pinned_action_bindings)
@@ -956,8 +1017,13 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          # The signed request that drove the escalated authorize is single-use.
          {:ok, retry_context} <- resign_for_retry(retry_context, resource, boundary),
          :ok <- verify_retry_workdir(retry_context) do
-      result =
-        Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context)
+      %{result: result, outcome: outcome} =
+        Arbor.Actions.authorize_and_execute_with_outcome(
+          agent_id,
+          action_module,
+          params,
+          retry_context
+        )
 
       case result do
         {:ok, result} ->
@@ -967,11 +1033,28 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           {:error,
            "Action #{name} still requires approval after consensus granted it. This is a bug."}
 
+        {:error, {:action_interrupted, _kind, detail}} ->
+          {:error,
+           call_failure(
+             outcome,
+             interrupted_message(name, outcome, detail),
+             name,
+             action_module,
+             params
+           )}
+
         {:error, reason} when is_binary(reason) ->
-          {:error, reason}
+          {:error, call_failure(outcome, reason, name, action_module, params)}
 
         {:error, reason} ->
-          {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}
+          {:error,
+           call_failure(
+             outcome,
+             "Action #{name} was approved but execution failed: #{inspect(reason)}",
+             name,
+             action_module,
+             params
+           )}
       end
     else
       {:error, reason} ->
@@ -1653,7 +1736,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp credential_key?(_key), do: false
 
-  defp with_signing_boundary(opts, fun) when is_function(fun, 1) do
+  defp with_signing_boundary(opts, name, fun) when is_function(fun, 1) do
     case Keyword.fetch(opts, :signing_authority) do
       :error ->
         fun.(nil)
@@ -1680,12 +1763,41 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           {{:return, value}, :ok} ->
             value
 
-          {{:return, _value}, {:error, reason}} ->
-            {:error, "Signing boundary close failed: #{inspect(reason)}"}
+          {{:return, value}, {:error, reason}} ->
+            signing_boundary_close_failure(value, reason, name)
 
           {{:raise, kind, reason, stacktrace}, _close_result} ->
             :erlang.raise(kind, reason, stacktrace)
         end
+    end
+  end
+
+  # A close failure withholds the call's result. When the action already ran,
+  # the failure keeps (or, after a success, becomes) an effect-bearing outcome
+  # rather than reading as a refusal.
+  defp signing_boundary_close_failure(value, reason, name) do
+    close_message = "Signing boundary close failed: #{inspect(reason)}"
+
+    case value do
+      {:error, %CallFailure{} = failure} ->
+        {:error,
+         CallFailure.new!(
+           outcome: failure.outcome,
+           message: failure.message <> "\n" <> close_message,
+           tool: failure.tool,
+           idempotency: failure.idempotency
+         )}
+
+      {:ok, _result} ->
+        {:error,
+         CallFailure.new!(
+           outcome: :unknown,
+           message: "Action #{name} ran, but its result was withheld. " <> close_message,
+           tool: name
+         )}
+
+      _refused ->
+        {:error, close_message}
     end
   end
 
@@ -1893,9 +2005,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # Execute an action thunk. arbor_actions is a guaranteed compile dep, so the
   # module is always loaded — this no longer guards module availability. It
-  # only converts an unexpected crash inside action execution into a clear
-  # error result instead of letting it propagate as a raw exception (e.g. when
-  # the action SYSTEM, like ActionRegistry, is not running in some context).
+  # only converts an unexpected crash into a clear error result instead of
+  # letting it propagate as a raw exception (e.g. when the action SYSTEM, like
+  # ActionRegistry, is not running in some context). A crash inside the action
+  # itself is contained and classified by
+  # Arbor.Actions.authorize_and_execute_with_outcome/4, so one reaching here
+  # comes from executor bookkeeping before admission and reads as a refusal.
   @doc false
   def run_action(fun) do
     fun.()

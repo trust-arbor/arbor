@@ -14,6 +14,8 @@ defmodule Arbor.LLM.ArborActionsExecutor do
   If `tools` is omitted, all available actions are used.
   """
 
+  alias Arbor.Contracts.Tool.CallFailure
+
   # Arbor.Orchestrator.ActionsExecutor lives in arbor_orchestrator (which
   # depends on arbor_llm). Runtime indirection avoids the cycle — see
   # Client's @tool_hooks_mod for the same pattern. defdelegate, being a
@@ -48,19 +50,19 @@ defmodule Arbor.LLM.ArborActionsExecutor do
       fn ->
         registry = Arbor.Common.ActionRegistry
 
-      Enum.flat_map(action_names, fn name ->
-        name = String.trim(name)
+        Enum.flat_map(action_names, fn name ->
+          name = String.trim(name)
 
-        case resolve_action(registry, name) do
-          {:ok, module} ->
-            [to_openai_format(module.to_tool())]
+          case resolve_action(registry, name) do
+            {:ok, module} ->
+              [to_openai_format(module.to_tool())]
 
-          {:error, _} ->
-            require Logger
-            Logger.warning("ArborActionsExecutor: unknown action '#{name}'")
-            []
-        end
-      end)
+            {:error, _} ->
+              require Logger
+              Logger.warning("ArborActionsExecutor: unknown action '#{name}'")
+              []
+          end
+        end)
       end
     ]) || []
   end
@@ -92,16 +94,19 @@ defmodule Arbor.LLM.ArborActionsExecutor do
   end
 
   @doc """
-  Execute an action by name. Delegates to `Arbor.Orchestrator.ActionsExecutor.execute/4`.
+  Execute an action by name. Delegates to
+  `Arbor.Orchestrator.ActionsExecutor.execute_classified/4`, so a failure is a
+  classified `Arbor.Contracts.Tool.CallFailure` that ToolLoop reads to tell a
+  call that never ran from one that may have taken effect.
 
   `defdelegate` would be a compile-time bind; we go through apply/3 to keep
   the arbor_orchestrator boundary at runtime — see module-level comment.
   """
   @spec execute(String.t(), map(), String.t(), keyword()) ::
-          {:ok, String.t()} | {:error, String.t()}
+          {:ok, String.t()} | {:error, CallFailure.t()}
   def execute(name, args, workdir, opts \\ []) do
     executor = @actions_executor_mod
-    apply(executor, :execute, [name, args, workdir, opts])
+    apply(executor, :execute_classified, [name, args, workdir, opts])
   end
 
   @doc """

@@ -5,8 +5,13 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   Handles:
   - Connection lifecycle (connect, health check, reconnect on failure)
   - Tool discovery and caching
-  - Tool invocation with timeout handling
+  - Tool invocation with timeout handling and outcome classification
   - Status reporting
+
+  Tool calls and resource reads run in the caller's process against the
+  checked-out `ExMCP.Client`, never inside this GenServer: a slow call does not
+  block the connection, and a caller that gives up leaves no call queued here
+  to be sent after it stopped waiting.
 
   ## State
 
@@ -16,10 +21,15 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
 
   use GenServer
 
+  alias Arbor.Contracts.Tool.CallFailure
+  alias Arbor.Gateway.MCP.CallOutcome
+
   require Logger
 
   @health_check_interval 30_000
   @default_timeout 30_000
+  # Checking out the client is a local state read; it sends nothing.
+  @checkout_timeout 5_000
 
   defstruct [
     :server_name,
@@ -63,11 +73,37 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   @spec list_tools(pid()) :: {:ok, [map()]} | {:error, term()}
   def list_tools(pid), do: GenServer.call(pid, :list_tools)
 
-  @doc "Call a tool on the connected MCP server."
-  @spec call_tool(pid(), String.t(), map(), keyword()) :: {:ok, term()} | {:error, term()}
+  @doc """
+  Call a tool on the connected MCP server.
+
+  Returns `{:ok, result}` when the tool answered, or
+  `{:error, %Arbor.Contracts.Tool.CallFailure{}}` classified by
+  `Arbor.Gateway.MCP.CallOutcome`: `:not_sent` when there was no connected
+  client, `:refused` when the server rejected the request before running a
+  tool, `:failed` when the tool answered with an error result, and `:unknown`
+  when the call may have been delivered with no trustworthy answer — a
+  timeout, an exit or a crash always reads as `:unknown`.
+
+  The call is never retried: ExMCP gets `retry_policy: false` and
+  `http_stream_retry: :safe_only` (its modern-stream default reissues a broken
+  tool call at least once).
+  """
+  @spec call_tool(pid(), String.t(), map(), keyword()) ::
+          {:ok, term()} | {:error, CallFailure.t()}
   def call_tool(pid, tool_name, arguments, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
-    GenServer.call(pid, {:call_tool, tool_name, arguments, timeout}, timeout + 5_000)
+
+    case checkout_client(pid) do
+      {:ok, client_pid, server_name} ->
+        invoke_tool(client_pid, server_name, tool_name, arguments, timeout)
+
+      {:error, {:not_connected, status}, server_name} ->
+        {:error, CallOutcome.not_connected(server_name, tool_name, status)}
+
+      # The checkout only reads connection state, so an exit here sent nothing.
+      {:exit, reason} ->
+        {:error, CallOutcome.not_connected(nil, tool_name, {:exit, reason})}
+    end
   end
 
   @doc "Refresh the cached tool list from the server."
@@ -82,7 +118,12 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   @spec read_resource(pid(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def read_resource(pid, uri, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
-    GenServer.call(pid, {:read_resource, uri, timeout}, timeout + 5_000)
+
+    case checkout_client(pid) do
+      {:ok, client_pid, _server_name} -> do_read_resource(client_pid, uri, timeout)
+      {:error, {:not_connected, _status} = reason, _server_name} -> {:error, reason}
+      {:exit, reason} -> {:error, {:exit, reason}}
+    end
   end
 
   @doc "Refresh the cached resource list from the server."
@@ -142,15 +183,17 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     {:reply, {:error, {:not_connected, state.connection_status}}, state}
   end
 
-  def handle_call({:call_tool, tool_name, arguments, timeout}, _from, state) do
-    case state.connection_status do
-      :connected ->
-        result = do_call_tool(state.client_pid, tool_name, arguments, timeout)
-        {:reply, result, state}
+  def handle_call(
+        :checkout_client,
+        _from,
+        %{connection_status: :connected, client_pid: client_pid} = state
+      )
+      when is_pid(client_pid) do
+    {:reply, {:ok, client_pid, state.server_name}, state}
+  end
 
-      other ->
-        {:reply, {:error, {:not_connected, other}}, state}
-    end
+  def handle_call(:checkout_client, _from, state) do
+    {:reply, {:error, {:not_connected, state.connection_status}, state.server_name}, state}
   end
 
   def handle_call(:list_resources, _from, %{connection_status: :connected} = state) do
@@ -159,17 +202,6 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
 
   def handle_call(:list_resources, _from, state) do
     {:reply, {:error, {:not_connected, state.connection_status}}, state}
-  end
-
-  def handle_call({:read_resource, uri, timeout}, _from, state) do
-    case state.connection_status do
-      :connected ->
-        result = do_read_resource(state.client_pid, uri, timeout)
-        {:reply, result, state}
-
-      other ->
-        {:reply, {:error, {:not_connected, other}}, state}
-    end
   end
 
   def handle_call(:refresh_resources, _from, %{connection_status: :connected} = state) do
@@ -408,6 +440,12 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       {:ok, []}
   end
 
+  defp checkout_client(pid) do
+    GenServer.call(pid, :checkout_client, @checkout_timeout)
+  catch
+    :exit, reason -> {:exit, reason}
+  end
+
   defp do_read_resource(client_pid, uri, timeout) do
     case ExMCP.Client.read_resource(client_pid, uri, timeout: timeout) do
       {:ok, %{contents: contents}} when is_list(contents) ->
@@ -423,6 +461,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       {:error, _} = error ->
         error
     end
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp normalize_resource(resource) when is_map(resource) do
@@ -447,21 +487,27 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     end)
   end
 
-  defp do_call_tool(client_pid, tool_name, arguments, timeout) do
-    case ExMCP.Client.call_tool(client_pid, tool_name, arguments, timeout) do
-      {:ok, %{content: content}} when is_list(content) ->
-        # ExMCP.Response struct
-        {:ok, extract_content(content)}
+  # Runs in the caller's process. `format: :map` keeps ExMCP's raw error terms
+  # (the :struct format folds a timeout and server JSON-RPC errors into one
+  # ProtocolError), which CallOutcome needs to tell "never sent" from "may
+  # have run".
+  defp invoke_tool(client_pid, server_name, tool_name, arguments, timeout) do
+    result =
+      ExMCP.Client.call_tool(client_pid, tool_name, arguments,
+        timeout: timeout,
+        format: :map,
+        retry_policy: false,
+        http_stream_retry: :safe_only
+      )
 
-      {:ok, %{"content" => content}} when is_list(content) ->
-        {:ok, extract_content(content)}
-
-      {:ok, result} ->
-        {:ok, result}
-
-      {:error, _} = error ->
-        error
+    case CallOutcome.returned(server_name, tool_name, result) do
+      {:ok, %{"content" => content}} when is_list(content) -> {:ok, extract_content(content)}
+      {:ok, %{content: content}} when is_list(content) -> {:ok, extract_content(content)}
+      other -> other
     end
+  catch
+    :exit, reason -> {:error, CallOutcome.exited(server_name, tool_name, reason)}
+    kind, reason -> {:error, CallOutcome.raised(server_name, tool_name, kind, reason)}
   end
 
   defp extract_content(content) when is_list(content) do

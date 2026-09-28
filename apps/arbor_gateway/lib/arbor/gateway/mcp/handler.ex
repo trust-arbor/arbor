@@ -25,6 +25,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Gateway.MCP.ToolBridge
   alias ExMCP.Protocol.VersionNegotiator
 
@@ -1402,6 +1403,9 @@ defmodule Arbor.Gateway.MCP.Handler do
       {:error, {:not_connected, name}} ->
         "## Error\n\nMCP server '#{name}' is not connected. " <>
           "Use arbor_status component=mcp to see connected servers."
+
+      {:error, %CallFailure{} = failure} ->
+        "## Error (MCP: #{server_name}/#{tool_name})\n\n#{CallFailure.describe(failure)}"
 
       {:error, :unauthorized, reason} ->
         "## Unauthorized\n\n#{reason}"

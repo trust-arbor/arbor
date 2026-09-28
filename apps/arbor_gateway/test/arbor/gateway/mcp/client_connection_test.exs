@@ -1,6 +1,7 @@
 defmodule Arbor.Gateway.MCP.ClientConnectionTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Gateway.MCP.ClientConnection
 
   @moduletag :fast
@@ -70,11 +71,14 @@ defmodule Arbor.Gateway.MCP.ClientConnectionTest do
   end
 
   describe "call_tool/4 when disconnected" do
-    test "returns not_connected error" do
+    test "returns a not-sent call failure" do
       {:ok, pid} = start_test_connection("offline_call")
 
-      assert {:error, {:not_connected, :disconnected}} =
+      assert {:error, %CallFailure{outcome: :not_sent, tool: "some_tool", message: message}} =
                ClientConnection.call_tool(pid, "some_tool", %{}, timeout: 1_000)
+
+      assert message =~ "offline_call"
+      assert message =~ "not connected"
     end
   end
 

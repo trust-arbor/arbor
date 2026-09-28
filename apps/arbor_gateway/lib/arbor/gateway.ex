@@ -169,9 +169,20 @@ defmodule Arbor.Gateway do
   - `:timeout` — call timeout in ms (default: 30_000)
   - `:agent_id` — agent ID for capability authorization
   - `:skip_auth` — skip capability check (default: false)
+
+  ## Errors
+
+  - `{:error, :unauthorized, reason}` — the agent lacks the tool capability.
+  - `{:error, {:not_connected, server_name}}` — no connection exists for the
+    server.
+  - `{:error, %Arbor.Contracts.Tool.CallFailure{}}` — the call reached the
+    connection and failed; `outcome` says whether it may have taken effect
+    (see `Arbor.Gateway.MCP.ClientConnection.call_tool/4`).
   """
   @spec call_mcp_tool(String.t(), String.t(), map(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()}
+          | {:error, {:not_connected, String.t()} | Arbor.Contracts.Tool.CallFailure.t()}
+          | {:error, :unauthorized, term()}
   def call_mcp_tool(server_name, tool_name, arguments, opts \\ []) do
     # Authorization check
     agent_id = Keyword.get(opts, :agent_id)
