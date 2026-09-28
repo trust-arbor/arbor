@@ -2005,6 +2005,29 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert Handler.maybe_put_signed_request(context) == context
     end
 
+    test "security regression: arbor_run native actions carry :derived external-agent provenance" do
+      # Pre-2026-09-27 the context had no :taint, so an external MCP agent's
+      # arguments reached authorize_and_execute decided as clean.
+      signed_request = %SignedRequest{
+        agent_id: "agent_prov",
+        signature: "fake-signature",
+        payload: "fake-payload",
+        timestamp: DateTime.utc_now(),
+        nonce: :crypto.strong_rand_bytes(16)
+      }
+
+      Process.put(:arbor_authenticated_agent_id, signed_request.agent_id)
+      Process.put(:arbor_authenticated_signed_request, signed_request)
+
+      context = Handler.native_action_context()
+
+      assert %Arbor.Contracts.Security.Taint{level: :derived, source: "gateway_mcp"} =
+               context[:taint]
+
+      assert context[:signed_request] == signed_request
+      assert is_binary(context[:workspace])
+    end
+
     test "no signed_request in process dict → context unchanged" do
       context = %{workspace: "/tmp"}
 

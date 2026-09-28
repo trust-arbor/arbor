@@ -34,15 +34,17 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   - `tools/call` — dispatches to `Arbor.Actions.authorize_and_execute/4`
   - `notifications/initialized` — acknowledged silently
 
-  Tool call results are wrapped with taint metadata (`:beam_agent` source) since
-  they cross agent trust boundaries even within the same BEAM node.
+  Tool call *inputs* cross an agent trust boundary even within one BEAM node:
+  they come from another LLM agent, so the action context carries a `:derived`
+  provenance label (`ExternalAgentTaint`, source `"agent_endpoint"`). Results
+  are returned to the calling agent as-is; this module does not wrap them.
   """
 
   use GenServer
   require Logger
 
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
-  alias Arbor.Gateway.MCP.{ActionBridge, EndpointRegistry}
+  alias Arbor.Gateway.MCP.{ActionBridge, EndpointRegistry, ExternalAgentTaint}
   alias ExMCP.Protocol.ResponseBuilder
 
   @server_info %{
@@ -294,7 +296,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
              signed_request: %SignedRequest{agent_id: agent_id} = signed_request
            } = auth_context
        }) do
-    {:ok, %{agent_id: agent_id, signed_request: signed_request, auth_context: auth_context}}
+    {:ok,
+     %{
+       agent_id: agent_id,
+       signed_request: signed_request,
+       auth_context: auth_context,
+       taint: ExternalAgentTaint.label("agent_endpoint")
+     }}
   end
 
   defp authenticated_action_context(_state), do: {:error, :endpoint_authentication_required}

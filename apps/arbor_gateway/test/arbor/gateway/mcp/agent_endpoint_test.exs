@@ -23,6 +23,25 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
   end
 
+  # Reports the provenance label authorize_and_execute handed the action.
+  defmodule TaintEchoAction do
+    use Jido.Action,
+      name: "taint_echo",
+      description: "Returns the taint level in its context",
+      schema: []
+
+    @impl true
+    def run(_params, context) do
+      level =
+        case Map.get(context, :taint) do
+          %{level: level} -> level
+          other -> other
+        end
+
+      {:ok, %{taint_level: inspect(level)}}
+    end
+  end
+
   defmodule AddAction do
     use Jido.Action,
       name: "add",
@@ -103,7 +122,14 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
 
+    # Endpoint inputs carry :derived provenance (2026-09-27). These tests pin
+    # principal authority, not taint, so run under the dev policy
+    # (:audit_only); the provenance label itself is asserted separately.
+    prev_taint_policy = Application.get_env(:arbor_actions, :default_taint_policy)
+    Application.put_env(:arbor_actions, :default_taint_policy, :audit_only)
+
     on_exit(fn ->
+      restore_env(:arbor_actions, :default_taint_policy, prev_taint_policy)
       restore_env(:arbor_security, :identity_verification, prev_identity)
       restore_env(:arbor_security, :capability_signing_required, prev_signing)
       restore_env(:arbor_security, :strict_identity_mode, prev_strict)
@@ -509,6 +535,23 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       ExMCP.Client.stop(client1)
       ExMCP.Client.stop(client2)
       Arbor.Gateway.stop_agent_endpoint("multi-agent")
+    end
+  end
+
+  describe "security regression: external-agent inputs carry :derived provenance" do
+    # Pre-2026-09-27 the endpoint called authorize_and_execute with no :taint,
+    # so another agent's LLM-produced arguments were decided as clean.
+    test "a tool call through the endpoint reaches the action labeled :derived" do
+      {agent_id, endpoint} = start_authorized_endpoint([TaintEchoAction])
+
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
+
+      {:ok, result} = ExMCP.Client.call_tool(client, "taint_echo", %{})
+      assert get_tool_result_text(result) =~ ":derived"
+
+      ExMCP.Client.stop(client)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
   end
 

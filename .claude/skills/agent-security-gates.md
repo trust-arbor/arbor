@@ -154,6 +154,24 @@ another one. It doubles as user documentation — anyone standing up agents need
   stays "no signal" there on purpose, because most `Trust.authorize` callers
   don't track taint, and reading their silence as untrusted would turn `:auto`
   action rules into approvals (e.g. stalling reviewed validation).
+- **External-agent inputs are labeled `:derived` (decision 2026-09-27).** Three
+  entry points used to hand `authorize_and_execute` no `:taint`, so an external
+  LLM agent's arguments were decided as clean:
+  - gateway `arbor_run` (`Handler.native_action_context/0`, source `gateway_mcp`)
+  - `AgentEndpoint` (source `agent_endpoint`)
+  - the ACP ToolServer (source `acp_tool_server`)
+  They now carry the same `:derived` label an in-process compute node's tool
+  calls get. Egress is unaffected, since `:derived` isn't exfiltration-blocked.
+  The action taint policy does apply: `:audit_only` (dev) records audits;
+  `:permissive` (test) and `:strict` (prod) refuse a `requires:` control param
+  (file `path`, shell `command`) that lacks the sanitization bit, with
+  `{:missing_sanitization, param, [...]}`, and `:strict` refuses any non-trusted
+  control param. *Symptom:* outside dev, an external agent's `file_read` or
+  `shell_execute` fails with `missing_sanitization` (as in-process agents'
+  already do). *Action:* this is the designed posture. Tests of authority or
+  plumbing pin `:arbor_actions, :default_taint_policy` to `:audit_only`, as dev
+  does. Regressions: the provenance tests in `handler_test.exs`,
+  `agent_endpoint_test.exs`, `tool_server_test.exs` and `acp_tool_exposure_test.exs`.
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 
