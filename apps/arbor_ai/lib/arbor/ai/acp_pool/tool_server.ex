@@ -32,6 +32,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   require Logger
 
   alias Arbor.AI.AcpPool.ToolServer.BearerAuth
+  alias Arbor.Contracts.Security.Taint
   alias ExMCP.Protocol.VersionNegotiator
 
   @loopback_binds [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}]
@@ -391,9 +392,16 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   # Per-handler context that flows into each tool call. Workspace scopes
   # file actions; absence means "no workspace constraint". Add fields
   # here as more action subsystems need per-session context.
-  defp build_exec_context(nil), do: %{}
-  defp build_exec_context(workspace) when is_binary(workspace), do: %{workspace: workspace}
-  defp build_exec_context(_), do: %{}
+  #
+  # Every call's arguments come from the spawned ACP coding agent (an LLM), so
+  # they carry the same `:derived` provenance an in-process compute node's
+  # tool calls get, instead of reaching authorize_and_execute unlabeled
+  # (= clean). Decision 2026-09-27, following Imp review D3.
+  defp build_exec_context(workspace) do
+    base = %{taint: %Taint{level: :derived, source: "acp_tool_server"}}
+
+    if is_binary(workspace), do: Map.put(base, :workspace, workspace), else: base
+  end
 
   # -- Tool Conversion --
 

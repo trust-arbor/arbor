@@ -53,7 +53,8 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       {:ok,
        %{
          workspace: Map.get(context, :workspace),
-         agent_id: Map.get(context, :agent_id)
+         agent_id: Map.get(context, :agent_id),
+         taint_level: context |> Map.get(:taint, %{}) |> Map.get(:level)
        }}
     end
   end
@@ -263,6 +264,29 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       [content] = result["content"]
       decoded = Jason.decode!(content["text"])
       assert decoded["workspace"] == "/tmp/agent_workspace_xyz"
+    end
+
+    test "security regression: ACP agent tool inputs carry :derived provenance, not clean" do
+      # Pre-2026-09-27 the exec context had no :taint, so the spawned coding
+      # agent's LLM-produced arguments were decided as clean.
+      for workspace <- ["/tmp/agent_workspace_xyz", nil] do
+        {:ok, %{ref: ref} = server} =
+          ToolServer.start([ContextEchoAction], workspace: workspace)
+
+        on_exit(fn -> ToolServer.stop(ref) end)
+        {_init, session_id} = initialize_mcp(server)
+
+        {:ok, response} =
+          mcp_request(
+            server,
+            "tools/call",
+            %{"name" => "context_echo", "arguments" => %{}},
+            session_id
+          )
+
+        decoded = Jason.decode!(hd(response["result"]["content"])["text"])
+        assert decoded["taint_level"] == "derived"
+      end
     end
 
     test "absent workspace yields nil in action context" do

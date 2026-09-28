@@ -25,6 +25,19 @@ defmodule Arbor.Actions.AcpToolExposureTest do
   alias Arbor.Security
 
   setup do
+    # ToolServer inputs carry :derived provenance (2026-09-27). These tests
+    # verify the capability/exposure/workspace plumbing, so they run under the
+    # dev taint policy (:audit_only); the enforcement consequence is pinned
+    # separately below.
+    previous_policy = Application.get_env(:arbor_actions, :default_taint_policy)
+    Application.put_env(:arbor_actions, :default_taint_policy, :audit_only)
+
+    on_exit(fn ->
+      if is_nil(previous_policy),
+        do: Application.delete_env(:arbor_actions, :default_taint_policy),
+        else: Application.put_env(:arbor_actions, :default_taint_policy, previous_policy)
+    end)
+
     {:ok, identity} = Identity.generate(name: "acp-tool-exposure-integration")
     agent_id = identity.agent_id
     :ok = Security.register_identity(identity)
@@ -146,6 +159,36 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
       assert error_text =~ "Path traversal denied",
              "expected path traversal error, got: #{error_text}"
+    end
+
+    test "security regression: ACP agent input is :derived end to end, so enforcing policies refuse an unsanitized path",
+         %{agent_id: agent_id, workspace: workspace} do
+      # Pre-2026-09-27 the ToolServer handed authorize_and_execute no :taint,
+      # so this read ran as clean input under every taint policy.
+      Application.put_env(:arbor_actions, :default_taint_policy, :permissive)
+
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
+
+      target = Path.join(workspace, "hello.txt")
+      File.write!(target, "hi")
+
+      {:ok, %{ref: ref} = server} =
+        ToolServer.start(Arbor.Actions.tool_modules_for_agent(agent_id),
+          agent_id: agent_id,
+          workspace: workspace
+        )
+
+      on_exit(fn -> ToolServer.stop(ref) end)
+
+      {:ok, %{"result" => result}} =
+        mcp_request(server, "tools/call", %{
+          "name" => "file_read",
+          "arguments" => %{"path" => target}
+        })
+
+      assert result["isError"]
+      assert hd(result["content"])["text"] =~ "missing_sanitization, :path"
     end
 
     test "agent without any grants gets [] tool_modules → empty tool list", %{
