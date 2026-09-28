@@ -118,8 +118,10 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
     assert_receive {:tool_execution, "second_action", %{"value" => "second_action"}, "/workspace",
                     second_opts}
 
-    assert Map.new(first_opts) == Map.new(expected_opts)
-    assert Map.new(second_opts) == Map.new(expected_opts)
+    # provider_call_id is per-invocation durable-evidence correlation, so each
+    # tool call carries its own provider id alongside the shared authority.
+    assert Map.new(first_opts) == Map.new([{:provider_call_id, "call_1"} | expected_opts])
+    assert Map.new(second_opts) == Map.new([{:provider_call_id, "call_2"} | expected_opts])
     # Exact term identity — not a reconstructed copy of authority fields.
     assert Keyword.fetch!(first_opts, :run_authorization) === opaque_run_authorization
     assert Keyword.fetch!(second_opts, :run_authorization) === opaque_run_authorization
