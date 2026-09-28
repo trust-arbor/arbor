@@ -67,13 +67,13 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       refute Arbor.Actions.Shell.Execute in tool_modules
 
       # Boot ToolServer with the filtered set + workspace context
-      {:ok, %{port: port, ref: ref}} =
+      {:ok, %{ref: ref} = server} =
         ToolServer.start(tool_modules, agent_id: agent_id, workspace: workspace)
 
       on_exit(fn -> ToolServer.stop(ref) end)
 
       # tools/list shows only the granted action surface
-      {:ok, list_response} = mcp_request(port, "tools/list", %{})
+      {:ok, list_response} = mcp_request(server, "tools/list", %{})
       tool_names = list_response["result"]["tools"] |> Enum.map(& &1["name"])
       assert "file_read" in tool_names
       refute "shell_execute" in tool_names
@@ -84,7 +84,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
       # tools/call → File.Read with an in-workspace path
       {:ok, call_response} =
-        mcp_request(port, "tools/call", %{
+        mcp_request(server, "tools/call", %{
           "name" => "file_read",
           "arguments" => %{"path" => target}
         })
@@ -119,7 +119,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
-      {:ok, %{port: port, ref: ref}} =
+      {:ok, %{ref: ref} = server} =
         ToolServer.start(tool_modules, agent_id: agent_id, workspace: workspace)
 
       on_exit(fn -> ToolServer.stop(ref) end)
@@ -132,7 +132,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       on_exit(fn -> File.rm(outside) end)
 
       {:ok, call_response} =
-        mcp_request(port, "tools/call", %{
+        mcp_request(server, "tools/call", %{
           "name" => "file_read",
           "arguments" => %{"path" => outside}
         })
@@ -155,13 +155,13 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
       assert tool_modules == []
 
-      {:ok, %{port: port, ref: ref, tool_count: count}} =
+      {:ok, %{ref: ref, tool_count: count} = server} =
         ToolServer.start(tool_modules, agent_id: agent_id, workspace: workspace)
 
       on_exit(fn -> ToolServer.stop(ref) end)
       assert count == 0
 
-      {:ok, response} = mcp_request(port, "tools/list", %{})
+      {:ok, response} = mcp_request(server, "tools/list", %{})
       assert response["result"]["tools"] == []
     end
   end
@@ -173,13 +173,31 @@ defmodule Arbor.Actions.AcpToolExposureTest do
   # "Session ID required" (see Arbor.AI.AcpPool.ToolServer.start/2). Perform the
   # protocol handshake — initialize, then notifications/initialized — and carry
   # the returned mcp-session-id on the real request.
-  defp mcp_request(port, method, params) do
-    with {:ok, session_id} <- mcp_initialize(port) do
-      mcp_post(port, session_id, method, params)
+  #
+  # Connect exactly as a spawned ACP agent does: the URL and headers (including
+  # the per-session bearer token) come from the `mcpServers` descriptor, so this
+  # also proves the descriptor carries working credentials.
+  defp mcp_request(server, method, params) do
+    endpoint = descriptor_endpoint(server)
+
+    with {:ok, session_id} <- mcp_initialize(endpoint) do
+      mcp_post(endpoint, session_id, method, params)
     end
   end
 
-  defp mcp_initialize(port) do
+  defp descriptor_endpoint(server) do
+    [%{"url" => url, "headers" => headers}] = ToolServer.mcp_servers_entry(server)
+
+    %{
+      url: String.to_charlist(url <> "/"),
+      headers:
+        Enum.map(headers, fn %{"name" => name, "value" => value} ->
+          {String.to_charlist(name), String.to_charlist(value)}
+        end)
+    }
+  end
+
+  defp mcp_initialize(endpoint) do
     body =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
@@ -192,7 +210,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
         }
       })
 
-    case http_post(port, [], body) do
+    case http_post(endpoint, [], body) do
       {:ok, {{_, 200, _}, headers, _}} ->
         case session_id_header(headers) do
           nil ->
@@ -202,7 +220,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
             # The server expects the initialized notification before other calls.
             _ =
               mcp_post_raw(
-                port,
+                endpoint,
                 session_id,
                 Jason.encode!(%{
                   "jsonrpc" => "2.0",
@@ -219,7 +237,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
     end
   end
 
-  defp mcp_post(port, session_id, method, params) do
+  defp mcp_post(endpoint, session_id, method, params) do
     body =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
@@ -228,7 +246,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
         "params" => params
       })
 
-    case mcp_post_raw(port, session_id, body) do
+    case mcp_post_raw(endpoint, session_id, body) do
       {:ok, {{_, 200, _}, _, response_body}} ->
         {:ok, response_body |> List.to_string() |> Jason.decode!()}
 
@@ -237,14 +255,14 @@ defmodule Arbor.Actions.AcpToolExposureTest do
     end
   end
 
-  defp mcp_post_raw(port, session_id, body) do
-    http_post(port, [{~c"mcp-session-id", String.to_charlist(session_id)}], body)
+  defp mcp_post_raw(endpoint, session_id, body) do
+    http_post(endpoint, [{~c"mcp-session-id", String.to_charlist(session_id)}], body)
   end
 
-  defp http_post(port, headers, body) do
+  defp http_post(%{url: url, headers: auth_headers}, headers, body) do
     :httpc.request(
       :post,
-      {~c"http://127.0.0.1:#{port}/", headers, ~c"application/json", String.to_charlist(body)},
+      {url, auth_headers ++ headers, ~c"application/json", String.to_charlist(body)},
       [{:timeout, 5_000}],
       []
     )

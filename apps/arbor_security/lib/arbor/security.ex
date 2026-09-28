@@ -1546,7 +1546,10 @@ defmodule Arbor.Security do
       egress_destination: Keyword.get(opts, :egress_destination),
       # The flowing data's taint level — THE signal for observe-before-enable:
       # whether real egress carries untrusted data the taint conjunct would block.
-      egress_taint: egress_taint_level(Keyword.get(opts, :egress_taint)),
+      # Reports the level the gate actually decides with (missing/unknown taint
+      # is :untrusted there — Imp review D3), so the event cannot claim "clean"
+      # for an egress the gate treated as untrusted.
+      egress_taint: EgressGate.effective_taint_level(Keyword.get(opts, :egress_taint)),
       source: :compute_node,
       # VP-05D2A0 — bounded: id and a presence flag only, never the human
       # principal_scope, the constraints map, or any raw authority.
@@ -1578,11 +1581,6 @@ defmodule Arbor.Security do
         nil
     end
   end
-
-  # Normalize an egress taint opt (level atom or Taint struct) to a level atom.
-  defp egress_taint_level(%{level: level}), do: level
-  defp egress_taint_level(level) when is_atom(level), do: level
-  defp egress_taint_level(_), do: nil
 
   @doc """
   Grant a capability to an agent.

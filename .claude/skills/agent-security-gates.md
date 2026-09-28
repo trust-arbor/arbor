@@ -134,6 +134,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   `level: :untrusted, chain: ["session_steering"]`. So "use the turn's actual taint
   instead of worst-case" is a no-op for chat; the actual value already IS
   untrusted. Do not re-propose it as a fix for `:initial_denied`.
+- **A missing or unreadable `:egress_taint` is `:untrusted` (2026-09-27, Imp review
+  D3).** `EgressGate.effective_taint_level/1` reads a level atom, a level string, or
+  a Taint struct/map with a `:level`. Anything else (key omitted or misspelled,
+  `nil`, an unknown atom/string, a bare multi-key context taint map) is decided as
+  `:untrusted`. Before this, those forms read as "no taint", which skipped
+  branches 1 and 2 and left only the policy check. *Symptom:* a new egress caller
+  gets `{:egress_blocked, tier, :untrusted}` even with `egress_mode: :allow`, and
+  `:egress_observed` reports `egress_taint: :untrusted`. *Action:* thread the real
+  taint. If your boundary's model genuinely means "no label = clean", pass
+  `egress_taint: :trusted` explicitly and say so in a comment. `LlmHandler`
+  (context with no taint labels) and `Arbor.Actions.authorize_and_execute`
+  (context without `:taint`) do exactly this; they are the two deliberate
+  "unlabeled = clean" decision points. Regression:
+  `egress_taint_fail_closed_security_regression_test.exs`.
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 
@@ -760,6 +774,45 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   successor is per-nonce ownership / trust zones
   (`trust-zone-segmentation-architecture.md`). Never trust-list a node by
   hand — the module deliberately has no seam for that.
+
+## 28. The ACP ToolServer requires its per-session bearer token (2026-09-27)
+
+- **What:** `Arbor.AI.AcpPool.ToolServer` runs Jido actions through
+  `authorize_and_execute/4` **as the owning agent**, so reaching its port means
+  acting with that agent's capabilities. Loopback binding keeps it off the
+  network. ex_mcp's Origin check (`validate_origin: true`, empty allow-list)
+  already 403s browser pages, and CORS never emitted an allow-origin header. But
+  any local non-browser process that found the port (a port scan is enough) was
+  served with no credential (Imp review D6). Now `start/2` mints a 32-byte token,
+  `ToolServer.BearerAuth` requires `authorization: Bearer <token>` (constant-time
+  compare, 401 otherwise), CORS is off, and a loopback bind only answers loopback
+  `Host` names (421, DNS rebinding).
+- **Symptom:** a client of a ToolServer gets `401 {"error":"unauthorized"}` on
+  `initialize` or any call. A hand-built descriptor with `"headers" => []` connects
+  to nothing. A `Host` other than 127.0.0.1/localhost/::1 gets 421.
+- **Action:** build the ACP descriptor with `ToolServer.mcp_servers_entry(info)`,
+  passing the map `start/2` returned, and send its `headers` verbatim. That is the
+  only place the token should live: `AcpPool` strips `:token` from the entry it
+  keeps in pool state. Never log `mcp_servers`: the token is a live credential for
+  the session's lifetime. See gate 12 for why `ExMCP.ACP.Client` stays at an
+  `:info` floor. Codex's adapter only forwards HTTP MCP servers that pass
+  `:authorize_mcp_server` or an exact-map `:trusted_mcp_servers` match; if Arbor
+  ever configures the latter, it must include the per-session header. Regression:
+  the `security regression (Imp review D6)` block in `tool_server_test.exs`.
+
+## 29. `Gateway.call_mcp_tool` / `read_mcp_resource` require `:agent_id` (2026-09-27)
+
+- **What:** both facade calls capability-check the calling agent against
+  `arbor://mcp/<server>/<tool-or-resource>`. A nil or blank `:agent_id` used to
+  skip the check entirely (Imp review D2). Only the literal `skip_auth: true` is a
+  bypass now. Note that `ToolBridge`/`ResourceBridge.authorize` still allow
+  everything when `Arbor.Security.CapabilityStore` is not running (a dev/test
+  fallback), so this gate is only as strong as the security subsystem being up.
+- **Symptom:** `{:error, :missing_agent_id}` from `Arbor.Gateway.call_mcp_tool/4`
+  or `read_mcp_resource/3`.
+- **Action:** pass `agent_id:` for the principal the call acts for. Reserve
+  `skip_auth: true` for trusted system code that has already authorized the call
+  another way. Regression: `missing_agent_id_security_regression_test.exs`.
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>

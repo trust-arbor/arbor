@@ -1055,8 +1055,11 @@ defmodule Arbor.AI.AcpPool do
       |> maybe_put(:workspace, workspace)
 
     case ToolServer.start(tool_modules, start_opts) do
-      {:ok, %{port: port} = info} ->
-        {info, ToolServer.mcp_servers_entry(port)}
+      {:ok, info} ->
+        # The bearer token goes only into the descriptor handed to the spawned
+        # agent; the pool entry keeps port/ref for teardown and status, never
+        # the secret (it would otherwise ride along in state and crash dumps).
+        {Map.delete(info, :token), ToolServer.mcp_servers_entry(info)}
 
       {:error, reason} ->
         Logger.warning(
