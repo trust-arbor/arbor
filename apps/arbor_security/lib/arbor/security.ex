@@ -3545,7 +3545,8 @@ defmodule Arbor.Security do
     after that retirement; retirement counts as zero while the ledger is
     paused, while the last retiring publication attempt has failed
     (`retirement.last_error` not `"none"`), or where no retiring publication
-    exists, i.e. ephemeral and small journals), plus
+    exists, i.e. small journals; ephemeral operational journals retire in
+    memory and report real headroom), plus
     `"reserved_entries"`/`"reserved_bytes"` (records pending operations have
     reserved; every admission is checked against written plus reserved). The
     existing map-size fields are unchanged, so an empty queue is never read as
@@ -3562,7 +3563,8 @@ defmodule Arbor.Security do
     `"none" | "soft_capacity_exhausted" | "capacity_exhausted" |
     "retired_version" | "operation_terminal"`.
   - `"retirement"`: `"floor"` (admission floor, 1 or 3), `"ledger_state"`
-    (`"none"` without a retirement ledger, else `"absent" | "bound" |
+    (`"none"` without a retirement ledger, i.e. ephemeral and small
+    journals, else `"absent" | "bound" |
     "bound_orphan" | "mismatch" | "ahead"`), `"ledger_frames"` (frames bound
     by the published snapshot), `"prepared_count"`,
     `"oldest_prepared_age_seconds"` and `"last_error"` (`"none"` or the

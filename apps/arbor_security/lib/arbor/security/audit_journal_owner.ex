@@ -45,6 +45,19 @@ defmodule Arbor.Security.AuditJournalOwner do
   reported in status; publications keep running non-retiring and retirement
   headroom counts as zero.
 
+  Ephemeral operational journals (the test default and a production-reachable
+  mode) retire in memory (decision H11): an ephemeral journal makes no
+  durability claim and has no file or ledger, so T2 and T3 run the same core
+  compaction a durable publication would rename into place
+  (`AuditJournalCore.compact/3` with `retire: true`) over the genesis source
+  and the unchanged genesis ledger binding, and T3 then retries the caller's
+  exact record once. The first in-memory retirement installs a v3 snapshot, so
+  the admission floor becomes 3 exactly as on a durable journal. A failed
+  in-memory compaction keeps the state, records `retirement.last_error` and
+  arms the same backoff. Ephemeral status reports real retirement headroom
+  with `retirement.ledger_state` `"none"` and `ledger_frames` 0. The small
+  profile never retires, ephemeral or durable.
+
   Status claims retirement headroom (`capacity.remaining_increase_admissions`)
   only while retirement is live and healthy: a durable operational journal,
   ledger not paused, and no failed last retiring attempt
@@ -71,6 +84,7 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFile
+  alias Arbor.Security.AuditJournalFileCore
   alias Arbor.Security.Config
   alias Arbor.Security.Contracts.AuditJournal
 
@@ -386,9 +400,11 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   @impl true
   def handle_continue(:retire, state) do
-    if publication_ready?(state),
-      do: {:noreply, run_t2(state)},
-      else: {:noreply, state}
+    cond do
+      publication_ready?(state) -> {:noreply, run_t2(state)}
+      in_memory_retirement_ready?(state) -> {:noreply, run_in_memory_t2(state)}
+      true -> {:noreply, state}
+    end
   end
 
   @impl true
@@ -568,7 +584,8 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   defp t2_due?(state) do
-    publication_ready?(state) and operational?(state) and not backing_off?(state) and
+    (publication_ready?(state) or in_memory_retirement_ready?(state)) and operational?(state) and
+      not backing_off?(state) and
       AuditJournalCore.retirable_count(state.core) >= state.t2_armed_at
   end
 
@@ -576,6 +593,9 @@ defmodule Arbor.Security.AuditJournalOwner do
     state.mode == :durable and state.serving and not state.poisoned? and
       not state.torn_tail? and not is_nil(state.handle)
   end
+
+  defp in_memory_retirement_ready?(state),
+    do: state.mode == :ephemeral and state.serving and operational?(state)
 
   defp adopt_publication(state, handle, trigger, started) do
     prior_total = retired_total(state.core)
@@ -706,9 +726,10 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   # Retirement headroom only exists where a retiring publication is reachable:
-  # a durable operational journal whose ledger is not paused.
+  # a durable operational journal whose ledger is not paused, or an ephemeral
+  # operational journal (in-memory retirement, no ledger).
   defp retiring?(state) do
-    state.mode == :durable and operational?(state) and not paused?(state)
+    state.mode in [:durable, :ephemeral] and operational?(state) and not paused?(state)
   end
 
   # Status and readiness additionally require the last retiring attempt to
@@ -742,16 +763,118 @@ defmodule Arbor.Security.AuditJournalOwner do
   defp now_ms, do: System.monotonic_time(:millisecond)
 
   defp apply_ephemeral_append(state, raw) do
-    case AuditJournalCore.append(state.core, raw) do
-      {:ok, core} ->
-        {:reply, {:ok, :committed}, %{state | core: core, last_error: :none}}
+    finish_ephemeral_append(AuditJournalCore.append(state.core, raw), state, raw, :first)
+  end
 
-      {:ok, core, :idempotent} ->
-        {:reply, {:ok, :idempotent}, %{state | core: core, last_error: :none}}
+  defp finish_ephemeral_append({:ok, core}, state, _raw, _phase) do
+    {:reply, {:ok, :committed}, %{state | core: core, last_error: :none}}
+  end
+
+  defp finish_ephemeral_append({:ok, core, :idempotent}, state, _raw, _phase) do
+    {:reply, {:ok, :idempotent}, %{state | core: core, last_error: :none}}
+  end
+
+  defp finish_ephemeral_append({:error, reason}, state, raw, :first)
+       when reason in [:soft_capacity_exhausted, :capacity_exhausted] do
+    maybe_retire_in_memory_and_retry(state, raw, {:error, reason})
+  end
+
+  defp finish_ephemeral_append({:error, reason}, state, _raw, _phase) do
+    {:reply, {:error, reason}, state}
+  end
+
+  # Ephemeral T3 (H11). Same predicate and backoff as the durable path; the
+  # small profile keeps its historical behavior (never compacts in memory).
+  defp maybe_retire_in_memory_and_retry(state, raw, cap_err) do
+    cond do
+      not operational?(state) or backing_off?(state) ->
+        {:reply, cap_err, state}
+
+      AuditJournalCore.publication_relieves?(state.core, raw, effective_retirable(state)) ->
+        case retire_in_memory(state, :capacity) do
+          {:ok, retired} ->
+            finish_ephemeral_append(
+              AuditJournalCore.append(retired.core, raw),
+              retired,
+              raw,
+              :retry
+            )
+
+          {:not_published, kept} ->
+            {:reply, cap_err, kept}
+        end
+
+      true ->
+        {:reply, cap_err, state}
+    end
+  end
+
+  # Ephemeral T2 body, run from handle_continue after the triggering reply.
+  defp run_in_memory_t2(state) do
+    case retire_in_memory(state, :acknowledge) do
+      {:ok, retired} -> retired
+      {:not_published, kept} -> kept
+    end
+  end
+
+  # H11: an ephemeral journal has no file and no ledger, so there is no
+  # durable evidence to preserve. The retiring compaction runs purely in
+  # memory over the genesis source with the unchanged genesis ledger binding
+  # (the core admits retiring without advancing the ledger only at genesis).
+  # Its result is exactly the state a durable publication of the same core
+  # would install, so `compact |> restore` equality is the core's own.
+  defp retire_in_memory(state, trigger) do
+    started = now_ms()
+
+    result =
+      AuditJournalCore.compact(state.core, in_memory_source(),
+        retire: true,
+        ledger: AuditJournal.ledger_genesis_binding()
+      )
+
+    case result do
+      {:ok, compacted, _snapshot, _pending} ->
+        {:ok,
+         state
+         |> adopt_in_memory_retirement(compacted, trigger, started)
+         |> after_publication_attempt(false)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:not_published,
+         state
+         |> publication_not_published(reason, trigger, started)
+         |> after_publication_attempt(false)}
     end
+  end
+
+  defp adopt_in_memory_retirement(state, compacted, trigger, started) do
+    retired = retired_total(compacted) - retired_total(state.core)
+    duration = now_ms() - started
+
+    Logger.info(
+      "Security audit journal in-memory retirement (#{trigger}): retired #{retired} " <>
+        "delivered identities, retired_total #{retired_total(compacted)}, duration_ms #{duration}"
+    )
+
+    :telemetry.execute(
+      [:arbor, :security, :audit_journal, :retired],
+      %{count: retired, duration_ms: duration},
+      %{
+        trigger: trigger,
+        retired_total: retired_total(compacted),
+        ledger_frames: ledger_frames(compacted),
+        ledger_state: :none
+      }
+    )
+
+    %{state | core: compacted, last_error: :none, retirement_error: :none}
+  end
+
+  defp in_memory_source do
+    {:ok, source} =
+      AuditJournalFileCore.source_binding(AuditJournalFileCore.genesis_digest(), 0, 0)
+
+    source
   end
 
   defp commit_handle(state, handle) do

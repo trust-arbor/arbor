@@ -752,7 +752,10 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert Map.delete(after_refusal, "last_refusal") == Map.delete(before, "last_refusal")
     end
 
-    test "ephemeral and small journals report no retirement ledger and no retirement headroom" do
+    # Slice 4 (H11): ephemeral operational journals retire in memory and
+    # report real headroom (audit_retirement_ephemeral_test.exs); neither
+    # they nor small journals ever have a ledger.
+    test "ephemeral and small journals report no retirement ledger" do
       {:ok, eph} =
         Owner.start_link(
           mode: :ephemeral,
