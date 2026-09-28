@@ -214,12 +214,39 @@ defmodule Arbor.Security do
 
   def execution_capability_snapshot(_), do: {:error, :capability_profile_unavailable}
 
+  # `admission_open` is a readiness signal for operators and qualification
+  # evidence, not the admission decision (the journal core decides every
+  # admission). It does not gate `SecurityQualification.enforcing_policy?`.
   defp qualification_journal_identity do
     case audit_journal_status() do
-      {:ok, status} -> {:ok, Map.take(status, ~w(mode durability serving poisoned torn_tail))}
-      _ -> {:error, :journal_unavailable}
+      {:ok, status} ->
+        {:ok,
+         status
+         |> Map.take(~w(mode durability serving poisoned torn_tail))
+         |> Map.put("admission_open", audit_admission_open?(status))}
+
+      _ ->
+        {:error, :journal_unavailable}
     end
   end
+
+  # Entry headroom is reservation-aware: `remaining_soft_entries` counts only
+  # written entries, while every admission is checked against written plus
+  # the records pending operations have reserved.
+  defp audit_admission_open?(%{"serving" => true} = status) do
+    capacity = Map.get(status, "capacity", %{})
+    ledger_state = get_in(status, ["retirement", "ledger_state"])
+
+    with increases when is_integer(increases) <- capacity["remaining_increase_admissions"],
+         soft when is_integer(soft) <- capacity["remaining_soft_entries"],
+         reserved when is_integer(reserved) <- capacity["reserved_entries"] do
+      increases > 0 and soft - reserved > 3 and ledger_state not in ["mismatch", "ahead"]
+    else
+      _ -> false
+    end
+  end
+
+  defp audit_admission_open?(_status), do: false
 
   defp qualification_approval_resource?(uri) when is_binary(uri),
     do:
@@ -3531,6 +3558,33 @@ defmodule Arbor.Security do
   a redacted last-error code, counts, pending age, and capacity. Never returns
   file handles, PIDs, paths, reducer internals, capability payloads, or signing
   material.
+
+  Terminal-identity retirement fields:
+
+  - `"capacity"` adds `"retirable_operation_count"` (delivered identities the
+    next retiring publication would retire), `"retired_operation_total"`,
+    `"retire_batch"` and `"remaining_increase_admissions"` (increase headroom
+    after that retirement; retirement counts as zero while the ledger is
+    paused or where no retiring publication exists, i.e. ephemeral and small
+    journals), plus `"reserved_entries"`/`"reserved_bytes"` (records pending
+    operations have reserved; every admission is checked against written
+    plus reserved). The existing map-size fields are unchanged, so an empty
+    queue is never read as capacity.
+  - `"last_refusal"`: the last prepare refusal since the owner started,
+    `"none" | "soft_capacity_exhausted" | "capacity_exhausted" |
+    "retired_version" | "operation_terminal"`.
+  - `"retirement"`: `"floor"` (admission floor, 1 or 3), `"ledger_state"`
+    (`"none"` without a retirement ledger, else `"absent" | "bound" |
+    "bound_orphan" | "mismatch" | "ahead"`), `"ledger_frames"` (frames bound
+    by the published snapshot), `"prepared_count"`,
+    `"oldest_prepared_age_seconds"` and `"last_error"` (`"none"` or the
+    reason the last retirement publication was not published).
+
+  `"ledger_state"` reflects the handle's last open or adopted publication: after
+  an unpublished attempt that left an orphan frame, a live owner may report
+  `"absent"` while a restart over the same bytes reports `"bound_orphan"`;
+  both are retiring postures. `"mismatch"`/`"ahead"` (paused) change only by
+  restart after the journal/ledger pair is restored.
   """
   @spec audit_journal_status() :: {:ok, map()} | {:error, :journal_unavailable}
   def audit_journal_status, do: AuditJournalOwner.status()
@@ -3544,7 +3598,16 @@ defmodule Arbor.Security do
   @spec audit_journal_pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
   def audit_journal_pending_operations, do: AuditJournalOwner.pending_operations()
 
-  @doc "Last serialized capability mutation audit status; diagnostic, not durable evidence."
+  @doc """
+  Last serialized capability mutation audit status; diagnostic, not durable evidence.
+
+  `:effect` and `:audit` as before (a refused grant reports
+  `effect: :not_applied, audit: :refused`), plus `:reason` — the closed class
+  of the last journal refusal (`:none | :capacity | :identity | :unavailable`)
+  — and `:degraded_reductions`, the number of reductions the CapabilityStore
+  process executed without a journal record since it started. Public mutation
+  results are unchanged (`{:error, :audit_unavailable}` for a refused grant).
+  """
   def capability_mutation_audit_status do
     GenServer.call(CapabilityStore, :mutation_audit_status)
   catch

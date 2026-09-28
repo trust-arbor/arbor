@@ -372,9 +372,15 @@ defmodule Arbor.Security.AuditJournalFile do
     # not take (the file keeps a group/other mode) and reports `value`.
     # :ledger_inspect_error — reading an existing ledger for classification
     # fails with `value` (a transient IO fault).
+    # :ledger_append_delay — the ledger phase of a retiring publication sleeps
+    # `value` milliseconds before it writes (a slow publication).
     @doc false
     @spec __test_inject__(
-            :ledger_write_error | :ledger_dir_sync | :ledger_create_chmod | :ledger_inspect_error,
+            :ledger_write_error
+            | :ledger_dir_sync
+            | :ledger_create_chmod
+            | :ledger_inspect_error
+            | :ledger_append_delay,
             term()
           ) :: :ok
     def __test_inject__(kind, value)
@@ -382,7 +388,8 @@ defmodule Arbor.Security.AuditJournalFile do
                :ledger_write_error,
                :ledger_dir_sync,
                :ledger_create_chmod,
-               :ledger_inspect_error
+               :ledger_inspect_error,
+               :ledger_append_delay
              ] do
       AuditRetirementLedger.__test_inject__(kind, value)
     end

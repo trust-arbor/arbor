@@ -460,6 +460,12 @@ defmodule Arbor.Security.AuditJournalCore do
   - `effective_retirable: n` — `n`, clamped to `0..raw count` (ignored when
     `paused: true`).
 
+  `reserved_entries`/`reserved_bytes` are the records every pending v2/v3
+  operation has reserved for its remaining lifecycle. They are not part of
+  `used_entries`, but every new admission is checked against
+  `used + reserved`: an increase needs `remaining_soft_entries -
+  reserved_entries >= 3` (its own prepared record plus two reserved records).
+
   Existing fields keep their map-size definitions so an empty queue is never
   read as capacity.
   """
@@ -472,6 +478,7 @@ defmodule Arbor.Security.AuditJournalCore do
     retirable = retirable_count(state)
     effective = effective_retirable(retirable, opts)
     retirement = AuditJournal.snapshot_retirement(Map.get(state, "snapshot"))
+    {reserved_entries, reserved_bytes} = capacity_reservation(state)
 
     %{
       "used_entries" => used_entries,
@@ -494,9 +501,19 @@ defmodule Arbor.Security.AuditJournalCore do
       "retirable_operation_count" => retirable,
       "retired_operation_total" => retirement["retired_total"],
       "retire_batch" => Map.get(limits, :retire_batch, 0),
-      "remaining_increase_admissions" => max(0, limits.soft_entry_cap - (retained - effective))
+      "remaining_increase_admissions" => max(0, limits.soft_entry_cap - (retained - effective)),
+      "reserved_entries" => reserved_entries,
+      "reserved_bytes" => reserved_bytes
     }
   end
+
+  defp capacity_reservation(%{"operations" => operations}) when is_map(operations) do
+    reserved_cost(operations)
+  rescue
+    _ -> {0, 0}
+  end
+
+  defp capacity_reservation(_state), do: {0, 0}
 
   defp effective_retirable(retirable, opts) do
     paused = Keyword.get(opts, :paused)

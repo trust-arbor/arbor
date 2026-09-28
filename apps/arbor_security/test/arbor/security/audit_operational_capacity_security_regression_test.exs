@@ -26,6 +26,17 @@ defmodule Arbor.Security.AuditOperationalCapacitySecurityRegressionTest do
     assert status["capacity"]["retained_increase_operation_cap"] == 3072
     assert status["capacity"]["retained_operation_count"] == 0
     assert status["committed_frames"] == 1
+    # Retirement (2026-09-28): promotion installs a v3 snapshot (floor 3) and
+    # never touches the ledger; the whole increase budget is available.
+    assert status["retirement"]["floor"] == 3
+    assert status["retirement"]["ledger_state"] == "absent"
+    assert status["retirement"]["ledger_frames"] == 0
+    assert status["retirement"]["last_error"] == "none"
+    assert status["last_refusal"] == "none"
+    assert status["capacity"]["retired_operation_total"] == 0
+    assert status["capacity"]["retire_batch"] == 512
+    assert status["capacity"]["remaining_increase_admissions"] == 3072
+    assert status["capacity"]["remaining_soft_entries"] == 3071
     GenServer.stop(first)
     assert {:ok, second} = AuditJournalOwner.start_link(opts)
     Process.unlink(second)

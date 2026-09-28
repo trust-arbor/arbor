@@ -169,6 +169,8 @@ defmodule Arbor.Security.AuditRetirementLedger do
   def append(%__MODULE__{path: path, state: state} = ledger, frame, hot_delivered)
       when is_binary(path) and is_binary(frame) and is_map(hot_delivered) do
     if LedgerCore.retiring_allowed?(state) do
+      append_delay()
+
       with :ok <- LedgerCore.verify_next_frame(ledger.binding, frame),
            {:ok, bound} <- LedgerCore.bound_size(ledger.binding),
            {:ok, fd, identity} <- open_for_append(ledger, bound) do
@@ -241,7 +243,8 @@ defmodule Arbor.Security.AuditRetirementLedger do
             | :ledger_truncate_below_bound
             | :ledger_dir_sync
             | :ledger_create_chmod
-            | :ledger_inspect_error,
+            | :ledger_inspect_error
+            | :ledger_append_delay,
             term()
           ) :: :ok
     def __test_inject__(key, value)
@@ -250,7 +253,8 @@ defmodule Arbor.Security.AuditRetirementLedger do
                :ledger_truncate_below_bound,
                :ledger_dir_sync,
                :ledger_create_chmod,
-               :ledger_inspect_error
+               :ledger_inspect_error,
+               :ledger_append_delay
              ] do
       current = Process.get(@inject_key, %{})
       Process.put(@inject_key, Map.put(current, key, value))
@@ -258,6 +262,15 @@ defmodule Arbor.Security.AuditRetirementLedger do
     end
 
     defp inject(key), do: Process.get(@inject_key, %{}) |> Map.get(key, :absent)
+
+    # A slow retiring publication: the ledger phase sleeps `ms` before it
+    # writes (used to measure what the triggering acknowledgement waits for).
+    defp append_delay do
+      case inject(:ledger_append_delay) do
+        ms when is_integer(ms) and ms > 0 -> Process.sleep(ms)
+        _ -> :ok
+      end
+    end
 
     defp pwrite_frame(fd, offset, frame) do
       case inject(:ledger_write_error) do
@@ -301,6 +314,7 @@ defmodule Arbor.Security.AuditRetirementLedger do
       end
     end
   else
+    defp append_delay, do: :ok
     defp pwrite_frame(fd, offset, frame), do: do_pwrite(fd, offset, frame)
     defp truncate_target(bound), do: {bound, false}
     defp sync_parent(dir), do: fsync_directory(dir)

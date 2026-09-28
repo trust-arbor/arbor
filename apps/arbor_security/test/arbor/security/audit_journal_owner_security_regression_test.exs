@@ -33,8 +33,20 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
                  "pending_count",
                  "oldest_pending_age_seconds",
                  "committed_frames",
-                 "capacity"
+                 "capacity",
+                 # Terminal-identity retirement (2026-09-28): the last prepare
+                 # refusal and the bounded retirement map.
+                 "last_refusal",
+                 "retirement"
                ])
+  @retirement_keys MapSet.new([
+                     "floor",
+                     "ledger_state",
+                     "ledger_frames",
+                     "prepared_count",
+                     "oldest_prepared_age_seconds",
+                     "last_error"
+                   ])
   @forbidden ~w(pid fd handle root path token core records intent capability private_key signing_key digest identity callback module backend)
 
   setup do
@@ -47,16 +59,25 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert {:ok, status} = Arbor.Security.audit_journal_status()
     assert {:ok, pending} = Arbor.Security.audit_journal_pending_operations()
     assert MapSet.new(Map.keys(status)) == @status_keys
+    assert MapSet.new(Map.keys(status["retirement"])) == @retirement_keys
+
+    assert status["last_refusal"] in ~w(none soft_capacity_exhausted capacity_exhausted retired_version operation_terminal)
+
+    assert status["retirement"]["ledger_state"] in ~w(none absent bound bound_orphan mismatch ahead)
+
     assert is_list(pending)
     assert length(pending) <= 48
     assert Jason.encode!(status)
     assert Jason.encode!(pending)
     assert status["oldest_pending_age_seconds"] in 0..31_536_000
+
     assert status["last_error"] in ~w(none disabled torn_tail not_committed commit_uncertain poisoned)
+
     assert status["reason"] in ~w(none disabled activation_only torn_tail poisoned)
 
     for key <- @forbidden do
       refute Map.has_key?(status, key)
+      refute Map.has_key?(status["retirement"], key)
     end
 
     refute function_exported?(Arbor.Security, :audit_journal_status, 1)
@@ -73,6 +94,7 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     refute match?({:ok, _}, Owner.append(pid, prepared))
 
     assert {:ok, disabled} = Owner.status(pid)
+
     assert {:ok, durable} =
              Owner.start_link(mode: :ephemeral, name: :"#{name}_ephemeral")
 
@@ -84,6 +106,7 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert disabled["reason"] == "disabled"
     assert disabled["last_error"] == "disabled"
     assert disabled["serving"] == false
+
     refute disabled["mode"] == empty_ephemeral["mode"] and
              disabled["availability"] == empty_ephemeral["availability"]
 
@@ -108,7 +131,12 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     root = unique_root()
 
     assert {:error, :invalid_opts} =
-             Owner.start_link(mode: :durable, root: root, path: Path.join(root, "x.log"), name: name)
+             Owner.start_link(
+               mode: :durable,
+               root: root,
+               path: Path.join(root, "x.log"),
+               name: name
+             )
 
     assert {:error, :invalid_opts} =
              Owner.start_link(mode: :ephemeral, file_module: :attacker, name: name)
