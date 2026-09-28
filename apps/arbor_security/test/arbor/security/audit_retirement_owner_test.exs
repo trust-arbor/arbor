@@ -669,9 +669,13 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     # execution policy snapshot is digested into the SecurityQualification
     # profile fingerprint, so a readiness field there would change the
     # fingerprint (and the exact approval URI) whenever a delivery backlog
-    # closed admission. Fails on ed9712a1b, which put `admission_open` into
-    # the snapshot's authority-journal identity; passes on the parent
-    # 52a2cc3fa, which had no readiness field.
+    # closed admission. A branch-internal regression pin: it fails with the
+    # behavior of intermediate commit ed9712a1b, which put `admission_open`
+    # into the snapshot's authority-journal identity (re-proven by mutating
+    # `qualification_journal_identity/0` back to that). The parent 52a2cc3fa
+    # had no readiness field, so the pinned behavior held there, but this
+    # test cannot run on it: its setup writes v3 snapshots
+    # (`AuditJournal.snapshot_kind/1`), which the parent lacks.
     test "security regression: journal admission readiness never changes the qualification policy snapshot" do
       # A fresh journal (open) and one whose retained dimension admits no
       # increase (closed), both serving.

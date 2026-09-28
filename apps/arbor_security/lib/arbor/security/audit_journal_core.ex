@@ -14,6 +14,13 @@ defmodule Arbor.Security.AuditJournalCore do
 
   `compaction_reclaims_occupancy?/1` is entry-based: projected occupancy is
   `1 + pending_record_count`, matching compact's `used_entries`.
+  `compaction_reclaims_occupancy?/1` and `publication_relieves?/3` first
+  decide from operation statuses and counts alone (O(n) in the operation
+  count, no record decode) and decode the retained records only when that
+  count-based projection says a publication could relieve. The count-based
+  projection equals the decoded one whenever the records decode, so the
+  answers are unchanged; a refusal that nothing can relieve (a no-consumer
+  backlog) never pays for a decode of the hot set.
 
   `reserved_entries`/`reserved_bytes` hold the records every pending v2/v3
   operation has reserved for the rest of its lifecycle. They are derived
@@ -137,17 +144,18 @@ defmodule Arbor.Security.AuditJournalCore do
   True when compacting would drop entry occupancy below the current count.
 
   Projected occupancy is `1 + pending_record_count` and must also fit the
-  hard entry cap. Does not invent a source or call `compact/2`.
+  hard entry cap. Does not invent a source or call `compact/2`. The projection
+  is counted from operation statuses first; the retained records are decoded
+  (and must compact) only when that count says compaction could reclaim.
   """
   @spec compaction_reclaims_occupancy?(term()) :: boolean()
   def compaction_reclaims_occupancy?(state) do
     with :ok <- valid_state(state),
+         true <- reclaims_entries?(state, projected_compact_entries(state["operations"])),
          {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
          {:ok, _pending_manifest, pending} <- compact_pending(pending_ops),
          {:ok, _terminal_manifest, _compacted} <- compact_terminals(terminal_ops) do
-      projected = 1 + length(pending)
-      current = state["entry_count"]
-      projected < current and projected <= limits(state).hard_entry_cap
+      reclaims_entries?(state, 1 + length(pending))
     else
       _ -> false
     end
@@ -205,27 +213,46 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
+  # Cheapest first: the retirable count and the retained-operation dimension
+  # are status counts, the post-publication entry projection counts pending
+  # records by status, and only a projection that fits decodes the pending
+  # records (which a compaction must be able to retain) to confirm it.
   defp retirement_relieves?(state, raw, effective_retirable) do
     with :ok <- valid_state(state),
          :operational <- profile(state),
+         retirable when retirable > 0 <- min(effective_retirable, retirable_count(state)),
          {:ok, record} <- map_admit(AuditJournal.admit_record(raw)),
+         cap = class_cap(record, limits(state)),
+         true <- map_size(state["operations"]) - retirable + new_operation_cost(record) <= cap,
+         # After the publication the hot entries are exactly the snapshot plus
+         # the pending records; kept terminals reserve nothing, so the
+         # maintained reservation (O(1)) is the pending operations' own.
+         {maintained_entries, _bytes} = prospective_reservation(state, record),
+         true <- projected_compact_entries(state["operations"]) + maintained_entries + 1 <= cap,
          {:ok, pending_ops, _terminal_ops} <- partition_operations(state["operations"]),
          {:ok, _manifest, pending_records} <- compact_pending(pending_ops) do
-      cap = class_cap(record, limits(state))
-      retirable = min(effective_retirable, retirable_count(state))
-      retained = map_size(state["operations"]) - retirable + new_operation_cost(record)
-
-      # After the publication the hot entries are exactly the snapshot plus the
-      # pending records; kept terminals reserve nothing.
       {reserved_entries, _bytes} =
         prospective_reservation(%{"operations" => pending_ops}, record)
 
-      entries = 1 + length(pending_records) + reserved_entries
-      retirable > 0 and retained <= cap and entries + 1 <= cap
+      1 + length(pending_records) + reserved_entries + 1 <= cap
     else
       _ -> false
     end
   end
+
+  # The entries a compaction keeps, from statuses alone: the snapshot plus
+  # every pending operation's retained records. Equal to `1 + length(pending)`
+  # from `compact_pending/1` whenever the records decode (it admits exactly the
+  # records `pending_record_types/1` names), so it filters exactly.
+  defp projected_compact_entries(operations) do
+    Enum.reduce(operations, 1, fn
+      {_id, %{"status" => status}}, acc -> acc + length(pending_record_types(status))
+      {_id, _op}, acc -> acc
+    end)
+  end
+
+  defp reclaims_entries?(state, projected),
+    do: projected < state["entry_count"] and projected <= limits(state).hard_entry_cap
 
   defp new_operation_cost(%{"record_type" => "prepared"}), do: 1
   defp new_operation_cost(_record), do: 0

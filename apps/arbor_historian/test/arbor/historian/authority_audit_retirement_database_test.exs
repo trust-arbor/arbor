@@ -12,11 +12,20 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   `Security.grant/revoke` and `Historian.flush_authority_audit/0` boundary.
   Every EventLog write is a real committed SQL transaction.
 
-  The sustained lane is the exact-parent security regression: on 52a2cc3fa
-  delivered identities stay retained, so grant 1537 (identity 3073) is refused
-  `:audit_unavailable` by the retained-increase cap. The target-replacement
-  lane pins retirement-era behavior (fails on the parent because nothing is
-  retired and the puller reports nothing).
+  The sustained lane is the exact-parent security regression. On 52a2cc3fa
+  delivered identities stay retained and capacity pressure is handled only by
+  synchronous non-retiring compaction, so the lane fails through the capacity
+  path at a timing-dependent point: when that compaction of the 1024 kept
+  delivered identities (at identity 1025, 3073 journal entries) takes longer
+  than the 5 s call timeout, pair 513's grant exits with a CapabilityStore
+  call timeout (the store then logs `:audit_unavailable`); when it finishes in
+  time, grant 1537 (identity 3073) is refused `:audit_unavailable` by the
+  retained-increase cap. Both were observed.
+
+  The volatile-target and target-replacement lanes are new-behavior tests:
+  on the parent they fail at their first retirement assertion
+  (`retirable_operation_count` / `retired_operation_total` are absent there,
+  since nothing is ever retired), and the parent's puller reports nothing.
   """
   use ExUnit.Case, async: false
 
@@ -31,6 +40,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
+  alias Arbor.Persistence.EventLog.ETS, as: ETSEventLog
   alias Arbor.Security
   alias Arbor.Security.AuditJournalOwner
   alias Arbor.Security.Contracts.AuditJournal
@@ -177,6 +187,79 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     assert status["retirement"]["floor"] == 3
     assert status["retirement"]["ledger_state"] == "bound"
     assert status["retirement"]["ledger_frames"] == 8
+    assert status["admission_open"] == true
+    assert {:ok, %{delivered: 0, pending: 0}} = Historian.flush_authority_audit()
+  end
+
+  test "a volatile target leaves operations effect_applied and unretired; restoring the SQL target delivers and retires them",
+       ctx do
+    handler = "authority-audit-retire-sql-volatile-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        @retired_event,
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:retired, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    # Sink outage: Historian's durable target is a process-lifetime EventLog,
+    # which never qualifies as audit durability.
+    volatile = :"authority_audit_retire_volatile_#{System.unique_integer([:positive])}"
+    start_supervised!({ETSEventLog, name: volatile})
+
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: volatile,
+      backend: ETSEventLog,
+      opts: []
+    })
+
+    assert {:ok, :process_lifetime} = Persistence.durability_class(volatile, ETSEventLog, [])
+
+    for n <- 1..256, do: grant_and_revoke!(ctx.principal, n)
+    assert {:ok, %{delivered: 0, pending: 512}} = Historian.flush_authority_audit()
+    assert {:ok, %{delivered: 0, pending: 512}} = Historian.flush_authority_audit()
+
+    {:ok, pending} = Security.audit_journal_pending_operations()
+    assert length(pending) == 512
+    assert Enum.all?(pending, &(&1["status"] == "effect_applied"))
+    first = hd(pending)["operation_id"]
+    assert {:ok, []} = Persistence.read_stream(volatile, ETSEventLog, stream(first))
+
+    {:ok, stalled} = Security.audit_journal_status()
+    assert stalled["pending_count"] == 512
+    assert stalled["capacity"]["retirable_operation_count"] == 0
+    assert stalled["capacity"]["retired_operation_total"] == 0
+    assert stalled["capacity"]["retained_operation_count"] == 512
+    assert stalled["last_refusal"] == "none"
+    assert retired_publications() == []
+
+    # The durable SQL target is back: one flush delivers the backlog, and the
+    # 512th acknowledgement arms T2, which retires all of it.
+    use_sink(SinkRepo)
+    assert {:ok, %{delivered: 512, pending: 0}} = Historian.flush_authority_audit()
+    # The status call queues behind the T2 continuation.
+    {:ok, status} = Security.audit_journal_status()
+
+    assert [{%{count: 512, duration_ms: ms}, %{trigger: :acknowledge, ledger_state: :bound}}] =
+             retired_publications()
+
+    assert ms < 5_000
+    assert row_count(SinkRepo) == 512
+    assert distinct_stream_count(SinkRepo) == 512
+    assert {:ok, [_committed]} = read(SinkRepo, stream(first))
+
+    assert status["pending_count"] == 0
+    assert status["capacity"]["retired_operation_total"] == 512
+    assert status["capacity"]["retained_operation_count"] == 0
+    assert status["retirement"]["floor"] == 3
+    assert status["retirement"]["ledger_state"] == "bound"
+    assert status["retirement"]["ledger_frames"] == 1
     assert status["admission_open"] == true
     assert {:ok, %{delivered: 0, pending: 0}} = Historian.flush_authority_audit()
   end

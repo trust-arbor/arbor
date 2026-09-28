@@ -11,19 +11,30 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
   An operation whose committed EventLog content conflicts with the journal
   intent (`:audit_content_conflict`, from the readback or from the journal's
   acknowledgement check) or whose stream cannot be read back exactly
-  (`:audit_content_unavailable`) stays `effect_applied` in the journal: it is
-  retried every poll, never acknowledged and therefore never retired. Such a
-  stuck operation is reported once per stuck episode, not on every poll: when
-  an operation first becomes stuck (or its reason changes) the puller emits
-  `[:arbor, :historian, :authority_audit, :conflict]` telemetry
-  (`%{count: 1}`, metadata `operation_id`, `reason`, `source`
+  (`:audit_content_unavailable`) stays `effect_applied` in the journal and is
+  retried every poll; only an acknowledged operation can retire.
+
+  - A conflict is persistent: the durable EventLog (or the journal's
+    acknowledgement check) holds different content for the same operation
+    id, so the operation is never acknowledged, and never retired, until that
+    content is reconciled. A same-UID authority-store rollback that
+    re-presents a retired identity in a different second is the expected
+    cause (see `docs/arbor/DURABLE_CAPABILITY_MUTATION_AUDIT.md`).
+  - Unavailability is transient (a busy or disconnected store): the operation
+    delivers once the stream reads back again.
+
+  Such a stuck operation is reported once per stuck episode, not on every
+  poll: when an operation first becomes stuck (or its reason or source
+  changes) the puller emits `[:arbor, :historian, :authority_audit, :conflict]`
+  telemetry (`%{count: 1}`, metadata `operation_id`, `reason`, `source`
   (`:event_log | :journal`)), and each delivery pass that finds newly stuck
-  operations logs one warning naming them. An operation leaves the stuck set
-  once it is no longer in the delivery batch (acknowledged, or no longer
-  pending), so a recurrence is reported again. A same-UID authority-store
-  rollback that re-presents a retired identity in a different second is the
-  expected cause of a persistent conflict (see
-  `docs/arbor/DURABLE_CAPABILITY_MUTATION_AUDIT.md`).
+  operations logs one warning naming them, worded per reason. A failed
+  attempt that proves nothing about the content (a raising backend, a
+  missing or non-durable target) keeps an already-stuck operation in its
+  episode, so a flapping store cannot re-report it on every alternation. An
+  operation leaves the stuck set once it is delivered or no longer in the
+  delivery batch (no longer pending), so a recurrence is reported again. The
+  stuck set is bounded by the journal's pending set.
   """
   use GenServer
 
@@ -133,17 +144,26 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
 
   defp stuck(_source, result), do: result
 
-  # Report each stuck operation once per stuck episode: the stuck set is
-  # exactly the stuck operations of the latest batch, so an acknowledged or
-  # no-longer-pending operation is forgotten and a recurrence reports again.
+  # Report each stuck operation once per stuck episode. The next stuck set
+  # holds the latest batch's stuck operations plus every previously stuck
+  # operation whose attempt merely failed (no content verdict), so a delivered
+  # or no-longer-pending operation is forgotten and a recurrence reports
+  # again, while a store flapping between an error and a raise does not.
   # Bounded by the journal's pending set.
-  defp note_stuck(state, outcomes) do
+  defp note_stuck(%{stuck: previous} = state, outcomes) do
     current =
-      for {id, {:stuck, source, reason}} <- outcomes, is_binary(id), into: %{} do
-        {id, {reason, source}}
-      end
+      Enum.reduce(outcomes, %{}, fn
+        {id, {:stuck, source, reason}}, acc when is_binary(id) ->
+          Map.put(acc, id, {reason, source})
 
-    fresh = Enum.reject(current, fn {id, value} -> Map.get(state.stuck, id) == value end)
+        {id, :failed}, acc when is_binary(id) and is_map_key(previous, id) ->
+          Map.put(acc, id, Map.fetch!(previous, id))
+
+        _outcome, acc ->
+          acc
+      end)
+
+    fresh = Enum.reject(current, fn {id, value} -> Map.get(previous, id) == value end)
 
     Enum.each(fresh, fn {id, {reason, source}} ->
       :telemetry.execute(@conflict_event, %{count: 1}, %{
@@ -167,15 +187,32 @@ defmodule Arbor.Historian.AuthorityAuditPuller do
     more =
       if length(fresh) > @logged_ids, do: " and #{length(fresh) - @logged_ids} more", else: ""
 
+    notes =
+      fresh
+      |> Enum.map(fn {_id, {reason, _source}} -> reason end)
+      |> Enum.uniq()
+      |> Enum.sort()
+      |> Enum.map_join(&reason_note/1)
+
     Logger.warning(
       "Historian authority audit delivery is stuck for #{length(fresh)} newly affected " <>
         "operation(s) (#{stuck_total} stuck in total): #{shown}#{more}. The journal keeps " <>
-        "them effect_applied; they are retried, never acknowledged and never retired. " <>
-        "A persistent audit_content_conflict usually means the durable EventLog already " <>
-        "holds different content for the same operation id (for example after an " <>
-        "authority-store rollback)."
+        "them effect_applied and they are retried every poll; only an acknowledged " <>
+        "operation retires." <> notes
     )
   end
+
+  defp reason_note(:audit_content_conflict),
+    do:
+      " audit_content_conflict is persistent: the durable EventLog (event_log) or the " <>
+        "journal's acknowledgement check (journal) holds different content for the same " <>
+        "operation id, for example after an authority-store rollback, so it is never " <>
+        "acknowledged and never retired until that content is reconciled."
+
+  defp reason_note(:audit_content_unavailable),
+    do:
+      " audit_content_unavailable is transient: the durable EventLog could not be read " <>
+        "back exactly; the operation delivers once the stream reads back again."
 
   defp event(raw) do
     with {:ok, timestamp, 0} <- DateTime.from_iso8601(raw["timestamp"]) do

@@ -16,6 +16,11 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
   lifecycle ~1024 is refused `:soft_capacity_exhausted` once delivered
   identities fill the entry budget.
 
+  The no-consumer refusal-cost test pins a branch-internal regression: the
+  first slice-4 T3 re-decoded the whole backlog on every capacity refusal
+  (it fails on 57ec0939e). The parent's ephemeral refusal ran no relief
+  predicate at all, so it passes there.
+
   `async: false`: the tests swap the registered journal owner and the
   configured audit consumer.
   """
@@ -31,15 +36,19 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
   @time "2026-09-28T12:00:00Z"
   @retired_event [:arbor, :security, :audit_journal, :retired]
+  @failed_event [:arbor, :security, :audit_journal, :publication_failed]
+  # Every in-memory retirement runs inside the owner's mailbox; a caller
+  # waits at most the 5 s journal call timeout.
+  @call_timeout_ms 5_000
 
   setup do
     handler = "audit-retire-ephemeral-#{System.unique_integer([:positive])}"
     test_pid = self()
 
     :ok =
-      :telemetry.attach(
+      :telemetry.attach_many(
         handler,
-        @retired_event,
+        [@retired_event, @failed_event],
         &__MODULE__.forward_event/4,
         test_pid
       )
@@ -72,6 +81,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
                meta.ledger_frames == 0
            end)
 
+    assert_within_call_timeout(publications)
     assert max_retained <= 512
 
     {:ok, status} = Owner.status(pid)
@@ -119,6 +129,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
     assert length(publications) == div(total, 512)
     assert Enum.all?(publications, fn {m, _meta} -> m.count == 512 end)
+    assert_within_call_timeout(publications)
 
     {:ok, status} = Owner.status(pid)
     assert status["capacity"]["retired_operation_total"] == div(total, 512) * 512
@@ -160,7 +171,9 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     assert admitted["operation_id"] == intent["operation_id"]
 
     assert [{%{count: ^retirable}, %{trigger: :capacity, ledger_state: :none}}] =
-             drain(@retired_event)
+             t3 = drain(@retired_event)
+
+    assert_within_call_timeout(t3)
 
     {:ok, status} = Owner.status(pid)
     assert status["pending_count"] == 1
@@ -195,6 +208,9 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     assert {:error, :soft_capacity_exhausted} = Owner.prepare(intent)
     assert drain(@retired_event) == []
 
+    assert [{_m, %{trigger: :capacity, outcome: :not_published, reason: :malformed}}] =
+             drain(@failed_event)
+
     {:ok, status} = Owner.status(pid)
     assert status["retirement"]["last_error"] == "malformed"
     assert status["last_refusal"] == "soft_capacity_exhausted"
@@ -204,7 +220,55 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
     assert status["admission_open"] == false
     assert status["entry_count"] == before["entry_count"]
-    assert is_integer(:sys.get_state(pid).publication_backoff_until)
+    backoff_until = :sys.get_state(pid).publication_backoff_until
+    assert is_integer(backoff_until)
+
+    # Inside the 5 s backoff a further capacity refusal answers the same
+    # error without another in-memory compaction attempt.
+    assert System.monotonic_time(:millisecond) < backoff_until
+    assert {:error, :soft_capacity_exhausted} = Owner.prepare(producer_grant(lifecycle_count + 2))
+    assert System.monotonic_time(:millisecond) < backoff_until
+    assert drain(@failed_event) == []
+    assert drain(@retired_event) == []
+    assert :sys.get_state(pid).publication_backoff_until == backoff_until
+    {:ok, still} = Owner.status(pid)
+    assert still["entry_count"] == before["entry_count"]
+    assert still["retirement"]["last_error"] == "malformed"
+  end
+
+  # A no-consumer backlog (the test default and any ephemeral journal whose
+  # sink stalls) refuses every further increase. Nothing is retirable, so T3
+  # must decline without re-decoding the retained records: the refusal path
+  # runs inside the single-writer owner, and a 5 s caller timeout turns a slow
+  # refusal into `{:commit_uncertain, :timeout}` and an unjournaled revoke.
+  # Before the count-based filter each refusal re-decoded the whole backlog
+  # (~0.8 s for 1024 pending grants).
+  test "a capacity refusal with nothing retirable answers without decoding the backlog" do
+    pid = start_registered_ephemeral!()
+
+    # 1024 pending effect_applied grants cost 3 entries each (2 written, 1
+    # reserved): the 3072-entry soft budget is full.
+    for n <- 1..1024 do
+      intent = producer_grant(n)
+      expect!(n, :prepare, {:ok, :_, "prepared"}, Owner.prepare(intent))
+      expect!(n, :observe, {:ok, :committed}, Owner.observe(intent["operation_id"], :applied))
+    end
+
+    {elapsed_us, replies} =
+      :timer.tc(fn -> for n <- 1025..1044, do: Owner.prepare(producer_grant(n)) end)
+
+    assert Enum.uniq(replies) == [{:error, :soft_capacity_exhausted}]
+    # 20 refusals; the decoding predicate needed ~16 s here.
+    assert elapsed_us < 3_000_000, "20 refusals took #{div(elapsed_us, 1000)} ms"
+
+    # Declining T3 is not a failed publication: nothing retired, no backoff.
+    assert drain(@retired_event) == []
+    assert :sys.get_state(pid).publication_backoff_until == nil
+    {:ok, status} = Owner.status(pid)
+    assert status["pending_count"] == 1024
+    assert status["capacity"]["retirable_operation_count"] == 0
+    assert status["last_refusal"] == "soft_capacity_exhausted"
+    assert status["retirement"]["last_error"] == "none"
   end
 
   test "ephemeral journals retire in memory with real headroom; small journals never retire" do
@@ -262,13 +326,20 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     )
   end
 
-  defp expect!(n, step, {:ok, :_, status}, {:ok, _intent, status}) when is_binary(status),
+  defp expect!(_n, _step, {:ok, :_, status}, {:ok, _intent, status}) when is_binary(status),
     do: :ok
 
   defp expect!(_n, _step, expected, expected), do: :ok
 
   defp expect!(n, step, expected, actual),
     do: flunk("lifecycle #{n} #{step}: expected #{inspect(expected)}, got #{inspect(actual)}")
+
+  defp assert_within_call_timeout(publications) do
+    durations = Enum.map(publications, fn {m, _meta} -> m.duration_ms end)
+
+    assert Enum.all?(durations, &(&1 < @call_timeout_ms)),
+           "in-memory retirement durations #{inspect(durations)} reach the #{@call_timeout_ms} ms call timeout"
+  end
 
   defp fill_entry_budget!(pid) do
     Enum.reduce_while(1..2000, 0, fn n, done ->

@@ -51,16 +51,20 @@ defmodule Arbor.Security.AuditJournalOwner do
   compaction a durable publication would rename into place
   (`AuditJournalCore.compact/3` with `retire: true`) over the genesis source
   and the unchanged genesis ledger binding, and T3 then retries the caller's
-  exact record once. The first in-memory retirement installs a v3 snapshot, so
-  the admission floor becomes 3 exactly as on a durable journal. A failed
-  in-memory compaction keeps the state, records `retirement.last_error` and
-  arms the same backoff. Ephemeral status reports real retirement headroom
-  with `retirement.ledger_state` `"none"` and `ledger_frames` 0. The small
-  profile never retires, ephemeral or durable.
+  exact record once. T3 first asks the same count-based relief predicate as a
+  durable journal, so a refusal that nothing can relieve (a no-consumer
+  backlog: nothing delivered, nothing retirable) answers without decoding the
+  hot set and arms no backoff. The first in-memory retirement installs a v3
+  snapshot, so the admission floor becomes 3 exactly as on a durable journal.
+  A failed in-memory compaction keeps the state, records
+  `retirement.last_error` and arms the same backoff. Ephemeral status reports
+  real retirement headroom with `retirement.ledger_state` `"none"` and
+  `ledger_frames` 0. The small profile never retires, ephemeral or durable.
 
   Status claims retirement headroom (`capacity.remaining_increase_admissions`)
-  only while retirement is live and healthy: a durable operational journal,
-  ledger not paused, and no failed last retiring attempt
+  only while retirement is live and healthy: a durable operational journal
+  whose ledger is not paused, or an ephemeral operational journal (in-memory
+  retirement), and in both cases no failed last retiring attempt
   (`retirement.last_error == "none"`). Top-level `admission_open` is the
   readiness projection `serving and ledger not paused and
   AuditJournalCore.increase_headroom?/2` under that headroom. It is a signal

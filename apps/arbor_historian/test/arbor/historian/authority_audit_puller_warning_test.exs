@@ -4,8 +4,10 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
   slice 4e): an operation whose committed EventLog content conflicts, whose
   stream cannot be read back exactly, or whose acknowledgement the journal
   answers `:audit_content_conflict` stays `effect_applied`, is retried every
-  poll and is never retired. Each stuck episode is logged and signalled once,
-  not on every 250 ms poll.
+  poll and retires only once acknowledged. Each stuck episode is logged and
+  signalled once, not on every 250 ms poll, with the warning worded per reason
+  (a conflict is persistent, unavailability transient), and a store flapping
+  between a read error and a raise does not restart the episode.
 
   On the parent 52a2cc3fa the puller is silent for all three (no warning, no
   telemetry): the operation is simply counted as pending.
@@ -48,13 +50,20 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
   defmodule NodeRestartETS do
     @moduledoc false
     # The ETS EventLog reporting node-restart durability so the puller's
-    # content path runs; selected streams answer a read error.
+    # content path runs; selected streams answer a read error or raise.
     def durability_class(_opts), do: :node_restart
 
     def read_stream(stream_id, opts) do
-      if stream_id in :persistent_term.get({__MODULE__, :unreadable}, []),
-        do: {:error, :injected_read_failure},
-        else: ETS.read_stream(stream_id, opts)
+      cond do
+        stream_id in :persistent_term.get({__MODULE__, :raising}, []) ->
+          raise "injected read raise"
+
+        stream_id in :persistent_term.get({__MODULE__, :unreadable}, []) ->
+          {:error, :injected_read_failure}
+
+        true ->
+          ETS.read_stream(stream_id, opts)
+      end
     end
 
     def append(stream_id, events, opts), do: ETS.append(stream_id, events, opts)
@@ -98,6 +107,7 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
     on_exit(fn ->
       :telemetry.detach(handler)
       :persistent_term.erase({NodeRestartETS, :unreadable})
+      :persistent_term.erase({NodeRestartETS, :raising})
       restore_env(:durable_event_log_target, old_target)
       restore_env(:security_module, old_security)
     end)
@@ -130,6 +140,12 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
     assert log =~ "#{unreadable.id} (audit_content_unavailable, event_log)"
     assert log =~ "#{journal_conflict.id} (audit_content_conflict, journal)"
     refute log =~ healthy.id
+    # Worded per reason: a conflict never resolves by retrying, an unreadable
+    # stream delivers once storage recovers.
+    assert log =~ "audit_content_conflict is persistent"
+    assert log =~ "never acknowledged and never retired until that content is reconciled"
+    assert log =~ "audit_content_unavailable is transient"
+    assert log =~ "delivers once the stream reads back again"
 
     assert Enum.sort(drain()) ==
              Enum.sort([
@@ -193,6 +209,66 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
     assert drain() == []
   end
 
+  test "a store flapping between a read error and a raise reports its stuck operation once" do
+    flappy = op(20)
+    raising = op(21)
+    unreadable([flappy.stream])
+    set_batch([flappy])
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{delivered: 0, pending: 1}} = Historian.flush_authority_audit()
+      end)
+
+    assert log =~ "stuck for 1 newly affected operation(s) (1 stuck in total)"
+    assert log =~ "#{flappy.id} (audit_content_unavailable, event_log)"
+    assert log =~ "audit_content_unavailable is transient"
+    refute log =~ "audit_content_conflict is persistent"
+    assert drain() == [{flappy.id, :audit_content_unavailable, :event_log}]
+
+    # The store alternates between raising (a failed attempt: no content
+    # verdict) and the same read error. One episode, reported once.
+    log =
+      capture_log(fn ->
+        for _ <- 1..3 do
+          raise_on([flappy.stream])
+          unreadable([])
+          assert {:ok, %{delivered: 0, pending: 1}} = Historian.flush_authority_audit()
+          raise_on([])
+          unreadable([flappy.stream])
+          assert {:ok, %{delivered: 0, pending: 1}} = Historian.flush_authority_audit()
+        end
+      end)
+
+    refute log =~ "stuck for"
+    assert drain() == []
+
+    # A failed attempt never starts an episode on its own.
+    raise_on([raising.stream])
+    set_batch([flappy, raising])
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{delivered: 0, pending: 2}} = Historian.flush_authority_audit()
+      end)
+
+    refute log =~ "stuck for"
+    assert drain() == []
+
+    # Storage recovers: both deliver and leave the stuck set.
+    raise_on([])
+    unreadable([])
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{delivered: 2, pending: 0}} = Historian.flush_authority_audit()
+      end)
+
+    refute log =~ "stuck for"
+    assert drain() == []
+    assert :sys.get_state(AuthorityAuditPuller).stuck == %{}
+  end
+
   test "a batch of healthy operations logs nothing and emits no conflict telemetry" do
     set_batch([op(10), op(11)])
 
@@ -231,6 +307,8 @@ defmodule Arbor.Historian.AuthorityAuditPullerWarningTest do
   end
 
   defp set_batch(ops), do: Agent.update(FakeSecurity, &%{&1 | batch: ops})
+  defp unreadable(streams), do: :persistent_term.put({NodeRestartETS, :unreadable}, streams)
+  defp raise_on(streams), do: :persistent_term.put({NodeRestartETS, :raising}, streams)
 
   defp answer(id, reply),
     do: Agent.update(FakeSecurity, &%{&1 | ack_answers: Map.put(&1.ack_answers, id, reply)})

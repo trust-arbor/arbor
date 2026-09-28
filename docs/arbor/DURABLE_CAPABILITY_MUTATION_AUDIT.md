@@ -64,13 +64,22 @@ intent-digest acknowledgement. Lost append acknowledgements are reconciled by
 readback. Extra rows, conflicting content, unavailable storage, and volatile
 targets leave journal evidence pending. An operation stuck on conflicting or
 unreadable content (`audit_content_conflict`, `audit_content_unavailable`,
-from the readback or from the journal's acknowledgement check) is retried on
-every poll but reported once per stuck episode: one `Logger.warning` per
-delivery pass naming the newly stuck operations, and
+from the readback or from the journal's acknowledgement check) stays
+`effect_applied`, is retried on every poll, and retires only once
+acknowledged. A conflict is persistent: the EventLog (or the journal's
+acknowledgement check) holds different content for the same operation id, so
+the operation is never acknowledged, and never retired, until that content is
+reconciled. Unavailability is transient: the operation delivers once the
+stream reads back again. Each stuck operation is reported once per stuck
+episode: one `Logger.warning` per delivery pass naming the newly stuck
+operations, worded per reason, and
 `[:arbor, :historian, :authority_audit, :conflict]` telemetry per operation
-(metadata `operation_id`, `reason`, `source` = `event_log | journal`). An
-operation that leaves the batch is forgotten, so a recurrence is reported
-again. Only the configured registered consumer PID can fetch delivery bodies or
+(metadata `operation_id`, `reason`, `source` = `event_log | journal`). A
+failed attempt with no content verdict (a raising backend, a missing or
+non-durable target) keeps an already-stuck operation in its episode, so a
+store flapping between an error and a raise is not re-reported. An operation
+that is delivered or leaves the batch is forgotten, so a recurrence is
+reported again. Only the configured registered consumer PID can fetch delivery bodies or
 acknowledge them; caller-provided ACKs cannot erase pending evidence. The
 trusted BEAM and its process registration remain part of this boundary.
 
@@ -124,8 +133,12 @@ stays below 512 and the limits bound the working set:
 Measured on the development laptop on 2026-09-28: 2300 public grant/revoke
 pairs (4600 identities) drained through the real Historian puller into a
 committed SQLite EventLog in 30-46 s across runs, with eight retiring
-publications and no refusal; the previous release refuses grant 1537
-(identity 3073) of the same workload.
+publications and no refusal. The previous release fails the same workload
+through the capacity path at a timing-dependent point: its synchronous
+non-retiring compaction at identity 1025 (3073 journal entries, all 1024
+delivered identities kept) took about 5.7 s in some runs, so that grant
+exceeded the 5-second call timeout; where it finished in time, grant 1537
+(identity 3073) was refused `:audit_unavailable` by the retained-increase cap.
 
 ### Identity v3 and the admission floor
 
@@ -187,7 +200,13 @@ points, all through the same checked compaction/publication pipeline:
   identities later.
 - On a capacity refusal (T3), when a publication could admit the refused
   record; the caller's exact record is then retried once. No record carries an
-  epoch, so the retry of the same raw record is correct by construction.
+  epoch, so the retry of the same raw record is correct by construction. The
+  relief predicate decides from operation statuses and counts first and
+  decodes the retained records only when a publication could relieve, so a
+  refusal that nothing can relieve (for example a backlog with no consumer:
+  nothing delivered, nothing retirable) answers in well under a millisecond
+  instead of re-decoding the hot set inside the single-writer owner, and arms
+  no backoff.
 
 A T2/T3 publication that is not published, and every T2/T3 attempt while the
 ledger is paused, starts a 5-second backoff (monotonic clock) in which T2 is
@@ -211,7 +230,8 @@ about 12 ms each.) Measured on the development laptop on 2026-09-28:
   (the Historian puller acknowledging after committed SQLite writes);
 - about 1.3 s for the first T2 after a sink outage left 1023 operations pending
   (the most the entry clause admits);
-- about 0.3-0.6 s per 512-identity in-memory retirement on an ephemeral journal.
+- about 0.15-0.6 s per 512-identity in-memory retirement on an ephemeral journal
+  (the ephemeral lanes assert every one stays under the 5-second call timeout).
 
 A call that still waits longer than the 5-second journal call timeout answers
 `{:commit_uncertain, :timeout}` (for the Historian puller a false "pending"; the
@@ -254,8 +274,11 @@ retries the caller's exact record once. The first in-memory retirement installs
 a v3 snapshot, so the floor becomes 3 as on a durable journal. Status reports
 real retirement headroom with `retirement.ledger_state` `"none"` and
 `ledger_frames` 0. A failed in-memory compaction keeps the state, sets
-`retirement.last_error` and arms the same backoff. Restarting an ephemeral
-journal loses everything, as before.
+`retirement.last_error` and arms the same backoff, inside which T2 is skipped
+and T3 answers the capacity refusal without another attempt. With no consumer
+(nothing is ever delivered) nothing retires, and a full ephemeral journal
+refuses increases exactly as before, without the relief predicate decoding the
+backlog. Restarting an ephemeral journal loses everything, as before.
 
 ### Status and readiness
 

@@ -7,14 +7,25 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
   configuration with production-shaped durable state under private temporary
   paths: a JSONFile authority store and a durable `:operational` audit journal
   under one realpath authority root (Application/TestBootstrap-selected, the
-  same way a node selects them), a persistent system-authority key,
-  `Arbor.Persistence.Repo` on a private SQLite file (never the shared test
-  database), migrated in the peer, and the real `AuthorityAuditPuller` whose
-  durable target is that Repo.
+  same way a node selects them), a persistent system-authority key, a real
+  SQLite3 Ecto repo on a private file (never the shared test database),
+  migrated in the peer with `arbor_persistence`'s migrations and serving the
+  real `Arbor.Persistence.EventLog.Ecto` backend, and the real
+  `AuthorityAuditPuller` whose durable target is that repo.
+
+  The repo is a private `Ecto.Repo` module shipped to each peer as object code
+  (like the driver), not `Arbor.Persistence.Repo`: that module's adapter is
+  fixed at compile time (`Ecto.Adapters.Postgres` under `ARBOR_DB=postgres`,
+  the CI database lane), and a whole-BEAM restart over a private temporary
+  database needs SQLite whatever the umbrella was compiled with. It carries
+  the same `recursive_triggers` pragma `Arbor.Persistence.Repo` sets for
+  SQLite.
 
   - Peer A drives more than 600 public `Security.grant/revoke` lifecycles
     (flushing between batches) so the first T2 retiring publication retires
-    512 delivered identities, then halts.
+    512 delivered identities, then halts. One flush runs with the puller's own
+    calls traced, observing the durability gate and the committed readback
+    before its acknowledgement.
   - Peer B reopens the same root and SQLite file: identical journal status
     except wall-clock fields, floor 3, the bound ledger; a flush redelivers
     nothing; a raw v2 prepared of a retired identity's facts is refused
@@ -39,20 +50,34 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
   alias Arbor.Common.SafePath
   alias Arbor.Security.Contracts.AuditJournal
 
+  repo =
+    defmodule PeerSinkRepo do
+      @moduledoc false
+      # Shipped to the peers as object code: adapter-independent of the
+      # compiled Arbor.Persistence.Repo.
+      use Ecto.Repo, otp_app: :arbor_historian, adapter: Ecto.Adapters.SQLite3
+    end
+
   driver =
     defmodule PeerDriver do
       @moduledoc false
       # Shipped to the peers as object code; runs only lib modules there.
       alias Arbor.Historian
+      alias Arbor.Historian.AuthorityAuditRetirementPeerRestartTest.PeerSinkRepo, as: Repo
       alias Arbor.Historian.Config, as: HistorianConfig
       alias Arbor.Persistence
       alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
-      alias Arbor.Persistence.Repo
       alias Arbor.Security
       alias Arbor.Security.AuditJournalOwner
 
       @target_name :historian_durable_event_log
       @conflict_event [:arbor, :historian, :authority_audit, :conflict]
+      @puller_calls [
+        {Persistence, :durability_class, 3},
+        {Persistence, :read_stream, 4},
+        {Persistence, :append, 5},
+        {Security, :acknowledge_authority_audit, 2}
+      ]
 
       def boot(%{umbrella: umbrella, db: db, root: root, keys: keys, collector: collector}) do
         # Nothing may reach the control channel before the forwarder is up.
@@ -71,16 +96,6 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
           master_key_path: Path.join(keys, "master.key")
         )
 
-        put_all(:arbor_persistence, [
-          {Repo,
-           database: db,
-           pool: DBConnection.ConnectionPool,
-           pool_size: 4,
-           busy_timeout: 5_000,
-           journal_mode: :wal,
-           log: false}
-        ])
-
         put_all(:arbor_historian,
           durable_event_log_target: %{
             name: @target_name,
@@ -91,8 +106,21 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
 
         {:ok, _} = Application.ensure_all_started(:arbor_historian)
         install_log_forwarder(collector)
+
+        {:ok, _} =
+          Supervisor.start_child(
+            Arbor.Persistence.Supervisor,
+            {Repo,
+             database: db,
+             pool: DBConnection.ConnectionPool,
+             pool_size: 4,
+             busy_timeout: 5_000,
+             journal_mode: :wal,
+             custom_pragmas: [recursive_triggers: true],
+             log: false}
+          )
+
         true = Repo.__adapter__() == Ecto.Adapters.SQLite3
-        {:ok, _} = Supervisor.start_child(Arbor.Persistence.Supervisor, Repo)
         migrations = Path.join(umbrella, "apps/arbor_persistence/priv/repo/migrations")
         _ = Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
         :ok = Security.TestBootstrap.start!()
@@ -178,6 +206,37 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
         end
       end
 
+      # A flush with the puller process's own calls traced (this process is
+      # the tracer): the durability gate, the committed readback and the
+      # acknowledgement, in the order the puller made them.
+      def traced_flush do
+        puller = Process.whereis(Arbor.Historian.AuthorityAuditPuller)
+        Enum.each(@puller_calls, &:erlang.trace_pattern(&1, true, [:global]))
+        1 = :erlang.trace(puller, true, [:call, {:tracer, self()}])
+
+        try do
+          result = Historian.flush_authority_audit()
+          ref = :erlang.trace_delivered(puller)
+
+          receive do
+            {:trace_delivered, ^puller, ^ref} -> :ok
+          end
+
+          {result, traced_calls([])}
+        after
+          :erlang.trace(puller, false, [:call])
+          Enum.each(@puller_calls, &:erlang.trace_pattern(&1, false, [:global]))
+        end
+      end
+
+      defp traced_calls(acc) do
+        receive do
+          {:trace, _pid, :call, {_module, fun, _args}} -> traced_calls([fun | acc])
+        after
+          0 -> Enum.reverse(acc)
+        end
+      end
+
       def grant(principal, suffix),
         do:
           Security.grant(principal: principal, resource: "arbor://memory/read/peer-sql/#{suffix}")
@@ -224,6 +283,8 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
       end
     end
 
+  @repo elem(repo, 1)
+  @repo_binary elem(repo, 2)
   @driver elem(driver, 1)
   @driver_binary elem(driver, 2)
   @umbrella Path.expand("../../../../..", __DIR__)
@@ -246,6 +307,21 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
     assert {:ok, :node_restart} = call(a, :target_durability, [])
     assert [] = call(a, :drive_pairs, [principal, 1..10, 10])
 
+    # The real puller, observed on its own process: it checks the target's
+    # durability class, finds the stream absent, appends, rereads the
+    # committed row, and only then acknowledges.
+    assert {:ok, _traced} = call(a, :grant, [principal, "traced"])
+
+    assert {{:ok, %{delivered: 1, pending: 0}}, puller_calls} = call(a, :traced_flush, [])
+
+    assert puller_calls == [
+             :durability_class,
+             :read_stream,
+             :append,
+             :read_stream,
+             :acknowledge_authority_audit
+           ]
+
     # The rollback copy of the authority store, taken before exact grant G.
     before_g = namespace_listing(root)
     copy_namespaces!(root, backup)
@@ -261,7 +337,8 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
     assert [] = call(a, :drive_pairs, [principal, 11..320, 50])
     assert {:ok, %{delivered: 0, pending: 0}} = call(a, :flush, [])
     assert {:ok, status_a} = call(a, :status, [])
-    identities = 2 * 320 + 1
+    # 320 pairs, G and the traced grant.
+    identities = 2 * 320 + 2
     assert status_a["pending_count"] == 0
     assert status_a["capacity"]["retired_operation_total"] == 512
     assert status_a["capacity"]["retained_operation_count"] == identities - 512
@@ -432,6 +509,13 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
     {:ok, peer, node} = start_peer(name)
     on_exit(fn -> safely_stop_peer(peer) end)
     :ok = :erpc.call(node, :code, :add_pathsa, [:code.get_path()])
+
+    {:module, @repo} =
+      :erpc.call(node, :code, :load_binary, [
+        @repo,
+        ~c"authority_audit_retirement_peer_sink_repo",
+        @repo_binary
+      ])
 
     {:module, @driver} =
       :erpc.call(node, :code, :load_binary, [
