@@ -884,13 +884,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   # Conservative egress taint: the MOST severe level across all context taint —
   # the prompt may incorporate any context data, so if anything is untrusted/
-  # hostile, treat the egress as carrying it. Returns nil when no taint present.
+  # hostile, treat the egress as carrying it.
+  #
+  # With no labels at all this returns :trusted, EXPLICITLY. That is the engine
+  # context's own model (unlabeled keys carry no taint — see Context taint
+  # provenance), and it is what a nil here used to mean implicitly. The egress
+  # gate now fails closed on a nil/unknown taint (Imp review D3, 2026-09-27), so
+  # the "no labels = clean" decision has to be stated at this boundary rather
+  # than guessed by the security kernel.
   defp egress_taint_level(context) do
     context
     |> Map.get(:taint, %{})
     |> Map.values()
     |> Enum.map(fn t -> Map.get(t, :level, :derived) end)
-    |> Enum.max_by(fn level -> Map.get(@taint_severity, level, 1) end, fn -> nil end)
+    |> Enum.max_by(fn level -> Map.get(@taint_severity, level, 1) end, fn -> :trusted end)
   end
 
   defp call_llm(prompt, node, context, graph, opts) do

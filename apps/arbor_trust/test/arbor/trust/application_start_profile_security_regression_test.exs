@@ -383,8 +383,12 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     assert {:ok, _} = restart_trust!(:activation_only, true)
     unknown = "agent_egress_#{System.unique_integer([:positive])}"
 
-    assert Arbor.Trust.authorize_egress(unknown, :external_provider, egress_mode: :auto) ==
-             {:requires_approval, :egress}
+    # egress_taint: :trusted isolates the standing layer; a missing taint is
+    # decided as :untrusted by the kernel (Imp review D3).
+    assert Arbor.Trust.authorize_egress(unknown, :external_provider,
+             egress_mode: :auto,
+             egress_taint: :trusted
+           ) == {:requires_approval, :egress}
 
     assert {:error, :malformed_policy_opts} =
              Arbor.Trust.authorize(unknown, "arbor://ai/generate", :execute,
@@ -471,6 +475,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              Arbor.Trust.authorize(agent_id, resource, :execute,
                egress_tier: :external_provider,
                egress_mode: :auto,
+               egress_taint: :trusted,
                verify_identity: false
              )
   end
@@ -580,7 +585,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              allow_permissive_baseline: false
            ) == :ask
 
-    assert Arbor.Trust.authorize_egress(unknown, :external_provider) ==
+    assert Arbor.Trust.authorize_egress(unknown, :external_provider, egress_taint: :trusted) ==
              {:requires_approval, :egress}
 
     assert Policy.tighten_public_opts(unknown, []) == {:ok, []}

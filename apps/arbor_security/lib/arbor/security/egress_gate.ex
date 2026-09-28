@@ -35,6 +35,7 @@ defmodule Arbor.Security.EgressGate do
 
   alias Arbor.Contracts.Security.{Capability, CapabilityUri}
   alias Arbor.Contracts.Security.Classification
+  alias Arbor.Contracts.Security.Taint
 
   @type decision :: :allow | :ask | {:block, atom()}
 
@@ -66,10 +67,15 @@ defmodule Arbor.Security.EgressGate do
   The egress decision for an agent + resolved tier, given candidate caps for
   refinement. Returns `:allow`, `:ask`, or `{:block, reason}`.
 
-  `opts`: `:egress_taint` (level atom or Taint struct), `:egress_destination`
-  (host/provider string for destination-scoped caps), plus the disclosure
-  route opts `:egress_provider`/`:egress_runtime`/`:egress_model` consulted
-  only when `disclosure_cap` is present.
+  `opts`: `:egress_taint` (level atom or string, or a Taint struct/map with a
+  `:level`), `:egress_destination` (host/provider string for destination-scoped
+  caps), plus the disclosure route opts `:egress_provider`/`:egress_runtime`/
+  `:egress_model` consulted only when `disclosure_cap` is present.
+
+  The taint conjunct is the fail-closed part of the ceiling: a missing, nil,
+  misspelled, or unrecognized `:egress_taint` is decided as `:untrusted` (see
+  `effective_taint_level/1`). A caller whose own taint model means "no label =
+  clean" must pass `:trusted` explicitly.
 
   `disclosure_cap` (VP-05D2A0) is an already-validated, exact interactive
   disclosure `Capability.t()` (never a raw candidate list, never resolved
@@ -269,12 +275,30 @@ defmodule Arbor.Security.EgressGate do
 
   defp normalize_tier(_), do: nil
 
-  # The flowing data's taint level — accepts a bare level atom or a Taint struct.
-  defp taint_level(opts) do
-    case Keyword.get(opts, :egress_taint) do
-      %{level: level} -> level
-      level when is_atom(level) -> level
-      _ -> nil
-    end
-  end
+  @doc """
+  The taint level the gate decides with for a raw `:egress_taint` value.
+
+  Accepts a level atom, a level string, or a Taint struct/map carrying one.
+  FAIL CLOSED (Imp review D3, 2026-09-27): anything else — `nil` (the key was
+  omitted or misspelled), an unknown atom/string, a bare multi-key taint map —
+  is `:untrusted`. Previously these read as "no taint", skipping both the
+  `:hostile` and `:untrusted` branches and leaving only the policy check.
+  Same posture as `TaintEnvelope.missing_fallback/0` for unlabeled durable data.
+  """
+  @spec effective_taint_level(term()) :: Taint.level()
+  def effective_taint_level(%{level: level}), do: normalize_taint_level(level)
+  def effective_taint_level(%{"level" => level}), do: normalize_taint_level(level)
+  def effective_taint_level(level), do: normalize_taint_level(level)
+
+  @taint_levels Taint.levels()
+  @taint_level_strings Map.new(@taint_levels, &{Atom.to_string(&1), &1})
+
+  defp normalize_taint_level(level) when level in @taint_levels, do: level
+
+  defp normalize_taint_level(level) when is_binary(level),
+    do: Map.get(@taint_level_strings, level, :untrusted)
+
+  defp normalize_taint_level(_level), do: :untrusted
+
+  defp taint_level(opts), do: opts |> Keyword.get(:egress_taint) |> effective_taint_level()
 end

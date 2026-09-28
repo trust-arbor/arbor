@@ -134,6 +134,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   `level: :untrusted, chain: ["session_steering"]`. So "use the turn's actual taint
   instead of worst-case" is a no-op for chat; the actual value already IS
   untrusted. Do not re-propose it as a fix for `:initial_denied`.
+- **A missing or unreadable `:egress_taint` is `:untrusted` (2026-09-27, Imp review
+  D3).** `EgressGate.effective_taint_level/1` reads a level atom, a level string, or
+  a Taint struct/map with a `:level`. Anything else (key omitted or misspelled,
+  `nil`, an unknown atom/string, a bare multi-key context taint map) is decided as
+  `:untrusted`. Before this, those forms read as "no taint", which skipped
+  branches 1 and 2 and left only the policy check. *Symptom:* a new egress caller
+  gets `{:egress_blocked, tier, :untrusted}` even with `egress_mode: :allow`, and
+  `:egress_observed` reports `egress_taint: :untrusted`. *Action:* thread the real
+  taint. If your boundary's model genuinely means "no label = clean", pass
+  `egress_taint: :trusted` explicitly and say so in a comment. `LlmHandler`
+  (context with no taint labels) and `Arbor.Actions.authorize_and_execute`
+  (context without `:taint`) do exactly this; they are the two deliberate
+  "unlabeled = clean" decision points. Regression:
+  `egress_taint_fail_closed_security_regression_test.exs`.
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 

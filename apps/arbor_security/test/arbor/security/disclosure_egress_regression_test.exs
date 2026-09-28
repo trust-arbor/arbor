@@ -345,7 +345,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       {:ok, signed} = SystemAuthority.sign_capability(expired)
       {:ok, :stored} = CapabilityStore.put(signed)
 
-      assert Arbor.Security.authorize_egress(agent_id, :external_provider) ==
+      assert Arbor.Security.authorize_egress(agent_id, :external_provider, egress_taint: :trusted) ==
                {:requires_approval, :egress}
     end
 
@@ -363,7 +363,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       {:ok, signed} = SystemAuthority.sign_capability(cap)
       {:ok, :stored} = CapabilityStore.put(signed)
 
-      assert Arbor.Security.authorize_egress(agent_id, :external_provider) == :allow
+      assert Arbor.Security.authorize_egress(agent_id, :external_provider, egress_taint: :trusted) ==
+               :allow
     end
   end
 
