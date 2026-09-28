@@ -39,6 +39,11 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
   @retired_event [:arbor, :security, :audit_journal, :retired]
   @failed_event [:arbor, :security, :audit_journal, :publication_failed]
   @paused_event [:arbor, :security, :audit_journal, :ledger_paused]
+  # The readiness walk reads status every @readiness_stride increases far
+  # from the entry clause and before every increase within one stride plus
+  # @readiness_window entries of it.
+  @readiness_stride 50
+  @readiness_window 30
 
   setup do
     handler = "audit-retire-owner-#{System.unique_integer([:positive])}"
@@ -701,6 +706,10 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       refute admission_open?(closed)
     end
 
+    # A status read digests every pending operation, so reading readiness
+    # before each of the ~1020 increases is quadratic; it overran the default
+    # 60 s timeout under full-suite CPU load.
+    @tag timeout: 300_000
     test "admission_open follows the exact entry clause of the next increase" do
       root = unique_root()
       {name, _pid} = start_owner(root)
@@ -717,25 +726,51 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
                Owner.observe(name, rejected["operation_id"], {:rejected, "before_mismatch"})
 
       capacity = status!(name)["capacity"]
-      assert rem(capacity["remaining_soft_entries"] - capacity["reserved_entries"], 3) == 0
+      assert rem(entry_slack(capacity), 3) == 0
 
+      # Readiness is read before every @readiness_stride-th increase while the
+      # entry slack is far from the clause, and before every increase once a
+      # reading is within one stride of increases plus @readiness_window
+      # entries of it. The dense stretch therefore always spans the last
+      # admitted increase (slack exactly 3) and the refused one; a refusal
+      # without a reading before it fails the walk instead of passing it.
       outcome =
-        Enum.reduce_while(1..1100, :open, fn n, :open ->
-          ready? = admission_open?(name)
+        Enum.reduce_while(1..1100, {:sparse, 0}, fn n, {mode, dense_checks} ->
+          reading =
+            if mode == :dense or rem(n, @readiness_stride) == 1, do: status!(name)
+
+          mode =
+            if reading &&
+                 entry_slack(reading["capacity"]) <
+                   3 + 3 * @readiness_stride + @readiness_window,
+               do: :dense,
+               else: mode
 
           case Owner.prepare(name, grant(n)) do
             {:ok, _, "prepared"} ->
-              assert ready?, "admission_open was false but increase #{n} was admitted"
-              {:cont, :open}
+              if reading do
+                assert reading["admission_open"],
+                       "admission_open was false but increase #{n} was admitted"
+              end
+
+              checked = if reading && mode == :dense, do: 1, else: 0
+              {:cont, {mode, dense_checks + checked}}
 
             {:error, :soft_capacity_exhausted} ->
-              refute ready?, "admission_open was true but increase #{n} was refused"
-              {:halt, {:refused_at, n}}
+              assert reading, "increase #{n} was refused without a readiness reading before it"
+
+              refute reading["admission_open"],
+                     "admission_open was true but increase #{n} was refused"
+
+              {:halt, {:refused_at, n, dense_checks}}
           end
         end)
 
-      assert {:refused_at, n} = outcome
+      assert {:refused_at, n, dense_checks} = outcome
       assert n in 1020..1025
+      # Every admitted increase of the dense stretch (at least the window's
+      # worth) was checked against readiness.
+      assert dense_checks >= div(@readiness_window, 3)
       # The refused call's T3 compaction reclaims the rejected operation's two
       # records, which still leaves less than one increase.
       capacity = status!(name)["capacity"]
@@ -877,6 +912,9 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
   end
 
   defp admission_open?(name), do: status!(name)["admission_open"]
+
+  defp entry_slack(capacity),
+    do: capacity["remaining_soft_entries"] - capacity["reserved_entries"]
 
   defp wait_backoff, do: Process.sleep(5_100)
 
