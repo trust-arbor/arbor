@@ -9,6 +9,22 @@ defmodule Arbor.Trust.TaintConjunct do
 
   This module is pure apart from reading the already-resolved capability profile
   projection by URI when the caller did not provide an explicit `:effect_class`.
+
+  ## Absent vs unreadable taint
+
+  An *absent* operation taint (no `:operation_taint` / `:egress_taint` /
+  `:taint` opt, or only nil ones) is "no taint signal" and imposes nothing:
+  most `Trust.authorize` callers (agent executor, reviewed validation, owned
+  routines, tool disclosure) do not track taint at all, and reading their
+  silence as `:untrusted` would turn every `:auto` rule on a degraded action
+  profile into a human approval. The one path that does carry taint,
+  `Arbor.Actions.authorize_and_execute/4`, always supplies an explicit level.
+
+  A *present but unreadable* taint (unknown atom or string, `true`, an empty or
+  unlabeled map, a struct/map with an unknown `:level`) is `:untrusted`
+  (2026-09-27, Imp review D3 follow-up). Previously it read as nil, so a
+  garbled label on a high-risk operation passed as clean here while
+  `Arbor.Security.EgressGate` blocked the same request as untrusted.
   """
 
   alias Arbor.Trust.CapabilityProfileRegistry
@@ -82,9 +98,12 @@ defmodule Arbor.Trust.TaintConjunct do
   @doc "Resolve the operation input taint level from authorization opts."
   @spec operation_taint(keyword()) :: taint_level() | nil
   def operation_taint(opts) when is_list(opts) do
-    opts
-    |> first_present([:operation_taint, :egress_taint, :taint])
-    |> taint_level()
+    case first_present(opts, [:operation_taint, :egress_taint, :taint]) do
+      # Absent: no taint signal (see moduledoc). Anything present is read,
+      # and an unreadable value fails closed to :untrusted.
+      nil -> nil
+      taint -> taint_level(taint)
+    end
   end
 
   defp profile_effect_class(resource_uri) do
@@ -122,15 +141,16 @@ defmodule Arbor.Trust.TaintConjunct do
   defp taint_level(level) when is_atom(level), do: normalize_taint(level)
   defp taint_level(level) when is_binary(level), do: normalize_taint(level)
 
+  # A context taint map (key -> label): the worst label. Unreadable entries
+  # count as :untrusted, and an empty map carries no readable label at all.
   defp taint_level(taint_map) when is_map(taint_map) do
     taint_map
     |> Map.values()
     |> Enum.map(&taint_level/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.max_by(&Map.get(@taint_rank, &1, 2), fn -> nil end)
+    |> Enum.max_by(&Map.fetch!(@taint_rank, &1), fn -> :untrusted end)
   end
 
-  defp taint_level(_taint), do: nil
+  defp taint_level(_taint), do: :untrusted
 
   defp normalize_taint(level) when level in [:trusted, :derived, :untrusted, :hostile],
     do: level
@@ -141,9 +161,9 @@ defmodule Arbor.Trust.TaintConjunct do
       "derived" -> :derived
       "untrusted" -> :untrusted
       "hostile" -> :hostile
-      _ -> nil
+      _ -> :untrusted
     end
   end
 
-  defp normalize_taint(_level), do: nil
+  defp normalize_taint(_level), do: :untrusted
 end

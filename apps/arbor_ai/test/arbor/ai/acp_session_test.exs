@@ -832,6 +832,143 @@ defmodule Arbor.AI.AcpSessionTest do
              AcpSession.send_message(server, "invalid", timeout: 100, deadline_ms: huge_deadline)
   end
 
+  describe "adapter-backed providers receive the bound ToolServer (Imp D6 follow-up)" do
+    # Before 2026-09-27 the ToolServer descriptor only rode `session/new`.
+    # ex_mcp's ClaudeSDK adapter ignores it there (Claude never saw the
+    # ToolServer) and the Codex adapter refuses any unauthorized MCP server
+    # (session/new failed outright once a ToolServer was bound).
+    @token "tok_session_0123456789abcdef0123456789"
+
+    defp tool_server_entry,
+      do: Arbor.AI.AcpPool.ToolServer.mcp_servers_entry(%{port: 41_002, token: @token})
+
+    defp start_adapter_session(adapter, adapter_opts, extra \\ []) do
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          [
+            provider: :test,
+            client_opts: [test_pid: self(), adapter: adapter, adapter_opts: adapter_opts],
+            mcp_servers: tool_server_entry(),
+            timeout: 1_000
+          ] ++ extra
+        )
+
+      on_exit(fn -> if Process.alive?(session), do: AcpSession.close(session) end)
+      session
+    end
+
+    defp started_client_opts(session) do
+      :ok = AcpSession.await_ready(session, timeout: 1_000)
+      Agent.get(:sys.get_state(session).client, & &1.opts)
+    end
+
+    test "Claude gets the ToolServer through a private --mcp-config file, strict, pre-allowed" do
+      session =
+        start_adapter_session(ExMCP.ACP.Adapters.ClaudeSDK, [permission_mode: :default],
+          tool_profile: %{
+            allowed_tools: ["Read"],
+            gated_tools: [],
+            wildcard?: false,
+            deny_unlisted?: true
+          }
+        )
+
+      opts = started_client_opts(session)
+      adapter_opts = Keyword.fetch!(opts, :adapter_opts)
+      refute Keyword.has_key?(opts, :arbor_mcp_allow_tools)
+
+      assert adapter_opts[:strict_mcp_config] == true
+      assert ["--mcp-config", path] = Enum.take(adapter_opts[:extra_args], -2)
+      assert Path.dirname(path) == :sys.get_state(session).runtime_home_cleanup.path
+
+      assert {:ok, %File.Stat{type: :regular, mode: mode}} = File.lstat(path)
+      assert Bitwise.band(mode, 0o7777) == 0o600
+
+      assert %{"mcpServers" => %{"arbor-tools" => %{"headers" => headers}}} =
+               path |> File.read!() |> Jason.decode!()
+
+      assert headers == %{"Authorization" => "Bearer " <> @token}
+
+      # Profile allow-list is extended, not replaced.
+      assert adapter_opts[:allowed_tools] == ["Read", "mcp__arbor-tools"]
+    end
+
+    test "security regression: the Claude launch argv and session status never carry the token" do
+      session = start_adapter_session(ExMCP.ACP.Adapters.ClaudeSDK, permission_mode: :default)
+      adapter_opts = session |> started_client_opts() |> Keyword.fetch!(:adapter_opts)
+
+      {_exe, argv} = ExMCP.ACP.Adapters.ClaudeSDK.Protocol.command(adapter_opts)
+      assert "--strict-mcp-config" in argv
+      assert "--mcp-config" in argv
+      refute Enum.any?(argv, &String.contains?(&1, @token))
+    end
+
+    test "security regression: session status and crash-report state redact the bearer token" do
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self()],
+          mcp_servers: tool_server_entry(),
+          timeout: 1_000
+        )
+
+      on_exit(fn -> if Process.alive?(session), do: AcpSession.close(session) end)
+      :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      status = inspect(:sys.get_status(session), limit: :infinity, printable_limit: :infinity)
+      refute status =~ @token
+      assert status =~ "[REDACTED]"
+    end
+
+    test "Codex trusts exactly the bound ToolServer, so session/new carries its header" do
+      session =
+        start_adapter_session(ExMCP.ACP.Adapters.Codex,
+          trusted_mcp_servers: :all,
+          authorize_mcp_server: fn _ -> true end
+        )
+
+      adapter_opts = session |> started_client_opts() |> Keyword.fetch!(:adapter_opts)
+      assert adapter_opts[:trusted_mcp_servers] == tool_server_entry()
+      refute Keyword.has_key?(adapter_opts, :authorize_mcp_server)
+
+      cwd = System.tmp_dir!()
+
+      new_session = fn opts ->
+        {:ok, state} = ExMCP.ACP.Adapters.Codex.init(opts ++ [cwd: cwd])
+
+        ExMCP.ACP.Adapters.Codex.translate_outbound(
+          %{
+            "method" => "session/new",
+            "id" => 1,
+            "params" => %{"cwd" => cwd, "mcpServers" => tool_server_entry()}
+          },
+          state
+        )
+      end
+
+      assert {:ok, request, _state} = new_session.(adapter_opts)
+      wire = request |> IO.iodata_to_binary() |> String.trim() |> Jason.decode!()
+
+      assert get_in(wire, ["params", "config", "mcp_servers", "arbor-tools", "http_headers"]) ==
+               %{"Authorization" => "Bearer " <> @token}
+
+      # The pre-fix launch (no trusted list) is refused by the adapter.
+      assert {:error, "MCP server is not authorized", _state} =
+               new_session.(Keyword.delete(adapter_opts, :trusted_mcp_servers))
+    end
+
+    test "an adapter without MCP support fails the launch instead of stranding the ToolServer" do
+      session = start_adapter_session(ExMCP.ACP.Adapters.Pi, [])
+
+      assert {:error, {:acp_mcp_servers_unsupported, ExMCP.ACP.Adapters.Pi}} =
+               AcpSession.await_ready(session, timeout: 1_000)
+    end
+  end
+
   describe "Config.resolve/2" do
     test "resolves native ACP providers" do
       assert {:ok, opts} = Config.resolve(:gemini)
