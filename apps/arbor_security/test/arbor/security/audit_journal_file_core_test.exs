@@ -620,6 +620,28 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       assert {:error, :malformed} = FileCore.candidate_basename("a/b")
     end
 
+    test "ledger_basename derives the retirement ledger from the journal basename" do
+      assert {:ok, "audit_journal.v1.retirement.v1.log"} =
+               FileCore.ledger_basename("audit_journal.v1.log")
+
+      assert {:ok, "foo.retirement.v1.log"} = FileCore.ledger_basename("foo.log")
+      assert {:ok, "journal.retirement.v1.log"} = FileCore.ledger_basename("journal")
+      assert {:ok, "a.log.retirement.v1.log"} = FileCore.ledger_basename("a.log.log")
+
+      {:ok, ledger} = FileCore.ledger_basename("audit_journal.v1.log")
+      {:ok, candidate} = FileCore.candidate_basename("audit_journal.v1.log")
+      refute ledger in ["audit_journal.v1.log", candidate]
+
+      for bad <- ["", ".", "..", "a/b", "a" <> <<0>> <> ".log", <<0xFF>>, nil, :log] do
+        assert {:error, :malformed} = FileCore.ledger_basename(bad)
+      end
+    end
+
+    test "the ledger_append phase is pre-rename: a ledger fault is never publish_uncertain" do
+      assert {:not_published, :ledger_write_failed} =
+               FileCore.classify_publish_phase(:ledger_append, :ledger_write_failed)
+    end
+
     test "leftover_action admits only regular 0600 single-link" do
       assert :unlink = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 1})
 

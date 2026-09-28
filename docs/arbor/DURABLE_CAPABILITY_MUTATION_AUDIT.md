@@ -91,9 +91,17 @@ v1/v2 `prepared` is refused `:retired_version` before any capacity check and
 writes nothing, while v1/v2 operations already pending complete by id. Retiring
 delivered identities out of the hot set is being landed in slices; see
 `.arbor/roadmap/3-in-progress/authority-audit-terminal-identity-retirement-protocol.md`.
-Until the file layer retires them, delivered identities remain retained as
-described above. Retirement must not silently treat a retired identity as new
-or delete protected audit history.
+The durable journal file can retire them (since 2026-09-28): a retiring
+publication first writes the exact compact strings it removes from the hot
+snapshot as one fsynced frame of a cold, append-only retirement ledger next to
+the journal (`audit_journal.v1.retirement.v1.log`, mode 0600), then binds that
+frame in the v3 snapshot it renames into place. A ledger write failure leaves
+the journal unchanged and retires nothing. A ledger that does not match its
+binding (`mismatch`) or holds unexpected frames beyond it (`ahead`) is never
+overwritten; publications then keep every delivered identity hot. The journal
+owner does not request retiring publications yet, so until that slice lands
+delivered identities remain retained as described above. Retirement must not
+silently treat a retired identity as new or delete protected audit history.
 
 ## Coverage and limits
 

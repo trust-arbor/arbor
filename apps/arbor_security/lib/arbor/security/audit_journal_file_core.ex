@@ -28,6 +28,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
     :sync,
     :candidate_proof,
     :candidate_reproof,
+    :ledger_append,
     :source_tip_proof
   ]
   @post_rename_phases [:dir_finalize, :reopen, :published_replay]
@@ -286,6 +287,34 @@ defmodule Arbor.Security.AuditJournalFileCore do
   end
 
   def candidate_basename(_name), do: {:error, :malformed}
+
+  @doc """
+  Basename of the cold retirement ledger that belongs to a journal file.
+
+  Strips one trailing `.log` from the journal basename and appends
+  `.retirement.v1.log`: `audit_journal.v1.log` becomes
+  `audit_journal.v1.retirement.v1.log`, and an explicit `foo.log` journal
+  gets `foo.retirement.v1.log`. The ledger lives in the journal's own
+  directory, so two journals under one root never share a ledger.
+  """
+  @spec ledger_basename(term()) :: {:ok, String.t()} | {:error, :malformed}
+  def ledger_basename(name) when is_binary(name) do
+    cond do
+      name in ["", ".", ".."] -> {:error, :malformed}
+      not String.valid?(name) -> {:error, :malformed}
+      String.contains?(name, <<0>>) -> {:error, :malformed}
+      String.contains?(name, "/") -> {:error, :malformed}
+      true -> {:ok, strip_log_suffix(name) <> ".retirement.v1.log"}
+    end
+  end
+
+  def ledger_basename(_name), do: {:error, :malformed}
+
+  defp strip_log_suffix(name) do
+    if String.ends_with?(name, ".log"),
+      do: binary_part(name, 0, byte_size(name) - 4),
+      else: name
+  end
 
   @spec leftover_action(term()) :: :unlink | {:error, atom()}
   def leftover_action(%{type: :symlink}), do: {:error, :symlink_rejected}
