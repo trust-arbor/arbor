@@ -286,6 +286,18 @@ defmodule Arbor.Actions.TaintEnforcementTest do
                )
     end
 
+    test "regression: audit-only allows an aggregate label on a sanitization-requiring param" do
+      # Pre-fix the aggregate audit-only branch had no :missing_sanitization
+      # clause and raised CaseClauseError, so a :derived external-agent call to
+      # e.g. shell_execute crashed in dev instead of being audited.
+      for taint <- [:derived, %TaintStruct{level: :derived, source: "gateway_mcp"}] do
+        context = %{taint: taint, taint_policy: :audit_only}
+
+        assert :ok =
+                 TaintEnforcement.check(MockExtendedControlAction, %{command: "ls"}, context)
+      end
+    end
+
     test "audit-only mode still allows aggregate violations" do
       context = %{taint: :untrusted, taint_policy: :audit_only}
 

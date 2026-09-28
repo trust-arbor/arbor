@@ -129,6 +129,14 @@ defmodule Arbor.Actions.TaintEnforcement do
         # Log the violation but allow execution
         TaintEvents.emit_taint_audited(action_module, param, level, context)
         :ok
+
+      # A sanitization-requiring control param (e.g. Shell's `command`) with a
+      # non-trusted aggregate label. Audit it like the per-parameter path does;
+      # this clause was missing, so audit-only raised CaseClauseError instead
+      # (reachable once external-agent entry points labeled inputs :derived).
+      {:error, {:missing_sanitization, param, _missing}} ->
+        TaintEvents.emit_taint_audited(action_module, param, :unsanitized, context)
+        :ok
     end
   end
 
