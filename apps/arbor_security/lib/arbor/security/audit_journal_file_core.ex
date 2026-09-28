@@ -456,10 +456,13 @@ defmodule Arbor.Security.AuditJournalFileCore do
     end
   end
 
+  # Every admissible snapshot kind (v1 small, v2 legacy operational, v3
+  # operational with retirement accounting) classifies as a snapshot frame, so
+  # an operational publication of a v3 snapshot replays and self-proves.
   defp payload_kind(payload) when is_binary(payload) do
     case decode_json(payload) do
       {:ok, %{"kind" => kind}} ->
-        if kind in [AuditJournal.snapshot_kind(), AuditJournal.operational_snapshot_kind()] do
+        if kind in AuditJournal.snapshot_kinds() do
           :snapshot
         else
           :record

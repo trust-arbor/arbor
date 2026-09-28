@@ -6,8 +6,10 @@ replace either store or claim coverage of every Security authority owner.
 
 ## Commit and recovery boundary
 
-CapabilityStore prepares a version-2 intent before a new or changed capability
-can be written or published live. The intent identifies the exact store key,
+CapabilityStore prepares a version-3 intent before a new or changed capability
+can be written or published live (since 2026-09-28; version 3 carries the same
+facts as the earlier version 2 under its own identity domain, so the two
+identities of identical facts never collide). The intent identifies the exact store key,
 Record ID, generation, revision, and digest of the complete serialized capability.
 Its operation ID is stable over those mutation facts; observation time and
 optional correlation fields do not create a second mutation identity. The first
@@ -81,9 +83,16 @@ remaining identity slots even when pending count is zero. Successful delivery
 does not provide unlimited lifetime. Rollout must check both pending and retained
 headroom; do not delete the journal to reset it.
 
-Planned follow-up: source-owned retirement of delivered v2 identities, backed by
-exact durable delivery evidence and explicit replay/late-retry semantics. It must
-not silently weaken v1 terminal replay or delete protected audit history.
+Operational snapshots are version 3 (since 2026-09-28). A v3 snapshot carries
+the retirement accounting (`retired_total` and the cold retirement-ledger
+binding) and sets the journal's admission floor to intent version 3: an unknown
+v1/v2 `prepared` is refused `:retired_version` before any capacity check and
+writes nothing, while v1/v2 operations already pending complete by id. Retiring
+delivered identities out of the hot set is being landed in slices; see
+`.arbor/roadmap/3-in-progress/authority-audit-terminal-identity-retirement-protocol.md`.
+Until the file layer retires them, delivered identities remain retained as
+described above. Retirement must not silently treat a retired identity as new
+or delete protected audit history.
 
 ## Coverage and limits
 

@@ -1,11 +1,37 @@
 defmodule Arbor.Security.Contracts.AuditJournal do
   @moduledoc """
-  Security-owned v1 authority-mutation intent and append-record contracts.
+  Security-owned authority-mutation intent, append-record, snapshot and
+  retirement-batch contracts.
 
   Wire kinds:
-  - intent: `arbor.security.authority_mutation_intent.v1`
+  - intent: `arbor.security.authority_mutation_intent.v1`, `.v2`, `.v3`
   - record: `arbor.security.authority_mutation_record.v1`
-  - snapshot: `arbor.security.audit_journal_snapshot.v1`
+  - snapshot: `arbor.security.audit_journal_snapshot.v1` (small profile),
+    `.v2` (operational, read-only legacy) and `.v3` (operational, carries the
+    retirement accounting)
+  - retirement batch: `arbor.security.audit_retirement_batch.v1` (the payload of
+    one cold retirement-ledger frame)
+
+  Intent identity:
+  - v1: `sha256(v1 domain || canonical facts)` including `prepared_at` and the
+    optional lineage ids.
+  - v2 and v3: `sha256(vN domain || canonical facts minus prepared_at and the
+    optional actor/task/session/correlation/causation ids)`. v3 hashes the same
+    facts as v2 under its own domain (`version` and `kind` are hashed facts), so
+    a v3 identity never equals the v2 identity of identical facts.
+    `legacy_alias_operation_id/1` returns that v2 identity for a v3 intent.
+
+  Snapshot v3 exact keys: `version kind source pending_manifest terminals
+  capacity_profile retirement`, where `retirement` is exactly
+  `%{"retired_total" => n, "ledger" => binding}` and `binding` is exactly
+  `%{"frames" => n, "tip_offset" => n, "tip_len" => n, "tip_digest" => hex64}`.
+  `frames == 0` iff `tip_len == 0` iff `tip_digest` is the genesis digest (and
+  then `tip_offset == 0`); ledger `frames` is bounded only by the JSON-safe
+  integer range, never by the 4096-entry frame bound of `source`.
+
+  Retirement batch exact keys: `version` (1), `kind`, `source` (the operational
+  journal source binding of the retiring publication) and `retired`, a map of
+  1..4096 operation ids to their delivered terminal compact strings.
 
   Compact grammar (`pending_manifest` and `terminals` are maps keyed by
   operation_id, sorted on encode, and must not overlap):
@@ -26,8 +52,22 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @record_kind "arbor.security.authority_mutation_record.v1"
   @snapshot_kind "arbor.security.audit_journal_snapshot.v1"
   @operational_snapshot_kind "arbor.security.audit_journal_snapshot.v2"
+  @snapshot_kind_v3 "arbor.security.audit_journal_snapshot.v3"
+  @retirement_batch_kind "arbor.security.audit_retirement_batch.v1"
+  @intent_kind_v2 "arbor.security.authority_mutation_intent.v2"
+  @intent_kind_v3 "arbor.security.authority_mutation_intent.v3"
   @intent_domain "arbor.security.authority_mutation_intent.v1" <> <<0>>
-  @intent_domain_v2 "arbor.security.authority_mutation_intent.v2" <> <<0>>
+  @intent_domain_v2 @intent_kind_v2 <> <<0>>
+  @intent_domain_v3 @intent_kind_v3 <> <<0>>
+  # The retirement ledger chains its frames from the same genesis digest as the
+  # journal file (`AuditJournalFileCore.genesis_digest/0`); pinned by a test.
+  @ledger_genesis_digest Base.encode16(
+                           :crypto.hash(
+                             :sha256,
+                             "arbor.security.audit_journal.genesis.v1" <> <<0>>
+                           ),
+                           case: :lower
+                         )
   @record_domain "arbor.security.authority_mutation_record.v1" <> <<0>>
 
   @operations ["capability_grant", "capability_revoke"]
@@ -61,6 +101,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @max_nodes 64
   @operational_entries 4096
   @operational_snapshot_bytes 4 * 1024 * 1024
+  @retire_batch 512
 
   @intent_required ~w(
     version kind operation effect_class authority_namespace authority_key
@@ -105,6 +146,14 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @snapshot_order @snapshot_keys
   @snapshot_source_order @snapshot_source_keys
   @snapshot_max_keys 5
+  @snapshot_v2_keys @snapshot_keys ++ ["capacity_profile"]
+  @snapshot_v3_keys @snapshot_v2_keys ++ ["retirement"]
+  @retirement_keys ~w(retired_total ledger)
+  @retirement_order @retirement_keys
+  @ledger_keys ~w(frames tip_offset tip_len tip_digest)
+  @ledger_order @ledger_keys
+  @retirement_batch_keys ~w(version kind source retired)
+  @retirement_batch_order @retirement_batch_keys
   @sha_group "([0-9a-f]{64})"
   @pending_compact_re ~r/\Aprepared:([0-9a-f]{64})(?:\|effect_applied:([0-9a-f]{64}))?\z/
   @terminal_delivered_re Regex.compile!(
@@ -138,6 +187,10 @@ defmodule Arbor.Security.Contracts.AuditJournal do
                       @applied_observation_keys ++
                       @rejected_observation_keys ++
                       @snapshot_keys ++
+                      @snapshot_v3_keys ++
+                      @retirement_keys ++
+                      @ledger_keys ++
+                      @retirement_batch_keys ++
                       @snapshot_source_keys ++ MapSet.to_list(@forbidden_names)
                   )
   @max_wire_key_bytes @wire_key_names |> Enum.map(&byte_size/1) |> Enum.max()
@@ -183,6 +236,60 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   @spec snapshot_kind() :: String.t()
   def snapshot_kind, do: @snapshot_kind
+
+  @doc "Wire kind of snapshot `version` 1 (small), 2 (legacy operational) or 3 (operational)."
+  @spec snapshot_kind(1 | 2 | 3) :: String.t()
+  def snapshot_kind(1), do: @snapshot_kind
+  def snapshot_kind(2), do: @operational_snapshot_kind
+  def snapshot_kind(3), do: @snapshot_kind_v3
+
+  @doc "Every admissible snapshot wire kind (used to classify journal frames)."
+  @spec snapshot_kinds() :: [String.t()]
+  def snapshot_kinds, do: [@snapshot_kind, @operational_snapshot_kind, @snapshot_kind_v3]
+
+  @doc "Wire kind of intent `version` 1, 2 or 3."
+  @spec intent_kind(1 | 2 | 3) :: String.t()
+  def intent_kind(1), do: @intent_kind
+  def intent_kind(2), do: @intent_kind_v2
+  def intent_kind(3), do: @intent_kind_v3
+
+  @doc "Wire kind of one retirement-ledger frame payload."
+  @spec retirement_batch_kind() :: String.t()
+  def retirement_batch_kind, do: @retirement_batch_kind
+
+  @doc """
+  The ledger binding of a journal that has never written a retirement frame.
+
+  `tip_digest` is the lowercase hex of the journal genesis digest, which is also
+  the predecessor of the first retirement-ledger frame.
+  """
+  @spec ledger_genesis_binding() :: map()
+  def ledger_genesis_binding do
+    %{
+      "frames" => 0,
+      "tip_offset" => 0,
+      "tip_len" => 0,
+      "tip_digest" => @ledger_genesis_digest
+    }
+  end
+
+  @doc """
+  Retirement accounting carried by an admitted snapshot.
+
+  A v3 snapshot answers its own `retirement` object; every other snapshot (or
+  `nil`) answers zero retired operations and the genesis ledger binding.
+  """
+  @spec snapshot_retirement(term()) :: map()
+  def snapshot_retirement(%{
+        "version" => 3,
+        "retirement" => %{"retired_total" => total, "ledger" => ledger}
+      })
+      when is_integer(total) and is_map(ledger) do
+    %{"retired_total" => total, "ledger" => ledger}
+  end
+
+  def snapshot_retirement(_snapshot),
+    do: %{"retired_total" => 0, "ledger" => ledger_genesis_binding()}
 
   @spec intent_domain() :: binary()
   def intent_domain, do: @intent_domain
@@ -256,6 +363,10 @@ defmodule Arbor.Security.Contracts.AuditJournal do
         applied_observation: length(@applied_observation_keys),
         rejected_observation: length(@rejected_observation_keys),
         snapshot: @snapshot_max_keys,
+        snapshot_v3: length(@snapshot_v3_keys),
+        snapshot_retirement: length(@retirement_keys),
+        snapshot_ledger: length(@ledger_keys),
+        retirement_batch: length(@retirement_batch_keys),
         snapshot_source: length(@snapshot_source_keys)
       }
     }
@@ -272,13 +383,17 @@ defmodule Arbor.Security.Contracts.AuditJournal do
       reserve_bytes: 4 * 1024 * 1024,
       soft_byte_cap: 12 * 1024 * 1024,
       max_fold_records: @operational_entries,
-      max_snapshot_bytes: @operational_snapshot_bytes
+      max_snapshot_bytes: @operational_snapshot_bytes,
+      retire_batch: @retire_batch
     })
   end
 
   def operational_snapshot_kind, do: @operational_snapshot_kind
 
-  def snapshot_profile(%{"version" => 2, "capacity_profile" => "operational"}), do: :operational
+  def snapshot_profile(%{"version" => version, "capacity_profile" => "operational"})
+      when version in [2, 3],
+      do: :operational
+
   def snapshot_profile(_snapshot), do: :small
 
   @spec effect_class_for(term()) :: {:ok, String.t()} | {:error, :unsupported_operation}
@@ -313,6 +428,60 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   def operation_id(input) do
     with {:ok, admitted} <- admit_intent(input) do
       {:ok, admitted["operation_id"]}
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @doc """
+  The v2 operation id of the identical facts of an admitted v3 intent.
+
+  Only for cutover continuity (a v2 operation still pending when the producer
+  moved to v3). Any other intent version answers `{:error, :unsupported_version}`.
+  """
+  @spec legacy_alias_operation_id(term()) :: {:ok, String.t()} | {:error, error()}
+  def legacy_alias_operation_id(input) do
+    case admit_intent(input) do
+      {:ok, %{"version" => 3} = intent} ->
+        intent
+        |> Map.delete("operation_id")
+        |> Map.put("version", 2)
+        |> Map.put("kind", @intent_kind_v2)
+        |> operation_id()
+
+      {:ok, _other_version} ->
+        {:error, :unsupported_version}
+
+      {:error, _} = err ->
+        err
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @doc """
+  Admit one retirement-ledger frame payload (closed, exact keys).
+
+  `retired` holds 1..4096 delivered terminal compact strings keyed by operation
+  id; its canonical bytes are bounded by the operational snapshot byte bound.
+  """
+  @spec admit_retirement_batch(term()) :: {:ok, map()} | {:error, error()}
+  def admit_retirement_batch(input) do
+    do_admit_retirement_batch(input)
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @spec canonical_retirement_batch_bytes(term()) :: {:ok, binary()} | {:error, error()}
+  def canonical_retirement_batch_bytes(input) do
+    with {:ok, batch} <- admit_retirement_batch(input) do
+      encode_retirement_batch(batch)
     end
   rescue
     _ -> {:error, :malformed}
@@ -397,8 +566,36 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   # Snapshot
   # ---------------------------------------------------------------------------
 
+  # Snapshot v3 is modeled on the v2 clause: exact keys, no structural
+  # `budget_ok` (a 4096-entry manifest far exceeds its 64-node budget), and the
+  # operational byte bound enforced by `encode_snapshot/1`.
+  defp do_admit_snapshot(%{"version" => 3} = input) do
+    with {:ok, attrs} <- admit_object(input, @snapshot_v3_keys, length(@snapshot_v3_keys)),
+         :ok <- require_exact_keys(attrs, @snapshot_v3_keys),
+         {:ok, _} <- admit_exact(attrs["kind"], @snapshot_kind_v3, "kind"),
+         {:ok, _} <- admit_exact(attrs["capacity_profile"], "operational", "capacity_profile"),
+         {:ok, source} <- admit_snapshot_source(attrs["source"], :operational),
+         {:ok, pending} <- admit_pending_manifest(attrs["pending_manifest"]),
+         {:ok, terminals} <- admit_terminals(attrs["terminals"]),
+         :ok <- reject_manifest_overlap(pending, terminals),
+         {:ok, retirement} <- admit_retirement(attrs["retirement"]) do
+      admitted = %{
+        attrs
+        | "source" => source,
+          "pending_manifest" => pending,
+          "terminals" => terminals,
+          "retirement" => retirement
+      }
+
+      case encode_snapshot(admitted) do
+        {:ok, _bytes} -> {:ok, admitted}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   defp do_admit_snapshot(%{"version" => 2} = input) do
-    keys = @snapshot_keys ++ ["capacity_profile"]
+    keys = @snapshot_v2_keys
 
     with {:ok, attrs} <- admit_object(input, keys, 6),
          :ok <- require_exact_keys(attrs, keys),
@@ -459,6 +656,117 @@ defmodule Arbor.Security.Contracts.AuditJournal do
        }}
     end
   end
+
+  defp admit_retirement(value) do
+    with {:ok, attrs} <- admit_object(value, @retirement_keys, length(@retirement_keys)),
+         :ok <- require_exact_keys(attrs, @retirement_keys),
+         {:ok, total} <- admit_non_negative_int(attrs["retired_total"], "retired_total"),
+         {:ok, ledger} <- admit_ledger_binding(attrs["ledger"]),
+         :ok <- retirement_consistent(total, ledger) do
+      {:ok, %{"retired_total" => total, "ledger" => ledger}}
+    end
+  end
+
+  # Every ledger frame retires at least one operation, so a binding can never
+  # name more frames than operations retired. In-memory (ephemeral) retirement
+  # keeps the genesis binding while `retired_total` grows.
+  defp retirement_consistent(total, %{"frames" => frames}) when frames <= total, do: :ok
+  defp retirement_consistent(_total, _ledger), do: {:error, {:invalid_field, "retired_total"}}
+
+  # Ledger frames are bounded by the JSON-safe integer range only; the
+  # 4096-frame bound of `admit_snapshot_frames/2` is a journal-file bound and
+  # must never cap the lifetime ledger.
+  defp admit_ledger_binding(value) do
+    with {:ok, attrs} <- admit_object(value, @ledger_keys, length(@ledger_keys)),
+         :ok <- require_exact_keys(attrs, @ledger_keys),
+         {:ok, frames} <- admit_non_negative_int(attrs["frames"], "frames"),
+         {:ok, offset} <- admit_non_negative_int(attrs["tip_offset"], "tip_offset"),
+         {:ok, len} <- admit_ledger_tip_len(attrs["tip_len"]),
+         {:ok, digest} <- admit_hex64(attrs["tip_digest"], "tip_digest"),
+         :ok <- ledger_binding_consistent(frames, offset, len, digest) do
+      {:ok,
+       %{"frames" => frames, "tip_offset" => offset, "tip_len" => len, "tip_digest" => digest}}
+    end
+  end
+
+  defp admit_ledger_tip_len(value)
+       when is_integer(value) and value >= 0 and value <= @operational_snapshot_bytes,
+       do: {:ok, value}
+
+  defp admit_ledger_tip_len(value) when is_float(value), do: {:error, :float_not_allowed}
+  defp admit_ledger_tip_len(value) when is_integer(value), do: {:error, :integer_out_of_range}
+  defp admit_ledger_tip_len(_value), do: {:error, {:invalid_field, "tip_len"}}
+
+  # Genesis has exactly one representation. The first frame is written at
+  # offset 0; every later frame follows at least one earlier frame.
+  defp ledger_binding_consistent(0, 0, 0, @ledger_genesis_digest), do: :ok
+
+  defp ledger_binding_consistent(0, _offset, _len, _digest),
+    do: {:error, {:invalid_field, "ledger"}}
+
+  defp ledger_binding_consistent(frames, offset, len, digest)
+       when len > 0 and digest != @ledger_genesis_digest and
+              ((frames == 1 and offset == 0) or (frames > 1 and offset > 0)),
+       do: :ok
+
+  defp ledger_binding_consistent(_frames, _offset, _len, _digest),
+    do: {:error, {:invalid_field, "ledger"}}
+
+  defp admit_non_negative_int(value, _field)
+       when is_integer(value) and value >= 0 and value <= @max_json_safe_int,
+       do: {:ok, value}
+
+  defp admit_non_negative_int(value, _field) when is_float(value),
+    do: {:error, :float_not_allowed}
+
+  defp admit_non_negative_int(value, _field) when is_integer(value),
+    do: {:error, :integer_out_of_range}
+
+  defp admit_non_negative_int(_value, field), do: {:error, {:invalid_field, field}}
+
+  # ---------------------------------------------------------------------------
+  # Retirement batch (one cold ledger frame payload)
+  # ---------------------------------------------------------------------------
+
+  defp do_admit_retirement_batch(input) do
+    with {:ok, attrs} <-
+           admit_object(input, @retirement_batch_keys, length(@retirement_batch_keys)),
+         :ok <- require_exact_keys(attrs, @retirement_batch_keys),
+         {:ok, version} <- admit_version(attrs["version"]),
+         {:ok, kind} <- admit_exact(attrs["kind"], @retirement_batch_kind, "kind"),
+         {:ok, source} <- admit_snapshot_source(attrs["source"], :operational),
+         {:ok, retired} <- admit_retired(attrs["retired"]) do
+      admitted = %{"version" => version, "kind" => kind, "source" => source, "retired" => retired}
+
+      case encode_retirement_batch(admitted) do
+        {:ok, _bytes} -> {:ok, admitted}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  # Only delivered terminals retire (the exact, restart-durable consumer
+  # acknowledgement is the retirement evidence); an effect_rejected string can
+  # never enter a batch.
+  defp admit_retired(value) do
+    case admit_compact_map(value, &admit_delivered_compact/1) do
+      {:ok, retired} when map_size(retired) >= 1 -> {:ok, retired}
+      {:ok, _empty} -> {:error, {:invalid_field, "retired"}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp admit_delivered_compact(value) when is_binary(value) and byte_size(value) <= 512 do
+    with :ok <- require_utf8(value),
+         true <- Regex.match?(@terminal_delivered_re, value) do
+      {:ok, value}
+    else
+      {:error, _} = err -> err
+      false -> {:error, :invalid_field}
+    end
+  end
+
+  defp admit_delivered_compact(_value), do: {:error, :invalid_field}
 
   defp profile_frames_bound(frames, profile) do
     if frames <= limits(profile).hard_entry_cap,
@@ -794,24 +1102,30 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   end
 
   defp admit_intent_version(2), do: {:ok, 2}
+  defp admit_intent_version(3), do: {:ok, 3}
   defp admit_intent_version(version), do: admit_version(version)
 
-  defp intent_kind(1), do: @intent_kind
-  defp intent_kind(2), do: "arbor.security.authority_mutation_intent.v2"
-
-  # V2 identity binds the mutation, not the wall clock or diagnostic lineage of
-  # a later observation. The first full canonical prepared record remains
+  # V2/V3 identity binds the mutation, not the wall clock or diagnostic lineage
+  # of a later observation. The first full canonical prepared record remains
   # immutable; appending different bytes under this identity still conflicts.
-  defp derive_operation_id(%{"version" => 2} = intent, _fact_bytes) do
+  # V3 hashes the same facts under its own domain, so v2 and v3 identities of
+  # identical facts never collide.
+  defp derive_operation_id(%{"version" => version} = intent, _fact_bytes)
+       when version in [2, 3] do
     facts = Map.drop(intent, ["prepared_at" | @intent_optional])
     {:ok, bytes} = encode_intent_facts(facts)
-    :crypto.hash(:sha256, @intent_domain_v2 <> bytes) |> Base.encode16(case: :lower)
+
+    :crypto.hash(:sha256, versioned_intent_domain(version) <> bytes)
+    |> Base.encode16(case: :lower)
   end
 
   defp derive_operation_id(_intent, fact_bytes) do
     :crypto.hash(:sha256, @intent_domain <> fact_bytes)
     |> Base.encode16(case: :lower)
   end
+
+  defp versioned_intent_domain(2), do: @intent_domain_v2
+  defp versioned_intent_domain(3), do: @intent_domain_v3
 
   # ---------------------------------------------------------------------------
   # Records
@@ -1009,7 +1323,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   end
 
   defp compatible_versioned_before_after(
-         2,
+         version,
          "capability_grant",
          %{
            "kind" => "live",
@@ -1019,7 +1333,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
          },
          %{"kind" => "live", "record_id" => id, "generation" => generation, "revision" => next}
        )
-       when next == revision + 1, do: :ok
+       when version in [2, 3] and next == revision + 1, do: :ok
 
   defp compatible_versioned_before_after(_version, operation, before_fence, after_fingerprint),
     do: compatible_before_after(operation, before_fence, after_fingerprint)
@@ -1177,10 +1491,19 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     encode_ordered(record, @delivered_order, @max_record_bytes, :record_too_large)
   end
 
+  defp encode_snapshot(%{"version" => 3} = snapshot) do
+    encode_ordered(
+      snapshot,
+      @snapshot_v3_keys,
+      @operational_snapshot_bytes,
+      :record_too_large
+    )
+  end
+
   defp encode_snapshot(%{"version" => 2} = snapshot) do
     encode_ordered(
       snapshot,
-      @snapshot_order ++ ["capacity_profile"],
+      @snapshot_v2_keys,
       @operational_snapshot_bytes,
       :record_too_large
     )
@@ -1188,6 +1511,15 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp encode_snapshot(snapshot) do
     encode_ordered(snapshot, @snapshot_order, @max_record_bytes, :record_too_large)
+  end
+
+  defp encode_retirement_batch(batch) do
+    encode_ordered(
+      batch,
+      @retirement_batch_order,
+      @operational_snapshot_bytes,
+      :record_too_large
+    )
   end
 
   defp encode_ordered(map, order, max_bytes, too_large) do
@@ -1220,6 +1552,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   defp canonicalize("source", value), do: ordered_object(value, @snapshot_source_order)
   defp canonicalize("pending_manifest", value), do: ordered_sorted_map(value)
   defp canonicalize("terminals", value), do: ordered_sorted_map(value)
+  defp canonicalize("retired", value), do: ordered_sorted_map(value)
+  defp canonicalize("retirement", value), do: ordered_object(value, @retirement_order)
+  defp canonicalize("ledger", value), do: ordered_object(value, @ledger_order)
   defp canonicalize(_key, value), do: value
 
   defp ordered_sorted_map(map) when is_map(map) do

@@ -6,6 +6,11 @@ defmodule Arbor.Security.CapabilityAuditCore do
   chain and metadata), physical Record identity and backend incarnation. They
   are audit identity, never permission or proof against an offline store writer.
   Time enters from the serialized mutation owner.
+
+  Intents are emitted as version 3 (`arbor.security.authority_mutation_intent.v3`):
+  the same facts and fingerprints as v2 under the v3 identity domain, so a
+  journal whose snapshot is v3 (admission floor 3) admits every new mutation
+  while refusing re-presented v1/v2 identities as `:retired_version`.
   """
 
   alias Arbor.Contracts.Coding.CanonicalJson
@@ -64,8 +69,8 @@ defmodule Arbor.Security.CapabilityAuditCore do
         end
 
       facts = %{
-        "version" => 2,
-        "kind" => "arbor.security.authority_mutation_intent.v2",
+        "version" => 3,
+        "kind" => "arbor.security.authority_mutation_intent.v3",
         "operation" => name,
         "effect_class" => class,
         "authority_namespace" => "capability",
