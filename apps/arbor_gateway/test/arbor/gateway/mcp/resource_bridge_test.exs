@@ -111,12 +111,12 @@ defmodule Arbor.Gateway.MCP.ResourceBridgeTest do
   end
 
   describe "authorize/3" do
-    test "returns :ok or unauthorized depending on security infrastructure" do
-      result = ResourceBridge.authorize("agent_123", "fs", "config.json")
-
-      # In isolation: CapabilityStore not running -> permissive mode -> :ok
-      # In umbrella: CapabilityStore running -> no capability granted -> unauthorized
-      assert result == :ok or match?({:error, :unauthorized, _}, result)
+    test "denies an agent without the capability" do
+      # test_helper starts Arbor.Security.TestBootstrap, so security is up and
+      # the ungranted agent is refused. There is no permissive fallback: with
+      # security down this also denies (security_unavailable_security_regression_test).
+      assert {:error, :unauthorized, _msg} =
+               ResourceBridge.authorize("agent_123", "fs", "config.json")
     end
   end
 end
