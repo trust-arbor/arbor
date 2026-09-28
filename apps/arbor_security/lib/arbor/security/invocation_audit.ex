@@ -3,6 +3,7 @@ defmodule Arbor.Security.InvocationAudit do
   # Process-local provenance, never supplied through action params or Engine context.
   # The host and loaded BEAM are trusted; this is not an isolation boundary against
   # arbitrary code executing inside the VM. The configured sink owns durability.
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Security.Config
   require Logger
 
@@ -52,7 +53,7 @@ defmodule Arbor.Security.InvocationAudit do
           _ = finish({:error, :execution_interrupted})
           :erlang.raise(kind, reason, __STACKTRACE__)
       after
-        if parent, do: Process.put(@active_key, parent), else: Process.delete(@active_key)
+        restore_parent(parent)
       end
     else
       _ -> {:error, :invocation_audit_unavailable}
@@ -113,24 +114,64 @@ defmodule Arbor.Security.InvocationAudit do
     end
   end
 
+  # A nested invocation that admitted an effect is part of its parent's effect
+  # (a tool call dispatching an action), so the parent must never later read as
+  # refused. Only the flag is carried up; the child's events stay on its stream.
+  defp restore_parent(nil), do: Process.delete(@active_key)
+
+  defp restore_parent(parent) do
+    parent =
+      if match?(%{"effect_started" => true}, Process.get(@active_key)),
+        do: Map.put(parent, "effect_started", true),
+        else: parent
+
+    Process.put(@active_key, parent)
+  end
+
   defp finish(result) do
     current = Process.get(@active_key)
-
-    outcome =
-      case result do
-        {:ok, :pending_approval, _} -> "approval_required"
-        {:ok, _, _} -> "completed"
-        {:ok, _} -> "completed"
-        :ok -> "completed"
-        :authorized -> "permission_allowed"
-        {:denied, _} -> "refused"
-        {:error, :execution_interrupted} -> "interrupted"
-        {:error, _} -> if(current["effect_started"], do: "failed", else: "refused")
-        _ -> "unknown"
-      end
-
-    persist(event(current, "outcome", %{"outcome" => outcome}))
+    persist(event(current, "outcome", %{"outcome" => outcome(result, current)}))
   end
+
+  # Terminal vocabulary: completed, approval_required, permission_allowed,
+  # refused (nothing ran), not_sent (the request never left), failed (the effect
+  # started and an error came back), interrupted (it raised), unknown (it may
+  # have taken effect and nothing says whether). A missing outcome reads back as
+  # indeterminate. "refused" needs proof that nothing ran: this frame's own
+  # admission record, or a CallFailure from the boundary that decided it.
+  defp outcome(result, current) do
+    case result do
+      {:ok, :pending_approval, _} -> "approval_required"
+      {:ok, _, _} -> "completed"
+      {:ok, _} -> "completed"
+      :ok -> "completed"
+      :authorized -> "permission_allowed"
+      {:denied, _} -> "refused"
+      {:error, :execution_interrupted} -> "interrupted"
+      {:error, %CallFailure{outcome: outcome}} -> call_failure_outcome(outcome, current)
+      {:error, reason} -> error_outcome(reason, current)
+      _ -> "unknown"
+    end
+  end
+
+  # Admission outranks a refusal claim: the effect demonstrably started.
+  defp call_failure_outcome(outcome, %{"effect_started" => true})
+       when outcome in [:refused, :not_sent],
+       do: "failed"
+
+  defp call_failure_outcome(outcome, _current)
+       when outcome in [:refused, :not_sent, :failed, :unknown],
+       do: Atom.to_string(outcome)
+
+  defp call_failure_outcome(_outcome, _current), do: "unknown"
+
+  defp error_outcome(reason, %{"effect_started" => true}),
+    do: if(CallFailure.timeout_reason?(reason), do: "unknown", else: "failed")
+
+  # A tool frame never admits an effect itself, so an unclassified error there is
+  # only the executor's return value; it cannot prove that nothing ran.
+  defp error_outcome(_reason, %{"surface" => "tool"}), do: "unknown"
+  defp error_outcome(_reason, _current), do: "refused"
 
   defp event(current, stage, data) do
     current

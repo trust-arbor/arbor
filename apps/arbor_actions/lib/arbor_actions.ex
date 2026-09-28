@@ -96,6 +96,7 @@ defmodule Arbor.Actions do
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Signals
 
   @doc false
@@ -1516,22 +1517,10 @@ defmodule Arbor.Actions do
   defp call_outcome(_result, false), do: :refused
 
   defp call_outcome({:error, reason}, true) do
-    if timeout_reason?(reason, 4), do: :unknown, else: :failed
+    if CallFailure.timeout_reason?(reason), do: :unknown, else: :failed
   end
 
   defp call_outcome(_result, true), do: :unknown
-
-  # A timeout after the action started may have left its effect in flight, so
-  # it reads as unknown. Only term shapes are matched, never message text.
-  defp timeout_reason?(_reason, 0), do: false
-  defp timeout_reason?(reason, _depth) when reason in [:timeout, :etimedout], do: true
-  defp timeout_reason?({:timeout, _detail}, _depth), do: true
-
-  defp timeout_reason?({tag, inner}, depth) when is_atom(tag),
-    do: timeout_reason?(inner, depth - 1)
-
-  defp timeout_reason?(%{reason: inner}, depth), do: timeout_reason?(inner, depth - 1)
-  defp timeout_reason?(_reason, _depth), do: false
 
   defp interrupted_detail(kind, reason, stacktrace) do
     detail =

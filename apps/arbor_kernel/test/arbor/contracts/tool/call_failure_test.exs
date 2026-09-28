@@ -54,6 +54,32 @@ defmodule Arbor.Contracts.Tool.CallFailureTest do
     end
   end
 
+  describe "timeout_reason?/1" do
+    test "recognizes timeout term shapes, including wrapped ones" do
+      for reason <- [
+            :timeout,
+            :etimedout,
+            {:timeout, {GenServer, :call, []}},
+            {:http_error, :timeout},
+            %{reason: :timeout},
+            {:transport, %{reason: :etimedout}}
+          ] do
+        assert CallFailure.timeout_reason?(reason), inspect(reason)
+      end
+    end
+
+    test "never matches message text or unrelated reasons" do
+      for reason <- [
+            "timed out after 30s",
+            :bad_input,
+            {:unauthorized, "timeout"},
+            {:a, {:b, {:c, {:d, {:e, :timeout}}}}}
+          ] do
+        refute CallFailure.timeout_reason?(reason), inspect(reason)
+      end
+    end
+  end
+
   describe "describe/1" do
     test "states that refused and unsent calls were not carried out" do
       assert CallFailure.describe(failure(:refused, nil)) =~ "was not carried out"

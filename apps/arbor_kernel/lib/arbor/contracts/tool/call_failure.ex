@@ -114,6 +114,26 @@ defmodule Arbor.Contracts.Tool.CallFailure do
   def indeterminate_effect?(%__MODULE__{}), do: false
 
   @doc """
+  True when an error reason reports a timeout, matched by term shape and never
+  by message text: `:timeout`, `:etimedout`, `{:timeout, _}`, or one of those
+  wrapped in a tagged 2-tuple or a map's `:reason` (a few levels deep, e.g.
+  `{:http_error, :timeout}` or a transport exception). After a call has
+  started, a timeout means it may still have taken effect.
+  """
+  @spec timeout_reason?(term()) :: boolean()
+  def timeout_reason?(reason), do: timeout_reason?(reason, 4)
+
+  defp timeout_reason?(_reason, 0), do: false
+  defp timeout_reason?(reason, _depth) when reason in [:timeout, :etimedout], do: true
+  defp timeout_reason?({:timeout, _detail}, _depth), do: true
+
+  defp timeout_reason?({tag, inner}, depth) when is_atom(tag),
+    do: timeout_reason?(inner, depth - 1)
+
+  defp timeout_reason?(%{reason: inner}, depth), do: timeout_reason?(inner, depth - 1)
+  defp timeout_reason?(_reason, _depth), do: false
+
+  @doc """
   The failure's message followed by one sentence stating what the outcome
   means for the caller.
   """
