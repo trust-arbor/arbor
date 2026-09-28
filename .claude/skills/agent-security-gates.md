@@ -148,6 +148,12 @@ another one. It doubles as user documentation — anyone standing up agents need
   (context without `:taint`) do exactly this; they are the two deliberate
   "unlabeled = clean" decision points. Regression:
   `egress_taint_fail_closed_security_regression_test.exs`.
+  `Arbor.Trust.TaintConjunct` (TRUST-15) follows the same rule for *present*
+  values: an unreadable operation taint is `:untrusted` and degrades
+  `:auto`/`:allow` to `:ask` for high-risk effect classes. An *absent* taint
+  stays "no signal" there on purpose, because most `Trust.authorize` callers
+  don't track taint, and reading their silence as untrusted would turn `:auto`
+  action rules into approvals (e.g. stalling reviewed validation).
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 
