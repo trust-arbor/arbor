@@ -188,6 +188,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "eval"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "identity"}), do: :arbor_agent
   defp owner_for_parsed(%CapabilityUri{domain: "monitor"}), do: :arbor_kernel_runtime
+  # arbor://skill/use/<name-hash>/<digest> was registered 2026-09-24 (exact
+  # approval for skill consumption, 69b99660b) with no owner row, so it failed
+  # this guard from that day, like egress/ and forge/ before it. The approval
+  # capability is built and verified by Arbor.Common.SkillLibrary.Versions.
+  defp owner_for_parsed(%CapabilityUri{domain: "skill"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "trust"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "acp"}), do: :arbor_gateway
