@@ -96,6 +96,7 @@ defmodule Arbor.Actions do
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Signals
 
   @doc false
@@ -139,6 +140,8 @@ defmodule Arbor.Actions do
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
   @active_action_authorization_key {__MODULE__, :active_action_authorization}
   @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
+  @active_effect_admission_key {__MODULE__, :active_effect_admission}
+  @interrupted_detail_limit 500
 
   defmodule ActionAuthorization do
     @moduledoc false
@@ -1448,6 +1451,102 @@ defmodule Arbor.Actions do
   def authorize_and_execute_with_receipt(_agent_id, _action_module, _params, _context),
     do: %{result: {:error, :invalid_authorization_principal}, invocation_id: nil}
 
+  @doc """
+  Execute through the ordinary admission boundary (`authorize_and_execute/4`)
+  and classify a failed call by how far it got.
+
+  Returns `%{result: result, effect_admitted: boolean, outcome: outcome}`.
+  `effect_admitted` is true once admission entered the action's `run/2`, so
+  its effect may have started. `outcome` is:
+
+    * `nil` — the call returned `{:ok, _}` or `{:ok, :pending_approval, id}`.
+    * `:refused` — the call failed before admission entered `run/2`; the
+      action did not run.
+    * `:failed` — the action ran and returned `{:error, reason}`.
+    * `:unknown` — the action ran and there is no trustworthy answer: it
+      raised, threw or exited, or its error reports a timeout.
+
+  A raise, throw or exit inside the call does not escape. It is returned as
+  `{:error, {:action_interrupted, kind, detail}}` with a bounded `detail`; a
+  required invocation audit still records the call as interrupted. The
+  action's own return value never produces `:refused`: only the admission
+  boundary decides that nothing ran. See `Arbor.Contracts.Tool.CallFailure`.
+  """
+  @spec authorize_and_execute_with_outcome(String.t(), module(), map(), map()) :: %{
+          result: {:ok, any()} | {:ok, :pending_approval, String.t()} | {:error, term()},
+          effect_admitted: boolean(),
+          outcome: nil | :refused | :failed | :unknown
+        }
+  def authorize_and_execute_with_outcome(agent_id, action_module, params, context \\ %{}) do
+    admission_key = {__MODULE__, :effect_admitted, make_ref()}
+
+    try do
+      # Remote call on purpose: authorize_and_execute/4 stays the single
+      # observable entry point (call tracing in security regression tests).
+      result =
+        with_process_binding(@active_effect_admission_key, admission_key, fn ->
+          __MODULE__.authorize_and_execute(agent_id, action_module, params, context)
+        end)
+
+      admitted? = Process.get(admission_key) == true
+      %{result: result, effect_admitted: admitted?, outcome: call_outcome(result, admitted?)}
+    catch
+      kind, reason ->
+        require Logger
+
+        admitted? = Process.get(admission_key) == true
+        detail = interrupted_detail(kind, reason, __STACKTRACE__)
+
+        Logger.warning(
+          "[Arbor.Actions] #{inspect(action_module)} interrupted " <>
+            "(effect_admitted=#{admitted?}): #{detail}"
+        )
+
+        %{
+          result: {:error, {:action_interrupted, kind, detail}},
+          effect_admitted: admitted?,
+          outcome: if(admitted?, do: :unknown, else: :refused)
+        }
+    after
+      Process.delete(admission_key)
+    end
+  end
+
+  defp call_outcome({:ok, :pending_approval, _proposal_id}, _admitted?), do: nil
+  defp call_outcome({:ok, _result}, _admitted?), do: nil
+  defp call_outcome(_result, false), do: :refused
+
+  defp call_outcome({:error, reason}, true) do
+    if CallFailure.timeout_reason?(reason), do: :unknown, else: :failed
+  end
+
+  defp call_outcome(_result, true), do: :unknown
+
+  defp interrupted_detail(kind, reason, stacktrace) do
+    detail =
+      case kind do
+        :error -> Exception.message(Exception.normalize(:error, reason, stacktrace))
+        _other -> "#{kind}: #{inspect(reason, limit: 20, printable_limit: 200)}"
+      end
+
+    String.slice(detail, 0, @interrupted_detail_limit)
+  rescue
+    _exception -> "#{kind}"
+  end
+
+  # Marks the innermost authorize_and_execute_with_outcome/4 frame. A nested
+  # action call without its own frame marks the enclosing one, which is
+  # already admitted because the enclosing action is running.
+  defp mark_effect_admitted do
+    case Process.get(@active_effect_admission_key) do
+      {__MODULE__, :effect_admitted, reference} = key when is_reference(reference) ->
+        Process.put(key, true)
+
+      _other ->
+        :ok
+    end
+  end
+
   defp authorize_and_execute_admitted(agent_id, action_module, params, context) do
     with :ok <- MemoryWritePolicy.check(action_module, params, context),
          :ok <- validate_authorization_principal(agent_id),
@@ -2100,6 +2199,7 @@ defmodule Arbor.Actions do
 
   defp do_execute_action(action_module, params, context) do
     emit_started(action_module, params)
+    mark_effect_admitted()
 
     case action_module.run(params, context) do
       {:ok, :pending_approval, proposal_id} ->

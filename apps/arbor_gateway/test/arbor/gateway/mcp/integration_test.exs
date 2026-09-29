@@ -9,6 +9,7 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Gateway.MCP.ClientConnection
   alias Arbor.Gateway.MCP.ClientSupervisor
   alias Arbor.Gateway.MCP.ResourceBridge
@@ -75,10 +76,16 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
       assert tool.capability_uri == "arbor://mcp/weather_service/get_weather"
       assert tool.source == :mcp
 
-      # Call the tool (MockServer's default_tool_call handles "sample_tool" name,
-      # other names return a "Tool not found" message — still a valid response)
-      {:ok, result} = ClientConnection.call_tool(conn, "get_weather", %{"input" => "NYC"})
-      assert result != nil
+      # MockServer's default_tool_call answers "get_weather" with an MCP error
+      # result ("Tool not found"): the tool answered, so the call is :failed.
+      assert {:error, %CallFailure{outcome: :failed, message: message}} =
+               ClientConnection.call_tool(conn, "get_weather", %{"input" => "NYC"})
+
+      assert message =~ "Tool not found"
+
+      # "sample_tool" is the name MockServer answers successfully.
+      {:ok, result} = ClientConnection.call_tool(conn, "sample_tool", %{"input" => "NYC"})
+      assert result =~ "Processed: NYC"
 
       # Taint the result
       tainted = ToolBridge.taint_result(result, "weather_service", "get_weather")

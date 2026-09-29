@@ -77,6 +77,7 @@ defmodule Arbor.LLM.ToolLoop do
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.SteeringMessage
+  alias Arbor.Contracts.Tool.CallFailure
 
   alias Arbor.LLM.ArborActionsExecutor
 
@@ -237,6 +238,11 @@ defmodule Arbor.LLM.ToolLoop do
       # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
       # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
       tool_failures: %{},
+      # {tool name, argument digest} of calls whose outcome was unknown on a tool
+      # not declared safe to repeat. An identical call is refused for the rest of
+      # this run instead of being re-run after backoff: it may already have taken
+      # effect (the live counterpart of EffectRecoveryCore's indeterminate effect).
+      indeterminate_calls: MapSet.new(),
       terminal_tools: terminal_tools,
       terminal_correction_attempted: false,
       tool_taint: tool_taint,
@@ -1245,8 +1251,11 @@ defmodule Arbor.LLM.ToolLoop do
   defp execute_tools(tool_calls, state) do
     require Logger
 
-    {results, tool_failures} =
-      Enum.map_reduce(tool_calls, Map.get(state, :tool_failures, %{}), fn tc, failures ->
+    initial_guards =
+      {Map.get(state, :tool_failures, %{}), Map.get(state, :indeterminate_calls, MapSet.new())}
+
+    {results, {tool_failures, indeterminate_calls}} =
+      Enum.map_reduce(tool_calls, initial_guards, fn tc, {failures, indeterminate} ->
         {args, args_error} =
           case normalize_args(tc.arguments) do
             {:ok, args} -> {args, nil}
@@ -1261,6 +1270,7 @@ defmodule Arbor.LLM.ToolLoop do
         })
 
         prior_failures = Map.get(failures, tc.name, 0)
+        call_key = indeterminate_call_key(tc.name, args)
 
         # Pass the signer function to the executor — it signs with the correct
         # canonical URI (including params/agent_id scoping) after resolving the
@@ -1282,6 +1292,15 @@ defmodule Arbor.LLM.ToolLoop do
           cond do
             args_error ->
               {{:error, {:invalid_tool_arguments, args_error}}, 0}
+
+            # An identical earlier call may have taken effect with no answer. Never
+            # re-run it automatically (backoff retry would duplicate the effect).
+            MapSet.member?(indeterminate, call_key) ->
+              Logger.warning(
+                "[ToolLoop] tool=#{tc.name} NOT re-run: an identical call's outcome is unknown"
+              )
+
+              {{:error, indeterminate_repeat_failure(tc.name)}, 0}
 
             # DISCOVERY RUNAWAY GUARD: tool_find_tools SUCCEEDS every call, so the failure cap below
             # never fires — a model that keeps re-discovering instead of calling tools it already has
@@ -1318,7 +1337,8 @@ defmodule Arbor.LLM.ToolLoop do
         Logger.info(
           "[ToolLoop] tool=#{tc.name} signer=#{state.signer != nil} " <>
             "authority=#{state.signing_authority_present?} " <>
-            "result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
+            "result=#{match?({:ok, _}, result)} outcome=#{call_outcome(result)} " <>
+            "duration=#{duration_ms}ms"
         )
 
         case result do
@@ -1342,19 +1362,9 @@ defmodule Arbor.LLM.ToolLoop do
           # fetch from an exfil POST. Bounded like result_preview.
           args_preview: Arbor.LLM.ExternalTerm.inspect(args),
           success: match?({:ok, _}, result),
+          outcome: call_outcome(result),
           duration_ms: duration_ms,
-          result_preview:
-            case result do
-              {:ok, text} when is_binary(text) ->
-                String.slice(text, 0..200)
-
-              {:error, reason} ->
-                err = classify_error(reason)
-                "ERROR [#{err.type}]: #{err.message}"
-
-              _ ->
-                Arbor.LLM.ExternalTerm.inspect(result)
-            end
+          result_preview: result_preview(result)
         })
 
         # Record tool telemetry
@@ -1381,7 +1391,9 @@ defmodule Arbor.LLM.ToolLoop do
             true -> Map.update(failures, tc.name, 1, &(&1 + 1))
           end
 
-        {{{tc.id, tc.name, result}, duration_ms}, new_failures}
+        new_indeterminate = track_indeterminate(indeterminate, call_key, result)
+
+        {{{tc.id, tc.name, result}, duration_ms}, {new_failures, new_indeterminate}}
       end)
 
     # map_reduce threads `failures`, not `state`, so per-tool time has to travel
@@ -1393,6 +1405,7 @@ defmodule Arbor.LLM.ToolLoop do
     updated_state =
       state
       |> Map.put(:tool_failures, tool_failures)
+      |> Map.put(:indeterminate_calls, indeterminate_calls)
       |> Map.update(:discovery_count, discovery_this_round, &(&1 + discovery_this_round))
       |> Map.update(:tool_ms_total, round_tool_ms, &(&1 + round_tool_ms))
 
@@ -1413,6 +1426,50 @@ defmodule Arbor.LLM.ToolLoop do
       {result, acc + duration_ms}
     end)
   end
+
+  # Identity of a model call for the indeterminate-repeat guard: the tool name
+  # and the exact decoded arguments.
+  defp indeterminate_call_key(name, args) when is_map(args),
+    do: {name, :crypto.hash(:sha256, :erlang.term_to_binary(args, [:deterministic]))}
+
+  defp indeterminate_call_key(name, _args), do: {name, :invalid_arguments}
+
+  defp indeterminate_repeat_failure(name) do
+    CallFailure.new!(
+      outcome: :refused,
+      message:
+        "Tool '#{name}' was not re-run: an identical call earlier in this turn got no " <>
+          "trustworthy answer and may already have taken effect. It will not be repeated " <>
+          "this turn. Check whether it took effect (for example by reading the state it " <>
+          "would change) and report what you find instead of retrying it.",
+      tool: name
+    )
+  end
+
+  defp track_indeterminate(indeterminate, call_key, {:error, %CallFailure{} = failure}) do
+    if CallFailure.indeterminate_effect?(failure),
+      do: MapSet.put(indeterminate, call_key),
+      else: indeterminate
+  end
+
+  defp track_indeterminate(indeterminate, _call_key, _result), do: indeterminate
+
+  defp result_preview({:ok, text}) when is_binary(text), do: String.slice(text, 0..200)
+
+  defp result_preview({:error, %CallFailure{outcome: outcome, message: message}}),
+    do: "ERROR [#{outcome}]: #{String.slice(message, 0..200)}"
+
+  defp result_preview({:error, reason}) do
+    err = classify_error(reason)
+    "ERROR [#{err.type}]: #{err.message}"
+  end
+
+  defp result_preview(result), do: Arbor.LLM.ExternalTerm.inspect(result)
+
+  defp call_outcome({:ok, _result}), do: :ok
+  defp call_outcome({:ok, :pending_approval, _proposal_id}), do: :pending_approval
+  defp call_outcome({:error, %CallFailure{outcome: outcome}}), do: outcome
+  defp call_outcome(_result), do: :unclassified
 
   defp put_tool_taint(opts, nil, _args), do: opts
 
@@ -1766,6 +1823,14 @@ defmodule Arbor.LLM.ToolLoop do
   defp bounded_legacy_tool_result({:ok, value}, _name, aggregate) do
     with {:ok, encoded, next} <- ToolResultBudget.encode(value, aggregate) do
       {:ok, encoded, false, next}
+    end
+  end
+
+  defp bounded_legacy_tool_result({:error, %CallFailure{} = failure}, _name, aggregate) do
+    content = "Error: " <> CallFailure.describe(failure)
+
+    with {:ok, next} <- ToolResultBudget.account(content, aggregate) do
+      {:ok, content, true, next}
     end
   end
 

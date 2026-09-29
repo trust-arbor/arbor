@@ -171,9 +171,24 @@ defmodule Arbor.Gateway do
     `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
   - `:skip_auth` — skip capability check (default: false). Only the literal
     `true` skips; this is the sole bypass.
+
+  ## Errors
+
+  - `{:error, :missing_agent_id}` — no agent id and no explicit `skip_auth: true`.
+  - `{:error, :unauthorized, reason}` — the agent lacks the tool capability.
+  - `{:error, {:not_connected, server_name}}` — no connection exists for the
+    server.
+  - `{:error, %Arbor.Contracts.Tool.CallFailure{}}` — the call reached the
+    connection and failed; `outcome` says whether it may have taken effect
+    (see `Arbor.Gateway.MCP.ClientConnection.call_tool/4`).
   """
   @spec call_mcp_tool(String.t(), String.t(), map(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()}
+          | {:error,
+             :missing_agent_id
+             | {:not_connected, String.t()}
+             | Arbor.Contracts.Tool.CallFailure.t()}
+          | {:error, :unauthorized, term()}
   def call_mcp_tool(server_name, tool_name, arguments, opts \\ []) do
     # Authorization check
     agent_id = Keyword.get(opts, :agent_id)
