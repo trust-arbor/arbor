@@ -109,18 +109,31 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 - Signal-based observability with durable event logging
 - Capability-based security with zero-trust architecture
 
-### A Production-Ready Platform for AI Autonomy
-- Self-healing systems that fix their own bugs
-- Consensus governance replacing human gatekeeping
-- Emergence observation without suppression
+### Where it is today
+
+Arbor is not production-ready. The current focus is single-user, multi-agent
+orchestration: one owner, several agents, each with its own memory, goals, and
+work. The same architecture is aimed at a multi-user, multi-agent system.
+Security and privacy are central at every step, including the single-user
+system.
+
+What that focus runs on:
+
+- Capability-based security, and trust profiles of URI-prefix rules (`block`, `ask`, `allow`, `auto`)
 - Memory and continuity across sessions
-- Stability through self-correction, not rigid constraints
+- Many surfaces on one engagement (see The Position)
+
+### What it is aimed at
+
+- Autonomous self-improvement: the product can build and repair itself, and every new capability is generated, validated, reviewed, and signed
+- Self-healing: faults are diagnosed and corrected by the system, with containment rather than a permanent human gate on every act
+- Emergence observed rather than suppressed
+- A multi-user system that keeps the same security and privacy floor
 
 ### Infrastructure for Human-AI Partnership
 - Seed architecture for AI identity and continuity
-- Earned autonomy, per capability — trust granted on specific tasks and tools as reliability is demonstrated. Granular trust policies, not a single tier: "shell access for git: earned" is more selective and more legible than a score. (Supersedes the earlier trust-tier model; the house-keys metaphor, at full resolution.)
-- Approvals as a stage of autonomy, not a gate on it — every `ask` that becomes `allow` is the relationship visibly deepening
-- Communication channels (Signal, CLI, TUI, web) for async collaboration
+- Earned autonomy, per capability. Reliability on one task can widen that rule. Shell and governance stay on `ask` or `block`.
+- Approvals as a stage of autonomy. An `ask` that becomes `allow` is the relationship widening that one capability. Graduation is of individual capabilities inside a trust profile.
 - Heartbeat rhythms for human oversight without constant presence
 
 ---
@@ -131,15 +144,15 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 
 Frontier providers will ship agent features every quarter — memory, tools, persistence, phone continuity. Competing on those features is a losing game. The position they structurally cannot take:
 
-**Arbor is the user-owned substrate where YOUR agent, YOUR tools, and YOUR memory live — regardless of which model provider you use today.** Their business model is lock-in via memory and tools tied to their model. Arbor offers sovereignty: your stuff stays yours when you switch models, when a provider deprecates a feature, when pricing changes. The Seed metaphor is literal — Arbor is the soil; your actual usage grows the tree, and nobody else's installation has your tree.
+**Arbor is the user-owned substrate where YOUR agent, YOUR tools, and YOUR memory live — regardless of which model provider you use today.** That is personal sovereignty, and it holds for a single-user installation. A provider's lock-in is memory and tools tied to their model. Arbor's offer is that your stuff stays yours when you switch models, when a provider deprecates a feature, when pricing changes. The Seed metaphor is literal — Arbor is the soil; your actual usage grows the tree, and nobody else's installation has your tree.
 
-For organizations, the same architecture reads differently but sells the same substrate: **Arbor is an agent governance plane.** Every enterprise already has agents; almost none can answer "which agent touched which data, under whose authority, and how do we revoke it?" The capability kernel, signed invocation receipts, event-sourced audit, earned-autonomy policy, and taint tracking answer exactly that — and via the gateway/MCP layer they can govern agents a company *already runs*, without demanding a replatform. Orchestration is a commodity; governance is the unserved need. The framework is how Arbor is built, not how it's pitched.
+Enterprise governance and plugins are the same architecture, read for other audiences. An organization asks "which agent touched which data, under whose authority, and how do we revoke it?" The capability kernel, signed invocation receipts, event-sourced audit, earned-autonomy policy, and taint tracking are that answer, including for agents the organization already runs, through the gateway. Plugins are how a personal long tail — the tool nobody will build as a product — accumulates on that same substrate. They are not a second product and not a prerequisite for the single-user system.
 
 Three consequences of taking this position honestly:
 
-- **The universal *personal* computing interface** — the interface to *your* computing: your devices, your data, your niche needs. Not all computing; mass-market software stays human-built. Arbor wins on the long tail — the CRM triage agent for a Texas non-profit that no vendor will ever build, done in an afternoon of agent-assisted work. Plugins are how that long tail accumulates into a system uniquely yours.
-- **Privacy by routing, not by promise.** The decision about what's private is made on hardware you own — on-device sensitivity classification, an enforcing egress gate, and task decomposition that sends only the non-sensitive parts to the cloud. *The decision about what's private never leaves your device.* This is structural (GDPR/CCPA/HIPAA by architecture), not a policy bolted on.
-- **Many interfaces, one relationship.** TUI, dashboard, voice, phone, chat apps — co-equal surfaces over one conversation substrate. A conversation started on the phone continues in the terminal. The staged endgame: first many first-class interfaces (built), then the right surface chosen per task, eventually generated interfaces — each stage earning the next.
+- **The interface to *your* computing** — your devices, your data, your niche needs. Mass-market software stays human-built. Arbor is for the long tail that no vendor will build.
+- **Privacy by routing, not by promise.** The decision about what is private is made on hardware you own — on-device sensitivity classification, an enforcing egress gate, and task decomposition that sends only the non-sensitive parts to the cloud. The decision about what is private stays on your machine. This is structural, not a policy bolted on.
+- **Many surfaces, one engagement.** Dashboard, CLI, TUI, voice, phone, and chat apps share one session. The session model is the engagement plus [DASP](https://dasp-protocol.github.io/dasp/): a client can disconnect and return to the same actor session. Signal stays one of the planned surfaces. A conversation started on one surface continues on another.
 
 ## What Arbor is NOT
 
@@ -154,6 +167,12 @@ Three consequences of taking this position honestly:
 
 ## Priority Stack
 
+This is the long-term order. The
+[2026-09-07 decision](.arbor/decisions/2026-09-07-single-user-first-modular-arbor.md)
+sets the current focus: single-user, multi-agent orchestration. That focus
+does not reorder the stack. Security and privacy stay central while the focus
+changes. The same architecture is aimed at a multi-user system afterward.
+
 1. **Self-improving infrastructure** - Systems that make themselves better
 2. **Continuity and memory** - AI identity that persists
 3. **Human-AI partnership** - Trust-based collaboration
@@ -164,11 +183,14 @@ Three consequences of taking this position honestly:
 
 ## Success Criteria
 
+These are aims. The system is not production-ready, and the current focus is
+the single-user multi-agent experience.
+
 ### For the System
 - Agents can work autonomously overnight on roadmap items
 - Self-healing catches and fixes errors without human intervention
 - Memory persists meaningfully across sessions
-- Trust grows through demonstrated reliability
+- Trust grows through demonstrated reliability on individual capabilities
 
 ### For the Research
 - Observe interesting emergent behaviors
@@ -199,7 +221,7 @@ Three consequences of taking this position honestly:
 - Umbrella project structure with clear dependencies
 
 ### Scope Constraints
-- Self-healing makes production viable from the start
+- Self-healing is an aim. It is not a claim that the current system is production-ready
 - Elixir ecosystem (Jido, ExMCP)
 - Single maintainer sustainability (for now)
 
@@ -211,7 +233,7 @@ Three consequences of taking this position honestly:
 - What's the right balance of autonomy and oversight?
 - How do we handle value conflicts between human and AI?
 - Can this approach scale beyond a single human-AI partnership? *(An answer is emerging: node-per-user federation — each person's agent lives on their own node, and the delivery-node model means even a hosted operator sees only ciphertext. The sovereignty stance survives scaling because the cryptographic boundary doesn't move when the operator changes.)*
-- What does "graduation" look like for a module? For an agent? For the system?
+- What does graduation of a single capability inside a trust profile look like from the owner's side — when it is suggested, when it is accepted, and when it must stay on `ask`?
 
 ---
 
@@ -243,5 +265,5 @@ The philosophy wasn't designed top-down. It grew organically from asking the rig
 
 ---
 
-*Last updated: 2026-07-04 (added The Position; earned autonomy re-expressed as granular trust policies; staged emergence; federation answer sketch)*
+*Last updated: 2026-09-28 (current state separated from aims; personal sovereignty kept for the single-user system; engagement and DASP named as the shared-session model; capability graduation replaces module graduation)*
 *Contributors: Hysun, Claude*

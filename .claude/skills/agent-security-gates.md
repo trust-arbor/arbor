@@ -134,6 +134,44 @@ another one. It doubles as user documentation — anyone standing up agents need
   `level: :untrusted, chain: ["session_steering"]`. So "use the turn's actual taint
   instead of worst-case" is a no-op for chat; the actual value already IS
   untrusted. Do not re-propose it as a fix for `:initial_denied`.
+- **A missing or unreadable `:egress_taint` is `:untrusted` (2026-09-27, Imp review
+  D3).** `EgressGate.effective_taint_level/1` reads a level atom, a level string, or
+  a Taint struct/map with a `:level`. Anything else (key omitted or misspelled,
+  `nil`, an unknown atom/string, a bare multi-key context taint map) is decided as
+  `:untrusted`. Before this, those forms read as "no taint", which skipped
+  branches 1 and 2 and left only the policy check. *Symptom:* a new egress caller
+  gets `{:egress_blocked, tier, :untrusted}` even with `egress_mode: :allow`, and
+  `:egress_observed` reports `egress_taint: :untrusted`. *Action:* thread the real
+  taint. If your boundary's model genuinely means "no label = clean", pass
+  `egress_taint: :trusted` explicitly and say so in a comment. `LlmHandler`
+  (context with no taint labels) and `Arbor.Actions.authorize_and_execute`
+  (context without `:taint`) do exactly this; they are the two deliberate
+  "unlabeled = clean" decision points. Regression:
+  `egress_taint_fail_closed_security_regression_test.exs`.
+  `Arbor.Trust.TaintConjunct` (TRUST-15) follows the same rule for *present*
+  values: an unreadable operation taint is `:untrusted` and degrades
+  `:auto`/`:allow` to `:ask` for high-risk effect classes. An *absent* taint
+  stays "no signal" there on purpose, because most `Trust.authorize` callers
+  don't track taint, and reading their silence as untrusted would turn `:auto`
+  action rules into approvals (e.g. stalling reviewed validation).
+- **External-agent inputs are labeled `:derived` (decision 2026-09-27).** Three
+  entry points used to hand `authorize_and_execute` no `:taint`, so an external
+  LLM agent's arguments were decided as clean:
+  - gateway `arbor_run` (`Handler.native_action_context/0`, source `gateway_mcp`)
+  - `AgentEndpoint` (source `agent_endpoint`)
+  - the ACP ToolServer (source `acp_tool_server`)
+  They now carry the same `:derived` label an in-process compute node's tool
+  calls get. Egress is unaffected, since `:derived` isn't exfiltration-blocked.
+  The action taint policy does apply: `:audit_only` (dev) records audits;
+  `:permissive` (test) and `:strict` (prod) refuse a `requires:` control param
+  (file `path`, shell `command`) that lacks the sanitization bit, with
+  `{:missing_sanitization, param, [...]}`, and `:strict` refuses any non-trusted
+  control param. *Symptom:* outside dev, an external agent's `file_read` or
+  `shell_execute` fails with `missing_sanitization` (as in-process agents'
+  already do). *Action:* this is the designed posture. Tests of authority or
+  plumbing pin `:arbor_actions, :default_taint_policy` to `:audit_only`, as dev
+  does. Regressions: the provenance tests in `handler_test.exs`,
+  `agent_endpoint_test.exs`, `tool_server_test.exs` and `acp_tool_exposure_test.exs`.
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 
@@ -266,6 +304,10 @@ another one. It doubles as user documentation — anyone standing up agents need
   explicit scoped ToolServer. Force provider logs into the private runtime at warning
   verbosity, and keep `ExMCP.ACP.Client` at an `:info` module-level floor because
   its debug fallback includes complete unsupported notification payloads.
+- **Claude sessions are strict (2026-09-27).** Every ClaudeSDK launch gets
+  `--strict-mcp-config`, so servers from the user's own Claude configuration
+  never join, even when the bound list is empty (see gate 28). Codex still reads
+  `~/.codex/config.toml`; RuntimeHome has no private Codex home yet.
 
 ## 13. Cluster security-sync is optional until subscribers are configured
 
@@ -760,6 +802,62 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   successor is per-nonce ownership / trust zones
   (`trust-zone-segmentation-architecture.md`). Never trust-list a node by
   hand — the module deliberately has no seam for that.
+
+## 28. The ACP ToolServer requires its per-session bearer token (2026-09-27)
+
+- **What:** `Arbor.AI.AcpPool.ToolServer` runs Jido actions through
+  `authorize_and_execute/4` **as the owning agent**, so reaching its port means
+  acting with that agent's capabilities. Loopback binding keeps it off the
+  network. ex_mcp's Origin check (`validate_origin: true`, empty allow-list)
+  already 403s browser pages, and CORS never emitted an allow-origin header. But
+  any local non-browser process that found the port (a port scan is enough) was
+  served with no credential (Imp review D6). Now `start/2` mints a 32-byte token,
+  `ToolServer.BearerAuth` requires `authorization: Bearer <token>` (constant-time
+  compare, 401 otherwise), CORS is off, and a loopback bind only answers loopback
+  `Host` names (421, DNS rebinding).
+- **Symptom:** a client of a ToolServer gets `401 {"error":"unauthorized"}` on
+  `initialize` or any call. A hand-built descriptor with `"headers" => []` connects
+  to nothing. A `Host` other than 127.0.0.1/localhost/::1 gets 421.
+- **Action:** build the ACP descriptor with `ToolServer.mcp_servers_entry(info)`,
+  passing the map `start/2` returned, and send its `headers` verbatim. That is the
+  only place the token should live: `AcpPool` strips `:token` from the entry it
+  keeps in pool state. Never log `mcp_servers`: the token is a live credential for
+  the session's lifetime. `AcpSession.format_status/1` redacts header and env
+  values in the bound list. See gate 12 for why `ExMCP.ACP.Client` stays at an
+  `:info` floor. Regression: the `security regression (Imp review D6)` block in
+  `tool_server_test.exs`.
+- **Adapter-backed providers need launch-time delivery (fixed 2026-09-27).** Native
+  ACP agents read `mcpServers` from `session/new`. ex_mcp 1.3.0's ClaudeSDK adapter
+  ignores it there, so Claude never saw the ToolServer. The Codex/ZCode adapters
+  refuse any MCP server that isn't authorized, so `session/new` failed outright
+  once a ToolServer was bound. `AcpSession.McpLaunchCore` now handles both, keyed
+  on the client's `:adapter`:
+  - Claude: writes the servers to a 0600 `claude-mcp-config.json` in the private
+    runtime home and passes `--mcp-config <path>` plus `--strict-mcp-config`.
+    Never the JSON itself, since argv is visible to `ps`. It also appends
+    `mcp__<name>` to `allowed_tools` after the tool-profile merge, because the
+    ToolServer authorizes each call itself.
+  - Codex/ZCode: `trusted_mcp_servers` is set to exactly the bound list, and any
+    `:authorize_mcp_server` is dropped.
+  - Pi and other adapters: fail the launch with `{:acp_mcp_servers_unsupported, adapter}`.
+  Symptom of the old gap: a Claude ACP agent with `tool_modules` had no
+  `mcp__arbor-tools__*` tools, and a Codex one failed with "MCP server is not
+  authorized". Tests: `mcp_launch_core_test.exs` and the "adapter-backed providers
+  receive the bound ToolServer" block in `acp_session_test.exs`.
+
+## 29. `Gateway.call_mcp_tool` / `read_mcp_resource` require `:agent_id` (2026-09-27)
+
+- **What:** both facade calls capability-check the calling agent against
+  `arbor://mcp/<server>/<tool-or-resource>`. A nil or blank `:agent_id` used to
+  skip the check entirely (Imp review D2). Only the literal `skip_auth: true` is a
+  bypass now. Note that `ToolBridge`/`ResourceBridge.authorize` still allow
+  everything when `Arbor.Security.CapabilityStore` is not running (a dev/test
+  fallback), so this gate is only as strong as the security subsystem being up.
+- **Symptom:** `{:error, :missing_agent_id}` from `Arbor.Gateway.call_mcp_tool/4`
+  or `read_mcp_resource/3`.
+- **Action:** pass `agent_id:` for the principal the call acts for. Reserve
+  `skip_auth: true` for trusted system code that has already authorized the call
+  another way. Regression: `missing_agent_id_security_regression_test.exs`.
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>

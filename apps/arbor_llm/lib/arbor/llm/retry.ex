@@ -154,7 +154,8 @@ defmodule Arbor.LLM.Retry do
 
   Covers the same shapes as `Retry.execute/2`'s default `:should_retry`
   callback: rate-limit, timeout, network error, transient_error atoms;
-  HTTP 429 and 5xx; `%Arbor.LLM.ProviderError{retryable: true}`;
+  HTTP 429 and 5xx; `%Arbor.LLM.ProviderError{retryable: true}` (never one
+  with `context_window_exceeded: true` — the same request cannot fit on retry);
   `%Arbor.LLM.OAuth.ResponsesFailure` with one of
   `:quota`, `:provider_outage`, or `:transport` class — while auth, forbidden,
   tier-denied, and protocol failures stay non-retryable, so a credential problem
@@ -171,7 +172,8 @@ defmodule Arbor.LLM.Retry do
   callers that go through this helper directly.
   """
   @spec fallback_eligible?(term()) :: boolean()
-  def fallback_eligible?(%Arbor.LLM.ProviderError{retryable: retryable}), do: retryable
+  def fallback_eligible?(%Arbor.LLM.ProviderError{context_window_exceeded: true}), do: false
+  def fallback_eligible?(%Arbor.LLM.ProviderError{retryable: retryable}), do: retryable == true
 
   def fallback_eligible?(%Arbor.LLM.OAuth.ResponsesFailure{class: class, code: code}) do
     with true <- Arbor.LLM.OAuth.ResponsesFailure.valid_class_code?(class, code) do

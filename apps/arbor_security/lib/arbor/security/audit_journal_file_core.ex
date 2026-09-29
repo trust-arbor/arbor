@@ -28,6 +28,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
     :sync,
     :candidate_proof,
     :candidate_reproof,
+    :ledger_append,
     :source_tip_proof
   ]
   @post_rename_phases [:dir_finalize, :reopen, :published_replay]
@@ -287,6 +288,56 @@ defmodule Arbor.Security.AuditJournalFileCore do
 
   def candidate_basename(_name), do: {:error, :malformed}
 
+  @ledger_suffix ".retirement.v1.log"
+
+  @doc """
+  Basename of the cold retirement ledger that belongs to a journal file.
+
+  Strips the trailing `.log` from the journal basename and appends
+  `.retirement.v1.log`: `audit_journal.v1.log` becomes
+  `audit_journal.v1.retirement.v1.log`, and an explicit `foo.log` journal
+  gets `foo.retirement.v1.log`. The ledger lives in the journal's own
+  directory.
+
+  The mapping is injective and its image is disjoint from every journal
+  name, so two journals under one root never share a ledger and no journal
+  file is ever another journal's ledger:
+
+  - only a basename ending in `.log` with a non-empty stem has a ledger
+    (`foo` and `foo.log` would otherwise both map to `foo.retirement.v1.log`);
+  - a ledger-shaped basename (`ledger_basename?/1`) has no ledger of its own,
+    and `AuditJournalFile.open/1` refuses it as a journal.
+
+  Any other name is `{:error, :malformed}` (the journal then has no ledger
+  and its retirement is paused).
+  """
+  @spec ledger_basename(term()) :: {:ok, String.t()} | {:error, :malformed}
+  def ledger_basename(name) when is_binary(name) do
+    cond do
+      not plain_basename?(name) -> {:error, :malformed}
+      ledger_basename?(name) -> {:error, :malformed}
+      name == ".log" -> {:error, :malformed}
+      not String.ends_with?(name, ".log") -> {:error, :malformed}
+      true -> {:ok, binary_part(name, 0, byte_size(name) - 4) <> @ledger_suffix}
+    end
+  end
+
+  def ledger_basename(_name), do: {:error, :malformed}
+
+  @doc """
+  True for a basename in the retirement-ledger namespace (ends in
+  `.retirement.v1.log`). Such a name is reserved for ledgers: it is never a
+  journal and never owns a ledger.
+  """
+  @spec ledger_basename?(term()) :: boolean()
+  def ledger_basename?(name) when is_binary(name), do: String.ends_with?(name, @ledger_suffix)
+  def ledger_basename?(_name), do: false
+
+  defp plain_basename?(name) do
+    name not in ["", ".", ".."] and String.valid?(name) and not String.contains?(name, <<0>>) and
+      not String.contains?(name, "/")
+  end
+
   @spec leftover_action(term()) :: :unlink | {:error, atom()}
   def leftover_action(%{type: :symlink}), do: {:error, :symlink_rejected}
 
@@ -456,10 +507,13 @@ defmodule Arbor.Security.AuditJournalFileCore do
     end
   end
 
+  # Every admissible snapshot kind (v1 small, v2 legacy operational, v3
+  # operational with retirement accounting) classifies as a snapshot frame, so
+  # an operational publication of a v3 snapshot replays and self-proves.
   defp payload_kind(payload) when is_binary(payload) do
     case decode_json(payload) do
       {:ok, %{"kind" => kind}} ->
-        if kind in [AuditJournal.snapshot_kind(), AuditJournal.operational_snapshot_kind()] do
+        if kind in AuditJournal.snapshot_kinds() do
           :snapshot
         else
           :record

@@ -130,15 +130,12 @@ defmodule Arbor.Gateway.MCP.ToolBridgeTest do
   end
 
   describe "authorize/3" do
-    test "returns :ok or :unauthorized depending on security context" do
-      # In standalone test: security not running → permissive → :ok
-      # In umbrella test: security running → agent lacks capability → {:error, :unauthorized, _}
-      result = ToolBridge.authorize("agent_123", "github", "create_issue")
-
-      case result do
-        :ok -> :ok
-        {:error, :unauthorized, _msg} -> :ok
-      end
+    test "denies an agent without the capability" do
+      # test_helper starts Arbor.Security.TestBootstrap, so security is up and
+      # the ungranted agent is refused. There is no permissive fallback: with
+      # security down this also denies (security_unavailable_security_regression_test).
+      assert {:error, :unauthorized, _msg} =
+               ToolBridge.authorize("agent_123", "github", "create_issue")
     end
   end
 end

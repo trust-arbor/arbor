@@ -40,10 +40,10 @@ defmodule Arbor.Gateway do
       # List tools from all connected servers
       tools = Arbor.Gateway.list_mcp_tools()
 
-      # Call a specific tool
+      # Call a specific tool (capability-checked for the calling agent)
       {:ok, result} = Arbor.Gateway.call_mcp_tool("github", "create_issue", %{
         "owner" => "org", "repo" => "project", "title" => "Bug report"
-      })
+      }, agent_id: agent_id)
 
   ## Configuration
 
@@ -167,11 +167,14 @@ defmodule Arbor.Gateway do
   ## Options
 
   - `:timeout` — call timeout in ms (default: 30_000)
-  - `:agent_id` — agent ID for capability authorization
-  - `:skip_auth` — skip capability check (default: false)
+  - `:agent_id` — agent ID for capability authorization. Required unless
+    `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
+  - `:skip_auth` — skip capability check (default: false). Only the literal
+    `true` skips; this is the sole bypass.
 
   ## Errors
 
+  - `{:error, :missing_agent_id}` — no agent id and no explicit `skip_auth: true`.
   - `{:error, :unauthorized, reason}` — the agent lacks the tool capability.
   - `{:error, {:not_connected, server_name}}` — no connection exists for the
     server.
@@ -181,7 +184,10 @@ defmodule Arbor.Gateway do
   """
   @spec call_mcp_tool(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()}
-          | {:error, {:not_connected, String.t()} | Arbor.Contracts.Tool.CallFailure.t()}
+          | {:error,
+             :missing_agent_id
+             | {:not_connected, String.t()}
+             | Arbor.Contracts.Tool.CallFailure.t()}
           | {:error, :unauthorized, term()}
   def call_mcp_tool(server_name, tool_name, arguments, opts \\ []) do
     # Authorization check
@@ -238,8 +244,10 @@ defmodule Arbor.Gateway do
   ## Options
 
   - `:timeout` — read timeout in ms (default: 30_000)
-  - `:agent_id` — agent ID for capability authorization
-  - `:skip_auth` — skip capability check (default: false)
+  - `:agent_id` — agent ID for capability authorization. Required unless
+    `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
+  - `:skip_auth` — skip capability check (default: false). Only the literal
+    `true` skips; this is the sole bypass.
   """
   @spec read_mcp_resource(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -358,12 +366,18 @@ defmodule Arbor.Gateway do
 
   # -- Private helpers --
 
-  defp maybe_authorize(nil, _server, _tool, _skip), do: :ok
+  # FAIL CLOSED (Imp review D2, 2026-09-27): only an explicit `skip_auth: true`
+  # bypasses the capability check. A missing or blank `:agent_id` is a denial,
+  # never an implicit skip — the old `nil -> :ok` clause let any caller that
+  # dropped the option reach an external MCP server with no authorization.
   defp maybe_authorize(_agent_id, _server, _tool, true), do: :ok
 
-  defp maybe_authorize(agent_id, server_name, tool_name, false) do
+  defp maybe_authorize(agent_id, server_name, tool_name, _skip)
+       when is_binary(agent_id) and agent_id != "" do
     ToolBridge.authorize(agent_id, server_name, tool_name)
   end
+
+  defp maybe_authorize(_agent_id, _server, _tool, _skip), do: {:error, :missing_agent_id}
 
   defp find_connection(server_name) do
     case ClientSupervisor.find_connection(server_name) do
@@ -372,12 +386,16 @@ defmodule Arbor.Gateway do
     end
   end
 
-  defp maybe_authorize_resource(nil, _server, _resource, _skip), do: :ok
+  # Same fail-closed rule as maybe_authorize/4 (Imp review D2).
   defp maybe_authorize_resource(_agent_id, _server, _resource, true), do: :ok
 
-  defp maybe_authorize_resource(agent_id, server_name, resource_name, false) do
+  defp maybe_authorize_resource(agent_id, server_name, resource_name, _skip)
+       when is_binary(agent_id) and agent_id != "" do
     ResourceBridge.authorize(agent_id, server_name, resource_name)
   end
+
+  defp maybe_authorize_resource(_agent_id, _server, _resource, _skip),
+    do: {:error, :missing_agent_id}
 
   # Derive a short resource name from a URI for capability lookups.
   # Tries to find a matching cached resource name, falls back to URI basename.

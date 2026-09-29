@@ -321,6 +321,18 @@ defmodule Arbor.LLM do
 
   def generate(_opts), do: {:error, :keyword_options_required}
 
+  @doc """
+  Whether a failed request's reason says the prompt exceeded the model's
+  context window — the typed `context_window_exceeded` field of
+  `%Arbor.LLM.ProviderError{}`, never error text. Callers compact or switch
+  models; retrying the same request cannot succeed.
+  """
+  @spec context_window_exceeded?(term()) :: boolean()
+  def context_window_exceeded?(%Arbor.LLM.ProviderError{context_window_exceeded: exceeded?}),
+    do: exceeded? == true
+
+  def context_window_exceeded?(_reason), do: false
+
   @doc "Generate an authoritative indexed embedding batch through the bounded LLM transport."
   @spec embed_batch(atom() | String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}

@@ -26,7 +26,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Contracts.Tool.CallFailure
-  alias Arbor.Gateway.MCP.ToolBridge
+  alias Arbor.Gateway.MCP.{ExternalAgentTaint, ToolBridge}
   alias ExMCP.Protocol.VersionNegotiator
 
   require Logger
@@ -662,6 +662,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp auth_context_option(_opts, _key), do: nil
+
+  # The action context for a standalone `arbor_run` native action. The caller
+  # is an external MCP agent, so its arguments carry the `:derived` label
+  # (ExternalAgentTaint) instead of reaching authorize_and_execute unlabeled
+  # (= clean). Public (@doc false) for the provenance regression test.
+  @doc false
+  def native_action_context do
+    %{workspace: default_workspace(), taint: ExternalAgentTaint.label("gateway_mcp")}
+    |> maybe_put_signed_request()
+  end
 
   # Public (@doc false) for the H1 regression test, which constructs a fake
   # signed_request in the process dict and asserts the helper threads it
@@ -1428,11 +1438,13 @@ defmodule Arbor.Gateway.MCP.Handler do
         # `%{workspace: ...}` and the proof was discarded after gateway auth.
         # Pipeline-internal actions are rejected by find_exposed_action_module
         # and again by authorize_and_execute without allow_pipeline_internal.
-        context =
-          %{workspace: default_workspace()}
-          |> maybe_put_signed_request()
-
-        result = call_actions(:authorize_and_execute, [agent_id, mod, atom_params, context])
+        result =
+          call_actions(:authorize_and_execute, [
+            agent_id,
+            mod,
+            atom_params,
+            native_action_context()
+          ])
 
         case result do
           {:ok, {:ok, value}} ->

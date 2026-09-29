@@ -233,7 +233,13 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
     end
 
     test "rejects unsupported version" do
+      # Revised 2026-09-28 (intent v3): version 3 is admissible under its own
+      # kind, so version 3 carrying the v1 kind is a kind mismatch and the first
+      # unsupported version is 4.
       assert {:error, :unsupported_version} =
+               AuditJournal.admit_intent(Map.put(grant_facts(), "version", 4))
+
+      assert {:error, {:invalid_field, "kind"}} =
                AuditJournal.admit_intent(Map.put(grant_facts(), "version", 3))
     end
 
@@ -614,7 +620,13 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
                  put_in(empty_snapshot(), ["pending_manifest", oid], <<0xFF>>)
                )
 
+      # Revised 2026-09-28 (snapshot v3): version 3 selects the exact 7-key v3
+      # clause, so a 5-key object claiming version 3 is missing fields and the
+      # first unsupported snapshot version is 4.
       assert {:error, :unsupported_version} =
+               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "version", 4))
+
+      assert {:error, :missing_field} =
                AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "version", 3))
 
       assert {:error, {:invalid_field, "kind"}} =

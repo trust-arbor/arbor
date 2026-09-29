@@ -251,7 +251,10 @@ defmodule Arbor.Trust.PolicyTest do
 
       put_security_env(:egress_gate_enforcing, true)
 
-      assert Arbor.Trust.authorize_egress(agent_id, :external_provider) == :allow
+      # Clean data stated explicitly: this asserts the standing layer, and the
+      # kernel reads a missing taint as :untrusted (Imp review D3).
+      assert Arbor.Trust.authorize_egress(agent_id, :external_provider, egress_taint: :trusted) ==
+               :allow
     end
 
     test "Trust.authorize passes profile egress standing into operation authorization",
@@ -269,6 +272,7 @@ defmodule Arbor.Trust.PolicyTest do
       assert {:ok, :authorized} =
                Arbor.Trust.authorize(agent_id, resource, :execute,
                  egress_tier: :external_provider,
+                 egress_taint: :trusted,
                  verify_identity: false
                )
     end

@@ -3,9 +3,9 @@ defmodule Arbor.LLM.Plugs.RateLimitBackoff do
   Same-path retry plug for rate-limit errors.
 
   Sits AFTER `Arbor.LLM.Plugs.Dispatch` in the pipeline. When the
-  dispatch plug stamps a rate-limit error onto the call (HTTP 429 or a
-  `%ProviderError{status: 429}` / `retryable: true` with a populated
-  `retry_after_ms`), this plug:
+  dispatch plug stamps a rate-limit error onto the call (Dispatch reports
+  every failure as a `%ProviderError{}`: `status: 429`, or `retryable: true`
+  with the provider's `Retry-After` in `retry_after_ms`), this plug:
 
     1. Sleeps for the indicated `retry_after_ms` (or an exponential
        backoff when the field is missing), capped at `:max_delay_ms`.
@@ -134,6 +134,7 @@ defmodule Arbor.LLM.Plugs.RateLimitBackoff do
 
   # ── Rate-limit detection ────────────────────────────────────────────
 
+  defp rate_limited?(%ProviderError{context_window_exceeded: true}), do: false
   defp rate_limited?(%ProviderError{status: 429}), do: true
 
   defp rate_limited?(%ProviderError{retryable: true, retry_after_ms: ms}) when is_integer(ms),

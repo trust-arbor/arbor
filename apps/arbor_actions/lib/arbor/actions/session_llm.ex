@@ -43,6 +43,8 @@ defmodule Arbor.Actions.SessionLlm do
     | `turn_count` | integer | no | Current turn number |
     | `messages` | list | no | Conversation history |
     | `percepts` | list | no | Action result percepts (for followup mode) |
+    | `heartbeat_prompt` | string | no | The beat's heartbeat prompt (followup mode seeds an empty history with it) |
+    | `last_response` | string | no | Previous LLM reply (followup mode appends it as the assistant turn) |
     """
     use Jido.Action,
       name: "session_llm_build_prompt",
@@ -67,6 +69,16 @@ defmodule Arbor.Actions.SessionLlm do
         turn_count: [type: :integer, required: false, doc: "Turn number"],
         messages: [type: {:list, :map}, required: false, doc: "Conversation history"],
         percepts: [type: {:list, :map}, required: false, doc: "Percepts for followup"],
+        heartbeat_prompt: [
+          type: :string,
+          required: false,
+          doc: "Heartbeat prompt that opens the followup conversation"
+        ],
+        last_response: [
+          type: :string,
+          required: false,
+          doc: "Previous LLM reply, appended to the followup conversation"
+        ],
         private_relationship: [
           type: :map,
           required: false,
@@ -136,15 +148,47 @@ defmodule Arbor.Actions.SessionLlm do
 
     # --- Followup mode ---
 
+    # Rebuilds the tool-loop conversation so each followup call sees what it is
+    # following up on: the heartbeat prompt llm_call answered, the previous LLM
+    # reply, then the new action results. Every beat starts with
+    # session.messages = [], and before 2026-09-27 the followup got the action
+    # results alone — no prompt, no goal, and none of its own prior replies.
     defp build_followup(params) do
       percepts = get_list(params, :percepts, "session.percepts")
       messages = get_list(params, :messages, "session.messages")
+      heartbeat_prompt = get_string(params, :heartbeat_prompt, "session.heartbeat_prompt")
+      previous_reply = get_string(params, :last_response, "last_response")
 
       percept_msg = format_percepts(percepts)
-      followup_messages = messages ++ [%{"role" => "user", "content" => percept_msg}]
+
+      followup_messages =
+        messages
+        |> seed_heartbeat_prompt(heartbeat_prompt)
+        |> append_previous_reply(previous_reply)
+        |> Kernel.++([%{"role" => "user", "content" => percept_msg}])
 
       {:ok, %{followup_prompt: percept_msg, messages: followup_messages}}
     end
+
+    defp seed_heartbeat_prompt([], prompt) when is_binary(prompt),
+      do: [%{"role" => "user", "content" => prompt}]
+
+    defp seed_heartbeat_prompt(messages, _prompt), do: messages
+
+    # The reply answers the last user message. With no user turn before it (the
+    # consolidation path has no llm_call or heartbeat prompt) it is dropped, so
+    # the history never opens on, or doubles, an assistant turn.
+    defp append_previous_reply(messages, reply) when is_binary(reply) do
+      case List.last(messages) do
+        %{"role" => role} when role in ["user", :user] ->
+          messages ++ [%{"role" => "assistant", "content" => reply}]
+
+        _ ->
+          messages
+      end
+    end
+
+    defp append_previous_reply(messages, _reply), do: messages
 
     # --- Turn mode ---
 
@@ -661,6 +705,14 @@ defmodule Arbor.Actions.SessionLlm do
 
     defp get_list(params, atom_key, context_key) do
       List.wrap(params[atom_key] || params[to_string(atom_key)] || params[context_key] || [])
+    end
+
+    # Non-empty binary or nil — an empty prompt or reply is no conversation turn.
+    defp get_string(params, atom_key, context_key) do
+      case params[atom_key] || params[to_string(atom_key)] || params[context_key] do
+        s when is_binary(s) and s != "" -> s
+        _ -> nil
+      end
     end
 
     defp get_map(params, atom_key, context_key) do

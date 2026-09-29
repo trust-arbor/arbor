@@ -18,16 +18,33 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   Uses `Plug.Cowboy` + `ExMCP.HttpPlug` with a function handler
   for per-session tool configuration at runtime. Each ToolServer
   gets a unique ranch listener ref and OS-assigned port.
+
+  ## Access control
+
+  Tools run as the owning agent, so reaching the port is acting with that
+  agent's capabilities. Each server mints a per-session bearer token
+  (`BearerAuth`); only the descriptor built by `mcp_servers_entry/2` carries it,
+  and every request without it gets `401`. CORS is off (no browser client exists;
+  ex_mcp's Origin check already refuses foreign origins), and on a loopback bind
+  the `Host` header must be a loopback name (DNS-rebinding defense).
   """
 
   require Logger
 
+  alias Arbor.AI.AcpPool.ToolServer.BearerAuth
+  alias Arbor.Contracts.Security.Taint
   alias ExMCP.Protocol.VersionNegotiator
+
+  @loopback_binds [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}]
+  @loopback_hosts ["127.0.0.1", "localhost", "::1", "[::1]"]
 
   @doc """
   Start an HTTP MCP server exposing the given action modules as tools.
 
-  Returns `{:ok, %{port: port, ref: ranch_ref}}` or `{:error, reason}`.
+  Returns `{:ok, %{port: port, ref: ranch_ref, tool_count: n, token: token}}`
+  or `{:error, reason}`. `token` is the per-session bearer secret: hand the
+  whole map to `mcp_servers_entry/2` and do not retain or log the token
+  elsewhere.
 
   ## Options
 
@@ -65,12 +82,17 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       handle_mcp_request(request, tools, tool_map, agent_id, exec_context)
     end
 
-    plug_opts = [
+    token = generate_token()
+
+    mcp_opts = [
       handler: handler,
       server_info: %{"name" => "arbor-tools", "version" => "1.0.0"},
       protocol_mode: :legacy_only,
       sse_enabled: false,
-      cors_enabled: true
+      # No browser client exists. CORS on bought nothing (ex_mcp never sent an
+      # allow-origin with an empty allow-list) and only widened the surface.
+      cors_enabled: false,
+      allowed_hosts: allowed_hosts(bind_ip)
     ]
 
     cowboy_opts = [
@@ -79,7 +101,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       ip: bind_ip
     ]
 
-    case Plug.Cowboy.http(ExMCP.HttpPlug, plug_opts, cowboy_opts) do
+    case Plug.Cowboy.http(BearerAuth, [token: token, mcp: mcp_opts], cowboy_opts) do
       {:ok, _pid} ->
         actual_port = :ranch.get_port(ranch_ref)
 
@@ -88,7 +110,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
             "for agent #{agent_id} (ref: #{ranch_ref})"
         )
 
-        {:ok, %{port: actual_port, ref: ranch_ref, tool_count: length(tools)}}
+        {:ok, %{port: actual_port, ref: ranch_ref, tool_count: length(tools), token: token}}
 
       {:error, reason} ->
         Logger.error("[ToolServer] Failed to start: #{Arbor.LLM.inspect_external_reason(reason)}")
@@ -111,15 +133,20 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   end
 
   @doc """
-  Build the `mcp_servers` list for an ACP session/new request.
+  Build the `mcp_servers` list for an ACP session/new request from the map
+  returned by `start/2`.
 
-  Returns the format expected by `ExMCP.ACP.Client.new_session/3`:
-  `[%{"type" => "http", "name" => "arbor-tools", "url" => "http://...", "headers" => []}]`
+  Returns the format expected by `ExMCP.ACP.Client.new_session/3`, carrying
+  the server's bearer token so the spawned agent (and only it) can call tools:
+
+      [%{"type" => "http", "name" => "arbor-tools", "url" => "http://...",
+         "headers" => [%{"name" => "Authorization", "value" => "Bearer <token>"}]}]
 
   Pass a `host` option for remote-accessible servers (default: "127.0.0.1").
   """
-  @spec mcp_servers_entry(non_neg_integer(), keyword()) :: [map()]
-  def mcp_servers_entry(port, opts \\ []) do
+  @spec mcp_servers_entry(%{port: non_neg_integer(), token: String.t()}, keyword()) :: [map()]
+  def mcp_servers_entry(%{port: port, token: token}, opts \\ [])
+      when is_integer(port) and is_binary(token) do
     host = Keyword.get(opts, :host, "127.0.0.1")
 
     [
@@ -127,10 +154,18 @@ defmodule Arbor.AI.AcpPool.ToolServer do
         "type" => "http",
         "name" => "arbor-tools",
         "url" => "http://#{host}:#{port}",
-        "headers" => []
+        "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> token}]
       }
     ]
   end
+
+  # 32 random bytes, URL-safe. Lives only in the descriptor and BearerAuth opts.
+  defp generate_token, do: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+  # A loopback listener only answers loopback Host names (DNS rebinding). A
+  # deliberately remote bind keeps :any — the bearer token is the gate there.
+  defp allowed_hosts(bind_ip) when bind_ip in @loopback_binds, do: @loopback_hosts
+  defp allowed_hosts(_bind_ip), do: :any
 
   # -- MCP Request Handler --
 
@@ -357,9 +392,16 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   # Per-handler context that flows into each tool call. Workspace scopes
   # file actions; absence means "no workspace constraint". Add fields
   # here as more action subsystems need per-session context.
-  defp build_exec_context(nil), do: %{}
-  defp build_exec_context(workspace) when is_binary(workspace), do: %{workspace: workspace}
-  defp build_exec_context(_), do: %{}
+  #
+  # Every call's arguments come from the spawned ACP coding agent (an LLM), so
+  # they carry the same `:derived` provenance an in-process compute node's
+  # tool calls get, instead of reaching authorize_and_execute unlabeled
+  # (= clean). Decision 2026-09-27, following Imp review D3.
+  defp build_exec_context(workspace) do
+    base = %{taint: %Taint{level: :derived, source: "acp_tool_server"}}
+
+    if is_binary(workspace), do: Map.put(base, :workspace, workspace), else: base
+  end
 
   # -- Tool Conversion --
 

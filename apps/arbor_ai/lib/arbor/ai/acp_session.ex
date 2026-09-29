@@ -97,6 +97,7 @@ defmodule Arbor.AI.AcpSession do
 
   alias Arbor.AI.AcpSession.Config
   alias Arbor.AI.AcpSession.GrokSandbox
+  alias Arbor.AI.AcpSession.McpLaunchCore
   alias Arbor.AI.AcpSession.RuntimeHome
   alias Arbor.AI.AcpPromptFailure
   alias Arbor.AI.AcpTranscript
@@ -111,6 +112,10 @@ defmodule Arbor.AI.AcpSession do
   # thinking. These are session-lifetime ceilings, not start-handshake bounds.
   @default_pending_request_timeout_ms 5_400_000
   @default_handler_request_timeout_ms 1_200_000
+  # Session-internal client_opts key: bound MCP server tool names to append to
+  # the adapter's allowed_tools after the tool-profile merge. Popped before
+  # the client starts.
+  @mcp_allow_tools_key :arbor_mcp_allow_tools
   @default_close_timeout_ms 5_000
   @stream_callback_timeout_ms 5_000
   @default_transcript_sink_timeout_ms 5_000
@@ -438,6 +443,51 @@ defmodule Arbor.AI.AcpSession do
       {:error, reason} -> {:stop, reason}
     end
   end
+
+  # The bound mcpServers list carries the ACP ToolServer's bearer token (Imp
+  # review D6). Keep header and env values out of crash reports and
+  # :sys.get_status output.
+  @impl true
+  def format_status(status) when is_map(status) do
+    Map.update(status, :state, nil, &redact_mcp_secrets/1)
+  end
+
+  defp redact_mcp_secrets(%__MODULE__{} = state) do
+    %{
+      state
+      | mcp_servers: redact_mcp_servers(state.mcp_servers),
+        opts: redact_mcp_servers_opt(state.opts)
+    }
+  end
+
+  defp redact_mcp_secrets(other), do: other
+
+  defp redact_mcp_servers_opt(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and Keyword.has_key?(opts, :mcp_servers),
+      do: Keyword.update!(opts, :mcp_servers, &redact_mcp_servers/1),
+      else: opts
+  end
+
+  defp redact_mcp_servers_opt(opts), do: opts
+
+  defp redact_mcp_servers(servers) when is_list(servers),
+    do: Enum.map(servers, &redact_mcp_server/1)
+
+  defp redact_mcp_servers(other), do: other
+
+  defp redact_mcp_server(server) when is_map(server) do
+    Enum.reduce(["headers", "env"], server, fn key, acc ->
+      case Map.get(acc, key) do
+        pairs when is_list(pairs) -> Map.put(acc, key, Enum.map(pairs, &redact_pair/1))
+        _absent -> acc
+      end
+    end)
+  end
+
+  defp redact_mcp_server(other), do: other
+
+  defp redact_pair(%{"name" => name}), do: %{"name" => name, "value" => "[REDACTED]"}
+  defp redact_pair(_pair), do: "[REDACTED]"
 
   @impl true
   def handle_continue(:start_client, state) do
@@ -967,6 +1017,8 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp configure_client_opts(client_opts, session_pid, opts, cwd) do
+    {mcp_allow_tools, client_opts} = Keyword.pop(client_opts, @mcp_allow_tools_key, [])
+
     handler_opts =
       client_opts
       |> Keyword.get(:handler_opts, [])
@@ -986,6 +1038,7 @@ defmodule Arbor.AI.AcpSession do
     |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
     |> Keyword.put(:handler_opts, Keyword.merge(handler_opts, tool_profile_opts))
     |> merge_adapter_opts(tool_profile_opts)
+    |> append_allowed_tools(mcp_allow_tools)
     |> Keyword.put_new(:pending_request_timeout, @default_pending_request_timeout_ms)
     |> Keyword.put_new(:handler_request_timeout, @default_handler_request_timeout_ms)
     |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
@@ -1021,6 +1074,58 @@ defmodule Arbor.AI.AcpSession do
     # the derived profile.
     Keyword.put(client_opts, :adapter_opts, Keyword.merge(tool_profile_opts, existing))
   end
+
+  # Bound MCP servers the adapter must pre-allow (Claude `mcp__<name>`), added
+  # after the tool-profile merge so they extend, never replace, its list.
+  defp append_allowed_tools(client_opts, []), do: client_opts
+
+  defp append_allowed_tools(client_opts, tools) do
+    adapter_opts = Keyword.get(client_opts, :adapter_opts, [])
+
+    allowed =
+      case Keyword.get(adapter_opts, :allowed_tools) do
+        existing when is_list(existing) -> Enum.uniq(existing ++ tools)
+        _absent -> tools
+      end
+
+    Keyword.put(client_opts, :adapter_opts, Keyword.put(adapter_opts, :allowed_tools, allowed))
+  end
+
+  # Deliver the bound `mcpServers` list to adapter-backed providers, which do
+  # not honor it from `session/new` (see McpLaunchCore). The ToolServer
+  # descriptor carries a bearer token, so Claude's copy goes to a 0600 file in
+  # the private runtime home rather than onto argv. Native commands: no-op.
+  defp bind_adapter_mcp_servers(client_opts, %{path: runtime_home} = cleanup, servers) do
+    adapter = Keyword.get(client_opts, :adapter)
+
+    with {:ok, plan} <- McpLaunchCore.plan(adapter, servers, runtime_home),
+         :ok <- stage_mcp_launch_file(cleanup, plan.file),
+         {:ok, client_opts} <- put_planned_adapter_opts(client_opts, adapter, plan) do
+      {:ok, put_mcp_allow_tools(client_opts, plan.allow_tools)}
+    end
+  end
+
+  defp bind_adapter_mcp_servers(_client_opts, _cleanup, _servers),
+    do: {:error, :invalid_acp_runtime_home}
+
+  defp stage_mcp_launch_file(_cleanup, nil), do: :ok
+
+  defp stage_mcp_launch_file(cleanup, {path, contents}),
+    do: RuntimeHome.stage_private_file(cleanup, path, contents)
+
+  defp put_planned_adapter_opts(client_opts, nil, _plan), do: {:ok, client_opts}
+
+  defp put_planned_adapter_opts(client_opts, _adapter, plan) do
+    with {:ok, adapter_opts} <-
+           McpLaunchCore.apply_adapter_opts(Keyword.get(client_opts, :adapter_opts, []), plan) do
+      {:ok, Keyword.put(client_opts, :adapter_opts, adapter_opts)}
+    end
+  end
+
+  defp put_mcp_allow_tools(client_opts, []), do: client_opts
+
+  defp put_mcp_allow_tools(client_opts, tools),
+    do: Keyword.put(client_opts, @mcp_allow_tools_key, tools)
 
   defp unwrap_grok_launch({:ok, result}), do: result
 
@@ -1088,6 +1193,8 @@ defmodule Arbor.AI.AcpSession do
         with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
              {:ok, client_opts} <-
                RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider),
+             {:ok, client_opts} <-
+               bind_adapter_mcp_servers(client_opts, runtime_home_cleanup, state.mcp_servers),
              :ok <- stage_provider_runtime(state.provider, runtime_home_cleanup) do
           GrokSandbox.with_launch(
             state.provider,
@@ -2394,6 +2501,12 @@ defmodule Arbor.AI.AcpSession do
       with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
            {:ok, client_opts} <-
              RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider),
+           {:ok, client_opts} <-
+             bind_adapter_mcp_servers(
+               client_opts,
+               state.runtime_home_cleanup,
+               state.mcp_servers
+             ),
            :ok <- prepare_provider_reconnect(state.provider, state.runtime_home_cleanup) do
         GrokSandbox.with_launch(
           state.provider,

@@ -152,13 +152,21 @@ digraph Heartbeat {
   check_loop [shape=diamond, condition_key="session.has_action_results"]
 
   // ── Build followup prompt from action results ──────────────
+  // Rebuilds the loop's conversation in session.messages: the heartbeat prompt
+  // (seeded once — every beat starts with an empty history), the previous
+  // reply (last_response), then these action results.
   build_followup [type="exec", target="action", action="session_llm.build_prompt",
-                  context_keys="session.percepts,session.messages",
+                  context_keys="session.percepts,session.messages,session.heartbeat_prompt,last_response",
                   param.mode="followup", output_prefix="session"]
 
   // ── LLM followup call (uses followup prompt) ───────────────
+  // Carries the session system prompt like llm_call. Until 2026-09-27 it had
+  // no system_prompt_context_key, so LlmHandler fell back to a generic
+  // "coding agent" prompt, and build_followup passed only the action results —
+  // every tool-loop reply ran without the agent's identity or its goal.
   llm_followup [type="compute", purpose="llm", simulate="false",
                 prompt_context_key="session.followup_prompt",
+                system_prompt_context_key="session.system_prompt",
                 messages_context_key="session.messages"]
 
   // ── Exit ─────────────────────────────────────────────────

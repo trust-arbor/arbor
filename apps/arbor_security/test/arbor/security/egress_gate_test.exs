@@ -84,7 +84,10 @@ defmodule Arbor.Security.EgressGateTest do
       enforce!()
 
       assert {:requires_approval, _cap} =
-               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
     end
 
     test "on_host (local LLM) is NOT gated", %{agent_id: agent} do
@@ -161,7 +164,10 @@ defmodule Arbor.Security.EgressGateTest do
     test "external_peer egress is NOT escalated to approval", %{agent_id: agent} do
       enforce!()
 
-      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_peer) ==
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_peer,
+               egress_taint: :trusted
+             ) ==
                :authorized
     end
   end
@@ -173,6 +179,7 @@ defmodule Arbor.Security.EgressGateTest do
 
       assert AuthDecision.check(agent, @resource, :execute,
                egress_tier: :external_provider,
+               egress_taint: :trusted,
                egress_mode: :allow
              ) == :authorized
     end
@@ -191,7 +198,10 @@ defmodule Arbor.Security.EgressGateTest do
       enforce!()
 
       assert {:requires_approval, _} =
-               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
     end
   end
 
@@ -220,6 +230,7 @@ defmodule Arbor.Security.EgressGateTest do
       assert {:ok, :pending_approval, proposal_id} =
                Arbor.Security.authorize(agent, @resource, :execute,
                  egress_tier: :external_provider,
+                 egress_taint: :trusted,
                  verify_identity: false
                )
 
@@ -240,14 +251,17 @@ defmodule Arbor.Security.EgressGateTest do
     test "enforcing + no egress standing → requires_approval", %{agent_id: agent} do
       enforce!()
 
-      assert Arbor.Security.authorize_egress(agent, :external_provider) ==
+      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_taint: :trusted) ==
                {:requires_approval, :egress}
     end
 
     test "enforcing + caller supplies standing → :allow", %{agent_id: agent} do
       enforce!()
 
-      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_mode: :allow) ==
+      assert Arbor.Security.authorize_egress(agent, :external_provider,
+               egress_mode: :allow,
+               egress_taint: :trusted
+             ) ==
                :allow
     end
 
@@ -279,7 +293,8 @@ defmodule Arbor.Security.EgressGateTest do
 
       CapabilityStore.put(cap)
 
-      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_taint: :trusted) ==
+               :allow
     end
   end
 
@@ -308,7 +323,10 @@ defmodule Arbor.Security.EgressGateTest do
       enforce!()
       grant_egress_cap(agent, %{max_tier: :external_provider})
 
-      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider) ==
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_taint: :trusted
+             ) ==
                :authorized
     end
 
@@ -318,7 +336,10 @@ defmodule Arbor.Security.EgressGateTest do
       grant_egress_cap(agent, %{max_tier: :on_premises})
 
       assert {:requires_approval, _} =
-               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
     end
 
     test "a destination-scoped cap covers a matching destination", %{agent_id: agent} do
@@ -328,6 +349,7 @@ defmodule Arbor.Security.EgressGateTest do
 
       assert AuthDecision.check(agent, @resource, :execute,
                egress_tier: :external_provider,
+               egress_taint: :trusted,
                egress_destination: "api.anthropic.com"
              ) == :authorized
     end
@@ -340,6 +362,7 @@ defmodule Arbor.Security.EgressGateTest do
       assert {:requires_approval, _} =
                AuthDecision.check(agent, @resource, :execute,
                  egress_tier: :external_provider,
+                 egress_taint: :trusted,
                  egress_destination: "evil.example.com"
                )
     end
@@ -440,7 +463,11 @@ defmodule Arbor.Security.EgressGateTest do
                EgressGate.decide(
                  "agent_1",
                  :external_provider,
-                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [
+                   egress_destination: "opencode_zen",
+                   egress_mode: :allow,
+                   egress_taint: :trusted
+                 ],
                  [],
                  nil
                )
@@ -470,7 +497,7 @@ defmodule Arbor.Security.EgressGateTest do
                EgressGate.decide(
                  "agent_1",
                  :external_provider,
-                 [egress_destination: "openrouter", egress_mode: :allow],
+                 [egress_destination: "openrouter", egress_mode: :allow, egress_taint: :trusted],
                  [],
                  nil
                )

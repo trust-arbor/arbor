@@ -1776,7 +1776,7 @@ defmodule Arbor.Actions do
       |> Keyword.put(:effect_class, effect_class)
       |> Keyword.put(:operation_taint, operation_taint)
       |> Keyword.put(:egress_tier, egress_tier)
-      |> Keyword.put(:egress_taint, operation_taint)
+      |> Keyword.put(:egress_taint, egress_taint_for(operation_taint))
       |> Keyword.put(:egress_destination, egress_destination)
       |> maybe_put_auth_scope(:task_id, context_value(clean_context, :task_id))
       |> maybe_put_auth_scope(:session_id, context_value(clean_context, :session_id))
@@ -3706,6 +3706,15 @@ defmodule Arbor.Actions do
   end
 
   defp auth_context_identity_verified?(_context, _agent_id, _signed_request), do: false
+
+  # The egress gate fails closed on a nil/unknown `:egress_taint` (Imp review
+  # D3, 2026-09-27). On this path a context without `:taint` means the caller
+  # attached no provenance label, which has always been decided as clean here;
+  # say so explicitly instead of leaving the security kernel to guess. Callers
+  # carrying untrusted inputs must thread `:taint` into the context (ToolLoop
+  # and ExecHandler already do when their inputs are labeled).
+  defp egress_taint_for(nil), do: :trusted
+  defp egress_taint_for(taint), do: taint
 
   # Egress observability (2026-06-14 decision): emit a security signal whenever
   # an action's egress crosses the trust boundary (external_provider /

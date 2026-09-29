@@ -53,7 +53,8 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       {:ok,
        %{
          workspace: Map.get(context, :workspace),
-         agent_id: Map.get(context, :agent_id)
+         agent_id: Map.get(context, :agent_id),
+         taint_level: context |> Map.get(:taint, %{}) |> Map.get(:level)
        }}
     end
   end
@@ -113,15 +114,27 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
   end
 
   describe "mcp_servers_entry/2" do
-    test "returns the exact standard ACP HTTP descriptor" do
+    test "returns the exact standard ACP HTTP descriptor carrying the bearer token" do
       assert [
                %{
                  "type" => "http",
                  "name" => "arbor-tools",
                  "url" => "http://127.0.0.1:12345",
-                 "headers" => []
+                 "headers" => [%{"name" => "Authorization", "value" => "Bearer tok"}]
                }
-             ] == ToolServer.mcp_servers_entry(12345)
+             ] == ToolServer.mcp_servers_entry(%{port: 12345, token: "tok"})
+    end
+
+    test "each started server mints its own token and the descriptor carries it" do
+      {:ok, %{ref: ref_a, token: token_a} = a} = ToolServer.start([TestAction])
+      {:ok, %{ref: ref_b, token: token_b}} = ToolServer.start([TestAction])
+      on_exit(fn -> Enum.each([ref_a, ref_b], &ToolServer.stop/1) end)
+
+      assert byte_size(token_a) >= 32
+      assert token_a != token_b
+
+      assert [%{"headers" => [%{"name" => "Authorization", "value" => "Bearer " <> ^token_a}]}] =
+               ToolServer.mcp_servers_entry(a)
     end
   end
 
@@ -146,10 +159,10 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
   describe "MCP protocol over HTTP" do
     setup do
       install_passthrough_runner()
-      {:ok, %{port: port, ref: ref}} = ToolServer.start([TestAction, AnotherAction])
+      {:ok, %{ref: ref} = server} = ToolServer.start([TestAction, AnotherAction])
       on_exit(fn -> ToolServer.stop(ref) end)
-      {init_response, session_id} = initialize_mcp(port)
-      {:ok, port: port, session_id: session_id, init_response: init_response}
+      {init_response, session_id} = initialize_mcp(server)
+      {:ok, server: server, session_id: session_id, init_response: init_response}
     end
 
     test "responds to initialize", %{init_response: response, session_id: session_id} do
@@ -160,8 +173,8 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert response["result"]["capabilities"]["tools"]
     end
 
-    test "responds to tools/list", %{port: port, session_id: session_id} do
-      {:ok, response} = mcp_request(port, "tools/list", %{}, session_id)
+    test "responds to tools/list", %{server: server, session_id: session_id} do
+      {:ok, response} = mcp_request(server, "tools/list", %{}, session_id)
       tools = response["result"]["tools"]
       assert length(tools) == 2
 
@@ -174,10 +187,10 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert test_tool["inputSchema"]["properties"]["input"]
     end
 
-    test "responds to tools/call", %{port: port, session_id: session_id} do
+    test "responds to tools/call", %{server: server, session_id: session_id} do
       {:ok, response} =
         mcp_request(
-          port,
+          server,
           "tools/call",
           %{
             "name" => "test_action",
@@ -195,10 +208,10 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert decoded["result"] == "processed: hello"
     end
 
-    test "returns error for unknown tool", %{port: port, session_id: session_id} do
+    test "returns error for unknown tool", %{server: server, session_id: session_id} do
       {:ok, response} =
         mcp_request(
-          port,
+          server,
           "tools/call",
           %{
             "name" => "nonexistent_tool",
@@ -211,13 +224,13 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert result["isError"]
     end
 
-    test "responds to ping", %{port: port, session_id: session_id} do
-      {:ok, response} = mcp_request(port, "ping", %{}, session_id)
+    test "responds to ping", %{server: server, session_id: session_id} do
+      {:ok, response} = mcp_request(server, "ping", %{}, session_id)
       assert response["result"] == %{}
     end
 
-    test "returns method not found for unknown methods", %{port: port, session_id: session_id} do
-      {:ok, response} = mcp_request(port, "unknown/method", %{}, session_id)
+    test "returns method not found for unknown methods", %{server: server, session_id: session_id} do
+      {:ok, response} = mcp_request(server, "unknown/method", %{}, session_id)
       assert response["error"]["code"] == -32601
     end
   end
@@ -229,15 +242,15 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     end
 
     test "workspace from start opts arrives in action context" do
-      {:ok, %{port: port, ref: ref}} =
+      {:ok, %{ref: ref} = server} =
         ToolServer.start([ContextEchoAction], workspace: "/tmp/agent_workspace_xyz")
 
       on_exit(fn -> ToolServer.stop(ref) end)
-      {_init, session_id} = initialize_mcp(port)
+      {_init, session_id} = initialize_mcp(server)
 
       {:ok, response} =
         mcp_request(
-          port,
+          server,
           "tools/call",
           %{
             "name" => "context_echo",
@@ -253,14 +266,37 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert decoded["workspace"] == "/tmp/agent_workspace_xyz"
     end
 
+    test "security regression: ACP agent tool inputs carry :derived provenance, not clean" do
+      # Pre-2026-09-27 the exec context had no :taint, so the spawned coding
+      # agent's LLM-produced arguments were decided as clean.
+      for workspace <- ["/tmp/agent_workspace_xyz", nil] do
+        {:ok, %{ref: ref} = server} =
+          ToolServer.start([ContextEchoAction], workspace: workspace)
+
+        on_exit(fn -> ToolServer.stop(ref) end)
+        {_init, session_id} = initialize_mcp(server)
+
+        {:ok, response} =
+          mcp_request(
+            server,
+            "tools/call",
+            %{"name" => "context_echo", "arguments" => %{}},
+            session_id
+          )
+
+        decoded = Jason.decode!(hd(response["result"]["content"])["text"])
+        assert decoded["taint_level"] == "derived"
+      end
+    end
+
     test "absent workspace yields nil in action context" do
-      {:ok, %{port: port, ref: ref}} = ToolServer.start([ContextEchoAction])
+      {:ok, %{ref: ref} = server} = ToolServer.start([ContextEchoAction])
       on_exit(fn -> ToolServer.stop(ref) end)
-      {_init, session_id} = initialize_mcp(port)
+      {_init, session_id} = initialize_mcp(server)
 
       {:ok, response} =
         mcp_request(
-          port,
+          server,
           "tools/call",
           %{
             "name" => "context_echo",
@@ -306,13 +342,13 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       Application.put_env(:arbor_ai, :test_side_effect_pid, self())
       on_exit(fn -> Application.delete_env(:arbor_ai, :test_side_effect_pid) end)
 
-      {:ok, %{port: port, ref: ref}} = ToolServer.start([SideEffectAction])
+      {:ok, %{ref: ref} = server} = ToolServer.start([SideEffectAction])
       on_exit(fn -> ToolServer.stop(ref) end)
-      {_init, session_id} = initialize_mcp(port)
+      {_init, session_id} = initialize_mcp(server)
 
       {:ok, response} =
         mcp_request(
-          port,
+          server,
           "tools/call",
           %{"name" => "side_effect", "arguments" => %{}},
           session_id
@@ -325,10 +361,99 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     end
   end
 
+  describe "security regression (Imp review D6): per-session bearer token gate" do
+    # Pre-fix the ToolServer served any local process that found its port: no
+    # credential, CORS on, `"headers" => []` in the descriptor. Tools run via
+    # authorize_and_execute AS THE OWNING AGENT, so reaching the port was acting
+    # with that agent's capabilities. The passthrough runner stands in for a
+    # successful authorization here, so a request that gets past the transport
+    # WOULD execute — which is exactly what the gate must prevent.
+    setup do
+      install_passthrough_runner()
+      Application.put_env(:arbor_ai, :test_side_effect_pid, self())
+      on_exit(fn -> Application.delete_env(:arbor_ai, :test_side_effect_pid) end)
+
+      {:ok, %{ref: ref} = server} = ToolServer.start([SideEffectAction])
+      on_exit(fn -> ToolServer.stop(ref) end)
+      {:ok, server: server}
+    end
+
+    test "an unauthenticated local caller cannot initialize a session", %{server: server} do
+      assert {:error, {:unexpected_status, 401, _}} =
+               do_mcp_request(Map.delete(server, :token), "initialize", %{}, nil)
+    end
+
+    test "replaying the agent's session id without the token does not execute a tool",
+         %{server: server} do
+      # The legitimate agent (holding the descriptor's token) opens a session.
+      {_init, session_id} = initialize_mcp(server)
+
+      # A local attacker that learned/guessed the session id but not the token.
+      assert {:error, {:unexpected_status, 401, _}} =
+               mcp_request(
+                 Map.delete(server, :token),
+                 "tools/call",
+                 %{"name" => "side_effect", "arguments" => %{}},
+                 session_id
+               )
+
+      refute_receive :ACTION_EXECUTED, 200
+
+      # Control: the token holder on the same session does execute.
+      assert {:ok, %{"result" => %{"isError" => false}}} =
+               mcp_request(
+                 server,
+                 "tools/call",
+                 %{"name" => "side_effect", "arguments" => %{}},
+                 session_id
+               )
+
+      assert_receive :ACTION_EXECUTED, 1_000
+    end
+
+    test "a wrong token, another server's token, or a non-Bearer scheme is refused",
+         %{server: server} do
+      {:ok, %{ref: other_ref, token: other_token}} = ToolServer.start([SideEffectAction])
+      on_exit(fn -> ToolServer.stop(other_ref) end)
+
+      for token <- [String.duplicate("x", 43), other_token, ""] do
+        assert {:error, {:unexpected_status, 401, _}} =
+                 do_mcp_request(%{server | token: token}, "initialize", %{}, nil)
+      end
+
+      assert {:error, {:unexpected_status, 401, _}} =
+               raw_post(server.port, [{"authorization", "Basic " <> server.token}])
+    end
+
+    test "a loopback listener refuses a non-loopback Host (DNS rebinding)", %{server: server} do
+      assert {:error, {:unexpected_status, 421, _}} =
+               raw_post(server.port, [
+                 {"authorization", "Bearer " <> server.token},
+                 {"host", "attacker.example.com:#{server.port}"}
+               ])
+    end
+  end
+
+  defp raw_post(port, headers) do
+    body =
+      Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => %{}})
+
+    case Req.post("http://127.0.0.1:#{port}",
+           body: body,
+           headers: [{"content-type", "application/json"} | headers],
+           receive_timeout: 5_000,
+           retry: false
+         ) do
+      {:ok, %{status: 200} = resp} -> {:ok, resp}
+      {:ok, %{status: status, body: body}} -> {:error, {:unexpected_status, status, body}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # -- Helpers --
 
-  defp initialize_mcp(port) do
-    {:ok, response, headers} = do_mcp_request(port, "initialize", %{}, nil)
+  defp initialize_mcp(server) do
+    {:ok, response, headers} = do_mcp_request(server, "initialize", %{}, nil)
     session_id = session_id_from_headers(headers)
 
     assert is_binary(session_id) and session_id != "",
@@ -337,14 +462,16 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     {response, session_id}
   end
 
-  defp mcp_request(port, method, params, session_id) do
-    case do_mcp_request(port, method, params, session_id) do
+  defp mcp_request(server, method, params, session_id) do
+    case do_mcp_request(server, method, params, session_id) do
       {:ok, response, _headers} -> {:ok, response}
       other -> other
     end
   end
 
-  defp do_mcp_request(port, method, params, session_id) do
+  # `server` is the map from ToolServer.start/2; its :token (when present) is
+  # sent as the bearer, exactly as the ACP descriptor instructs the agent to.
+  defp do_mcp_request(%{port: port} = server, method, params, session_id) do
     body =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
@@ -356,6 +483,7 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     headers =
       [{"content-type", "application/json"}]
       |> maybe_put_session_header(session_id)
+      |> maybe_put_bearer(Map.get(server, :token))
 
     url = "http://127.0.0.1:#{port}"
 
@@ -380,6 +508,11 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     do: [{"mcp-session-id", session_id} | headers]
 
   defp maybe_put_session_header(headers, _session_id), do: headers
+
+  defp maybe_put_bearer(headers, token) when is_binary(token),
+    do: [{"authorization", "Bearer " <> token} | headers]
+
+  defp maybe_put_bearer(headers, _token), do: headers
 
   defp session_id_from_headers(headers) when is_map(headers) do
     headers

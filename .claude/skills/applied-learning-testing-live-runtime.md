@@ -248,6 +248,11 @@ Tests that assert an exact launched budget at a deadline boundary must inject th
 <!-- applied-learning: umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app -->
 <a id="applied-learning-umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app"></a>
 **Umbrella runtime config must not execute modules from an optional child app.** `config/runtime.exs` is evaluated when a lower-level child runs independently, so calling `Arbor.Agent.Config` there made `arbor_security` fail before its tests because `arbor_agent` was not compiled or loaded. Keep runtime config data-only; validate an app-specific environment selector inside that app's startup boundary, where the module and its dependencies are guaranteed to exist (found 2026-07-11 running the isolated Security suite).
+A `mix run --no-start` inspection still evaluates runtime config. For compiled-code
+introspection in an isolated leaf, isolate its operator-state home and relevant
+external config selectors instead of starting unrelated apps to satisfy a
+host-specific loader. Check the pinned Mix parser before assuming a flag can
+skip runtime config (reinforced 2026-09-27 during native source inspection).
 
 <!-- applied-learning: compile-env-reads-must-target-the-exact-runtime-invariant -->
 <a id="applied-learning-compile-env-reads-must-target-the-exact-runtime-invariant"></a>
@@ -1075,6 +1080,12 @@ non-accepting infrastructure evidence rather than proof that the bug existed. Pu
 compile or API work behind a delayed factory invoked from the test process, keep a behavioral
 assertion against the missing or fixed public API, and require candidate success plus ordinary
 parent test failure (found 2026-09-01 during G5B1 exact-two-revision verification).
+
+Build callback test state through the public initializer instead of duplicating
+private state fields. New lifecycle fields can make a handwritten fixture fail
+with `KeyError` before the intended security assertion; initialize while the
+dependency is available, then remove it to exercise fail-closed behavior (found
+2026-09-27 extending the bounded Source permission regression).
 
 <!-- applied-learning: source-corpus-tests-must-not-require-ambient-git-metadata -->
 <a id="applied-learning-source-corpus-tests-must-not-require-ambient-git-metadata"></a>

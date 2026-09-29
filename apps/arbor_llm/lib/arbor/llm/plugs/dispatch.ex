@@ -18,12 +18,26 @@ defmodule Arbor.LLM.Plugs.Dispatch do
       + `Req.request/1` directly (bypasses
       `ReqLLM.Embedding.validate_model/1`'s catalog gate for
       operator-pulled local-LM models)
+
+  ## Failures
+
+  Every failure is one `%Arbor.LLM.ProviderError{}` built by
+  `Arbor.LLM.ProviderErrorCore` — HTTP status, transport, provider-library
+  exceptions, exits, and local refusals of a provider response alike — so
+  `Plugs.RateLimitBackoff`, `Arbor.LLM.Retry`, and provider fallback decide
+  on typed fields. A deadline expiry stays `%Arbor.LLM.RequestTimeoutError{}`.
+  A non-2xx response is halted right after the bounded body decoder, before
+  the provider library's response steps turn it into an exception that drops
+  the headers (`Retry-After`) and carries the request body. Errors leave
+  bounded to the adapter-error budget via `Arbor.LLM.Boundary.provider_error/1`.
   """
 
   use Arbor.LLM.Plug
   alias Arbor.LLM.Call
   alias Arbor.LLM.Boundary
   alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.ProviderErrorCore
+  alias Arbor.LLM.RequestTimeoutError
   alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
 
@@ -34,7 +48,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   def call(%Call{result: nil, operation: op, request: req, assigns: assigns} = call) do
     single_attempt? = Map.get(assigns, :single_attempt) == true
     live_completion? = Map.get(assigns, :live_completion) == true
-    %{call | result: do_dispatch(op, req, single_attempt?, live_completion?)}
+    %{call | result: op |> do_dispatch(req, single_attempt?, live_completion?) |> bounded()}
   end
 
   # Already has a result — short-circuited by an upstream plug.
@@ -50,37 +64,22 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
     with {:ok, model} <- ReqLLM.model(model_spec),
          {:ok, provider_module} <- ReqLLM.provider(model.provider),
-         {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts),
-         request <- ResponseBudget.apply_req_receipt(request, maximum),
-         request <- maybe_disable_req_retry(request, single_attempt?),
-         request <- maybe_disable_redirects(request, live_completion?),
-         request <- maybe_apply_anonymous_auth(request, anonymous?),
-         {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
-           Req.request(request) do
-      {:error, {:response_bytes_exceeded, maximum}}
+         {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts) do
+      request
+      |> ResponseBudget.apply_req_receipt(maximum)
+      |> halt_http_failure()
+      |> maybe_disable_req_retry(single_attempt?)
+      |> maybe_disable_redirects(live_completion?)
+      |> maybe_apply_anonymous_auth(anonymous?)
+      |> Req.request()
+      |> response_result(:req_llm, &{:ok, &1})
     else
-      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
-        {:error, {:invalid_response_body, reason}}
-
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        {:ok, body}
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error,
-         ReqLLM.Error.API.Request.exception(
-           reason: "HTTP #{status}: Request failed",
-           status: status,
-           response_body: body
-         )}
-
-      {:error, _reason} = error ->
-        error
+      {:error, reason} -> {:error, provider_error(reason, :req_llm)}
     end
   rescue
-    e -> {:error, exception_for(e)}
+    e -> {:error, provider_error(e, :req_llm)}
   catch
-    :exit, reason -> {:error, exit_for(reason)}
-    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+    kind, reason -> {:error, caught(kind, reason, :req_llm)}
   end
 
   defp do_dispatch(operation, request, single_attempt?, _live_completion?),
@@ -104,16 +103,18 @@ defmodule Arbor.LLM.Plugs.Dispatch do
       ])
 
     # Bounded Finch streaming already performs one stream request.
-    BoundedStream.start(model_spec, messages, req_opts,
-      max_response_bytes: maximum,
-      max_events: max_events,
-      max_event_bytes: max_event_bytes
-    )
+    case BoundedStream.start(model_spec, messages, req_opts,
+           max_response_bytes: maximum,
+           max_events: max_events,
+           max_event_bytes: max_event_bytes
+         ) do
+      {:error, reason} -> {:error, provider_error(reason, :req_llm)}
+      started -> started
+    end
   rescue
-    e -> {:error, exception_for(e)}
+    e -> {:error, provider_error(e, :req_llm)}
   catch
-    :exit, reason -> {:error, exit_for(reason)}
-    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+    kind, reason -> {:error, caught(kind, reason, :req_llm)}
   end
 
   defp do_dispatch(:embed_cloud, {model_spec, texts, opts}, single_attempt?)
@@ -121,12 +122,13 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     with {:ok, model} <- ReqLLM.model(model_spec),
          true <- embedding_capable?(model) or {:error, {:embedding_not_supported, model_spec}} do
       dispatch_embedding(model, texts, opts, :req_llm, single_attempt?)
+    else
+      {:error, reason} -> {:error, provider_error(reason, :req_llm)}
     end
   rescue
-    e -> {:error, exception_for(e)}
+    e -> {:error, provider_error(e, :req_llm)}
   catch
-    :exit, reason -> {:error, exit_for(reason)}
-    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+    kind, reason -> {:error, caught(kind, reason, :req_llm)}
   end
 
   defp do_dispatch(:embed_local, {%LLMDB.Model{} = model, texts, opts}, single_attempt?) do
@@ -138,10 +140,9 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     # as the openai embeddings API which Ollama serves at /v1/embeddings.
     dispatch_embedding(model, texts, opts, :req_llm_direct, single_attempt?)
   rescue
-    e -> {:error, exception_for(e)}
+    e -> {:error, provider_error(e, :req_llm_direct)}
   catch
-    :exit, reason -> {:error, exit_for(reason)}
-    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+    kind, reason -> {:error, caught(kind, reason, :req_llm_direct)}
   end
 
   # ── Helpers ────────────────────────────────────────────────────────
@@ -165,71 +166,112 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     req_opts = Keyword.drop(opts, [:arbor_max_response_bytes, :arbor_anonymous_auth])
 
     with {:ok, provider_module} <- ReqLLM.provider(model.provider),
-         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts),
-         request <- ResponseBudget.apply_req_receipt(request, maximum),
-         request <- maybe_disable_req_retry(request, single_attempt?),
-         request <- maybe_apply_anonymous_auth(request, anonymous?),
-         {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
-           Req.request(request) do
-      {:error, {:response_bytes_exceeded, maximum}}
+         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts) do
+      request
+      |> ResponseBudget.apply_req_receipt(maximum)
+      |> halt_http_failure()
+      |> maybe_disable_req_retry(single_attempt?)
+      |> maybe_apply_anonymous_auth(anonymous?)
+      |> Req.request()
+      |> response_result(source, fn body ->
+        case Boundary.embedding_response_with_indices(body, length(texts)) do
+          {:error, reason} ->
+            {:error,
+             ProviderErrorCore.from_failure(reason,
+               source: source,
+               message: "invalid provider embedding response"
+             )}
+
+          indexed ->
+            indexed
+        end
+      end)
     else
-      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
-        {:error, {:invalid_response_body, reason}}
-
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        Boundary.embedding_response_with_indices(body, length(texts))
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error,
-         ProviderError.exception(
-           message: "embedding HTTP #{status}",
-           status: status,
-           retryable: retryable_status?(status),
-           details: %{source: source, body: Arbor.LLM.ExternalTerm.inspect(body)}
-         )}
-
-      {:error, _} = error ->
-        error
+      {:error, reason} -> {:error, provider_error(reason, source)}
     end
   end
 
-  defp exception_for(%{__struct__: mod} = e)
-       when mod in [ReqLLM.Error.API.Request, ReqLLM.Error.API.Response] do
-    status = Map.get(e, :status)
+  # ── Failure classification ─────────────────────────────────────────
 
-    ProviderError.exception(
-      message: Arbor.LLM.ExternalTerm.exception_message(e),
-      status: status,
-      retryable: retryable_status?(status),
-      details: %{source: :req_llm, raw: Arbor.LLM.ExternalTerm.inspect(e)}
+  # Insert a response step right after the bounded body decoder that halts any
+  # non-2xx, so Arbor classifies it from the real status, headers, and body
+  # before the provider library converts it into an exception.
+  defp halt_http_failure(%Req.Request{response_steps: steps} = request) do
+    {before, rest} =
+      Enum.split_while(steps, fn {name, _step} -> name != :arbor_decode_bounded_body end)
+
+    case rest do
+      [decode | later] ->
+        %{
+          request
+          | response_steps: before ++ [decode, {:arbor_http_failure, &halt_failure/1}] ++ later
+        }
+
+      [] ->
+        Req.Request.prepend_response_steps(request, arbor_http_failure: &halt_failure/1)
+    end
+  end
+
+  defp halt_failure({request, %Req.Response{status: status} = response})
+       when status not in 200..299,
+       do: Req.Request.halt(request, response)
+
+  defp halt_failure(request_response), do: request_response
+
+  # Status first: a non-2xx is a provider failure even when its body was
+  # undecodable (an HTML error page) or oversized.
+  defp response_result({:ok, %Req.Response{status: status} = response}, source, _on_success)
+       when status not in 200..299,
+       do: {:error, http_error(response, source)}
+
+  defp response_result(
+         {:ok, %Req.Response{private: %{arbor_response_overflow: maximum}}},
+         source,
+         _on_success
+       ),
+       do: {:error, provider_error({:response_bytes_exceeded, maximum}, source)}
+
+  defp response_result(
+         {:ok, %Req.Response{private: %{arbor_response_error: reason}}},
+         source,
+         _on_success
+       ),
+       do: {:error, provider_error({:invalid_response_body, reason}, source)}
+
+  defp response_result({:ok, %Req.Response{body: body}}, _source, on_success),
+    do: on_success.(body)
+
+  defp response_result({:error, reason}, source, _on_success),
+    do: {:error, provider_error(reason, source)}
+
+  defp http_error(%Req.Response{status: status, headers: headers} = response, source) do
+    body = failure_body(response)
+
+    ProviderErrorCore.from_http(status, headers, body,
+      source: source,
+      original: %{response | body: body, private: %{}}
     )
   end
 
-  defp exception_for(e) do
-    ProviderError.exception(
-      message: Arbor.LLM.ExternalTerm.exception_message(e),
-      retryable: false,
-      details: %{source: :req_llm, raw: Arbor.LLM.ExternalTerm.inspect(e)}
-    )
-  end
+  # The decoded JSON body when the bounded decoder accepted it; otherwise the
+  # raw bytes it buffered (e.g. an HTML error page from a proxy).
+  defp failure_body(%Req.Response{private: %{arbor_response_chunks: chunks} = private})
+       when is_list(chunks) and
+              (is_map_key(private, :arbor_response_error) or
+                 is_map_key(private, :arbor_response_overflow)),
+       do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-  defp exit_for({:timeout, _}) do
-    Arbor.LLM.RequestTimeoutError.exception(message: "request timed out")
-  end
+  defp failure_body(%Req.Response{body: body}), do: body
 
-  defp exit_for(reason) do
-    bounded = Arbor.LLM.ExternalTerm.sanitize(reason)
-    rendered = Arbor.LLM.ExternalTerm.inspect(bounded)
+  defp provider_error(reason, source), do: ProviderErrorCore.from_failure(reason, source: source)
 
-    ProviderError.exception(
-      message: "request exited: " <> rendered,
-      retryable: false,
-      details: %{source: :req_llm, raw: rendered}
-    )
-  end
+  defp caught(:exit, {:timeout, _reason}, _source),
+    do: RequestTimeoutError.exception(message: "request timed out")
 
-  defp retryable_status?(status) when status in [408, 429, 500, 502, 503, 504], do: true
-  defp retryable_status?(_), do: false
+  defp caught(kind, reason, source), do: provider_error({kind, reason}, source)
+
+  defp bounded({:error, %ProviderError{} = error}), do: {:error, Boundary.provider_error(error)}
+  defp bounded(result), do: result
 
   defp embedding_capable?(%LLMDB.Model{capabilities: capabilities}) when is_map(capabilities),
     do:

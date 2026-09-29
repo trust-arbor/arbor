@@ -1,7 +1,7 @@
 defmodule Arbor.LLM.Boundary do
   @moduledoc false
 
-  alias Arbor.LLM.{Deadline, Response, ResponseBudget, StreamEvent}
+  alias Arbor.LLM.{Deadline, ExternalTerm, ProviderError, Response, ResponseBudget, StreamEvent}
 
   @max_response_bytes 16_777_216
   @max_stream_event_bytes 1_048_576
@@ -27,6 +27,14 @@ defmodule Arbor.LLM.Boundary do
     max_map_keys: 2_000,
     max_list_items: 10_000
   ]
+  @adapter_error_limits [
+    max_bytes: 65_536,
+    max_nodes: 2_000,
+    max_depth: 8,
+    max_map_keys: 256,
+    max_list_items: 2_000
+  ]
+  @max_label_bytes 256
   @finish_reasons [:stop, :length, :tool_calls, :content_filter, :error, :other]
   @stream_types [:start, :delta, :tool_call, :tool_result, :step_finish, :finish, :error]
 
@@ -240,18 +248,67 @@ defmodule Arbor.LLM.Boundary do
     end
   end
 
-  defp validate_adapter_error(reason) do
-    case ResponseBudget.validate(reason,
-           max_bytes: 65_536,
-           max_nodes: 2_000,
-           max_depth: 8,
-           max_map_keys: 256,
-           max_list_items: 2_000
-         ) do
-      :ok -> {:error, reason}
-      {:error, _invalid} -> {:error, {:invalid_adapter_error, bounded_shape(reason)}}
+  @doc """
+  Keep a typed provider failure within the adapter-error budget.
+
+  When the terms it carries exceed the budget, only `original` and `details`
+  are bounded (`ExternalTerm.sanitize/1`); `status`, `retryable`,
+  `retry_after_ms`, and `context_window_exceeded` always survive, so an
+  oversized failure — a context overflow carrying a huge body, say — is never
+  reduced to an unclassified `{:invalid_adapter_error, _}`.
+  """
+  @spec provider_error(ProviderError.t()) :: ProviderError.t()
+  def provider_error(%ProviderError{} = error) do
+    case ResponseBudget.validate(error, @adapter_error_limits) do
+      :ok -> error
+      {:error, _invalid} -> bounded_provider_error(error)
     end
   end
+
+  defp validate_adapter_error(reason) do
+    case ResponseBudget.validate(reason, @adapter_error_limits) do
+      :ok -> {:error, reason}
+      {:error, _invalid} -> {:error, bounded_adapter_error(reason)}
+    end
+  end
+
+  defp bounded_adapter_error(%ProviderError{} = error), do: bounded_provider_error(error)
+  defp bounded_adapter_error(reason), do: {:invalid_adapter_error, bounded_shape(reason)}
+
+  defp bounded_provider_error(%ProviderError{} = error) do
+    bounded = %ProviderError{
+      message: ExternalTerm.exception_message(error),
+      provider: bounded_label(error.provider),
+      status: bounded_integer(error.status),
+      retryable: error.retryable == true,
+      retry_after_ms: bounded_integer(error.retry_after_ms),
+      code: bounded_label(error.code),
+      details: ExternalTerm.sanitize(error.details),
+      original: ExternalTerm.sanitize(error.original),
+      context_window_exceeded: error.context_window_exceeded == true
+    }
+
+    # Sanitized terms can still hold map keys the budget rejects; fall back to
+    # the original's shape rather than drop the classification.
+    case ResponseBudget.validate(bounded, @adapter_error_limits) do
+      :ok -> bounded
+      {:error, _invalid} -> %{bounded | details: nil, original: bounded_shape(error.original)}
+    end
+  end
+
+  defp bounded_label(value) when is_atom(value), do: value
+
+  defp bounded_label(value) when is_binary(value) do
+    if byte_size(value) <= @max_label_bytes and String.valid?(value), do: value, else: nil
+  end
+
+  defp bounded_label(_value), do: nil
+
+  defp bounded_integer(value)
+       when is_integer(value) and value >= @signed_64_min and value <= @signed_64_max,
+       do: value
+
+  defp bounded_integer(_value), do: nil
 
   defp normalize_stream_event(%StreamEvent{} = event), do: {:ok, event}
 

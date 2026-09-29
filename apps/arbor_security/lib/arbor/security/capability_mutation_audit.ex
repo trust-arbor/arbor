@@ -8,7 +8,21 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   Reductions remain possible with unavailable journal, but never turn a failed
   delete into an acknowledged success. Post-effect journal failure is reported
   separately and cannot roll back or disguise the known authority effect.
+
+  Journal refusals keep the public result vocabulary (a refused grant is
+  `{:error, :audit_unavailable}`; a refused reduction executes `:degraded`)
+  and add a closed reason class to `last_status/0`: `:capacity` (soft or
+  hard capacity), `:identity` (`:operation_terminal | :retired_version`) or
+  `:unavailable` (anything else). A refused grant emits
+  `[:arbor, :security, :audit_journal, :refused]`; every degraded
+  (unjournaled) reduction emits
+  `[:arbor, :security, :audit_journal, :degraded_reduction]` and is counted.
+  The first 10 degraded reductions of the calling process log a warning, then
+  every 100th with the cumulative count, so a sustained outage cannot flood
+  the log an operator reads.
   """
+
+  require Logger
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
@@ -20,6 +34,9 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   @store :arbor_security_capabilities
   @status_key {__MODULE__, :last_status}
   @correlation_key {__MODULE__, :correlation}
+  @degraded_key {__MODULE__, :degraded_reductions}
+  @warn_first 10
+  @warn_every 100
 
   def with_correlation(correlation, fun) do
     value =
@@ -35,7 +52,28 @@ defmodule Arbor.Security.CapabilityMutationAudit do
     end
   end
 
-  def last_status, do: Process.get(@status_key, %{audit: :none, effect: :none, operation: :none})
+  def last_status do
+    @status_key
+    |> Process.get(%{audit: :none, effect: :none, operation: :none, reason: :none})
+    |> Map.put(:degraded_reductions, Process.get(@degraded_key, 0))
+  end
+
+  @doc false
+  @spec reason_class(term()) :: :capacity | :identity | :unavailable
+  def reason_class(reason) when reason in [:soft_capacity_exhausted, :capacity_exhausted],
+    do: :capacity
+
+  def reason_class(reason) when reason in [:operation_terminal, :retired_version],
+    do: :identity
+
+  def reason_class(_reason), do: :unavailable
+
+  @doc false
+  @spec warn_degraded_reduction?(pos_integer()) :: boolean()
+  def warn_degraded_reduction?(count) when is_integer(count) and count > 0,
+    do: count <= @warn_first or rem(count, @warn_every) == 0
+
+  def warn_degraded_reduction?(_count), do: false
 
   def put(%Capability{} = cap, mode) when mode in [:create, :upsert] do
     with {:ok, before} <- entry(cap.id),
@@ -94,9 +132,15 @@ defmodule Arbor.Security.CapabilityMutationAudit do
     now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     case Core.intent(operation, before, after_entry, data, now, Process.get(@correlation_key)) do
-      {:ok, intent} -> prepare_mutation(operation, intent, before, after_entry)
-      _ when operation == :revoke -> degraded_reduction(before, after_entry)
-      _ -> {:error, :invalid_audit_intent}
+      {:ok, intent} ->
+        prepare_mutation(operation, intent, before, after_entry)
+
+      _ when operation == :revoke ->
+        note_degraded_reduction(:invalid_audit_intent, nil)
+        with_reason(degraded_reduction(before, after_entry), :invalid_audit_intent)
+
+      _ ->
+        {:error, :invalid_audit_intent}
     end
   end
 
@@ -108,13 +152,63 @@ defmodule Arbor.Security.CapabilityMutationAudit do
       {:ok, original, "effect_applied"} ->
         reobserve(operation, original, :tracked)
 
-      {:error, _} when operation == :revoke ->
-        execute(operation, intent, before, after_entry, :degraded)
+      {:error, reason} when operation == :revoke ->
+        note_degraded_reduction(reason, intent["operation_id"])
+        with_reason(execute(operation, intent, before, after_entry, :degraded), reason)
 
-      _ ->
-        {:error, :audit_unavailable}
+      other ->
+        refused_grant(operation, intent, refusal_reason(other))
     end
   end
+
+  defp refusal_reason({:error, reason}), do: reason
+  defp refusal_reason(_other), do: :unexpected_prepare_result
+
+  defp refused_grant(operation, intent, reason) do
+    class = reason_class(reason)
+
+    :telemetry.execute(
+      [:arbor, :security, :audit_journal, :refused],
+      %{count: 1},
+      %{operation: operation, reason: class}
+    )
+
+    status(operation, intent["operation_id"], :not_applied, :refused, class)
+    {:error, :audit_unavailable}
+  end
+
+  # A reduction the journal could not record executes unjournaled. It is
+  # always counted and signalled; the warning is rate limited per process.
+  defp note_degraded_reduction(reason, operation_id) do
+    count = Process.get(@degraded_key, 0) + 1
+    Process.put(@degraded_key, count)
+    class = reason_class(reason)
+
+    :telemetry.execute(
+      [:arbor, :security, :audit_journal, :degraded_reduction],
+      %{count: 1, total: count},
+      %{reason: class}
+    )
+
+    if warn_degraded_reduction?(count) do
+      Logger.warning(
+        "Capability reduction executed without a journal record (degraded #{count}, " <>
+          "reason #{class}, operation #{operation_id || "none"})"
+      )
+    end
+
+    :ok
+  end
+
+  # The degraded execution path records its own effect/audit status; the
+  # refusal reason class is added to it.
+  defp with_reason(result, reason) do
+    Process.put(@status_key, Map.put(last_status_raw(), :reason, reason_class(reason)))
+    result
+  end
+
+  defp last_status_raw,
+    do: Process.get(@status_key, %{audit: :none, effect: :none, operation: :none, reason: :none})
 
   # Legacy stored keys may predate the closed journal schema. Their removal
   # still uses the exact authority owner and observation; no fabricated audit
@@ -222,12 +316,13 @@ defmodule Arbor.Security.CapabilityMutationAudit do
 
   # Diagnostic state belongs to the serialized CapabilityStore caller. It is
   # not durable evidence, permission, or a substitute for journal replay.
-  defp status(operation, id, effect, audit),
+  defp status(operation, id, effect, audit, reason \\ :none),
     do:
       Process.put(@status_key, %{
         operation: operation,
         operation_id: id,
         effect: effect,
-        audit: audit
+        audit: audit,
+        reason: reason
       })
 end

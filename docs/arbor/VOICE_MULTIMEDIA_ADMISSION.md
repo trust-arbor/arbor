@@ -2,6 +2,14 @@
 
 2026-09-27 — VP-07B0 installed, activated and qualified through the live runtime.
 
+The subsequent private Git baseline is also installed, active and live-qualified
+on 2026-09-27, integrated as `b8ab4f364`. Its lock begins `e4378b25`, source tree
+`5464f8dd`, image index `471c256a`, and active config `d3cd16c0`. The restart
+reported 26 apps ready; ordinary readiness passed in 14.425 seconds and the
+Workspace/Mix no-device proof passed with positive cleanup. Full identities and
+evidence are in the [current source adoption record](VOICE_MEDIA_SOURCE_ADOPTION.md).
+The B0 tables and original proof below retain their original Hex-source scope.
+
 The original admission used `arbor_multimedia` as an L0 facade scaffold. Its
 original direct dependencies were Membrane Core 1.3.4, PortAudio plugin 0.19.6,
 and RawAudio 0.12.3. The supervised device owner is now integrated, with the

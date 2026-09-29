@@ -29,26 +29,31 @@ defmodule Arbor.Gateway.Memory.RouterTest do
   end
 
   setup do
-    # Use unique agent IDs to avoid test interference
-    agent_id = "gateway_memory_test_#{System.unique_integer([:positive])}"
+    # Use unique agent IDs to avoid test interference. Capability principals
+    # must be `agent_`/`human_` ids or the grant is refused.
+    agent_id = "agent_gateway_memory_test_#{System.unique_integer([:positive])}"
 
-    # Grant memory capabilities for the test agent (M4 authorization)
-    # capability_signing_required: false in test config, so direct put works
-    now = DateTime.utc_now()
+    # Grant memory capabilities for the test agent (M4 authorization) through
+    # the Security facade. A hand-built Capability struct written straight into
+    # CapabilityStore no longer persists: since the capability mutation audit
+    # journal (2026-09-24) the write is refused with :invalid_audit_intent, so
+    # every request here was a 403.
+    caps =
+      for action <- [:read, :write] do
+        {:ok, cap} =
+          Arbor.Security.grant(
+            principal: agent_id,
+            resource: "arbor://memory/#{action}/#{agent_id}"
+          )
 
-    for action <- [:read, :write] do
-      cap = %Arbor.Contracts.Security.Capability{
-        id: "cap_mem_#{action}_#{agent_id}",
-        principal_id: agent_id,
-        resource_uri: "arbor://memory/#{action}/#{agent_id}",
-        granted_at: now,
-        expires_at: DateTime.add(now, 3600, :second)
-      }
+        cap
+      end
 
-      Arbor.Security.CapabilityStore.put(cap)
-    end
+    on_exit(fn ->
+      Memory.cleanup_for_agent(agent_id)
+      for cap <- caps, do: Arbor.Security.revoke(cap.id)
+    end)
 
-    on_exit(fn -> Memory.cleanup_for_agent(agent_id) end)
     {:ok, agent_id: agent_id}
   end
 

@@ -143,6 +143,40 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   def inject(_client_opts, _cleanup_identity, _provider),
     do: {:error, :invalid_acp_client_options}
 
+  @doc """
+  Stage a secret-bearing launch file (0600, exclusive create) directly inside
+  the session's private runtime home, e.g. the Claude `--mcp-config` file that
+  carries the ToolServer bearer token (`McpLaunchCore`). A reconnect reuses
+  the runtime home, so an existing file is accepted only if it is a regular
+  0600 file with identical content.
+  """
+  @spec stage_private_file(map(), String.t(), binary()) :: :ok | {:error, atom()}
+  def stage_private_file(%{path: runtime_home}, path, content)
+      when is_binary(runtime_home) and is_binary(path) and is_binary(content) do
+    if Path.dirname(path) == runtime_home do
+      case write_private_file(path, content, :acp_launch_file_stage_failed) do
+        :ok -> :ok
+        {:error, :already_exists} -> verify_staged_file(path, content)
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, :acp_launch_file_outside_runtime_home}
+    end
+  end
+
+  def stage_private_file(_cleanup_identity, _path, _content),
+    do: {:error, :invalid_acp_runtime_home}
+
+  defp verify_staged_file(path, content) do
+    with {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
+         true <- band(mode, 0o7777) == 0o600,
+         {:ok, ^content} <- File.read(path) do
+      :ok
+    else
+      _other -> {:error, :acp_launch_file_stage_failed}
+    end
+  end
+
   @spec cleanup(map()) :: :ok | {:error, term()}
   def cleanup(cleanup_identity) when is_map(cleanup_identity) do
     Arbor.Shell.remove_owned_tree(cleanup_identity)

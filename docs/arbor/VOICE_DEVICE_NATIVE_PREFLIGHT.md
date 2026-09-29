@@ -111,8 +111,8 @@ The approved portable adoption uses full immutable refs on Arbor's existing
 private Git host. Both forks were published privately on 2026-09-27 and are
 pinned in Multimedia’s dependencies. See [the source adoption record](VOICE_MEDIA_SOURCE_ADOPTION.md).
 The default driver remains unavailable. Fresh host and contained Linux builds
-pass, as does root-owned candidate admission. Activation and physical device
-qualification remain distinct pending steps.
+pass, as do root-owned candidate admission, activation and the genuine live
+Workspace/Mix build/load proof. Physical device qualification remains pending.
 
 A separate first BEAM ownership harness had a failed mock boundary: Mockery
 interception was not compiled into the dependency, so four attempted fake native

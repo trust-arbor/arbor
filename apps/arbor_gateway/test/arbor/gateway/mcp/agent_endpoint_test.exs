@@ -23,6 +23,25 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
   end
 
+  # Reports the provenance label authorize_and_execute handed the action.
+  defmodule TaintEchoAction do
+    use Jido.Action,
+      name: "taint_echo",
+      description: "Returns the taint level in its context",
+      schema: []
+
+    @impl true
+    def run(_params, context) do
+      level =
+        case Map.get(context, :taint) do
+          %{level: level} -> level
+          other -> other
+        end
+
+      {:ok, %{taint_level: inspect(level)}}
+    end
+  end
+
   defmodule AddAction do
     use Jido.Action,
       name: "add",
@@ -57,7 +76,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       name: "nested_coding_validation",
       description: "Runs the shell validation used by a coding action",
       schema: [
-        command: [type: :string, required: true, doc: "Validation command"]
+        command: [type: :string, required: true, doc: "Validation command"],
+        cwd: [type: :string, required: true, doc: "Validation working directory"]
       ]
 
     @impl true
@@ -65,7 +85,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       Arbor.Actions.authorize_and_execute(
         Map.fetch!(context, :agent_id),
         Arbor.Actions.Shell.Execute,
-        %{command: params.command, sandbox: :none},
+        %{command: params.command, cwd: params.cwd, sandbox: :none},
         context
       )
     end
@@ -103,7 +123,14 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
 
+    # Endpoint inputs carry :derived provenance (2026-09-27). These tests pin
+    # principal authority, not taint, so run under the dev policy
+    # (:audit_only); the provenance label itself is asserted separately.
+    prev_taint_policy = Application.get_env(:arbor_actions, :default_taint_policy)
+    Application.put_env(:arbor_actions, :default_taint_policy, :audit_only)
+
     on_exit(fn ->
+      restore_env(:arbor_actions, :default_taint_policy, prev_taint_policy)
       restore_env(:arbor_security, :identity_verification, prev_identity)
       restore_env(:arbor_security, :capability_signing_required, prev_signing)
       restore_env(:arbor_security, :strict_identity_mode, prev_strict)
@@ -512,30 +539,50 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
   end
 
+  describe "security regression: external-agent inputs carry :derived provenance" do
+    # Pre-2026-09-27 the endpoint called authorize_and_execute with no :taint,
+    # so another agent's LLM-produced arguments were decided as clean.
+    test "a tool call through the endpoint reaches the action labeled :derived" do
+      {agent_id, endpoint} = start_authorized_endpoint([TaintEchoAction])
+
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
+
+      {:ok, result} = ExMCP.Client.call_tool(client, "taint_echo", %{})
+      assert get_tool_result_text(result) =~ ":derived"
+
+      ExMCP.Client.stop(client)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
+    end
+  end
+
   describe "security regression: endpoint principal authority" do
     test "registered typed endpoint executes childless Shell and drops authority after ownership removal" do
       ensure_shell_started()
+      cwd = shell_workdir!()
 
       {agent_id, endpoint} =
         start_authorized_endpoint(
           [Arbor.Actions.Shell.Execute],
-          ["arbor://shell/exec/echo"]
+          ["arbor://shell/exec/echo", fs_read_grant(cwd)]
         )
 
       {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
 
       {:ok, result} =
         ExMCP.Client.call_tool(client, "shell_execute", %{
-          "command" => "echo endpoint-fallback-authorized"
+          "command" => "echo endpoint-fallback-authorized",
+          "cwd" => cwd
         })
 
-      assert get_tool_result_text(result) =~ "endpoint-fallback-authorized"
+      assert_contained_shell_output(result, "endpoint-fallback-authorized")
 
       :ok = EndpointRegistry.unregister(agent_id)
 
       {:ok, denied} =
         ExMCP.Client.call_tool(client, "shell_execute", %{
-          "command" => "echo endpoint-authority-leaked"
+          "command" => "echo endpoint-authority-leaked",
+          "cwd" => cwd
         })
 
       denied_text = get_tool_result_text(denied)
@@ -712,8 +759,9 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     test "registered normal endpoint authenticates direct Shell execution" do
       ensure_shell_started()
+      cwd = shell_workdir!()
       {agent_id, signed_request} = authenticated_identity("normal-shell")
-      authorize_agent(agent_id, ["arbor://shell/exec/echo"])
+      authorize_agent(agent_id, ["arbor://shell/exec/echo", fs_read_grant(cwd)])
 
       {:ok, _endpoint} =
         Arbor.Gateway.start_agent_endpoint(agent_id,
@@ -725,10 +773,11 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       {:ok, result} =
         ExMCP.Client.call_tool(client, "shell_execute", %{
-          "command" => "echo endpoint-normal-authorized"
+          "command" => "echo endpoint-normal-authorized",
+          "cwd" => cwd
         })
 
-      assert get_tool_result_text(result) =~ "endpoint-normal-authorized"
+      assert_contained_shell_output(result, "endpoint-normal-authorized")
 
       ExMCP.Client.stop(client)
       Arbor.Gateway.stop_agent_endpoint(agent_id)
@@ -737,11 +786,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     test "registered endpoint keeps principal scope through nested coding validation" do
       ensure_shell_started()
+      cwd = shell_workdir!()
       {agent_id, signed_request} = authenticated_identity("nested-coding")
 
       authorize_agent(agent_id, [
         Arbor.Actions.canonical_uri_for(NestedCodingValidationAction, %{}),
-        "arbor://shell/exec/echo"
+        "arbor://shell/exec/echo",
+        fs_read_grant(cwd)
       ])
 
       {:ok, _endpoint} =
@@ -754,10 +805,11 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       {:ok, result} =
         ExMCP.Client.call_tool(client, "nested_coding_validation", %{
-          "command" => "echo nested-coding-validation-authorized"
+          "command" => "echo nested-coding-validation-authorized",
+          "cwd" => cwd
         })
 
-      assert get_tool_result_text(result) =~ "nested-coding-validation-authorized"
+      assert_contained_shell_output(result, "nested-coding-validation-authorized")
 
       ExMCP.Client.stop(client)
       Arbor.Gateway.stop_agent_endpoint(agent_id)
@@ -863,13 +915,49 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
 
-    rules = Enum.reduce(resources, profile.rules, &Map.put(&2, &1, :auto))
+    # Trust rules match by URI prefix, so `/**` would make a rule that never
+    # fires; the capability keeps it as its path scope.
+    rules =
+      Enum.reduce(resources, profile.rules, fn resource, rules ->
+        Map.put(rules, String.replace_suffix(resource, "/**", ""), :auto)
+      end)
+
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
 
     Enum.each(resources, fn resource ->
       assert {:ok, _capability} =
                Arbor.Security.grant(principal: agent_id, resource: resource)
     end)
+  end
+
+  # Agent Shell calls need an explicit canonical cwd covered by a signed
+  # `arbor://fs/read<dir>/**` grant (docs/arbor/AGENT_SHELL_CONTAINMENT.md).
+  defp shell_workdir! do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_endpoint_shell_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+      )
+
+    :ok = File.mkdir(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    # macOS temp dirs sit behind the /var -> /private/var symlink; containment
+    # only admits the canonical real path.
+    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(dir)
+    cwd
+  end
+
+  defp fs_read_grant(cwd), do: "arbor://fs/read#{cwd}/**"
+
+  # Containment is qualified on macOS only; elsewhere it refuses before launch.
+  defp assert_contained_shell_output(result, marker) do
+    text = get_tool_result_text(result)
+
+    if :os.type() == {:unix, :darwin} do
+      assert text =~ marker
+    else
+      refute text =~ marker <> "\n"
+    end
   end
 
   # Extract text content from MCP tool result
