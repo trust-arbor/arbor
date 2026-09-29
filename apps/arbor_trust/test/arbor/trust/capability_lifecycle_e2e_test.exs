@@ -114,7 +114,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       past_expires = DateTime.add(DateTime.utc_now(), -3600, :second)
 
       cap = %Capability{
-        id: "cap_expired_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/expired",
         principal_id: agent_id,
         granted_at: past_granted,
@@ -136,7 +136,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       future_expires = DateTime.add(DateTime.utc_now(), 3600, :second)
 
       cap = %Capability{
-        id: "cap_future_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/future",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -161,7 +161,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   describe "max_uses" do
     test "capability with max_uses is auto-revoked after limit", %{agent_id: agent_id} do
       cap = %Capability{
-        id: "cap_maxuses_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/limited",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -212,7 +212,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       future_not_before = DateTime.add(DateTime.utc_now(), 3600, :second)
 
       cap = %Capability{
-        id: "cap_notbefore_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/future_start",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -237,7 +237,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       past_not_before = DateTime.add(DateTime.utc_now(), -3600, :second)
 
       cap = %Capability{
-        id: "cap_notbefore_past_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/past_start",
         principal_id: agent_id,
         granted_at: DateTime.add(DateTime.utc_now(), -7200, :second),
@@ -451,7 +451,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       session_id = "session_#{:erlang.unique_integer([:positive])}"
 
       cap = %Capability{
-        id: "cap_session_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/session",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -480,7 +480,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       wrong_session = "session_wrong_#{:erlang.unique_integer([:positive])}"
 
       cap = %Capability{
-        id: "cap_session_wrong_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/session_locked",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -508,7 +508,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       session_id = "session_#{:erlang.unique_integer([:positive])}"
 
       cap = %Capability{
-        id: "cap_session_none_#{:erlang.unique_integer([:positive])}",
+        id: canonical_cap_id(),
         resource_uri: "arbor://test/session_required",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -602,9 +602,13 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   # Helpers
   # ===========================================================================
 
+  # The capability audit journal (2026-09-24) admits only canonical
+  # `cap_<32 hex>` ids, the form Capability.new/1 generates.
+  defp canonical_cap_id, do: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
   defp grant_capability(agent_id, resource_uri) do
     cap = %Capability{
-      id: "cap_lifecycle_#{:erlang.unique_integer([:positive])}",
+      id: canonical_cap_id(),
       resource_uri: resource_uri,
       principal_id: agent_id,
       granted_at: DateTime.utc_now(),

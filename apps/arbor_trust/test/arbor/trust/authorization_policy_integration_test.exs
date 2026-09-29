@@ -360,7 +360,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   defp grant_preapproved_capability(agent_id, resource_uri) do
     cap = %Capability{
-      id: "cap_preapproved_#{:erlang.unique_integer([:positive])}",
+      id: canonical_cap_id(),
       resource_uri: resource_uri,
       principal_id: agent_id,
       granted_at: DateTime.utc_now(),
@@ -402,4 +402,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   defp restore_security(key, value), do: Application.put_env(:arbor_security, key, value)
   defp restore_trust(key, nil), do: Application.delete_env(:arbor_trust, key)
   defp restore_trust(key, value), do: Application.put_env(:arbor_trust, key, value)
+
+  # The capability audit journal (2026-09-24) admits only canonical
+  # `cap_<32 hex>` ids, the form Capability.new/1 generates.
+  defp canonical_cap_id, do: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
 end
