@@ -235,6 +235,94 @@ defmodule Arbor.Actions.SessionLlmTest do
     end
   end
 
+  describe "BuildPrompt — followup conversation (regression: tool loop lost the beat)" do
+    # Every heartbeat starts with session.messages = []. Before 2026-09-27 the
+    # followup call received only the action results — not the heartbeat prompt
+    # llm_call answered, and not its own prior reply.
+
+    @success [
+      %{"data" => %{"action_type" => "file.read", "result" => "ok"}, "outcome" => "success"}
+    ]
+
+    defp followup(params) do
+      assert {:ok, result} =
+               SessionLlm.BuildPrompt.run(Map.merge(%{mode: "followup"}, params), %{})
+
+      result
+    end
+
+    defp turns(messages), do: Enum.map(messages, &{&1["role"], &1["content"]})
+
+    test "first followup opens with the heartbeat prompt and the reply it produced" do
+      result =
+        followup(%{
+          percepts: @success,
+          messages: [],
+          heartbeat_prompt: "HEARTBEAT: pursue goal G-1",
+          last_response: ~s({"actions": [{"type": "file.read"}]})
+        })
+
+      assert turns(result.messages) == [
+               {"user", "HEARTBEAT: pursue goal G-1"},
+               {"assistant", ~s({"actions": [{"type": "file.read"}]})},
+               {"user", result.followup_prompt}
+             ]
+    end
+
+    test "later followups accumulate each reply between result messages" do
+      first =
+        followup(%{
+          percepts: @success,
+          messages: [],
+          heartbeat_prompt: "HEARTBEAT",
+          last_response: "reply-1"
+        })
+
+      second =
+        followup(%{
+          percepts: @success,
+          messages: first.messages,
+          heartbeat_prompt: "HEARTBEAT",
+          last_response: "reply-2"
+        })
+
+      # The heartbeat prompt is seeded once, not re-added per iteration.
+      assert turns(second.messages) == [
+               {"user", "HEARTBEAT"},
+               {"assistant", "reply-1"},
+               {"user", first.followup_prompt},
+               {"assistant", "reply-2"},
+               {"user", second.followup_prompt}
+             ]
+    end
+
+    test "full context-key names are accepted, like the other followup params" do
+      result =
+        followup(%{
+          "session.percepts" => @success,
+          "session.messages" => [],
+          "session.heartbeat_prompt" => "HEARTBEAT",
+          "last_response" => "reply-1"
+        })
+
+      assert Enum.map(result.messages, & &1["role"]) == ["user", "assistant", "user"]
+    end
+
+    test "a reply with no user turn before it is dropped, never opening the history" do
+      # Consolidation beats reach the loop without llm_call or a heartbeat prompt.
+      result = followup(%{percepts: @success, messages: [], last_response: "stray"})
+
+      assert turns(result.messages) == [{"user", result.followup_prompt}]
+    end
+
+    test "empty prompt and reply add no turns" do
+      result =
+        followup(%{percepts: @success, messages: [], heartbeat_prompt: "", last_response: ""})
+
+      assert turns(result.messages) == [{"user", result.followup_prompt}]
+    end
+  end
+
   describe "BuildPrompt — turn mode" do
     test "injects timestamps into user messages" do
       messages = [

@@ -77,10 +77,11 @@ digraph HeartbeatNotes {
   // ── Tool loop control ──────────────────────────────────────
   check_loop [shape=diamond, condition_key="session.has_action_results"]
   build_followup [type="exec", target="action", action="session_llm.build_prompt",
-                  context_keys="session.percepts,session.messages",
+                  context_keys="session.percepts,session.messages,session.heartbeat_prompt,last_response",
                   param.mode="followup", output_prefix="session"]
   llm_followup [type="compute", purpose="llm", simulate="false",
                 prompt_context_key="session.followup_prompt",
+                system_prompt_context_key="session.system_prompt",
                 messages_context_key="session.messages"]
 
   // ── Exit ─────────────────────────────────────────────────
