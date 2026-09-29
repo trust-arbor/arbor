@@ -171,6 +171,9 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "comms"}), do: :arbor_comms
   defp owner_for_parsed(%CapabilityUri{domain: "signals"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "mcp"}), do: :arbor_gateway
+  # Exact MCP server connect approvals (Imp review D7, 2026-09-28): granted by
+  # Arbor.Agent.set_mcp_config/2, required by Gateway.connect_mcp_server/2.
+  defp owner_for_parsed(%CapabilityUri{domain: "mcp_server"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "tool"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_security
@@ -188,6 +191,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "eval"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "identity"}), do: :arbor_agent
   defp owner_for_parsed(%CapabilityUri{domain: "monitor"}), do: :arbor_kernel_runtime
+  # arbor://skill/use/<name-hash>/<digest> was registered 2026-09-24 (exact
+  # approval for skill consumption, 69b99660b) with no owner row, so it failed
+  # this guard from that day, like egress/ and forge/ before it. The approval
+  # capability is built and verified by Arbor.Common.SkillLibrary.Versions.
+  defp owner_for_parsed(%CapabilityUri{domain: "skill"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "trust"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "acp"}), do: :arbor_gateway

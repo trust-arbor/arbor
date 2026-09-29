@@ -27,7 +27,11 @@ defmodule Arbor.GatewayFacadeTest do
   describe "connect_mcp_server/2" do
     test "returns error when ClientSupervisor is not running" do
       # DynamicSupervisor not started => exit
-      assert catch_exit(Gateway.connect_mcp_server("test", %{transport: :stdio}))
+      # A valid config, so the call reaches the (absent) supervisor. An invalid
+      # one is now refused before that (ClientConfigCore, Imp review D7).
+      assert catch_exit(
+               Gateway.connect_mcp_server("test", %{transport: :stdio, command: ["mcp-server"]})
+             )
     end
   end
 

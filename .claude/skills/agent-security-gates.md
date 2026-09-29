@@ -850,14 +850,40 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 - **What:** both facade calls capability-check the calling agent against
   `arbor://mcp/<server>/<tool-or-resource>`. A nil or blank `:agent_id` used to
   skip the check entirely (Imp review D2). Only the literal `skip_auth: true` is a
-  bypass now. Note that `ToolBridge`/`ResourceBridge.authorize` still allow
-  everything when `Arbor.Security.CapabilityStore` is not running (a dev/test
-  fallback), so this gate is only as strong as the security subsystem being up.
+  bypass now. `ToolBridge`/`ResourceBridge.authorize` also deny when the
+  security subsystem is unavailable (fixed `592553074`; they used to allow
+  everything while `CapabilityStore` was down).
 - **Symptom:** `{:error, :missing_agent_id}` from `Arbor.Gateway.call_mcp_tool/4`
   or `read_mcp_resource/3`.
 - **Action:** pass `agent_id:` for the principal the call acts for. Reserve
   `skip_auth: true` for trusted system code that has already authorized the call
   another way. Regression: `missing_agent_id_security_regression_test.exs`.
+
+## 30. Agent-bound MCP servers need the operator's exact approval (2026-09-28)
+
+- **What:** an agent's profile `mcp_servers` are connected on start/resume. For
+  stdio that spawns the command, and for http it dials the URL, as that agent.
+  Until Imp review D7 nothing checked a capability, so whatever could write the
+  metadata got process spawn. Now `Arbor.Agent.set_mcp_config/2` (the operator's
+  consent) grants the agent one capability per server,
+  `arbor://mcp_server/connect/<sha256(name)>/<config digest>`
+  (`Arbor.Security.mcp_server_approval_uri/2`), and revokes approvals for
+  servers it no longer lists. `Arbor.Gateway.connect_mcp_server/2` requires that
+  exact capability for any config carrying `:agent_id`. The digest covers
+  `transport`/`command`/`env`/`url`/`server`, so editing any of them voids the
+  approval. The dedicated `mcp_server` domain keeps it out of reach of
+  `arbor://mcp/...` tool grants and `arbor://agent/...` wildcards.
+- **Symptom:** an agent's configured MCP server doesn't connect, and the log
+  says it `is not approved for its current config` (from
+  `connect_mcp_server/2`, `{:error, :mcp_server_not_approved}`). Expect this for
+  agents configured before 2026-09-28, and for any metadata edited outside
+  `set_mcp_config/2`. `set_mcp_config/2` itself returns
+  `{:error, {:invalid_mcp_server, server}}` for a server without a `:name`.
+- **Action:** re-run `Arbor.Agent.set_mcp_config(agent_id, servers)` with the
+  intended servers. Don't hand-grant the URI. Operator connections made
+  without `:agent_id` are not gated here. Regressions:
+  `mcp_server_approval_security_regression_test.exs` (gateway) and the
+  `set_mcp_config/2 is the MCP server approval` block in `manager_test.exs`.
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>

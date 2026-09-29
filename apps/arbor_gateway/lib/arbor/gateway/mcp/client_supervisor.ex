@@ -23,7 +23,7 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
 
   use DynamicSupervisor
 
-  alias Arbor.Gateway.MCP.ClientConnection
+  alias Arbor.Gateway.MCP.{ClientConfigCore, ClientConnection}
 
   def start_link(opts \\ []) do
     DynamicSupervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -48,8 +48,11 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
   """
   @spec start_connection(String.t(), map()) :: {:ok, pid()} | {:error, term()}
   def start_connection(server_name, config) when is_binary(server_name) and is_map(config) do
-    child_spec = {ClientConnection, Map.put(config, :server_name, server_name)}
-    DynamicSupervisor.start_child(__MODULE__, child_spec)
+    # Normalize atom/string keys and reject a config that can only fail
+    # (Imp review D7) before a connection process exists.
+    with {:ok, config} <- ClientConfigCore.normalize(server_name, config) do
+      DynamicSupervisor.start_child(__MODULE__, {ClientConnection, config})
+    end
   end
 
   @doc "Stop a connection by server name."

@@ -101,11 +101,17 @@ defmodule Arbor.Gateway do
   - `:command` — command for stdio transport
   - `:url` — URL for HTTP/SSE transport
   - `:env` — environment variables for stdio transport
-  - `:agent_id` — owning agent ID (for capability scoping)
+  - `:agent_id` — owning agent ID. An agent-bound connection requires that
+    agent to hold the exact approval capability for this config
+    (`Arbor.Security.mcp_server_approval_uri/2`, granted by
+    `Arbor.Agent.set_mcp_config/2`); otherwise `{:error, :mcp_server_not_approved}`.
+    Operator connections without `:agent_id` are not gated here.
   """
   @spec connect_mcp_server(String.t(), map()) :: {:ok, pid()} | {:error, term()}
   def connect_mcp_server(server_name, config) do
-    ClientSupervisor.start_connection(server_name, config)
+    with :ok <- authorize_mcp_server_connect(server_name, config) do
+      ClientSupervisor.start_connection(server_name, config)
+    end
   end
 
   @doc """
@@ -137,11 +143,17 @@ defmodule Arbor.Gateway do
 
   def list_mcp_tools(nil) do
     ClientSupervisor.list_connections()
-    |> Enum.flat_map(fn {name, pid, :connected} ->
-      case ClientConnection.list_tools(pid) do
-        {:ok, tools} -> ToolBridge.to_arbor_tools(name, tools)
-        _ -> []
-      end
+    |> Enum.flat_map(fn
+      {name, pid, :connected} ->
+        case ClientConnection.list_tools(pid) do
+          {:ok, tools} -> ToolBridge.to_arbor_tools(name, tools)
+          _ -> []
+        end
+
+      # A disconnected/unhealthy server (e.g. retrying with backoff) must not
+      # take down the listing for every other server (Imp review D7).
+      _not_connected ->
+        []
     end)
   end
 
@@ -214,11 +226,17 @@ defmodule Arbor.Gateway do
 
   def list_mcp_resources(nil) do
     ClientSupervisor.list_connections()
-    |> Enum.flat_map(fn {name, pid, :connected} ->
-      case ClientConnection.list_resources(pid) do
-        {:ok, resources} -> ResourceBridge.to_arbor_resources(name, resources)
-        _ -> []
-      end
+    |> Enum.flat_map(fn
+      {name, pid, :connected} ->
+        case ClientConnection.list_resources(pid) do
+          {:ok, resources} -> ResourceBridge.to_arbor_resources(name, resources)
+          _ -> []
+        end
+
+      # A disconnected/unhealthy server (e.g. retrying with backoff) must not
+      # take down the listing for every other server (Imp review D7).
+      _not_connected ->
+        []
     end)
   end
 
@@ -365,6 +383,35 @@ defmodule Arbor.Gateway do
   end
 
   # -- Private helpers --
+
+  # Imp review D7 (2026-09-28): an agent-bound connection spawns the configured
+  # command or dials the configured URL as that agent, so it needs the
+  # operator's exact approval of this config. Before this, any mcp_servers entry
+  # in profile metadata was connected unchecked on the agent's next start. The
+  # check uses the kernel Security.authorize (no trust JIT-minting), so only an
+  # explicit grant approves. A crash while checking denies.
+  defp authorize_mcp_server_connect(server_name, config) do
+    case Map.get(config, :agent_id) || Map.get(config, "agent_id") do
+      nil ->
+        :ok
+
+      agent_id when is_binary(agent_id) and agent_id != "" ->
+        with {:ok, uri} <- Arbor.Security.mcp_server_approval_uri(server_name, config),
+             {:ok, :authorized} <-
+               Arbor.Security.authorize(agent_id, uri, :execute, verify_identity: false) do
+          :ok
+        else
+          _denied -> {:error, :mcp_server_not_approved}
+        end
+
+      _malformed ->
+        {:error, :mcp_server_not_approved}
+    end
+  rescue
+    _ -> {:error, :mcp_server_not_approved}
+  catch
+    _, _ -> {:error, :mcp_server_not_approved}
+  end
 
   # FAIL CLOSED (Imp review D2, 2026-09-27): only an explicit `skip_auth: true`
   # bypasses the capability check. A missing or blank `:agent_id` is a denial,
