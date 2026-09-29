@@ -137,11 +137,17 @@ defmodule Arbor.Gateway do
 
   def list_mcp_tools(nil) do
     ClientSupervisor.list_connections()
-    |> Enum.flat_map(fn {name, pid, :connected} ->
-      case ClientConnection.list_tools(pid) do
-        {:ok, tools} -> ToolBridge.to_arbor_tools(name, tools)
-        _ -> []
-      end
+    |> Enum.flat_map(fn
+      {name, pid, :connected} ->
+        case ClientConnection.list_tools(pid) do
+          {:ok, tools} -> ToolBridge.to_arbor_tools(name, tools)
+          _ -> []
+        end
+
+      # A disconnected/unhealthy server (e.g. retrying with backoff) must not
+      # take down the listing for every other server (Imp review D7).
+      _not_connected ->
+        []
     end)
   end
 
@@ -214,11 +220,17 @@ defmodule Arbor.Gateway do
 
   def list_mcp_resources(nil) do
     ClientSupervisor.list_connections()
-    |> Enum.flat_map(fn {name, pid, :connected} ->
-      case ClientConnection.list_resources(pid) do
-        {:ok, resources} -> ResourceBridge.to_arbor_resources(name, resources)
-        _ -> []
-      end
+    |> Enum.flat_map(fn
+      {name, pid, :connected} ->
+        case ClientConnection.list_resources(pid) do
+          {:ok, resources} -> ResourceBridge.to_arbor_resources(name, resources)
+          _ -> []
+        end
+
+      # A disconnected/unhealthy server (e.g. retrying with backoff) must not
+      # take down the listing for every other server (Imp review D7).
+      _not_connected ->
+        []
     end)
   end
 
