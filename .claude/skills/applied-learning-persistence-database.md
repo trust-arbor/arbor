@@ -152,6 +152,12 @@ verifying the persistence CAS foundation).
 <a id="applied-learning-a-durable-store-and-its-json-mirror-can-preserve-different-scalar-representations"></a>
 **A durable store and its JSON mirror can preserve different scalar representations.** Arbor's checkpoint store keeps known outcome-status atoms while `checkpoint.json` encodes them as strings; recursively normalizing map keys does not normalize scalar values. Decode closed enums from both trusted atom and JSON string forms, fail closed on unknown values, and regress both store-backed resume and file round-trips so one path cannot silently turn `:fail` into `:success` (found 2026-07-16 exposing validation failures after terminal recovery).
 
+For atom-keyed settings APIs, accept persisted string keys without creating atoms,
+and remove both key forms on update/delete. Test a real cold-store reload:
+the live cache can hide unreadable reverse indexes and duplicate JSON keys
+(found 2026-09-28 when identity resolution survived restart but alias listing
+reported no linked identities).
+
 <!-- applied-learning: a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome -->
 <a id="applied-learning-a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome"></a>
 **A checkpoint receipt digest must cover a losslessly rehydratable Outcome.** `EffectOwner` hashes the complete `%Outcome{}`, so `Checkpoint.deserialize/1` must restore every non-transient hashed field in its original closed type. Dropping `output_taint` changed a valid settled receipt after JSON reload and made same-run recovery fail with `:result_digest_mismatch`; never hide that defect by clearing `current_effect` or resetting its generation in a test fixture. Regress atom and full-struct taint through both file and configured-store loading whenever the persisted Outcome shape changes (found 2026-07-16 repairing stale checkpoint-resume tests).

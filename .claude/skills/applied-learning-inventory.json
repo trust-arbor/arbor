@@ -4419,7 +4419,7 @@
       "anchor": "applied-learning-a-durable-store-and-its-json-mirror-can-preserve-different-scalar-representations",
       "source_date": "2026-07-16",
       "source_incident": "found 2026-07-16 exposing validation failures after terminal recovery).",
-      "content_sha256": "ffa9e929e0e07ae95eab2d4f24e92e96207116fa676d78583788a9ee45b5ab49",
+      "content_sha256": "d22225a645f7a2cea22dc5d658feddb5b7ac6ff2a2b0de9973e8547faae92320",
       "always_loaded": false
     },
     {
