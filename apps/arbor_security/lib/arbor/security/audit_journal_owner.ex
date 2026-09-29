@@ -74,9 +74,10 @@ defmodule Arbor.Security.AuditJournalOwner do
   would un-qualify sessions whenever a delivery backlog closed admission.
 
   `prepare` answers `{:error, :operation_terminal}` for every terminal
-  identity (compacted or not), continues a pending v1/v2 operation when a v3
+  identity (compacted or not), continues a pending v2 operation when a v3
   intent of identical facts arrives (only while such an operation is
-  pending), and records the last identity/capacity refusal in status.
+  pending), and records the last identity/capacity refusal in status. Pending
+  v1 operations must retry with their original identity.
 
   Not a generic store. CapabilityStore prepares and observes mutations; the
   registered Historian consumer acknowledges exact durable event content.
@@ -965,10 +966,11 @@ defmodule Arbor.Security.AuditJournalOwner do
     end
   end
 
-  # Cutover continuity: a v1/v2 operation pending before the v3 producer
+  # Cutover continuity: a v2 operation pending before the v3 producer
   # shipped is continued by a v3 intent of identical facts instead of forking
   # a second identity. Gated: no alias is derived unless such an operation is
-  # pending. Raw `append/1` has no such path (stated residual).
+  # pending. Pending v1 operations retry with their original identity.
+  # Raw `append/1` has no such path (stated residual).
   defp legacy_alias_lookup(core, %{"version" => 3} = intent) do
     with true <- AuditJournalCore.legacy_pending?(core),
          {:ok, alias_id} <- AuditJournal.legacy_alias_operation_id(intent),

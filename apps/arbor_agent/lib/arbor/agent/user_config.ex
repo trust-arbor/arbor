@@ -72,7 +72,7 @@ defmodule Arbor.Agent.UserConfig do
   def put(principal_id, key, value) when is_binary(principal_id) and is_atom(key) do
     if available?() do
       config = load_config_map(principal_id)
-      updated = Map.put(config, key, value)
+      updated = put_setting(config, key, value)
       store_config_map(principal_id, updated)
     else
       {:error, :store_unavailable}
@@ -93,7 +93,10 @@ defmodule Arbor.Agent.UserConfig do
   def put_many(principal_id, settings) when is_binary(principal_id) and is_map(settings) do
     if available?() do
       config = load_config_map(principal_id)
-      updated = Map.merge(config, settings)
+
+      updated =
+        Enum.reduce(settings, config, fn {key, value}, acc -> put_setting(acc, key, value) end)
+
       store_config_map(principal_id, updated)
     else
       {:error, :store_unavailable}
@@ -109,7 +112,7 @@ defmodule Arbor.Agent.UserConfig do
   @spec get(String.t(), atom()) :: term()
   def get(principal_id, key) when is_binary(principal_id) and is_atom(key) do
     config = load_config_map(principal_id)
-    Map.get(config, key)
+    get_setting(config, key)
   end
 
   @doc """
@@ -156,7 +159,7 @@ defmodule Arbor.Agent.UserConfig do
   def delete(principal_id, key) when is_binary(principal_id) and is_atom(key) do
     if available?() do
       config = load_config_map(principal_id)
-      updated = Map.delete(config, key)
+      updated = delete_setting(config, key)
       store_config_map(principal_id, updated)
     else
       {:error, :store_unavailable}
@@ -213,7 +216,7 @@ defmodule Arbor.Agent.UserConfig do
   @spec get_api_key(String.t(), atom()) :: String.t() | nil
   def get_api_key(principal_id, provider) when is_atom(provider) do
     case get(principal_id, :api_keys) do
-      %{} = keys -> Map.get(keys, provider)
+      %{} = keys -> get_setting(keys, provider)
       _ -> nil
     end
   end
@@ -225,11 +228,34 @@ defmodule Arbor.Agent.UserConfig do
   def put_api_key(principal_id, provider, api_key)
       when is_atom(provider) and is_binary(api_key) do
     current_keys = get(principal_id, :api_keys) || %{}
-    updated_keys = Map.put(current_keys, provider, api_key)
+    updated_keys = put_setting(current_keys, provider, api_key)
     put(principal_id, :api_keys, updated_keys)
   end
 
   # ── Private ─────────────────────────────────────────────────────────
+
+  # JSON-backed stores reload map keys as strings. Read both forms without
+  # creating atoms, and remove the old form on mutation so JSON cannot contain
+  # two conflicting values for the same setting. Preserve explicit nil/false.
+  defp get_setting(config, key) do
+    Map.get(config, key, Map.get(config, Atom.to_string(key)))
+  end
+
+  defp put_setting(config, key, value) do
+    config |> delete_setting(key) |> Map.put(key, value)
+  end
+
+  defp delete_setting(config, key) when is_atom(key) do
+    Map.drop(config, [key, Atom.to_string(key)])
+  end
+
+  defp delete_setting(config, key) when is_binary(key) do
+    Map.reject(config, fn {existing, _} ->
+      existing == key or (is_atom(existing) and Atom.to_string(existing) == key)
+    end)
+  end
+
+  defp delete_setting(config, key), do: Map.delete(config, key)
 
   defp load_config_map(principal_id) do
     if available?() do
