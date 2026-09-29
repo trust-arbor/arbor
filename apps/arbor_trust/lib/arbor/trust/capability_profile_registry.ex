@@ -171,6 +171,9 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "comms"}), do: :arbor_comms
   defp owner_for_parsed(%CapabilityUri{domain: "signals"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "mcp"}), do: :arbor_gateway
+  # Exact MCP server connect approvals (Imp review D7, 2026-09-28): granted by
+  # Arbor.Agent.set_mcp_config/2, required by Gateway.connect_mcp_server/2.
+  defp owner_for_parsed(%CapabilityUri{domain: "mcp_server"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "tool"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_security

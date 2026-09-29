@@ -296,7 +296,7 @@ defmodule Arbor.Agent.BootstrapTest do
 
   describe "Manager.set_mcp_config/2" do
     test "stores MCP server config in profile metadata" do
-      profile = make_profile("mcp-1", display_name: "MCP Agent", metadata: %{})
+      profile = make_profile("agent_mcp_config_1", display_name: "MCP Agent", metadata: %{})
       ProfileStore.store_profile(profile)
 
       servers = [
@@ -304,9 +304,9 @@ defmodule Arbor.Agent.BootstrapTest do
         %{name: "filesystem", transport: :stdio, command: ["npx", "@mcp/server-fs", "/ws"]}
       ]
 
-      assert :ok = Manager.set_mcp_config("mcp-1", servers)
+      assert :ok = Manager.set_mcp_config("agent_mcp_config_1", servers)
 
-      {:ok, loaded} = ProfileStore.load_profile("mcp-1")
+      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_1")
       assert length(loaded.metadata[:mcp_servers]) == 2
 
       names = Enum.map(loaded.metadata[:mcp_servers], & &1[:name])
@@ -316,7 +316,7 @@ defmodule Arbor.Agent.BootstrapTest do
 
     test "preserves existing metadata when setting MCP config" do
       profile =
-        make_profile("mcp-2",
+        make_profile("agent_mcp_config_2",
           display_name: "MCP Agent 2",
           metadata: %{last_model_config: %{id: "test"}, custom: "value"}
         )
@@ -324,11 +324,11 @@ defmodule Arbor.Agent.BootstrapTest do
       ProfileStore.store_profile(profile)
 
       assert :ok =
-               Manager.set_mcp_config("mcp-2", [
+               Manager.set_mcp_config("agent_mcp_config_2", [
                  %{name: "db", transport: :http, url: "http://localhost:3000"}
                ])
 
-      {:ok, loaded} = ProfileStore.load_profile("mcp-2")
+      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_2")
       # MCP config added
       assert length(loaded.metadata[:mcp_servers]) == 1
       # Existing metadata preserved
@@ -342,16 +342,16 @@ defmodule Arbor.Agent.BootstrapTest do
 
     test "can set empty config to clear MCP servers" do
       profile =
-        make_profile("mcp-3",
+        make_profile("agent_mcp_config_3",
           display_name: "MCP Agent 3",
           metadata: %{mcp_servers: [%{name: "old"}]}
         )
 
       ProfileStore.store_profile(profile)
 
-      assert :ok = Manager.set_mcp_config("mcp-3", [])
+      assert :ok = Manager.set_mcp_config("agent_mcp_config_3", [])
 
-      {:ok, loaded} = ProfileStore.load_profile("mcp-3")
+      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_3")
       assert loaded.metadata[:mcp_servers] == []
     end
   end

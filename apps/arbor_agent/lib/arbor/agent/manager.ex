@@ -20,6 +20,7 @@ defmodule Arbor.Agent.Manager do
   """
 
   alias Arbor.Agent.{APIAgent, Claude, Lifecycle, ProfileStore}
+  alias Arbor.Contracts.Security.CapabilityUri
 
   require Logger
 
@@ -344,6 +345,14 @@ defmodule Arbor.Agent.Manager do
   profile metadata. On next start/resume, the agent will auto-connect
   to these MCP servers.
 
+  This call is the operator's consent: for each server it grants the agent a
+  capability bound to that server's exact config
+  (`Arbor.Security.mcp_server_approval_uri/2`) and revokes approvals for
+  servers no longer listed. `Arbor.Gateway.connect_mcp_server/2` refuses an
+  agent-bound connection without it, so metadata written any other way (or
+  edited afterwards) does not connect (Imp review D7, 2026-09-28). Every server
+  needs a non-empty `:name`.
+
   ## Server Config
 
   Each server spec is a map with:
@@ -363,15 +372,62 @@ defmodule Arbor.Agent.Manager do
   """
   @spec set_mcp_config(String.t(), [map()]) :: :ok | {:error, term()}
   def set_mcp_config(agent_id, servers) when is_binary(agent_id) and is_list(servers) do
-    case ProfileStore.load_profile(agent_id) do
-      {:ok, profile} ->
-        metadata = Map.put(profile.metadata || %{}, :mcp_servers, servers)
-        updated = %{profile | metadata: metadata}
-        ProfileStore.store_profile(updated)
-
-      {:error, _} = error ->
-        error
+    with {:ok, profile} <- ProfileStore.load_profile(agent_id),
+         {:ok, approval_uris} <- mcp_server_approval_uris(servers),
+         :ok <- reconcile_mcp_server_approvals(agent_id, approval_uris) do
+      metadata = Map.put(profile.metadata || %{}, :mcp_servers, servers)
+      ProfileStore.store_profile(%{profile | metadata: metadata})
     end
+  end
+
+  defp mcp_server_approval_uris(servers) do
+    Enum.reduce_while(servers, {:ok, []}, fn server, {:ok, acc} ->
+      name = is_map(server) && (Map.get(server, :name) || Map.get(server, "name"))
+
+      case is_binary(name) && Arbor.Security.mcp_server_approval_uri(name, server) do
+        {:ok, uri} -> {:cont, {:ok, [uri | acc]}}
+        _invalid -> {:halt, {:error, {:invalid_mcp_server, server}}}
+      end
+    end)
+  end
+
+  # Grant each wanted approval the agent lacks and revoke held approvals that
+  # are no longer wanted, so the capability set mirrors the configured list.
+  defp reconcile_mcp_server_approvals(agent_id, wanted) do
+    prefix = Arbor.Security.mcp_server_approval_prefix()
+
+    with {:ok, caps} <- Arbor.Security.list_capabilities(agent_id) do
+      held =
+        Enum.filter(caps, &CapabilityUri.prefix_match?(prefix, &1.resource_uri))
+
+      held_uris = MapSet.new(held, & &1.resource_uri)
+      wanted = MapSet.new(wanted)
+
+      with :ok <- grant_missing(agent_id, MapSet.difference(wanted, held_uris)) do
+        held
+        |> Enum.reject(&MapSet.member?(wanted, &1.resource_uri))
+        |> revoke_all()
+      end
+    end
+  end
+
+  defp grant_missing(agent_id, uris) do
+    Enum.reduce_while(uris, :ok, fn uri, :ok ->
+      case Arbor.Security.grant(principal: agent_id, resource: uri) do
+        {:ok, _cap} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:mcp_server_approval_failed, reason}}}
+      end
+    end)
+  end
+
+  defp revoke_all(caps) do
+    Enum.reduce_while(caps, :ok, fn cap, :ok ->
+      case Arbor.Security.revoke(cap.id) do
+        :ok -> {:cont, :ok}
+        {:error, :not_found} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:mcp_server_approval_revoke_failed, reason}}}
+      end
+    end)
   end
 
   @doc """
@@ -954,6 +1010,12 @@ defmodule Arbor.Agent.Manager do
       case apply(Arbor.Gateway, :connect_mcp_server, [server_name, config]) do
         {:ok, _pid} ->
           Logger.info("[Manager] Connected MCP server '#{server_name}' for #{agent_id}")
+
+        {:error, :mcp_server_not_approved} ->
+          Logger.warning(
+            "[Manager] MCP server '#{server_name}' for #{agent_id} is not approved for its " <>
+              "current config; not connecting. Approve it with Arbor.Agent.set_mcp_config/2."
+          )
 
         {:error, reason} ->
           Logger.warning(

@@ -760,7 +760,7 @@ defmodule Arbor.Agent.ManagerTest do
     @describetag :fast
 
     test "stores MCP server config in profile metadata" do
-      agent_id = "mcp-config-#{System.unique_integer([:positive])}"
+      agent_id = "agent_mcp_config_#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id)
       ProfileStore.store_profile(profile)
 
@@ -784,7 +784,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "overwrites previous MCP config" do
-      agent_id = "mcp-overwrite-#{System.unique_integer([:positive])}"
+      agent_id = "agent_mcp_overwrite_#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id, metadata: %{mcp_servers: [%{name: "old"}]})
       ProfileStore.store_profile(profile)
 
@@ -806,6 +806,69 @@ defmodule Arbor.Agent.ManagerTest do
       {:ok, updated} = ProfileStore.load_profile(agent_id)
       stored_servers = updated.metadata[:mcp_servers] || updated.metadata["mcp_servers"]
       assert stored_servers == []
+    end
+  end
+
+  describe "security regression: set_mcp_config/2 is the MCP server approval (Imp D7)" do
+    # Before 2026-09-28 set_mcp_config only wrote metadata, and connect_mcp_servers
+    # connected whatever that metadata held. It now grants one capability per
+    # server bound to its exact config, and Gateway.connect_mcp_server/2 refuses
+    # an agent-bound connection without it.
+    @describetag :fast
+
+    defp approvals(agent_id) do
+      prefix = Arbor.Security.mcp_server_approval_prefix()
+      {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+
+      caps
+      |> Enum.map(& &1.resource_uri)
+      |> Enum.filter(&Arbor.Contracts.Security.CapabilityUri.prefix_match?(prefix, &1))
+      |> Enum.sort()
+    end
+
+    defp approval_uri(server) do
+      {:ok, uri} = Arbor.Security.mcp_server_approval_uri(server.name, server)
+      uri
+    end
+
+    setup do
+      agent_id = "agent_mcp_approval_#{System.unique_integer([:positive])}"
+      ProfileStore.store_profile(make_profile(agent_id))
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.Security.CapabilityStore),
+          do: Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      end)
+
+      %{agent_id: agent_id}
+    end
+
+    test "grants exactly the configured servers' approvals and revokes replaced ones", %{
+      agent_id: agent_id
+    } do
+      github = %{name: "github", transport: :stdio, command: ["npx", "github-server"]}
+      fs = %{name: "fs", transport: :stdio, command: ["npx", "fs-server", "/tmp"]}
+
+      assert :ok = Manager.set_mcp_config(agent_id, [github, fs])
+      assert approvals(agent_id) == Enum.sort([approval_uri(github), approval_uri(fs)])
+
+      edited = %{github | command: ["npx", "github-server", "--extra"]}
+      assert :ok = Manager.set_mcp_config(agent_id, [edited])
+      assert approvals(agent_id) == [approval_uri(edited)]
+
+      assert :ok = Manager.set_mcp_config(agent_id, [])
+      assert approvals(agent_id) == []
+    end
+
+    test "a server without a name is rejected and nothing is stored or granted", %{
+      agent_id: agent_id
+    } do
+      assert {:error, {:invalid_mcp_server, _}} =
+               Manager.set_mcp_config(agent_id, [%{transport: :stdio, command: ["x"]}])
+
+      {:ok, profile} = ProfileStore.load_profile(agent_id)
+      refute Map.has_key?(profile.metadata || %{}, :mcp_servers)
+      assert approvals(agent_id) == []
     end
   end
 

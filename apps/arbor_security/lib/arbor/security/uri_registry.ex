@@ -135,6 +135,9 @@ defmodule Arbor.Security.UriRegistry do
 
     # Gateway MCP bridge
     "arbor://mcp/",
+    # Exact operator approval to connect an MCP server on an agent's behalf:
+    # arbor://mcp_server/connect/<sha256(name)>/<config digest> (Imp review D7).
+    "arbor://mcp_server/connect",
 
     # Forge project capability prefix (segment-aware; projector must not match)
     "arbor://forge/project",

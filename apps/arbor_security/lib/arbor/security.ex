@@ -1458,6 +1458,22 @@ defmodule Arbor.Security do
   def same_principal?(a, b), do: Arbor.Security.IdentityAlias.same_principal?(a, b)
 
   @doc """
+  The exact-approval capability URI for connecting MCP server `name` with
+  `config` on an agent's behalf (Imp review D7). `Arbor.Agent.set_mcp_config/2`
+  grants it and `Arbor.Gateway.connect_mcp_server/2` requires it for an
+  agent-bound connection. Any change to what runs or where it connects changes
+  the URI. See `Arbor.Security.McpServerApprovalCore`.
+  """
+  @spec mcp_server_approval_uri(String.t(), map()) ::
+          {:ok, String.t()} | {:error, :invalid_mcp_server}
+  def mcp_server_approval_uri(name, config),
+    do: Arbor.Security.McpServerApprovalCore.resource_uri(name, config)
+
+  @doc "The registered prefix of every MCP server approval URI."
+  @spec mcp_server_approval_prefix() :: String.t()
+  def mcp_server_approval_prefix, do: Arbor.Security.McpServerApprovalCore.prefix()
+
+  @doc """
   Mint a new interactive disclosure capability (VP-05D2A0). See
   `Arbor.Security.DisclosureCapability.issue/1` for the option contract and
   invariants.
