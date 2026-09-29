@@ -17,7 +17,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.LLM.{Boundary, ContentPart, Deadline, Endpoint, Request, RequestTimeoutError}
-  alias Arbor.LLM.{Response, ResponseBudget}
+  alias Arbor.LLM.{ProviderErrorCore, Response, ResponseBudget}
 
   @provider "lm_studio_owned"
   @max_response_bytes 16_777_216
@@ -126,11 +126,18 @@ defmodule Arbor.LLM.Adapter.LmStudio do
           {:ok, parse_response(decoded)}
         end
 
-      {:ok, %{status: status, body: resp}} ->
-        {:error, {:lm_studio_http, status, detail(resp)}}
+      {:ok, %Req.Response{status: status, headers: headers, body: resp} = response} ->
+        {:error,
+         Boundary.provider_error(
+           ProviderErrorCore.from_http(status, headers, resp,
+             source: :lm_studio,
+             original: %{response | private: %{}}
+           )
+         )}
 
       {:error, reason} ->
-        {:error, {:lm_studio_request_failed, reason}}
+        {:error,
+         Boundary.provider_error(ProviderErrorCore.from_failure(reason, source: :lm_studio))}
     end
   end
 
@@ -328,7 +335,4 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   defp put_present(map, _k, nil), do: map
   defp put_present(map, k, v), do: Map.put(map, k, v)
-
-  defp detail(%{"error" => e}), do: e
-  defp detail(body), do: Arbor.LLM.ExternalTerm.inspect(body)
 end

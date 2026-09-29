@@ -55,6 +55,15 @@ defmodule Arbor.LLM.RetryTest do
              })
     end
 
+    test "a context-window overflow is never eligible, even when marked retryable" do
+      refute Retry.fallback_eligible?(%Arbor.LLM.ProviderError{
+               message: "HTTP 400: prompt is too long",
+               status: 400,
+               retryable: true,
+               context_window_exceeded: true
+             })
+    end
+
     test "ResponsesFailure eligibility is table authoritative" do
       assert Retry.fallback_eligible?(
                ResponsesFailure.transport(:openai_oauth, :openai, :deadline_exceeded)

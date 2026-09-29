@@ -2,7 +2,7 @@ defmodule Arbor.Agent.SimpleAgentLLMBoundaryTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.SimpleAgent
-  alias Arbor.LLM.{Client, ContentPart, Message, RequestTimeoutError, Response}
+  alias Arbor.LLM.{Client, ContentPart, Message, ProviderError, RequestTimeoutError, Response}
 
   @moduletag :fast
 
@@ -44,12 +44,21 @@ defmodule Arbor.Agent.SimpleAgentLLMBoundaryTest do
           {:error, :provider_failed}
 
         {"overflow", 1} ->
+          {:error,
+           %ProviderError{
+             message: "HTTP 400: maximum context length exceeded",
+             status: 400,
+             retryable: false,
+             context_window_exceeded: true
+           }}
+
+        {"overflow-text", 1} ->
           {:error, "maximum context length exceeded"}
 
         {"loop", _} ->
           tool_response(round)
 
-        {model, 0} when model in ["tool", "overflow"] ->
+        {model, 0} when model in ["tool", "overflow", "overflow-text"] ->
           tool_response(round)
 
         _ ->
@@ -210,6 +219,13 @@ defmodule Arbor.Agent.SimpleAgentLLMBoundaryTest do
     assert result.turns == 1
     assert length(result.tool_calls) == 1
     assert result.usage == %{input_tokens: 2, output_tokens: 3, total_tokens: 5}
+    assert_received {:provider_request, _, _}
+    assert_received {:provider_request, _, _}
+    refute_received {:provider_request, _, _}
+  end
+
+  test "context overflow is the typed provider field, never error text" do
+    assert {:error, "maximum context length exceeded"} = run("overflow-text", tools: [Probe])
     assert_received {:provider_request, _, _}
     assert_received {:provider_request, _, _}
     refute_received {:provider_request, _, _}
