@@ -885,6 +885,58 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `mcp_server_approval_security_regression_test.exs` (gateway) and the
   `set_mcp_config/2 is the MCP server approval` block in `manager_test.exs`.
 
+## 31. MCP bridges deny when the security subsystem is unavailable (2026-09-27)
+
+- **What:** `Arbor.Gateway.MCP.ToolBridge.authorize/3` and
+  `ResourceBridge.authorize/3` sit behind `Arbor.Gateway.call_mcp_tool/4` and
+  `read_mcp_resource/3`. They used to return `:ok` ("permissive mode") whenever
+  `security_available?/0` was false: the `:arbor_gateway, :security_module` was
+  not loaded or lacked `authorize/3`, or `Arbor.Security.CapabilityStore` was not
+  registered. So while security was booting or restarting, every external MCP
+  tool call and resource read was granted, even with an `:agent_id`, which left
+  gate 29's `:agent_id` requirement only as strong as security being up. The
+  rescue/catch branches were already fail-closed
+  (2026-06-09 Sentinel finding). The unavailable branch now denies too, matching
+  `AcpPool.ToolServer`'s `{:error, :security_unavailable}`.
+- **Symptom:** `{:error, :unauthorized, "security subsystem unavailable; cannot
+  authorize arbor://mcp/<server>/<tool>"}` (resources:
+  `arbor://mcp/<server>/resource/<name>`). You see it when a call lands while
+  `arbor_security` is still starting or its `CapabilityStore` is restarting, in a
+  test or app that never started security, or when `config :arbor_gateway,
+  :security_module` names a module without `authorize/3`.
+- **Action:** have `arbor_security` running before routing MCP calls. In tests,
+  start `Arbor.Security.TestBootstrap` as `apps/arbor_gateway/test/test_helper.exs`
+  does. A denial during a restart window is correct: retry once the store is back
+  instead of adding a fallback. Do not reintroduce a dev/test permissive mode. A
+  test that needs a specific decision should inject `:security_module` with an
+  `authorize/3` that returns it. Regression:
+  `security_unavailable_security_regression_test.exs`.
+
+## 32. Agent Shell needs an explicit workdir with a filesystem grant (2026-09-24)
+
+- **What:** generic agent Shell execution (`Arbor.Shell.authorize_and_execute/3`,
+  `Arbor.Actions.Shell.Execute`, and anything that nests them, such as MCP
+  agent endpoints and coding validation) runs under OS containment
+  (`Arbor.Shell.AgentContainment`, commit `2dcfce8a7`). An executable
+  capability alone grants no filesystem access. Each call needs an explicit,
+  existing, absolute, canonical `cwd`, covered by a current signed ordinary
+  `arbor://fs/read<dir>/**` grant, with Trust allowing it. `touch` also needs
+  the matching write grant. Containment is qualified on macOS only. Contract:
+  `docs/arbor/AGENT_SHELL_CONTAINMENT.md`.
+- **Symptom:** `Shell execution failed: :agent_workdir_required` (no `cwd`, or
+  one that is not canonical: a macOS temp dir under `/var/...` fails because it
+  resolves to `/private/var/...`). `:agent_filesystem_unauthorized` means there
+  is no covering grant or Trust refused it; `:agent_filesystem_protected` means
+  the cwd is in a credential path (`.ssh`, `.git`, `.arbor`, ...). Off macOS:
+  `{:agent_containment_unavailable, :platform_not_qualified}`.
+- **Action:** pass `cwd`, resolved with `Arbor.Common.SafePath.resolve_real/1`.
+  Grant `"arbor://fs/read" <> cwd <> "/**"` through `Arbor.Security.grant/1`, and
+  put the Trust rule on the bare prefix `"arbor://fs/read" <> cwd`, because a `/**`
+  trust rule never matches. Grant a narrow working directory, never a home
+  directory or a root. Worked examples:
+  `shell_filesystem_containment_security_regression_test.exs` (arbor_actions)
+  and the Shell cases in `agent_endpoint_test.exs` (arbor_gateway).
+
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
 **Do not telemetry-invert distributed security state sync.** Security observability can emit `:telemetry` and let `arbor_signals` bridge it back to signals, but nonce, capability, and identity sync are load-bearing cross-node security state. `NonceCache` uses `security.nonce_seen` to block replay against peer nodes; `CapabilityStore` uses revocation signals to evict revoked grants on peers; `Identity.Registry` uses identity lifecycle signals to keep peer caches current. Telemetry is in-process and synchronous, so it cannot replace node-hop transport. B9 extraction needs an injected sync transport (likely Phoenix.PubSub or `Arbor.Signals` behind a behaviour), not a telemetry bridge, before dropping the `arbor_signals` dependency.
