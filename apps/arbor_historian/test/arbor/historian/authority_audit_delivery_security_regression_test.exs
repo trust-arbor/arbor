@@ -5,7 +5,9 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
   @moduletag :integration
   @moduletag security: :regression
 
+  alias Arbor.Common.SafePath
   alias Arbor.Historian
+  alias Arbor.Historian.AuthorityAuditTestHelpers
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
@@ -53,25 +55,27 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
   end
 
   setup ctx do
+    AuthorityAuditTestHelpers.isolate_legacy_events!()
     :ok = Security.TestBootstrap.start!()
-    original = Process.whereis(AuditJournalOwner)
-    true = Process.unregister(AuditJournalOwner)
     root = Path.join(System.tmp_dir!(), "historian-audit-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
+    {:ok, root} = SafePath.resolve_real(root)
     File.chmod!(root, 0o700)
-    {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: root)
-    Process.unlink(journal)
-    original_store = install_journal_outage_store(ctx, root)
+    original = Process.whereis(AuditJournalOwner)
+    original_store = if ctx[:journal_restart], do: Process.whereis(:arbor_security_capabilities)
     old_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
-    Application.put_env(:arbor_historian, :durable_event_log_target, target(EctoEventLog))
     principal = "agent_delivery_#{System.unique_integer([:positive])}"
 
+    # Register cleanup before the first swap, including failed setup paths.
+    # Restore the original journal before restarting CapabilityStore against
+    # its original authority store; keep that dependency order in one callback.
     on_exit(fn ->
       if pid = Process.whereis(Arbor.Historian.AuthorityAuditPuller), do: GenServer.stop(pid)
       {:ok, caps} = Security.list_capabilities(principal)
       Enum.each(caps, &Security.revoke(&1.id))
-      GenServer.stop(Process.whereis(AuditJournalOwner))
-      true = Process.register(original, AuditJournalOwner)
+      pid = Process.whereis(AuditJournalOwner)
+      if is_pid(pid) and pid != original, do: GenServer.stop(pid)
+      unless Process.whereis(AuditJournalOwner), do: Process.register(original, AuditJournalOwner)
       restore_authority_store(original_store)
 
       case old_target do
@@ -82,6 +86,11 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
       File.rm_rf!(root)
     end)
 
+    true = Process.unregister(AuditJournalOwner)
+    {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: root)
+    Process.unlink(journal)
+    install_journal_outage_store(ctx, root)
+    Application.put_env(:arbor_historian, :durable_event_log_target, target(EctoEventLog))
     {:ok, cap} = Security.grant(principal: principal, resource: "arbor://memory/read/delivery")
     {:ok, [pending]} = Security.audit_journal_pending_operations()
     %{id: pending["operation_id"], cap: cap, journal: journal, root: root}
@@ -193,7 +202,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
 
   defp start_puller! do
     # Manual flush is executed by the real registered production consumer.
-    start_supervised!({Arbor.Historian.AuthorityAuditPuller, poll_interval_ms: 60_000})
+    AuthorityAuditTestHelpers.start_manual_puller!()
   end
 
   defp install_journal_outage_store(%{journal_restart: true}, root) do
@@ -219,10 +228,14 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
 
   defp restore_authority_store(original) do
     name = :arbor_security_capabilities
-    GenServer.stop(Process.whereis(name))
-    true = Process.register(original, name)
-    :ok = Supervisor.terminate_child(Security.Supervisor, CapabilityStore)
-    {:ok, _} = Supervisor.restart_child(Security.Supervisor, CapabilityStore)
+    pid = Process.whereis(name)
+
+    if pid != original do
+      if is_pid(pid), do: GenServer.stop(pid)
+      true = Process.register(original, name)
+      :ok = Supervisor.terminate_child(Security.Supervisor, CapabilityStore)
+      {:ok, _} = Supervisor.restart_child(Security.Supervisor, CapabilityStore)
+    end
   end
 
   defp target(backend),

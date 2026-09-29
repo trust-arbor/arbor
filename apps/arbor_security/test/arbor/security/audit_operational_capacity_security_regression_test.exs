@@ -1,12 +1,14 @@
 defmodule Arbor.Security.AuditOperationalCapacitySecurityRegressionTest do
   use ExUnit.Case, async: false
   @moduletag :integration
+  alias Arbor.Common.SafePath
   alias Arbor.Security.AuditJournalOwner
 
   test "security regression: operational profile survives cold replay and refuses a small-profile downgrade" do
     Process.flag(:trap_exit, true)
     root = Path.join(System.tmp_dir!(), "audit-profile-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
+    {:ok, root} = SafePath.resolve_real(root)
     File.chmod!(root, 0o700)
     name = :audit_operational_capacity_test
     opts = [mode: :durable, root: root, name: name, capacity_profile: :operational]

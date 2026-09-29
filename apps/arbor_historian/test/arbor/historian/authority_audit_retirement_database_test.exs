@@ -10,7 +10,11 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   hold that file's write lock), and runs the real AuthorityAuditPuller
   (content readback, then exact acknowledgement) through the public
   `Security.grant/revoke` and `Historian.flush_authority_audit/0` boundary.
-  Every EventLog write is a real committed SQL transaction.
+  Every authority EventLog write is a real committed SQL transaction. The
+  unrelated legacy Security.Events observability adapter is scoped to a
+  test-owned sink; mixed observability/audit traffic performance is a separate
+  lane. The real puller is driven only by explicit public flushes so its timer
+  cannot consume part of an asserted batch on a slow machine.
 
   The sustained lane is the exact-parent security regression. On 52a2cc3fa
   delivered identities stay retained and capacity pressure is handled only by
@@ -37,6 +41,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
 
   alias Arbor.Common.SafePath
   alias Arbor.Historian
+  alias Arbor.Historian.AuthorityAuditTestHelpers
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
@@ -90,23 +95,16 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   end
 
   setup ctx do
+    AuthorityAuditTestHelpers.isolate_legacy_events!()
     :ok = Security.TestBootstrap.start!()
     root = unique_dir("historian-retire-journal")
     original = Process.whereis(AuditJournalOwner)
-    true = Process.unregister(AuditJournalOwner)
-
-    {:ok, journal} =
-      AuditJournalOwner.start_link(mode: :durable, root: root, capacity_profile: :operational)
-
-    Process.unlink(journal)
     old_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
-    start_sink!(SinkRepo, ctx.template)
-    use_sink(SinkRepo)
-    principal = "agent_retire_sql_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      if pid = Process.whereis(AuditJournalOwner), do: GenServer.stop(pid)
-      true = Process.register(original, AuditJournalOwner)
+      pid = Process.whereis(AuditJournalOwner)
+      if is_pid(pid) and pid != original, do: GenServer.stop(pid)
+      unless Process.whereis(AuditJournalOwner), do: Process.register(original, AuditJournalOwner)
 
       case old_target do
         {:ok, value} -> Application.put_env(:arbor_historian, :durable_event_log_target, value)
@@ -116,7 +114,16 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
       File.rm_rf(root)
     end)
 
-    start_supervised!({Arbor.Historian.AuthorityAuditPuller, poll_interval_ms: 60_000})
+    true = Process.unregister(AuditJournalOwner)
+
+    {:ok, journal} =
+      AuditJournalOwner.start_link(mode: :durable, root: root, capacity_profile: :operational)
+
+    Process.unlink(journal)
+    start_sink!(SinkRepo, ctx.template)
+    use_sink(SinkRepo)
+    principal = "agent_retire_sql_#{System.unique_integer([:positive])}"
+    AuthorityAuditTestHelpers.start_manual_puller!()
     %{principal: principal, root: root, template: ctx.template}
   end
 
