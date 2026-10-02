@@ -1,0 +1,64 @@
+{
+  "schema": "conversation-ui-archive-verification/v1",
+  "date": "2026-10-01",
+  "source_origins": 128,
+  "byte_identical_files": 113,
+  "formatter_only_files": 15,
+  "frozen_origin_bytes": 761680,
+  "normalized_archive_source_bytes": 764403,
+  "reconstructed_original_frozen_input_hashes_match": true,
+  "reverse_patch_dry_run_passed": true,
+  "reverse_patch_reconstructed_origins": 128,
+  "metadata_free_elixir_ast_equality": {
+    "normalized_files": 15,
+    "equal_files": 15,
+    "independent_review": true,
+    "local_receipt": "tmp/preserved/conversation-checkpoint-20261001/offline-format/ast-equality-current.json",
+    "receipt_sha256": "87cae53468af9f358b3b8beadd96abc021371fcecfb29e9166f38827838125b4",
+    "all_current_files_formatter_fixed_points": true,
+    "prior_receipt_preserved": true
+  },
+  "formatter_configuration_changed": false,
+  "symlinks": 0,
+  "dependency_build_database_credentials_or_raw_log_files": 0,
+  "local_dependency_free_tests": {
+    "tests": 37,
+    "passed": 37,
+    "failed": 0,
+    "run_before_elixir_formatting": true,
+    "tested_typescript_sources_unchanged": true
+  },
+  "host_or_renderer_requalification": false,
+  "reconstruction_patch": {
+    "format": "unified diff with retained nonblank context and empty blank context records",
+    "sha256": "79ade0c3366bbb5b9707b1b08dd0f0796a23734a91d1dcd612a5a75040cf1c52",
+    "bytes": 42503,
+    "blank_context_prefixes_removed": 12,
+    "reverse_tool": "/usr/bin/patch",
+    "reverse_dry_run_passed": true,
+    "exact_reverse_original_origins": 128,
+    "naive_zero_context_candidate_rejected_by_exact_hash_check": true,
+    "only_blank_context_prefixes_trimmed_after_regeneration": true
+  },
+  "formatter_fixed_point_review": {
+    "public_api": "Mix.Tasks.Format.formatter_for_file/2",
+    "toolchain": {
+      "otp": "28",
+      "elixir": "1.19.5"
+    },
+    "technical_files": 145,
+    "archive_files": 73,
+    "total_files": 218,
+    "all_current_files_formatted": true,
+    "all_formatted_outputs_idempotent": true,
+    "archive_configuration": "root formatter configuration, no plugins, no Phoenix locals",
+    "local_receipt": "tmp/preserved/conversation-checkpoint-20261001/offline-format/public-formatter-result.json",
+    "receipt_sha256": "1cd91a6c1ec40f09341dc18dc39c882e3dbb9dac5d3b4c5942d3fd19cb31b678",
+    "application_first_pass_sha256": "7f7b8d88eac91a312e25c81a010ba0ee6f9b42633562ce8bb83fcfc6c90d6a44",
+    "application_stable_sha256": "d2cfde0a28cb40e22c1dfed5eae4b3d07c91f07338e18ace77a4ac16420e88bc",
+    "formatter_contract_regression_assertions": 4,
+    "formatter_contract_regression_receipt_sha256": "79894f301105a9acd4043f6c69a7f4f067fc851b783aeb007d296234a9ead17d",
+    "originals_unchanged": true,
+    "prior_archive_representation_preserved": "tmp/preserved/conversation-checkpoint-20261001/archive-reconstruction-history/before-stable-second-pass"
+  }
+}

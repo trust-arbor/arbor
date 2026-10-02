@@ -1,0 +1,1352 @@
+{
+  "schema": "conversation-ui-source-snapshot/v1",
+  "date": "2026-10-01",
+  "source_workspace": "conversation-ui-dependency-bootstrap-20261001-rz4ezrx2",
+  "source_frozen_inputs_sha256": "65b254d90ca68113b3a07de4fe3912b4732c467bab1021f765b295d371399ccc",
+  "qualification_result_sha256": "e22bd08305561c4bb6835b5322ebb5a49f620bffd83e12f5f038391412d8f63f",
+  "qualification_review_sha256": "e335c70be2b6605bca135fcadf14d024a9087f616bb129b99b7a8449baf5180d",
+  "copied_files": [
+    {
+      "path": "baseline/.tool-versions",
+      "bytes": 35,
+      "sha256": "abdf984d1b0729480dc2dbdd59d9faff209ea59def609fb089448e5408ed6c22",
+      "copied_from_frozen_input": "baseline/.tool-versions",
+      "byte_identical": true,
+      "frozen_sha256": "abdf984d1b0729480dc2dbdd59d9faff209ea59def609fb089448e5408ed6c22",
+      "frozen_bytes": 35,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/bin/mix",
+      "bytes": 2783,
+      "sha256": "4e6460ea20b66abf724f4ec5f8c4185daadffdfcf12599c3afddfd8cf80eaeeb",
+      "copied_from_frozen_input": "baseline/bin/mix",
+      "byte_identical": true,
+      "frozen_sha256": "4e6460ea20b66abf724f4ec5f8c4185daadffdfcf12599c3afddfd8cf80eaeeb",
+      "frozen_bytes": 2783,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/.formatter.exs",
+      "bytes": 50,
+      "sha256": "42bf753df3dbf8bd44556472867ca7c2691fe6a33551ed464e00380c064ffb02",
+      "copied_from_frozen_input": "baseline/packages/adapter/.formatter.exs",
+      "byte_identical": true,
+      "frozen_sha256": "42bf753df3dbf8bd44556472867ca7c2691fe6a33551ed464e00380c064ffb02",
+      "frozen_bytes": 50,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/README.md",
+      "bytes": 9734,
+      "sha256": "ec5a9498060a42b51924f98f10574a84b5e51f895c5b37af986354a5c29cc1e6",
+      "copied_from_frozen_input": "baseline/packages/adapter/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "ec5a9498060a42b51924f98f10574a84b5e51f895c5b37af986354a5c29cc1e6",
+      "frozen_bytes": 9734,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/lib/conversation_kit/arbor.ex",
+      "bytes": 19988,
+      "sha256": "65424a8c1a5b8ca58abefa8f71a7278910c1df12fa7e5b79a58ac1d6d3cf8039",
+      "copied_from_frozen_input": "baseline/packages/adapter/lib/conversation_kit/arbor.ex",
+      "byte_identical": true,
+      "frozen_sha256": "65424a8c1a5b8ca58abefa8f71a7278910c1df12fa7e5b79a58ac1d6d3cf8039",
+      "frozen_bytes": 19988,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/lib/conversation_kit/arbor/client.ex",
+      "bytes": 537,
+      "sha256": "35cd4ed438e086052df23b05e9e9906d32337b1d8cb848a5a0138ff7ccc52bb6",
+      "copied_from_frozen_input": "baseline/packages/adapter/lib/conversation_kit/arbor/client.ex",
+      "byte_identical": true,
+      "frozen_sha256": "35cd4ed438e086052df23b05e9e9906d32337b1d8cb848a5a0138ff7ccc52bb6",
+      "frozen_bytes": 537,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/mix.exs",
+      "bytes": 273,
+      "sha256": "e35ede0b4f1163723d9bfc314e7b6ae8f164c1de3e9c42f3fb5f9f3f7883cd3e",
+      "copied_from_frozen_input": "baseline/packages/adapter/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "e35ede0b4f1163723d9bfc314e7b6ae8f164c1de3e9c42f3fb5f9f3f7883cd3e",
+      "frozen_bytes": 273,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/test/arbor_test.exs",
+      "bytes": 24216,
+      "sha256": "d01724091ee50501f380e77d9e0122345e8ba25ac2e62ba8a021e4bc82bc4842",
+      "copied_from_frozen_input": "baseline/packages/adapter/test/arbor_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "d01724091ee50501f380e77d9e0122345e8ba25ac2e62ba8a021e4bc82bc4842",
+      "frozen_bytes": 24216,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/adapter/test/test_helper.exs",
+      "bytes": 15,
+      "sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "copied_from_frozen_input": "baseline/packages/adapter/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "frozen_bytes": 15,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/.formatter.exs",
+      "bytes": 54,
+      "sha256": "b540f171199281a98d165dbbb8d300a11dc9fde2fd86e4995f1926c53d165142",
+      "copied_from_frozen_input": "baseline/packages/core/.formatter.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b540f171199281a98d165dbbb8d300a11dc9fde2fd86e4995f1926c53d165142",
+      "frozen_bytes": 54,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/README.md",
+      "bytes": 4190,
+      "sha256": "0d190e55ee852442db65eb8c930b153c24087cfcfd1e80f3d262ee5658fd8703",
+      "copied_from_frozen_input": "baseline/packages/core/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "0d190e55ee852442db65eb8c930b153c24087cfcfd1e80f3d262ee5658fd8703",
+      "frozen_bytes": 4190,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/lib/conversation_kit.ex",
+      "bytes": 14304,
+      "sha256": "8fa02648cbe07f3eae5af128239f60e1a8b1314700279c6f220dcc4e4056206e",
+      "copied_from_frozen_input": "baseline/packages/core/lib/conversation_kit.ex",
+      "byte_identical": true,
+      "frozen_sha256": "8fa02648cbe07f3eae5af128239f60e1a8b1314700279c6f220dcc4e4056206e",
+      "frozen_bytes": 14304,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/lib/conversation_kit/snapshot.ex",
+      "bytes": 1696,
+      "sha256": "420b22daa57968f803027d2942138102f551a23ed2561fb1221c2c5ce49053d6",
+      "copied_from_frozen_input": "baseline/packages/core/lib/conversation_kit/snapshot.ex",
+      "byte_identical": true,
+      "frozen_sha256": "420b22daa57968f803027d2942138102f551a23ed2561fb1221c2c5ce49053d6",
+      "frozen_bytes": 1696,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/mix.exs",
+      "bytes": 195,
+      "sha256": "6d86ce37b39b06c2693374c4153990a17a4658c1988f1c6ab9769ae80af5d5c1",
+      "copied_from_frozen_input": "baseline/packages/core/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "6d86ce37b39b06c2693374c4153990a17a4658c1988f1c6ab9769ae80af5d5c1",
+      "frozen_bytes": 195,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/priv/event.schema.json",
+      "bytes": 15433,
+      "sha256": "90bef349f3385932b47ea8427bc8011c7f6565cd0d93dc5ba9fe4bdc3d524d9c",
+      "copied_from_frozen_input": "baseline/packages/core/priv/event.schema.json",
+      "byte_identical": true,
+      "frozen_sha256": "90bef349f3385932b47ea8427bc8011c7f6565cd0d93dc5ba9fe4bdc3d524d9c",
+      "frozen_bytes": 15433,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/scripts/actionability_proof.exs",
+      "bytes": 1918,
+      "sha256": "5442fd27c6f088eb945f2c23d94ebcfd76bcf58bb6b68262c88ff13ef70e6873",
+      "copied_from_frozen_input": "baseline/packages/core/scripts/actionability_proof.exs",
+      "byte_identical": false,
+      "frozen_sha256": "721162ef2330042a8b829bad47a9677cc908dec5011845b3b9d02036ac27101f",
+      "frozen_bytes": 1859,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/core/test/boundary_test.exs",
+      "bytes": 731,
+      "sha256": "7858aec0896ee1f2efb05b703b743466cb515f3e4f155f571eb82b246bfe383a",
+      "copied_from_frozen_input": "baseline/packages/core/test/boundary_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "7858aec0896ee1f2efb05b703b743466cb515f3e4f155f571eb82b246bfe383a",
+      "frozen_bytes": 731,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/test/conversation_kit_test.exs",
+      "bytes": 10982,
+      "sha256": "ccf0af1f7ea6965d325a2b5bcf493f96599dea32195d0eba97fcb5b44f03ba1b",
+      "copied_from_frozen_input": "baseline/packages/core/test/conversation_kit_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "ccf0af1f7ea6965d325a2b5bcf493f96599dea32195d0eba97fcb5b44f03ba1b",
+      "frozen_bytes": 10982,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/test/extension_test.exs",
+      "bytes": 1777,
+      "sha256": "1ea46d64c5790f713731310e14f34a83ed5cd53ebae200493e0ceca882b6fd90",
+      "copied_from_frozen_input": "baseline/packages/core/test/extension_test.exs",
+      "byte_identical": false,
+      "frozen_sha256": "cbbe88cc60f1b5257a6bc9270edad8a6293d3f64cffd8f9cde95b49c061d43a0",
+      "frozen_bytes": 1770,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/core/test/snapshot_test.exs",
+      "bytes": 1796,
+      "sha256": "339941cef195d880bccac2c796b6ada5ad7e4d76e1dd5b93782dbb8b878351e2",
+      "copied_from_frozen_input": "baseline/packages/core/test/snapshot_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "339941cef195d880bccac2c796b6ada5ad7e4d76e1dd5b93782dbb8b878351e2",
+      "frozen_bytes": 1796,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/core/test/test_helper.exs",
+      "bytes": 15,
+      "sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "copied_from_frozen_input": "baseline/packages/core/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "frozen_bytes": 15,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/.formatter.exs",
+      "bytes": 178,
+      "sha256": "2218005fd94c1dc634fbce2e88a03b25fdb8006d53eba0118ee1b8a7f96561e9",
+      "copied_from_frozen_input": "baseline/packages/demo/.formatter.exs",
+      "byte_identical": true,
+      "frozen_sha256": "2218005fd94c1dc634fbce2e88a03b25fdb8006d53eba0118ee1b8a7f96561e9",
+      "frozen_bytes": 178,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/README.md",
+      "bytes": 6818,
+      "sha256": "57168c8e0b11d53ee01d2fb00ea7c64a5e7000422632cd910bf865d3f07079cb",
+      "copied_from_frozen_input": "baseline/packages/demo/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "57168c8e0b11d53ee01d2fb00ea7c64a5e7000422632cd910bf865d3f07079cb",
+      "frozen_bytes": 6818,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/bench/render.exs",
+      "bytes": 4772,
+      "sha256": "41919cfbddf15b16263732178e640fc084f6df8d5f043c5240764992e6bbaa28",
+      "copied_from_frozen_input": "baseline/packages/demo/bench/render.exs",
+      "byte_identical": false,
+      "frozen_sha256": "31e25978e494d19f1af6f57ed1c021e5b50c1f2c7bed0248768770bf85f35cd0",
+      "frozen_bytes": 4076,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/bench/snapshots.exs",
+      "bytes": 1027,
+      "sha256": "caeaccc45361fd2ddb2b398f99763739197316d4e9cda8b9444269516dd10e2b",
+      "copied_from_frozen_input": "baseline/packages/demo/bench/snapshots.exs",
+      "byte_identical": false,
+      "frozen_sha256": "83ef20d19f4616941cd2e2d0fbfff1a7dd771246e9c045c61c9384460eee9bc6",
+      "frozen_bytes": 980,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/config/config.exs",
+      "bytes": 675,
+      "sha256": "8cb10be99bcfa693c50badb4474d8aedbbadd72a149fbae39580beab2e4ac8ea",
+      "copied_from_frozen_input": "baseline/packages/demo/config/config.exs",
+      "byte_identical": true,
+      "frozen_sha256": "8cb10be99bcfa693c50badb4474d8aedbbadd72a149fbae39580beab2e4ac8ea",
+      "frozen_bytes": 675,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/application.ex",
+      "bytes": 311,
+      "sha256": "d2cfde0a28cb40e22c1dfed5eae4b3d07c91f07338e18ace77a4ac16420e88bc",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/application.ex",
+      "byte_identical": false,
+      "frozen_sha256": "076a92d3439cae53c830d2f006dc5c2e96e601fcba3a517c202b4816cc8adc9a",
+      "frozen_bytes": 280,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/arbor_breeze_view.ex",
+      "bytes": 4396,
+      "sha256": "2ee4d5433bd047c01fad4753d447f3b73fd8b9fd060bbf7298ed69593957460b",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/arbor_breeze_view.ex",
+      "byte_identical": true,
+      "frozen_sha256": "2ee4d5433bd047c01fad4753d447f3b73fd8b9fd060bbf7298ed69593957460b",
+      "frozen_bytes": 4396,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/arbor_chat_live.ex",
+      "bytes": 8604,
+      "sha256": "c354cd4090a92417377b7419f5a33bcb44d14ff6cd5ef0b479462182d5ef0b32",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/arbor_chat_live.ex",
+      "byte_identical": true,
+      "frozen_sha256": "c354cd4090a92417377b7419f5a33bcb44d14ff6cd5ef0b479462182d5ef0b32",
+      "frozen_bytes": 8604,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/arbor_client.ex",
+      "bytes": 10212,
+      "sha256": "45db0f2f5e6ecec711d5727c592b202b9e28c008dd2fbc6af061c37823111aea",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/arbor_client.ex",
+      "byte_identical": true,
+      "frozen_sha256": "45db0f2f5e6ecec711d5727c592b202b9e28c008dd2fbc6af061c37823111aea",
+      "frozen_bytes": 10212,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/arbor_interaction.ex",
+      "bytes": 3002,
+      "sha256": "c5c83892d035da26d40f0580f17bd096decc398c3f039bae1492e2813d366024",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/arbor_interaction.ex",
+      "byte_identical": true,
+      "frozen_sha256": "c5c83892d035da26d40f0580f17bd096decc398c3f039bae1492e2813d366024",
+      "frozen_bytes": 3002,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/breeze_view.ex",
+      "bytes": 2593,
+      "sha256": "141f48ad1b27c28907ee374134f1daa8c0e359078ede08ed63132674ed7a5a12",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/breeze_view.ex",
+      "byte_identical": false,
+      "frozen_sha256": "3d740a97a90989386b9702c037c6f41ecf126e75762d9c9b7bfeda2a5fc6e532",
+      "frozen_bytes": 2575,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/chat_components.ex",
+      "bytes": 1875,
+      "sha256": "5a2e821b9156788517ffc7f553bf2da724fea9d4fa20c4b291b7f0b10db101cd",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/chat_components.ex",
+      "byte_identical": false,
+      "frozen_sha256": "ca840a000e55c3b2a1a0fb344fd449700dd6bdf766f369d5cb5b3362f36ef7b9",
+      "frozen_bytes": 1869,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/chat_live.ex",
+      "bytes": 4033,
+      "sha256": "e000c4b52043f25e39e002194807a959bcdbc14262dee18cc9cac5d55c9a9cd2",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/chat_live.ex",
+      "byte_identical": false,
+      "frozen_sha256": "e0cdea7742ae6d2fcb8ccb360d5a32525ab99e82493dd5129539384936e10ad5",
+      "frozen_bytes": 4011,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/endpoint.ex",
+      "bytes": 533,
+      "sha256": "49c5c34f04290a15680b62f1467e40e0becb114c9135d7f1ab6c1a1a38b8772f",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/endpoint.ex",
+      "byte_identical": false,
+      "frozen_sha256": "7d55560d48cd8abc4309437d329c1e67ff9877f10a28192b08b549b3d0b640fb",
+      "frozen_bytes": 506,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/error_html.ex",
+      "bytes": 140,
+      "sha256": "4b5e490baa8bf5c288a2de2d69a1d3d91bc335d73febb356318dd07de3317f7c",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/error_html.ex",
+      "byte_identical": true,
+      "frozen_sha256": "4b5e490baa8bf5c288a2de2d69a1d3d91bc335d73febb356318dd07de3317f7c",
+      "frozen_bytes": 140,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/history_window.ex",
+      "bytes": 1560,
+      "sha256": "0732b19bc9fddc062b0e4f72a12c9fafe9dec8ee8a6b4ed4dfd35f86b617dac9",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/history_window.ex",
+      "byte_identical": true,
+      "frozen_sha256": "0732b19bc9fddc062b0e4f72a12c9fafe9dec8ee8a6b4ed4dfd35f86b617dac9",
+      "frozen_bytes": 1560,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/interaction.ex",
+      "bytes": 2336,
+      "sha256": "94b0558293d9494255a56d204222c78bd354523ea966f9f299bdbdc4f9ce90f8",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/interaction.ex",
+      "byte_identical": false,
+      "frozen_sha256": "33cbd4b993c03503fe8ca13039552cf698c2e1a264f23c2d5f0b3c02e3e332a7",
+      "frozen_bytes": 2165,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/layout.ex",
+      "bytes": 753,
+      "sha256": "49748bcd17a12abc264f9d6449c8ca10efc5f92f88eacf368ddc22f44dad8988",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/layout.ex",
+      "byte_identical": false,
+      "frozen_sha256": "cb198e625c3e2fb390c79bba96e9967b5d445a6ff4ede9497837ea8f2af81c5e",
+      "frozen_bytes": 752,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/mock_host.ex",
+      "bytes": 6977,
+      "sha256": "96b27fba05e2b0312405a17743f7e1aa9e9699bc3c511c0642be5a0ac9060f19",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/mock_host.ex",
+      "byte_identical": false,
+      "frozen_sha256": "76a320842c77ef4569626da4fbac9df81b2d06216c47a887f8fe3dca23a3fc72",
+      "frozen_bytes": 6012,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/question.ex",
+      "bytes": 7065,
+      "sha256": "8780e0c258b7fc394018af5fa7e6bbcf43bd7acb444d4363f27158f95ae1ff5f",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/question.ex",
+      "byte_identical": true,
+      "frozen_sha256": "8780e0c258b7fc394018af5fa7e6bbcf43bd7acb444d4363f27158f95ae1ff5f",
+      "frozen_bytes": 7065,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/router.ex",
+      "bytes": 457,
+      "sha256": "7d11986d5aab0252aecf218a2175461c691a23cb7bcb9f85954f9f77f832b98f",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/router.ex",
+      "byte_identical": true,
+      "frozen_sha256": "7d11986d5aab0252aecf218a2175461c691a23cb7bcb9f85954f9f77f832b98f",
+      "frozen_bytes": 457,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/lib/conversation_demo/term_ui_view.ex",
+      "bytes": 4412,
+      "sha256": "339bc429f4cd3f5a3e90d781c3d6fed52df5b3e6e4bf45222109da1ab424de72",
+      "copied_from_frozen_input": "baseline/packages/demo/lib/conversation_demo/term_ui_view.ex",
+      "byte_identical": false,
+      "frozen_sha256": "64d5c53ae57edd094d5690881d323208ad6a13fcb6ef9868faee2ab1d6767bab",
+      "frozen_bytes": 4010,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/mix.exs",
+      "bytes": 747,
+      "sha256": "b245be32803af11a68f6b1083ff4778b78b8ada6d025c53d9a007ee62e9b2fa2",
+      "copied_from_frozen_input": "baseline/packages/demo/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b245be32803af11a68f6b1083ff4778b78b8ada6d025c53d9a007ee62e9b2fa2",
+      "frozen_bytes": 747,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/mix.lock",
+      "bytes": 9907,
+      "sha256": "875a4bd6f6f11993133334f886b80bc3bb495d617ee896698b758ca10d8e8911",
+      "copied_from_frozen_input": "baseline/packages/demo/mix.lock",
+      "byte_identical": true,
+      "frozen_sha256": "875a4bd6f6f11993133334f886b80bc3bb495d617ee896698b758ca10d8e8911",
+      "frozen_bytes": 9907,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/priv/static/app.css",
+      "bytes": 5432,
+      "sha256": "23c4428dd1dac9f1e9cf6470ee06bc88c84320c29a67872b3599be405fdd842b",
+      "copied_from_frozen_input": "baseline/packages/demo/priv/static/app.css",
+      "byte_identical": true,
+      "frozen_sha256": "23c4428dd1dac9f1e9cf6470ee06bc88c84320c29a67872b3599be405fdd842b",
+      "frozen_bytes": 5432,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/priv/static/app.js",
+      "bytes": 695,
+      "sha256": "8524d11ed17dc2001bd33da735ef1b88b18064959798febfa557676d8b19043a",
+      "copied_from_frozen_input": "baseline/packages/demo/priv/static/app.js",
+      "byte_identical": true,
+      "frozen_sha256": "8524d11ed17dc2001bd33da735ef1b88b18064959798febfa557676d8b19043a",
+      "frozen_bytes": 695,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/arbor_interfaces_test.exs",
+      "bytes": 24235,
+      "sha256": "6532a75642ea0f2baa636bc2c4033bb70ca986f42d5f22aa1a663a288bc12208",
+      "copied_from_frozen_input": "baseline/packages/demo/test/arbor_interfaces_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "6532a75642ea0f2baa636bc2c4033bb70ca986f42d5f22aa1a663a288bc12208",
+      "frozen_bytes": 24235,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/comparison_fixture.exs",
+      "bytes": 5559,
+      "sha256": "f6001325f80e01949ed0f55ed8337e478e39dde67ef558e40e80446e7b6f4ce0",
+      "copied_from_frozen_input": "baseline/packages/demo/test/comparison_fixture.exs",
+      "byte_identical": true,
+      "frozen_sha256": "f6001325f80e01949ed0f55ed8337e478e39dde67ef558e40e80446e7b6f4ce0",
+      "frozen_bytes": 5559,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/comparison_interfaces_test.exs",
+      "bytes": 6773,
+      "sha256": "deb77fdb7071f0ce111caf9adc1265bcf82507fa09e22bcb8003a9d3590be7c0",
+      "copied_from_frozen_input": "baseline/packages/demo/test/comparison_interfaces_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "deb77fdb7071f0ce111caf9adc1265bcf82507fa09e22bcb8003a9d3590be7c0",
+      "frozen_bytes": 6773,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/history_window_test.exs",
+      "bytes": 1619,
+      "sha256": "57e629f908086f570b6acaa75cc62a59075d92b2bf3f847e771931226fdf1238",
+      "copied_from_frozen_input": "baseline/packages/demo/test/history_window_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "57e629f908086f570b6acaa75cc62a59075d92b2bf3f847e771931226fdf1238",
+      "frozen_bytes": 1619,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/interfaces_test.exs",
+      "bytes": 5201,
+      "sha256": "0dd07e84f4e22b27bbbadd501f36c806a61953c3e2f923b4996d7dbe7aeaa26f",
+      "copied_from_frozen_input": "baseline/packages/demo/test/interfaces_test.exs",
+      "byte_identical": false,
+      "frozen_sha256": "843b1206363cdd3f9a19ac461d9ad2547978fb69c6c4bf6ba98022f8d1412642",
+      "frozen_bytes": 5014,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/test/notice_extension_test.exs",
+      "bytes": 1575,
+      "sha256": "4c8236ab3f6063e83663779ff3383af90978251e9e9920d55261dba93f617a8f",
+      "copied_from_frozen_input": "baseline/packages/demo/test/notice_extension_test.exs",
+      "byte_identical": false,
+      "frozen_sha256": "c5cf3bc9b0a8ec677eb3f1e34bc90ae1649c89432e59b1a2b6adcb3161686b69",
+      "frozen_bytes": 1491,
+      "formatting_only": true
+    },
+    {
+      "path": "baseline/packages/demo/test/question_test.exs",
+      "bytes": 6082,
+      "sha256": "31545d62aae99c16478dacd27fbb778703e49d14249a22f86cac07d4c9ffff07",
+      "copied_from_frozen_input": "baseline/packages/demo/test/question_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "31545d62aae99c16478dacd27fbb778703e49d14249a22f86cac07d4c9ffff07",
+      "frozen_bytes": 6082,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/demo/test/test_helper.exs",
+      "bytes": 15,
+      "sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "copied_from_frozen_input": "baseline/packages/demo/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "frozen_bytes": 15,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/.formatter.exs",
+      "bytes": 50,
+      "sha256": "42bf753df3dbf8bd44556472867ca7c2691fe6a33551ed464e00380c064ffb02",
+      "copied_from_frozen_input": "baseline/packages/remote/.formatter.exs",
+      "byte_identical": true,
+      "frozen_sha256": "42bf753df3dbf8bd44556472867ca7c2691fe6a33551ed464e00380c064ffb02",
+      "frozen_bytes": 50,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/README.md",
+      "bytes": 4515,
+      "sha256": "2802a0c66aad493b5b1110be63371f07a76ae611b645311f5b9e48936d4c535e",
+      "copied_from_frozen_input": "baseline/packages/remote/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "2802a0c66aad493b5b1110be63371f07a76ae611b645311f5b9e48936d4c535e",
+      "frozen_bytes": 4515,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/lib/conversation_kit/arbor/gateway.ex",
+      "bytes": 14502,
+      "sha256": "80b9b3b8deef8620f4eb5fa49d343aa275b13b992d295076d739e26c93999edc",
+      "copied_from_frozen_input": "baseline/packages/remote/lib/conversation_kit/arbor/gateway.ex",
+      "byte_identical": true,
+      "frozen_sha256": "80b9b3b8deef8620f4eb5fa49d343aa275b13b992d295076d739e26c93999edc",
+      "frozen_bytes": 14502,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/lib/conversation_kit/arbor/gateway/wire.ex",
+      "bytes": 5643,
+      "sha256": "66f3b5738a550c54ef9e02173aee4dc750c5f940711cb8693bee89ef40e75fdd",
+      "copied_from_frozen_input": "baseline/packages/remote/lib/conversation_kit/arbor/gateway/wire.ex",
+      "byte_identical": true,
+      "frozen_sha256": "66f3b5738a550c54ef9e02173aee4dc750c5f940711cb8693bee89ef40e75fdd",
+      "frozen_bytes": 5643,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/mix.exs",
+      "bytes": 448,
+      "sha256": "c6bc6ca5026ebd5e7df33daa06d6c6dbc15ba7968d8f40c43424c2ae2b034341",
+      "copied_from_frozen_input": "baseline/packages/remote/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "c6bc6ca5026ebd5e7df33daa06d6c6dbc15ba7968d8f40c43424c2ae2b034341",
+      "frozen_bytes": 448,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/mix.lock",
+      "bytes": 1327,
+      "sha256": "21785afa37cc0d9bb93dfdc63098a912bfaee66d0898078babc9f165a61c4e20",
+      "copied_from_frozen_input": "baseline/packages/remote/mix.lock",
+      "byte_identical": true,
+      "frozen_sha256": "21785afa37cc0d9bb93dfdc63098a912bfaee66d0898078babc9f165a61c4e20",
+      "frozen_bytes": 1327,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/test/gateway_test.exs",
+      "bytes": 17883,
+      "sha256": "6b7708f6db5142fe08b5763aa27ad6164c9fc6a1a69fe98e80aac797f8c0e40a",
+      "copied_from_frozen_input": "baseline/packages/remote/test/gateway_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "6b7708f6db5142fe08b5763aa27ad6164c9fc6a1a69fe98e80aac797f8c0e40a",
+      "frozen_bytes": 17883,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/test/test_helper.exs",
+      "bytes": 15,
+      "sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "copied_from_frozen_input": "baseline/packages/remote/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "frozen_bytes": 15,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/packages/remote/test/wire_test.exs",
+      "bytes": 3729,
+      "sha256": "0d5812184a26262520e5abe5e023a1c924266ee87ac08dde223a72044ae103e9",
+      "copied_from_frozen_input": "baseline/packages/remote/test/wire_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "0d5812184a26262520e5abe5e023a1c924266ee87ac08dde223a72044ae103e9",
+      "frozen_bytes": 3729,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/scripts/scale.exs",
+      "bytes": 3456,
+      "sha256": "40f242443f82b2c7ddf3d63ae8a3be45352e2e1fc65334ea1d158e5f4e07637b",
+      "copied_from_frozen_input": "baseline/scripts/scale.exs",
+      "byte_identical": true,
+      "frozen_sha256": "40f242443f82b2c7ddf3d63ae8a3be45352e2e1fc65334ea1d158e5f4e07637b",
+      "frozen_bytes": 3456,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/apps/arbor_security/test/support/oidc_test_helper.ex",
+      "bytes": 2952,
+      "sha256": "0fe60a7e627a401c469ea1db910c0c8c97a0ec735ec395f35a3a8aa9e1bdd251",
+      "copied_from_frozen_input": "baseline/source/apps/arbor_security/test/support/oidc_test_helper.ex",
+      "byte_identical": true,
+      "frozen_sha256": "0fe60a7e627a401c469ea1db910c0c8c97a0ec735ec395f35a3a8aa9e1bdd251",
+      "frozen_bytes": 2952,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/apps/arbor_voice/mix.exs",
+      "bytes": 1902,
+      "sha256": "59354d27bbc477829044f6e6275563ea7e264eabc1cc6cdfda76eda3810c3f7a",
+      "copied_from_frozen_input": "baseline/source/apps/arbor_voice/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "59354d27bbc477829044f6e6275563ea7e264eabc1cc6cdfda76eda3810c3f7a",
+      "frozen_bytes": 1902,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/apps/arbor_voice/test/arbor/voice/conversation_ui_comparison_test.exs",
+      "bytes": 11613,
+      "sha256": "cdf90dbc366e007c887a8b984bc433eab94fd86fad41d09c3f6631297dd6c686",
+      "copied_from_frozen_input": "baseline/source/apps/arbor_voice/test/arbor/voice/conversation_ui_comparison_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "cdf90dbc366e007c887a8b984bc433eab94fd86fad41d09c3f6631297dd6c686",
+      "frozen_bytes": 11613,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/apps/arbor_voice/test/support/conversation_cross_surface_fixture.ex",
+      "bytes": 30134,
+      "sha256": "f09c009e549038771e48e29cbea654cbcc957ac29f9e8b971f005217042b62e7",
+      "copied_from_frozen_input": "baseline/source/apps/arbor_voice/test/support/conversation_cross_surface_fixture.ex",
+      "byte_identical": true,
+      "frozen_sha256": "f09c009e549038771e48e29cbea654cbcc957ac29f9e8b971f005217042b62e7",
+      "frozen_bytes": 30134,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/apps/arbor_voice/test/test_helper.exs",
+      "bytes": 58,
+      "sha256": "9b43ec437bc0772b781aca7d980602a75351bf67c1a7979c31cc76856bb5b72c",
+      "copied_from_frozen_input": "baseline/source/apps/arbor_voice/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "9b43ec437bc0772b781aca7d980602a75351bf67c1a7979c31cc76856bb5b72c",
+      "frozen_bytes": 58,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/.formatter.exs",
+      "bytes": 63,
+      "sha256": "302c995c86ef4e2b37a146313045097ef0d0f8e1c0f7da441cb4ca6f7c21143f",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/.formatter.exs",
+      "byte_identical": true,
+      "frozen_sha256": "302c995c86ef4e2b37a146313045097ef0d0f8e1c0f7da441cb4ca6f7c21143f",
+      "frozen_bytes": 63,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/README.md",
+      "bytes": 4464,
+      "sha256": "25f6d1431e1c34e2d7cc80c35fc82846e3e16108638f68ceee4a05df65b58f80",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "25f6d1431e1c34e2d7cc80c35fc82846e3e16108638f68ceee4a05df65b58f80",
+      "frozen_bytes": 4464,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/lib/arbor/client/endpoint.ex",
+      "bytes": 1493,
+      "sha256": "208ee5d69d89ba471007cff17f77c3df85d9a64c4098a72408ceccb82d400aa8",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/lib/arbor/client/endpoint.ex",
+      "byte_identical": true,
+      "frozen_sha256": "208ee5d69d89ba471007cff17f77c3df85d9a64c4098a72408ceccb82d400aa8",
+      "frozen_bytes": 1493,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/lib/arbor/client/login.ex",
+      "bytes": 11840,
+      "sha256": "14c07c13affa51398e41c3704931ed71402305db003838e12b664644cb6736c5",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/lib/arbor/client/login.ex",
+      "byte_identical": true,
+      "frozen_sha256": "14c07c13affa51398e41c3704931ed71402305db003838e12b664644cb6736c5",
+      "frozen_bytes": 11840,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/lib/arbor/client/protocol.ex",
+      "bytes": 5568,
+      "sha256": "5b44586d4122e6477884d8e2b55d98af1354d1329b63c02d7ab1df636e3a0d89",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/lib/arbor/client/protocol.ex",
+      "byte_identical": true,
+      "frozen_sha256": "5b44586d4122e6477884d8e2b55d98af1354d1329b63c02d7ab1df636e3a0d89",
+      "frozen_bytes": 5568,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/lib/arbor/client/signer.ex",
+      "bytes": 6133,
+      "sha256": "eb6499f7796a14d312374c3dd069f9c0d139e0ba8cf0ae1b182837dd03228eb5",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/lib/arbor/client/signer.ex",
+      "byte_identical": true,
+      "frozen_sha256": "eb6499f7796a14d312374c3dd069f9c0d139e0ba8cf0ae1b182837dd03228eb5",
+      "frozen_bytes": 6133,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/lib/arbor/client/socket.ex",
+      "bytes": 15769,
+      "sha256": "749b7f974ec1bdfc7d4f8de13bbcc970852372a35a9a0a81f7fa1a705d80d3a9",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/lib/arbor/client/socket.ex",
+      "byte_identical": true,
+      "frozen_sha256": "749b7f974ec1bdfc7d4f8de13bbcc970852372a35a9a0a81f7fa1a705d80d3a9",
+      "frozen_bytes": 15769,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/mix.exs",
+      "bytes": 307,
+      "sha256": "318df6d19d273476c27803f1f2dde4e8c03626fd7cebedef7e76e3c38c63713f",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/mix.exs",
+      "byte_identical": true,
+      "frozen_sha256": "318df6d19d273476c27803f1f2dde4e8c03626fd7cebedef7e76e3c38c63713f",
+      "frozen_bytes": 307,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/mix.lock",
+      "bytes": 1327,
+      "sha256": "21785afa37cc0d9bb93dfdc63098a912bfaee66d0898078babc9f165a61c4e20",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/mix.lock",
+      "byte_identical": true,
+      "frozen_sha256": "21785afa37cc0d9bb93dfdc63098a912bfaee66d0898078babc9f165a61c4e20",
+      "frozen_bytes": 1327,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/arbor/client/key_file_security_regression_test.exs",
+      "bytes": 989,
+      "sha256": "fad1164f0342382938964f0fa0dacef8bcc353fd7c89af5a0b032d3a0be5bc33",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/arbor/client/key_file_security_regression_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "fad1164f0342382938964f0fa0dacef8bcc353fd7c89af5a0b032d3a0be5bc33",
+      "frozen_bytes": 989,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/arbor/client/login_test.exs",
+      "bytes": 10017,
+      "sha256": "b7a959f27753c4623419201705fe34d112f3098d90e58e58ce7d5c5f91c7e480",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/arbor/client/login_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b7a959f27753c4623419201705fe34d112f3098d90e58e58ce7d5c5f91c7e480",
+      "frozen_bytes": 10017,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/arbor/client/protocol_test.exs",
+      "bytes": 6158,
+      "sha256": "7f9be19752329aa09b8ce29651e07f5f464306e1ceaf9beedf77f6d4c713604f",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/arbor/client/protocol_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "7f9be19752329aa09b8ce29651e07f5f464306e1ceaf9beedf77f6d4c713604f",
+      "frozen_bytes": 6158,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/arbor/client/signer_test.exs",
+      "bytes": 3676,
+      "sha256": "8d83935e732ed1dbfcf4ef6991c1fef8a267b26600043bf8280c743806cc4d59",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/arbor/client/signer_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "8d83935e732ed1dbfcf4ef6991c1fef8a267b26600043bf8280c743806cc4d59",
+      "frozen_bytes": 3676,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/arbor/client/socket_test.exs",
+      "bytes": 17836,
+      "sha256": "91eee3b4189b62e8786a6023e78f1c9ffe004bcd0de9bd3f38b6989409a7afc2",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/arbor/client/socket_test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "91eee3b4189b62e8786a6023e78f1c9ffe004bcd0de9bd3f38b6989409a7afc2",
+      "frozen_bytes": 17836,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/clients/arbor_client/test/test_helper.exs",
+      "bytes": 15,
+      "sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "copied_from_frozen_input": "baseline/source/clients/arbor_client/test/test_helper.exs",
+      "byte_identical": true,
+      "frozen_sha256": "b086ec47f0c6c7aaeb4cffca5ae5243dd05e0dc96ab761ced93325d5315f4b12",
+      "frozen_bytes": 15,
+      "formatting_only": false
+    },
+    {
+      "path": "baseline/source/config/test.exs",
+      "bytes": 15155,
+      "sha256": "c49cb694fa5fc6b46661423fe5e40ad8fb1dee72b64fd1384697618b7b950194",
+      "copied_from_frozen_input": "baseline/source/config/test.exs",
+      "byte_identical": true,
+      "frozen_sha256": "c49cb694fa5fc6b46661423fe5e40ad8fb1dee72b64fd1384697618b7b950194",
+      "frozen_bytes": 15155,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/.npmrc",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "copied_from_frozen_input": "typescript/.npmrc",
+      "byte_identical": true,
+      "frozen_sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "frozen_bytes": 1,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/ink/App.tsx",
+      "bytes": 8553,
+      "sha256": "c5ab97e737e98beaad0a00852e435875f942b8ee8846e9f8dec14a7cc929b0bc",
+      "copied_from_frozen_input": "typescript/ink/App.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "c5ab97e737e98beaad0a00852e435875f942b8ee8846e9f8dec14a7cc929b0bc",
+      "frozen_bytes": 8553,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/ink/main.tsx",
+      "bytes": 911,
+      "sha256": "0b60853aaaac3a227d120ac071d4d5857378226f761a0048a63052f3ac602506",
+      "copied_from_frozen_input": "typescript/ink/main.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "0b60853aaaac3a227d120ac071d4d5857378226f761a0048a63052f3ac602506",
+      "frozen_bytes": 911,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/ink/renderer.test.tsx",
+      "bytes": 9680,
+      "sha256": "280749d522f0cad52e368cb50768daa524f269342bfcd9a260606da79c0360ce",
+      "copied_from_frozen_input": "typescript/ink/renderer.test.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "280749d522f0cad52e368cb50768daa524f269342bfcd9a260606da79c0360ce",
+      "frozen_bytes": 9680,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/ink/testing.ts",
+      "bytes": 469,
+      "sha256": "bdf0562db33bd1944e3b534da1f74bbebaa1c1c56e957ad190d3b3d69802d614",
+      "copied_from_frozen_input": "typescript/ink/testing.ts",
+      "byte_identical": true,
+      "frozen_sha256": "bdf0562db33bd1944e3b534da1f74bbebaa1c1c56e957ad190d3b3d69802d614",
+      "frozen_bytes": 469,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/inspect-exports.mjs",
+      "bytes": 1991,
+      "sha256": "b637ca994a598da26aa630eac0b15244f9a2b84cb0467ab0f4ef7b250ef838e9",
+      "copied_from_frozen_input": "typescript/inspect-exports.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "b637ca994a598da26aa630eac0b15244f9a2b84cb0467ab0f4ef7b250ef838e9",
+      "frozen_bytes": 1991,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/inspect-registry.mjs",
+      "bytes": 1302,
+      "sha256": "9e722fd1184b3c5d0bdd88335349fd5940dd039e0a6f1fe372319206c0ce58eb",
+      "copied_from_frozen_input": "typescript/inspect-registry.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "9e722fd1184b3c5d0bdd88335349fd5940dd039e0a6f1fe372319206c0ce58eb",
+      "frozen_bytes": 1302,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/npm-global-config",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "copied_from_frozen_input": "typescript/npm-global-config",
+      "byte_identical": true,
+      "frozen_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "frozen_bytes": 0,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/npm-user-config",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "copied_from_frozen_input": "typescript/npm-user-config",
+      "byte_identical": true,
+      "frozen_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "frozen_bytes": 0,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/package-lock.json",
+      "bytes": 147424,
+      "sha256": "8343f147aa9f79e469007df35573eb9cf1e49ec7bb04b217b8b4a98fb34a7202",
+      "copied_from_frozen_input": "typescript/package-lock.json",
+      "byte_identical": true,
+      "frozen_sha256": "8343f147aa9f79e469007df35573eb9cf1e49ec7bb04b217b8b4a98fb34a7202",
+      "frozen_bytes": 147424,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/package.json",
+      "bytes": 937,
+      "sha256": "f3fb766a58a1ba87290b833e2aa5750f1650e46043f0e398fdf9372ebedbf807",
+      "copied_from_frozen_input": "typescript/package.json",
+      "byte_identical": true,
+      "frozen_sha256": "f3fb766a58a1ba87290b833e2aa5750f1650e46043f0e398fdf9372ebedbf807",
+      "frozen_bytes": 937,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/package.template.json",
+      "bytes": 1088,
+      "sha256": "52f1fe32d99c30e6a527cbbaa4d414314b24db56e428b69998d82107660c4cd6",
+      "copied_from_frozen_input": "typescript/package.template.json",
+      "byte_identical": true,
+      "frozen_sha256": "52f1fe32d99c30e6a527cbbaa4d414314b24db56e428b69998d82107660c4cd6",
+      "frozen_bytes": 1088,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/published-resolution.json",
+      "bytes": 6952,
+      "sha256": "8d9214795c3813c0ad741dc5e968b0c761cadc2f6336d68123732527795cad28",
+      "copied_from_frozen_input": "typescript/published-resolution.json",
+      "byte_identical": true,
+      "frozen_sha256": "8d9214795c3813c0ad741dc5e968b0c761cadc2f6336d68123732527795cad28",
+      "frozen_bytes": 6952,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/repeat-renderers.mjs",
+      "bytes": 2782,
+      "sha256": "049d147c3e6a084e8b17be8b45570438e8b32ebf3152354a80634c852386a92f",
+      "copied_from_frozen_input": "typescript/repeat-renderers.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "049d147c3e6a084e8b17be8b45570438e8b32ebf3152354a80634c852386a92f",
+      "frozen_bytes": 2782,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/resolve-published.mjs",
+      "bytes": 4964,
+      "sha256": "a6d16697287b46a2a36ffda96b671fd4c30784fdc881b23d74727b69e8df42d2",
+      "copied_from_frozen_input": "typescript/resolve-published.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "a6d16697287b46a2a36ffda96b671fd4c30784fdc881b23d74727b69e8df42d2",
+      "frozen_bytes": 4964,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/README.md",
+      "bytes": 3835,
+      "sha256": "45658c5be77803e632efc0c4b90b66a1f83aba9bc1746f5bf5347dff6d6ab731",
+      "copied_from_frozen_input": "typescript/shared/README.md",
+      "byte_identical": true,
+      "frozen_sha256": "45658c5be77803e632efc0c4b90b66a1f83aba9bc1746f5bf5347dff6d6ab731",
+      "frozen_bytes": 3835,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/fixture.d.mts",
+      "bytes": 689,
+      "sha256": "63033dea22eac6fe0ab98785f92c3a81195d9793dc62b62ffb604e244783adc5",
+      "copied_from_frozen_input": "typescript/shared/fixture.d.mts",
+      "byte_identical": true,
+      "frozen_sha256": "63033dea22eac6fe0ab98785f92c3a81195d9793dc62b62ffb604e244783adc5",
+      "frozen_bytes": 689,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/fixture.mjs",
+      "bytes": 5385,
+      "sha256": "d5d7ea04f5380c49a883204ae5b338144d66cbfba14e48535b521b1ea9f4ea4c",
+      "copied_from_frozen_input": "typescript/shared/fixture.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "d5d7ea04f5380c49a883204ae5b338144d66cbfba14e48535b521b1ea9f4ea4c",
+      "frozen_bytes": 5385,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/node-channel.mjs",
+      "bytes": 3099,
+      "sha256": "6c065ab49213ce6731be12f0fe389728fd8a1185e33bbb94f31807c6ccbd4d1a",
+      "copied_from_frozen_input": "typescript/shared/node-channel.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "6c065ab49213ce6731be12f0fe389728fd8a1185e33bbb94f31807c6ccbd4d1a",
+      "frozen_bytes": 3099,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/published-resolution.mjs",
+      "bytes": 8399,
+      "sha256": "4f0642e1fd71dfdb5b3a5b372f07b33a589ccfd601537544814cff5ca87995c7",
+      "copied_from_frozen_input": "typescript/shared/published-resolution.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "4f0642e1fd71dfdb5b3a5b372f07b33a589ccfd601537544814cff5ca87995c7",
+      "frozen_bytes": 8399,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/question.d.mts",
+      "bytes": 523,
+      "sha256": "878252d130e33db4a7d250ab3d11b1e4d9b135e0c6165f76f61396d7530223d5",
+      "copied_from_frozen_input": "typescript/shared/question.d.mts",
+      "byte_identical": true,
+      "frozen_sha256": "878252d130e33db4a7d250ab3d11b1e4d9b135e0c6165f76f61396d7530223d5",
+      "frozen_bytes": 523,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/question.mjs",
+      "bytes": 2194,
+      "sha256": "bde758d8ea90a28fa171942be7c4d8c16c95b400019b76b5b1ef19c19ed73be4",
+      "copied_from_frozen_input": "typescript/shared/question.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "bde758d8ea90a28fa171942be7c4d8c16c95b400019b76b5b1ef19c19ed73be4",
+      "frozen_bytes": 2194,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/store.d.mts",
+      "bytes": 2699,
+      "sha256": "0664d091fbcc07c5a2c21460c8ca1703507b83c2a05d97966e04ac2377f895a0",
+      "copied_from_frozen_input": "typescript/shared/store.d.mts",
+      "byte_identical": true,
+      "frozen_sha256": "0664d091fbcc07c5a2c21460c8ca1703507b83c2a05d97966e04ac2377f895a0",
+      "frozen_bytes": 2699,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/store.mjs",
+      "bytes": 18044,
+      "sha256": "3a36550c79ef0fa3d6d83780b64562104084bba1028f96598fed91da7bf43cde",
+      "copied_from_frozen_input": "typescript/shared/store.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "3a36550c79ef0fa3d6d83780b64562104084bba1028f96598fed91da7bf43cde",
+      "frozen_bytes": 18044,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/transport.mjs",
+      "bytes": 3787,
+      "sha256": "18c5a8e9a528bb879cd8db0898fe3b42f67712bf0988cd9544e836d50878a830",
+      "copied_from_frozen_input": "typescript/shared/transport.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "18c5a8e9a528bb879cd8db0898fe3b42f67712bf0988cd9544e836d50878a830",
+      "frozen_bytes": 3787,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/shared/wire.mjs",
+      "bytes": 3990,
+      "sha256": "d77d5483c66eeed3a0ab29f3b1b3e683e594caa6e88979557a4178c90193221b",
+      "copied_from_frozen_input": "typescript/shared/wire.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "d77d5483c66eeed3a0ab29f3b1b3e683e594caa6e88979557a4178c90193221b",
+      "frozen_bytes": 3990,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tests/node-channel.test.mjs",
+      "bytes": 2602,
+      "sha256": "b2650baa7dcb3b0babd91ff964587c518805e2bb36aa4ce51d752def1d2479b2",
+      "copied_from_frozen_input": "typescript/tests/node-channel.test.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "b2650baa7dcb3b0babd91ff964587c518805e2bb36aa4ce51d752def1d2479b2",
+      "frozen_bytes": 2602,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tests/published-resolution.test.mjs",
+      "bytes": 8031,
+      "sha256": "65e05d403d8fa8f1e87b5f76e08d382523f99d45111dabfa52f1420dad10b5e3",
+      "copied_from_frozen_input": "typescript/tests/published-resolution.test.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "65e05d403d8fa8f1e87b5f76e08d382523f99d45111dabfa52f1420dad10b5e3",
+      "frozen_bytes": 8031,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tests/real_gateway.mjs",
+      "bytes": 2576,
+      "sha256": "a43b78234e5f2ebb63154b4e0c0e41aecebce03d6166b5009a3f31d0b1ea43ec",
+      "copied_from_frozen_input": "typescript/tests/real_gateway.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "a43b78234e5f2ebb63154b4e0c0e41aecebce03d6166b5009a3f31d0b1ea43ec",
+      "frozen_bytes": 2576,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tests/store.test.mjs",
+      "bytes": 11809,
+      "sha256": "7eacba699884ad3c31853094ba60a2da7d6f65d4e04bf890560b2e3e37a2e5d3",
+      "copied_from_frozen_input": "typescript/tests/store.test.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "7eacba699884ad3c31853094ba60a2da7d6f65d4e04bf890560b2e3e37a2e5d3",
+      "frozen_bytes": 11809,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tests/transport.test.mjs",
+      "bytes": 3847,
+      "sha256": "2b573c664fd63fae0551a391518dcb181479a5c39ca5055fa522f7585f95e40f",
+      "copied_from_frozen_input": "typescript/tests/transport.test.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "2b573c664fd63fae0551a391518dcb181479a5c39ca5055fa522f7585f95e40f",
+      "frozen_bytes": 3847,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/tsconfig.json",
+      "bytes": 448,
+      "sha256": "93475a8768be1d5a7d303d7588872a9a00f21616c2ece608d91c901f1ba6826e",
+      "copied_from_frozen_input": "typescript/tsconfig.json",
+      "byte_identical": true,
+      "frozen_sha256": "93475a8768be1d5a7d303d7588872a9a00f21616c2ece608d91c901f1ba6826e",
+      "frozen_bytes": 448,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/verify-prepared.mjs",
+      "bytes": 1718,
+      "sha256": "14e590eea99bb32be969fa5d6f08215aee4879f7ebd0fef234d60687c1c1cbbf",
+      "copied_from_frozen_input": "typescript/verify-prepared.mjs",
+      "byte_identical": true,
+      "frozen_sha256": "14e590eea99bb32be969fa5d6f08215aee4879f7ebd0fef234d60687c1c1cbbf",
+      "frozen_bytes": 1718,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/App.tsx",
+      "bytes": 8093,
+      "sha256": "1f9538dbc55e429e166b5db4fd1800778fda7f0849a4e9b2b38f9d8c8fd3fb10",
+      "copied_from_frozen_input": "typescript/web/App.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "1f9538dbc55e429e166b5db4fd1800778fda7f0849a4e9b2b38f9d8c8fd3fb10",
+      "frozen_bytes": 8093,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/assets.d.ts",
+      "bytes": 94,
+      "sha256": "6b831125245f718a8ccda8413f408e52b25c0807025ae4416eaa700c16a863fd",
+      "copied_from_frozen_input": "typescript/web/assets.d.ts",
+      "byte_identical": true,
+      "frozen_sha256": "6b831125245f718a8ccda8413f408e52b25c0807025ae4416eaa700c16a863fd",
+      "frozen_bytes": 94,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/index.html",
+      "bytes": 327,
+      "sha256": "87640d8b6335ab00e0d7a9fe54d427e818e534c92bcede3590800970b1a970af",
+      "copied_from_frozen_input": "typescript/web/index.html",
+      "byte_identical": true,
+      "frozen_sha256": "87640d8b6335ab00e0d7a9fe54d427e818e534c92bcede3590800970b1a970af",
+      "frozen_bytes": 327,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/main.tsx",
+      "bytes": 992,
+      "sha256": "c2352b3e1fdaa206806f2d92eb4d548b416769c56c6637d2fac301cd811f14c6",
+      "copied_from_frozen_input": "typescript/web/main.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "c2352b3e1fdaa206806f2d92eb4d548b416769c56c6637d2fac301cd811f14c6",
+      "frozen_bytes": 992,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/real-surfaces.tsx",
+      "bytes": 10519,
+      "sha256": "7a11c0f028445ecf89b2e45f927f54c6215f07684f368f6ece19b4ffc2614b15",
+      "copied_from_frozen_input": "typescript/web/real-surfaces.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "7a11c0f028445ecf89b2e45f927f54c6215f07684f368f6ece19b4ffc2614b15",
+      "frozen_bytes": 10519,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/renderer-journey.test.tsx",
+      "bytes": 1585,
+      "sha256": "0b3aa2d4839333bed5e2838dcd2b0e3a839cb5f95ce5b3a6706441c6d3dc6bf3",
+      "copied_from_frozen_input": "typescript/web/renderer-journey.test.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "0b3aa2d4839333bed5e2838dcd2b0e3a839cb5f95ce5b3a6706441c6d3dc6bf3",
+      "frozen_bytes": 1585,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/renderer.test.tsx",
+      "bytes": 9198,
+      "sha256": "c24a630c50d8b792c200a776c9418c7760c5602865cbbc83e0289ee4ef2b82c2",
+      "copied_from_frozen_input": "typescript/web/renderer.test.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "c24a630c50d8b792c200a776c9418c7760c5602865cbbc83e0289ee4ef2b82c2",
+      "frozen_bytes": 9198,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/scale.tsx",
+      "bytes": 10261,
+      "sha256": "4b5a5694389c3d629081080c7d11bf10e32d479885ef5808f2024ad4fee4f497",
+      "copied_from_frozen_input": "typescript/web/scale.tsx",
+      "byte_identical": true,
+      "frozen_sha256": "4b5a5694389c3d629081080c7d11bf10e32d479885ef5808f2024ad4fee4f497",
+      "frozen_bytes": 10261,
+      "formatting_only": false
+    },
+    {
+      "path": "typescript/web/style.css",
+      "bytes": 2277,
+      "sha256": "bfe59e0493e51a48647961e1d7cb69b5283a5a8b51eb71c99f4859009b421c13",
+      "copied_from_frozen_input": "typescript/web/style.css",
+      "byte_identical": true,
+      "frozen_sha256": "bfe59e0493e51a48647961e1d7cb69b5283a5a8b51eb71c99f4859009b421c13",
+      "frozen_bytes": 2277,
+      "formatting_only": false
+    }
+  ],
+  "generated_files": [
+    {
+      "path": ".gitignore",
+      "bytes": 176,
+      "sha256": "7cb0f7737693a7d84045bc0fdd7e17e22350234a62edbc44b4f036db329f7c73"
+    },
+    {
+      "path": "README.md",
+      "bytes": 11993,
+      "sha256": "152dbe165b804d1f89c021f6254baed7f8bf3fa7e5e94cf6e74b6380d7608a71"
+    },
+    {
+      "path": "reports/archive-verification.json",
+      "bytes": 2882,
+      "sha256": "c633ec1007bb6110cb9f48aa1f402d2d054553cabeb1e1d42c0385550f9c7bf7"
+    },
+    {
+      "path": "reports/original-source-formatting.patch",
+      "bytes": 42503,
+      "sha256": "79ade0c3366bbb5b9707b1b08dd0f0796a23734a91d1dcd612a5a75040cf1c52"
+    },
+    {
+      "path": "reports/qualification-summary.json",
+      "bytes": 5540,
+      "sha256": "e86eb8892c7de288e2aa7386781b236af2ccb8c28c78e73e6a8666db5ec4157f"
+    },
+    {
+      "path": "reports/scale-summary.json",
+      "bytes": 11343,
+      "sha256": "0d99f3990de7cd9322bcc100a4d865521643f88aeda394058884224ad051ed5d"
+    }
+  ],
+  "manifest_self_hash_excluded": true,
+  "counts": {
+    "copied_files": 128,
+    "byte_identical_files": 113,
+    "formatter_only_files": 15,
+    "generated_files": 6,
+    "total_files_including_manifest": 135,
+    "copied_bytes": 764403,
+    "frozen_origin_bytes": 761680,
+    "generated_bytes_excluding_manifest": 74437
+  },
+  "source_reconstruction": {
+    "patch": "reports/original-source-formatting.patch",
+    "patch_sha256": "79ade0c3366bbb5b9707b1b08dd0f0796a23734a91d1dcd612a5a75040cf1c52",
+    "direction": "forward maps qualified original to formatted archive; reverse reconstructs exact original",
+    "path_strip_components": 1,
+    "apply_only_to_disposable_archive_copy": true,
+    "formatted_files": 15,
+    "unchanged_files": 113,
+    "metadata_free_elixir_ast_equal": true,
+    "ast_review_receipt_sha256": "87cae53468af9f358b3b8beadd96abc021371fcecfb29e9166f38827838125b4",
+    "patch_context_encoding": "nonblank unified context retained; blank context records have no single-space prefix",
+    "blank_context_prefixes_removed": 12,
+    "reverse_tool": "/usr/bin/patch -R -p1",
+    "superseded_ast_review_receipt_sha256": "977476a622b42bbf3a586f7d8d3278d814dbba8952defade250bf215bd7b8487",
+    "public_formatter_receipt_sha256": "1cd91a6c1ec40f09341dc18dc39c882e3dbb9dac5d3b4c5942d3fd19cb31b678",
+    "all_normalized_sources_formatter_fixed_points": true,
+    "formatter_contract_regression_receipt_sha256": "79894f301105a9acd4043f6c69a7f4f067fc851b783aeb007d296234a9ead17d",
+    "prior_archive_manifest_sha256": "d5fa7c5f5ea141a01843cada904e3264583f350ebb79063ee0a0257850f5d0af"
+  }
+}

@@ -1,0 +1,15 @@
+**/node_modules/
+**/deps/
+**/_build/
+**/dist/
+**/web-dist/
+**/tmp/
+**/logs/
+**/npm-cache/
+**/dependency-evidence/
+**/arbor-home/
+**/interactive-runs/
+*.log
+*.sqlite3
+*.db
+.env

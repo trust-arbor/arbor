@@ -1,0 +1,1045 @@
+--- a/baseline/packages/core/scripts/actionability_proof.exs
++++ b/baseline/packages/core/scripts/actionability_proof.exs
+@@ -1,20 +1,39 @@
+ baseline = Path.expand("../../fixtures/measurements/pre-actionability-core.ex.txt", __DIR__)
+ source = File.read!(baseline)
+-Code.compile_string(String.replace(source, "defmodule ConversationKit do", "defmodule PreviousConversationKit do", global: false))
+
+-fixture = Path.expand("../../fixtures/v1/conversation.json", __DIR__) |> File.read!() |> JSON.decode!()
+-{:ok, before} = PreviousConversationKit.replay(fixture["events"], PreviousConversationKit.new(fixture["id"]))
++Code.compile_string(
++  String.replace(source, "defmodule ConversationKit do", "defmodule PreviousConversationKit do",
++    global: false
++  )
++)
++
++fixture =
++  Path.expand("../../fixtures/v1/conversation.json", __DIR__) |> File.read!() |> JSON.decode!()
++
++{:ok, before} =
++  PreviousConversationKit.replay(fixture["events"], PreviousConversationKit.new(fixture["id"]))
++
+ {:ok, after_state} = ConversationKit.replay(fixture["events"], ConversationKit.new(fixture["id"]))
++
+ settled = %{
+-  "id" => "proof-12", "revision" => 12, "kind" => "settled",
+-  "data" => %{"command_id" => "research", "outcome" => %{
+-    "status" => "cancelled", "output" => nil, "error" => nil
+-  }}
++  "id" => "proof-12",
++  "revision" => 12,
++  "kind" => "settled",
++  "data" => %{
++    "command_id" => "research",
++    "outcome" => %{
++      "status" => "cancelled",
++      "output" => nil,
++      "error" => nil
++    }
++  }
+ }
++
+ {:ok, before} = PreviousConversationKit.apply(before, settled)
+ {:ok, after_state} = ConversationKit.apply(after_state, settled)
+ previous = PreviousConversationKit.project(before)
+ current = ConversationKit.project(after_state)
++
+ report = %{
+   "scope" => "Projection correctness adjustment before notice extension, no authorization bypass",
+   "before" => Map.take(previous, ["approvals", "tools", "speech"]),
+@@ -22,10 +41,14 @@
+   "preserved_authoritative_approval" => after_state["approvals"],
+   "preserved_authoritative_tool" => after_state["tools"]
+ }
++
+ true = hd(previous["approvals"])["status"] == "pending"
+ true = Enum.any?(previous["speech"], &(&1["type"] == "screen_required"))
+ true = hd(current["approvals"])["status"] == "unresolved"
+ false = Enum.any?(current["speech"], &(&1["type"] == "screen_required"))
+ out = Path.expand("../../fixtures/measurements/actionability-fix.json", __DIR__)
+ File.write!(out, JSON.encode!(report))
+-IO.puts("Verified previous pending control/escalation becomes unresolved and silent after terminal cancellation.")
++
++IO.puts(
++  "Verified previous pending control/escalation becomes unresolved and silent after terminal cancellation."
++)
+--- a/baseline/packages/core/test/extension_test.exs
++++ b/baseline/packages/core/test/extension_test.exs
+@@ -5,7 +5,9 @@
+   String.replace(
+     baseline_source,
+     "defmodule ConversationKit do",
+-    "defmodule BaselineConversationKit do", global: false)
++    "defmodule BaselineConversationKit do",
++    global: false
++  )
+ )
+
+ defmodule ConversationKit.ExtensionTest do
+--- a/baseline/packages/demo/bench/render.exs
++++ b/baseline/packages/demo/bench/render.exs
+@@ -6,68 +6,163 @@
+
+ defmodule ConversationDemo.RenderBenchmark do
+   alias ConversationDemo.{ChatLive, TermUIView}
++
+   def run do
+     File.mkdir_p!("evidence")
+     results = Enum.map([100, 1_000, 10_000], &measure/1)
++
+     report = %{
+       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+-      elixir: System.version(), otp: :erlang.system_info(:otp_release) |> to_string(),
+-      dataset: "N transcript messages, N/2 completed commands, 2N valid events; replay setup outside renderer timings",
+-      viewport: %{width: 90, height: 36}, samples: 3,
+-      scope: "Elixir process wall time. LiveView HEEx-to-HTML serialization, Breeze terminal layout+ANSI, TermUI tree+cell buffer. Excludes browser JS, DOM/layout/paint, network, PTY writing, and host work.",
++      elixir: System.version(),
++      otp: :erlang.system_info(:otp_release) |> to_string(),
++      dataset:
++        "N transcript messages, N/2 completed commands, 2N valid events; replay setup outside renderer timings",
++      viewport: %{width: 90, height: 36},
++      samples: 3,
++      scope:
++        "Elixir process wall time. LiveView HEEx-to-HTML serialization, Breeze terminal layout+ANSI, TermUI tree+cell buffer. Excludes browser JS, DOM/layout/paint, network, PTY writing, and host work.",
+       results: results
+     }
++
+     File.write!("evidence/render-benchmark.json", Jason.encode!(report, pretty: true) <> "\n")
+   end
++
+   defp measure(count) do
+     IO.puts("Preparing #{count} transcript messages")
+-    {setup_us, {:ok, state}} = :timer.tc(fn -> ConversationKit.replay(events(count), ConversationKit.new("bench")) end)
++
++    {setup_us, {:ok, state}} =
++      :timer.tc(fn -> ConversationKit.replay(events(count), ConversationKit.new("bench")) end)
++
+     projection = ConversationKit.project(state)
+-    ui = %{snapshot: %{projection: projection, progress: %{}, remaining: 0}, draft: "", error: nil, connected: true, host: nil, width: 90, height: 36, scroll: 0}
++
++    ui = %{
++      snapshot: %{projection: projection, progress: %{}, remaining: 0},
++      draft: "",
++      error: nil,
++      connected: true,
++      host: nil,
++      width: 90,
++      height: 36,
++      scroll: 0
++    }
++
+     projection_time = sample(fn -> ConversationKit.project(state) end)
+-    liveview_time = sample(fn -> ChatLive.render(%{ui: ui, __changed__: nil}) |> Phoenix.HTML.Safe.to_iodata() |> IO.iodata_to_binary() end)
+-    session = Breeze.Test.start!(ConversationDemo.BenchmarkBreeze, size: {90, 36}, start_opts: [ui: ui])
+-    breeze_time = try do
+-      sample(fn -> Breeze.Test.render!(session) end)
+-    catch
+-      :exit, {:timeout, _call} -> %{status: "timeout", deadline_ms: 5_000, note: "Breeze.Test public API's fixed call deadline; total render duration was not established"}
+-    after
+-      Breeze.Test.stop(session)
+-    end
+-    {:ok, buffer} = TermUI.Renderer.BufferManager.start_link(name: ConversationDemo.BenchBuffer, rows: 36, cols: 90)
+-    termui_time = try do
++
++    liveview_time =
+       sample(fn ->
+-        TermUI.Renderer.BufferManager.clear_current(buffer)
+-        TermUI.Runtime.NodeRenderer.render_to_buffer(TermUIView.view(ui), buffer)
++        ChatLive.render(%{ui: ui, __changed__: nil})
++        |> Phoenix.HTML.Safe.to_iodata()
++        |> IO.iodata_to_binary()
+       end)
+-    after GenServer.stop(buffer) end
+-    result = %{messages: count, events: count * 2, setup_replay_us: setup_us, project: projection_time, liveview_html: liveview_time, breeze_ansi: breeze_time, termui_cells: termui_time}
++
++    session =
++      Breeze.Test.start!(ConversationDemo.BenchmarkBreeze, size: {90, 36}, start_opts: [ui: ui])
++
++    breeze_time =
++      try do
++        sample(fn -> Breeze.Test.render!(session) end)
++      catch
++        :exit, {:timeout, _call} ->
++          %{
++            status: "timeout",
++            deadline_ms: 5_000,
++            note:
++              "Breeze.Test public API's fixed call deadline; total render duration was not established"
++          }
++      after
++        Breeze.Test.stop(session)
++      end
++
++    {:ok, buffer} =
++      TermUI.Renderer.BufferManager.start_link(
++        name: ConversationDemo.BenchBuffer,
++        rows: 36,
++        cols: 90
++      )
++
++    termui_time =
++      try do
++        sample(fn ->
++          TermUI.Renderer.BufferManager.clear_current(buffer)
++          TermUI.Runtime.NodeRenderer.render_to_buffer(TermUIView.view(ui), buffer)
++        end)
++      after
++        GenServer.stop(buffer)
++      end
++
++    result = %{
++      messages: count,
++      events: count * 2,
++      setup_replay_us: setup_us,
++      project: projection_time,
++      liveview_html: liveview_time,
++      breeze_ansi: breeze_time,
++      termui_cells: termui_time
++    }
++
+     IO.puts(Jason.encode!(result))
+     result
+   end
++
+   defp sample(fun) do
+     {cold, output} = :timer.tc(fun)
+-    samples = for _ <- 1..3 do
+-      :erlang.garbage_collect()
+-      {microseconds, _} = :timer.tc(fun)
+-      microseconds
+-    end
+-    %{first_us: cold, warm_samples_us: samples, median_us: samples |> Enum.sort() |> Enum.at(1), output_bytes: if(is_binary(output), do: byte_size(output), else: nil)}
++
++    samples =
++      for _ <- 1..3 do
++        :erlang.garbage_collect()
++        {microseconds, _} = :timer.tc(fun)
++        microseconds
++      end
++
++    %{
++      first_us: cold,
++      warm_samples_us: samples,
++      median_us: samples |> Enum.sort() |> Enum.at(1),
++      output_bytes: if(is_binary(output), do: byte_size(output), else: nil)
++    }
+   end
++
+   defp events(count) do
+     Enum.flat_map(1..div(count, 2), fn number ->
+       id = "bench-#{number}"
+       user = "Compare the interface choices #{number}: café 東京 🌿."
+       text = "Shared conversation #{number}; native layout, independent draft, durable result."
++
+       [
+         {"admitted", %{"command_id" => id, "name" => "chat.send"}},
+-        {"message", %{"message" => %{"id" => id <> ".user", "command_id" => id, "role" => "user", "text" => user}}},
+-        {"message", %{"message" => %{"id" => id <> ".assistant", "command_id" => id, "role" => "assistant", "text" => text}}},
+-        {"settled", %{"command_id" => id, "outcome" => %{"status" => "completed", "output" => %{"message_id" => id <> ".assistant", "text" => text}, "error" => nil}}}
++        {"message",
++         %{
++           "message" => %{
++             "id" => id <> ".user",
++             "command_id" => id,
++             "role" => "user",
++             "text" => user
++           }
++         }},
++        {"message",
++         %{
++           "message" => %{
++             "id" => id <> ".assistant",
++             "command_id" => id,
++             "role" => "assistant",
++             "text" => text
++           }
++         }},
++        {"settled",
++         %{
++           "command_id" => id,
++           "outcome" => %{
++             "status" => "completed",
++             "output" => %{"message_id" => id <> ".assistant", "text" => text},
++             "error" => nil
++           }
++         }}
+       ]
+     end)
+     |> Enum.with_index(1)
+-    |> Enum.map(fn {{kind, data}, revision} -> %{"id" => "event-#{revision}", "revision" => revision, "kind" => kind, "data" => data} end)
++    |> Enum.map(fn {{kind, data}, revision} ->
++      %{"id" => "event-#{revision}", "revision" => revision, "kind" => kind, "data" => data}
++    end)
+   end
+ end
+
+--- a/baseline/packages/demo/bench/snapshots.exs
++++ b/baseline/packages/demo/bench/snapshots.exs
+@@ -1,19 +1,30 @@
+ alias ConversationDemo.{BreezeView, TermUIView}
+ File.mkdir_p!("evidence")
++
+ for {width, height} <- [{90, 36}, {24, 14}] do
+   session = Breeze.Test.start!(BreezeView, size: {width, height})
+   File.write!("evidence/breeze-#{width}x#{height}.txt", Breeze.Test.render_text!(session))
+   Breeze.Test.stop(session)
+   state = TermUIView.init([]) |> Map.merge(%{width: width, height: height})
+-  {:ok, manager} = TermUI.Renderer.BufferManager.start_link(name: ConversationDemo.SnapshotBuffer, rows: height, cols: width)
++
++  {:ok, manager} =
++    TermUI.Renderer.BufferManager.start_link(
++      name: ConversationDemo.SnapshotBuffer,
++      rows: height,
++      cols: width
++    )
++
+   TermUI.Runtime.NodeRenderer.render_to_buffer(TermUIView.view(state), manager)
+   buffer = TermUI.Renderer.BufferManager.get_current_buffer(manager)
+-  output = Enum.map_join(1..height, "\n", fn row ->
+-    Enum.map_join(1..width, "", fn col ->
+-      cell = TermUI.Renderer.Buffer.get_cell(buffer, row, col)
+-      if cell.wide_placeholder, do: "", else: cell.char
++
++  output =
++    Enum.map_join(1..height, "\n", fn row ->
++      Enum.map_join(1..width, "", fn col ->
++        cell = TermUI.Renderer.Buffer.get_cell(buffer, row, col)
++        if cell.wide_placeholder, do: "", else: cell.char
++      end)
+     end)
+-  end)
++
+   File.write!("evidence/termui-#{width}x#{height}.txt", output)
+   GenServer.stop(manager)
+ end
+--- a/baseline/packages/demo/lib/conversation_demo/application.ex
++++ b/baseline/packages/demo/lib/conversation_demo/application.ex
+@@ -1,9 +1,14 @@
+ defmodule ConversationDemo.Application do
+   use Application
++
+   def start(_type, _args) do
+-    Supervisor.start_link([
+-      {Phoenix.PubSub, name: ConversationDemo.PubSub},
+-      ConversationDemo.Endpoint
+-    ], strategy: :one_for_one, name: ConversationDemo.Supervisor)
++    Supervisor.start_link(
++      [
++        {Phoenix.PubSub, name: ConversationDemo.PubSub},
++        ConversationDemo.Endpoint
++      ],
++      strategy: :one_for_one,
++      name: ConversationDemo.Supervisor
++    )
+   end
+ end
+--- a/baseline/packages/demo/lib/conversation_demo/breeze_view.ex
++++ b/baseline/packages/demo/lib/conversation_demo/breeze_view.ex
+@@ -4,13 +4,22 @@
+   alias ConversationDemo.Interaction
+
+   def mount(opts, term), do: {:ok, assign(term, ui: Interaction.new(opts))}
+-  def handle_event("chat:draft", %{value: value}, term), do: {:noreply, assign(term, ui: %{term.assigns.ui | draft: value})}
++
++  def handle_event("chat:draft", %{value: value}, term),
++    do: {:noreply, assign(term, ui: %{term.assigns.ui | draft: value})}
++
+   def handle_event("chat:send", _params, term), do: act(term, "send", %{})
+   def handle_event("chat:" <> action, params, term), do: act(term, action, params)
+   def handle_event(:input, %{"key" => "Escape"}, term), do: {:stop, term}
+-  def handle_event(:input, %{"key" => key}, term), do: {:noreply, assign(term, ui: Interaction.key(term.assigns.ui, key))}
++
++  def handle_event(:input, %{"key" => key}, term),
++    do: {:noreply, assign(term, ui: Interaction.key(term.assigns.ui, key))}
++
+   def handle_event(_, _, term), do: {:noreply, term}
+-  defp act(term, action, params), do: {:noreply, assign(term, ui: Interaction.act(term.assigns.ui, action, params))}
++
++  defp act(term, action, params),
++    do: {:noreply, assign(term, ui: Interaction.act(term.assigns.ui, action, params))}
++
+   defp narrow?(width), do: width < 40
+
+   def render(assigns) do
+--- a/baseline/packages/demo/lib/conversation_demo/chat_components.ex
++++ b/baseline/packages/demo/lib/conversation_demo/chat_components.ex
+@@ -1,6 +1,7 @@
+ defmodule ConversationDemo.ChatComponents do
+   use Phoenix.Component
+-  attr :block, :map, required: true
++  attr(:block, :map, required: true)
++
+   def semantic_block(assigns) do
+     ~H"""
+     <article id={"block-" <> @block["id"]} class={"block " <> @block["type"]} data-kind={@block["type"]}>
+@@ -13,6 +14,7 @@
+     </article>
+     """
+   end
++
+   defp label(%{"type" => "message", "role" => "user"}), do: "You"
+   defp label(%{"type" => "message"}), do: "Assistant"
+   defp label(%{"type" => "tool"}), do: "Tool activity"
+@@ -20,8 +22,9 @@
+   defp label(%{"type" => "command"}), do: "Request status"
+   defp label(_), do: "Update"
+
+-  attr :draft, :string, required: true
+-  attr :connected, :boolean, required: true
++  attr(:draft, :string, required: true)
++  attr(:connected, :boolean, required: true)
++
+   def composer(assigns) do
+     ~H"""
+     <form id="composer" phx-submit="chat:send" phx-change="chat:draft" phx-hook="Composer" class="composer">
+--- a/baseline/packages/demo/lib/conversation_demo/chat_live.ex
++++ b/baseline/packages/demo/lib/conversation_demo/chat_live.ex
+@@ -4,14 +4,21 @@
+   import ConversationDemo.ChatComponents
+
+   def mount(_params, _session, socket), do: {:ok, assign(socket, :ui, Interaction.new())}
++
+   def handle_event("chat:send", %{"text" => text}, socket) do
+-    ui = socket.assigns.ui |> Interaction.act("draft", %{"text" => text}) |> Interaction.act("send", %{})
++    ui =
++      socket.assigns.ui
++      |> Interaction.act("draft", %{"text" => text})
++      |> Interaction.act("send", %{})
++
+     socket = assign(socket, :ui, ui)
+     {:noreply, if(ui.error == nil, do: push_event(socket, "composer:sent", %{}), else: socket)}
+   end
++
+   def handle_event("chat:" <> action, params, socket) do
+     {:noreply, assign(socket, :ui, Interaction.act(socket.assigns.ui, action, params))}
+   end
++
+   def render(assigns) do
+     ~H"""
+     <div class="study-shell">
+--- a/baseline/packages/demo/lib/conversation_demo/endpoint.ex
++++ b/baseline/packages/demo/lib/conversation_demo/endpoint.ex
+@@ -1,10 +1,16 @@
+ defmodule ConversationDemo.Endpoint do
+   use Phoenix.Endpoint, otp_app: :conversation_demo
+-  @session [store: :cookie, key: "conversation_spike", signing_salt: "local-spike", same_site: "Lax"]
+-  socket "/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session]]
+-  plug Plug.Static, at: "/assets", from: {:conversation_demo, "priv/static"}
+-  plug Plug.RequestId
+-  plug Plug.Parsers, parsers: [:urlencoded], pass: ["*/*"]
+-  plug Plug.Session, @session
+-  plug ConversationDemo.Router
++
++  @session [
++    store: :cookie,
++    key: "conversation_spike",
++    signing_salt: "local-spike",
++    same_site: "Lax"
++  ]
++  socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session]])
++  plug(Plug.Static, at: "/assets", from: {:conversation_demo, "priv/static"})
++  plug(Plug.RequestId)
++  plug(Plug.Parsers, parsers: [:urlencoded], pass: ["*/*"])
++  plug(Plug.Session, @session)
++  plug(ConversationDemo.Router)
+ end
+--- a/baseline/packages/demo/lib/conversation_demo/interaction.ex
++++ b/baseline/packages/demo/lib/conversation_demo/interaction.ex
+@@ -1,30 +1,57 @@
+ defmodule ConversationDemo.Interaction do
+   @moduledoc "Renderer boundary: local drafts/connectivity, host calls, and semantic projection."
+   alias ConversationDemo.MockHost
++
+   def new(opts \\ []) do
+-    host = Keyword.get_lazy(opts, :host, fn -> {:ok, pid} = MockHost.start_link(owner: self()); pid end)
+-    %{host: host, snapshot: MockHost.snapshot(host), draft: "", connected: true, error: nil, width: 80, height: 24}
++    host =
++      Keyword.get_lazy(opts, :host, fn ->
++        {:ok, pid} = MockHost.start_link(owner: self())
++        pid
++      end)
++
++    %{
++      host: host,
++      snapshot: MockHost.snapshot(host),
++      draft: "",
++      connected: true,
++      error: nil,
++      width: 80,
++      height: 24
++    }
+   end
++
+   def act(ui, "draft", %{"text" => text}), do: %{ui | draft: text}
+   def act(ui, "disconnect", _), do: %{ui | connected: false}
++
+   def act(ui, "replay", _) do
+     case MockHost.act(ui.host, "replay") do
+       {:ok, snapshot} -> %{ui | snapshot: snapshot, connected: true, error: nil}
+       {:error, error} -> %{ui | error: inspect(error)}
+     end
+   end
++
+   def act(ui, action, params) do
+-    params = case action do
+-      "send" -> %{"text" => Map.get(params, "text", ui.draft)}
+-      "approve" -> Map.take(params, ["approval_id", "decision"])
+-      _ -> params
+-    end
++    params =
++      case action do
++        "send" -> %{"text" => Map.get(params, "text", ui.draft)}
++        "approve" -> Map.take(params, ["approval_id", "decision"])
++        _ -> params
++      end
++
+     case MockHost.act(ui.host, action, params) do
+       {:ok, snapshot} ->
+-        %{ui | snapshot: if(ui.connected, do: snapshot, else: ui.snapshot), draft: if(action == "send", do: "", else: ui.draft), error: nil}
+-      {:error, error} -> %{ui | error: inspect(error)}
++        %{
++          ui
++          | snapshot: if(ui.connected, do: snapshot, else: ui.snapshot),
++            draft: if(action == "send", do: "", else: ui.draft),
++            error: nil
++        }
++
++      {:error, error} ->
++        %{ui | error: inspect(error)}
+     end
+   end
++
+   def key(ui, "Enter"), do: act(ui, "send", %{})
+   def key(ui, "F2"), do: act(ui, "advance", %{})
+   def key(ui, "F3"), do: act(ui, "replay", %{})
+@@ -32,9 +59,15 @@
+   def key(ui, "F5"), do: approval(ui, "approved")
+   def key(ui, "F6"), do: approval(ui, "denied")
+   def key(ui, "F7"), do: act(ui, "uncertain", %{})
+-  def key(ui, "Backspace"), do: %{ui | draft: ui.draft |> String.graphemes() |> Enum.drop(-1) |> Enum.join()}
+-  def key(ui, key) when is_binary(key), do: if(String.length(key) == 1, do: %{ui | draft: ui.draft <> key}, else: ui)
++
++  def key(ui, "Backspace"),
++    do: %{ui | draft: ui.draft |> String.graphemes() |> Enum.drop(-1) |> Enum.join()}
++
++  def key(ui, key) when is_binary(key),
++    do: if(String.length(key) == 1, do: %{ui | draft: ui.draft <> key}, else: ui)
++
+   def key(ui, _), do: ui
++
+   defp approval(ui, decision) do
+     case Enum.find(ui.snapshot.projection["approvals"], &(&1["status"] == "pending")) do
+       nil -> %{ui | error: "No pending approval"}
+--- a/baseline/packages/demo/lib/conversation_demo/layout.ex
++++ b/baseline/packages/demo/lib/conversation_demo/layout.ex
+@@ -1,5 +1,6 @@
+ defmodule ConversationDemo.Layout do
+   use Phoenix.Component
++
+   def root(assigns) do
+     ~H"""
+     <!DOCTYPE html>
+--- a/baseline/packages/demo/lib/conversation_demo/mock_host.ex
++++ b/baseline/packages/demo/lib/conversation_demo/mock_host.ex
+@@ -5,90 +5,205 @@
+   def snapshot(host), do: GenServer.call(host, :snapshot)
+   def act(host, action, params \\ %{}), do: GenServer.call(host, {:act, action, params})
+   def events(host), do: GenServer.call(host, :events)
++
+   def fixture do
+-    file = case System.get_env("CONVERSATION_FIXTURE", "conversation") do
+-      "conversation" -> "conversation.json"
+-      "notice" -> "notice.json"
+-      other -> raise "Unknown fixture #{inspect(other)}"
+-    end
++    file =
++      case System.get_env("CONVERSATION_FIXTURE", "conversation") do
++        "conversation" -> "conversation.json"
++        "notice" -> "notice.json"
++        other -> raise "Unknown fixture #{inspect(other)}"
++      end
++
+     Path.expand("../../../fixtures/v1/" <> file, __DIR__) |> File.read!() |> Jason.decode!()
+   end
++
+   def init(opts) do
+     if owner = Keyword.get(opts, :owner), do: Process.monitor(owner)
+     fixture = Keyword.get_lazy(opts, :fixture, &fixture/0)
+     {:ok, model} = ConversationKit.replay(fixture["events"], ConversationKit.new(fixture["id"]))
+     {:ok, %{model: model, events: fixture["events"], progress: %{}, queue: [], serial: 0}}
+   end
++
+   def handle_call(:snapshot, _from, state), do: {:reply, show(state), state}
+   def handle_call(:events, _from, state), do: {:reply, state.events, state}
++
+   def handle_call({:act, action, params}, _from, state) do
+     case decide(state, action, params) do
+       {:ok, next} -> {:reply, {:ok, show(next)}, next}
+       {:error, reason} -> {:reply, {:error, reason}, state}
+     end
+   end
++
+   def handle_info({:DOWN, _, :process, _, _}, state), do: {:stop, :normal, state}
+-  defp show(state), do: %{projection: ConversationKit.project(state.model), progress: state.progress, remaining: length(state.queue)}
++
++  defp show(state),
++    do: %{
++      projection: ConversationKit.project(state.model),
++      progress: state.progress,
++      remaining: length(state.queue)
++    }
++
+   defp decide(state, "replay", _) do
+-    {:ok, model} = ConversationKit.replay(state.events, ConversationKit.new(show(state).projection["id"]))
++    {:ok, model} =
++      ConversationKit.replay(state.events, ConversationKit.new(show(state).projection["id"]))
++
+     {:ok, %{state | model: model, progress: %{}}}
+   end
++
+   defp decide(%{queue: []} = state, "advance", _), do: {:ok, state}
++
+   defp decide(%{queue: [{:progress, id, text} | rest]} = state, "advance", _) do
+-    {:ok, progress} = ConversationKit.progress(state.progress, %{"command_id" => id, "text" => text})
++    {:ok, progress} =
++      ConversationKit.progress(state.progress, %{"command_id" => id, "text" => text})
++
+     {:ok, %{state | queue: rest, progress: progress}}
+   end
++
+   defp decide(%{queue: [{kind, data} | rest]} = state, "advance", _) do
+     next = append(%{state | queue: rest}, kind, data)
+     {:ok, if(kind == "settled", do: %{next | progress: %{}}, else: next)}
+   end
++
+   defp decide(state, "send", %{"text" => text} = params) do
+     with {:ok, _intent} <- ConversationKit.intent(state.model, "send", params) do
+       id = "demo-#{state.serial + 1}"
+-      next = state |> Map.put(:serial, state.serial + 1)
++
++      next =
++        state
++        |> Map.put(:serial, state.serial + 1)
+         |> append("admitted", %{"command_id" => id, "name" => "chat.send"})
+-        |> append("message", %{"message" => %{"id" => id <> ".user", "role" => "user", "text" => text, "command_id" => id}})
++        |> append("message", %{
++          "message" => %{
++            "id" => id <> ".user",
++            "role" => "user",
++            "text" => text,
++            "command_id" => id
++          }
++        })
++
+       queue = [
+         {:progress, id, "I am checking the conversation…"},
+-        {"tool_started", %{"id" => id <> ".tool", "command_id" => id, "name" => "search", "text" => "Searching the local fixture"}},
+-        {"approval_requested", %{"id" => id <> ".approval", "command_id" => id, "text" => "Allow the mock search to continue?", "protected" => true}}
++        {"tool_started",
++         %{
++           "id" => id <> ".tool",
++           "command_id" => id,
++           "name" => "search",
++           "text" => "Searching the local fixture"
++         }},
++        {"approval_requested",
++         %{
++           "id" => id <> ".approval",
++           "command_id" => id,
++           "text" => "Allow the mock search to continue?",
++           "protected" => true
++         }}
+       ]
++
+       {:ok, %{next | queue: state.queue ++ queue}}
+     end
+   end
++
+   defp decide(state, "approve", params) do
+     with {:ok, _intent} <- ConversationKit.intent(state.model, "approve", params) do
+-      approval = Enum.find(show(state).projection["approvals"], &(&1["id"] == params["approval_id"]))
++      approval =
++        Enum.find(show(state).projection["approvals"], &(&1["id"] == params["approval_id"]))
++
+       id = approval["command_id"]
+       decision = params["decision"]
+       next = append(state, "approval_resolved", %{"id" => approval["id"], "decision" => decision})
++
+       if decision == "approved" do
+-        text = "The mock search is complete. This response is shared by the web, terminal, and speech projections."
+-        tool = Enum.find(show(state).projection["tools"], &(&1["command_id"] == id and &1["status"] == "running"))
++        text =
++          "The mock search is complete. This response is shared by the web, terminal, and speech projections."
++
++        tool =
++          Enum.find(
++            show(state).projection["tools"],
++            &(&1["command_id"] == id and &1["status"] == "running")
++          )
++
+         queue = [
+-          {"tool_finished", %{"id" => tool["id"], "status" => "completed", "text" => "One local result found"}},
+-          {"message", %{"message" => %{"id" => id <> ".assistant", "role" => "assistant", "text" => text, "command_id" => id}}},
+-          {"settled", %{"command_id" => id, "outcome" => %{"status" => "completed", "output" => %{"message_id" => id <> ".assistant", "text" => text}, "error" => nil}}}
++          {"tool_finished",
++           %{"id" => tool["id"], "status" => "completed", "text" => "One local result found"}},
++          {"message",
++           %{
++             "message" => %{
++               "id" => id <> ".assistant",
++               "role" => "assistant",
++               "text" => text,
++               "command_id" => id
++             }
++           }},
++          {"settled",
++           %{
++             "command_id" => id,
++             "outcome" => %{
++               "status" => "completed",
++               "output" => %{"message_id" => id <> ".assistant", "text" => text},
++               "error" => nil
++             }
++           }}
+         ]
++
+         {:ok, %{next | queue: next.queue ++ queue}}
+       else
+-        tool = Enum.find(show(state).projection["tools"], &(&1["command_id"] == id and &1["status"] == "running"))
+-        next = if tool, do: append(next, "tool_finished", %{"id" => tool["id"], "status" => "cancelled", "text" => "Mock search cancelled after denial"}), else: next
+-        {:ok, append(next, "settled", %{"command_id" => id, "outcome" => outcome("failed", "approval_denied", "The mock request was denied.")})}
++        tool =
++          Enum.find(
++            show(state).projection["tools"],
++            &(&1["command_id"] == id and &1["status"] == "running")
++          )
++
++        next =
++          if tool,
++            do:
++              append(next, "tool_finished", %{
++                "id" => tool["id"],
++                "status" => "cancelled",
++                "text" => "Mock search cancelled after denial"
++              }),
++            else: next
++
++        {:ok,
++         append(next, "settled", %{
++           "command_id" => id,
++           "outcome" => outcome("failed", "approval_denied", "The mock request was denied.")
++         })}
+       end
+     end
+   end
++
+   defp decide(state, "uncertain", _) do
+     case Enum.find(show(state).projection["commands"], &(&1["status"] == "pending")) do
+-      nil -> {:error, :no_pending_command}
+-      command -> {:ok, append(%{state | queue: [], progress: %{}}, "settled", %{"command_id" => command["id"], "outcome" => outcome("uncertain", "effect_unknown", "The mock effect could not be established. It was not repeated.")})}
+-    end
+-  end
++      nil ->
++        {:error, :no_pending_command}
++
++      command ->
++        {:ok,
++         append(%{state | queue: [], progress: %{}}, "settled", %{
++           "command_id" => command["id"],
++           "outcome" =>
++             outcome(
++               "uncertain",
++               "effect_unknown",
++               "The mock effect could not be established. It was not repeated."
++             )
++         })}
++    end
++  end
++
+   defp decide(_state, _action, _params), do: {:error, :unsupported_action}
+-  defp outcome(status, code, message), do: %{"status" => status, "output" => nil, "error" => %{"code" => code, "message" => message, "retryable" => false}}
++
++  defp outcome(status, code, message),
++    do: %{
++      "status" => status,
++      "output" => nil,
++      "error" => %{"code" => code, "message" => message, "retryable" => false}
++    }
++
+   defp append(state, kind, data) do
+     revision = ConversationKit.project(state.model)["revision"] + 1
+     event = %{"id" => "event-#{revision}", "revision" => revision, "kind" => kind, "data" => data}
++
+     case ConversationKit.apply(state.model, event) do
+       {:ok, model} -> %{state | model: model, events: state.events ++ [event]}
+       {:error, reason} -> raise "Mock host invalid event #{kind}: #{inspect(reason)}"
+--- a/baseline/packages/demo/lib/conversation_demo/term_ui_view.ex
++++ b/baseline/packages/demo/lib/conversation_demo/term_ui_view.ex
+@@ -8,31 +8,65 @@
+     Process.send_after(self(), :dispatch_effects, 20)
+     Map.merge(Interaction.new(opts), %{effects: [], scroll: 0})
+   end
+-  def event_to_msg(%Event.Resize{width: width, height: height}, _state), do: {:msg, {:resize, width, height}}
++
++  def event_to_msg(%Event.Resize{width: width, height: height}, _state),
++    do: {:msg, {:resize, width, height}}
++
+   def event_to_msg(%Event.Key{key: :escape}, _state), do: {:msg, :quit}
+-  def event_to_msg(%Event.Key{key: key}, _state) when key in [:enter, :backspace, :page_up, :page_down, :f2, :f3, :f4, :f5, :f6, :f7] do
+-    translated = %{enter: "Enter", backspace: "Backspace", page_up: "PageUp", page_down: "PageDown", f2: "F2", f3: "F3", f4: "F4", f5: "F5", f6: "F6", f7: "F7"}[key]
++
++  def event_to_msg(%Event.Key{key: key}, _state)
++      when key in [:enter, :backspace, :page_up, :page_down, :f2, :f3, :f4, :f5, :f6, :f7] do
++    translated =
++      %{
++        enter: "Enter",
++        backspace: "Backspace",
++        page_up: "PageUp",
++        page_down: "PageDown",
++        f2: "F2",
++        f3: "F3",
++        f4: "F4",
++        f5: "F5",
++        f6: "F6",
++        f7: "F7"
++      }[key]
++
+     {:msg, {:key, translated}}
+   end
+-  def event_to_msg(%Event.Key{char: char}, _state) when is_binary(char) and char != "", do: {:msg, {:key, char}}
++
++  def event_to_msg(%Event.Key{char: char}, _state) when is_binary(char) and char != "",
++    do: {:msg, {:key, char}}
++
+   def event_to_msg(_, _), do: :ignore
+   def update({:resize, width, height}, state), do: {%{state | width: width, height: height}, []}
+-  def update({:key, "PageUp"}, state), do: {%{state | scroll: state.scroll + max(state.height - 6, 1)}, []}
+-  def update({:key, "PageDown"}, state), do: {%{state | scroll: max(state.scroll - max(state.height - 6, 1), 0)}, []}
+-  def update({:key, "Enter"}, state), do: {%{state | draft: "", effects: state.effects ++ [{:send, state.draft}]}, []}
+-  def update({:key, key}, state) when key in ["F2", "F3", "F4", "F5", "F6", "F7"], do: {%{state | effects: state.effects ++ [{:key, key}]}, []}
++
++  def update({:key, "PageUp"}, state),
++    do: {%{state | scroll: state.scroll + max(state.height - 6, 1)}, []}
++
++  def update({:key, "PageDown"}, state),
++    do: {%{state | scroll: max(state.scroll - max(state.height - 6, 1), 0)}, []}
++
++  def update({:key, "Enter"}, state),
++    do: {%{state | draft: "", effects: state.effects ++ [{:send, state.draft}]}, []}
++
++  def update({:key, key}, state) when key in ["F2", "F3", "F4", "F5", "F6", "F7"],
++    do: {%{state | effects: state.effects ++ [{:key, key}]}, []}
++
+   def update({:key, key}, state), do: {Interaction.key(state, key), []}
+   def update(:quit, state), do: {state, [TermUI.Command.quit()]}
+   def update(_, state), do: {state, []}
+
+   def handle_info(:dispatch_effects, state) do
+     Process.send_after(self(), :dispatch_effects, 20)
+-    next = Enum.reduce(state.effects, state, fn
+-      {:send, text}, ui -> Interaction.act(ui, "send", %{"text" => text})
+-      {:key, key}, ui -> Interaction.key(ui, key)
+-    end)
++
++    next =
++      Enum.reduce(state.effects, state, fn
++        {:send, text}, ui -> Interaction.act(ui, "send", %{"text" => text})
++        {:key, key}, ui -> Interaction.key(ui, key)
++      end)
++
+     {%{next | effects: [], draft: state.draft}, []}
+   end
++
+   def handle_info(_, state), do: {state, []}
+
+   def view(state) do
+@@ -41,26 +75,61 @@
+     start = max(length(content) - available - Map.get(state, :scroll, 0), 0)
+     visible = Enum.slice(content, start, available)
+     padding = List.duplicate("", max(available - length(visible), 0))
+-    title = if state.width < 35, do: "TERMUI / r#{state.snapshot.projection["revision"]}", else: hd(rows(state))
+-    heading = [title, if(state.connected, do: "Following · PgUp/PgDn", else: "Disconnected · F3 replay")]
+-    footer = [state.error || "", "> " <> state.draft, "F2 next F3 replay F4 pause", "F5 yes F6 no F7 ? Esc exit"]
++
++    title =
++      if state.width < 35,
++        do: "TERMUI / r#{state.snapshot.projection["revision"]}",
++        else: hd(rows(state))
++
++    heading = [
++      title,
++      if(state.connected, do: "Following · PgUp/PgDn", else: "Disconnected · F3 replay")
++    ]
++
++    footer = [
++      state.error || "",
++      "> " <> state.draft,
++      "F2 next F3 replay F4 pause",
++      "F5 yes F6 no F7 ? Esc exit"
++    ]
++
+     stack(:vertical, Enum.map(heading ++ visible ++ padding ++ footer, &text/1))
+   end
++
+   def rows(state) do
+     projection = state.snapshot.projection
+-    ["CONVERSATION / TERMUI · revision #{projection["revision"]}", if(state.connected, do: "Following the shared record", else: "Disconnected — F3 replays the record")]
+-    ++ Enum.flat_map(projection["blocks"], fn block -> ["#{block["role"] || block["type"]} #{block["status"] || ""}", block["text"]] end)
+-    ++ Enum.map(state.snapshot.progress, fn {_id, text} -> "… " <> text end)
+-    ++ Enum.map(projection["speech"], &"VOICE [#{&1["type"]}]: #{&1["text"]}")
++
++    [
++      "CONVERSATION / TERMUI · revision #{projection["revision"]}",
++      if(state.connected,
++        do: "Following the shared record",
++        else: "Disconnected — F3 replays the record"
++      )
++    ] ++
++      Enum.flat_map(projection["blocks"], fn block ->
++        ["#{block["role"] || block["type"]} #{block["status"] || ""}", block["text"]]
++      end) ++
++      Enum.map(state.snapshot.progress, fn {_id, text} -> "… " <> text end) ++
++      Enum.map(projection["speech"], &"VOICE [#{&1["type"]}]: #{&1["text"]}")
+   end
++
+   def wrap(text, width) do
+-    text |> String.split("\n") |> Enum.flat_map(fn paragraph ->
+-      {lines, current, _columns} = Enum.reduce(String.graphemes(paragraph), {[], "", 0}, fn char, {lines, current, columns} ->
+-        size = TermUI.Renderer.DisplayWidth.width(char)
+-        if columns + size > width and current != "", do: {lines ++ [current], char, size}, else: {lines, current <> char, columns + size}
+-      end)
++    text
++    |> String.split("\n")
++    |> Enum.flat_map(fn paragraph ->
++      {lines, current, _columns} =
++        Enum.reduce(String.graphemes(paragraph), {[], "", 0}, fn char,
++                                                                 {lines, current, columns} ->
++          size = TermUI.Renderer.DisplayWidth.width(char)
++
++          if columns + size > width and current != "",
++            do: {lines ++ [current], char, size},
++            else: {lines, current <> char, columns + size}
++        end)
++
+       lines ++ [current]
+     end)
+   end
++
+   def run, do: TermUI.Runtime.run(root: __MODULE__)
+ end
+--- a/baseline/packages/demo/test/interfaces_test.exs
++++ b/baseline/packages/demo/test/interfaces_test.exs
+@@ -12,7 +12,7 @@
+     assert html =~ "uncertain"
+     assert html =~ "Review the pending approval on screen"
+     html = view |> form("#composer", text: "café 東京 🌿") |> render_submit()
+-    assert_push_event view, "composer:sent", %{}
++    assert_push_event(view, "composer:sent", %{})
+     assert html =~ "café 東京 🌿"
+     assert html =~ "Command demo-1: pending"
+     view |> form("#composer", text: "Keep my draft: 東京") |> render_change()
+@@ -50,16 +50,30 @@
+     rendered = Breeze.Test.render_text!(session)
+     assert String.valid?(rendered)
+     assert length(String.split(rendered, "\n")) >= 1
+-    assert Enum.all?(String.split(rendered, "\n"), &(TermUI.Renderer.DisplayWidth.width(&1) <= 24))
++
++    assert Enum.all?(
++             String.split(rendered, "\n"),
++             &(TermUI.Renderer.DisplayWidth.width(&1) <= 24)
++           )
++
+     session = Breeze.Test.resize(session, {90, 45})
+     assert Breeze.Test.render_text!(session) =~ "café 東京 🌿"
+-    Breeze.Test.event(session, "chat:approve", %{"approval_id" => "approval-access", "decision" => "denied"})
+-    assert Breeze.Test.render_text!(session) =~ "approval_denied" or Breeze.Test.render_text!(session) =~ "denied"
++
++    Breeze.Test.event(session, "chat:approve", %{
++      "approval_id" => "approval-access",
++      "decision" => "denied"
++    })
++
++    assert Breeze.Test.render_text!(session) =~ "approval_denied" or
++             Breeze.Test.render_text!(session) =~ "denied"
+   end
+
+   test "TermUI runtime dispatches input and resize with actual render-tree-to-buffer output" do
+     runtime = start_supervised!({TermUI.Runtime, root: TermUIView, skip_terminal: true})
+-    for char <- String.graphemes("café 東京 🌿"), do: TermUI.Runtime.send_event(runtime, %TermUI.Event.Key{key: :char, char: char})
++
++    for char <- String.graphemes("café 東京 🌿"),
++        do: TermUI.Runtime.send_event(runtime, %TermUI.Event.Key{key: :char, char: char})
++
+     TermUI.Runtime.send_event(runtime, %TermUI.Event.Key{key: :enter})
+     TermUI.Runtime.send_event(runtime, %TermUI.Event.Resize{width: 24, height: 14})
+     TermUI.Runtime.sync(runtime)
+@@ -69,13 +83,28 @@
+     assert ui.draft == ""
+     assert ui.width == 24
+     assert Enum.any?(ui.snapshot.projection["messages"], &(&1["text"] == "café 東京 🌿"))
+-    buffer = start_supervised!({TermUI.Renderer.BufferManager, name: ConversationDemo.TestBuffer, rows: 14, cols: 24})
++
++    buffer =
++      start_supervised!(
++        {TermUI.Renderer.BufferManager, name: ConversationDemo.TestBuffer, rows: 14, cols: 24}
++      )
++
+     TermUI.Runtime.NodeRenderer.render_to_buffer(TermUIView.view(ui), buffer)
+     current = TermUI.Renderer.BufferManager.get_current_buffer(buffer)
+-    text = for row <- 1..14, into: "", do: Enum.map_join(1..24, "", fn col -> TermUI.Renderer.Buffer.get_cell(current, row, col).char end)
++
++    text =
++      for row <- 1..14,
++          into: "",
++          do:
++            Enum.map_join(1..24, "", fn col ->
++              TermUI.Renderer.Buffer.get_cell(current, row, col).char
++            end)
++
+     assert text =~ "TERMUI / r"
+     assert String.valid?(text)
+-    assert TermUIView.wrap("東京🌿 café", 5) |> Enum.all?(&(TermUI.Renderer.DisplayWidth.width(&1) <= 5))
++
++    assert TermUIView.wrap("東京🌿 café", 5)
++           |> Enum.all?(&(TermUI.Renderer.DisplayWidth.width(&1) <= 5))
+   end
+
+   test "all adapters consume one projection and replay does not change a local draft" do
+--- a/baseline/packages/demo/test/notice_extension_test.exs
++++ b/baseline/packages/demo/test/notice_extension_test.exs
+@@ -12,15 +12,32 @@
+     notice = Enum.find(ui.snapshot.projection["blocks"], &(&1["type"] == "notice"))
+     assert render_component(&ChatComponents.semantic_block/1, block: notice) =~ @text
+     session = Breeze.Test.start!(BreezeView, size: {90, 60}, start_opts: [host: host])
++
+     try do
+       assert Breeze.Test.render_text!(session) =~ @text
+     after
+       Breeze.Test.stop(session)
+     end
+-    manager = start_supervised!({TermUI.Renderer.BufferManager, name: ConversationDemo.NoticeBuffer, rows: 60, cols: 90})
+-    TermUI.Runtime.NodeRenderer.render_to_buffer(TermUIView.view(%{ui | width: 90, height: 60}), manager)
++
++    manager =
++      start_supervised!(
++        {TermUI.Renderer.BufferManager, name: ConversationDemo.NoticeBuffer, rows: 60, cols: 90}
++      )
++
++    TermUI.Runtime.NodeRenderer.render_to_buffer(
++      TermUIView.view(%{ui | width: 90, height: 60}),
++      manager
++    )
++
+     buffer = TermUI.Renderer.BufferManager.get_current_buffer(manager)
+-    text = Enum.map_join(1..60, "\n", fn row -> Enum.map_join(1..90, "", fn col -> TermUI.Renderer.Buffer.get_cell(buffer, row, col).char end) end)
++
++    text =
++      Enum.map_join(1..60, "\n", fn row ->
++        Enum.map_join(1..90, "", fn col ->
++          TermUI.Renderer.Buffer.get_cell(buffer, row, col).char
++        end)
++      end)
++
+     assert text =~ @text
+     refute Enum.any?(ui.snapshot.projection["speech"], &(&1["text"] == @text))
+   end

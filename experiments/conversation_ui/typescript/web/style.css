@@ -1,0 +1,31 @@
+:root { color-scheme: light; color: #1e3027; background: #f5f4ec; font-family: Georgia, serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 920px; margin: 0 auto; padding: 28px 24px; }
+header { border-bottom: 2px solid #314d3c; margin-bottom: 16px; }
+.eyebrow, .role, footer, output, button { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+.eyebrow { letter-spacing: .12em; }
+h1 { margin: 8px 0; font-weight: 400; font-size: 34px; }
+h2 { font-size: 19px; font-weight: 400; }
+nav, .history-controls, [role="group"] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+button { border: 1px solid #849184; padding: 8px 10px; background: #fffef8; color: #1e3027; cursor: pointer; }
+button:hover:not(:disabled), button[aria-pressed="true"] { background: #d9e8d9; border-color: #314d3c; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid #365c8d; outline-offset: 2px; }
+.history-controls label { font-size: 13px; }
+.history-controls output { margin-left: auto; }
+.transcript { height: 48vh; min-height: 240px; overflow-y: auto; border-block: 1px solid #c6cdbf; background: #fffef8; padding: 8px 16px; }
+.message { display: grid; grid-template-columns: 90px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid #ebece3; }
+.message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.role { padding-top: 3px; color: #647268; text-transform: uppercase; }
+.message[data-role="assistant"] .role { color: #274f36; }
+.composer { display: flex; gap: 10px; margin: 12px 0; }
+textarea { flex: 1; min-width: 0; resize: vertical; padding: 10px; border: 1px solid #849184; font: inherit; }
+.question { padding: 4px 16px; border-left: 3px solid #314d3c; background: #e8eddf; margin: 20px 0; }
+.question p, .delivery p { font-size: 13px; }
+.delivery { color: #57645a; }
+footer { border-top: 1px solid #c6cdbf; padding-top: 8px; }
+footer details button { margin: 8px 8px 0 0; }
+[role="alert"] { padding: 14px; background: #f1e1d5; }
+.empty { color: #6f776b; }
+@media (max-width: 560px) { main { padding: 16px; } .message { grid-template-columns: 65px 1fr; gap: 8px; } h1 { font-size: 28px; } }

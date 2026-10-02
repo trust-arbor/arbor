@@ -1,0 +1,363 @@
+{
+  "schema": "conversation-ui-portable-scale-summary/v1",
+  "date": "2026-10-01",
+  "samples_per_lane": 1,
+  "comparison_limit": "Different renderer measurement boundaries and terminal geometries; these observations are not directly comparable performance rankings.",
+  "live_view_breeze": {
+    "schema": "conversation-ui-scale/v1",
+    "results": [
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "live_view",
+        "retained_messages": 100,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 10461,
+        "output_bytes": 8346
+      },
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "breeze",
+        "retained_messages": 100,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 50990,
+        "output_bytes": 5324
+      },
+      {
+        "status": "passed",
+        "mode": "full",
+        "renderer": "live_view",
+        "retained_messages": 100,
+        "rendered_message_blocks": 100,
+        "wall_microseconds": 222,
+        "output_bytes": 28337
+      },
+      {
+        "status": "passed",
+        "mode": "full",
+        "renderer": "breeze",
+        "retained_messages": 100,
+        "rendered_message_blocks": 100,
+        "wall_microseconds": 39393,
+        "output_bytes": 5324
+      },
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "live_view",
+        "retained_messages": 1000,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 305,
+        "output_bytes": 8390
+      },
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "breeze",
+        "retained_messages": 1000,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 9936,
+        "output_bytes": 5324
+      },
+      {
+        "status": "passed",
+        "mode": "full",
+        "renderer": "live_view",
+        "retained_messages": 1000,
+        "rendered_message_blocks": 1000,
+        "wall_microseconds": 1773,
+        "output_bytes": 255142
+      },
+      {
+        "status": "passed",
+        "mode": "full",
+        "renderer": "breeze",
+        "retained_messages": 1000,
+        "rendered_message_blocks": 1000,
+        "wall_microseconds": 893802,
+        "output_bytes": 5324
+      },
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "live_view",
+        "retained_messages": 10000,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 2543,
+        "output_bytes": 8434
+      },
+      {
+        "status": "passed",
+        "mode": "window",
+        "renderer": "breeze",
+        "retained_messages": 10000,
+        "rendered_message_blocks": 20,
+        "wall_microseconds": 22123,
+        "output_bytes": 5324
+      },
+      {
+        "status": "passed",
+        "mode": "full",
+        "renderer": "live_view",
+        "retained_messages": 10000,
+        "rendered_message_blocks": 10000,
+        "wall_microseconds": 19994,
+        "output_bytes": 2541147
+      },
+      {
+        "status": "public_test_api_timeout_5000ms",
+        "mode": "full",
+        "renderer": "breeze",
+        "retained_messages": 10000,
+        "rendered_message_blocks": 10000,
+        "wall_microseconds": 5073486
+      }
+    ],
+    "samples_per_lane": 1,
+    "terminal_size": [
+      110,
+      55
+    ],
+    "default_window_messages": 20,
+    "delivery_blocks": 0
+  },
+  "assistant_ui": {
+    "schema": "conversation-ui-scale/v1",
+    "samples_per_lane": 1,
+    "default_window_messages": 20,
+    "delivery_blocks": 0,
+    "all_window_lanes_passed": true,
+    "full_failures": 0,
+    "limits": [
+      "JSDOM DOM mount is not browser layout or LiveView HTML-string rendering",
+      "Ink test active-screen frame is not a physical terminal or Breeze redraw",
+      "Ink test stdout geometry is recorded per lane; it is not matched to Breeze 110 columns by 55 rows",
+      "No Static history; existing terminal scrollback is not erased"
+    ],
+    "results": [
+      {
+        "renderer": "web",
+        "mode": "window",
+        "requested_messages": 100,
+        "retained_messages": 100,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 69.05879099999993,
+        "output_bytes": 4104,
+        "hydration_ms": 0.7711249999999978,
+        "active_output_record_count": 20,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "web",
+        "mode": "full",
+        "requested_messages": 100,
+        "retained_messages": 100,
+        "rendered_message_blocks": 100,
+        "expected_rendered_message_blocks": 100,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 83.73799999999994,
+        "output_bytes": 16508,
+        "hydration_ms": 0.781290999999996,
+        "active_output_record_count": 100,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "web",
+        "mode": "window",
+        "requested_messages": 1000,
+        "retained_messages": 1000,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 65.18458300000009,
+        "output_bytes": 4148,
+        "hydration_ms": 2.372084000000001,
+        "active_output_record_count": 20,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "web",
+        "mode": "full",
+        "requested_messages": 1000,
+        "retained_messages": 1000,
+        "rendered_message_blocks": 1000,
+        "expected_rendered_message_blocks": 1000,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 206.2917500000001,
+        "output_bytes": 157813,
+        "hydration_ms": 2.5509580000000014,
+        "active_output_record_count": 1000,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "web",
+        "mode": "window",
+        "requested_messages": 10000,
+        "retained_messages": 10000,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 67.51316699999995,
+        "output_bytes": 4192,
+        "hydration_ms": 15.972709000000002,
+        "active_output_record_count": 20,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "web",
+        "mode": "full",
+        "requested_messages": 10000,
+        "retained_messages": 10000,
+        "rendered_message_blocks": 10000,
+        "expected_rendered_message_blocks": 10000,
+        "measurement": "jsdom_dom_mount",
+        "status": "passed",
+        "duration_ms": 1159.613875,
+        "output_bytes": 1588818,
+        "hydration_ms": 15.794417000000003,
+        "active_output_record_count": 10000,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "window",
+        "requested_messages": 100,
+        "retained_messages": 100,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 58.39187499999997,
+        "output_bytes": 1793,
+        "hydration_ms": 0.8549589999999938,
+        "active_output_record_count": 20,
+        "output_line_count": 70,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "full",
+        "requested_messages": 100,
+        "retained_messages": 100,
+        "rendered_message_blocks": 100,
+        "expected_rendered_message_blocks": 100,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 83.25704200000001,
+        "output_bytes": 4786,
+        "hydration_ms": 0.7866669999999942,
+        "active_output_record_count": 100,
+        "output_line_count": 310,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "window",
+        "requested_messages": 1000,
+        "retained_messages": 1000,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 54.01991700000002,
+        "output_bytes": 1817,
+        "hydration_ms": 2.6359170000000063,
+        "active_output_record_count": 20,
+        "output_line_count": 70,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "full",
+        "requested_messages": 1000,
+        "retained_messages": 1000,
+        "rendered_message_blocks": 1000,
+        "expected_rendered_message_blocks": 1000,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 282.09445800000003,
+        "output_bytes": 39440,
+        "hydration_ms": 2.698332999999998,
+        "active_output_record_count": 1000,
+        "output_line_count": 3010,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "window",
+        "requested_messages": 10000,
+        "retained_messages": 10000,
+        "rendered_message_blocks": 20,
+        "expected_rendered_message_blocks": 20,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 52.931167000000016,
+        "output_bytes": 1841,
+        "hydration_ms": 16.395541,
+        "active_output_record_count": 20,
+        "output_line_count": 70,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      },
+      {
+        "renderer": "ink",
+        "mode": "full",
+        "requested_messages": 10000,
+        "retained_messages": 10000,
+        "rendered_message_blocks": 10000,
+        "expected_rendered_message_blocks": 10000,
+        "measurement": "ink_active_screen_frame",
+        "status": "passed",
+        "duration_ms": 1866.9884579999998,
+        "output_bytes": 394944,
+        "hydration_ms": 17.421625,
+        "active_output_record_count": 10000,
+        "output_line_count": 30010,
+        "terminal_geometry": {
+          "columns": 100,
+          "rows": null,
+          "source": "ink-testing-library stdout; no rows supplied"
+        },
+        "renderer_stderr_bytes": 0,
+        "diagnostic_output_bytes": 0
+      }
+    ]
+  }
+}

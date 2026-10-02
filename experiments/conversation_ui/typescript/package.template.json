@@ -1,0 +1,31 @@
+{
+  "name": "arbor-conversation-ui-comparison",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:shared": "node --test --test-reporter=tap tests/*.test.mjs",
+    "test:renderers": "node --import tsx --test --test-reporter=tap web/renderer.test.tsx ink/renderer.test.tsx",
+    "build:web": "esbuild web/main.tsx --bundle --outfile=web/dist/app.js --platform=browser --format=esm"
+  },
+  "dependencies": {
+    "@assistant-ui/core": "published-stable",
+    "@assistant-ui/react": "published-stable",
+    "@assistant-ui/react-ink": "published-stable",
+    "ink": "published-stable",
+    "react": "published-stable",
+    "react-dom": "published-stable",
+    "ws": "published-stable"
+  },
+  "devDependencies": {
+    "@types/node": "published-stable",
+    "@types/react": "published-stable",
+    "@types/react-dom": "published-stable",
+    "esbuild": "published-stable",
+    "ink-testing-library": "published-stable",
+    "jsdom": "published-stable",
+    "tsx": "published-stable",
+    "typescript": "published-stable"
+  }
+}

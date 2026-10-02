@@ -1,0 +1,59 @@
+Code.require_file(Path.expand("../../build_support/mix_project_paths.exs", __DIR__))
+
+defmodule ArborVoice.MixProject do
+  use Mix.Project
+
+  def project do
+    paths =
+      Arbor.MixProjectPaths.project_paths(build_path: "../../_build", deps_path: "../../deps")
+
+    [
+      app: :arbor_voice,
+      version: "0.1.0",
+      build_path: paths[:build_path],
+      config_path: "../../config/config.exs",
+      deps_path: paths[:deps_path],
+      lockfile: "../../mix.lock",
+      elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: [~r"^test/support/"],
+      start_permanent: Mix.env() == :prod,
+      deps: deps()
+    ]
+  end
+
+  def application do
+    [
+      extra_applications: [:logger],
+      mod: {Arbor.Voice.Application, []}
+    ]
+  end
+
+  # L8 — headless engagement-substrate consumer for voice, the sibling of
+  # arbor_dashboard. arbor_orchestrator + arbor_agent pin the level at L8
+  # (1 + their L7); direct security/trust deps support realtime egress gates.
+  defp deps do
+    [
+      {:conversation_kit_arbor_gateway,
+       path: "../../../packages/remote", only: :test, runtime: false},
+      {:conversation_demo, path: "../../../packages/demo", only: :test, runtime: false},
+      {:arbor_kernel_runtime, in_umbrella: true},
+      {:arbor_multimedia, in_umbrella: true},
+      {:arbor_persistence, in_umbrella: true},
+      {:arbor_comms, in_umbrella: true},
+      {:arbor_llm, in_umbrella: true},
+      {:arbor_ai, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
+      {:arbor_orchestrator, in_umbrella: true},
+      {:arbor_agent, in_umbrella: true},
+      {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.0"},
+      {:mint, "~> 1.9"},
+      {:mint_web_socket, "~> 1.0"}
+    ]
+  end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
+end

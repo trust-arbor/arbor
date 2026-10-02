@@ -1,0 +1,190 @@
+{
+  "schema": "conversation-ui-portable-review-summary/v1",
+  "date": "2026-10-01",
+  "status": "accepted_after_exact_generated_output_review",
+  "original_attempt_status": "frozen_input_drift",
+  "qualification_result_sha256": "e22bd08305561c4bb6835b5322ebb5a49f620bffd83e12f5f038391412d8f63f",
+  "qualification_review_sha256": "e335c70be2b6605bca135fcadf14d024a9087f616bb129b99b7a8449baf5180d",
+  "frozen_inputs_receipt_sha256": "65b254d90ca68113b3a07de4fe3912b4732c467bab1021f765b295d371399ccc",
+  "passed_phases": 25,
+  "phases": [
+    {
+      "id": "node_runtime",
+      "status": "passed"
+    },
+    {
+      "id": "shared_boundary",
+      "status": "passed"
+    },
+    {
+      "id": "published_resolution_tests",
+      "status": "passed"
+    },
+    {
+      "id": "frozen_published_packages",
+      "status": "passed"
+    },
+    {
+      "id": "npm_lock",
+      "status": "passed"
+    },
+    {
+      "id": "npm_install",
+      "status": "passed"
+    },
+    {
+      "id": "published_exports",
+      "status": "passed"
+    },
+    {
+      "id": "typescript",
+      "status": "passed"
+    },
+    {
+      "id": "assistant_ui_renderers",
+      "status": "passed"
+    },
+    {
+      "id": "renderer_stability",
+      "status": "passed"
+    },
+    {
+      "id": "web_build",
+      "status": "passed"
+    },
+    {
+      "id": "assistant_ui_scale",
+      "status": "passed"
+    },
+    {
+      "id": "native_dependency_input",
+      "status": "passed"
+    },
+    {
+      "id": "dependency_toolchain",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_dependency_bootstrap",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_native_compile",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_native_output",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_dependencies",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_compile",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_renderers",
+      "status": "passed"
+    },
+    {
+      "id": "baseline_scale",
+      "status": "passed"
+    },
+    {
+      "id": "gateway_dependency_bootstrap",
+      "status": "passed"
+    },
+    {
+      "id": "gateway_dependencies",
+      "status": "passed"
+    },
+    {
+      "id": "gateway_compile",
+      "status": "passed"
+    },
+    {
+      "id": "real_gateway",
+      "status": "passed"
+    }
+  ],
+  "distinct_selected_tests": {
+    "shared_boundary": 23,
+    "published_resolution_tests": 14,
+    "assistant_ui_renderers": 11,
+    "baseline_renderers": 17,
+    "real_gateway": 1
+  },
+  "distinct_test_count": 66,
+  "renderer_repeats": 10,
+  "tests_per_renderer_repeat": 11,
+  "generated_output_review": {
+    "scope": "Exactly two generated pa_devices C/C++ files; only local loop-index identifier renames were accepted. The original failed status was retained.",
+    "unchanged_frozen_input_count": 12231,
+    "verified_execution_log_count": 24,
+    "outputs": [
+      {
+        "path": "baseline/source/deps/membrane_portaudio_plugin/c_src/membrane_portaudio_plugin/_generated/nif/pa_devices.c",
+        "before_sha256": "df4e06eae1d25335a91096ed9251e585d12dab18557baece15335350dea09e2b",
+        "after_sha256": "930a1605bfc81f9e48aee8701cab3a4174fc56ca1b6d41ea6f25b67a3d6b9dd6",
+        "reconstructed_sha256": "df4e06eae1d25335a91096ed9251e585d12dab18557baece15335350dea09e2b",
+        "raw_reconstruction_equal": true,
+        "loop_count": 2,
+        "renames": {
+          "i_5": "i_8",
+          "i_7": "i_10"
+        },
+        "references_per_loop": {
+          "i_5": 10,
+          "i_7": 10
+        },
+        "changed_identifier_occurrences": 20
+      },
+      {
+        "path": "baseline/source/deps/membrane_portaudio_plugin/c_src/membrane_portaudio_plugin/_generated/nif/pa_devices.cpp",
+        "before_sha256": "df4e06eae1d25335a91096ed9251e585d12dab18557baece15335350dea09e2b",
+        "after_sha256": "930a1605bfc81f9e48aee8701cab3a4174fc56ca1b6d41ea6f25b67a3d6b9dd6",
+        "reconstructed_sha256": "df4e06eae1d25335a91096ed9251e585d12dab18557baece15335350dea09e2b",
+        "raw_reconstruction_equal": true,
+        "loop_count": 2,
+        "renames": {
+          "i_5": "i_8",
+          "i_7": "i_10"
+        },
+        "references_per_loop": {
+          "i_5": 10,
+          "i_7": 10
+        },
+        "changed_identifier_occurrences": 20
+      }
+    ]
+  },
+  "real_gateway": {
+    "claims": [
+      "real_authenticated_v2_socket",
+      "actual_web_question_controls",
+      "actual_ink_unicode_composer",
+      "ink_observes_host_question_completion",
+      "web_observes_host_ink_followup",
+      "disconnect_clear",
+      "reconnect_stable_ids",
+      "both_active_surfaces_clear_on_local_access_loss"
+    ],
+    "journalCursor": 9,
+    "status": "passed",
+    "transcriptCount": 6,
+    "transcriptIdHash": "1dfb67a944c20abf1e827ede62e9870341ba28c56faafd4ee05d9a55ea38ff83"
+  },
+  "limits": [
+    "DOM/terminal test frames; no physical browser/PTY/mobile acceptance",
+    "scripted model; no microphone/provider acceptance",
+    "local access clearing; no real Gateway revocation test",
+    "no maintenance-cost or general agent-productivity winner"
+  ],
+  "recommendation": "Retain LiveView and Breeze for production. Assistant-ui web and Ink are viable at the tested boundary, but this experiment establishes no required capability gap or maintenance-cost winner.",
+  "local_receipts": [
+    "tmp/preserved/conversation-ui-dependency-bootstrap-20261001/attempt-20261001T195800Z-1a41cd",
+    "tmp/preserved/conversation-ui-generated-drift-review-20261001"
+  ]
+}
