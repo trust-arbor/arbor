@@ -156,7 +156,7 @@ unrelated commit appear ancestral or hide an untracked mutation.
 
 <!-- applied-learning: temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm -->
 <a id="applied-learning-temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm"></a>
-**Temporary test roots must be collision-safe across BEAM invocations, not only within one VM.** `System.unique_integer/1` restarts with a new VM, so a predictable global `/tmp` path can collide with residue from an interrupted prior run. Allocate an exclusive random/OS-owned directory, register cleanup ownership before partial fixture construction, and regress stale-root behavior deterministically (found 2026-07-11 rerunning coding benchmark tests in an isolated worktree).
+**Temporary test roots must be collision-safe across BEAM invocations, not only within one VM.** `System.unique_integer/1` restarts with a new VM, so a predictable global `/tmp` path can collide with residue from an interrupted prior run. Allocate an exclusive random/OS-owned directory, register cleanup ownership before partial fixture construction, and regress stale-root behavior deterministically (found 2026-07-11 rerunning coding benchmark tests in an isolated worktree). Separate checkouts alone do not isolate `System.tmp_dir!/0`: simultaneous candidate/predecessor Voice journeys reused a migrated SQLite database until their fixture roots included OS process identity and an exclusively created random suffix (2026-09-27).
 
 <!-- applied-learning: pinned-otp-file-timestamps-may-be-too-coarse-to-prove-same-read-stability -->
 <a id="applied-learning-pinned-otp-file-timestamps-may-be-too-coarse-to-prove-same-read-stability"></a>
@@ -453,6 +453,12 @@ Compute the true merge base, enumerate the complete merge-base-to-tip commit
 and path manifest, and prove overlap and non-overlap provenance before replay.
 Never treat the final correction's base-to-tip range as the full inherited
 candidate (found 2026-08-23 while reconstructing the contract-change stack).
+For copied qualification trees, name the patch base explicitly and verify every
+destination preimage before adoption. A cumulative continuation patch may be
+complete relative to an earlier experiment while omitting its SDK/package
+prerequisites in main. Separate the host delta from the retained client layout;
+never copy test-isolation config or runtime state with source (2026-09-30 human
+conversation login adoption).
 
 <!-- applied-learning: preserve-resumable-evidence-outside-os-temporary-roots -->
 <a id="applied-learning-preserve-resumable-evidence-outside-os-temporary-roots"></a>

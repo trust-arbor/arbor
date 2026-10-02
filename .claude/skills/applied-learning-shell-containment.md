@@ -216,6 +216,11 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 <!-- applied-learning: prime-apple-container-s-builder-explicitly-on-first-use -->
 <a id="applied-learning-prime-apple-container-s-builder-explicitly-on-first-use"></a>
 **Prime Apple Container's builder explicitly on first use.** Inspect `container system property list`, pull the configured builder image with bounded download concurrency, then run `container builder start` before the first build. Otherwise the automatic pull/start path can look like a missing BuildKit runtime or a hung build (found 2026-07-16 provisioning the standalone Apple Container 1.1.0 runtime).
+Record the builder's running/stopped state and creation identity before a build,
+not just its name. A build can recreate and start a previously stopped instance;
+the pre-existing name does not make that newly running instance unrelated to the
+task. Restore only the task's change after the build and verify the resulting
+inventory (found 2026-09-27 during native Git baseline renewal).
 
 <!-- applied-learning: a-trusted-bootstrap-cli-that-forks-needs-a-closed-process-tree-primitive-not-a-generic-no-fork-bypass -->
 <a id="applied-learning-a-trusted-bootstrap-cli-that-forks-needs-a-closed-process-tree-primitive-not-a-generic-no-fork-bypass"></a>
@@ -355,6 +360,7 @@ accept only its fully pinned result. Unsupported, unavailable, malformed, and
 raced status must fail closed rather than letting expensive work discover the
 problem later (found 2026-08-28 when Apple control-plane status was pinned while
 CrossApp workload image policy was unavailable).
+When promoting a new image, compare its complete reviewed environment and labels with the candidate policy; inheriting the predecessor policy can retain an obsolete PATH or omit admitted Mix/cache variables even when all image digests are correct (reinforced 2026-09-27 during native-audio baseline admission).
 
 <!-- applied-learning: image-policy-stores-provisioning-references-not-derived-execution-aliases -->
 <a id="applied-learning-image-policy-stores-provisioning-references-not-derived-execution-aliases"></a>
@@ -437,3 +443,12 @@ calling the host ready. For provisioning, DHCP success is not internet admission
 upstream virtual-MAC allowlists need owner approval, not a NAT bypass. Rootless
 Podman may additionally need the newly installed user dbus.socket started. Record
 these separately from candidate validation or journey acceptance (2026-09-07).
+<!-- applied-learning: provision-and-probe-through-the-same-pinned-container-installation -->
+<a id="applied-learning-provision-and-probe-through-the-same-pinned-container-installation"></a>
+**Provision and probe through the same pinned container installation.** Use the
+exact admitted CLI and install root for service lifecycle commands, not whichever
+binary leads PATH. Different installations can register their API server under
+the same launchd label and app root. Compare CLI/API versions, launchd program
+and install root before changing a strict parser; restore the intended service
+when those disagree (found 2026-09-27 when Homebrew Container 1.4.1 provisioning
+replaced the service used by Arbor's root-owned 1.1.0 CLI).

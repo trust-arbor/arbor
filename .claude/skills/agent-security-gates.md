@@ -1033,6 +1033,43 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 <a id="applied-learning-local-oidc-http-issuers-need-allow-http-wired-through-runtime-config"></a>
 **Local OIDC HTTP issuers need `allow_http` wired through runtime config.** Discovery and AuthCodeFlow reject `http://` unless the provider map has `allow_http: true`. Setting `OIDC_ISSUER=http://localhost:8080` alone yields dashboard 502 `{:invalid_issuer, :scheme_not_allowed}`. `Arbor.Security.OIDC.Config.allow_http?/2` is the single resolver; `runtime.exs` and CLI fallbacks must call it. Production stays fail-closed unless `OIDC_ALLOW_HTTP=true`; non-prod loopback HTTP (`localhost` / `127.0.0.1` / `::1`) defaults open (found 2026-08-24 launching local Zitadel).
 
+**Pinned endpoint origin gate:** configured `:endpoints` skip discovery fetching,
+but `Discovery.authorize_origin/3` still requires the issuer origin or an exact
+`:trusted_origins` entry. `allow_http: true` permits the scheme only. A fixture
+with an HTTPS issuer and a loopback provider otherwise fails before `/device`,
+surfacing as terminal-login `:unauthorized`. Add only the test-owned listener's
+exact origin to that fixture configuration; do not widen production policy.
+Trace the enforcing function even when module prose implies pins grant trust
+(found 2026-09-30 during human-login cross-surface qualification).
+
+**Distinguish browser instructions from credential transport.** When a supported
+local IdP starts device authorization but login fails before showing its code,
+check the returned verification URI at both the host and SDK validators before
+changing grants or issuer configuration. A display-only `http://localhost` link
+is compatible with explicit/resolved local OIDC HTTP policy; it does not justify
+accepting DNS names for credential-bearing Gateway connections. Cover the actual
+provider URI shape in a joined test and rebuild every client build used by the
+manual launcher, not just the SDK test build (2026-09-30 local Zitadel handoff).
+Check credential timestamps before treating a later generic denial as a new
+grant failure. A client-side expiry check can clear the projection without any
+new Gateway traffic; transport reconnect does not renew a login. Record initial
+attachment and later refresh separately, because an atomic history/journal sync
+can discard partial success (2026-09-30 manual terminal continuation).
+
+**Separate login assertions from application-session lifetime.** Before choosing
+a credential TTL, inspect existing browser and CLI session ownership. A valid
+OIDC assertion can establish an application session with its own lifecycle.
+For an open TUI, use connection ownership and authenticated keepalives, current
+permission checks, and bounded unclaimed/reconnect cleanup; do not silently
+turn a short token TTL into a user-visible total session limit. Trace every
+client freshness check and immutable server binding when changing lifetime
+semantics (user correction, 2026-09-30).
+When adding idle authorization checks, trace their denial through the transport
+owner to the renderer as well as through ordinary request replies. An unsolicited
+revocation notice must retain the unauthorized state across reconnect and reach
+the surface's private-data clearing path; classifying it as a recoverable
+protocol error loses that invariant (2026-09-30 terminal keepalive review).
+
 <!-- applied-learning: telemetry-bridged-security-audits-are-observations-not-sync-mutations -->
 <a id="applied-learning-telemetry-bridged-security-audits-are-observations-not-sync-mutations"></a>
 **Telemetry-bridged security audits are observations, not sync mutations.**
@@ -1057,6 +1094,12 @@ state. A convenience resolver that returns its input on errors cannot establish
 authoritative canonicalization. Keep the original subject for audit/revocation,
 and test linked identities, unrelated proofs, resolver outages and recovery before
 migrating histories (learned 2026-09-07 reviewing the entry-point convergence plan).
+Trace credential acquisition separately from signature transport before making
+raw-key export a prerequisite. An absent operator file does not imply missing
+human signing: OIDC can already hold an encrypted key and return process-owned
+signing authority. Shared key-file formats do not make an agent proof a human
+proof, and a process-owned authority is not automatically usable by a remote
+client (2026-09-29 terminal/MCP authentication audit).
 
 <!-- applied-learning: a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action -->
 <a id="applied-learning-a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action"></a>
@@ -1064,3 +1107,10 @@ migrating histories (learned 2026-09-07 reviewing the entry-point convergence pl
 
 <a id="gate-new-action-uri-needs-cap-and-trust-rule-on-execution-principal"></a>
 **Gate: a NEW action URI needs BOTH a capability AND a trust rule on the EXECUTION PRINCIPAL — `mix arbor.coding.grant` now closes both layers for the execution principal.** Hit 2026-08-31 dispatching fleet-dispatch-v1 (first `design_council_review` use on omats). Historical behavior through 2026-08-31: the grant loop filtered findings to `authenticated_caller` and granted only to the key-file caller, so `arbor.coding.grant` could print "converged" while the coordinator still lacked caps (`authority_horizon_missing` with `principal_role=execution_principal`). As of 2026-09-01 the Mix task grants each missing URI to the principal the finding names (key-file caller and `--agent-id` coordinator) and converges only when no role has missing findings. As of 2026-09-03 it also, after capability convergence, installs a bare-prefix trust rule on the execution principal for each required `arbor://action/coding/` URI with `user_match: nil` and effective `:block`/`:ask`, mirroring same-parent sibling coding-rule modes (`:auto` on today's coding-agent profiles). Remaining manual cases: `--no-trust-rules`, or a refuse (`:no_siblings` / `:conflicting_siblings` / wildcard/root). Symptom if the trust layer is still open: the pipeline reaches the action and dies `design_council_failed` with `ApprovalGuard ... Policy denied` (`user_match: nil`, egress-classed baseline `:block`). Action: run `mix arbor.coding.grant` for the plan (both layers). Verify with `Arbor.Trust.explain/2`. Do not hand-type `Arbor.Trust.Store.update_profile` / `Arbor.Trust.Authority.set_rule` as the operator path.
+<!-- applied-learning: separate-stateful-authorization-from-non-consuming-continuation-checks -->
+<a id="applied-learning-separate-stateful-authorization-from-non-consuming-continuation-checks"></a>
+**Separate stateful authorization from non-consuming continuation checks.** `Arbor.Security.authorize/4` consumes rate allowances and `max_uses`, potentially revoking an exhausted grant. Do not repeat it as a read-only release or dispatch predicate. Authenticate once, charge once, and use a Security-owned continuation check that retains active identity, current capability, reflex, delegation, approval and stateless constraints. A split decision/effect path must also retain the public facade's `InvocationAudit.observe_authorization/3` failure gate before issuing authority. Reject unsupported finite-use continuation before charging; never accept a missing grant to work around automatic revocation. Verify a one-token rate allowance, explicit revocation, suspended identity and failed audit sink (found 2026-09-26 while implementing durable conversation ingress).
+
+<!-- applied-learning: check-conversation-authority-before-allowance-effects-and-again-before-publication -->
+<a id="applied-learning-check-conversation-authority-before-allowance-effects-and-again-before-publication"></a>
+**Check conversation authority before allowance effects and again before publication.** Bind a signed request to the exact operation and preserve its proof subject separately from the canonical conversation owner. Resolve that owner and reject unsupported finite-use chat grants before spending allowances. Accepted-turn continuations recheck current subject grants and the pinned owner without charging the request again; check at transcript commit and response publication, not only admission. A post-commit denial suppresses disclosure but does not undo the committed pair. (found 2026-09-27 in alias, rate-limit and blocked-turn convergence regressions).

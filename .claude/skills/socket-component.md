@@ -166,3 +166,38 @@ Signs a LiveView section should become a socket-first component:
 5. Update the parent LiveView to delegate mount, events, and handle_info to the component.
 6. If the component needs pure business logic, create a corresponding core module using the CRC pattern.
 7. Run `mix compile` to verify.
+<!-- applied-learning: separate-admission-acknowledgement-from-refresh-and-clear-only-the-acknowledged-draft -->
+<a id="applied-learning-separate-admission-acknowledgement-from-refresh-and-clear-only-the-acknowledged-draft"></a>
+**Separate admission acknowledgement from refresh, and clear only the acknowledged draft.** An accepted command followed by a failed history read is still accepted. Clear its ambiguous-submission buffer on acknowledgement, expose the refresh error separately, and never leave the same submitted draft ready to send under a new ID. A late acknowledgement must clear only matching submitted text or draft version, preserving newer edits in both server state and the focused browser input. Security-driven private-state clearing remains unconditional (found 2026-09-27 while qualifying shared ConversationKit web/terminal sessions).
+
+<!-- applied-learning: exercise-native-input-and-browser-hooks-not-only-framework-events -->
+<a id="applied-learning-exercise-native-input-and-browser-hooks-not-only-framework-events"></a>
+**Exercise native input and browser hooks, not only framework events.** A callback test that invokes chat:send does not prove Enter submits. Breeze 0.5.3 single-line input requires the view to handle unconsumed Enter despite a br-submit attribute; its input content slot and explicit width also affect rendering. Test real Unicode key input, resize and submit behavior. Phoenix may retain a focused input despite changed assigns, so explicit conditional acknowledgement hooks and unconditional private-data clearing must also be checked in the browser (found 2026-09-27 during the Arbor adapter renderer qualification).
+
+For a manual-test handoff, exercise the actual signed-in account through target
+selection and verify that the intended controls are enabled. A signed-in header
+does not prove current token validity, a listed profile does not prove chat
+permission, and a “Resume” label does not prove a lifecycle operation. Verify
+session proof at HTTP entry, LiveView mount/reconnect and callback boundaries;
+retain separate resource authorization. Inspect the framework's actual logging
+path before trusting parameter filters: the pinned LiveView mount logger
+inspects sessions directly, so all routed views need the supported logging
+control and a behavioral credential-sentinel test. Include the setup's actual
+permission grant in readiness verification: an empty audit delivery queue does
+not prove retained-identity admission headroom, and a successful profile create
+may still have a failed best-effort owner grant (2026-09-27 voice preview
+handoff correction).
+
+Verify each framework's public assign API before reusing familiar syntax.
+Breeze 0.5.3 assigns a term with `assign/2`; extend a renderer's assigns map with
+`Map.put/3`. Render Phoenix ARIA booleans as explicit `"true"` or `"false"`
+strings and assert the actual HTML attribute values, rather than assuming
+ordinary boolean-attribute semantics (2026-10-01 structured-question comparison).
+
+<!-- applied-learning: conclude-interface-comparisons-with-one-delivery-choice-per-surface -->
+<a id="applied-learning-conclude-interface-comparisons-with-one-delivery-choice-per-surface"></a>
+**Conclude interface comparisons with one delivery choice per surface.** When the user wants a selected stack, finish the spike with a concrete choice based on required capabilities and implementation cost; retain alternatives as evidence rather than implying ongoing feature parity. Preserve replaceable adapter boundaries without multiplying maintained implementations. Distinguish measured extension reuse from inferred agent authoring ease: fewer source lines do not prove fewer tokens, iterations or defects. Before promoting a prototype into a reusable library, compare existing projects at that same abstraction level; a successful renderer spike proves feasibility, not a missing ecosystem capability. Qualify remaining requirements on the selected stack, reopening the choice for material new evidence such as a close existing implementation (user clarification and prior-art review on 2026-09-27 after the ConversationKit renderer experiments).
+
+<!-- applied-learning: clear-pending-liveview-stream-inserts-when-revoking-private-state -->
+<a id="applied-learning-clear-pending-liveview-stream-inserts-when-revoking-private-state"></a>
+**Clear pending LiveView stream inserts when revoking private state.** When a read or scope check fails after stream inserts were queued in the same render, remove those inserts before resetting the stream. Phoenix stream reset alone can still deliver the queued private rows. Regress the actual rendered DOM as well as assigns, and ignore unscoped signal payloads rather than using them to refill an authorized view. (found 2026-09-27 while converging production ChatLive onto authenticated durable history).

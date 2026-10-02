@@ -15,7 +15,49 @@ A worker's reported green run is evidence, not acceptance: it may have selected
 the wrong lines, run before the final commit, or used stale workspace state.
 After integrating a delegated slice, rerun its exact focused suite from an
 independent worktree before treating it as green (found 2026-07-25 when two
-stale Coding Plan fixture expectations survived a reported full-file pass).
+stale Coding Plan fixture expectations survived a reported full-file pass). For copied dependencies, compare tracked source bytes and module compile-source paths with the exact reviewed ref before accepting a later compile log. Updating the fork does not refresh a private dependency copy; a sealed harness can compile fresh files while the normal build still compiles an older copy (found 2026-09-27 during media fork adoption).
+Clean dependency sources and matching loaded/on-disk BEAM MD5s do not prove that
+the artifacts were built from the current pinned ref. Explicitly rebuild changed
+dependencies and verify required option keys/exports in the restarted runtime;
+cached PortAudio BEAMs survived a managed restart and rejected the new
+`executor_identity` option before capture (2026-09-29).
+Apply the same check to copied test builds: `mix compile --force` recompiles
+umbrella applications without forcing their dependency artifacts. Rebuild a
+changed dependency explicitly with `deps.compile <name> --force` and verify its
+required exports before accepting application compilation; the private Voice
+candidate retained an older `SyncExecutor` BEAM despite clean, correctly pinned
+source defining `bind_lease/4` (2026-09-29).
+Validate dependency caches against each execution root's own lockfile before
+handing off a multi-project run. A standalone client nested under an umbrella
+can lock different versions of identically named packages. Copying umbrella
+caches into that client's private `deps` left three lock mismatches after all
+server lanes had passed; preserve the client lock and materialize its exact
+verified packages instead (2026-09-29 terminal qualification).
+Bootstrap each cold execution root's complete locked dependency graph before
+selectively forcing changed packages. `mix deps.compile <names>` compiles the
+named packages as-is unless children are explicitly included; a warm parent
+build can hide missing transitive prerequisites in a standalone project.
+The 2026-10-01 UI comparison reached the correct Jason source but had never
+compiled its ordered-object struct. Preserve the lock and decoder contract;
+repair dependency build ordering instead of changing working application code.
+For cold compilers that write into dependency directories, exclude only
+reviewed generated output paths from source inventories. A whole cache or
+tool directory exemption can hide executable input changes; the UI comparison
+retains all Erlang.mk files while exempting only known `.d` and `.app` outputs.
+For observed generated-symbol drift, bind the generator/DSL inputs and require
+capture-free local renames to reconstruct the frozen bytes exactly before
+accepting a separate reviewed verdict. Preserve the original failure and reject
+unreviewed variants; Unifex's shared counter changed only two local loop names
+after full dependency bootstrap in the 2026-10-01 UI comparison. Such evidence
+review does not require rerunning unaffected behavior or hiding generated trees.
+
+A single computed formatter output is not a fresh formatting check. Verify the
+resulting bytes with the repository's configured formatter, then confirm another
+formatting pass leaves them unchanged. On 2026-10-01, pinned Elixir 1.19.5 changed
+an `application.ex` call layout on two successive passes before stabilizing.
+A one-pass archive preflight had been treated as green; the normal Mix hook
+caught the remaining change. Bind final source hashes only after the fresh
+configured check and stable-output check.
 
 <!-- applied-learning: fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety -->
 <a id="applied-learning-fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety"></a>
@@ -276,7 +318,13 @@ skip runtime config (reinforced 2026-09-27 during native source inspection).
 
 <!-- applied-learning: distribution-readiness-is-not-application-readiness -->
 <a id="applied-learning-distribution-readiness-is-not-application-readiness"></a>
-**Distribution readiness is not application readiness.** `mix arbor.start` currently reports success when the named BEAM responds to distribution pings, but a later umbrella application can still fail and tear the node down before Gateway binds. After every restart, poll `http://127.0.0.1:4000/health` and inspect the daemon log if the process exits; do not dispatch work from the startup banner alone (found 2026-07-13 recovering the Phase 6 delegator runtime).
+**Distribution readiness is not application readiness.** `mix arbor.start` historically reported success when the named BEAM responded to distribution pings, while a later umbrella application could still fail and tear the node down before Gateway bound. The managed start now checks both distribution and all expected applications; verify the intended interface and inspect the daemon log if the process exits, rather than treating reachability alone as readiness (found 2026-07-13 recovering the Phase 6 delegator runtime; source reconciled 2026-09-29).
+For a user-facing test handoff, check every prerequisite of the next action in the actual runtime, including durable budget configuration and a real read of its store. Device loopback and provider credential health do not establish readiness for a complete voice turn; also exercise a failed start followed by retry (reinforced 2026-09-28 after the voice preview reached an unconfigured ledger only after capture).
+Evaluate execution restrictions per operation rather than inferring that every command is blocked: on 2026-09-29 the isolated test runner failed at Mix.PubSub socket creation, but the authorized normal managed restart compiled and started all applications successfully. Preserve the unrun-test limitation separately from observed deployment success.
+Check the semantic success receipt for follow-up CLI operations too. The
+`arbor.agent resume` task can print an error while exiting zero; an activation
+launcher must verify the success line for the exact agent or confirm its state
+through the owning facade before reporting it resumed (2026-09-30).
 
 <!-- applied-learning: authenticate-the-control-plane-service-not-only-its-cli -->
 <a id="applied-learning-authenticate-the-control-plane-service-not-only-its-cli"></a>
@@ -298,6 +346,26 @@ skip runtime config (reinforced 2026-09-27 during native source inspection).
 <a id="applied-learning-test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape"></a>
 **Test pure consumers with the exact producer envelope, not a convenient synthetic shape.** A standalone core test can validate every local invariant while still accepting a map layout that its real upstream never emits. Mirror the producer's closed atom/string key placement, grouping, revision fields, and serialized scalar forms in the consumer fixture, then run both suites together; the Apple execution core originally passed against a flat purpose map while `Arbor.Actions.Mix.projections_for_resource/2` emitted grouped `read_only` / `read_write` lists (found 2026-07-14 composing the Phase 6 projection boundary).
 Verify the actual adapter error type and persisted identifiers before asserting a downstream branch: a real HTTP 429 can return a different error envelope from the Backoff classifier, and a stored Session UUID can differ from its external name. A synthetic shape proves the pure branch only. Exercise valid producer bounds before attributing an oversized fixture rejection to the consumer; retain defensive pure-boundary coverage when the storage codec rejects it earlier (reconfirmed 2026-09-09 in private-memory embedding and hybrid-search qualification).
+For browser-origin gates, check the response policy that shapes the next browser
+request. `Referrer-Policy: no-referrer` can make an ordinary form POST send
+`Origin: null`; a synthetic request with the expected Origin misses that failure.
+Keep strict Origin/CSRF checks, use a compatible `same-origin` policy on clean
+control pages, and retain `no-referrer` on secret bootstrap redirects. Regress
+headers and the cookie/CSRF path, then exercise an actual browser submission
+(2026-09-29 interactive fixture; [Fetch Origin algorithm](https://fetch.spec.whatwg.org/#append-a-request-origin-header)).
+Construct adapter-owned request fields consistently in Plug tests. `Plug.Test.conn`
+sets parsed host/port but does not synthesize Cowboy's raw Host header; Plug's
+general header mutators reject Host. A test of a raw Host gate needs a trusted
+fixture constructor for both representations, including negative cases. Check
+the pinned adapter API before handing off a test that fabricates a request
+(2026-09-29 control regressions stopped in their helper before reaching the gate).
+
+Protocol tests must assert the actual serialized shape, including nested values.
+Canonical conversation submits encode the input map as the positional `[id, text]`
+array; decoding the outer JSON does not restore that map. Match the canonical
+array and stable command ID explicitly before injecting a transport fault. A string-key
+lookup on that array stopped the terminal-session qualification before it reached
+the intended authorization-loss assertion (2026-09-30).
 
 <!-- applied-learning: escape-backticks-inside-javascript-template-literals-used-for-tool-orchestration -->
 <a id="applied-learning-escape-backticks-inside-javascript-template-literals-used-for-tool-orchestration"></a>
@@ -306,6 +374,16 @@ Verify the actual adapter error type and persisted identifiers before asserting 
 <!-- applied-learning: prove-resource-absence-positively-do-not-reinterpret-an-arbitrary-lookup-failure-as-absence -->
 <a id="applied-learning-prove-resource-absence-positively-do-not-reinterpret-an-arbitrary-lookup-failure-as-absence"></a>
 **Prove resource absence positively; do not reinterpret an arbitrary lookup failure as absence.** A nonzero `inspect` can mean service loss, authorization failure, malformed input, or transport failure, not only `not found`. For enforcing cleanup, require a successful bounded inventory response and prove the exact owned identifier is absent from its parsed structured entries before releasing output or ownership (found 2026-07-14 designing Apple Container teardown).
+Likewise, a running `osascript` process does not prove that a macOS authentication
+dialog is visible. Describe the observed pending process and uncertainty, then
+check its completion log and installed-file identities before asking the user to
+act on an assumed prompt (user correction, 2026-09-27 native baseline promotion).
+An inventory may bound output count without bounding execution time. Before using
+it as an idle check, trace synchronous disk/native enrichment, shared lifecycle
+mailboxes and caller-timeout cancellation. Global coding-resource enrichment can
+continue after RPC timeout; use the cheapest source-owned projection that proves
+the needed fact, and never interpret timeout or restart as resource absence
+(found 2026-09-27 during the same promotion).
 
 <!-- applied-learning: a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process -->
 <a id="applied-learning-a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process"></a>
@@ -317,7 +395,7 @@ Verify the actual adapter error type and persisted identifiers before asserting 
 
 <!-- applied-learning: configure-a-replacement-test-process-before-an-observer-can-discover-it -->
 <a id="applied-learning-configure-a-replacement-test-process-before-an-observer-can-discover-it"></a>
-**Configure a replacement test process before an observer can discover it.** Starting a named fake with permissive/default behavior and then resetting it in a second call creates a race: a monitored coordinator can resolve and invoke the replacement between those operations. Start the fake atomically in its intended mode, or suspend the observer across replacement setup and resume it afterward; otherwise a deterministic turnover regression can fail or, worse, pass through unintended behavior (found 2026-07-15 in the Apple reconciler-PID turnover test).
+**Configure a replacement test process before an observer can discover it.** Starting a named fake with permissive/default behavior and then resetting it in a second call creates a race: a monitored coordinator can resolve and invoke the replacement between those operations. Start the fake atomically in its intended mode, or suspend the observer across replacement setup and resume it afterward; otherwise a deterministic turnover regression can fail or, worse, pass through unintended behavior (found 2026-07-15 in the Apple reconciler-PID turnover test). Native/device tests must make real fallback impossible before calling the tested API. Mock expectations do not prove dependency interception was compiled in: verify the loaded fake module/NIF provenance in a fresh process, and abort if the real native boundary can resolve. A missed Mockery interception reached PortAudio initialization in an isolated ownership harness on 2026-09-27; three calls had recorded pre-open errors and a fourth discarded its result, so absence of capture could not be claimed categorically. Detect the actual OS before applying a platform permission gate; on that OS, a missing module or failed NIF load is denial, not evidence that the permission does not apply (2026-09-27 bounded capture review).
 
 <!-- applied-learning: beam-monotonic-timestamps-may-be-negative -->
 <a id="applied-learning-beam-monotonic-timestamps-may-be-negative"></a>
@@ -462,6 +540,20 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <a id="applied-learning-fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful"></a>
 **Fault-injection stores must faithfully perform every operation they report as successful.** A fail-after-N persistence double that returns `:ok` without storing the value creates an impossible durable state and invalidates crash-ordering regressions. Implement the normal success effect, arm failure counts relative to an explicit mode switch, and test the double's contract independently before relying on it to prove a state-machine invariant (found 2026-07-21 while validating discard-journal persistence failure).
 
+When extending a one-turn fixture to queued or repeated turns, inspect its
+incremental read contract too. A known-empty transcript reader must support the
+legitimate `[after: 0]` refresh after an internal-only consultation, as well as
+bootstrap `[]`; observe the requested options in the test. Do not advance the
+canonical cursor for hidden records or weaken production freshness checks to
+accommodate a fake's missing clause (2026-09-30 Voice consultation qualification).
+
+For authenticated multi-turn security tests, a successful append must be visible
+to the next scoped transcript read. Prefer a private migrated Repo over a fake
+that acknowledges writes without storing them. Check checkpoint semantics before
+using restore as a partial state setter: transcript restoration invalidates the
+live anchor, so seeding legacy context must not silently discard an established
+conversation (2026-09-30 private-goal prompt qualification).
+
 <!-- applied-learning: verify-that-an-exunit-line-filter-selected-the-intended-test -->
 <a id="applied-learning-verify-that-an-exunit-line-filter-selected-the-intended-test"></a>
 **Verify that an ExUnit line filter selected the intended test.** A `mix test file.exs:line` selector aimed at an `@tag`, comment, or nearby blank can resolve to the preceding test and produce a convincing but irrelevant pass. Point at the actual `test` declaration, then inspect the traced test name or distinctive fixture output before using the result as regression proof (found 2026-07-21 while proving the Git checkout-loss regression fails on the unfixed clause order).
@@ -514,6 +606,14 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <a id="applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle"></a>
 **Aggregate tests must own dependency availability and globally named process lifecycle.** Umbrella order can leave an optional service running even when an app-local run exercises its unavailable fallback, and a linked named process can outlive one test long enough to race the next setup. Inject the intended available or unavailable dependency explicitly, restore global config from an `async: false` module, and start test-owned named processes under `start_supervised!/1` so teardown is synchronous. Never use the accidental absence of a globally registered service as a fixture (found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).
 Distinguish supervision shutdown from completion of a separate backend owner's cleanup. SQLite Sandbox owner exit can precede asynchronous connection check-in; a following read-then-write transaction on another physical connection can encounter a prior writer. For synchronous isolated fixture controls, run the same private migrations and a single physical Sandbox connection on both revisions, and label that evidence accurately; do not add sleeps, retry product operations or change production pool policy to hide the race (reconfirmed 2026-09-09 in relationship cleanup controls).
+
+For cross-app SQL protocol tests, explicitly scope ancillary event adapters before
+bootstrap; another app's test helper may silently change the selected writer.
+Verify the effective Repo path before startup, since a worktree does not isolate
+hardcoded test databases. Drive exact per-flush counts with a test-owned timer,
+and register restoration before the first global swap, preserving dependency
+order in one callback when LIFO callbacks would invert it (2026-09-28 audit
+retirement qualification exposed all four fixture interactions).
 
 <!-- applied-learning: restart-recovery-regressions-must-pass-cold-and-standalone -->
 <a id="applied-learning-restart-recovery-regressions-must-pass-cold-and-standalone"></a>
@@ -597,6 +697,13 @@ when a runtime `Enum.find!/2` error survived compile-only candidate validation).
 when the module omitted the requested tag. Evidence admission must verify that
 the expected module/tests were selected, not merely the process exit code or
 zero-failure count (found 2026-07-28 during the Phase C delegated-work canary).
+A wrong umbrella test path can also exit zero while every app reports that no
+path matched. Resolve the path first and inspect the executed count before
+recording a pass (reinforced 2026-09-27 during conversation continuity replay).
+When freezing expected counts, expand module-level test-generation loops;
+counting `test` declarations undercounts those cases. Independent source review
+caught 12 declarations producing 15 conversation-binding cases before the
+operator qualification was sealed (2026-09-30).
 
 <!-- applied-learning: parenthesize-do-block-expressions-assigned-to-module-attributes -->
 <a id="applied-learning-parenthesize-do-block-expressions-assigned-to-module-attributes"></a>
@@ -765,6 +872,11 @@ and mailbox tests should assert exact unconsumed messages. Keep fake-clock state
 in the test process or ensure explicit cleanup; a linked Agent can outlive a
 normally exiting test process and leak into later tests (found 2026-08-02 while
 reworking VOICE transport deadlines).
+For real socket deadline regressions, keep the peer alive beyond the client
+expiry and queued-call return. Otherwise peer retirement can prevent the late
+write and make the test pass without the client fence. Give the observation
+message a separate bounded delivery allowance (2026-09-29 remote conversation
+transport review).
 
 <!-- applied-learning: isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection -->
 <a id="applied-learning-isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection"></a>
@@ -948,6 +1060,12 @@ under `MIX_ENV=test` (or an equivalent test-module compile gate) before binding
 review. Preserve the full later behavioral run; this cheap gate establishes only
 that the claimed evidence can load (found 2026-08-24 when Packet B called
 `invalid_tag(kind)` inside match patterns).
+Parsing and formatting do not expand assertion macros. In pinned ExUnit 1.19,
+a guarded `refute_receive` pattern failed compilation after application compile
+had passed. Use a native selective `receive` with the same guard and timeout
+when the negative assertion must reject one class of message while tolerating
+another; preserve that distinction when correcting the macro use (2026-09-29
+Voice qualification).
 
 <!-- applied-learning: signal-test-callbacks-must-not-assume-serialized-delivery -->
 <a id="applied-learning-signal-test-callbacks-must-not-assume-serialized-delivery"></a>
@@ -978,6 +1096,14 @@ outlived `Arbor.Actions.MixTest`'s default timeout in CrossApp batch 18).
 <!-- applied-learning: a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it -->
 <a id="applied-learning-a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it"></a>
 **A canary must assert its invariant, not the implementation that satisfies it.** The C1 continuity canary exists to prove a fact planted in session 1 reaches the session 3 prompt. Its main test asserts exactly that (`rendered(messages) =~ "Postgres"`) and kept passing when recall moved from a leading system message onto the user turn for prompt caching. But a SIBLING test in the same file pinned the placement — `assert [%{"role" => "system"} | rest] = messages` — and went red on a change that preserved the invariant perfectly (2026-08-25). Two rules follow. When a canary breaks, first ask whether the invariant broke or only the mechanism did; if the mechanism, re-point the assertion rather than reverting the change or deleting the test. And when changing a cross-cutting behaviour like prompt assembly, grep for every test asserting that behaviour, not just the module's own test file — this one lived in `canary/`, and a targeted run of `session_llm_test.exs` was green while it was red.
+
+Test the number of user-visible exchanges as well as continuity. On 2026-09-30,
+the joined web/Breeze/Voice test passed because it explicitly expected both an
+internal Agent consultation pair and the final spoken pair as separate chat
+exchanges. Physical testing exposed the duplicate question and two answers for
+one recording. Separate audit/source records from published conversation turns,
+then assert one exact utterance/final-answer pair and one occurrence in the next
+provider input. Retaining every row is not sufficient proof of a correct UI.
 
 <!-- applied-learning: enumerate-candidate-tests-from-the-working-tree-not-the-index-alone -->
 <a id="applied-learning-enumerate-candidate-tests-from-the-working-tree-not-the-index-alone"></a>
@@ -1016,7 +1142,19 @@ in a `@moduletag :fast` file is slow, remove the module tag, mark each genuinely
 fast test with `@tag :fast`, and give the slow test `@tag :slow` plus its measured
 timeout. Verify the selected and excluded test counts instead of trusting the tag
 declaration (found 2026-08-26 while isolating the 10,001-record Security hydration
-regression).
+regression). `--include` filters are alternatives, not intersections with
+`--only`: adding `--include database --include isolated_repo` can reselect an
+entire database-tagged file. For a narrow predecessor witness, select exact
+source lines and verify the reported selected/excluded counts (2026-09-27 Voice
+pair-acknowledgement regression). Multiple tags require a keyword list such as
+`@moduletag fast: true, integration: true`, or separate attributes; a list of
+atoms is invalid. Compile a qualification fixture with ExUnit autorun disabled
+before paying for a cold contained build (2026-09-27 native admission fixture).
+Read the pinned formatter's count semantics: ExUnit 1.19's printed test count
+excludes excluded cases, so a file with 18 selected tests and one excluded test
+must report `18 tests` and `(1 excluded)`, not `19 tests` (2026-09-29 Voice
+qualification runner source review).
+The same rule applies to expected-failure witnesses: two selected expiry-cap regressions in a thirteen-case file report two tests and eleven exclusions. Recheck against an accepted log or the pinned formatter before sealing a runner (2026-09-29 human-login review).
 
 <!-- applied-learning: supervision-topology-changes-require-managed-restarts-before-live-verification -->
 <a id="applied-learning-supervision-topology-changes-require-managed-restarts-before-live-verification"></a>
@@ -1054,6 +1192,12 @@ must call the app's idempotent canonical bootstrap boundary (for Security,
 the OTP application. Prove this with a same-BEAM multi-file batch whose following
 file needs the restored owner (found 2026-08-26 in P1B-2A CrossApp batch 17; fixed
 and verified 2026-08-27 with 1,634 Security tests passing).
+When adding a supervised child, assert named dependency order and actual
+supervisor ownership rather than guessing negative list offsets. The terminal
+login qualification selected a stale audit-owner tail assertion: the journal
+correctly preceded CapabilityStore and Reflex.Registry, so adjusting only the
+offset for the new child still failed (2026-09-29). Preserve order checks and PID
+equality; express the dependency relation explicitly.
 
 <!-- applied-learning: sources-only-validation-compiles-need-git-and-a-normal-mix-compile -->
 <a id="applied-learning-sources-only-validation-compiles-need-git-and-a-normal-mix-compile"></a>
@@ -1067,6 +1211,22 @@ read checkout `.git`, and emit `mix compile` (plus optional
 children may keep `--no-deps-check` once `_build` is populated. Do not skip
 the in-unit deps compile until a pre-compiled baseline `_build/test` is
 digest-pinned (found 2026-08-26, V7-17 / run 11o; supersedes V7-15).
+
+Hex 2.5.1 dependency fetching creates extraction directories in its current working directory, so a read-only project mount fails with `:erofs` even when `MIX_DEPS_PATH` is writable. Use a disposable writable checkout for operator source provisioning, verify its tracked bytes and lock afterward, and keep subsequent no-network validation in a separate copy (found 2026-09-27 during VP-07B0 native admission).
+
+Resolve umbrella dependency changes from the root, then compare every lock entry.
+Fetching from a leaf app omits sibling constraints and can float unrelated packages.
+For an exact two-package source adoption, retain only Mix-generated records for
+those packages, preserve the other original records, and require a full-root
+`deps.get --check-locked` to succeed without changing the lock (found 2026-09-27
+during the private media fork adoption).
+
+Valid Mix CLI syntax does not establish contained-command admission. Trace the
+exact execution-core argv matcher before preparing a live proof: `test --no-start`
+is rejected, while the existing owner-issued `run --no-start runner.exs --
+result.etf selected_tests` route is admitted. Use reviewed runner bytes and retain
+`--no-start` inside the nested test; do not silently drop it to pass the outer
+allowlist (found 2026-09-27 during the Git media live proof).
 
 <!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
 <a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>
@@ -1131,6 +1291,30 @@ accept a prefix, or let a worker choose tests. Prefer a small deterministic
 composition fixture for an infrastructure claim, then widen evidence where shared
 state/topology/security demands it (learned 2026-09-07 during the single-user-first
 architecture reassessment).
+When the operator explicitly makes residual bugs non-blocking, record which
+prerequisite is superseded and resume the selected milestone. Preserve unresolved
+failures and unverified observations as follow-ups instead of restarting the
+same dedicated hardening cycle (2026-10-01 conversation interface evaluation).
+Before delegating a renderer comparison, freeze its shared feature, history
+window and recovery cases in one artifact. Match those semantics before comparing
+render time or implementation effort; different defaults manufacture a winner.
+Select versions from verified published metadata before pinning a comparison;
+main-branch package manifests can describe releases that are not published.
+Bind exact selected distributions to the dependency lock, preserve every lookup
+outcome per attempt, and verify installed public exports separately from moving
+upstream source (2026-10-01 assistant-ui/Ink preparation: a source-derived core
+version returned npm 404 before installation).
+Once exact dependencies are installed, run every locally available admitted
+consumer check before returning a continuation. Include process teardown in
+renderer acceptance: successful UI assertions can precede an uncaught error
+from pending React work after DOM globals are removed. Await public renderer
+cleanup before restoring that environment (2026-10-01 released API comparison).
+Rendered focus is not input-handler readiness: Ink registers handlers in a
+passive effect after rendering the cursor. Flush public React lifecycle
+boundaries before injecting each keyboard event, keep one write per action,
+and capture both public composer state and the frame on failure. For a
+sporadic failure, require consecutive fresh-process runs that stop on any
+failure, not retries until a pass (2026-10-01 uncertainty-composer qualification).
 
 <!-- applied-learning: trace-evidence-must-preserve-actual-effect-observations -->
 <a id="applied-learning-trace-evidence-must-preserve-actual-effect-observations"></a>
@@ -1142,7 +1326,25 @@ calls with different results. Accept only documented result shapes; an arbitrary
 exception without the expected marker is not proof of empty recall. Pair happy
 paths with counterexamples that bypass the facade, repeat the query, and fail
 the effect (found 2026-09-08 qualifying J0; bridge fallback invented evidence,
-then query-only deduplication discarded genuine calls).
+then query-only deduplication discarded genuine calls). Persist each stage's
+bounded result before evaluating pass/fail: a `with true <- projection.passed`
+chain that returns only `false` loses the failing stage and its command output,
+forcing an expensive repeat of the real operation (2026-09-27 native admission).
+Before interpreting zero trace events as absence of an effect, establish a
+positive control on the same execution path. OTP processes marked `:sensitive`
+suppress tracing, so a healthy Desk capture/playback can produce zero function
+events even when a separate ordinary-process trace works. Keep that protection
+enabled; use an isolated device collaborator or existing bounded observability
+instead (2026-09-29 voice reload and cancellation qualification).
+
+Record the command, exit code, stdout and stderr even when stderr is empty.
+On 2026-10-01, a stderr-only wrapper hid twelve staged-whitespace errors that
+`git diff --cached --check` reported on stdout for a literal reconstruction patch.
+Check staged whitespace before handing off an archive, and verify reconstructed
+source hashes after a patch tool reports success: a zero-context reverse patch
+exited zero but ambiguous insertion offsets did not reproduce the frozen bytes.
+Choose a representation that preserves exact reconstruction and the normal
+whitespace gate; neither successful tool exit nor a gate bypass proves both.
 
 <!-- applied-learning: offline-validation-images-must-cover-executables-and-private-build-descendants -->
 <a id="applied-learning-offline-validation-images-must-cover-executables-and-private-build-descendants"></a>
@@ -1157,3 +1359,13 @@ separately from activation of the live factory baseline. Verify special permissi
 bits with stat: pinned `File.chmod!/2` strips sticky mode, while checked OS
 `chmod +t` sets it; otherwise a test never exercises its intended sticky-directory
 case (found 2026-09-08 in the J0 surrounding Commands suite).
+Offline package resolution does not disable dependency runtime networking.
+Before app startup, disable unrelated automatic refresh services and assert
+that their workers are absent while their read-only functionality still works.
+Keep their seed data frozen: moving it outside the manifest hides the symptom
+but leaves the network effect. `HEX_OFFLINE` did not stop tzdata's updater from
+replacing a frozen release during Gateway qualification (2026-09-29).
+
+<!-- applied-learning: derive-integration-fixture-roots-from-source-locations-not-mix-working-directory -->
+<a id="applied-learning-derive-integration-fixture-roots-from-source-locations-not-mix-working-directory"></a>
+**Derive integration fixture roots from source locations, not Mix working directory.** Umbrella test tasks can execute with the current directory set to apps/<app>. A helper using File.cwd! to find migrations or retained evidence may create a database in the wrong tree and run zero migrations. Derive fixture, migration and artifact roots from __DIR__ or an explicit validated root; positively assert migrations and isolated storage before exercising persistence (found 2026-09-27 while qualifying ConversationKit against a real Arbor Session).

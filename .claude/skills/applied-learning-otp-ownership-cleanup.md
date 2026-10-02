@@ -4,6 +4,17 @@ Read this when changing GenServer ownership, cancellation, supervision, restart,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: one-shot-protocol-safety-requires-an-uncontaminated-session -->
+<a id="applied-learning-one-shot-protocol-safety-requires-an-uncontaminated-session"></a>
+**One-shot protocol safety requires an uncontaminated Session.** If normalized
+provider events lack response/item correlation, closing after one audio turn is
+insufficient when an earlier text turn can leave delayed events on the same
+connection. Enforce the audio-only mode before any admission or provider effect,
+then retire the Session after its sole completed or cancelled operation. Regress
+both the rejected prior operation and the subsequent valid audio turn; do not
+claim reusable-session safety from a close-after-audio test alone (found
+2026-09-27 reviewing VP-07A1).
+
 <!-- applied-learning: a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart -->
 <a id="applied-learning-a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart"></a>
 **A later `rest_for_one` child must not wait in `terminate/2` for an earlier crashed sibling to restart.** OTP terminates all later children before restarting the failed child, so a drain coordinator that waits for a dead Journal/Reconciler creates a supervision deadlock. Run exhaustive planned shutdown barriers from `Application.prep_stop/1` while the dependency chain is live; crash-driven turnover must exit promptly and rely on durable intent plus startup reconstruction (identified 2026-07-15 while wiring the Apple durable-unit topology).
@@ -110,6 +121,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: secret-bearing-genservers-need-explicit-status-redaction -->
 <a id="applied-learning-secret-bearing-genservers-need-explicit-status-redaction"></a>
 **Secret-bearing GenServers need explicit status redaction.** Redacted struct `Inspect` implementations do not protect a broker whose raw state map uses bearer tokens as keys or stores session/root private keys. Implement bounded `format_status/2`, keep secrets out of crash metadata and error tuples, and regress `:sys`/status formatting for every authority owner (found 2026-07-11 reviewing verified-request and execution-permit brokers).
+For framework-hosted callbacks, identify the actual OTP process module: adding a formatter to a Membrane element callback does not format its Core GenServer. Audit direct framework option/action/exception logging too before claiming PCM redaction (reinforced 2026-09-27 during bounded device preflight).
 
 Sensitive exception redaction must preserve OTP graceful exit classes. Keep exits
 with `:normal` and `:shutdown` unchanged, redact only the private payload in
@@ -117,6 +129,19 @@ with `:normal` and `:shutdown` unchanged, redact only the private payload in
 looks graceful. Regress actual component and owned-supervisor exit reasons plus
 raw Logger privacy; a sanitized normal exit must not become a failure (found
 2026-09-27 during Membrane gated startup qualification).
+
+Preserve a source-owned failure stage and closed reason class when private
+errors are collapsed. Logging only a generic refusal, then retiring the owner,
+forces another user recording to distinguish capture from provider startup.
+Allowlist both fields, never inspect collaborator terms, and keep diagnostics
+out of lifecycle decisions (found 2026-09-29 during Voice Desk diagnosis).
+OTP can append the original exception stack after the status formatter. Prevent malformed secret-bearing calls from reaching argument-bearing function-clause failures; redacting `:reason` alone is insufficient. Preserve `:log` as a list, and keep real crash-log capture active through the exact process DOWN before asserting absence of credentials (2026-09-29 standalone login review).
+Process flags are not automatically `Process.info/2` items: OTP 28 rejects
+`:sensitive` there. At an existing test-only reset point, assert the documented
+previous value returned by `Process.flag(:sensitive, false)` instead; this keeps
+the check that production enabled sensitivity without disabling the production
+flag or preventing the whole fixture from running (2026-09-29 Gateway login
+qualification).
 
 <!-- applied-learning: format-status-2-does-not-make-secret-bearing-genserver-state-private -->
 <a id="applied-learning-format-status-2-does-not-make-secret-bearing-genserver-state-private"></a>
@@ -149,6 +174,7 @@ owner qualification, 2026-09-08).
 <!-- applied-learning: caller-timeout-does-not-cancel-a-queued-owner-mutation -->
 <a id="applied-learning-caller-timeout-does-not-cancel-a-queued-owner-mutation"></a>
 **Caller timeout does not cancel a queued owner mutation.** A bounded `GenServer.call/3` can return timeout while its request remains in the mailbox and later consumes a permit or commits state. Put the caller's absolute deadline inside the request, check it in the owner immediately before mutation, and return indeterminate plus exact reconciliation only when the outcome cannot be proven; the call timeout alone is not the operation deadline (found 2026-07-11 suspending the execution-permit broker).
+Expiry timers are cleanup notifications, not authorization gates. A ready login handle can be redeemed ahead of its queued expiry message, and a current-authority check can block across expiry. Check the absolute deadline synchronously before and after that check, then cap the actual signed proof at the same authentication expiry (2026-09-29 terminal login review).
 
 <!-- applied-learning: exclusive-create-failure-does-not-grant-cleanup-ownership -->
 <a id="applied-learning-exclusive-create-failure-does-not-grant-cleanup-ownership"></a>
@@ -185,6 +211,7 @@ owner qualification, 2026-09-08).
 <!-- applied-learning: an-operation-deadline-never-authorizes-abandoning-owned-cleanup -->
 <a id="applied-learning-an-operation-deadline-never-authorizes-abandoning-owned-cleanup"></a>
 **An operation deadline never authorizes abandoning owned cleanup.** Stop admitting setup or candidate work once the original absolute budget expires, but retain a supervised cleanup owner and retry bounded teardown until positive absence is proven. This may outlive the caller's operation budget, as the materializer already does; returning on the deadline while a named containment unit may remain would turn timeout into a containment bypass (confirmed 2026-07-14 designing the Apple Container unit worker).
+For native media, distinguish completed playback from resource closure. Pipeline DOWN, EOS, enqueue success or a swallowed native close error proves neither. Return a bounded pending result while retaining the device fence on uncertain close; a media failure followed by confirmed closure can release that fence (reinforced 2026-09-27 while reviewing PortAudio ownership). Serialize buffer writes with explicit native destruction: a live NIF resource reference does not prevent its internal buffer being freed. Release proven custody at the resource owner before depending on a coordinator acknowledgement, and use atomic compare-and-clear so a stale releaser cannot clear a successor. Keep public occupancy IDs separate from private completion credentials at every message hop. Before-open worker state can prove no resource exists only after revoking admission; unknown or blocked open cannot (2026-09-27 multimedia owner review).
 
 Register each effect-capable child through a public no-effect startup handshake
 and bind custody before acknowledging setup. Attach private stream correlation
@@ -317,6 +344,13 @@ joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
 <a id="applied-learning-source-owner-cleanup-success-does-not-imply-convergence"></a>
 **Source-owner cleanup success does not imply convergence.** Crash-durable cleanup may remove the physical resource, fail marker deletion, install retained retry residue, and still return `{:ok, state}` because the destructive phase succeeded. Reconciliation may emit a settled receipt only when the helper succeeded and every authoritative source index proves absence; preserve helper errors and the exact returned state instead of converting partial success into settlement (found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).
 
+Positive cleanup facts must outlive the producer that observed them. A Session
+can exit after a bounded close returns pending while its cleanup lease later
+settles; preserve an exact per-operation join for source custody, authenticated
+backend retirement plus worker DOWN, and stable lease drain. Publish that
+receipt before successful cleanup acknowledgements, and never reconstruct it
+from empty supervisors or a missing Session (2026-09-29 Voice Desk).
+
 <!-- applied-learning: out-of-band-owner-updates-must-survive-stale-process-local-publication -->
 <a id="applied-learning-out-of-band-owner-updates-must-survive-stale-process-local-publication"></a>
 **Out-of-band owner updates must survive stale process-local publication.** A ticker or helper can advance canonical journal state while the owning process is blocked, leaving its process-local snapshot stale. When that owner later republishes the full snapshot, the canonical owner boundary must monotonic-merge independently advanced fields only within the same owner epoch (for example, `owner_node` plus the actual Engine `spawning_pid`); a recovery or takeover epoch must publish its own value. Regress the exact sequence of initial publication, out-of-band advance, then stale full publication (found 2026-07-29 while tracing coding-pipeline heartbeat regressions during long validation).
@@ -355,6 +389,15 @@ rejected or never dispatched. Keep teardown as ordinary `handle_info` state
 transitions and defer caller replies with `GenServer.reply/2` (found 2026-08-03
 reviewing Voice VP-07 audio ownership; reinforced 2026-08-16 reviewing E0B2C2's
 fallback process owner).
+
+A pull-style protocol worker must also own socket delivery between callbacks.
+Mint's default active-once socket can send bytes while a GenServer is handling
+another operation; a generic `handle_info` then discards them before `recv` runs.
+For a pull adapter, select passive mode before HTTP upgrade and at WebSocket
+creation, retain bytes coalesced with the upgrade, and return the latest opaque
+handle when partial decoding reaches a timeout. Exercise real decoder fragments
+across timeout/next-read boundaries; a fake event queue cannot reproduce mailbox
+loss (found 2026-09-29 after Voice startup succeeded but the turn stalled).
 
 <!-- applied-learning: admit-effect-ownership-before-invalidating-retryable-discovery -->
 <a id="applied-learning-admit-effect-ownership-before-invalidating-retryable-discovery"></a>
@@ -396,3 +439,14 @@ task/principal lineage reactivation at each durable resource consumer boundary a
 test owner death immediately after the predecessor checkpoint; an opaque resource
 id or a successful earlier acquisition is not restart authority (found 2026-09-02
 while reviewing immutable CrossApp review snapshots).
+<!-- applied-learning: retain-conversation-authority-through-final-publication -->
+<a id="applied-learning-retain-conversation-authority-through-final-publication"></a>
+**Retain conversation authority through final publication.** Finishing a provider
+turn or releasing its egress lease does not finish the enclosing conversation
+operation. Keep the immutable authenticated subject, owner, scope and proof
+available through transcript commit, guarded rendering and the final reply;
+recheck after append and immediately before disclosure. A committed write may
+remain after revocation, but it must not force a successful reply or playback.
+Use a nonconsuming continuation check for repeated effects and fresh admission
+for the next turn, so chunk-level checks do not spend additional allowances
+(found 2026-09-27 while binding Voice to the canonical private conversation).

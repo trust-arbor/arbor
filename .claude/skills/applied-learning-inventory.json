@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 731,
+  "entry_count": 744,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -333,7 +333,7 @@
     {
       "source_ordinal": 28,
       "slug": "hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
-      "title": "Hysun's estimates run 2\u20134x conservative; the real constraint is decision bandwidth, not implementation speed.",
+      "title": "Hysun's estimates run 2–4x conservative; the real constraint is decision bandwidth, not implementation speed.",
       "topic": "testing-live-runtime",
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
@@ -362,7 +362,7 @@
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-don-t-prematurely-cap-max-tokens",
       "source_date": "2026-07-01",
-      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` \u2192 `session.max_tokens`); prefer leaving it unset over guessing a low number.",
+      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` → `session.max_tokens`); prefer leaving it unset over guessing a low number.",
       "content_sha256": "3dbb4dbbc6bba30169343fa26a1772fe2f11eddfa848e9869dfb011e62b9dc3a",
       "always_loaded": true
     },
@@ -639,7 +639,7 @@
       "anchor": "applied-learning-dbconnection-timeout-does-not-bound-time-already-spent-in-the-pool-queue",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 while testing EventLog append deadlines with an exhausted one-connection PostgreSQL pool).",
-      "content_sha256": "975b923e4eb502369ce5317f820ef1882ea4fc71e5935b3ada91cfa3c955f870",
+      "content_sha256": "488726079d07e3b9325fe043337bd9df44792e6e788429668c466ce1611f6f47",
       "always_loaded": false
     },
     {
@@ -771,7 +771,7 @@
       "anchor": "applied-learning-budget-multi-leg-action-timeouts-against-the-enclosing-wall-clock",
       "source_date": "2026-07-10",
       "source_incident": "found 2026-07-10 during security-regression profile activation).",
-      "content_sha256": "4de57eec835adbd14bc3b5fad178e17382ff7cad2772129a2b5ef3e68c5535ee",
+      "content_sha256": "f44c53a4fedac3cff47186e33db9edbf7d7d6b8cb2bd08ef8b40a4321a0cff60",
       "always_loaded": false
     },
     {
@@ -861,7 +861,7 @@
     {
       "source_ordinal": 72,
       "slug": "trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
-      "title": "Trust-policy rules match by URI PREFIX, not glob \u2014 never write `/",
+      "title": "Trust-policy rules match by URI PREFIX, not glob — never write `/",
       "topic": "security-gates",
       "destination": ".claude/skills/agent-security-gates.md",
       "anchor": "applied-learning-trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
@@ -1911,7 +1911,7 @@
       "anchor": "applied-learning-tests-must-never-move-or-rename-live-credential-stores-to-simulate-missing-credentials",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing the provider-discovery baseline repair).",
-      "content_sha256": "467e63ecc85deed38a2dbbd419321da345cbc4bd0b61f173a2e6cd52d94e20cd",
+      "content_sha256": "10c3700b9162a1c48299da6811d4fb428414f29aa34e52ee4e1cc8c400bd5c5c",
       "always_loaded": false
     },
     {
@@ -2175,7 +2175,7 @@
       "anchor": "applied-learning-temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 rerunning coding benchmark tests in an isolated worktree).",
-      "content_sha256": "afcedc95459c1a7fad859e9098adc5c860a3d2d11a193aa533a4a616e5b30c37",
+      "content_sha256": "54897e638b9a9e498288df6cdb8e4a6d1f25d53a6da744dcc496683ebe04d65f",
       "always_loaded": false
     },
     {
@@ -2583,7 +2583,7 @@
       "anchor": "applied-learning-secret-bearing-genservers-need-explicit-status-redaction",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing verified-request and execution-permit brokers).",
-      "content_sha256": "df002ae38b8573b69dc9db6b229765e725520880cb72e75d7ee6cf626efef7c5",
+      "content_sha256": "cbace74f440129af0cacf0f2f9f9fdef3c0c2cba6a5ac7e62bac10afad0f2342",
       "always_loaded": false
     },
     {
@@ -2847,7 +2847,7 @@
       "anchor": "applied-learning-caller-timeout-does-not-cancel-a-queued-owner-mutation",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 suspending the execution-permit broker).",
-      "content_sha256": "ec93cc1e242668057c3e85778c23cbb5e35e0e8e438b792d61eec24a41a8fb4f",
+      "content_sha256": "ae1013229c35ef4d96135da8817c5ab7a4bc50c8e0d413a8a50f93e08b14b61f",
       "always_loaded": false
     },
     {
@@ -3123,7 +3123,7 @@
       "anchor": "applied-learning-distribution-readiness-is-not-application-readiness",
       "source_date": "2026-07-13",
       "source_incident": "found 2026-07-13 recovering the Phase 6 delegator runtime).",
-      "content_sha256": "7d6192641e04a71c56f343052d12bdc33899d26a74da5070754d600ba042751a",
+      "content_sha256": "3597238b104dadfff07640fe40dd3f8ac1667f085526451b5cb649e9bf364d9b",
       "always_loaded": false
     },
     {
@@ -3471,7 +3471,7 @@
       "anchor": "applied-learning-test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 composing the Phase 6 projection boundary).",
-      "content_sha256": "4c19543ce36960109537a9fa9c6f4ad4e1a547bcc01fc673ad160d891ffc524e",
+      "content_sha256": "22724ff7d5ef1657ff8f2d02446bb63c2e7b228cacba62ab94c706a79570c865",
       "always_loaded": false
     },
     {
@@ -3507,7 +3507,7 @@
       "anchor": "applied-learning-prove-resource-absence-positively-do-not-reinterpret-an-arbitrary-lookup-failure-as-absence",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 designing Apple Container teardown).",
-      "content_sha256": "b60169acd4c33541f29a6af70e4e16854b790949c4c4dcafb72f305091e49b4f",
+      "content_sha256": "cf601728a45fe2b20afbdc14d8567997c56ea8cc94fc5c6f9ce989e71e8e0231",
       "always_loaded": false
     },
     {
@@ -3531,7 +3531,7 @@
       "anchor": "applied-learning-an-operation-deadline-never-authorizes-abandoning-owned-cleanup",
       "source_date": "2026-07-14",
       "source_incident": "confirmed 2026-07-14 designing the Apple Container unit worker).",
-      "content_sha256": "96750ff1f3ef5405c608042fba1bef4d92aecea6694daa2410f2a97796f2e8e6",
+      "content_sha256": "a2cd59f081d233a9b7a59e18a905cb9450b6204c55771a7172ca1746022ff3bd",
       "always_loaded": false
     },
     {
@@ -3687,7 +3687,7 @@
       "anchor": "applied-learning-configure-a-replacement-test-process-before-an-observer-can-discover-it",
       "source_date": "2026-07-15",
       "source_incident": "found 2026-07-15 in the Apple reconciler-PID turnover test).",
-      "content_sha256": "49659abcb7240498258385d88f4a28381d34fcfcd68cad1b5b9b3ccb895fa991",
+      "content_sha256": "025f15db639461215b9d305da564637b67093f34a12dbaa007f61cf243fbd876",
       "always_loaded": false
     },
     {
@@ -4587,7 +4587,7 @@
       "anchor": "applied-learning-prime-apple-container-s-builder-explicitly-on-first-use",
       "source_date": "2026-07-16",
       "source_incident": "found 2026-07-16 provisioning the standalone Apple Container 1.1.0 runtime).",
-      "content_sha256": "ec7a67093e399fd33256d8907bde42ff47343f10d82c39a4f70804cf65842e86",
+      "content_sha256": "cde4b01a1bcb2a1ab1b0f9a46b569f64aca40fa80ff6fbac265293501a0d8a4a",
       "always_loaded": false
     },
     {
@@ -5115,7 +5115,7 @@
       "anchor": "applied-learning-normalize-forced-reqllm-tool-choices-at-the-adapter-boundary",
       "source_date": "2026-07-18",
       "source_incident": "found 2026-07-18 when every Ollama council reviewer failed before transport).",
-      "content_sha256": "f8f9b96457df22a7e5fb77a553519f4460f84213f579e703f1620df2d085f6f5",
+      "content_sha256": "a7fdbd4520e1633fec037919a3626b8d40bc70e115ec9df8a62ff5122861df08",
       "always_loaded": false
     },
     {
@@ -5548,7 +5548,7 @@
       "anchor": "applied-learning-a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner",
       "source_date": "2026-07-19",
       "source_incident": "live r6 on 2026-07-19 America/Chicago: irq_0f9b88fb1290267d was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred.",
-      "content_sha256": "d2ce14fda0921dab35d444f8166ac94c20c1e14fb07271e8a582c00bc854a3ef",
+      "content_sha256": "450e4b42e4f4bc22aad0e4f4db51d1a8072cf45cedfbc5f43801c14a27db1975",
       "always_loaded": false
     },
     {
@@ -5821,7 +5821,7 @@
       "anchor": "applied-learning-fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 while validating discard-journal persistence failure).",
-      "content_sha256": "96816445c14e88881e3c6a6981fb9316d8d716f3c184e2203bd61e155ce16ec7",
+      "content_sha256": "aa6ae4696a9e7055458c05258fb91e214a29eddfb2194ac5ac4840288f68632d",
       "always_loaded": false
     },
     {
@@ -6341,7 +6341,7 @@
       "anchor": "applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle",
       "source_date": "2026-07-24",
       "source_incident": "found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).",
-      "content_sha256": "dfff977ece8fc6612271a7c4130b207eeb100c4f4ecfd6eac8fbeae4cbdb3c12",
+      "content_sha256": "d112118013d481fb505ff2c98c4f33a5ec284d89f42bcd2f166b7751fd80443f",
       "always_loaded": false
     },
     {
@@ -6354,7 +6354,7 @@
       "anchor": "applied-learning-independently-rerun-delegated-verification-against-the-committed-revision",
       "source_date": "2026-07-25",
       "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
-      "content_sha256": "fbad28f986c6f6d4a0cfbf88d869894ad4c514372e92b5e5041e32c32f94a811",
+      "content_sha256": "28b14f222d4f043262fbb48a31ae53612797b007393304e554978e274621e581",
       "always_loaded": false
     },
     {
@@ -6549,7 +6549,7 @@
       "anchor": "applied-learning-a-green-exunit-exit-must-include-a-nonzero-intended-test-count",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 during the Phase C delegated-work canary).",
-      "content_sha256": "1130c4a38fa19fb6857022225a3dc26e31c6ed66d6bff6992afd705661987302",
+      "content_sha256": "b43b10b32e7e016690118b6467bfbbae41a7ab920483242e9851a0474cf3281e",
       "always_loaded": false
     },
     {
@@ -6809,7 +6809,7 @@
       "anchor": "applied-learning-source-owner-cleanup-success-does-not-imply-convergence",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).",
-      "content_sha256": "15cafb81de33e566dc3aafdbd0cd5ccedc7e1c132b41956e4fb9e2986767b72e",
+      "content_sha256": "93642dd17dc0d2efa32309192566c764857df6855701c8dbd2fe35395eb679c4",
       "always_loaded": false
     },
     {
@@ -7498,7 +7498,7 @@
       "anchor": "applied-learning-deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local",
       "source_date": "2026-08-02",
       "source_incident": "found 2026-08-02 while reworking VOICE transport deadlines).",
-      "content_sha256": "86046ca8413c7ec93b7f5c2f6440b2b4a851a92e6ebbfe549f3faabfde56608c",
+      "content_sha256": "cea6862981e825c1b91bebbf81c5ca7fb9f74d325cf84716e8a32cf97e0df0ef",
       "always_loaded": false
     },
     {
@@ -7719,7 +7719,7 @@
       "anchor": "applied-learning-do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox",
       "source_date": "2026-08-03",
       "source_incident": "found 2026-08-03 reviewing Voice VP-07 audio ownership).",
-      "content_sha256": "359051f0ac21b8fdaf06ea70abefd154926c44cdc6af27312a7d5514c54e5731",
+      "content_sha256": "74816dd97de7d146f41c237c3ae3e0df54f21d8bdc0f53432e6e18f4c9b6170e",
       "always_loaded": false
     },
     {
@@ -8292,7 +8292,7 @@
       "source_date": "2026-08-23",
       "source_incident": "found 2026-08-23 while reconstructing the contract-change stack",
       "always_loaded": false,
-      "content_sha256": "021c6f0db390c82d6b3492e6dd6afb7aeec1103dd46f2a5e671ef31b6c839c3c"
+      "content_sha256": "679a10e466803d60e2fc824d4b0cd0ea19447cb0589da61e88f7931ee67d13d3"
     },
     {
       "source_ordinal": 674,
@@ -8344,7 +8344,7 @@
       "source_date": "2026-08-24",
       "source_incident": "found 2026-08-24 when Packet B called invalid_tag(kind) inside match patterns",
       "always_loaded": false,
-      "content_sha256": "0e5773dc56f3bff1fac20973573d0093d17edfc392586c01fd74a41753b75e69"
+      "content_sha256": "e185dac6f8fb53730c1f6d3ffa430a722f60ede8be35fd280fc1b18f09f4e52d"
     },
     {
       "source_ordinal": 678,
@@ -8383,7 +8383,7 @@
       "source_date": "2026-08-24",
       "source_incident": "found 2026-08-24 launching local Zitadel",
       "always_loaded": false,
-      "content_sha256": "10dc0bd82fd58a4399b958a82510bf5529ee88e06c708d864f2c4e642e27cf43"
+      "content_sha256": "fe17400188e6fef4686d46aa90f04147c67bf9db6dc72b512c74e01c193d4e6f"
     },
     {
       "source_ordinal": 681,
@@ -8435,7 +8435,7 @@
       "source_date": "2026-08-25",
       "source_incident": "found 2026-08-25 moving recall to the user turn",
       "always_loaded": false,
-      "content_sha256": "65799333ba1a65f84d8a9ba6fa807d5c4c3ad4cd39f33368f9b1d78549858934"
+      "content_sha256": "08a1ea30190a45069be9ab75fb44b02d1298b1f6ccc52bed38aca972648756c2"
     },
     {
       "source_ordinal": 685,
@@ -8513,7 +8513,7 @@
       "source_date": "2026-08-26",
       "source_incident": "found 2026-08-26 while isolating the 10,001-record Security hydration regression",
       "always_loaded": false,
-      "content_sha256": "3397e0566c3cc66f22031883c70b999dec378725e471d9518a9e4d7de1c16831"
+      "content_sha256": "f3209ecfe076f5af5e17d6477db57d6227e23257191597143c79057e0e2e7024"
     },
     {
       "source_ordinal": 691,
@@ -8578,7 +8578,7 @@
       "source_date": "2026-08-27",
       "source_incident": "found 2026-08-26 in P1B-2A CrossApp batch 17 and verified 2026-08-27",
       "always_loaded": false,
-      "content_sha256": "07e6a9ca30b04dd647b67f6830d09a0d2cc9a9bfd01ce1622d580cb95d79a3f1"
+      "content_sha256": "b24604e917fbc6746678f679aa2d9b802fd7639c0157b5fb812ae0e982b09c8f"
     },
     {
       "source_ordinal": 696,
@@ -8604,7 +8604,7 @@
       "source_date": "2026-08-26",
       "source_incident": "found 2026-08-26, V7-17 / run 11o; supersedes V7-15",
       "always_loaded": false,
-      "content_sha256": "9d77320b7048c7ab304609be308e0c7d8e8c086c67c716733dda7ac0e2d5367f"
+      "content_sha256": "c9c2b5927b09cc97d53373e57610f11e695465e0a8c5c03d9920ee3d793fd385"
     },
     {
       "source_ordinal": 698,
@@ -8656,7 +8656,7 @@
       "source_date": "2026-08-28",
       "source_incident": "found 2026-08-28 when Apple control-plane status was pinned while CrossApp workload image policy was unavailable",
       "always_loaded": false,
-      "content_sha256": "418feacd59579528032546a5963f18d25c77fc2877b883880079d9e71040c2a8"
+      "content_sha256": "0699e293cbd1cb8da901120b07aef55498c1704eb610d645da62b0ba795a3fcf"
     },
     {
       "source_ordinal": 702,
@@ -8851,7 +8851,7 @@
       "source_date": "2026-09-02",
       "source_incident": "found 2026-09-02 when every OpenAI OAuth reviewer failed with invalid_terminal_usage_keys",
       "always_loaded": false,
-      "content_sha256": "9b0565ba2396c44ff1b4cb032db974c194089b1e1d42453a29d384be5dd0255a"
+      "content_sha256": "b6cdddfc9357927dea721ca4e245a6f9ee82cde085f6cd15a6741705bb0f6b88"
     },
     {
       "source_ordinal": 717,
@@ -8916,7 +8916,7 @@
       "source_date": "2026-09-07",
       "source_incident": "learned 2026-09-07 while separating personal-agent delivery from G5E and shared-authority qualification",
       "always_loaded": false,
-      "content_sha256": "ba15a33f0078e73bef1ba2401706818b8a4117f4f0cfa593723dde1c03909529"
+      "content_sha256": "66bdddc148758ccb1252a344cf2e4dbb561341defd7e691c5e805a674f2f42bc"
     },
     {
       "source_ordinal": 722,
@@ -8955,7 +8955,7 @@
       "source_date": "2026-09-07",
       "source_incident": "learned 2026-09-07 reviewing the entry-point convergence plan",
       "always_loaded": false,
-      "content_sha256": "a912fd2643f2dcab03690a6191387dbf0bfc9fc310c03620ba6047f507abaf83"
+      "content_sha256": "3daea78e5923bb4c3d7ad6d54bf6dfc7b7a72fa40c0846041dc941ddea196cc9"
     },
     {
       "source_ordinal": 725,
@@ -9033,7 +9033,7 @@
       "source_date": "2026-09-08",
       "source_incident": "found 2026-09-08 while independently falsifying J0 recall observation claims",
       "always_loaded": false,
-      "content_sha256": "fc148d6cc9238d66e969b0e10666efcafc51dc8c0fbbb5675bc0639a8a22ed4f"
+      "content_sha256": "184f9e3625b5228fa6bf6fa3b5903479058a779475538678fe2e818b93338149"
     },
     {
       "source_ordinal": 731,
@@ -9046,9 +9046,178 @@
       "source_date": "2026-09-08",
       "source_incident": "found 2026-09-08 in isolated J0 surrounding Commands qualification",
       "always_loaded": false,
-      "content_sha256": "ad72712ca91e9fcc59a01e288489f78fcb2119852ed6f65705390033032d6cdb"
+      "content_sha256": "123c2bcf28fe8a1a5d4800ad835bc024361236b59bf8894839fa60d7e05350b7"
+    },
+    {
+      "source_ordinal": 739,
+      "source_kind": "post-migration",
+      "slug": "separate-stateful-authorization-from-non-consuming-continuation-checks",
+      "title": "Separate stateful authorization from non-consuming continuation checks.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-separate-stateful-authorization-from-non-consuming-continuation-checks",
+      "source_date": "2026-09-26",
+      "source_incident": "found 2026-09-26 while implementing durable conversation ingress",
+      "always_loaded": false,
+      "content_sha256": "40ed2fb238abf5bea9569fcd883e8f1cfb132692690435b909c16f1a4508f443"
+    },
+    {
+      "source_ordinal": 740,
+      "source_kind": "post-migration",
+      "slug": "separate-admission-acknowledgement-from-refresh-and-clear-only-the-acknowledged-draft",
+      "title": "Separate admission acknowledgement from refresh, and clear only the acknowledged draft.",
+      "topic": "ui",
+      "destination": ".claude/skills/socket-component.md",
+      "anchor": "applied-learning-separate-admission-acknowledgement-from-refresh-and-clear-only-the-acknowledged-draft",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 while qualifying shared ConversationKit web/terminal sessions",
+      "always_loaded": false,
+      "content_sha256": "a8a6247c7df417c61f2cb25c7a29a46a14a6f5fc6c16c673c19cced6af7072fd"
+    },
+    {
+      "source_ordinal": 741,
+      "source_kind": "post-migration",
+      "slug": "exercise-native-input-and-browser-hooks-not-only-framework-events",
+      "title": "Exercise native input and browser hooks, not only framework events.",
+      "topic": "ui",
+      "destination": ".claude/skills/socket-component.md",
+      "anchor": "applied-learning-exercise-native-input-and-browser-hooks-not-only-framework-events",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 during the Arbor adapter renderer qualification",
+      "always_loaded": false,
+      "content_sha256": "f07c602e64f8de1a00872bd3de7f69beb23645dd0c6661b269f48df15eaa634d"
+    },
+    {
+      "source_ordinal": 742,
+      "source_kind": "post-migration",
+      "slug": "derive-integration-fixture-roots-from-source-locations-not-mix-working-directory",
+      "title": "Derive integration fixture roots from source locations, not Mix working directory.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-derive-integration-fixture-roots-from-source-locations-not-mix-working-directory",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 while qualifying ConversationKit against a real Arbor Session",
+      "always_loaded": false,
+      "content_sha256": "bbc2340f94704e1705b3dfcf1e2d7590395c8b40d4f8a74618528dfb9ae9752c"
+    },
+    {
+      "source_ordinal": 743,
+      "source_kind": "post-migration",
+      "slug": "conclude-interface-comparisons-with-one-delivery-choice-per-surface",
+      "title": "Conclude interface comparisons with one delivery choice per surface.",
+      "topic": "ui",
+      "destination": ".claude/skills/socket-component.md",
+      "anchor": "applied-learning-conclude-interface-comparisons-with-one-delivery-choice-per-surface",
+      "source_date": "2026-09-27",
+      "source_incident": "user clarification and prior-art review on 2026-09-27 after the ConversationKit renderer experiments",
+      "always_loaded": false,
+      "content_sha256": "b328b840f764b33d36c28ae2909e8be10c8d846f69abecce064d8d931f963afa"
+    },
+    {
+      "source_ordinal": 744,
+      "source_kind": "post-migration",
+      "slug": "clear-pending-liveview-stream-inserts-when-revoking-private-state",
+      "title": "Clear pending LiveView stream inserts when revoking private state.",
+      "topic": "ui",
+      "destination": ".claude/skills/socket-component.md",
+      "anchor": "applied-learning-clear-pending-liveview-stream-inserts-when-revoking-private-state",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 while converging production ChatLive onto authenticated durable history",
+      "always_loaded": false,
+      "content_sha256": "2435adb79ec3f72e61ab1287f574899316adbd4417f390118c124c9ffbb718ce"
+    },
+    {
+      "source_ordinal": 745,
+      "source_kind": "post-migration",
+      "slug": "check-conversation-authority-before-allowance-effects-and-again-before-publication",
+      "title": "Check conversation authority before allowance effects and again before publication.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-check-conversation-authority-before-allowance-effects-and-again-before-publication",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 in alias, rate-limit and blocked-turn convergence regressions",
+      "always_loaded": false,
+      "content_sha256": "d2c772e42a45f17a8fecb58e567f1c7d6b396a18469ab9eb344436d5f57ce262"
+    },
+    {
+      "source_ordinal": 746,
+      "source_kind": "post-migration",
+      "slug": "provider-startup-defaults-are-not-acknowledged-operation-formats",
+      "title": "Provider startup defaults are not acknowledged operation formats.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-provider-startup-defaults-are-not-acknowledged-operation-formats",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 during VP-07A0 xAI configuration acknowledgement review",
+      "always_loaded": false,
+      "content_sha256": "8c5dea0e86c823adc6471fa36ea479a20e2e69b9af3566916c20653947b1d087"
+    },
+    {
+      "source_ordinal": 747,
+      "source_kind": "post-migration",
+      "slug": "release-provider-audio-only-for-the-exact-guarded-final-text",
+      "title": "Release provider audio only for the exact guarded final text.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-release-provider-audio-only-for-the-exact-guarded-final-text",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 reviewing VP-07A1 presentation",
+      "always_loaded": false,
+      "content_sha256": "93980b87416b05fe2b76a730be0b83b30565ce2cedf6ca4c616b16ca6e70dc04"
+    },
+    {
+      "source_ordinal": 748,
+      "source_kind": "post-migration",
+      "slug": "retain-conversation-authority-through-final-publication",
+      "title": "Retain conversation authority through final publication.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-retain-conversation-authority-through-final-publication",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 while binding Voice to the canonical private conversation",
+      "always_loaded": false,
+      "content_sha256": "a3226cea92dec876dcfe6122b39ac0f7cd25556d54baffd3c794dd3cf44fb58b"
+    },
+    {
+      "source_ordinal": 749,
+      "source_kind": "post-migration",
+      "slug": "one-shot-protocol-safety-requires-an-uncontaminated-session",
+      "title": "One-shot protocol safety requires an uncontaminated Session.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-one-shot-protocol-safety-requires-an-uncontaminated-session",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 reviewing VP-07A1",
+      "always_loaded": false,
+      "content_sha256": "67e677fe0db434066acae2ab37002da69f1fd6edbd642f09d333e9c7e0995e02"
+    },
+    {
+      "source_ordinal": 750,
+      "source_kind": "post-migration",
+      "slug": "provision-and-probe-through-the-same-pinned-container-installation",
+      "title": "Provision and probe through the same pinned container installation.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-provision-and-probe-through-the-same-pinned-container-installation",
+      "source_date": "2026-09-27",
+      "source_incident": "found 2026-09-27 during native-audio baseline admission",
+      "always_loaded": false,
+      "content_sha256": "a18dd1e4aebfe60da2fd5fa8e1b7f6873026495fd03e8486a9bd5254d2735303"
+    },
+    {
+      "source_ordinal": 751,
+      "source_kind": "post-migration",
+      "slug": "bound-active-audit-work-separately-from-durable-history",
+      "title": "Bound active audit work separately from durable history.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-bound-active-audit-work-separately-from-durable-history",
+      "source_date": "2026-09-27",
+      "source_incident": "user challenge and live security-journal exhaustion, 2026-09-27",
+      "always_loaded": false,
+      "content_sha256": "ee55b0ec715a64e13f6acb495bf6aa164c98a08143cf72952944b8f2454123ba"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 270
+  "post_migration_entry_count": 283
 }

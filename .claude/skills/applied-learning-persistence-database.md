@@ -64,6 +64,15 @@ verifying the persistence CAS foundation).
 <a id="applied-learning-dbconnection-timeout-does-not-bound-time-already-spent-in-the-pool-queue"></a>
 **DBConnection `:timeout` does not bound time already spent in the pool queue.** The connection deadline timer starts when a queued checkout finally receives a connection, so a caller can wait through the pool's queue interval before the timeout is observed. For a hard caller-owned deadline, use `queue: false`, retry checkout in the caller with bounded backoff, and pass the same absolute `:deadline` to the transaction and every query (found 2026-07-11 while testing EventLog append deadlines with an exhausted one-connection PostgreSQL pool).
 
+For SQLite lock warnings, identify the transaction phase and read back durable
+outcomes before changing retries. `EventLog.Ecto` and `SessionStore` use
+deadline-capped 5 ms lock waits; Exqlite disconnects on transaction-control SQL
+errors, so a successful acquisition retry can still emit a connection error.
+Measure contention before tuning the wait, retain no-late-commit regressions and
+post-write uncertainty handling, and never suppress genuine database failures
+(source-backed lesson from recurring warnings during completed cross-surface
+turns, 2026-09-29).
+
 <!-- applied-learning: phoenix-tracker-is-a-distributed-projection-not-a-first-writer-cas -->
 <a id="applied-learning-phoenix-tracker-is-a-distributed-projection-not-a-first-writer-cas"></a>
 **Phoenix.Tracker is a distributed projection, not a first-writer CAS.** Concurrent node owners can publish conflicting metadata, tracking failure may be ignored, and lookup order is not a conflict-resolution protocol. Security-relevant answer/idempotence state needs an atomic shared durable backend; use Tracker/PubSub only after the source-of-truth commit and fail closed when that backend is unavailable (found 2026-07-11 reviewing cluster approval answers).
@@ -250,3 +259,6 @@ owner responsive, then apply conflict-safely against a hot-state snapshot so
 concurrent durable-first writes win; regress both responsiveness and stale
 overwrite (found 2026-08-26 when a 29,034-row RunJournal refresh took about 5.8
 seconds and terminalized P1B-2A).
+<!-- applied-learning: bound-active-audit-work-separately-from-durable-history -->
+<a id="applied-learning-bound-active-audit-work-separately-from-durable-history"></a>
+**Bound active audit work separately from durable history.** A finite outbox or recovery working-set budget must not become a lifetime event quota when completed-operation fingerprints accumulate. Keep durable history and duplicate/conflict evidence in scalable storage, reclaim hot admission capacity only after verified durable transfer, and qualify sustained operation beyond the hot bound as well as outage/restart behavior. An empty pending queue does not prove sustainable admission. Do not declare rollout ready while terminal retirement remains deferred (user challenge and live security-journal exhaustion, 2026-09-27).

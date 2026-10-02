@@ -599,6 +599,12 @@ source-coupling baseline).
 
 A durable task does not wake an external coding harness after its turn ends. Keep the supervising turn open with timed polling through actionable gates, or establish and verify an actual wake-up mechanism before ending it; never imply an unarmed background watcher exists. On 2026-09-07, ending the provider-setup turn left J0 at its 22:41 UTC commit approval until the user prompted again. Record this as a manager continuity failure, not a factory execution stall.
 
+The same distinction applies to collaborator messaging: `send_message` queues
+context but does not start an idle or completed agent. Use `followup_task` for
+the next work slice and confirm the agent is running before reporting that work
+is underway (2026-09-29: voice compatibility follow-up messages remained queued
+after the worker had completed its previous patch).
+
 <!-- applied-learning: acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape -->
 <a id="applied-learning-acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape"></a>
 **ACP usage extraction must follow the provider's prompt-result shape.** Prefer the bounded top-level `usage` map; when it is absent, inspect provider metadata such as `_meta.usage`. At the `AcpSession` boundary, use first-present alias semantics, accept only non-negative signed-64 integers, preserve the provider result unchanged, and exercise both cumulative session status and cost accounting. Verify a provider-shape change with a live canary rather than inferring it from zero metrics (found 2026-07-20 when Grok CLI 0.2.106 returned nonzero `inputTokens`/`outputTokens` only under `_meta.usage`, leaving the r8 report at zero before `a459458d`).
