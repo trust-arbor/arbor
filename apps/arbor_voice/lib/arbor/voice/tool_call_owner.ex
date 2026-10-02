@@ -5,6 +5,7 @@ defmodule Arbor.Voice.ToolCallOwner do
   # Proposes outcome before normal exit so Session can treat any remaining
   # matching DOWN (including :normal/:shutdown) as tool_failed when pending.
 
+  alias Arbor.Voice.Diagnostics
   alias Arbor.Voice.Session.ToolTaskCore
 
   @activate_wait_ms 5_000
@@ -19,7 +20,7 @@ defmodule Arbor.Voice.ToolCallOwner do
     router = Map.fetch!(opts, :router)
     context = Map.fetch!(opts, :context)
     authority = Map.fetch!(opts, :authority)
-    timeout_ms = Map.fetch!(opts, :timeout_ms)
+    deadline_ms = Map.fetch!(opts, :deadline_ms)
 
     # Keep the supervisor/worker links load-bearing. Supervisor shutdown or an
     # unexpected worker crash takes this owner down, and Session's monitor owns
@@ -45,12 +46,30 @@ defmodule Arbor.Voice.ToolCallOwner do
     end
 
     timeout_message = {:tool_timeout, generation, call_id, token}
-    timer_ref = Process.send_after(self(), timeout_message, timeout_ms)
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      _ = Process.demonitor(session_mon, [:flush])
+      Diagnostics.failure(:tool_execution, :tool_timeout)
+
+      propose(
+        %{session_pid: session_pid, generation: generation, call_id: call_id, token: token},
+        ToolTaskCore.normalize(:tool_timeout)
+      )
+
+      exit(:normal)
+    end
+
+    timer_ref = Process.send_after(self(), timeout_message, remaining_ms)
     owner = self()
 
     worker =
       spawn_link(fn ->
-        output = router |> safe_invoke(context, authority) |> ToolTaskCore.normalize()
+        output =
+          if System.monotonic_time(:millisecond) < deadline_ms,
+            do: router |> safe_invoke(context, authority) |> ToolTaskCore.normalize(),
+            else: ToolTaskCore.normalize(:tool_timeout)
+
         send(owner, {:worker_finished, generation, call_id, token, output})
       end)
 
@@ -62,7 +81,8 @@ defmodule Arbor.Voice.ToolCallOwner do
       worker: worker,
       generation: generation,
       call_id: call_id,
-      token: token
+      token: token,
+      deadline_ms: deadline_ms
     })
   end
 
@@ -81,6 +101,7 @@ defmodule Arbor.Voice.ToolCallOwner do
       ^timeout_message ->
         shutdown_worker(state.worker)
         _ = Process.demonitor(state.session_mon, [:flush])
+        Diagnostics.failure(:tool_execution, :tool_timeout)
         propose(state, ToolTaskCore.normalize(:tool_timeout))
         exit(:normal)
 
@@ -89,7 +110,13 @@ defmodule Arbor.Voice.ToolCallOwner do
         cancel_timer(state.timer_ref, timeout_message)
         _ = Process.demonitor(state.session_mon, [:flush])
         # Outcome before normal exit — Session sees tool_outcome before DOWN.
-        propose(state, output)
+        if System.monotonic_time(:millisecond) < state.deadline_ms do
+          propose(state, output)
+        else
+          Diagnostics.failure(:tool_execution, :tool_timeout)
+          propose(state, ToolTaskCore.normalize(:tool_timeout))
+        end
+
         exit(:normal)
 
       _other ->

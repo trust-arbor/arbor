@@ -18,7 +18,8 @@ defmodule Arbor.Voice.TranscriptRecorder do
   alias Arbor.Voice.Session.ManagedDispatchCore
 
   @id_max_bytes 256
-  @opts_allowlist [:comms, :persistence, :backend, :mode, :delegation]
+  @opts_allowlist [:comms, :persistence, :backend, :mode, :delegation, :voice_parent_id]
+  @voice_parent_id ~r/\Avoice_[0-9a-f]{32}\z/
   @delegation_keys ["provider", "task", "task_id", "outcome"]
   @allowed_outcomes MapSet.new(["dispatched"])
 
@@ -38,6 +39,9 @@ defmodule Arbor.Voice.TranscriptRecorder do
   * `:backend` / `:mode` — trusted backend metadata; existing atoms or valid
     UTF-8 binaries, normalized to strings via `Atom.to_string/1` (never
     `String.to_atom/1`)
+  * `:voice_parent_id` — optional source-owned audio interaction identifier,
+    `voice_` followed by 32 lowercase hex characters; copied to both entries.
+    It is correlation only, never an authorization or delivery receipt.
   * `:delegation` — optional trusted string-keyed receipt with exactly
     `provider`, `task`, `task_id`, and `outcome`. Valid receipts add flat
     assistant-only `delegation_*` metadata keys; user metadata stays
@@ -146,8 +150,24 @@ defmodule Arbor.Voice.TranscriptRecorder do
     base = %{"transport" => "voice"}
 
     with {:ok, meta} <- put_optional_meta(base, opts, :backend),
-         {:ok, meta} <- put_optional_meta(meta, opts, :mode) do
+         {:ok, meta} <- put_optional_meta(meta, opts, :mode),
+         {:ok, meta} <- put_voice_parent(meta, opts) do
       {:ok, meta}
+    end
+  end
+
+  defp put_voice_parent(meta, opts) do
+    case Keyword.fetch(opts, :voice_parent_id) do
+      :error ->
+        {:ok, meta}
+
+      {:ok, id} when is_binary(id) and byte_size(id) == 38 ->
+        if Regex.match?(@voice_parent_id, id),
+          do: {:ok, Map.put(meta, "voice_parent_id", id)},
+          else: {:error, {:invalid_opts, :invalid_voice_parent_id}}
+
+      _ ->
+        {:error, {:invalid_opts, :invalid_voice_parent_id}}
     end
   end
 

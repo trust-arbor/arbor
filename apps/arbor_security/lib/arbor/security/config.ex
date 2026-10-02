@@ -28,6 +28,34 @@ defmodule Arbor.Security.Config do
   @app :arbor_security
 
   @doc false
+  def terminal_login_options do
+    options = Application.get_env(@app, :terminal_login, [])
+    options = if is_list(options) and Keyword.keyword?(options), do: options, else: []
+
+    bounded = fn key, default, maximum ->
+      case Keyword.get(options, key, default) do
+        value when is_integer(value) and value >= 1 and value <= maximum -> value
+        _ -> default
+      end
+    end
+
+    module = Keyword.get(options, :device_flow_module, Arbor.Security.OIDC.DeviceFlow)
+
+    %{
+      device_flow_module:
+        if(is_atom(module) and not is_nil(module),
+          do: module,
+          else: Arbor.Security.OIDC.DeviceFlow
+        ),
+      attach_seconds: bounded.(:attach_seconds, 60, 300),
+      reconnect_seconds: bounded.(:reconnect_seconds, 120, 3_600),
+      pending_seconds: bounded.(:pending_seconds, 300, 300),
+      max_pending: bounded.(:max_pending, 32, 32),
+      max_active: bounded.(:max_active, 128, 128)
+    }
+  end
+
+  @doc false
   def private_memory_admission_ttl_ms do
     case Application.get_env(@app, :private_memory_admission_ttl_ms, 900_000) do
       ttl when is_integer(ttl) and ttl in 1..3_600_000 -> ttl

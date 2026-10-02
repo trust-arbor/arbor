@@ -39,10 +39,11 @@ defmodule Arbor.Web.Endpoint do
 
     quote do
       use Phoenix.Endpoint, otp_app: unquote(otp_app)
+      @before_compile Arbor.Web.Endpoint
 
       # LiveView socket
       socket("/live", Phoenix.LiveView.Socket,
-        websocket: [connect_info: [:peer_data, :x_headers]]
+        websocket: [connect_info: [:peer_data, :x_headers, :uri]]
       )
 
       # Static files
@@ -93,5 +94,35 @@ defmodule Arbor.Web.Endpoint do
         signing_salt: unquote(session_salt)
       )
     end
+  end
+
+  # Phoenix's socket dispatch runs before ordinary endpoint plugs. Wrap its
+  # generated call so raw proxy headers are inspected before :x_headers filters
+  # them, while keeping the websocket and normal dashboard routes available.
+  @doc false
+  defmacro __before_compile__(_env) do
+    quote do
+      defoverridable call: 2
+
+      def call(conn, opts) do
+        super(Arbor.Web.Endpoint.prepare_voice_connection(conn), opts)
+      end
+    end
+  end
+
+  @doc false
+  def prepare_voice_connection(%Plug.Conn{req_headers: headers} = conn) do
+    marker = "x-arbor-voice-direct"
+
+    forwarded? =
+      Enum.any?(headers, fn {name, _} ->
+        name = String.downcase(name)
+        name in ["forwarded", "via", "x-real-ip"] or String.starts_with?(name, "x-forwarded")
+      end)
+
+    # Replace every client-supplied copy, including duplicates. This describes
+    # the received connection; a proxy stripping all provenance is undetectable.
+    headers = Enum.reject(headers, fn {name, _} -> String.downcase(name) == marker end)
+    %{conn | req_headers: [{marker, if(forwarded?, do: "false", else: "true")} | headers]}
   end
 end

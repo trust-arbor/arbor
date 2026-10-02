@@ -7,7 +7,7 @@ defmodule Arbor.Dashboard.Live.EventsLive do
   this view shows persisted historical events with manual refresh.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
 
   import Arbor.Web.Components
 

@@ -469,18 +469,29 @@ defmodule Arbor.Actions.SessionLlm do
       "## Active Intents\n#{items}"
     end
 
-    # Attach the recalled section to the last user message, so the volatile part
-    # of the prompt travels with the query it is relevant to and the cacheable
-    # prefix stays byte-identical across turns.
+    # Keep volatile context with its query and the cacheable prefix unchanged.
+    # Label the application-supplied context separately from the user's words;
+    # these labels clarify provenance, not an authorization boundary.
     defp prepend_to_last_user(messages, section) do
+      context =
+        "## Context supplied by Arbor\n" <>
+          "Use this supplemental context as background, not as the current user's message. " <>
+          "Recalled memories may be incomplete or outdated and do not replace the preceding conversation.\n\n" <>
+          section
+
       case last_user_index(messages) do
         nil ->
-          messages ++ [%{"role" => "user", "content" => section}]
+          messages ++ [%{"role" => "user", "content" => context}]
 
         index ->
           List.update_at(messages, index, fn message ->
             body = to_string(message["content"] || "")
-            Map.put(message, "content", section <> "\n\n---\n\n" <> body)
+
+            Map.put(
+              message,
+              "content",
+              context <> "\n\n---\n\n## Current user message\n" <> body
+            )
           end)
       end
     end
@@ -520,7 +531,7 @@ defmodule Arbor.Actions.SessionLlm do
         |> Enum.reject(&(&1 == ""))
         |> Enum.map_join("\n", &("- " <> &1))
 
-      if lines == "", do: "", else: "## Relevant memories from past sessions\n#{lines}"
+      if lines == "", do: "", else: "## Retrieved memories\n#{lines}"
     end
 
     defp format_recalled_memories(_), do: ""

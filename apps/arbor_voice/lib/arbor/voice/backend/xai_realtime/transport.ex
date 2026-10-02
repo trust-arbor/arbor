@@ -10,54 +10,134 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
   @default_recv_timeout 90_000
   @default_send_timeout 30_000
 
-  @spec connect(keyword()) :: {:ok, map()} | {:error, term()}
-  def connect(opts) do
-    host = Keyword.fetch!(opts, :host)
-    port = Keyword.fetch!(opts, :port)
-    path = Keyword.fetch!(opts, :path)
-    token = Keyword.fetch!(opts, :token)
-    clock_fun = Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end)
-    upgrade_deadline = clock_fun.() + @default_recv_timeout
+  @spec connect(keyword()) :: {:ok, map()} | {:error, :connect_failed, :closed | :cleanup_pending}
+  def connect(opts), do: connect(opts, {Mint.HTTP, Mint.WebSocket, :ssl})
 
-    with {:ok, conn} <-
-           Mint.HTTP.connect(:https, host, port,
-             protocols: [:http1],
-             transport_opts: [send_timeout: @default_send_timeout, send_timeout_close: true]
-           ),
-         {:ok, conn, ref} <-
-           Mint.WebSocket.upgrade(:wss, conn, path, [{"authorization", "Bearer " <> token}]),
-         {:ok, conn, status, headers} <-
-           await_upgrade(conn, ref, nil, nil, upgrade_deadline, clock_fun),
-         {:ok, conn, ws} <- Mint.WebSocket.new(conn, ref, status, headers) do
-      {:ok, %{conn: conn, ref: ref, ws: ws, pending: [], clock_fun: clock_fun}}
-    else
-      {:error, _conn, reason} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+  # Explicit internal qualification seam; production never reads collaborator
+  # modules from caller options.
+  @doc false
+  def connect(opts, {http, _websocket, _ssl} = deps) do
+    clock = Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end)
+    deadline = clock.() + @default_recv_timeout
+
+    case http.connect(:https, Keyword.fetch!(opts, :host), Keyword.fetch!(opts, :port),
+           protocols: [:http1],
+           mode: :passive,
+           transport_opts: [send_timeout: @default_send_timeout, send_timeout_close: true]
+         ) do
+      {:ok, conn} -> upgrade_connection(conn, opts, deadline, clock, deps)
+      {:error, _reason} -> {:error, :connect_failed, :closed}
+      _ -> {:error, :connect_failed, :cleanup_pending}
     end
+  rescue
+    _ -> {:error, :connect_failed, :cleanup_pending}
+  catch
+    _, _ -> {:error, :connect_failed, :cleanup_pending}
   end
 
-  defp await_upgrade(conn, ref, status, headers, deadline, clock_fun) do
+  defp upgrade_connection(conn, opts, deadline, clock, {_http, websocket, _ssl} = deps) do
+    case websocket.upgrade(:wss, conn, Keyword.fetch!(opts, :path), [
+           {"authorization", "Bearer " <> Keyword.fetch!(opts, :token)}
+         ]) do
+      {:ok, next, ref} -> finish_upgrade(next, ref, deadline, clock, deps)
+      {:error, next, _reason} -> reject_connection(next, deps)
+      _ -> reject_connection(conn, deps)
+    end
+  rescue
+    _ -> reject_connection(conn, deps)
+  catch
+    _, _ -> reject_connection(conn, deps)
+  end
+
+  defp finish_upgrade(conn, ref, deadline, clock, {http, _websocket, _ssl} = deps) do
+    case await_upgrade(conn, ref, nil, nil, deadline, clock, http) do
+      {:ok, next, status, headers, data} ->
+        new_websocket(next, ref, status, headers, data, clock, deps)
+
+      {:error, next, _reason} ->
+        reject_connection(next, deps)
+    end
+  rescue
+    _ -> reject_connection(conn, deps)
+  catch
+    _, _ -> reject_connection(conn, deps)
+  end
+
+  defp new_websocket(conn, ref, status, headers, data, clock, {_http, websocket, _ssl} = deps) do
+    case websocket.new(conn, ref, status, headers, mode: :passive) do
+      {:ok, next, ws} ->
+        state = %{conn: next, ref: ref, ws: ws, pending: [], clock_fun: clock}
+        retain_upgrade_frames(state, data, deps)
+
+      {:error, next, _reason} ->
+        reject_connection(next, deps)
+
+      _ ->
+        reject_connection(conn, deps)
+    end
+  rescue
+    _ -> reject_connection(conn, deps)
+  catch
+    _, _ -> reject_connection(conn, deps)
+  end
+
+  defp retain_upgrade_frames(state, <<>>, _deps), do: {:ok, state}
+
+  defp retain_upgrade_frames(state, data, deps) do
+    case decode_events(state.ws, data) do
+      {:ok, ws, events} -> {:ok, %{state | ws: ws, pending: events}}
+      {:error, _reason} -> reject_connection(state.conn, deps)
+    end
+  rescue
+    _ -> reject_connection(state.conn, deps)
+  catch
+    _, _ -> reject_connection(state.conn, deps)
+  end
+
+  defp reject_connection(conn, {http, _websocket, ssl}) do
+    disposition = if close(%{conn: conn}, {http, ssl}) == :ok, do: :closed, else: :cleanup_pending
+    {:error, :connect_failed, disposition}
+  end
+
+  defp await_upgrade(conn, ref, status, headers, deadline, clock_fun, http) do
     case remaining_budget(deadline, clock_fun) do
       :timeout ->
-        {:error, :upgrade_timeout}
+        {:error, conn, :upgrade_timeout}
 
       remaining ->
-        receive do
-          msg ->
-            case upgrade_step(Mint.WebSocket.stream(conn, msg), conn, ref, status, headers) do
-              {:continue, conn, status, headers} ->
-                await_upgrade(conn, ref, status, headers, deadline, clock_fun)
+        received = http.recv(conn, 0, remaining)
 
-              {:complete, conn, status, headers} ->
-                {:ok, conn, status, headers}
+        case received do
+          {:error, next, _reason, _responses} ->
+            {:error, next, :upgrade_failed}
 
-              {:error, reason} ->
-                {:error, reason}
+          _ ->
+            case upgrade_step(received, conn, ref, status, headers) do
+              {:continue, next, status, headers} ->
+                await_upgrade(next, ref, status, headers, deadline, clock_fun, http)
+
+              {:complete, next, status, headers} ->
+                # Mint's HTTP/1 101 body emits any coalesced WebSocket bytes
+                # in the same response batch as :done. Keep full and partial frames.
+                {:ok, _, responses} = received
+                data = for {:data, ^ref, bytes} <- responses, into: <<>>, do: bytes
+                {:ok, next, status, headers, data}
+
+              {:error, _reason} ->
+                failed_conn =
+                  case received do
+                    {:ok, latest, _responses} -> latest
+                    _ -> conn
+                  end
+
+                {:error, failed_conn, :upgrade_failed}
             end
-        after
-          remaining -> {:error, :upgrade_timeout}
         end
     end
+  rescue
+    _ -> {:error, conn, :upgrade_failed}
+  catch
+    _, _ -> {:error, conn, :upgrade_failed}
   end
 
   @doc false
@@ -163,57 +243,46 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
     end
   end
 
-  @spec recv_frame(map(), timeout()) :: {:ok, map(), map()} | {:error, term()}
-  def recv_frame(%{pending: [event | rest]} = state, _timeout),
+  @spec recv_frame(map(), timeout()) ::
+          {:ok, map(), map()} | {:error, :timeout, map()} | {:error, term()}
+  def recv_frame(state, timeout), do: recv_frame(state, timeout, Mint.WebSocket)
+
+  # Explicit qualification seam, never selected by production caller options.
+  @doc false
+  def recv_frame(%{pending: [event | rest]} = state, _timeout, _websocket),
     do: {:ok, %{state | pending: rest}, event}
 
-  def recv_frame(state, :infinity), do: poll(state, :infinity)
+  def recv_frame(state, :infinity, websocket), do: poll(state, :infinity, websocket)
 
-  def recv_frame(state, timeout) when is_integer(timeout) and timeout >= 0 do
+  def recv_frame(state, timeout, websocket) when is_integer(timeout) and timeout >= 0 do
     deadline = state.clock_fun.() + timeout
-    poll(state, deadline)
+    poll(state, deadline, websocket)
   end
 
-  def recv_frame(_state, _timeout), do: {:error, :invalid_timeout}
+  def recv_frame(_state, _timeout, _websocket), do: {:error, :invalid_timeout}
 
-  # One absolute deadline for the whole recv_frame/2 call. Every internal
-  # skip site (empty data batch, non-text control payload, and a foreign
-  # :unknown mailbox message) recurses through poll/2 with this SAME deadline
-  # term -- never a freshly reconstructed timeout. Malformed JSON is an
-  # explicit transport error rather than an indefinitely skipped payload.
-  defp poll(state, deadline) do
+  # The worker's GenServer must never receive socket data between callbacks.
+  # Passive reads keep bytes in the socket until this operation owns them.
+  # Partial decode/control progress survives a timeout with the latest handle.
+  defp poll(state, deadline, websocket) do
     case remaining_budget(deadline, state.clock_fun) do
-      :timeout -> {:error, :timeout}
-      ms -> await_message(state, deadline, ms)
+      :timeout -> {:error, :timeout, state}
+      ms -> receive_socket(state, deadline, ms, websocket)
     end
   end
 
-  defp await_message(state, :infinity, :infinity) do
-    receive do
-      msg -> handle_message(state, :infinity, msg)
-    end
-  end
-
-  defp await_message(state, deadline, ms) do
-    receive do
-      msg -> handle_message(state, deadline, msg)
-    after
-      ms -> {:error, :timeout}
-    end
-  end
-
-  defp handle_message(state, deadline, msg) do
-    case Mint.WebSocket.stream(state.conn, msg) do
+  defp receive_socket(state, deadline, timeout, websocket) do
+    case websocket.recv(state.conn, 0, timeout) do
       {:ok, conn, resps} ->
         state = %{state | conn: conn}
         data = for {:data, r, d} <- resps, r == state.ref, into: <<>>, do: d
 
         if data == <<>> do
-          poll(state, deadline)
+          poll(state, deadline, websocket)
         else
           case decode_events(state.ws, data) do
             {:ok, ws, []} ->
-              poll(%{state | ws: ws}, deadline)
+              poll(%{state | ws: ws}, deadline, websocket)
 
             {:ok, ws, [first | rest]} ->
               {:ok, %{state | ws: ws, pending: rest}, first}
@@ -223,10 +292,11 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
           end
         end
 
-      :unknown ->
-        # Message not addressed to this connection (foreign mailbox
-        # traffic) -- skip through the same deadline, never crash.
-        poll(state, deadline)
+      {:error, conn, :timeout, _} ->
+        {:error, :timeout, %{state | conn: conn}}
+
+      {:error, conn, %Mint.TransportError{reason: :timeout}, _} ->
+        {:error, :timeout, %{state | conn: conn}}
 
       {:error, _conn, reason, _} ->
         {:error, reason}
@@ -265,11 +335,20 @@ defmodule Arbor.Voice.Backend.XaiRealtime.Transport do
     if ms <= 0, do: :timeout, else: ms
   end
 
-  @spec close(map()) :: :ok
-  def close(state) do
-    _ = Mint.HTTP.close(state.conn)
-    :ok
+  @spec close(map()) :: :ok | {:error, :close_failed}
+  def close(state), do: close(state, {Mint.HTTP, :ssl})
+
+  @doc false
+  def close(state, {http, ssl}) do
+    # The source-owned route is HTTPS. Mint.HTTP.close/1 discards the TLS close
+    # result, so check the actual socket operation under BackendWorker's watchdog.
+    case ssl.close(http.get_socket(state.conn)) do
+      :ok -> :ok
+      _ -> {:error, :close_failed}
+    end
   rescue
-    _exception -> :ok
+    _ -> {:error, :close_failed}
+  catch
+    _, _ -> {:error, :close_failed}
   end
 end

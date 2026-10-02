@@ -20,6 +20,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   require Logger
 
   alias Arbor.Orchestrator.Session.ContextBuilder
+  alias Arbor.Orchestrator.Session.Consultation
   alias Arbor.Orchestrator.Session.Persistence.Core
 
   # Matches the bounded history admitted by the legacy load_entries path.
@@ -322,7 +323,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
            private_memory_source: Keyword.get(opts, :private_memory_source),
            turn_count: ContextBuilder.get_turn_count(state)
          }) do
-      {:ok, [_, _] = entries} -> {:ok, entries}
+      {:ok, [_, _] = entries} -> {:ok, Consultation.classify_entries(state, entries)}
       {:error, _reason} -> {:error, :turn_persistence_unavailable}
     end
   end
@@ -769,9 +770,15 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   @doc false
   def load_private_memory_sources(state) do
-    # Recovery spans engagements only within this stable Session id. Use the
-    # same source-owned transcript reader as ordinary restoration.
-    get_load_session_messages_fn(state).(state.session_id, limit: 1_000)
+    # Includes durable internal consultations without making them visible chat
+    # history. The dedicated reader also verifies the source Session's agent.
+    reader =
+      case get_in(state, [Access.key(:adapters), Access.key(:load_private_memory_source_messages)]) do
+        fun when is_function(fun, 3) -> fun
+        _ -> &Arbor.Persistence.load_private_memory_source_messages/3
+      end
+
+    reader.(state.session_id, state.agent_id, limit: 1_000)
   rescue
     _ -> {:error, :private_memory_recovery_unavailable}
   catch

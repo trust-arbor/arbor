@@ -16,6 +16,9 @@ defmodule Arbor.Voice.ResourceOwner do
   alias Arbor.Voice.BackendWorker.Result
   alias Arbor.Voice.BackendWorkerSupervisor
   alias Arbor.Voice.CleanupLease
+  alias Arbor.Voice.ClosureReceipt
+  alias Arbor.Voice.Config
+  alias Arbor.Voice.Diagnostics
   alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.RealtimeBackend
   alias Arbor.Voice.PcmFormat
@@ -36,7 +39,6 @@ defmodule Arbor.Voice.ResourceOwner do
   @max_recv_timeout_ms 1_000
   @max_cleanups 16
   @max_close_timeout_ms 60_000
-  @max_audio_turn_timeout_ms 30_000
   @max_cleanup_attempts 10
   @max_cleanup_per_attempt_timeout_ms 60_000
   @max_backend_opts_count 32
@@ -157,6 +159,8 @@ defmodule Arbor.Voice.ResourceOwner do
             token: Redacted.new(token),
             starter_pid: self(),
             startup_ref: startup_ref,
+            await_startup_cleanup: Map.get(handoff, :await_startup_cleanup, false),
+            closure_receipt: Map.get(handoff, :closure_receipt),
             backend_module: backend_module,
             backend_opts: Redacted.new(backend_opts),
             authority: Redacted.new(authority),
@@ -201,19 +205,39 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   @doc false
-  def reserve_audio_turn(owner, format, bytes, timeout_ms) do
-    reserve_audio(owner, format, bytes, timeout_ms, :receive)
+  # The absolute form preserves Session's existing deadline across queueing.
+  # Integer callers get one deadline here, before the owner call is enqueued.
+  def reserve_audio_turn(owner, format, bytes, timeout_or_deadline) do
+    reserve_audio(owner, format, bytes, timeout_or_deadline, :receive)
   end
 
-  defp reserve_audio(owner, format, bytes, timeout_ms, disposition) do
+  defp reserve_audio(owner, format, bytes, timeout_or_deadline, disposition) do
     with :ok <- PcmFormat.validate(format),
          :ok <- PcmFormat.validate_byte_count(bytes),
-         true <- is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_close_timeout_ms do
-      call(owner, {:reserve_audio, format, bytes, timeout_ms, disposition})
+         {:ok, deadline} <- reservation_deadline(timeout_or_deadline, disposition) do
+      call(owner, {:reserve_audio, format, bytes, deadline, disposition})
     else
       _ -> {:error, :invalid_audio}
     end
   end
+
+  defp reservation_deadline({:deadline, deadline}, disposition) when is_integer(deadline) do
+    remaining = deadline - now_ms()
+
+    if remaining > 0 and remaining <= reservation_ceiling(disposition),
+      do: {:ok, deadline},
+      else: {:error, :invalid_audio}
+  end
+
+  defp reservation_deadline(timeout, disposition) when is_integer(timeout) do
+    if timeout > 0 and timeout <= reservation_ceiling(disposition),
+      do: {:ok, now_ms() + timeout},
+      else: {:error, :invalid_audio}
+  end
+
+  defp reservation_deadline(_, _), do: {:error, :invalid_audio}
+  defp reservation_ceiling(:receive), do: Config.max_audio_turn_timeout_ms()
+  defp reservation_ceiling(:close), do: @max_close_timeout_ms
 
   @doc false
   def handoff_audio(owner, %AudioOperation{owner: owner} = ticket, pcm) when is_pid(owner) do
@@ -356,21 +380,33 @@ defmodule Arbor.Voice.ResourceOwner do
     bootstrap = Redacted.value(redacted_bootstrap)
     authority_value = Redacted.value(bootstrap.authority)
     initial_cleanups_value = Redacted.value(bootstrap.initial_cleanups)
+    receipt = ClosureReceipt.for_owner(Map.get(bootstrap, :closure_receipt), bootstrap.owner_pid)
 
     with {:ok, authority_cell} <- EgressAuthority.new_private_cell(authority_value),
          {:ok, lease, lease_credential} <-
-           CleanupLease.start(self(), initial_cleanups_value,
-             supervisor: bootstrap.cleanup_lease_supervisor,
-             cleanup_supervisor: bootstrap.cleanup_supervisor,
-             cleanup_per_attempt_timeout_ms: bootstrap.config.cleanup_per_attempt_timeout_ms,
-             max_cleanups: bootstrap.config.max_cleanups
+           CleanupLease.start_with_receipt(
+             self(),
+             initial_cleanups_value,
+             [
+               supervisor: bootstrap.cleanup_lease_supervisor,
+               cleanup_supervisor: bootstrap.cleanup_supervisor,
+               cleanup_per_attempt_timeout_ms: bootstrap.config.cleanup_per_attempt_timeout_ms,
+               max_cleanups: bootstrap.config.max_cleanups
+             ],
+             receipt
            ) do
+      ClosureReceipt.custody_owned(receipt)
+
       state = %{
+        closure_receipt: receipt,
         owner_pid: bootstrap.owner_pid,
         owner_ref: Process.monitor(bootstrap.owner_pid),
         owner_token: bootstrap.token,
         starter_pid: bootstrap.starter_pid,
         startup_ref: bootstrap.startup_ref,
+        await_startup_cleanup: Map.get(bootstrap, :await_startup_cleanup, false),
+        startup_failed: false,
+        backend_retirement: :unknown,
         backend_module: bootstrap.backend_module,
         backend_opts: bootstrap.backend_opts,
         route: Redacted.new(authority_value.route),
@@ -624,7 +660,7 @@ defmodule Arbor.Voice.ResourceOwner do
     do: {:reply, {:error, :owner_poisoned}, state}
 
   defp dispatch_owner_request(
-         {:reserve_audio, format, bytes, timeout, disposition},
+         {:reserve_audio, format, bytes, deadline, disposition},
          _from,
          %{phase: :open, poisoned: false, audio_active: nil, metadata: %{input_format: format}} =
            state
@@ -632,13 +668,11 @@ defmodule Arbor.Voice.ResourceOwner do
        when disposition in [:close, :receive] do
     with :ok <- PcmFormat.validate(format),
          :ok <- PcmFormat.validate_byte_count(bytes),
-         true <- is_integer(timeout) and timeout > 0 and timeout <= @max_close_timeout_ms do
-      ceiling =
+         {:ok, ^deadline} <- reservation_deadline({:deadline, deadline}, disposition) do
+      deadline =
         if disposition == :receive,
-          do: @max_audio_turn_timeout_ms,
-          else: state.config.close_timeout_ms
-
-      deadline = now_ms() + min(timeout, ceiling)
+          do: deadline,
+          else: min(deadline, now_ms() + state.config.close_timeout_ms)
 
       ticket = %AudioOperation{
         owner: self(),
@@ -748,6 +782,7 @@ defmodule Arbor.Voice.ResourceOwner do
         {:DOWN, ref, :process, pid, _reason},
         %{owner_ref: ref, owner_pid: pid} = state
       ) do
+    ClosureReceipt.session_down(Map.get(state, :closure_receipt), pid)
     state = %{state | owner_ref: nil}
 
     cond do
@@ -770,7 +805,18 @@ defmodule Arbor.Voice.ResourceOwner do
         {:DOWN, ref, :process, pid, _reason},
         %{worker_ref: ref, worker: pid} = state
       ) do
+    # The exact worker monitor is only one half of the proof. Retirement was
+    # admitted from its authenticated operation result, never inferred here.
+    if state.backend_retirement == :closed,
+      do: ClosureReceipt.backend_closed(Map.get(state, :closure_receipt))
+
     state = %{state | worker: nil, worker_ref: nil, worker_credential: nil}
+
+    state =
+      if state.backend_retirement == :closed,
+        do: state,
+        else: %{state | close_error: state.close_error || :cleanup_pending}
+
     handle_worker_down(state)
   end
 
@@ -823,6 +869,16 @@ defmodule Arbor.Voice.ResourceOwner do
         %{current: %{token: token, origin: {:audio, _}}} = state
       ),
       do: {:noreply, cancel_audio_operation(state, :owner_timeout)}
+
+  def handle_info(
+        {:operation_deadline, token},
+        %{current: %{token: token, status: :draining_recv} = current} = state
+      ) do
+    if is_pid(state.worker), do: Process.exit(state.worker, :kill)
+
+    {:noreply,
+     %{state | current: %{current | status: :awaiting_down, reply: {:error, :owner_timeout}}}}
+  end
 
   def handle_info(:continue_audio_close, state), do: continue_close(state)
 
@@ -1003,6 +1059,60 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp handle_effect_request(_request, state), do: {:noreply, state}
 
+  # A cancelled receive may finish solely to recover its latest owned handle.
+  # Authority is already fenced: authenticate and dispose, never publish its
+  # payload, reopen the operation, or run deferred user work.
+  defp handle_worker_result(
+         result,
+         %{phase: :closing, current: %{status: :draining_recv} = current} = state
+       ) do
+    credential = worker_credential(state)
+    received_at = now_ms()
+
+    with {:ok, verified} <- BackendWorker.verify_result(result, credential),
+         true <- verified.worker == state.worker,
+         true <- verified.operation_token === current.token,
+         true <- verified.operation == :recv,
+         true <- verified.completed_at <= current.deadline_ms,
+         true <- received_at <= current.deadline_ms,
+         true <- is_integer(state.close_deadline_ms),
+         true <- received_at <= state.close_deadline_ms,
+         true <- current.expected_effects == [],
+         :ok <- BackendWorker.ack(state.worker, credential, result) do
+      cancel_timer(current.timer_ref)
+      {:audio_recv, from, _ticket} = current.origin
+      GenServer.reply(from, Redacted.new({:error, :backend_callback_failed}))
+      state = %{state | backend_retirement: verified.retirement}
+
+      if verified.retirement == :open and not terminal_outcome?(verified.outcome, :recv) do
+        continue_close(%{state | current: nil})
+      else
+        current = %{
+          current
+          | origin: :close,
+            timer_ref: nil,
+            status: :awaiting_down,
+            reply: {:error, :backend_callback_failed}
+        }
+
+        {:noreply, %{state | current: current}}
+      end
+    else
+      _invalid ->
+        cancel_timer(current.timer_ref)
+        if is_pid(state.worker), do: Process.exit(state.worker, :kill)
+
+        current = %{
+          current
+          | timer_ref: nil,
+            status: :awaiting_down,
+            reply: {:error, :backend_callback_failed}
+        }
+
+        {:noreply, %{state | current: current, close_error: :cleanup_pending}}
+    end
+  end
+
   defp handle_worker_result(result, %{current: current} = state) when not is_nil(current) do
     credential = worker_credential(state)
     received_at = now_ms()
@@ -1023,24 +1133,10 @@ defmodule Arbor.Voice.ResourceOwner do
 
       cond do
         EgressAuthority.authorize_operation(authority_cell(state), current.operation) != :ok ->
-          current = %{
-            current
-            | timer_ref: nil,
-              status: :awaiting_down,
-              reply: {:error, :backend_effect_denied}
-          }
-
-          {:noreply, %{poison_state(state) | current: current}}
+          reject_result_preserving_retirement(state, current, result, verified, credential)
 
         successful_outcome?(verified.outcome) and not effects_complete? ->
-          current = %{
-            current
-            | timer_ref: nil,
-              status: :awaiting_down,
-              reply: {:error, :backend_effect_denied}
-          }
-
-          {:noreply, %{poison_state(state) | current: current}}
+          reject_result_preserving_retirement(state, current, result, verified, credential)
 
         BackendWorker.ack(state.worker, credential, result) != :ok ->
           current = %{
@@ -1054,6 +1150,7 @@ defmodule Arbor.Voice.ResourceOwner do
 
         terminal? ->
           current = %{current | timer_ref: nil, status: :awaiting_down, reply: reply}
+          state = %{state | backend_retirement: verified.retirement}
 
           state =
             if current.operation == :close,
@@ -1063,7 +1160,7 @@ defmodule Arbor.Voice.ResourceOwner do
           {:noreply, %{state | current: current}}
 
         true ->
-          state = %{state | current: nil, phase: :open}
+          state = %{state | current: nil, phase: :open, backend_retirement: verified.retirement}
           complete_origin(current.origin, reply, state)
       end
     else
@@ -1082,6 +1179,26 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp handle_worker_result(_result, state), do: {:noreply, state}
+
+  defp reject_result_preserving_retirement(state, current, result, verified, credential) do
+    # Lost publication authority never authorizes the payload. It also must not
+    # erase a producing worker's authenticated, already-completed resource close.
+    state =
+      if verified.retirement == :closed and
+           terminal_outcome?(verified.outcome, current.operation) and
+           BackendWorker.ack(state.worker, credential, result) == :ok,
+         do: %{state | backend_retirement: :closed},
+         else: state
+
+    current = %{
+      current
+      | timer_ref: nil,
+        status: :awaiting_down,
+        reply: {:error, :backend_effect_denied}
+    }
+
+    {:noreply, %{poison_state(state) | current: current}}
+  end
 
   defp handle_worker_down(%{current: nil, phase: :closing} = state),
     do: begin_close_cleanup(state)
@@ -1106,13 +1223,18 @@ defmodule Arbor.Voice.ResourceOwner do
 
     case current.origin do
       :startup ->
-        startup_failure(state)
+        startup_failure(state, reply)
 
       :startup_meta ->
-        startup_failure(state)
+        startup_failure(state, reply, :backend_metadata)
 
       :close ->
-        begin_close_cleanup(%{state | phase: :closing, close_error: close_error(reply)})
+        error =
+          if state.backend_retirement == :closed,
+            do: state.close_error,
+            else: state.close_error || close_error(reply)
+
+        begin_close_cleanup(%{state | phase: :closing, close_error: error})
 
       {:call, from} ->
         GenServer.reply(from, reply)
@@ -1126,7 +1248,7 @@ defmodule Arbor.Voice.ResourceOwner do
   defp complete_origin(:startup, :ok, state) do
     case submit_operation(:meta, [], :startup_meta, state) do
       {:ok, next} -> {:noreply, next}
-      _ -> startup_failure(state)
+      _ -> startup_failure(state, :start_failed, :backend_metadata)
     end
   end
 
@@ -1135,12 +1257,14 @@ defmodule Arbor.Voice.ResourceOwner do
       send(state.starter_pid, {:resource_owner_started, state.startup_ref, self(), :ok})
       {:noreply, %{state | metadata: meta, phase: :open, starter_pid: nil, startup_ref: nil}}
     else
-      startup_failure(state)
+      startup_failure(state, :invalid_backend_meta, :backend_metadata)
     end
   end
 
-  defp complete_origin(:startup, _reply, state), do: startup_failure(state)
-  defp complete_origin(:startup_meta, _reply, state), do: startup_failure(state)
+  defp complete_origin(:startup, reply, state), do: startup_failure(state, reply)
+
+  defp complete_origin(:startup_meta, reply, state),
+    do: startup_failure(state, reply, :backend_metadata)
 
   defp complete_origin({:configured, from, requested}, :ok, state) do
     requested = if requested == :unspecified, do: state.requested_formats, else: requested
@@ -1202,7 +1326,14 @@ defmodule Arbor.Voice.ResourceOwner do
       dispatch_deferred(state)
     else
       GenServer.reply(from, Redacted.new({:error, :backend_callback_failed}))
-      state |> poison_state() |> begin_close() |> continue_close()
+
+      completion =
+        state.audio_completion || %{ticket: ticket, result: {:error, :backend_callback_failed}}
+
+      %{state | audio_completion: completion}
+      |> poison_state()
+      |> begin_close()
+      |> continue_close()
     end
   end
 
@@ -1271,6 +1402,14 @@ defmodule Arbor.Voice.ResourceOwner do
       |> begin_close()
 
     case state.current do
+      %{status: :draining_recv} ->
+        state
+
+      %{operation: :recv, origin: {:audio_recv, _, _}, status: :running} = current ->
+        # Retain the original operation timer and the first close deadline.
+        # The worker's own watchdog remains active throughout this drain.
+        %{state | current: %{current | status: :draining_recv}}
+
       current when not is_nil(current) ->
         cancel_timer(current.timer_ref)
         if is_pid(state.worker), do: Process.exit(state.worker, :kill)
@@ -1456,6 +1595,15 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp finish_close(reply, state) do
+    if state.startup_failed do
+      disposition = if reply == :ok, do: :closed, else: :cleanup_pending
+
+      send(
+        state.starter_pid,
+        {:resource_owner_started, state.startup_ref, self(), {:error, :start_failed, disposition}}
+      )
+    end
+
     if state.audio_completion do
       close = if reply == :ok, do: :ok, else: {:error, :cleanup_pending}
 
@@ -1542,6 +1690,15 @@ defmodule Arbor.Voice.ResourceOwner do
         Process.put(owner_token_key(pid), Redacted.new(token))
         {:ok, pid}
 
+      {:resource_owner_started, ^startup_ref, ^pid, {:error, :start_failed, disposition}}
+      when disposition in [:closed, :cleanup_pending] ->
+        outcome =
+          if await_exact_down(pid, monitor_ref, 1_000) == :ok,
+            do: disposition,
+            else: :cleanup_pending
+
+        {:error, {:handoff_accepted, :start_failed, outcome}}
+
       {:resource_owner_started, ^startup_ref, ^pid, {:error, :start_failed}} ->
         await_exact_down(pid, monitor_ref, 1_000)
         {:error, {:handoff_accepted, :start_failed}}
@@ -1556,7 +1713,23 @@ defmodule Arbor.Voice.ResourceOwner do
     end
   end
 
-  defp startup_failure(state) do
+  defp startup_failure(state, reason \\ :start_failed, stage \\ :backend_open) do
+    Diagnostics.failure(stage, reason)
+    do_startup_failure(state)
+  end
+
+  defp do_startup_failure(%{await_startup_cleanup: true} = state) do
+    state = %{state | startup_failed: true}
+
+    state =
+      if is_nil(state.worker) and state.backend_retirement != :closed,
+        do: %{state | close_error: state.close_error || :cleanup_pending},
+        else: state
+
+    state |> begin_close() |> continue_close()
+  end
+
+  defp do_startup_failure(state) do
     if is_pid(state.starter_pid) and is_reference(state.startup_ref) do
       send(
         state.starter_pid,
@@ -1646,13 +1819,23 @@ defmodule Arbor.Voice.ResourceOwner do
 
     cond do
       MapSet.new(keys)
-      |> MapSet.subset?(MapSet.new([:authority, :initial_cleanup, :initial_cleanups])) == false ->
+      |> MapSet.subset?(
+        MapSet.new([
+          :authority,
+          :initial_cleanup,
+          :initial_cleanups,
+          :await_startup_cleanup,
+          :closure_receipt
+        ])
+      ) == false ->
         {:error, :invalid_authority}
 
       Map.has_key?(handoff, :initial_cleanup) and Map.has_key?(handoff, :initial_cleanups) ->
         {:error, :invalid_authority}
 
-      not Map.has_key?(handoff, :authority) ->
+      not Map.has_key?(handoff, :authority) or
+        not is_boolean(Map.get(handoff, :await_startup_cleanup, false)) or
+          not ClosureReceipt.valid?(Map.get(handoff, :closure_receipt), :session, self()) ->
         {:error, :invalid_authority}
 
       true ->

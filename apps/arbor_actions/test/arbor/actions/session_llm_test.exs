@@ -55,7 +55,7 @@ defmodule Arbor.Actions.SessionLlmTest do
       # in the system prompt it would invalidate the cacheable prefix each
       # request (see the stable/volatile split in APIAgent).
       assert Enum.any?(result.messages, fn m ->
-               m["role"] == "user" and String.contains?(m["content"] || "", "Relevant memories") and
+               m["role"] == "user" and String.contains?(m["content"] || "", "Retrieved memories") and
                  String.contains?(m["content"] || "", "Hysun prefers verify-before-fix")
              end)
 
@@ -74,7 +74,8 @@ defmodule Arbor.Actions.SessionLlmTest do
         )
 
       refute Enum.any?(result.messages, fn m ->
-               m["role"] == "system" and String.contains?(m["content"] || "", "Relevant memories")
+               m["role"] == "system" and
+                 String.contains?(m["content"] || "", "Retrieved memories")
              end)
     end
   end

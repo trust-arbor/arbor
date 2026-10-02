@@ -10,11 +10,14 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
   alias Arbor.LLM.{Client, Message}
   alias Arbor.Memory.Test.PrivateSnapshotFixture, as: Fixture
   alias Arbor.Orchestrator.Session
+  alias Arbor.Persistence.Repo
   alias Arbor.Security
 
-  @moduletag :fast
   @moduletag :integration
+  @moduletag :database
+  @moduletag :isolated_repo
   @turn_dot Path.expand("../../../../specs/pipelines/session/turn.dot", __DIR__)
+  @migrations Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
   @system "Stable identity.\nKeep these exact system bytes."
   @goal "Finish the private VIOLET-QUARTZ lunar field notebook"
 
@@ -55,6 +58,22 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
     set_env(:arbor_orchestrator, :private_conversation_memory, enabled: false)
     set_env(:arbor_orchestrator, :_private_goal_observer, self())
     fixture = Fixture.start!()
+
+    # Authenticated turns reconcile the acknowledged transcript before calling
+    # the provider. Use real persistence for both writes and subsequent reads.
+    assert Process.whereis(Repo) == nil, "run with an isolated private SQLite Repo"
+
+    start_supervised!(
+      {Repo,
+       database: Path.join(fixture.root, "session.sqlite3"),
+       pool: DBConnection.ConnectionPool,
+       pool_size: 4,
+       busy_timeout: 5_000,
+       journal_mode: :wal}
+    )
+
+    assert [_ | _] = Ecto.Migrator.run(Repo, @migrations, :up, all: true, log: false)
+
     owner = Fixture.owner!()
     grant_execution!(owner)
 
@@ -78,9 +97,24 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
        ctx do
     for route <- [:messages, :flat] do
       session = start_session!(ctx, ctx.owner, route)
+
+      # Seed legacy agent-global context before the first private engagement.
+      # Restoring a checkpoint after an authenticated turn intentionally
+      # invalidates its transcript anchor and must not be used as a field update.
+      foreign_goals = [%{"description" => "FOREIGN-GLOBAL-GOAL"}]
+      foreign_memory = %{"note" => "FOREIGN-GLOBAL-WORKING-MEMORY"}
+
+      assert :ok =
+               Session.restore_checkpoint(session, %{
+                 "messages" => [],
+                 "goals" => foreign_goals,
+                 "working_memory" => foreign_memory
+               })
+
       assert {:ok, _} = turn(session, ctx.owner, "Hello before the update")
       assert_receive {:private_goal_provider, baseline, _}, 5_000
       assert system_text(baseline) == @system
+      refute inspect(baseline) =~ "FOREIGN-GLOBAL"
 
       receipt = Fixture.receipt!(ctx.owner)
 
@@ -102,13 +136,9 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
                  goal("must never write")
                )
 
-      # The public checkpoint path may carry older agent-global context. Private
-      # preparation removes those sections before the graph reads them.
-      assert :ok =
-               Session.restore_checkpoint(session, %{
-                 "goals" => [%{"description" => "FOREIGN-GLOBAL-GOAL"}],
-                 "working_memory" => %{"note" => "FOREIGN-GLOBAL-WORKING-MEMORY"}
-               })
+      state = Session.get_state(session)
+      assert state.goals == foreign_goals
+      assert state.working_memory == foreign_memory
 
       assert {:ok, _} = turn(session, ctx.owner, "What should I work on next?")
       assert_receive {:private_goal_provider, messages, opts}, 5_000
@@ -117,6 +147,17 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
       refute inspect(messages) =~ "FOREIGN-GLOBAL"
       refute inspect(messages) =~ "PrivateMemoryAdmission"
       refute Keyword.has_key?(opts, :memory_write_policy)
+
+      if route == :messages do
+        assert Enum.count(messages, fn message ->
+                 message.role == :user and Message.text(message) == "Hello before the update"
+               end) == 1
+
+        assert Enum.count(messages, fn message ->
+                 message.role == :assistant and Message.text(message) == "Understood."
+               end) == 1
+      end
+
       assert :ok = GenServer.stop(session)
     end
   end
@@ -262,11 +303,6 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
         "llm_model" => "private-goal-test",
         "stream" => false,
         "recover_session" => false
-      },
-      adapters: %{
-        ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
-        append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end,
-        load_recent_session_messages: fn _id, _opts -> [] end
       }
     ]
 

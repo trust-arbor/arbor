@@ -529,7 +529,8 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert elapsed < 1_000
     assert %{worker: nil, phase: :terminal} = :sys.get_state(owner)
     assert {:error, :owner_poisoned} = ResourceOwner.meta(owner)
-    assert :ok = ResourceOwner.close(owner)
+    # Worker death without authenticated retirement is not positive close.
+    assert {:error, :cleanup_pending} = ResourceOwner.close(owner)
   end
 
   @tag :security_regression
@@ -565,7 +566,8 @@ defmodule Arbor.Voice.ResourceOwnerTest do
              :gen_server.wait_response(request_id, 500)
 
     assert %{worker: nil, poisoned: true, phase: :terminal} = :sys.get_state(owner)
-    assert :ok = ResourceOwner.close(owner)
+    # Worker death without authenticated retirement is not positive close.
+    assert {:error, :cleanup_pending} = ResourceOwner.close(owner)
   end
 
   test "planned supervisor shutdown leaves cleanup execution to the independent lease" do
@@ -642,6 +644,9 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     refute_receive {:physical_effect, :send_text, _effect, _worker}, 100
     assert %{worker: nil, poisoned: true, phase: :terminal} = :sys.get_state(owner)
     assert {:error, :owner_poisoned} = ResourceOwner.send_audio(owner, <<1>>)
+    # Denial preserves the producing worker's authenticated close, without
+    # accepting the denied operation or permitting any later work.
+    assert_receive {:effect_backend_closed, _worker}
     assert :ok = ResourceOwner.close(owner)
   end
 

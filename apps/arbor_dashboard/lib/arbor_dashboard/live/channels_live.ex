@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
   creating new channels, and viewing channel details.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components

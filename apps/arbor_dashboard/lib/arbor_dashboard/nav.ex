@@ -8,6 +8,9 @@ defmodule Arbor.Dashboard.Nav do
   """
 
   import Phoenix.Component, only: [assign: 3]
+  import Phoenix.LiveView, only: [attach_hook: 4]
+
+  alias Arbor.Dashboard.{OidcAuth, SessionAuth}
 
   alias Arbor.Dashboard.Live.{
     AgentsLive,
@@ -42,6 +45,18 @@ defmodule Arbor.Dashboard.Nav do
   ]
 
   def on_mount(:default, _params, session, socket) do
+    oidc? = OidcAuth.configured?()
+
+    if oidc? and SessionAuth.verify(session["agent_id"], session["session_token"]) != :ok do
+      SessionAuth.reject_socket(socket)
+    else
+      socket = assign_navigation(socket, session)
+      socket = if oidc?, do: attach_session_guards(socket), else: socket
+      {:cont, socket}
+    end
+  end
+
+  defp assign_navigation(socket, session) do
     current_view = socket.view
     agent_id = session["agent_id"]
     display_name = session["user_display_name"]
@@ -54,19 +69,26 @@ defmodule Arbor.Dashboard.Nav do
     # Build TenantContext for multi-user support (nil when no OIDC session)
     tenant_context = build_tenant_context(agent_id, display_name)
 
-    socket =
-      socket
-      |> assign(:app_name, "Arbor Dashboard")
-      |> assign(:nav_items, nav_items)
-      |> assign(:node_info, node() |> to_string())
-      |> assign(:current_agent_id, agent_id)
-      |> assign(:current_user_display_name, display_name)
-      |> assign(:session_token, session["session_token"])
-      |> assign(:local_dev_operator?, session["local_dev_operator"] == true)
-      |> assign(:tenant_context, tenant_context)
-      |> assign(:authenticated?, agent_id != nil)
+    socket
+    |> assign(:app_name, "Arbor Dashboard")
+    |> assign(:nav_items, nav_items)
+    |> assign(:node_info, node() |> to_string())
+    |> assign(:current_agent_id, agent_id)
+    |> assign(:current_user_display_name, display_name)
+    |> assign(:session_token, session["session_token"])
+    |> assign(:local_dev_operator?, session["local_dev_operator"] == true)
+    |> assign(:tenant_context, tenant_context)
+    |> assign(:authenticated?, agent_id != nil)
+  end
 
-    {:cont, socket}
+  defp attach_session_guards(socket) do
+    socket
+    |> attach_hook(:dashboard_session_events, :handle_event, fn _event, _params, socket ->
+      SessionAuth.guard_socket(socket)
+    end)
+    |> attach_hook(:dashboard_session_messages, :handle_info, fn _message, socket ->
+      SessionAuth.guard_socket(socket)
+    end)
   end
 
   defp build_tenant_context(nil, _display_name), do: nil

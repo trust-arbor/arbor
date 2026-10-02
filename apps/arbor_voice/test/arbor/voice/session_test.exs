@@ -68,6 +68,47 @@ defmodule Arbor.Voice.SessionTest do
     :ok
   end
 
+  test "operation timeout options fail closed before resource startup and cannot raise operator limits" do
+    ctx = lifecycle_opts()
+    {user, agent} = unique_ids()
+
+    for {key, max} <- [tool_router_timeout_ms: 300_000, audio_turn_timeout_ms: 330_000],
+        bad <- [0, -1, max + 1, "100", nil, true] do
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user, agent, Keyword.put(ctx.opts, key, bad))
+    end
+
+    previous =
+      for key <- [:tool_router_timeout_ms, :audio_turn_timeout_ms, :desk_timeout_ms],
+          do: {key, Application.fetch_env(:arbor_voice, key)}
+
+    on_exit(fn ->
+      for {key, value} <- previous do
+        case value do
+          {:ok, old} -> Application.put_env(:arbor_voice, key, old)
+          :error -> Application.delete_env(:arbor_voice, key)
+        end
+      end
+    end)
+
+    for key <- [:tool_router_timeout_ms, :audio_turn_timeout_ms, :desk_timeout_ms] do
+      Application.put_env(:arbor_voice, key, :invalid)
+      assert {:error, :invalid_config} = Voice.start_session(user, agent, ctx.opts)
+      Application.delete_env(:arbor_voice, key)
+    end
+
+    for key <- [:tool_router_timeout_ms, :audio_turn_timeout_ms] do
+      Application.put_env(:arbor_voice, key, 5_000)
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user, agent, Keyword.put(ctx.opts, key, 5_001))
+
+      Application.delete_env(:arbor_voice, key)
+    end
+
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).starts == 0
+  end
+
   test "security regression: Session crash reports redact the current message and reason" do
     ctx = lifecycle_opts()
     {user_id, agent_id} = unique_ids()
@@ -86,6 +127,60 @@ defmodule Arbor.Voice.SessionTest do
 
     refute log =~ secret
     assert log =~ "redacted"
+  end
+
+  test "security regression: dead desk custody prevents backend startup" do
+    ctx = lifecycle_opts()
+    {user, agent} = unique_ids()
+    owner = spawn(fn -> :ok end)
+    ref = Process.monitor(owner)
+    assert_receive {:DOWN, ^ref, :process, ^owner, _}
+    revoked = :atomics.new(1, [])
+
+    custody = %{
+      pid: owner,
+      revoked: revoked,
+      deadline: System.monotonic_time(:millisecond) + 5_000
+    }
+
+    result = start_owned_desk_compat(user, agent, ctx.opts, custody)
+    on_exit(fn -> Voice.stop_session({user, agent}) end)
+    assert match?({:error, _}, result) or match?({:error, _, :closed}, result)
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).starts == 0
+  end
+
+  test "security regression: desk custody death closes its exact fresh Session" do
+    ctx = lifecycle_opts()
+    {user, agent} = unique_ids()
+
+    owner =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    revoked = :atomics.new(1, [])
+
+    custody = %{
+      pid: owner,
+      revoked: revoked,
+      deadline: System.monotonic_time(:millisecond) + 5_000
+    }
+
+    assert {:ok, _} = start_owned_desk_compat(user, agent, ctx.opts, custody)
+    on_exit(fn -> Voice.stop_session({user, agent}) end)
+    send(owner, :stop)
+    wait_until(fn -> TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1 end, 500)
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1
+  end
+
+  # The predecessor has ordinary startup only. Exercise that real behavior so
+  # these witnesses fail on unwanted backend entry/retention, not missing APIs.
+  defp start_owned_desk_compat(user, agent, opts, custody) do
+    if function_exported?(Voice, :start_owned_desk_session, 4),
+      do: apply(Voice, :start_owned_desk_session, [user, agent, opts, custody]),
+      else: Voice.start_session(user, agent, opts)
   end
 
   test "public stop timeout covers owner close, death confirmation, and scheduling margin" do

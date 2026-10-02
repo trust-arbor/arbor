@@ -1,5 +1,29 @@
 # Reviewed media source adoption — 2026-09-27
 
+**Compiled dependency repair, 2026-09-29:** the initial main restart below
+reused old PortAudio BEAMs even though the dependency checkout matched the new
+pins. Capture failed while constructing `Membrane.PortAudio.Source` because
+its loaded struct lacked `:executor_identity`. Explicitly rebuilding both
+media dependencies and performing another managed restart corrected the
+mismatch. PID 14088 reports all 26 apps ready; capture and playback pipeline
+configuration now pass a no-device probe. This does not establish a successful
+spoken turn. See `tmp/preserved/voice-dependency-rebuild-20260929/README.md` and
+the rebuild instructions in [local voice checks](VOICE_LOCAL_TEST_GUIDE.md).
+
+**Local main integration, 2026-09-29:** main's working tree now pins Core
+`c2e9c7aff031dd600d2318b72193a4825b0da95f` and PortAudio
+`c4e85f4d9ec4e080a7713f5f9878c67a658997c1`. These updates are not yet published.
+The local host reuses the previously admitted root-owned candidate configuration
+through its private environment; the global configuration retains the preceding
+baseline. A managed restart compiled the integration and brought all 26 apps up
+from main. This is an uncommitted working-tree integration: Git metadata is
+read-only in the coding session. New startup-cleanup regression tests remain
+unrun because the isolated test runner cannot open its Mix.PubSub socket.
+Evidence is in `tmp/preserved/voice-main-integration-20260929/README.md`.
+The earlier qualification is recorded in
+[the native driver follow-up](VOICE_NATIVE_DRIVER_PLAN.md).
+The rest of this document records the preceding published global baseline.
+
 The two reviewed dependency forks were published with user approval on
 2026-09-27 to private sibling repositories on Arbor's existing Git host.
 Multimedia pins the full commits below, reviewed in adoption candidate

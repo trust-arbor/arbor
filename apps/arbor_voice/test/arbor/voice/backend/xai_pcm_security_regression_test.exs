@@ -80,6 +80,176 @@ defmodule Arbor.Voice.Backend.XaiPcmSecurityRegressionTest do
     assert {:ok, _, {:output_audio, <<0, 0>>}} = XaiRealtime.recv(session, 1_000)
   end
 
+  test "JSON ping before the created and updated sequence waits for exact PCM acknowledgement" do
+    frames = [
+      %{"type" => "ping"},
+      %{"type" => "session.created", "session" => %{}},
+      %{"type" => "session.updated", "session" => confirmed_session()},
+      %{"type" => "response.output_audio.delta", "delta" => "AAA="}
+    ]
+
+    {:ok, session} = raw_open(transport_opts: [auto_ack: false, frames: frames])
+    assert %{input_format: nil, output_format: nil} = XaiRealtime.meta(session)
+    assert {:error, :audio_not_configured} = XaiRealtime.send_audio(session, <<0, 0>>)
+    assert {:ok, session} = XaiRealtime.configure(session, %{audio_mode: :pcm16})
+
+    assert %{input_format: %{sample_rate: 16_000}, output_format: %{sample_rate: 24_000}} =
+             XaiRealtime.meta(session)
+
+    assert [%{"type" => "session.update"}] = session.transport_state.sent
+    assert {:ok, _, {:output_audio, <<0, 0>>}} = XaiRealtime.recv(session, 1_000)
+    assert {:ok, _} = XaiRealtime.send_audio(session, <<0, 0>>)
+  end
+
+  test "observed JSON ping and session legacy sentinels admit only exact canonical PCM" do
+    acknowledgement = %{
+      "type" => "session.updated",
+      "session" => %{
+        "input_audio_format" => "not specified",
+        "output_audio_format" => "not specified",
+        "audio" => %{
+          "input" => %{
+            "format" => %{"type" => "audio/pcm", "rate" => 16_000},
+            "transport" => "json"
+          },
+          "output" => %{
+            "format" => %{"type" => "audio/pcm", "rate" => 24_000},
+            "transport" => "json"
+          }
+        }
+      }
+    }
+
+    frames = [
+      %{"type" => "ping"},
+      acknowledgement,
+      %{"type" => "response.output_audio.delta", "delta" => "AAA="}
+    ]
+
+    {:ok, session} = raw_open(transport_opts: [auto_ack: false, frames: frames])
+    assert {:error, :audio_not_configured} = XaiRealtime.send_audio(session, <<0, 0>>)
+    assert {:ok, session} = XaiRealtime.configure(session, %{audio_mode: :pcm16})
+
+    assert %{input_format: %{sample_rate: 16_000}, output_format: %{sample_rate: 24_000}} =
+             XaiRealtime.meta(session)
+
+    assert [%{"type" => "session.update"}] = session.transport_state.sent
+    assert {:ok, _, {:output_audio, <<0, 0>>}} = XaiRealtime.recv(session, 1_000)
+    assert {:ok, _} = XaiRealtime.send_audio(session, <<0, 0>>)
+  end
+
+  test "security regression: legacy sentinels never replace canonical formats or excuse conflicting declarations" do
+    sentinels = %{
+      "input_audio_format" => "not specified",
+      "output_audio_format" => "not specified"
+    }
+
+    valid = Map.merge(confirmed_session(), sentinels)
+
+    for payload <- [
+          sentinels,
+          update_in(valid, ["audio", "input"], &Map.delete(&1, "format")),
+          update_in(valid, ["audio", "output"], &Map.delete(&1, "format")),
+          put_in(valid, ["audio", "input", "format", "rate"], 24_000),
+          put_in(valid, ["audio", "output", "format", "type"], "audio/opus"),
+          put_in(valid, ["audio", "output", "transport"], "binary"),
+          Map.put(valid, "input_audio_format", "pcm16"),
+          Map.put(valid, "output_audio_format", "g711_ulaw"),
+          Map.put(valid, "input_audio_format", nil),
+          Map.put(valid, "output_audio_format", %{"type" => "not specified"}),
+          Map.put(valid, "input_audio_format", %URI{}),
+          Map.put(valid, "input_audio_format", ""),
+          Map.put(valid, "input_audio_format", "Not specified"),
+          Map.put(valid, "input_audio_format", "not specified "),
+          Map.put(valid, "sample_rate", "not specified"),
+          put_in(valid, ["audio", "input_audio_format"], "not specified"),
+          put_in(valid, ["audio", "input", "input_audio_format"], "not specified"),
+          put_in(valid, ["audio", "output", "output_audio_format"], "not specified"),
+          put_in(valid, ["audio", "output", "format", "output_audio_format"], "not specified")
+        ] do
+      configuration_refusal_log(%{"type" => "session.updated", "session" => payload})
+    end
+  end
+
+  test "security regression: legacy sentinel exception never applies to output audio deltas" do
+    for key <- ["input_audio_format", "output_audio_format"] do
+      frame = %{
+        "type" => "response.output_audio.delta",
+        "delta" => "AAA=",
+        key => "not specified"
+      }
+
+      {:ok, session} = open(transport_opts: [frames: [frame]])
+      assert {:error, :xai_audio_protocol_error} = XaiRealtime.recv(session, 1_000)
+    end
+  end
+
+  test "security regression: JSON ping cannot replace acknowledgement or admit early media or unknown events" do
+    for {tail, expected_error} <- [
+          {[], :xai_transport_failed},
+          {[%{"type" => "response.output_audio.delta", "delta" => "AAA="}],
+           :xai_audio_protocol_error},
+          {[%{"type" => "session.updated", "session" => %{}}], :xai_audio_protocol_error},
+          {[%{"type" => "ping.extra"}], :xai_audio_protocol_error}
+        ] do
+      parent = self()
+
+      {:ok, session} =
+        raw_open(
+          transport_opts: [
+            auto_ack: false,
+            frames: [%{"type" => "ping"} | tail],
+            on_close: fn latest -> send(parent, {:ping_closed_handle, latest}) end
+          ]
+        )
+
+      assert {:error, ^expected_error, latest} =
+               XaiRealtime.configure(session, %{audio_mode: :pcm16})
+
+      assert %{input_format: nil, output_format: nil} = XaiRealtime.meta(latest)
+      assert {:error, :audio_not_configured} = XaiRealtime.send_audio(latest, <<0, 0>>)
+      assert [%{"type" => "session.update"}] = latest.transport_state.sent
+      assert latest.transport_state.frames == []
+      closed = latest.transport_state
+      assert_receive {:ping_closed_handle, ^closed}
+      refute_receive {:ping_closed_handle, _}, 0
+    end
+  end
+
+  test "repeated JSON pings retain the original deadline and close the latest receive handle" do
+    parent = self()
+    key = {__MODULE__, make_ref()}
+    Process.put(key, 0)
+    acknowledgement = %{"type" => "session.updated", "session" => confirmed_session()}
+
+    {:ok, session} =
+      raw_open(
+        clock_fun: fn -> Process.get(key) end,
+        transport_opts: [
+          auto_ack: false,
+          frames: List.duplicate(%{"type" => "ping"}, 3) ++ [acknowledgement],
+          on_recv: fn -> Process.put(key, Process.get(key) + 11_000) end,
+          on_close: fn latest -> send(parent, {:ping_deadline_closed, latest}) end
+        ]
+      )
+
+    assert {:error, :timeout, latest} = XaiRealtime.configure(session, %{audio_mode: :pcm16})
+    assert Process.get(key) == 33_000
+    assert %{input_format: nil, output_format: nil} = XaiRealtime.meta(latest)
+    assert {:error, :audio_not_configured} = XaiRealtime.send_audio(latest, <<0, 0>>)
+    assert [%{"type" => "session.update"}] = latest.transport_state.sent
+    assert latest.transport_state.frames == [acknowledgement]
+    closed = latest.transport_state
+    assert_receive {:ping_deadline_closed, ^closed}
+
+    receive do
+      {:ping_deadline_closed, handle} when handle != closed ->
+        flunk("configuration timeout closed a stale receive handle")
+    after
+      0 -> :ok
+    end
+  end
+
   test "missing mismatched or binary-transport acknowledgement never admits PCM and closes latest" do
     for frames <- [
           [],
@@ -115,6 +285,146 @@ defmodule Arbor.Voice.Backend.XaiPcmSecurityRegressionTest do
       closed = latest.transport_state
       assert_receive {:closed_handle, ^closed}
     end
+  end
+
+  test "security regression: configuration error and unexpected events log only fixed failure classes" do
+    secret = "private-provider-error-and-event-sentinel"
+
+    for {frame, reason} <- [
+          {%{"type" => "error", "error" => %{"message" => secret, "code" => secret}},
+           :provider_rejected_configuration},
+          {%{"type" => secret, "payload" => secret}, :unexpected_provider_event}
+        ] do
+      log = configuration_refusal_log(frame)
+      assert log =~ "stage=provider_configuration reason=#{reason}"
+      refute log =~ secret
+    end
+  end
+
+  test "provider configuration rejection projects exact known codes and request paths" do
+    secret = "private-known-provider-error-message"
+
+    for {code, param, code_class, parameter_class} <- [
+          {"unknown_parameter", "session.audio.input.transcription", :unknown_parameter,
+           :input_transcription},
+          {"invalid_value", "session.voice", :invalid_value, :session_voice},
+          {"invalid_request_error", "session.tools", :invalid_request, :session_tools}
+        ] do
+      log =
+        configuration_refusal_log(%{
+          "type" => "error",
+          "error" => %{"code" => code, "param" => param, "message" => secret}
+        })
+
+      assert log =~ "stage=provider_error_code reason=#{code_class}"
+      assert log =~ "stage=provider_error_parameter reason=#{parameter_class}"
+      refute log =~ secret
+    end
+  end
+
+  test "security regression: unknown or malformed provider error fields never enter diagnostics" do
+    secret = "private-unknown-provider-error-sentinel"
+
+    for error <- [
+          secret,
+          %{"code" => "invalid_value.#{secret}", "param" => "session.voice.#{secret}"},
+          %{"code" => %{secret => secret}, "param" => RuntimeError.exception(secret)},
+          %{"code" => :invalid_value, "param" => :session_voice, "message" => secret},
+          %{"message" => secret}
+        ] do
+      log = configuration_refusal_log(%{"type" => "error", "error" => error})
+      assert log =~ "stage=provider_error_code reason=unknown"
+      assert log =~ "stage=provider_error_parameter reason=unknown"
+      refute log =~ secret
+      refute log =~ "RuntimeError"
+    end
+  end
+
+  test "unexpected startup events expose only known event classes and envelope shapes" do
+    secret = "private-unexpected-startup-envelope"
+
+    for {frame, event, session_shape, audio_shape} <- [
+          {%{"type" => "session.created", "audio" => %{"private" => secret}}, :session_created,
+           :absent, :map},
+          {%{"type" => "session.created", "session" => nil, "audio" => nil}, :session_created,
+           :null, :null},
+          {%{"type" => "session.created", "session" => secret, "audio" => secret},
+           :session_created, :non_map, :non_map},
+          {%{"type" => "rate_limits.updated", "session" => %{"private" => secret}},
+           :rate_limits_updated, :map, :absent},
+          {%{"type" => "response.created"}, :response_created, :absent, :absent},
+          {%{"type" => "response.output_audio.delta", "delta" => secret}, :media_before_ack,
+           :absent, :absent}
+        ] do
+      log = configuration_refusal_log(frame)
+      assert log =~ "stage=provider_event_type reason=#{event}"
+      assert log =~ "stage=provider_session_envelope reason=#{session_shape}"
+      assert log =~ "stage=provider_top_level_audio reason=#{audio_shape}"
+      refute log =~ secret
+    end
+  end
+
+  test "security regression: malformed or unknown startup event types never enter diagnostic text" do
+    secret = "private-unknown-event-type"
+
+    for {frame, event} <- [
+          {%{"private" => secret}, :missing_event_type},
+          {%{"type" => %{"private" => secret}}, :invalid_event_type},
+          {%{"type" => :session_created}, :invalid_event_type},
+          {%{"type" => "session.created.#{secret}"}, :unknown_event_type}
+        ] do
+      log = configuration_refusal_log(frame)
+      assert log =~ "stage=provider_event_type reason=#{event}"
+      refute log =~ secret
+    end
+  end
+
+  test "security regression: invalid format acknowledgement logs bounded shape without weakening refusal" do
+    secret = "private-format-acknowledgement-sentinel"
+
+    for {payload, reason} <- [
+          {%{}, :missing_audio_formats},
+          {put_in(confirmed_session(), ["audio", "input", "format", "rate"], 8_000),
+           :input_format_mismatch},
+          {put_in(confirmed_session(), ["audio", "output", "format", "rate"], 8_000),
+           :output_format_mismatch},
+          {put_in(confirmed_session(), ["audio", "output", "transport"], "binary"),
+           :non_json_transport},
+          {put_in(confirmed_session(), ["audio", "input", "format", "extra"], secret),
+           :conflicting_format_metadata},
+          {Map.put(confirmed_session(), "output_audio_format", secret),
+           :conflicting_format_metadata}
+        ] do
+      frame = %{"type" => "session.updated", "session" => Map.put(payload, "private", secret)}
+      log = configuration_refusal_log(frame)
+      assert log =~ "stage=provider_configuration reason=invalid_format_acknowledgement"
+      assert log =~ "stage=provider_format_acknowledgement reason=#{reason}"
+      refute log =~ secret
+    end
+  end
+
+  defp configuration_refusal_log(frame) do
+    parent = self()
+
+    {:ok, session} =
+      raw_open(
+        transport_opts: [
+          auto_ack: false,
+          frames: [frame],
+          on_close: fn latest -> send(parent, {:configuration_closed, latest}) end
+        ]
+      )
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, :xai_audio_protocol_error, latest} =
+               XaiRealtime.configure(session, %{audio_mode: :pcm16})
+
+      assert %{input_format: nil, output_format: nil} = XaiRealtime.meta(latest)
+      closed = latest.transport_state
+      assert_receive {:configuration_closed, ^closed}
+      refute_receive {:configuration_closed, _}, 0
+      assert {:error, :audio_not_configured} = XaiRealtime.send_audio(latest, <<0, 0>>)
+    end)
   end
 
   test "PCM-mode configuration requests provider audio while retaining exact JSON format acknowledgement" do
@@ -157,7 +467,8 @@ defmodule Arbor.Voice.Backend.XaiPcmSecurityRegressionTest do
 
   @tag :security_regression
   test "security regression: malformed wire PCM never becomes an empty or playable audio event" do
-    invalid = [nil, "", "%%%", "AQ==", Base.encode64(:binary.copy(<<0, 0>>, 32_769)), 12]
+    oversized = :binary.copy(<<0, 0>>, div(PcmFormat.max_bytes(), 2) + 1)
+    invalid = [nil, "", "%%%", "AQ==", Base.encode64(oversized), 12]
 
     for delta <- invalid do
       frame = %{"type" => "response.output_audio.delta", "delta" => delta}

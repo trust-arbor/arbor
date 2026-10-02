@@ -56,6 +56,8 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_comms, in_umbrella: true},
       {:arbor_commands, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
+      {:arbor_voice, in_umbrella: true},
+      {:arbor_multimedia, in_umbrella: true},
 
       # Phoenix stack (via arbor_web, but needed for endpoint)
       {:phoenix, "~> 1.7"},

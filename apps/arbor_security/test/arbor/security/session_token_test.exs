@@ -39,6 +39,33 @@ defmodule Arbor.Security.SessionTokenTest do
       {:ok, token} = SessionToken.generate("human_x", ttl: -1)
       assert {:error, :token_expired} = SessionToken.verify(token)
     end
+
+    @tag :terminal_session_expiry_cap
+    test "security regression: authenticated expiry caps the actual signed v1 payload" do
+      expiry = System.os_time(:second) + 30
+      assert {:ok, token} = SessionToken.generate("human_x", ttl: 900, max_expires_at: expiry)
+      assert {:ok, "human_x"} = SessionToken.verify(token)
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      assert %{v: 1, exp: ^expiry} = :erlang.binary_to_term(bytes, [:safe])
+
+      assert {:ok, shorter} = SessionToken.generate("human_x", ttl: 5, max_expires_at: expiry)
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(shorter, padding: false)
+
+      assert :erlang.binary_to_term(bytes, [:safe]).exp < expiry
+    end
+
+    @tag :terminal_session_expiry_cap
+    test "security regression: invalid or elapsed authentication bounds cannot mint a token" do
+      for bound <- [nil, "future", 0, -1, System.os_time(:second), 253_402_300_800] do
+        assert {:error, :invalid_expiry_bound} =
+                 SessionToken.generate("human_x", max_expires_at: bound)
+      end
+    end
   end
 
   describe "tamper resistance" do

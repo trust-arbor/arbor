@@ -228,8 +228,30 @@ defmodule Arbor.Voice.SessionProgressCueTest do
     fence_token = entry.token
     assert is_reference(fence_token)
 
-    # Wait past progress threshold
-    Process.sleep(120)
+    # The speech callback and following signal are separate observations.
+    # Wait for both, within the existing tool deadline, rather than assuming
+    # the scheduler completes them exactly 120 ms after tool admission.
+    assert :ok =
+             wait_until(
+               fn ->
+                 SpeechProbe.working_cue_count() == 1 and
+                   Enum.count(FakeSignals.emissions(ctx.signals), fn
+                     {:voice, :tool_progress,
+                      %{
+                        cue: :working,
+                        speech_output: :accepted,
+                        user_id: ^user_id,
+                        agent_id: ^agent_id
+                      }, []} ->
+                       true
+
+                     _ ->
+                       false
+                   end) == 1
+               end,
+               2_000
+             )
+
     assert Process.alive?(worker)
 
     # Exact source-owned working cue only (not substring/fallback).
@@ -262,7 +284,7 @@ defmodule Arbor.Voice.SessionProgressCueTest do
     send(session_pid, {:tool_progress, generation, "slow1", make_ref()})
     send(session_pid, {:tool_progress, generation + 1, "slow1", fence_token})
     send(session_pid, {:tool_progress, generation, "other", fence_token})
-    Process.sleep(50)
+    assert {:ok, _} = Voice.session_status(key)
     assert SpeechProbe.working_cue_count() == 1
 
     assert length(
@@ -431,7 +453,7 @@ defmodule Arbor.Voice.SessionProgressCueTest do
       turn_opts(
         tool_router_timeout_ms: 30_000,
         progress_threshold_ms: 5_000,
-        session_budget_ms: 400,
+        session_budget_ms: 1_000,
         wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
         monotonic_clock: fn -> System.monotonic_time(:millisecond) end
       )
@@ -454,7 +476,16 @@ defmodule Arbor.Voice.SessionProgressCueTest do
     generation = state.turn.generation
     fence_token = Map.fetch!(state.turn.pending, "exh1").token
 
-    assert {:error, :budget_exhausted} = Task.await(task, 5_000)
+    # Pin the otherwise timing-dependent callback phase. This callback is
+    # intentionally unresponsive, so killing it cannot prove positive close.
+    barrier = make_ref()
+    ControllableTurnBackend.enqueue([{:hold_recv, self(), barrier}])
+    assert_receive {:provider_recv_held, ^barrier, provider_worker}, 500
+    provider_ref = Process.monitor(provider_worker)
+
+    assert {:error, :cleanup_pending} = Task.await(task, 5_000)
+    assert_receive {:DOWN, ^provider_ref, :process, ^provider_worker, :killed}, 1_000
+    assert ControllableTurnBackend.close_count() == 0
 
     # Session terminates on hard timeout; worker/owner must not remain live.
     assert :ok = wait_until(fn -> not Process.alive?(worker) end, 2_000)

@@ -305,6 +305,65 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
       assert assistant_attrs.metadata["engagement_id"] == "eng_1"
     end
 
+    test "voice parent links persist once without allowing metadata to hide a human exchange",
+         ctx do
+      parent_id = "voice_" <> String.duplicate("a", 32)
+      metadata = %{voice_parent_id: parent_id, entry_type: "consultation", visibility: "internal"}
+
+      assert {:ok, 2} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 Map.put(ctx.user_entry, :metadata, metadata),
+                 Map.put(ctx.assistant_entry, :metadata, metadata),
+                 persistence: PersistenceAdapter
+               )
+
+      %{appended: [{_uuid, [user, assistant]}]} = FakePersistence.calls(ctx.persistence_agent)
+      assert user.metadata["voice_parent_id"] == parent_id
+      assert assistant.metadata["voice_parent_id"] == parent_id
+      assert user.entry_type == "user"
+      assert assistant.entry_type == "assistant"
+      refute Map.has_key?(user.metadata, "entry_type")
+      refute Map.has_key?(assistant.metadata, "visibility")
+    end
+
+    test "invalid or mismatched voice parent links fail before persistence", ctx do
+      parent_id = "voice_" <> String.duplicate("a", 32)
+      other_id = "voice_" <> String.duplicate("b", 32)
+
+      for invalid <- [
+            nil,
+            false,
+            %{},
+            "",
+            "voice_" <> String.duplicate("A", 32),
+            parent_id <> "x"
+          ] do
+        assert {:error, {:invalid_user_entry, :invalid_metadata_value}} =
+                 Comms.record_engagement_turn(
+                   "agent_1",
+                   "eng_1",
+                   Map.put(ctx.user_entry, :metadata, %{voice_parent_id: invalid}),
+                   ctx.assistant_entry,
+                   persistence: PersistenceAdapter
+                 )
+      end
+
+      for assistant_metadata <- [%{}, %{voice_parent_id: other_id}] do
+        assert {:error, :invalid_voice_parent_link} =
+                 Comms.record_engagement_turn(
+                   "agent_1",
+                   "eng_1",
+                   Map.put(ctx.user_entry, :metadata, %{voice_parent_id: parent_id}),
+                   Map.put(ctx.assistant_entry, :metadata, assistant_metadata),
+                   persistence: PersistenceAdapter
+                 )
+      end
+
+      assert FakePersistence.calls(ctx.persistence_agent).appended == []
+    end
+
     test "preserves the caller's sent_at/completed_at and derives utterance_end_at from sent_at",
          %{
            user_entry: user_entry,

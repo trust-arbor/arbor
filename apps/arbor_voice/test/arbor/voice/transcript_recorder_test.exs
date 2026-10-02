@@ -54,6 +54,47 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
     %{agent: agent}
   end
 
+  test "source-owned voice parent links both entries and never comes from transport metadata", %{
+    agent: agent
+  } do
+    parent_id = "voice_" <> String.duplicate("a", 32)
+    forged_id = "voice_" <> String.duplicate("b", 32)
+    message = voice_message(transport_metadata: %{voice_parent_id: forged_id})
+
+    assert {:ok, 2} =
+             TranscriptRecorder.record("agent_1", message, "reply", ~U[2026-01-01 00:00:01Z],
+               comms: FakeComms,
+               voice_parent_id: parent_id
+             )
+
+    assert [{_, _, user, assistant, []}] = FakeComms.calls(agent)
+    assert user.metadata["voice_parent_id"] == parent_id
+    assert assistant.metadata["voice_parent_id"] == parent_id
+    refute inspect({user, assistant}) =~ forged_id
+  end
+
+  test "malformed voice parent identifiers refuse before any transcript write", %{agent: agent} do
+    for id <- [
+          nil,
+          7,
+          "voice_" <> String.duplicate("A", 32),
+          "voice_" <> String.duplicate("a", 31),
+          "voice_" <> String.duplicate("a", 32) <> "\n"
+        ] do
+      assert {:error, {:invalid_opts, :invalid_voice_parent_id}} =
+               TranscriptRecorder.record(
+                 "agent_1",
+                 voice_message(),
+                 "reply",
+                 ~U[2026-01-01 00:00:01Z],
+                 comms: FakeComms,
+                 voice_parent_id: id
+               )
+    end
+
+    assert FakeComms.call_count(agent) == 0
+  end
+
   # ── happy path: one ordered Comms call, exact provenance ──
 
   describe "record/5 success path" do
@@ -409,7 +450,13 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
     test "rejects every malformed :delegation field before Comms", %{agent: agent} do
       msg = voice_message()
       completed = ~U[2026-01-01 00:00:01.000000Z]
-      base = %{"provider" => "grok", "task" => "t", "task_id" => "task_1", "outcome" => "dispatched"}
+
+      base = %{
+        "provider" => "grok",
+        "task" => "t",
+        "task_id" => "task_1",
+        "outcome" => "dispatched"
+      }
 
       malformed = [
         nil,

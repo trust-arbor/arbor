@@ -9,8 +9,12 @@ defmodule Arbor.Voice.Session do
 
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
+  alias Arbor.Voice.BudgetLedger
+  alias Arbor.Voice.ClosureReceipt
   alias Arbor.Voice.ConversationAuthority
   alias Arbor.Voice.Contracts.AudioTurn
+  alias Arbor.Voice.Desk
+  alias Arbor.Voice.Diagnostics
   alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.PcmFormat
   alias Arbor.Voice.Redacted
@@ -38,7 +42,6 @@ defmodule Arbor.Voice.Session do
   @default_owner_max_recv_ms 1_000
   # Text turns can run until hard budget; reply path clears the caller.
   @turn_call_timeout_ms :infinity
-  @audio_turn_timeout_ms 30_000
   # Max bytes of a guarded speakable string offered to speech_output.
   @speech_output_max_bytes 8192
   # Dedicated acceptance-seam Task.Supervisor (VP-04E2R1). Not ResourceCleanup.
@@ -135,21 +138,61 @@ defmodule Arbor.Voice.Session do
 
   @impl true
   def init(config) do
+    config =
+      case Map.get(config, :desk_owner) do
+        %{pid: pid, closed: closed} when is_pid(pid) ->
+          config
+          |> Map.put(:desk_owner_ref, Process.monitor(pid))
+          |> Map.put(:closure_receipt, ClosureReceipt.new(closed))
+
+        _ ->
+          config
+      end
+
     case start_transaction(config) do
       {:ok, state} ->
         {:ok, state}
 
       {:error, reason} ->
+        ClosureReceipt.session_closing(Map.get(config, :closure_receipt))
         {:stop, reason}
     end
   end
 
+  defp desk_gate(config) do
+    case Map.get(config, :desk_owner) do
+      nil -> :ok
+      custody -> if Desk.live?(custody), do: :ok, else: {:error, :start_failed}
+    end
+  rescue
+    _ -> {:error, :start_failed}
+  end
+
+  defp desk_turn_gate(state),
+    do: if(desk_gate(state) == :ok, do: :ok, else: {:error, :conversation_unauthorized})
+
+  defp stop_for_desk(state) do
+    case handle_call(:stop, {self(), make_ref()}, state) do
+      {:reply, _result, next} -> {:noreply, next}
+      {:stop, reason, _result, next} -> {:stop, reason, next}
+    end
+  end
+
   defp start_transaction(config) do
-    with {:ok, route_context} <-
-           EgressAuthority.resolve_backend_route(config.backend, config.ai_module),
+    with :ok <- desk_gate(config),
+         {:ok, route_context} <-
+           Diagnostics.observe(
+             :route_resolution,
+             EgressAuthority.resolve_backend_route(config.backend, config.ai_module)
+           ),
          voice_session_id <- Identifiers.generate_session_id(),
          true <- EgressAuthority.canonical_session_id?(voice_session_id),
-         {:ok, binding} <- ConversationAuthority.admit(config) do
+         {:ok, binding} <-
+           Diagnostics.observe(
+             :conversation_admission,
+             ConversationAuthority.admit(config, get_in(config, [:desk_owner, :binding]))
+           ),
+         :ok <- desk_gate(config) do
       engagement_id = Redacted.value(binding).engagement_id
       config = Map.put(config, :conversation_binding, binding)
       after_engagement(config, engagement_id, route_context, voice_session_id)
@@ -164,7 +207,10 @@ defmodule Arbor.Voice.Session do
     # inside the closure only (VP-05B/VP-05C). Built before resource/backend effects.
     tool_authority = build_tool_authority(config, engagement_id)
 
-    case reserve_budget(config) do
+    case Diagnostics.observe(
+           :budget_reservation,
+           with(:ok <- desk_gate(config), do: reserve_desk_budget(config))
+         ) do
       {:ok, _reservation, reserved_ms, start_ms, settlement} ->
         after_reservation(
           config,
@@ -192,14 +238,33 @@ defmodule Arbor.Voice.Session do
          start_ms,
          settlement
        ) do
-    case EgressAuthority.prepare_session_authority(
-           route_context,
-           config,
-           voice_session_id,
-           reserved_ms
-         ) do
+    preparation =
+      case desk_gate(config) do
+        :ok ->
+          Diagnostics.observe(
+            :route_grant,
+            EgressAuthority.prepare_session_authority(
+              route_context,
+              config,
+              voice_session_id,
+              reserved_ms
+            )
+          )
+
+        {:error, _} ->
+          if settle_release(settlement, config) == :ok, do: mark_desk_closed(config, 1)
+          {:error, :desk_revoked_before_authority}
+      end
+
+    case preparation do
       {:ok, egress_authority} ->
         handoff = owner_handoff(egress_authority, settlement, config.monotonic_clock)
+        handoff = Map.put(handoff, :closure_receipt, Map.get(config, :closure_receipt))
+
+        handoff =
+          if Map.get(config, :desk_owner),
+            do: Map.put(handoff, :await_startup_cleanup, true),
+            else: handoff
 
         case start_resource_owner(config, handoff) do
           {:ok, owner} ->
@@ -218,14 +283,33 @@ defmodule Arbor.Voice.Session do
               owner_ref
             )
 
+          {:error, {:handoff_accepted, :start_failed, disposition}} ->
+            if disposition == :closed,
+              do: ClosureReceipt.session_closing(Map.get(config, :closure_receipt))
+
+            {:error, :start_failed}
+
           {:error, {:handoff_accepted, :start_failed}} ->
             # CleanupLease accepted both route and budget obligations before
             # backend start failed. It is now the sole cleanup authority.
             {:error, :start_failed}
 
+          {:error, :handoff_not_attempted} ->
+            route_result =
+              egress_authority
+              |> EgressAuthority.route_cleanup()
+              |> run_fallback_cleanup(3)
+
+            release_result = settle_release(settlement, config)
+
+            if route_result == :ok and release_result == :ok,
+              do: mark_desk_closed(config, 1)
+
+            {:error, :start_failed}
+
           {:error, reason} ->
-            # Handoff was not accepted. Session still owns both provisional
-            # obligations and unwinds them directly and idempotently.
+            # Attempt fallback cleanup, but an arbitrary owner error does not
+            # prove that handoff or backend effects were never accepted.
             _ =
               egress_authority
               |> EgressAuthority.route_cleanup()
@@ -234,6 +318,9 @@ defmodule Arbor.Voice.Session do
             _ = settle_release(settlement, config)
             {:error, reason}
         end
+
+      {:error, :desk_revoked_before_authority} ->
+        {:error, :start_failed}
 
       {:error, reason} ->
         _ = settle_release(settlement, config)
@@ -253,7 +340,7 @@ defmodule Arbor.Voice.Session do
          owner,
          owner_ref
        ) do
-    case configure_and_read_meta(config, owner) do
+    case with(:ok <- desk_gate(config), do: configure_and_read_meta(config, owner)) do
       {:ok, backend, mode, formats} ->
         after_backend_ready(
           Map.put(config, :audio_formats, formats),
@@ -273,7 +360,9 @@ defmodule Arbor.Voice.Session do
       {:error, reason} ->
         # Initial handoff was accepted before owner startup returned. Owner and
         # CleanupLease exclusively own route and budget cleanup from here.
-        _ = startup_owner_unwind(config.resource_owner, owner, owner_ref)
+        if startup_owner_unwind(config.resource_owner, owner, owner_ref) == :ok,
+          do: ClosureReceipt.session_closing(Map.get(config, :closure_receipt))
+
         {:error, reason}
     end
   end
@@ -292,12 +381,16 @@ defmodule Arbor.Voice.Session do
          backend,
          mode
        ) do
+    session_deadline_ms = System.monotonic_time(:millisecond) + reserved_ms
     timer_ref = Process.send_after(self(), :hard_timeout, reserved_ms)
 
-    case Settlement.arm_consume(settlement) do
+    case with(:ok <- desk_gate(config), do: Settlement.arm_consume(settlement)) do
       :ok ->
         state = %{
           lifecycle: :ready,
+          desk_owner: Map.get(config, :desk_owner),
+          desk_owner_ref: Map.get(config, :desk_owner_ref),
+          closure_receipt: Map.get(config, :closure_receipt),
           user_id: config.user_id,
           agent_id: config.agent_id,
           session_key: config.session_key,
@@ -312,6 +405,8 @@ defmodule Arbor.Voice.Session do
           # cleanup is never replayed by Session after handoff.
           egress_authority: Redacted.new(egress_authority),
           reserved_ms: reserved_ms,
+          session_deadline_ms: session_deadline_ms,
+          audio_turn_timeout_ms: config.audio_turn_timeout_ms,
           backend: backend,
           mode: mode,
           timer_ref: timer_ref,
@@ -349,6 +444,7 @@ defmodule Arbor.Voice.Session do
           closing: false
         }
 
+        if state.desk_owner, do: Process.send_after(self(), :desk_lease, 100)
         # Success signals only after every readiness step succeeds.
         safe_emit(state, :start)
         safe_emit(state, :backend_connected)
@@ -357,7 +453,8 @@ defmodule Arbor.Voice.Session do
       {:error, _reason} ->
         _ = Process.cancel_timer(timer_ref)
         # Handoff is already accepted; close is the sole cleanup authority.
-        _ = startup_owner_unwind(config.resource_owner, owner, owner_ref)
+        if startup_owner_unwind(config.resource_owner, owner, owner_ref) == :ok,
+          do: ClosureReceipt.session_closing(Map.get(config, :closure_receipt))
 
         {:error, :start_failed}
     end
@@ -366,6 +463,17 @@ defmodule Arbor.Voice.Session do
   # ---------------------------------------------------------------------------
   # Startup steps
   # ---------------------------------------------------------------------------
+
+  defp reserve_desk_budget(config) do
+    reserve_budget(config)
+  end
+
+  defp mark_desk_closed(config, value) do
+    case get_in(config, [:desk_owner, :closed]) do
+      nil -> :ok
+      cell -> :atomics.put(cell, 1, value)
+    end
+  end
 
   defp reserve_budget(config) do
     # Wall clock is an injected collaborator: invoke inside catch/normalization
@@ -380,7 +488,7 @@ defmodule Arbor.Voice.Session do
             if not is_integer(requested_ms) or requested_ms < 1 do
               {:error, :start_failed}
             else
-              case safe_reserve(config, utc_day, requested_ms) do
+              case reserve_after_preflight(config, utc_day, requested_ms) do
                 {:ok, reservation} ->
                   # Once reserve succeeds, every later failure MUST release this
                   # exact reservation — never let an outer catch swallow it.
@@ -399,6 +507,44 @@ defmodule Arbor.Voice.Session do
         {:error, :start_failed}
     end
   end
+
+  defp reserve_after_preflight(config, utc_day, requested_ms) do
+    with :ok <- ledger_preflight(config) do
+      # Only the actual reservation can create an obligation. Invalid clocks
+      # and source-owned readiness refusals leave the initial receipt intact.
+      mark_desk_closed(config, 0)
+
+      case desk_gate(config) do
+        :ok ->
+          case safe_reserve(config, utc_day, requested_ms) do
+            {:error, :budget_exhausted} = error ->
+              # Only our ledger's pure denial proves no CAS was attempted. An
+              # injected collaborator or ambiguous CAS error provides no receipt.
+              if config.ledger == BudgetLedger, do: mark_desk_closed(config, 1)
+              error
+
+            result ->
+              result
+          end
+
+        {:error, _} = error ->
+          mark_desk_closed(config, 1)
+          error
+      end
+    end
+  end
+
+  defp ledger_preflight(%{ledger: BudgetLedger} = config) do
+    case Diagnostics.observe(
+           :budget_readiness,
+           BudgetLedger.readiness(Keyword.take(config.ledger_opts, [:backend, :backend_opts]))
+         ) do
+      {:ok, %{durability: :node_restart}} -> :ok
+      _ -> {:error, :start_failed}
+    end
+  end
+
+  defp ledger_preflight(_config), do: :ok
 
   # Injected wall clocks must return a valid UTC DateTime. Mirror the monotonic
   # clock boundary: catch raise/throw/exit and reject non-UTC/malformed values
@@ -499,22 +645,26 @@ defmodule Arbor.Voice.Session do
         {:ok, reservation, requested_ms, start_ms, settlement}
       else
         {:error, :invalid_clock} ->
-          _ = safe_ledger_release(config, reservation)
+          release_startup_reservation(config, reservation)
           {:error, :start_failed}
 
         {:error, _reason} ->
-          _ = safe_ledger_release(config, reservation)
+          release_startup_reservation(config, reservation)
           {:error, :start_failed}
 
         _malformed_requested ->
-          _ = safe_ledger_release(config, reservation)
+          release_startup_reservation(config, reservation)
           {:error, :start_failed}
       end
     catch
       _kind, _reason ->
-        _ = safe_ledger_release(config, reservation)
+        release_startup_reservation(config, reservation)
         {:error, :start_failed}
     end
+  end
+
+  defp release_startup_reservation(config, reservation) do
+    if safe_ledger_release(config, reservation) == :ok, do: mark_desk_closed(config, 1)
   end
 
   defp utc_day_and_ms_to_midnight(%DateTime{} = wall) do
@@ -547,16 +697,30 @@ defmodule Arbor.Voice.Session do
   defp utc_day_and_ms_to_midnight(_), do: :error
 
   defp start_resource_owner(config, handoff) do
+    case desk_gate(config) do
+      :ok -> attempt_resource_owner(config, handoff)
+      {:error, _} -> {:error, :handoff_not_attempted}
+    end
+  end
+
+  defp attempt_resource_owner(config, handoff) do
     try do
-      case config.resource_owner.start(
-             self(),
-             config.backend,
-             config.backend_opts,
-             handoff,
-             config.resource_owner_opts
-           ) do
+      result =
+        config.resource_owner.start(
+          self(),
+          config.backend,
+          config.backend_opts,
+          handoff,
+          config.resource_owner_opts
+        )
+
+      case result do
         {:ok, owner} when is_pid(owner) ->
           {:ok, owner}
+
+        {:error, {:handoff_accepted, :start_failed, disposition}} = error
+        when disposition in [:closed, :cleanup_pending] ->
+          error
 
         {:error, {:handoff_accepted, :start_failed}} = error ->
           error
@@ -604,23 +768,31 @@ defmodule Arbor.Voice.Session do
         :ok ->
           case config.resource_owner.meta(owner) do
             {:ok, meta} ->
-              reduce_backend_meta(meta, Map.get(config, :audio_mode, :text))
+              Diagnostics.observe(
+                :backend_metadata,
+                reduce_backend_meta(meta, Map.get(config, :audio_mode, :text))
+              )
 
-            {:error, _reason} ->
+            {:error, reason} ->
+              Diagnostics.failure(:backend_metadata, reason)
               {:error, :start_failed}
 
             _other ->
+              Diagnostics.failure(:backend_metadata, :unexpected_result)
               {:error, :start_failed}
           end
 
-        {:error, _reason} ->
+        {:error, reason} ->
+          Diagnostics.failure(:backend_configure, reason)
           {:error, :start_failed}
 
         _other ->
+          Diagnostics.failure(:backend_configure, :unexpected_result)
           {:error, :start_failed}
       end
     catch
       _kind, _reason ->
+        Diagnostics.failure(:backend_configure, :backend_callback_fault)
         {:error, :start_failed}
     end
   end
@@ -638,11 +810,13 @@ defmodule Arbor.Voice.Session do
     binding = config.conversation_binding
 
     base = %{
-      consult_agent: fn message when is_binary(message) ->
+      consult_agent: fn message, deadline when is_binary(message) ->
         with :ok <- ConversationAuthority.recheck(binding),
+             remaining when remaining > 0 <-
+               min(tool_timeout_ms, deadline - System.monotonic_time(:millisecond)),
              um = UserMessage.from_voice(message, sender_id: user_id),
              opts = [
-               timeout: tool_timeout_ms,
+               timeout: remaining,
                session_token: Redacted.value(redacted),
                expected_engagement_id: engagement_id
              ],
@@ -654,6 +828,31 @@ defmodule Arbor.Voice.Session do
         end
       end
     }
+
+    base =
+      if config.tool_router == Arbor.Voice.ToolRouter.PrivateConversation and
+           Map.get(config, :audio_mode) == :pcm16 do
+        Map.put(base, :private_audio_consultation, fn transcript, sent_at, parent_id, deadline ->
+          with :ok <- ConversationAuthority.recheck(binding),
+               remaining when remaining > 0 <-
+                 min(tool_timeout_ms, deadline - System.monotonic_time(:millisecond)),
+               message = UserMessage.from_voice(transcript, sender_id: user_id, sent_at: sent_at),
+               opts = [
+                 timeout: remaining,
+                 session_token: Redacted.value(redacted),
+                 expected_engagement_id: engagement_id
+               ],
+               {:ok, reply} <-
+                 agent_module.consult_conversation(user_id, agent_id, message, parent_id, opts),
+               :ok <- ConversationAuthority.recheck(binding) do
+            {:ok, reply}
+          else
+            _ -> {:error, :tool_error}
+          end
+        end)
+      else
+        base
+      end
 
     case orchestrator_module do
       nil ->
@@ -1003,9 +1202,28 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info(
-        {:voice_audio_operation_result, ticket, _, _},
+        {:voice_audio_operation_result, ticket, _, _} = message,
         %{turn: %{kind: :audio, ticket: ticket} = turn, closing: false} = state
       ) do
+    decoded = ResourceOwner.audio_result(message, ticket)
+
+    reason =
+      case decoded do
+        {:ok, {:error, reason}, _} -> reason
+        _ -> :audio_operation_failed
+      end
+
+    Diagnostics.failure(:audio_operation, reason)
+
+    turn =
+      case decoded do
+        {:ok, _result, :ok} when is_struct(ticket, ResourceOwner.AudioOperation) ->
+          Map.put(turn, :close_receipt, ticket)
+
+        _ ->
+          turn
+      end
+
     {:noreply, finish_audio_error(state, turn, :turn_failed)}
   end
 
@@ -1016,6 +1234,7 @@ defmodule Arbor.Voice.Session do
     case ResourceOwner.audio_result(message, ticket) do
       {:ok, result, close_result} ->
         state = state |> cancel_hard_timer() |> Map.put(:closing, true)
+        ClosureReceipt.session_closing(Map.get(state, :closure_receipt))
         reply = if close_result == :ok, do: result, else: {:error, :cleanup_pending}
         safe_reply(state.audio_operation.from, reply)
         state = clear_audio_operation(state)
@@ -1096,6 +1315,18 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info({:tool_progress, _gen, _id, _token}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{desk_owner_ref: ref} = state)
+      when is_reference(ref), do: stop_for_desk(state)
+
+  def handle_info(:desk_lease, state) do
+    if desk_gate(state) == :ok do
+      if Map.get(state, :desk_owner), do: Process.send_after(self(), :desk_lease, 100)
+      {:noreply, state}
+    else
+      stop_for_desk(state)
+    end
+  end
 
   def handle_info(
         {:DOWN, ref, :process, caller, _},
@@ -1206,6 +1437,8 @@ defmodule Arbor.Voice.Session do
         {:ok, next_state} -> next_state
         {:error, next_state} -> next_state
       end
+
+    ClosureReceipt.session_closing(Map.get(state, :closure_receipt))
 
     state =
       if is_map(turn) do
@@ -1360,7 +1593,11 @@ defmodule Arbor.Voice.Session do
     do: {:reply, {:error, :invalid_audio}, state}
 
   defp admit_audio_turn(state, from, pcm, format, operation, started_ms, wall, core) do
-    with :ok <- ConversationAuthority.admit_turn(state.conversation_binding),
+    with :ok <- desk_turn_gate(state),
+         :ok <- ConversationAuthority.admit_turn(state.conversation_binding),
+         :ok <- desk_turn_gate(state),
+         deadline_ms = audio_deadline(state),
+         true <- deadline_ms > System.monotonic_time(:millisecond),
          {:ok, lease} <- prepare_turn_authority(state) do
       {caller, _} = from
 
@@ -1371,13 +1608,13 @@ defmodule Arbor.Voice.Session do
         Process.send_after(
           self(),
           {:audio_turn_deadline, generation, deadline_token},
-          @audio_turn_timeout_ms
+          max(0, deadline_ms - System.monotonic_time(:millisecond))
         )
 
       turn = %{
         kind: :audio,
         generation: generation,
-        deadline_ms: System.monotonic_time(:millisecond) + @audio_turn_timeout_ms,
+        deadline_ms: deadline_ms,
         deadline_token: deadline_token,
         deadline_timer: deadline_timer,
         from: from,
@@ -1388,6 +1625,8 @@ defmodule Arbor.Voice.Session do
         capture_delay_ms: max(0, DateTime.diff(wall, operation.utterance_ended_at, :millisecond)),
         first_audio_ms: nil,
         operation_id: operation.operation_id,
+        voice_parent_id: Identifiers.generate_id("voice_"),
+        consultation_admitted: false,
         caller: caller,
         caller_ref: Process.monitor(caller),
         turn_id: lease.turn_id,
@@ -1403,14 +1642,16 @@ defmodule Arbor.Voice.Session do
 
       result =
         try do
-          with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+          with :ok <- desk_turn_gate(state),
+               :ok <- ConversationAuthority.recheck(state.conversation_binding),
                {:ok, ticket} <-
                  state.resource_owner.reserve_audio_turn(
                    state.owner,
                    format,
                    byte_size(pcm),
-                   30_000
+                   {:deadline, deadline_ms}
                  ),
+               :ok <- desk_turn_gate(state),
                {:ok, request_id} <- state.resource_owner.handoff_audio(state.owner, ticket, pcm) do
             {:ok, ticket, request_id}
           end
@@ -1422,19 +1663,23 @@ defmodule Arbor.Voice.Session do
         {:ok, ticket, request_id} ->
           {:noreply, %{active | turn: %{turn | ticket: ticket, request_id: request_id}}}
 
-        _ ->
+        failure ->
+          Diagnostics.failure(:audio_handoff, failure)
           {:noreply, finish_audio_error(active, turn, :turn_failed)}
       end
     else
-      {:error, _, {:fatal, provisional}} ->
+      {:error, reason, {:fatal, provisional}} ->
+        Diagnostics.failure(:audio_admission, reason)
         {next, cleanup} = close_session_without_turn(state, :turn_failed, provisional)
         audio_start_failure(next, cleanup)
 
       {:error, :conversation_unauthorized} ->
+        Diagnostics.failure(:audio_admission, :conversation_unauthorized)
         {next, cleanup} = close_session_without_turn(state, :turn_failed, nil)
         audio_start_failure(next, cleanup)
 
-      _ ->
+      failure ->
+        Diagnostics.failure(:audio_admission, failure)
         {:reply, {:error, :turn_failed}, state}
     end
   end
@@ -1442,11 +1687,18 @@ defmodule Arbor.Voice.Session do
   defp receive_audio_reply(state, turn, reply) do
     if audio_turn_current?(state, turn) do
       case reply do
-        {:ok, event} -> apply_audio_event(state, turn, event)
-        {:error, :timeout} -> enqueue_poll(state, turn.generation)
-        _ -> finish_audio_error(state, turn, :turn_failed)
+        {:ok, event} ->
+          apply_audio_event(state, turn, event)
+
+        {:error, :timeout} ->
+          enqueue_poll(state, turn.generation)
+
+        failure ->
+          Diagnostics.failure(:audio_receive, failure)
+          finish_audio_error(state, turn, :turn_failed)
       end
     else
+      Diagnostics.failure(:audio_receive, :turn_not_current)
       finish_audio_error(state, turn, :turn_failed)
     end
   end
@@ -1487,6 +1739,7 @@ defmodule Arbor.Voice.Session do
         end
 
       {:error, _} ->
+        Diagnostics.audio_rejected(turn.core, event)
         finish_audio_error(state, turn, :turn_failed)
     end
   end
@@ -1502,12 +1755,28 @@ defmodule Arbor.Voice.Session do
     turn = %{turn | user_message: user_message}
     final_text = ManagedDispatchCore.select_raw_assistant(turn.dispatch, data.provider_text)
 
-    with :healthy <- finalize_turn_authority(state, turn),
-         true <- audio_turn_current?(state, turn),
-         :ok <- ConversationAuthority.recheck(state.conversation_binding),
-         :ok <- record_transcript(state, turn, final_text),
-         true <- audio_turn_current?(state, turn),
-         :ok <- ConversationAuthority.recheck(state.conversation_binding) do
+    with :healthy <-
+           Diagnostics.expect(
+             :audio_final_authority,
+             finalize_turn_authority(state, turn),
+             :healthy
+           ),
+         true <- Diagnostics.expect(:audio_final_liveness, audio_turn_current?(state, turn), true),
+         :ok <-
+           Diagnostics.expect(
+             :audio_final_authority,
+             ConversationAuthority.recheck(state.conversation_binding),
+             :ok
+           ),
+         :ok <-
+           Diagnostics.expect(:audio_persistence, record_transcript(state, turn, final_text), :ok),
+         true <- Diagnostics.expect(:audio_final_liveness, audio_turn_current?(state, turn), true),
+         :ok <-
+           Diagnostics.expect(
+             :audio_final_authority,
+             ConversationAuthority.recheck(state.conversation_binding),
+             :ok
+           ) do
       presentation = audio_presentation(state, data, final_text)
       turn = if is_binary(presentation.audio), do: turn, else: %{turn | first_audio_ms: nil}
       {next, cleanup} = quarantine_turn(%{state | turn: turn})
@@ -1588,9 +1857,23 @@ defmodule Arbor.Voice.Session do
     )
   end
 
+  defp audio_deadline(state) do
+    deadline =
+      min(
+        System.monotonic_time(:millisecond) + state.audio_turn_timeout_ms,
+        state.session_deadline_ms
+      )
+
+    case state.desk_owner do
+      %{deadline: desk_deadline} -> min(deadline, desk_deadline)
+      _ -> deadline
+    end
+  end
+
   defp audio_turn_current?(state, turn),
     do:
       System.monotonic_time(:millisecond) < turn.deadline_ms and
+        desk_gate(state) == :ok and
         ConversationAuthority.recheck(state.conversation_binding) == :ok
 
   defp begin_audio_operation(state, from, format, pcm, timeout_ms) do
@@ -1609,6 +1892,7 @@ defmodule Arbor.Voice.Session do
                      byte_size(pcm),
                      timeout_ms
                    ),
+                 :ok <- desk_turn_gate(state),
                  {:ok, request_id} <- state.resource_owner.handoff_audio(state.owner, ticket, pcm) do
               {:ok, ticket, request_id}
             end
@@ -1687,10 +1971,17 @@ defmodule Arbor.Voice.Session do
     session_authority = Redacted.value(state.egress_authority)
     turn_id = Identifiers.generate_id("turn_")
 
-    case EgressAuthority.issue_turn(session_authority, turn_id) do
+    admission =
+      if session_authority.kind == :external,
+        do: ClosureReceipt.begin_provisional(Map.get(state, :closure_receipt)),
+        else: :ok
+
+    case with(:ok <- admission, do: EgressAuthority.issue_turn(session_authority, turn_id)) do
       {:ok, turn_authority} ->
         case register_turn_cleanup(state, turn_authority) do
           {:ok, turn_lease} ->
+            ClosureReceipt.custody_owned(Map.get(state, :closure_receipt))
+
             case safe_activate_turn(state, turn_lease) do
               :ok ->
                 {:ok, turn_lease}
@@ -1704,7 +1995,11 @@ defmodule Arbor.Voice.Session do
         end
 
       {:error, _reason} ->
-        {:error, :turn_failed, :recoverable}
+        # A failed external mint may have lost its acknowledgement. No exact
+        # cleanup token exists, so a Desk receipt must retain that uncertainty.
+        if session_authority.kind == :external and Map.get(state, :closure_receipt),
+          do: {:error, :turn_failed, {:fatal, nil}},
+          else: {:error, :turn_failed, :recoverable}
     end
   end
 
@@ -1745,7 +2040,7 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp unwind_unregistered_turn(_state, turn_authority) do
+  defp unwind_unregistered_turn(state, turn_authority) do
     cleanup_key = EgressAuthority.turn_cleanup_key(turn_authority)
     cleanup = EgressAuthority.turn_cleanup(turn_authority)
 
@@ -1753,6 +2048,7 @@ defmodule Arbor.Voice.Session do
     # a failed direct attempt is retained for adoption during fatal close.
     case EgressAuthority.run_cleanup(cleanup) do
       :ok ->
+        ClosureReceipt.custody_owned(Map.get(state, :closure_receipt))
         {:error, :turn_failed, :recoverable}
 
       {:error, _reason} ->
@@ -1889,7 +2185,36 @@ defmodule Arbor.Voice.Session do
   # Tool routing (VP-04E3) — Session is sole backend-output authority
   # ---------------------------------------------------------------------------
 
-  defp admit_and_route_tool(state, turn, %{id: call_id, name: name, arguments: args} = call) do
+  # The provider may assign different IDs to repeated requests. Reserve the
+  # single consultation before argument validation, worker creation or delivery;
+  # no failure/timeout/ambiguous result can reopen this source-owned slot.
+  defp admit_and_route_tool(
+         %{tool_router: Arbor.Voice.ToolRouter.PrivateConversation} = state,
+         %{kind: :audio, consultation_admitted: true} = turn,
+         %{id: call_id, name: "consult_agent"}
+       ) do
+    case safe_send_tool_result(
+           state,
+           call_id,
+           ToolTaskCore.normalize(:consultation_already_requested)
+         ) do
+      :ok -> enqueue_poll(state, turn.generation)
+      {:error, _} -> finish_audio_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp admit_and_route_tool(
+         %{tool_router: Arbor.Voice.ToolRouter.PrivateConversation} = state,
+         %{kind: :audio, consultation_admitted: false} = turn,
+         %{name: "consult_agent"} = call
+       ) do
+    next = %{turn | consultation_admitted: true}
+    route_tool(%{state | turn: next}, next, call)
+  end
+
+  defp admit_and_route_tool(state, turn, call), do: route_tool(state, turn, call)
+
+  defp route_tool(state, turn, %{id: call_id, name: name, arguments: args} = call) do
     pending = turn.pending || %{}
     dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
 
@@ -1973,11 +2298,48 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  defp tool_authority_for_turn(
+         %{tool_router: Arbor.Voice.ToolRouter.PrivateConversation, tool_authority: authority},
+         %{kind: :audio, core: %Redacted{value: %{transcript: transcript}}} = turn,
+         deadline
+       )
+       when is_binary(transcript) do
+    consult = Map.fetch!(authority, :private_audio_consultation)
+    sent_at = turn.utterance_ended_at
+    parent_id = turn.voice_parent_id
+    # FrontDesk still validates the closed tool argument schema. Its message
+    # is never authoritative speech: only completed STT reaches the Agent.
+    %{
+      consult_agent: fn _provider_message ->
+        consult.(transcript, sent_at, parent_id, deadline)
+      end
+    }
+  end
+
+  defp tool_authority_for_turn(
+         %{tool_router: Arbor.Voice.ToolRouter.PrivateConversation},
+         %{kind: :audio},
+         _deadline
+       ),
+       do: %{consult_agent: fn _ -> {:error, :tool_error} end}
+
+  defp tool_authority_for_turn(state, _turn, deadline) do
+    Map.update!(state.tool_authority, :consult_agent, fn consult ->
+      fn message -> consult.(message, deadline) end
+    end)
+  end
+
   defp do_start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate) do
     # Pre-create fence token before spawn; activation carries the same token.
     token = make_ref()
     generation = turn.generation
     session_pid = self()
+
+    deadline =
+      min(
+        System.monotonic_time(:millisecond) + state.tool_router_timeout_ms,
+        Map.get(turn, :deadline_ms, state.session_deadline_ms)
+      )
 
     context = %{
       call_id: call_id,
@@ -1995,8 +2357,8 @@ defmodule Arbor.Voice.Session do
       token: token,
       router: state.tool_router,
       context: context,
-      authority: state.tool_authority,
-      timeout_ms: state.tool_router_timeout_ms
+      authority: tool_authority_for_turn(state, turn, deadline),
+      deadline_ms: deadline
     }
 
     case start_tool_owner_child(owner_opts) do
@@ -2366,6 +2728,15 @@ defmodule Arbor.Voice.Session do
 
         opts =
           case turn do
+            %{kind: :audio, voice_parent_id: parent_id} ->
+              Keyword.put(opts, :voice_parent_id, parent_id)
+
+            _ ->
+              opts
+          end
+
+        opts =
+          case turn do
             %{dispatch: dispatch} ->
               case ManagedDispatchCore.receipt(dispatch) do
                 nil -> opts
@@ -2702,7 +3073,19 @@ defmodule Arbor.Voice.Session do
   defp settle_and_close(state) do
     case ensure_provisional_cleanup_owned(state) do
       {:ok, state} ->
-        {state, close_owner_authoritatively(state)}
+        receipt = Map.get(state, :closure_receipt)
+        ClosureReceipt.session_closing(receipt)
+        result = close_owner_authoritatively(state)
+
+        # The Desk join remains available to the lease after this Session and
+        # ResourceOwner exit. Unknown provisional custody cannot be hidden by
+        # an otherwise successful owner close.
+        result =
+          if receipt,
+            do: if(ClosureReceipt.closed?(receipt), do: :ok, else: {:error, :cleanup_pending}),
+            else: result
+
+        {state, result}
 
       {:error, state} ->
         {state, {:error, :cleanup_pending}}
@@ -2718,6 +3101,7 @@ defmodule Arbor.Voice.Session do
       when is_function(cleanup, 0) ->
         case safe_register_provisional_cleanup(state, key, cleanup) do
           :ok ->
+            ClosureReceipt.custody_owned(Map.get(state, :closure_receipt))
             {:ok, %{state | provisional_turn_authority: nil}}
 
           _ ->
@@ -2725,6 +3109,7 @@ defmodule Arbor.Voice.Session do
             # handoff when ordinary registration capacity/faults block transfer.
             case safe_adopt_provisional_cleanup(state, key, cleanup) do
               :ok ->
+                ClosureReceipt.custody_owned(Map.get(state, :closure_receipt))
                 {:ok, %{state | provisional_turn_authority: nil}}
 
               _ ->
@@ -2758,6 +3143,7 @@ defmodule Arbor.Voice.Session do
   defp complete_provisional_cleanup(state, cleanup) do
     case run_fallback_cleanup(cleanup, 3) do
       :ok ->
+        ClosureReceipt.custody_owned(Map.get(state, :closure_receipt))
         {:ok, %{state | provisional_turn_authority: nil}}
 
       {:error, _reason} ->
@@ -2862,7 +3248,7 @@ defmodule Arbor.Voice.Session do
         do: {:error, :cleanup_pending},
         else: safe_close_resource_owner(state.resource_owner, state.owner)
 
-    # A one-shot send can have finished its acknowledged cleanup just before
+    # A one-shot send or audio turn can have finished checked cleanup before
     # stop/death/timeout enters this handler. Only its exact private ticket
     # supplies positive close evidence; a bare owner DOWN still never does.
     close_result = if close_result == :ok, do: :ok, else: completed_audio_close(state)
@@ -2873,7 +3259,19 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp completed_audio_close(%{audio_operation: %{ticket: ticket}}) do
+  defp completed_audio_close(%{audio_operation: %{ticket: ticket}}),
+    do: completed_audio_ticket_close(ticket)
+
+  defp completed_audio_close(%{turn: %{kind: :audio, ticket: ticket, close_receipt: ticket}})
+       when is_struct(ticket, ResourceOwner.AudioOperation),
+       do: :ok
+
+  defp completed_audio_close(%{turn: %{kind: :audio, ticket: ticket}}),
+    do: completed_audio_ticket_close(ticket)
+
+  defp completed_audio_close(_state), do: {:error, :cleanup_pending}
+
+  defp completed_audio_ticket_close(%ResourceOwner.AudioOperation{} = ticket) do
     receive do
       {:voice_audio_operation_result, ^ticket, result, :ok} = message ->
         case ResourceOwner.audio_result(message, ticket) do
@@ -2885,7 +3283,7 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp completed_audio_close(_state), do: {:error, :cleanup_pending}
+  defp completed_audio_ticket_close(_ticket), do: {:error, :cleanup_pending}
 
   defp resource_owner_down?(%{owner: owner}) when is_pid(owner),
     do: not Process.alive?(owner)

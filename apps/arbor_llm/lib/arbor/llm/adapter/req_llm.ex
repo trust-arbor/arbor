@@ -754,10 +754,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   req_llm's `generate_text/3` accepts a list of `%ReqLLM.Message{}`
   structs (or, equivalently, the `Context.user/assistant/system/tool`
-  helpers). For text-only content we go through the helpers — they
-  normalize `String.t() | [ContentPart.t()]` content for us. For
-  structured content (already a list of parts), we pass the list
-  straight through.
+  helpers). Convert Arbor and persisted JSON text blocks into native
+  ReqLLM content parts before calling those helpers: they pass lists
+  through without normalizing their elements. User multimodal parts
+  retain their metadata; assistant content stays limited to text and tools.
 
   Public for testability.
   """
@@ -769,16 +769,16 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp translate_message(%Message{role: role, content: content} = msg) do
     case role do
       :user ->
-        ReqLLM.Context.user(reqllm_user_content(content))
+        ReqLLM.Context.user(reqllm_content(content))
 
       :assistant ->
         translate_assistant_content(content)
 
       :system ->
-        ReqLLM.Context.system(content)
+        ReqLLM.Context.system(reqllm_text_content(content))
 
       :developer ->
-        ReqLLM.Context.system(content)
+        ReqLLM.Context.system(reqllm_text_content(content))
 
       :tool ->
         # ReqLLM.Context doesn't expose a tool/1 helper; the tool_call_id
@@ -794,40 +794,71 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         # sanitized) tool-result text as a ReqLLM text part.
         %ReqLLM.Message{
           role: :tool,
-          content: content |> List.wrap() |> Enum.map(&reqllm_text_part/1),
+          content: content |> List.wrap() |> reqllm_text_content(),
           tool_call_id: tool_call_id
         }
     end
   end
 
-  # Only raw strings need wrapping (the tool-result text that raised "expected a
-  # map"). Existing ContentPart structs / maps pass through unchanged, preserving
-  # the prior List.wrap behavior for non-string content.
-  defp reqllm_text_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
-  defp reqllm_text_part(other), do: other
+  # Session history uses JSON text blocks, while live callers may supply Arbor
+  # parts or native ReqLLM structs. Only recognized text shapes become text;
+  # unknown blocks and structs must never be inspected/stringified into prompts.
+  defp reqllm_content(content) when is_binary(content), do: content
+  defp reqllm_content(parts) when is_list(parts), do: Enum.map(parts, &reqllm_content_part/1)
+  defp reqllm_content(other), do: other
 
-  # A user message's content is either a plain string or a list of Arbor ContentPart
-  # maps (multimodal). ReqLLM.Context.user takes the list as-is, so Arbor's kind-keyed
-  # maps must be converted to ReqLLM's type-keyed ContentParts first — otherwise they
-  # encode to empty content (a 400 "Input must have at least 1 token").
-  defp reqllm_user_content(content) when is_binary(content), do: content
-  defp reqllm_user_content(parts) when is_list(parts), do: Enum.map(parts, &reqllm_content_part/1)
-  defp reqllm_user_content(other), do: other
+  # Other roles retain their previous nontext representation. Only user
+  # messages have historically converted Arbor's image maps at this boundary.
+  defp reqllm_text_content(parts) when is_list(parts),
+    do: Enum.map(parts, &(reqllm_text_part(&1) || &1))
+
+  defp reqllm_text_content(other), do: other
 
   defp reqllm_content_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
   defp reqllm_content_part(%ReqLLM.Message.ContentPart{} = p), do: p
-  defp reqllm_content_part(%{kind: :text, text: t}), do: ReqLLM.Message.ContentPart.text(t)
+  defp reqllm_content_part(%_{} = other), do: other
+
+  defp reqllm_content_part(part) when is_map(part) do
+    reqllm_text_part(part) || reqllm_nontext_part(part)
+  end
+
+  defp reqllm_content_part(other), do: other
+
+  defp reqllm_text_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
+
+  defp reqllm_text_part(%ReqLLM.Message.ContentPart{type: :text, text: text} = part)
+       when is_binary(text),
+       do: part
+
+  defp reqllm_text_part(%_{}), do: nil
+
+  defp reqllm_text_part(part) when is_map(part) do
+    # Require exactly one discriminator and one payload key. A mixed map must
+    # not turn a historical thinking/tool block into text by key precedence.
+    types = part |> Map.take([:kind, "kind", :type, "type"]) |> Map.values()
+    texts = part |> Map.take([:text, "text"]) |> Map.values()
+
+    case {types, texts} do
+      {[type], [text]} when type in [:text, "text"] and is_binary(text) ->
+        ReqLLM.Message.ContentPart.text(text)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp reqllm_text_part(_), do: nil
 
   # Arbor's image_base64 stores ALREADY-base64 data; ReqLLM.image/2 base64-encodes
   # its input (expects raw bytes), which would double-encode. Build the data-URI
   # directly as an image_url so the base64 passes through untouched.
-  defp reqllm_content_part(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
+  defp reqllm_nontext_part(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
     do: ReqLLM.Message.ContentPart.image_url("data:#{mt || "image/png"};base64,#{data}")
 
-  defp reqllm_content_part(%{kind: :image, url: url}) when is_binary(url),
+  defp reqllm_nontext_part(%{kind: :image, url: url}) when is_binary(url),
     do: ReqLLM.Message.ContentPart.image_url(url)
 
-  defp reqllm_content_part(other), do: other
+  defp reqllm_nontext_part(other), do: other
 
   # An assistant message is either plain text (from history) OR a list of Arbor
   # content parts (build_assistant_message emits `%{kind: :text}` +
@@ -836,24 +867,27 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # field — and ReqLLM content parts are keyed by `:type`, so handing Arbor's
   # `:kind`-keyed maps to `Context.assistant/1` as raw content raised
   # `KeyError :type` on the continuation turn (the text part has no `:type`).
-  # Convert: text parts → the content string, tool_call parts → `:tool_calls`.
+  # Extract tool_call parts into `:tool_calls`; normalize text without losing
+  # its ordering or persisted JSON blocks. Keep nontext assistant content
+  # excluded before any provider codec, as in the original text/tool boundary.
   defp translate_assistant_content(content) when is_binary(content),
     do: ReqLLM.Context.assistant(content)
 
   defp translate_assistant_content(parts) when is_list(parts) do
-    text =
-      parts
-      |> Enum.filter(&(Map.get(&1, :kind) == :text))
-      |> Enum.map_join("", &(Map.get(&1, :text) || ""))
+    {tool_parts, content_parts} =
+      Enum.split_with(parts, &match?(%{kind: :tool_call}, &1))
 
     tool_calls =
-      parts
-      |> Enum.filter(&(Map.get(&1, :kind) == :tool_call))
-      |> Enum.map(fn tc ->
+      Enum.map(tool_parts, fn tc ->
         {Map.get(tc, :name), Map.get(tc, :arguments), [id: Map.get(tc, :id)]}
       end)
 
-    ReqLLM.Context.assistant(text, tool_calls: tool_calls)
+    content =
+      content_parts
+      |> Enum.map(&reqllm_text_part/1)
+      |> Enum.reject(&is_nil/1)
+
+    ReqLLM.Context.assistant(content, tool_calls: tool_calls)
   end
 
   defp translate_assistant_content(other), do: ReqLLM.Context.assistant(other)
@@ -1460,13 +1494,23 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp reasoning_from_details(%ReqLLM.Message{reasoning_details: details})
        when is_list(details) do
     details
-    |> Enum.map(fn %ReqLLM.Message.ReasoningDetails{text: text} -> text end)
+    |> Enum.map(&reasoning_detail_text/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
     |> nil_if_blank()
   end
 
   defp reasoning_from_details(_), do: nil
+
+  defp reasoning_detail_text(%ReqLLM.Message.ReasoningDetails{text: text})
+       when is_binary(text),
+       do: text
+
+  # ReqLLM's OpenRouter streaming decoder preserves wire maps here, while
+  # its non-streaming decoder produces ReasoningDetails structs. Extract
+  # text only; signatures and encrypted reasoning are opaque metadata.
+  defp reasoning_detail_text(%{"text" => text}) when is_binary(text), do: text
+  defp reasoning_detail_text(_), do: nil
 
   defp reasoning_from_thinking_parts(%ReqLLM.Message{content: nil}), do: nil
 

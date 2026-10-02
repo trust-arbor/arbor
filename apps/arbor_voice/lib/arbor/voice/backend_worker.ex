@@ -5,6 +5,7 @@ defmodule Arbor.Voice.BackendWorker do
 
   alias Arbor.Voice.Redacted
   alias Arbor.Voice.PcmFormat
+  alias Arbor.Voice.Diagnostics
 
   @result_tag :voice_backend_operation_result
 
@@ -50,6 +51,7 @@ defmodule Arbor.Voice.BackendWorker do
     :operation_timeout,
     :backend_callback_fault,
     :backend_open_failed,
+    :backend_open_uncertain,
     :backend_partial_failure,
     :backend_callback_failed,
     :invalid_backend_event,
@@ -251,7 +253,7 @@ defmodule Arbor.Voice.BackendWorker do
       :completion,
       :authenticator
     ]
-    defstruct @enforce_keys
+    defstruct @enforce_keys ++ [retirement: :unknown]
 
     @type t :: %__MODULE__{
             worker: pid(),
@@ -261,6 +263,7 @@ defmodule Arbor.Voice.BackendWorker do
             operation: atom(),
             completed_at: integer(),
             outcome: term(),
+            retirement: :open | :closed | :unknown,
             completion: CompletionCredential.t(),
             authenticator: Arbor.Voice.Redacted.t()
           }
@@ -455,6 +458,7 @@ defmodule Arbor.Voice.BackendWorker do
          operation: result.operation,
          completed_at: result.completed_at,
          outcome: result.outcome,
+         retirement: result.retirement,
          completion: result.completion
        }}
     else
@@ -724,16 +728,35 @@ defmodule Arbor.Voice.BackendWorker do
         execution
       end
 
-    {session, terminal} =
+    {session, retirement, terminal} =
       if execution.terminal do
-        {retire_session(execution.session, state), true}
+        {session, retirement} = retire_session_with_disposition(execution.session, state)
+        # A normal open rejection returns no owned handle. A fault before a
+        # handle is returned proves nothing about partially created resources.
+        retirement =
+          if is_nil(execution.session) and
+               execution.outcome not in [:ok, {:error, :backend_open_failed}],
+             do: :unknown,
+             else: retirement
+
+        {session, retirement, true}
       else
-        {execution.session, false}
+        {execution.session, :open, false}
       end
 
     completion_value = make_ref()
     completion = %CompletionCredential{value: Redacted.new(completion_value)}
-    result = build_result(state, execution.outcome, completed_at, completion, completion_value)
+
+    result =
+      build_result(
+        state,
+        execution.outcome,
+        retirement,
+        completed_at,
+        completion,
+        completion_value
+      )
+
     send(state.coordinator, {@result_tag, result})
 
     ack_timer =
@@ -755,7 +778,7 @@ defmodule Arbor.Voice.BackendWorker do
      }}
   end
 
-  defp build_result(state, outcome, completed_at, completion, completion_value) do
+  defp build_result(state, outcome, retirement, completed_at, completion, completion_value) do
     result = %Result{
       worker: self(),
       coordinator: state.coordinator,
@@ -764,6 +787,7 @@ defmodule Arbor.Voice.BackendWorker do
       operation: state.operation,
       completed_at: completed_at,
       outcome: outcome,
+      retirement: retirement,
       completion: completion,
       authenticator: Redacted.new(<<>>)
     }
@@ -797,10 +821,21 @@ defmodule Arbor.Voice.BackendWorker do
     callback.()
     |> normalize_result(state.operation, Redacted.value(state.session))
   rescue
-    _exception -> terminal_result(:backend_callback_fault, Redacted.value(state.session))
+    _exception ->
+      diagnose_audio_callback(state.operation, :backend_callback_fault)
+      terminal_result(:backend_callback_fault, Redacted.value(state.session))
   catch
-    _kind, _reason -> terminal_result(:backend_callback_fault, Redacted.value(state.session))
+    _kind, _reason ->
+      diagnose_audio_callback(state.operation, :backend_callback_fault)
+      terminal_result(:backend_callback_fault, Redacted.value(state.session))
   end
+
+  defp diagnose_audio_callback(:recv, reason), do: Diagnostics.failure(:backend_receive, reason)
+
+  defp diagnose_audio_callback(:send_audio, reason),
+    do: Diagnostics.failure(:backend_send_audio, reason)
+
+  defp diagnose_audio_callback(_, _), do: :ok
 
   defp normalize_result({:ok, session}, :open, _prior),
     do: operation_result(:ok, session, false)
@@ -808,33 +843,54 @@ defmodule Arbor.Voice.BackendWorker do
   defp normalize_result({:error, _reason}, :open, _prior),
     do: terminal_result(:backend_open_failed, nil)
 
+  defp normalize_result({:error, _reason, :cleanup_pending}, :open, _prior),
+    do: terminal_result(:backend_open_uncertain, nil)
+
   defp normalize_result({:ok, session}, operation, _prior)
        when operation in [:configure | @send_operations],
        do: operation_result(:ok, session, false)
 
-  defp normalize_result({:error, _reason, latest_session}, operation, _prior)
-       when operation in [:configure | @send_operations],
-       do: terminal_result(:backend_partial_failure, latest_session)
+  defp normalize_result({:error, reason, latest_session}, operation, _prior)
+       when operation in [:configure | @send_operations] do
+    diagnose_audio_callback(operation, reason)
+    terminal_result(:backend_partial_failure, latest_session)
+  end
 
   defp normalize_result({:error, _reason}, :configure, prior),
     do: terminal_result(:backend_callback_failed, prior)
 
-  defp normalize_result({:error, _reason}, operation, prior)
-       when operation in @send_operations,
-       do: terminal_result(:backend_callback_failed, prior)
+  defp normalize_result({:error, reason}, operation, prior)
+       when operation in @send_operations do
+    diagnose_audio_callback(operation, reason)
+    terminal_result(:backend_callback_failed, prior)
+  end
 
   defp normalize_result({:ok, session, event}, :recv, _prior) do
     case normalize_event(event) do
-      {:ok, bounded_event} -> operation_result({:ok, bounded_event}, session, false)
-      :error -> terminal_result(:invalid_backend_event, session)
+      {:ok, bounded_event} ->
+        operation_result({:ok, bounded_event}, session, false)
+
+      :error ->
+        Diagnostics.failure(:backend_receive, :invalid_backend_event)
+        terminal_result(:invalid_backend_event, session)
     end
   end
+
+  defp normalize_result({:error, :timeout, latest}, :recv, _prior),
+    do: operation_result({:error, :timeout}, latest, false)
 
   defp normalize_result({:error, :timeout}, :recv, prior),
     do: operation_result({:error, :timeout}, prior, false)
 
-  defp normalize_result({:error, _reason}, :recv, prior),
-    do: terminal_result(:backend_callback_failed, prior)
+  defp normalize_result({:error, reason}, :recv, prior) do
+    Diagnostics.failure(:backend_receive, reason)
+    terminal_result(:backend_callback_failed, prior)
+  end
+
+  defp normalize_result(_result, :recv, prior) do
+    Diagnostics.failure(:backend_receive, :invalid_backend_return)
+    terminal_result(:invalid_backend_return, prior)
+  end
 
   defp normalize_result(meta, :meta, prior) do
     if valid_meta?(meta),
@@ -845,8 +901,10 @@ defmodule Arbor.Voice.BackendWorker do
   defp normalize_result(:ok, :close, _prior), do: operation_result(:ok, nil, true)
   defp normalize_result(_result, :close, prior), do: terminal_result(:backend_close_failed, prior)
 
-  defp normalize_result(_result, _operation, prior),
-    do: terminal_result(:invalid_backend_return, prior)
+  defp normalize_result(_result, operation, prior) do
+    diagnose_audio_callback(operation, :invalid_backend_return)
+    terminal_result(:invalid_backend_return, prior)
+  end
 
   defp operation_result(outcome, session, terminal),
     do: %{outcome: outcome, session: session, terminal: terminal}
@@ -854,25 +912,28 @@ defmodule Arbor.Voice.BackendWorker do
   defp terminal_result(reason, session),
     do: operation_result({:error, reason}, session, true)
 
-  defp retire_session(nil, _state), do: nil
+  defp retire_session(session, state),
+    do: session |> retire_session_with_disposition(state) |> elem(0)
 
-  defp retire_session(session, state) do
+  defp retire_session_with_disposition(nil, _state), do: {nil, :closed}
+
+  defp retire_session_with_disposition(session, state) do
     case arm_relative_kill_timer(state.retire_timeout_ms) do
       {:ok, timer} ->
         try do
-          _ = state.backend_module.close(session)
-          nil
+          disposition = if state.backend_module.close(session) == :ok, do: :closed, else: :unknown
+          {nil, disposition}
         rescue
-          _exception -> nil
+          _exception -> {nil, :unknown}
         catch
-          _kind, _reason -> nil
+          _kind, _reason -> {nil, :unknown}
         after
           cancel_kill_timer(timer)
         end
 
       :error ->
         Process.exit(self(), :kill)
-        nil
+        {nil, :unknown}
     end
   end
 
@@ -1343,7 +1404,7 @@ defmodule Arbor.Voice.BackendWorker do
     exact_struct_shape?(result, Result) and is_pid(result.worker) and
       is_pid(result.coordinator) and is_reference(result.generation) and
       is_reference(result.operation_token) and result.operation in @operations and
-      valid_completed_at?(result.completed_at) and
+      valid_completed_at?(result.completed_at) and result.retirement in [:open, :closed, :unknown] and
       bounded_external_term?(result.outcome, @max_public_outcome_bytes) and
       valid_public_outcome?(result.operation, result.outcome)
   end
@@ -1418,7 +1479,7 @@ defmodule Arbor.Voice.BackendWorker do
 
   defp result_auth_fields(result, completion) do
     {result.worker, result.coordinator, result.generation, result.operation_token,
-     result.operation, result.completed_at, result.outcome, completion}
+     result.operation, result.completed_at, result.outcome, result.retirement, completion}
   end
 
   defp authenticate(secret, purpose, fields) do

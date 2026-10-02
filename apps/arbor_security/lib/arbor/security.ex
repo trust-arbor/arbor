@@ -536,6 +536,30 @@ defmodule Arbor.Security do
   # :verify_identity (caller), :task_id, :principal_scope.
   @issue_session_mode_keys [:session_token, :expected_engagement_id]
 
+  @doc """
+  Build the exact bytes to sign for a 90-second human conversation session.
+
+  The versioned payload binds purpose, subject, target and fixed lifetime.
+  Sign with `sign_key_file_request/2`; an ordinary signed chat request cannot
+  be substituted. This function creates no authority or identity.
+  """
+  defdelegate conversation_session_request_payload(principal, target),
+    to: Arbor.Security.ConversationSession,
+    as: :request_payload
+
+  @doc """
+  Exchange a fresh purpose-bound human signature for a 90-second session proof.
+
+  Requires a current reusable chat capability for the exact target, verifies
+  identity and nonce once, and rechecks authority before returning. No capability
+  is granted. The returned bearer token authenticates only `:chat` on this exact target and
+  is rejected by generic session verification. It must remain private; desk operations
+  retain it server-side and never return it through their control surface.
+  """
+  defdelegate issue_signed_conversation_session(principal, target, signed_request),
+    to: Arbor.Security.ConversationSession,
+    as: :issue
+
   @doc "Exchange an exact authenticated chat receipt for a pending, caller-owned memory admission."
   defdelegate exchange_private_memory_receipt(receipt, agent_id, sender_id, context),
     to: Arbor.Security.PrivateMemory,
@@ -872,6 +896,31 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Authenticate the exact human subject of a general browser session.
+
+  Checks the session signature and current expiry through the configured token
+  verifier. Scoped conversation tokens are not general login proofs. This does
+  not check registry status or grant resource authority; resource operations must
+  still use their existing identity and capability authorization gates.
+  """
+  @spec verify_human_session(String.t(), String.t()) :: :ok | {:error, :unauthorized}
+  def verify_human_session(principal, token)
+      when is_binary(token) and byte_size(token) in 1..4096 do
+    with :ok <- validate_issue_human_principal(principal),
+         {:ok, ^principal} <- apply(Config.session_token_module(), :verify, [token]) do
+      :ok
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  def verify_human_session(_, _), do: {:error, :unauthorized}
+
+  @doc """
   Recheck an admitted human conversation against its original session proof.
 
   Verifies the exact HMAC subject and current token expiry, then checks current
@@ -884,7 +933,12 @@ defmodule Arbor.Security do
       when is_binary(token) and byte_size(token) in 1..4096 do
     verifier = Config.session_token_module()
 
-    with {:ok, ^principal} <- verifier.verify(token),
+    proof =
+      if Code.ensure_loaded?(verifier) and function_exported?(verifier, :verify_for, 3),
+        do: apply(verifier, :verify_for, [token, "arbor://chat/agent/" <> target_agent, :chat]),
+        else: apply(verifier, :verify, [token])
+
+    with {:ok, ^principal} <- proof,
          {:ok, :authorized} <- recheck_conversation_owner(principal, target_agent, owner) do
       {:ok, :authorized}
     else
@@ -4094,6 +4148,59 @@ defmodule Arbor.Security do
   # ===========================================================================
   # OIDC Authentication
   # ===========================================================================
+
+  @doc """
+  Begin a bounded terminal device login for one chat target using only the
+  configured device-flow provider. Existing human registration and chat grants
+  are required; this API never provisions either. The handle is a bearer secret.
+  """
+  @spec begin_terminal_login(String.t()) ::
+          {:ok, map()} | {:error, :unauthorized | :login_unavailable}
+  defdelegate begin_terminal_login(target), to: Arbor.Security.TerminalLogin, as: :begin
+
+  @doc """
+  Poll a terminal login handle. Successful credential retrieval is one-shot;
+  a lost success response requires a new login. No OIDC token or key is returned.
+  """
+  @spec terminal_login_status(String.t()) :: {:ok, :pending | map()} | {:error, :unauthorized}
+  defdelegate terminal_login_status(handle), to: Arbor.Security.TerminalLogin, as: :status
+
+  @doc "Cancel a pending login and await retirement of its exact device-flow worker."
+  @spec cancel_terminal_login(String.t()) :: :ok | {:error, :unauthorized}
+  defdelegate cancel_terminal_login(handle), to: Arbor.Security.TerminalLogin, as: :cancel
+
+  @doc """
+  Preflight an unclaimed or disconnected terminal credential for socket upgrade.
+  Returns public binding metadata only, never a signing proof. Preflight does not
+  claim a connection or extend its bounded initial-attach/reconnect deadline.
+  """
+  @spec preflight_terminal_session(String.t()) ::
+          {:ok, map()} | {:error, :unauthorized | :session_in_use}
+  defdelegate preflight_terminal_session(credential),
+    to: Arbor.Security.TerminalLogin,
+    as: :preflight
+
+  @doc """
+  Claim a terminal credential for the actual calling connection process. Only
+  one live owner may hold it. Owner death begins the bounded reconnect grace;
+  an attached connection has no total-age cutoff. A caller cannot choose a PID.
+  """
+  @spec claim_terminal_session(String.t()) :: {:ok, map()} | {:error, :unauthorized}
+  defdelegate claim_terminal_session(credential), to: Arbor.Security.TerminalLogin, as: :claim
+
+  @doc """
+  Verify the calling connection owns an opaque terminal credential and retains
+  current human/target/owner authority. Returns a fresh, short-lived scoped proof.
+  The returned HMAC proof is SERVER-ONLY: trusted Gateway code may pass it to
+  Agent, but must never serialize it to a client, renderer, log, or status API.
+  No provider refresh, identity provisioning, or new grants occur.
+  """
+  @spec verify_terminal_session(String.t()) :: {:ok, map()} | {:error, :unauthorized}
+  defdelegate verify_terminal_session(credential), to: Arbor.Security.TerminalLogin, as: :verify
+
+  @doc "Revoke an opaque terminal credential. Idempotent while the broker is available."
+  @spec revoke_terminal_session(String.t()) :: :ok | {:error, :unauthorized}
+  defdelegate revoke_terminal_session(credential), to: Arbor.Security.TerminalLogin, as: :revoke
 
   @doc """
   Authenticate a human operator via OIDC device flow.

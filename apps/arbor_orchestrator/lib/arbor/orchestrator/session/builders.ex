@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.ContextBuilder
+  alias Arbor.Orchestrator.Session.Consultation
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
   alias Arbor.Orchestrator.Session.PrivateMemory
@@ -247,6 +248,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     agent_id = state.agent_id
     session_id = state.session_id
     session_pid = state.pid
+    consultation? = Consultation.active?(state)
 
     fn event ->
       case event do
@@ -261,19 +263,23 @@ defmodule Arbor.Orchestrator.Session.Builders do
             send(session_pid, {:stream_chunk, text})
           end
 
-          ResultProcessor.emit_signal(:agent, :stream_delta, %{
-            agent_id: agent_id,
-            session_id: session_id,
-            text: text,
-            source: source
-          })
+          unless consultation? do
+            ResultProcessor.emit_signal(:agent, :stream_delta, %{
+              agent_id: agent_id,
+              session_id: session_id,
+              text: text,
+              source: source
+            })
+          end
 
         %{type: :finish} ->
-          ResultProcessor.emit_signal(:agent, :stream_finish, %{
-            agent_id: agent_id,
-            session_id: session_id,
-            source: source
-          })
+          unless consultation? do
+            ResultProcessor.emit_signal(:agent, :stream_finish, %{
+              agent_id: agent_id,
+              session_id: session_id,
+              source: source
+            })
+          end
 
         _ ->
           :ok
@@ -383,10 +389,14 @@ defmodule Arbor.Orchestrator.Session.Builders do
       state = adopt_turn_commit(state, commit)
 
       state =
-        Arbor.Orchestrator.Session.Transcript.track_commit(state, entries, [
-          user_msg,
-          assistant_msg
-        ])
+        if Consultation.active?(state) do
+          state
+        else
+          Arbor.Orchestrator.Session.Transcript.track_commit(state, entries, [
+            user_msg,
+            assistant_msg
+          ])
+        end
 
       turn = Map.get(state, :private_memory_turn)
 
@@ -403,6 +413,20 @@ defmodule Arbor.Orchestrator.Session.Builders do
   end
 
   defp adopt_turn_commit(state, commit) do
+    if Consultation.active?(state) do
+      # Cognition and private-memory effects are retained; this exchange is not
+      # published as another human turn or a canonical compactor/transcript anchor.
+      next = %{state | working_memory: commit.working_memory, turn_count: commit.turn_count}
+
+      update_session_state(next, fn ss ->
+        ss |> Map.put(:working_memory, commit.working_memory) |> maybe_call_increment_turn()
+      end)
+    else
+      adopt_visible_turn_commit(state, commit)
+    end
+  end
+
+  defp adopt_visible_turn_commit(state, commit) do
     old_compression_count =
       if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
 

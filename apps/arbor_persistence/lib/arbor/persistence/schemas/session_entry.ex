@@ -43,7 +43,7 @@ defmodule Arbor.Persistence.Schemas.SessionEntry do
     :metadata
   ]
 
-  @valid_entry_types ~w(user assistant tool_use tool_result thinking system heartbeat progress)
+  @valid_entry_types ~w(user assistant consultation tool_use tool_result thinking system heartbeat progress)
   @valid_roles ~w(user assistant system)
 
   @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()

@@ -712,6 +712,42 @@ defmodule Arbor.Persistence.SessionStore do
     _ -> []
   end
 
+  @doc false
+  def load_private_memory_source_messages(session_id, agent_id, limit)
+      when is_binary(session_id) and is_binary(agent_id) and is_integer(limit) and
+             limit in 1..1000 do
+    case get_session(session_id) do
+      {:ok, %Session{agent_id: ^agent_id, id: session_uuid}} ->
+        from(e in SessionEntry,
+          where: e.session_id == ^session_uuid,
+          where:
+            (e.entry_type in ["user", "assistant"] and e.role == e.entry_type) or
+              (e.entry_type == "consultation" and e.role in ["user", "assistant"]),
+          order_by: [desc: e.entry_ordinal],
+          limit: ^limit
+        )
+        |> Repo.all(timeout: 5_000)
+        |> Enum.reverse()
+        |> Enum.map(&entry_to_display_map/1)
+
+      {:ok, _} ->
+        {:error, :private_memory_source_owner_mismatch}
+
+      {:error, :not_found} ->
+        []
+
+      _ ->
+        {:error, :private_memory_source_unavailable}
+    end
+  rescue
+    _ -> {:error, :private_memory_source_unavailable}
+  catch
+    _, _ -> {:error, :private_memory_source_unavailable}
+  end
+
+  def load_private_memory_source_messages(_, _, _),
+    do: {:error, :invalid_private_memory_source_scope}
+
   defp maybe_before_timestamp(query, nil), do: query
 
   defp maybe_before_timestamp(query, before_ts) do

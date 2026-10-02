@@ -429,27 +429,28 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
   end
 
   defp start_session!(ctx, adapters \\ %{}) do
-    {:ok, session} =
-      Session.start_link(
-        session_id: ctx.session_id,
-        agent_id: ctx.agent.agent_id,
-        turn_dot: ctx.path,
-        start_heartbeat: false,
-        compactor: {Compactor, []},
-        adapters: adapters,
-        signer: fn resource ->
-          SignedRequest.sign(resource, ctx.agent.agent_id, ctx.agent.private_key)
-        end,
-        config: %{
-          "llm_provider" => "lm_studio",
-          "llm_model" => "test",
-          "stream" => false,
-          "recover_session" => false
-        }
-      )
-
-    on_exit(fn -> if Process.alive?(session), do: GenServer.stop(session) end)
-    session
+    start_supervised!(
+      {Session,
+       [
+         session_id: ctx.session_id,
+         agent_id: ctx.agent.agent_id,
+         turn_dot: ctx.path,
+         start_heartbeat: false,
+         compactor: {Compactor, []},
+         adapters: adapters,
+         signer: fn resource ->
+           SignedRequest.sign(resource, ctx.agent.agent_id, ctx.agent.private_key)
+         end,
+         config: %{
+           "llm_provider" => "lm_studio",
+           "llm_model" => "test",
+           "stream" => false,
+           "recover_session" => false
+         }
+       ]},
+      id: make_ref(),
+      restart: :temporary
+    )
   end
 
   defp owner!(agent) do

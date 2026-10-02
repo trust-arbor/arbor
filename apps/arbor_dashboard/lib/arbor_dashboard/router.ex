@@ -3,6 +3,9 @@ defmodule Arbor.Dashboard.Router do
 
   use Arbor.Web.Router
 
+  # The pinned LiveView logger inspects mount sessions without parameter filtering.
+  # Every routed Dashboard LiveView disables that optional logger with `log: false`;
+  # live_view_logging_security_regression_test.exs exercises the actual routed views.
   @doc false
   def live_session_data(conn) do
     %{

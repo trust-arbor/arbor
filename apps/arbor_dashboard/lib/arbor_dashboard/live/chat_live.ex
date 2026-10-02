@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   transcript entries and command delivery state through the public Agent API.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
 
   import Arbor.Web.Components
   import Arbor.Dashboard.Live.ChatLive.Components
@@ -14,6 +14,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   alias Arbor.Common.CommandIntake
   alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Dashboard.ChatState
+  alias Arbor.Dashboard.Components.VoiceDeskComponent
   alias Arbor.Dashboard.Live.ChatLive.{Conversation, GroupChat}
 
   @impl true
@@ -110,6 +111,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       |> stream(:llm_interactions, [])
       |> stream(:approvals, [])
       |> Conversation.mount()
+      |> VoiceDeskComponent.mount(
+        if(connected?(socket), do: get_connect_info(socket, :peer_data), else: nil),
+        if(connected?(socket), do: get_connect_info(socket, :uri), else: nil),
+        if(connected?(socket), do: get_connect_info(socket, :x_headers), else: nil)
+      )
 
     # Reconnect to existing agent if one is running
     socket =
@@ -151,6 +157,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_event("voice:" <> action, params, socket) do
+    {:noreply, VoiceDeskComponent.event(socket, action, params)}
+  end
+
   def handle_event("stop-agent", _params, socket) do
     {:noreply,
      assign(socket,
@@ -205,7 +215,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             socket =
               socket
               |> stream_insert_command_error(
-                "No agent connected. Type /help to see available commands, or start an agent first."
+                "No agent connected. Ask an operator to start or resume the intended agent with the Arbor CLI. Type /help for local help."
               )
               |> assign(input: "")
 
@@ -321,6 +331,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_info(:refresh_conversation, socket) do
     {:noreply, Conversation.refresh(socket)}
+  end
+
+  def handle_info({:voice_desk_poll, id}, socket) do
+    {:noreply, VoiceDeskComponent.poll(socket, id)}
   end
 
   # These channels do not carry a freshly authenticated private conversation
@@ -482,7 +496,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         )
 
       _ ->
-        assign(socket, error: "The agent is not running. Start it from the Agents dashboard.")
+        assign(socket,
+          error:
+            "The agent is not running. Ask an operator to resume it with the Arbor CLI, then reopen this conversation."
+        )
     end
   rescue
     _ ->

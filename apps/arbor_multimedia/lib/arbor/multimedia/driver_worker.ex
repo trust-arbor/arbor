@@ -8,7 +8,12 @@ defmodule Arbor.Multimedia.DriverWorker do
 
   @impl true
   def init(%Redacted{value: {driver, owner, token, fence_id, permit}}) do
-    permit = Map.merge(permit, %{receiver: self(), notification: make_ref()})
+    permit =
+      Map.merge(permit, %{
+        receiver: self(),
+        notification: :crypto.strong_rand_bytes(32),
+        custody: {owner, token, fence_id, self()}
+      })
 
     {:ok,
      %{
@@ -19,6 +24,7 @@ defmodule Arbor.Multimedia.DriverWorker do
        token: token,
        fence_id: fence_id,
        handle: nil,
+       activation: :crypto.strong_rand_bytes(32),
        opened: false,
        closing: false
      }}
@@ -30,6 +36,7 @@ defmodule Arbor.Multimedia.DriverWorker do
     # closure from a callback exception, an exit, or a pipeline DOWN message.
     case safe_open(state.driver, spec, state.permit) do
       {:ok, handle} ->
+        send(self(), {:activate, state.activation, Redacted.new(spec)})
         {:noreply, %{state | handle: Redacted.new(handle), opened: true}}
 
       {:error, reason, :closed} ->
@@ -39,6 +46,28 @@ defmodule Arbor.Multimedia.DriverWorker do
       _ ->
         notify(state, {:error, :driver_failed})
         {:noreply, %{state | opened: true}}
+    end
+  end
+
+  def handle_info(
+        {:activate, activation, %Redacted{value: spec}},
+        %{activation: activation, handle: %Redacted{value: handle}, closing: false} = state
+      )
+      when is_binary(activation) do
+    state = %{state | activation: nil}
+
+    if Driver.admitted?(state.permit) do
+      case safe_activate(state.driver, handle, spec, state.permit) do
+        :ok ->
+          {:noreply, state}
+
+        _ ->
+          notify(state, {:error, :driver_failed})
+          request_close(state)
+      end
+    else
+      notify(state, {:error, :timeout})
+      request_close(state)
     end
   end
 
@@ -111,7 +140,7 @@ defmodule Arbor.Multimedia.DriverWorker do
   defp confirmed_close(state) do
     # Close is already proven. Release the exact fence here even when the
     # coordinating owner dies before receiving its acknowledgement.
-    :atomics.put(state.permit.active, 1, 0)
+    :atomics.put(state.permit.revoked, 1, 1)
     Fence.release(state.fence_id)
     notify(state, {:closed, :ok})
     {:stop, :normal, %{state | handle: nil}}
@@ -135,5 +164,13 @@ defmodule Arbor.Multimedia.DriverWorker do
     _ -> {:error, :cleanup_pending}
   catch
     _, _ -> {:error, :cleanup_pending}
+  end
+
+  defp safe_activate(driver, handle, spec, permit) do
+    driver.activate(handle, spec, permit)
+  rescue
+    _ -> {:error, :driver_failed}
+  catch
+    _, _ -> {:error, :driver_failed}
   end
 end

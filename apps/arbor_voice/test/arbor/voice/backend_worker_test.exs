@@ -1,5 +1,6 @@
 defmodule Arbor.Voice.BackendWorkerTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias Arbor.Voice.BackendWorker
   alias Arbor.Voice.BackendWorker.CompletionCredential
@@ -66,7 +67,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
             :release_configure -> {:ok, bump(session)}
           end
 
-        :configure_error ->
+        mode when mode in [:configure_error, :configure_close_failed] ->
           {:error, {:distinctive_configure_error, session.secret}}
 
         :partial_configure ->
@@ -102,7 +103,14 @@ defmodule Arbor.Voice.BackendWorkerTest do
     @impl true
     def send_audio(session, _audio) do
       send(session.parent, {:backend_called, :send_audio, self(), session.version})
-      {:ok, bump(session)}
+
+      case session.mode do
+        :send_audio_error -> {:error, :xai_transport_failed}
+        :send_audio_private_partial -> {:error, {:private_reason, session.secret}, bump(session)}
+        :send_audio_private_fault -> raise session.secret
+        :send_audio_invalid -> {:invalid, session.secret}
+        _ -> {:ok, bump(session)}
+      end
     end
 
     @impl true
@@ -114,7 +122,16 @@ defmodule Arbor.Voice.BackendWorkerTest do
     @impl true
     def recv(session, _timeout) do
       send(session.parent, {:backend_called, :recv, self(), session.version})
-      {:ok, bump(session), {:turn_done, %{text: "done"}}}
+
+      case {session.mode, session.version} do
+        {:recv_timeout_state, 0} -> {:error, :timeout, bump(session)}
+        {:recv_unknown_error_state, _} -> {:error, :unknown_failure, bump(session)}
+        {:recv_protocol_error, _} -> {:error, :xai_audio_protocol_error}
+        {:recv_private_error, _} -> {:error, {:private_reason, session.secret}}
+        {:recv_private_fault, _} -> raise session.secret
+        {:recv_invalid_event, _} -> {:ok, bump(session), {:private_event, session.secret}}
+        _ -> {:ok, bump(session), {:turn_done, %{text: "done"}}}
+      end
     end
 
     @impl true
@@ -136,7 +153,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
         {:backend_called, :close, self(), session.version, session.secret}
       )
 
-      :ok
+      if session.mode == :configure_close_failed, do: {:error, :close_failed}, else: :ok
     end
 
     defp session(parent, mode, secret, authorizer, route) do
@@ -226,6 +243,83 @@ defmodule Arbor.Voice.BackendWorkerTest do
     refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 25
     assert :ok = ack(worker, credential, close)
     assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+  end
+
+  test "receive timeout preserves the latest private handle for the next operation and close",
+       ctx do
+    {worker, credential} =
+      start_worker(ctx.supervisor, [parent: self(), mode: :recv_timeout_state], :none)
+
+    opened = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, opened)
+    {timeout, log} = with_log(fn -> submit_result(worker, credential, :recv, [50]) end)
+    refute log =~ "stage=backend_receive"
+    assert timeout.outcome == {:error, :timeout}
+    assert_receive {:backend_called, :recv, ^worker, 0}
+    assert :ok = ack(worker, credential, timeout)
+
+    received = submit_result(worker, credential, :recv, [50])
+    assert received.outcome == {:ok, {:turn_done, %{text: "done"}}}
+    assert_receive {:backend_called, :recv, ^worker, 1}
+    assert :ok = ack(worker, credential, received)
+    assert :ok = close_worker(worker, credential)
+    assert_receive {:backend_called, :close, ^worker, 2, "ordinary-session"}
+  end
+
+  test "security regression: only an exact timeout triple can keep a receive nonterminal", ctx do
+    {worker, credential} =
+      start_worker(ctx.supervisor, [parent: self(), mode: :recv_unknown_error_state], :none)
+
+    opened = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, opened)
+    failed = submit_result(worker, credential, :recv, [50])
+    assert failed.outcome == {:error, :invalid_backend_return}
+    assert_receive {:backend_called, :close, ^worker, 0, "ordinary-session"}
+    monitor = Process.monitor(worker)
+    assert :ok = ack(worker, credential, failed)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+  end
+
+  test "audio callback failure diagnostics preserve public outcomes and retire without private data",
+       ctx do
+    secret = "private-backend-session-exception-sentinel"
+
+    cases = [
+      {:recv_protocol_error, :recv, :backend_callback_failed, :xai_audio_protocol_error, 0},
+      {:recv_private_error, :recv, :backend_callback_failed, :unclassified, 0},
+      {:recv_private_fault, :recv, :backend_callback_fault, :backend_callback_fault, 0},
+      {:recv_invalid_event, :recv, :invalid_backend_event, :invalid_backend_event, 1},
+      {:send_audio_error, :send_audio, :backend_callback_failed, :xai_transport_failed, 0},
+      {:send_audio_private_partial, :send_audio, :backend_partial_failure, :unclassified, 1},
+      {:send_audio_private_fault, :send_audio, :backend_callback_fault, :backend_callback_fault,
+       0},
+      {:send_audio_invalid, :send_audio, :invalid_backend_return, :invalid_backend_return, 0}
+    ]
+
+    for {mode, operation, outcome, reason, version} <- cases do
+      {worker, credential} =
+        start_worker(ctx.supervisor, [parent: self(), mode: mode, secret: secret], :none)
+
+      opened = submit_result(worker, credential, :open, [])
+      assert :ok = ack(worker, credential, opened)
+      monitor = Process.monitor(worker)
+      args = if operation == :recv, do: [50], else: [<<0, 0>>]
+      stage = if operation == :recv, do: :backend_receive, else: :backend_send_audio
+
+      log =
+        capture_log(fn ->
+          failed = submit_result(worker, credential, operation, args)
+          assert failed.outcome == {:error, outcome}
+          assert_receive {:backend_called, :close, ^worker, ^version, ^secret}
+          assert :ok = ack(worker, credential, failed)
+          assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+        end)
+
+      assert log =~ "stage=#{stage} reason=#{reason}"
+      refute log =~ secret
+      refute log =~ "private_reason"
+      refute log =~ "private_event"
+    end
   end
 
   test "foreign holder of an exact effect request cannot authorize a physical effect", ctx do
@@ -565,6 +659,40 @@ defmodule Arbor.Voice.BackendWorkerTest do
       assert :ok = ack(worker, credential, failed)
       assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
     end)
+  end
+
+  test "security regression: terminal retirement proof is authenticated and failed close stays unknown",
+       ctx do
+    for {mode, expected} <- [{:configure_error, :closed}, {:configure_close_failed, :unknown}] do
+      {:ok, worker, credential} =
+        BackendWorkerSupervisor.start_worker(
+          ctx.supervisor,
+          self(),
+          make_ref(),
+          Backend,
+          [parent: self(), mode: mode],
+          :none,
+          []
+        )
+
+      opened = submit_result(worker, credential, :open, [])
+      assert :ok = ack(worker, credential, opened)
+      failed = submit_result(worker, credential, :configure, [%{}])
+      assert {:ok, verified} = BackendWorker.verify_result(failed.result, credential)
+      assert Map.get(verified, :retirement) == expected
+
+      assert {:error, :invalid_result} =
+               BackendWorker.verify_result(
+                 Map.put(
+                   failed.result,
+                   :retirement,
+                   if(expected == :closed, do: :unknown, else: :closed)
+                 ),
+                 credential
+               )
+
+      assert :ok = ack(worker, credential, failed)
+    end
   end
 
   test "partial send closes the latest opaque state before terminal result acknowledgement",
@@ -1054,7 +1182,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
     fields =
       {result.worker, result.coordinator, result.generation, result.operation_token,
-       result.operation, result.completed_at, result.outcome, completion}
+       result.operation, result.completed_at, result.outcome, result.retirement, completion}
 
     payload = :erlang.term_to_binary({BackendWorker, :result, fields}, [:deterministic])
     secret = Redacted.value(credential.secret)

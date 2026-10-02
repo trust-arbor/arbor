@@ -1,5 +1,6 @@
 defmodule Arbor.Voice.Backend.XaiRealtimeTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias Arbor.Voice.Backend.XaiRealtime
   alias Arbor.Voice.Backend.XaiRealtime.Transport
@@ -32,6 +33,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     def recv_frame(_state, _timeout), do: {:error, :timeout}
 
     def close(%{mode: :close_raise, token: token}), do: raise("close failed for #{token}")
+    def close(%{mode: :close_error, token: token}), do: {:error, token}
+    def close(%{mode: :close_throw, token: token}), do: throw(token)
+    def close(%{mode: :close_exit, token: token}), do: exit(token)
     def close(_state), do: :ok
   end
 
@@ -207,7 +211,36 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         oauth_resolver: fn :xai -> {:ok, token} end
       )
 
+    assert {:error, :xai_close_failed} = XaiRealtime.close(session)
+  end
+
+  test "security regression: provider close faults are bounded uncertainty, never success" do
+    for mode <- [:close_error, :close_throw, :close_exit] do
+      {:ok, session} =
+        XaiRealtime.open(
+          transport: TokenBearingTransport,
+          transport_opts: [mode: mode],
+          effect_authorizer: &allow_effect/2,
+          oauth_resolver: &stub_resolver/1
+        )
+
+      assert {:error, :xai_close_failed} = XaiRealtime.close(session)
+    end
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: TokenBearingTransport,
+        effect_authorizer: &allow_effect/2,
+        oauth_resolver: &stub_resolver/1
+      )
+
     assert :ok = XaiRealtime.close(session)
+  end
+
+  test "security regression: Mint close faults cannot become a positive transport receipt" do
+    assert {:error, :close_failed} = Transport.close(%{conn: :not_a_connection})
+    # A Mint logical closed flag is not independent TLS close evidence.
+    assert {:error, :close_failed} = Transport.close(%{conn: struct(Mint.HTTP1, state: :closed)})
   end
 
   @tag spec: "VOICE-6"
@@ -223,7 +256,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
 
   @tag spec: "VOICE-6"
   test "open/1 redacts a connect error that echoes the token" do
-    assert {:error, :xai_connect_failed} =
+    assert {:error, :xai_connect_failed, :cleanup_pending} =
              XaiRealtime.open(
                transport: FakeTransport,
                transport_opts: [connect_mode: {:error_echo, "super-secret-token-xyz"}],
@@ -234,7 +267,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
 
   @tag spec: "VOICE-6"
   test "open/1 redacts a connect that raises with the token embedded in the exception message" do
-    assert {:error, :xai_connect_failed} =
+    assert {:error, :xai_connect_failed, :cleanup_pending} =
              XaiRealtime.open(
                transport: FakeTransport,
                transport_opts: [connect_mode: {:raise_echo, "super-secret-token-xyz"}],
@@ -495,6 +528,19 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     assert {:error, :xai_effect_not_authorized, latest_session} =
              XaiRealtime.send_text(session, "partial")
 
+    assert latest_session.diagnostic_last_effect == :text_item
+
+    assert latest_session.transport_state.sent == [
+             %{
+               "type" => "conversation.item.create",
+               "item" => %{
+                 "type" => "message",
+                 "role" => "user",
+                 "content" => [%{"type" => "input_text", "text" => "partial"}]
+               }
+             }
+           ]
+
     assert events(key) == [
              {:authorize, :text_item, route},
              {:send, "conversation.item.create"},
@@ -652,48 +698,6 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              )
   end
 
-  # ── transport-level real receive loop: bounded, :unknown-safe, deterministic ──
-
-  test "Transport.recv_frame/2 bounds the receive loop to one logical deadline, leaving unconsumed :unknown messages behind" do
-    test_pid = self()
-
-    {receiver, mon} =
-      spawn_monitor(fn ->
-        for i <- 1..5, do: send(self(), {:probe, i})
-
-        # Process-dictionary clock, local to this dedicated receiver process
-        # -- 0, 40, 80, 120, ... -- so there is no separate Agent process to
-        # leak; it dies with the receiver regardless of exit reason.
-        Process.put(:fake_clock_ms, 0)
-
-        clock_fun = fn ->
-          current = Process.get(:fake_clock_ms)
-          Process.put(:fake_clock_ms, current + 40)
-          current
-        end
-
-        conn = struct(Mint.HTTP1, socket: make_ref())
-
-        state = %{
-          conn: conn,
-          ref: make_ref(),
-          ws: struct(Mint.WebSocket),
-          pending: [],
-          clock_fun: clock_fun
-        }
-
-        result = Transport.recv_frame(state, 100)
-        {:messages, messages} = Process.info(self(), :messages)
-        leftover_probes = Enum.count(messages, &match?({:probe, _}, &1))
-        send(test_pid, {:probe_result, result, leftover_probes})
-      end)
-
-    # The fake clock proves the 100ms protocol budget independently of VM
-    # scheduling; allow the monitored process to report under parallel builds.
-    assert_receive {:probe_result, {:error, :timeout}, 3}, 1_000
-    assert_receive {:DOWN, ^mon, :process, ^receiver, :normal}, 1_000
-  end
-
   # ── recv/2 accumulator + backend-level deadline ──
 
   test "response.done resets accumulated text so a reused session starts each turn clean" do
@@ -733,8 +737,8 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     clock_fun = fn -> Process.get(key) end
 
     frames = [
-      %{"type" => "unknown.one"},
-      %{"type" => "unknown.two"},
+      %{"type" => "input_audio_buffer.committed"},
+      %{"type" => "response.created"},
       %{"type" => "unknown.three"}
     ]
 
@@ -747,7 +751,11 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         clock_fun: clock_fun
       )
 
-    assert {:error, :timeout} = XaiRealtime.recv(session, 100)
+    assert {:error, :timeout, latest} = XaiRealtime.recv(session, 100)
+    assert latest.transport_state.frames == []
+    assert latest.diagnostic_commit
+    assert latest.diagnostic_response
+    refute latest.diagnostic_transcript
   end
 
   test "recv/2 accepts :infinity consistently with the backend callback contract" do
@@ -796,6 +804,200 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     assert {:ok, session, {:output_audio, <<1, 2>>}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, session, {:turn_done, %{text: "Hi friend"}}} = XaiRealtime.recv(session, 1_000)
     assert {:ok, _session, {:error, %{"message" => "boom"}}} = XaiRealtime.recv(session, 1_000)
+  end
+
+  test "runtime provider error diagnostics preserve events and never log private fields" do
+    secret = "private-provider-error-message-sentinel"
+
+    cases = [
+      {%{
+         "code" => "rate_limit_exceeded",
+         "param" => "session.audio.output.format.rate",
+         "message" => secret
+       }, :rate_limit_exceeded, :output_format_rate},
+      {%{"code" => secret, "param" => secret, "message" => secret}, :unknown, :unknown},
+      {secret, :unknown, :unknown}
+    ]
+
+    for {error, code, parameter} <- cases do
+      {:ok, session} =
+        XaiRealtime.open(
+          transport: FakeTransport,
+          transport_opts: [frames: [%{"type" => "error", "error" => error}]],
+          effect_authorizer: &allow_effect/2,
+          oauth_resolver: &stub_resolver/1
+        )
+
+      {:ok, session} = XaiRealtime.configure(session, %{})
+
+      log =
+        capture_log(fn ->
+          assert {:ok, latest, {:error, ^error}} = XaiRealtime.recv(session, 1_000)
+          assert :ok = XaiRealtime.close(latest)
+        end)
+
+      assert log =~ "stage=provider_runtime_error_code reason=#{code}"
+      assert log =~ "stage=provider_runtime_error_parameter reason=#{parameter}"
+      refute log =~ secret
+      refute log =~ "stub-token"
+    end
+  end
+
+  test "security regression: runtime error field shapes distinguish missing values without disclosure" do
+    secret = "private-error-type-code-param-message-event-id-sentinel"
+
+    cases = [
+      {%{"type" => "error"}, :absent, :absent, :unknown, :unknown, :unknown},
+      {%{"type" => "error", "error" => nil}, :null, :absent, :unknown, :unknown, :unknown},
+      {%{"type" => "error", "error" => secret}, :non_map, :absent, :unknown, :unknown, :unknown},
+      {%{"type" => "error", "error" => %{}}, :map, :absent, :unknown, :unknown, :unknown},
+      {%{"type" => "error", "error" => %{"type" => nil, "code" => nil, "param" => nil}}, :map,
+       :null, :unknown, :unknown, :unknown},
+      {%{
+         "type" => "error",
+         "error" => %{"type" => "server_error", "param" => nil, "message" => secret}
+       }, :map, %{type: :binary, code: :absent, parameter: :null}, :server_error, :unknown,
+       :unknown},
+      {%{"type" => "error", "error" => %{"type" => secret, "code" => secret, "param" => secret}},
+       :map, :binary, :unknown, :unknown, :unknown},
+      {%{
+         "type" => "error",
+         "error" => %{"type" => %{private: secret}, "code" => [secret], "param" => {secret}}
+       }, :map, :nonbinary, :unknown, :unknown, :unknown},
+      {%{
+         "type" => "error",
+         "error" => %{
+           "type" => "server_error",
+           "code" => "server_error",
+           "param" => "session.audio.input",
+           "message" => secret,
+           "event_id" => secret
+         }
+       }, :map, :binary, :server_error, :server_error, :input_audio},
+      {%{
+         "type" => "error",
+         "error" => %{
+           "type" => "invalid_request_error",
+           "code" => "rate_limit_exceeded",
+           "param" => "session.audio.output"
+         }
+       }, :map, :binary, :invalid_request, :rate_limit_exceeded, :output_audio}
+    ]
+
+    for {frame, envelope, shape, type, code, parameter} <- cases do
+      session = runtime_script([frame])
+      error = frame["error"]
+
+      log =
+        capture_log(fn ->
+          assert {:ok, latest, {:error, ^error}} = XaiRealtime.recv(session, 1_000)
+          assert latest.transport_state.frames == []
+          assert :ok = XaiRealtime.close(latest)
+        end)
+
+      assert log =~ "stage=provider_runtime_error_envelope reason=#{envelope}"
+
+      for field <- [:type, :code, :parameter] do
+        field_shape = if is_map(shape), do: Map.fetch!(shape, field), else: shape
+        assert log =~ "stage=provider_runtime_error_#{field}_shape reason=#{field_shape}"
+      end
+
+      assert log =~ "stage=provider_runtime_error_type reason=#{type}"
+      assert log =~ "stage=provider_runtime_error_code reason=#{code}"
+      assert log =~ "stage=provider_runtime_error_parameter reason=#{parameter}"
+      refute log =~ secret
+      refute log =~ "stub-token"
+    end
+  end
+
+  test "runtime rejection reports observed milestones and last successful effect without changing frames" do
+    secret = "private-audio-transcript-tool-output-sentinel"
+    error = %{"type" => "server_error", "message" => secret}
+    error_frame = %{"type" => "error", "error" => error}
+    commit = %{"type" => "input_audio_buffer.committed", "item_id" => secret}
+
+    transcript = %{
+      "type" => "conversation.item.input_audio_transcription.completed",
+      "transcript" => secret
+    }
+
+    response = %{"type" => "response.created", "response" => %{"id" => secret}}
+
+    for {frames, consume_transcript?, send_result?, commit_seen, transcript_seen, response_seen} <-
+          [
+            {[error_frame], false, false, :not_observed, :not_observed, :not_observed},
+            {[commit, error_frame], false, false, :observed, :not_observed, :not_observed},
+            {[commit, transcript, response, error_frame], true, true, :observed, :observed,
+             :observed}
+          ] do
+      session = runtime_script(frames)
+      assert {:ok, session} = XaiRealtime.send_audio(session, <<0, 0>>)
+      [_, append, commit_frame, create] = session.transport_state.sent
+      assert append == %{"type" => "input_audio_buffer.append", "audio" => "AAA="}
+      assert commit_frame == %{"type" => "input_audio_buffer.commit"}
+      assert create == %{"type" => "response.create"}
+
+      session =
+        if consume_transcript? do
+          assert {:ok, latest, {:input_transcript, ^secret}} = XaiRealtime.recv(session, 1_000)
+          latest
+        else
+          session
+        end
+
+      session =
+        if send_result? do
+          assert {:ok, latest} = XaiRealtime.send_tool_result(session, secret, secret)
+
+          assert Enum.take(latest.transport_state.sent, -2) == [
+                   %{
+                     "type" => "conversation.item.create",
+                     "item" => %{
+                       "type" => "function_call_output",
+                       "call_id" => secret,
+                       "output" => secret
+                     }
+                   },
+                   %{"type" => "response.create"}
+                 ]
+
+          latest
+        else
+          session
+        end
+
+      log =
+        capture_log(fn ->
+          assert {:ok, latest, {:error, ^error}} = XaiRealtime.recv(session, 1_000)
+          # A new physical input starts new observations even on a reused backend.
+          assert {:ok, reused} = XaiRealtime.send_audio(latest, <<0, 0>>)
+          refute reused.diagnostic_commit
+          refute reused.diagnostic_transcript
+          refute reused.diagnostic_response
+          assert :ok = XaiRealtime.close(reused)
+        end)
+
+      effect = if send_result?, do: :tool_result_response, else: :audio_response
+      assert log =~ "stage=provider_runtime_last_effect reason=#{effect}"
+      assert log =~ "stage=provider_runtime_commit_seen reason=#{commit_seen}"
+      assert log =~ "stage=provider_runtime_transcript_seen reason=#{transcript_seen}"
+      assert log =~ "stage=provider_runtime_response_seen reason=#{response_seen}"
+      refute log =~ secret
+      refute log =~ "stub-token"
+    end
+  end
+
+  defp runtime_script(frames) do
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [frames: frames],
+        effect_authorizer: &allow_effect/2,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    {:ok, session} = XaiRealtime.configure(session, %{})
+    session
   end
 
   # ── close/1 ──

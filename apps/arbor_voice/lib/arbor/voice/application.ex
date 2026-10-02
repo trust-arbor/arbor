@@ -23,7 +23,17 @@ defmodule Arbor.Voice.Application do
         id: Arbor.Voice.ToolTaskSupervisor
       ),
       Arbor.Voice.ResourceSupervisor,
-      Arbor.Voice.SessionSupervisor
+      Arbor.Voice.SessionSupervisor,
+      Supervisor.child_spec(
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbor.Voice.DeskWorkerSupervisor},
+        id: Arbor.Voice.DeskWorkerSupervisor
+      ),
+      Arbor.Voice.Presentation,
+      Supervisor.child_spec(
+        {DynamicSupervisor,
+         strategy: :one_for_one, max_children: 16, name: Arbor.Voice.DeskSupervisor},
+        id: Arbor.Voice.DeskSupervisor
+      )
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Voice.Supervisor]

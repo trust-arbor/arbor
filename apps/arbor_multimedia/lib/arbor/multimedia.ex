@@ -15,6 +15,45 @@ defmodule Arbor.Multimedia do
 
   @type audio :: %{pcm: binary(), sample_rate: pos_integer(), channels: 1, sample_format: :s16le}
 
+  @doc "Observe retained device custody. This never cancels work or releases a fence."
+  @spec device_status() :: :idle | :busy | :cleanup_pending | :device_unavailable
+  def device_status do
+    GenServer.call(DeviceOwner, :device_status, 1_000)
+  catch
+    :exit, _ -> if Fence.current() == nil, do: :device_unavailable, else: :cleanup_pending
+  end
+
+  @doc "Query microphone permission explicitly; never called during application startup."
+  @spec microphone_permission() ::
+          :authorized | :denied | :restricted | :not_determined | :unavailable
+  def microphone_permission, do: permission(:microphone_permission)
+
+  @doc "Explicitly request microphone permission once, then return the current status."
+  @spec request_microphone_permission() ::
+          :authorized | :denied | :restricted | :not_determined | :unavailable
+  def request_microphone_permission, do: permission(:request_microphone_permission)
+
+  defp permission(operation) do
+    driver = Application.get_env(:arbor_multimedia, :driver, Arbor.Multimedia.Driver.Unavailable)
+
+    if Code.ensure_loaded?(driver) and function_exported?(driver, operation, 0) do
+      case apply(driver, operation, []) do
+        status
+        when status in [:authorized, :denied, :restricted, :not_determined, :unavailable] ->
+          status
+
+        _ ->
+          :unavailable
+      end
+    else
+      :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
+  end
+
   @spec devices() :: {:ok, [map()]} | {:error, atom()}
   def devices, do: run(%{kind: :devices, duration_ms: 0})
 

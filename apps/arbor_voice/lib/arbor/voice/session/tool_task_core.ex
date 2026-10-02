@@ -35,6 +35,7 @@ defmodule Arbor.Voice.Session.ToolTaskCore do
   def normalize(:tool_capacity_exceeded), do: code_json("tool_capacity_exceeded")
   def normalize(:router_unavailable), do: code_json("router_unavailable")
   def normalize(:tool_cancelled), do: code_json("tool_cancelled")
+  def normalize(:consultation_already_requested), do: code_json("consultation_already_requested")
 
   def normalize({:error, :no_tools_installed}), do: TurnCore.no_tools_installed_output()
   def normalize({:error, :unknown_tool}), do: code_json("unknown_tool")
@@ -88,7 +89,13 @@ defmodule Arbor.Voice.Session.ToolTaskCore do
   Requires live generation match, pending entry, exact fence token, and that
   the cue has not already been emitted. Returns `:emit` or `:ignore`.
   """
-  @spec authorize_progress(map() | nil, non_neg_integer(), String.t(), reference(), non_neg_integer()) ::
+  @spec authorize_progress(
+          map() | nil,
+          non_neg_integer(),
+          String.t(),
+          reference(),
+          non_neg_integer()
+        ) ::
           :emit | :ignore
   def authorize_progress(pending_entry, generation, call_id, token, live_generation)
       when is_binary(call_id) and is_reference(token) and is_integer(generation) and

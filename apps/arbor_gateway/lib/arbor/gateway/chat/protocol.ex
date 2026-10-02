@@ -41,18 +41,8 @@ defmodule Arbor.Gateway.Chat.Protocol do
     with {:ok, %{"payload" => payload, "authorization" => "Signature " <> encoded} = envelope} <-
            Jason.decode(binary),
          true <- map_size(envelope) == 2 and is_binary(payload),
-         {:ok,
-          [
-            "arbor.conversation.v2",
-            operation,
-            caller,
-            target,
-            input,
-            [after_cursor, through, limit],
-            expected_engagement_id
-          ]} <- Jason.decode(payload),
-         {:ok, operation, input} <- operation(operation, input),
-         true <- is_binary(caller) and is_binary(target),
+         {:ok, request} <- decode_payload(payload),
+         caller = request.caller,
          {:ok, json} <- Base.decode64(encoded, padding: false),
          {:ok,
           %{
@@ -72,7 +62,48 @@ defmodule Arbor.Gateway.Chat.Protocol do
              timestamp: timestamp,
              nonce: nonce,
              signature: signature
-           ),
+           ) do
+      {:ok, request |> Map.delete(:caller) |> Map.put(:proof, proof)}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  end
+
+  def decode_authenticated(_), do: {:error, :unauthorized}
+
+  @doc "Decode a session-mode frame; its caller and target must match the socket binding."
+  def decode_session(binary) when is_binary(binary) and byte_size(binary) <= 262_144 do
+    with {:ok, %Jason.OrderedObject{values: pairs}} <-
+           Jason.decode(binary, objects: :ordered_objects),
+         true <- length(pairs) == 2,
+         %{"payload" => payload, "authentication" => "conversation_session"} = envelope <-
+           Map.new(pairs),
+         true <- map_size(envelope) == 2 and is_binary(payload) do
+      decode_payload(payload)
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  end
+
+  def decode_session(_), do: {:error, :unauthorized}
+
+  defp decode_payload(payload) do
+    with {:ok,
+          [
+            "arbor.conversation.v2",
+            operation,
+            caller,
+            target,
+            input,
+            [after_cursor, through, limit],
+            expected_engagement_id
+          ]} <- Jason.decode(payload),
+         {:ok, operation, input} <- operation(operation, input),
+         true <- is_binary(caller) and is_binary(target),
          {:ok, opts} <- page_opts(operation, after_cursor, through, limit),
          true <-
            is_nil(expected_engagement_id) or
@@ -83,15 +114,11 @@ defmodule Arbor.Gateway.Chat.Protocol do
           do: Keyword.put(opts, :expected_engagement_id, expected_engagement_id),
           else: opts
 
-      {:ok, %{operation: operation, target: target, input: input, opts: opts, proof: proof}}
+      {:ok, %{operation: operation, caller: caller, target: target, input: input, opts: opts}}
     else
       _ -> {:error, :unauthorized}
     end
-  rescue
-    _ -> {:error, :unauthorized}
   end
-
-  def decode_authenticated(_), do: {:error, :unauthorized}
 
   defp operation("submit", [id, text]) when is_binary(id) and is_binary(text),
     do: {:ok, :submit, %{id: id, text: text}}

@@ -27,7 +27,7 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
   # shared state with no per-test isolation — an agent registered (and still
   # alive) by concurrent activity elsewhere in the BEAM makes find_first_agent/0
   # return it, flipping ChatLive into its *with-agent* state. The "no-agent
-  # state" test (line ~126) then renders the connected UI instead of the /start
+  # state" test (line ~126) then renders the connected UI instead of the setup
   # hint and fails intermittently. See the test-isolation flake fixed here.
   #
   # We snapshot the registry, clear it so every test in this module sees a
@@ -82,7 +82,7 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
       {:ok, _view, html} = live(conn, "/chat")
 
       assert html =~ "Agent Chat"
-      assert html =~ "Interactive conversation"
+      assert html =~ "Private conversation with durable delivery status"
     end
 
     @tag :fast
@@ -188,11 +188,14 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
 
   describe "ChatLive no-agent state (Phase 2c)" do
     @tag :fast
-    test "renders the slash-command hint pointing at /start and Agents dashboard", %{conn: conn} do
+    test "directs agent setup to an operator while keeping local help available", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/chat")
 
-      assert html =~ "/start"
-      assert html =~ "Agents dashboard" or html =~ "/agents"
+      assert html =~ "Ask an operator"
+      assert html =~ "Arbor CLI"
+      assert html =~ "/help"
+      assert html =~ "Agents dashboard"
+      refute html =~ "/start"
       # Negative: the old dropdown form is gone.
       refute html =~ ~s(phx-submit="start-agent")
       refute html =~ ~s(<select name="model")

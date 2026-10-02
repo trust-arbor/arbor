@@ -61,9 +61,9 @@ defmodule Arbor.Security.AuthDecision do
   in its audit trail.
   """
   @spec evaluate(AuthContext.t(), String.t(), atom(), keyword()) :: decision_result()
-  def evaluate(%AuthContext{} = auth, resource_uri, _action \\ :execute, opts \\ []) do
+  def evaluate(%AuthContext{} = auth, resource_uri, action \\ :execute, opts \\ []) do
     with {:ok, auth} <- check_uri(auth, resource_uri),
-         {:ok, auth} <- verify_identity_proof(auth, resource_uri, opts) do
+         {:ok, auth} <- verify_identity_proof(auth, resource_uri, action, opts) do
       # Drop any session_token before capability/scope/approval work so the
       # credential cannot leak into later pure checks or recorded decisions.
       opts = strip_session_token(opts)
@@ -149,7 +149,7 @@ defmodule Arbor.Security.AuthDecision do
   # Status is always forced before token crypto or ambiguity checks; the
   # Gateway-preverified / signed-request path is used only when the option is
   # absent.
-  defp verify_identity_proof(auth, resource_uri, opts) do
+  defp verify_identity_proof(auth, resource_uri, action, opts) do
     case session_token_presence(opts) do
       :absent ->
         with {:ok, auth} <- check_identity(auth),
@@ -160,7 +160,7 @@ defmodule Arbor.Security.AuthDecision do
       {:present, token} ->
         with {:ok, auth} <- check_identity_status(auth, auth.principal_id),
              :ok <- reject_ambiguous_signed_request(auth),
-             {:ok, auth} <- verify_session_token_proof(auth, token) do
+             {:ok, auth} <- verify_session_token_proof(auth, token, resource_uri, action) do
           {:ok, auth}
         end
 
@@ -216,8 +216,13 @@ defmodule Arbor.Security.AuthDecision do
     {:error, :ambiguous_identity_proof, auth}
   end
 
-  defp verify_session_token_proof(%AuthContext{principal_id: principal_id} = auth, token) do
-    case safe_verify_session_token(token) do
+  defp verify_session_token_proof(
+         %AuthContext{principal_id: principal_id} = auth,
+         token,
+         resource,
+         action
+       ) do
+    case safe_verify_session_token(token, resource, action) do
       {:ok, verified_pid} when is_binary(verified_pid) and verified_pid != "" ->
         cond do
           not is_binary(principal_id) ->
@@ -241,11 +246,16 @@ defmodule Arbor.Security.AuthDecision do
     end
   end
 
-  defp safe_verify_session_token(token) do
+  defp safe_verify_session_token(token, resource, action) do
     module = session_token_module()
 
     if Code.ensure_loaded?(module) and function_exported?(module, :verify, 1) do
-      case apply(module, :verify, [token]) do
+      result =
+        if function_exported?(module, :verify_for, 3),
+          do: apply(module, :verify_for, [token, resource, action]),
+          else: apply(module, :verify, [token])
+
+      case result do
         {:ok, pid} when is_binary(pid) -> {:ok, pid}
         {:error, _} -> :invalid
         _ -> :invalid

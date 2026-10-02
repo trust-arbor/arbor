@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   and advisory council consultations from the Arbor consensus system.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   require Logger

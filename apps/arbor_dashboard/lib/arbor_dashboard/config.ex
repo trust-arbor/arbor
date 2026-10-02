@@ -6,4 +6,13 @@ defmodule Arbor.Dashboard.Config do
   def conversation_api do
     Application.get_env(:arbor_dashboard, :conversation_api, Arbor.Agent)
   end
+
+  def session_auth_api,
+    do: Application.get_env(:arbor_dashboard, :session_auth_api, Arbor.Security)
+
+  def voice_api, do: Application.get_env(:arbor_dashboard, :voice_api, Arbor.Voice)
+  def multimedia_api, do: Application.get_env(:arbor_dashboard, :multimedia_api, Arbor.Multimedia)
+
+  def local_voice_controls?,
+    do: Application.get_env(:arbor_dashboard, :local_voice_controls, false) == true
 end

@@ -537,7 +537,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   # Humans require OIDC registration (Registry rejects bare human_ register).
   # Inline the minimal issuer path so arbor_agent tests do not depend on
   # arbor_security/test/support (not on the agent test load path).
-  defp register_active_human! do
+  defp register_active_human!, do: register_active_human_identity!().agent_id
+
+  defp register_active_human_identity! do
     unique = System.unique_integer([:positive, :monotonic])
     issuer = "https://oidc-test.arbor.local/msgfacade/#{unique}"
     subject = "subject-#{unique}"
@@ -605,7 +607,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       _ = Security.deregister_identity(human_id)
     end)
 
-    human_id
+    human_identity
   end
 
   defp assert_no_secret_leak(term, secrets) do
@@ -1073,6 +1075,97 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       end)
 
       :ok
+    end
+
+    @tag :voice_consultation
+    test "security regression: public consultation binds its parent and suppresses ordinary chat signals",
+         %{target: target} do
+      ensure_signals_topology!()
+      caller = register_active_human!()
+      resource = "arbor://chat/agent/" <> target
+      track_grant!(caller, resource)
+      register_agent_only(target)
+      parent = self()
+      voice_id = "voice_" <> String.duplicate("a", 32)
+      message = build_route_free_message(caller, content: "exact completed utterance")
+
+      {:ok, session} =
+        FakeAuthSession.start_link(parent, fn _from, request ->
+          assert {:consult_authenticated, ^message, receipt, ^voice_id} = request
+          assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
+          {:ok, %PipelineResponse{content: "grounded consultation reply"}}
+        end)
+
+      insert_fake_session!(target, session)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, __MODULE__.SessionBridge)
+
+      {:ok, subscription} =
+        Arbor.Signals.subscribe(
+          "agent.chat_message",
+          fn signal ->
+            send(parent, {:consultation_chat_signal, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      on_exit(fn -> Arbor.Signals.unsubscribe(subscription) end)
+      assert {:ok, token} = SessionToken.generate(caller)
+
+      assert {:ok, "grounded consultation reply"} =
+               Arbor.Agent.consult_conversation(
+                 caller,
+                 target,
+                 message,
+                 voice_id,
+                 session_token: token
+               )
+
+      assert_receive {:auth_session_call, _, {:consult_authenticated, ^message, _, ^voice_id}}
+      refute_receive {:consultation_chat_signal, _}, 100
+    end
+
+    @tag :voice_consultation
+    test "security regression: consultation rejects absent or ordinary signed proof and malformed parent before delivery",
+         %{target: target} do
+      identity = register_active_human_identity!()
+      caller = identity.agent_id
+      track_grant!(caller, "arbor://chat/agent/" <> target)
+      message = build_route_free_message(caller)
+      voice_id = "voice_" <> String.duplicate("b", 32)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.consult_conversation(caller, target, message, voice_id)
+
+      {:ok, payload} = Arbor.Agent.message_request_payload(caller, target, message)
+
+      {:ok, signed} =
+        Arbor.Contracts.Security.SignedRequest.sign(payload, caller, identity.private_key)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.consult_conversation(caller, target, message, voice_id,
+                 signed_request: signed
+               )
+
+      # The proof is valid for this registered caller and remains unconsumed:
+      # refusal is about the consultation purpose, not signature authenticity.
+      assert {:ok, ^caller} = Security.verify_request(signed)
+
+      assert {:ok, token} = SessionToken.generate(caller)
+
+      for malformed <- [nil, "voice_" <> String.duplicate("A", 32), voice_id <> "suffix"] do
+        assert {:error, :unauthorized} =
+                 Arbor.Agent.consult_conversation(caller, target, message, malformed,
+                   session_token: token
+                 )
+      end
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.consult_conversation(caller, target, message, voice_id,
+                 session_token: "invalid-session-proof"
+               )
+
+      refute_receive {:auth_session_call, _, _}
     end
 
     test "security regression: non-owner cannot replace Session binding or steal authenticated delivery" do
@@ -2573,4 +2666,8 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest.SessionBridge do
 
   def send_authenticated_message(_session, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_authenticated_message_request}
+
+  def consult_authenticated(session, message, receipt, parent, timeout) do
+    GenServer.call(session, {:consult_authenticated, message, receipt, parent}, timeout)
+  end
 end

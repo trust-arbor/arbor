@@ -33,6 +33,33 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# Native audio is an explicit host opt-in while physical qualification is pending.
+# Selecting the driver never enumerates devices or asks for microphone access.
+# Tests use their own injected drivers and ignore ambient host preferences.
+if config_env() != :test do
+  case System.get_env("ARBOR_AUDIO_DRIVER") do
+    nil ->
+      :ok
+
+    "unavailable" ->
+      config :arbor_multimedia, :driver, Arbor.Multimedia.Driver.Unavailable
+
+    "native" ->
+      config :arbor_multimedia, :driver, Arbor.Multimedia.Driver.Native
+      config :arbor_dashboard, :local_voice_controls, true
+
+      # A real voice turn needs durable allowance accounting as well as device
+      # access. This adapter uses the canonical Repo for either supported SQL
+      # database; it attests linearizable CAS and node-restart durability.
+      config :arbor_voice,
+        budget_backend: Arbor.Persistence.QueryableStore.Postgres,
+        budget_backend_opts: [repo: Arbor.Persistence.Repo]
+
+    _ ->
+      raise "ARBOR_AUDIO_DRIVER must be native or unavailable"
+  end
+end
+
 # Host-selected evidence is deployment policy. An invalid present setting must
 # never silently restore exploratory execution. Tests ignore ambient policy.
 if config_env() != :test do
@@ -240,16 +267,20 @@ if config_env() != :test do
 end
 
 # ============================================================================
-# Production security authority state root
+# Explicit security authority state root (dev/prod)
 # ============================================================================
-# Explicit absolute path only. Full durable Security boots fail closed at
-# freeze if this is unset. :activation_only boots do not freeze and do not
-# require it. Do not default to cwd, ~, or ARBOR_DATA_DIR — that would
-# silently choose a second root. Migration to a new directory is a separate
-# operator action with a receipt.
-if config_env() == :prod do
+# Explicit absolute path only. Production durable boots require a configured
+# root; development preserves its existing default when this is absent. Test
+# VMs ignore the ambient setting. Never derive an override from cwd, ~, or
+# ARBOR_DATA_DIR: worktree previews must name the existing authority directory,
+# not silently select a second root. Migration remains a separate operator action.
+if config_env() != :test do
   case System.get_env("ARBOR_SECURITY_STATE_DIR") do
     dir when is_binary(dir) and dir != "" ->
+      unless Path.type(dir) == :absolute do
+        raise "ARBOR_SECURITY_STATE_DIR must be an absolute path"
+      end
+
       config :arbor_security, authority_state_root: dir
 
     _unset ->

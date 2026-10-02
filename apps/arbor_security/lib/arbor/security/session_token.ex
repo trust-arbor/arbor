@@ -48,6 +48,10 @@ defmodule Arbor.Security.SessionToken do
 
   @doc """
   Generate a signed session token for a human principal.
+
+  A trusted caller may pass `:max_expires_at` (Unix seconds) to cap the token
+  at the expiry of the authentication that established the session. Invalid
+  or elapsed bounds are rejected. Omitting it preserves the normal TTL.
   """
   @spec generate(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
   def generate(principal_id, opts \\ []) when is_binary(principal_id) do
@@ -56,22 +60,121 @@ defmodule Arbor.Security.SessionToken do
     expires_at = DateTime.add(now, ttl, :second)
     session_id = Keyword.get(opts, :session_id, generate_session_id())
 
-    payload = %{
-      v: @token_version,
-      pid: principal_id,
-      sid: session_id,
-      iat: DateTime.to_unix(now),
-      exp: DateTime.to_unix(expires_at)
-    }
+    with {:ok, expires_at} <- cap_expiry(expires_at, now, opts) do
+      payload = %{
+        v: @token_version,
+        pid: principal_id,
+        sid: session_id,
+        iat: DateTime.to_unix(now),
+        exp: DateTime.to_unix(expires_at)
+      }
 
-    # Sign the EXACT bytes that get transported — never a re-serialization.
-    payload_bytes = :erlang.term_to_binary(payload)
-    signature = mac(payload_bytes)
+      # Sign the EXACT bytes that get transported — never a re-serialization.
+      payload_bytes = :erlang.term_to_binary(payload)
+      signature = mac(payload_bytes)
 
-    token = Base.url_encode64(signature <> payload_bytes, padding: false)
+      token = Base.url_encode64(signature <> payload_bytes, padding: false)
 
-    {:ok, token}
+      {:ok, token}
+    end
   end
+
+  defp cap_expiry(expires_at, now, opts) do
+    case Keyword.fetch(opts, :max_expires_at) do
+      :error ->
+        {:ok, expires_at}
+
+      {:ok, bound} when is_integer(bound) and bound >= 0 and bound <= 253_402_300_799 ->
+        expires = min(DateTime.to_unix(expires_at), bound)
+
+        if expires > DateTime.to_unix(now),
+          do: DateTime.from_unix(expires),
+          else: {:error, :invalid_expiry_bound}
+
+      _ ->
+        {:error, :invalid_expiry_bound}
+    end
+  end
+
+  @doc false
+  def generate_conversation(principal, target) do
+    if conversation_id?(principal, "human_") and conversation_target?(target) do
+      now = DateTime.to_unix(DateTime.utc_now())
+
+      payload = %{
+        v: 2,
+        pid: principal,
+        sid: generate_session_id(),
+        iat: now,
+        exp: now + 90,
+        purpose: :conversation,
+        target: target
+      }
+
+      bytes = :erlang.term_to_binary(payload)
+      {:ok, Base.url_encode64(mac(bytes) <> bytes, padding: false)}
+    else
+      {:error, :invalid_token_scope}
+    end
+  end
+
+  @doc """
+  Verify authentication for the actual resource and action.
+
+  Legacy v1 login tokens retain their existing behavior. Version 2 conversation
+  tokens can authenticate only `:chat` on their exact target; generic `verify/1`
+  deliberately rejects them, so other token consumers cannot widen their scope.
+  """
+  def verify_for(token, resource, action)
+      when is_binary(token) and byte_size(token) > 0 and byte_size(token) <= @max_token_bytes do
+    with {:ok, signature, bytes} <- split_token(token),
+         :ok <- verify_mac(bytes, signature),
+         {:ok, payload} <- safe_decode_payload(bytes),
+         :ok <- check_scope(payload, resource, action),
+         :ok <- check_expiry(payload) do
+      {:ok, payload.pid}
+    end
+  end
+
+  def verify_for(_, _, _), do: {:error, :invalid_token}
+
+  defp check_scope(%{v: @token_version}, _, _), do: :ok
+
+  defp check_scope(
+         %{
+           v: 2,
+           purpose: :conversation,
+           target: target,
+           pid: principal,
+           sid: sid,
+           iat: issued,
+           exp: expires
+         } = payload,
+         resource,
+         :chat
+       )
+       when map_size(payload) == 7 do
+    if conversation_id?(principal, "human_") and conversation_target?(target) and
+         is_binary(sid) and byte_size(sid) == 32 and is_integer(issued) and
+         is_integer(expires) and expires - issued == 90 and
+         resource == "arbor://chat/agent/" <> target do
+      :ok
+    else
+      {:error, :invalid_token_scope}
+    end
+  end
+
+  defp check_scope(_, _, _), do: {:error, :invalid_token_scope}
+
+  defp conversation_target?(target),
+    do: conversation_id?(target, "agent_") or conversation_id?(target, "human_")
+
+  defp conversation_id?(id, prefix) when is_binary(id) and byte_size(id) in 1..256,
+    do:
+      String.valid?(id) and String.starts_with?(id, prefix) and
+        Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, id) and byte_size(id) > byte_size(prefix)
+
+  defp conversation_id?(_, _), do: false
 
   @doc """
   Verify a session token and return the principal_id if valid.

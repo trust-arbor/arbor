@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   Subscribes to the signal bus for live updates.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components

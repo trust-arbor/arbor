@@ -218,7 +218,7 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
   @tag :security_regression
   @tag :p3_parent_selector
   @tag spec: "VOICE-17"
-  test "security regression: valid exact authority permits physical effects but a substitute cap does not" do
+  test "security regression: substitute capability denies effects while preserving authenticated close receipt" do
     user_id = "user_p3_selector"
     agent_id = "agent_p3_selector"
 
@@ -269,6 +269,7 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     events = EgressAuthorityFakes.events()
     assert physical_send_count(events) == physical_before_denial
     assert {:transport_close, 3} in events
+    assert Enum.count(events, &match?({:transport_close, _}, &1)) == 1
 
     assert_order(events, [
       {:trust_effect, :trusted},

@@ -7,7 +7,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
   high-level eval APIs.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
 
   import Arbor.Web.Components
 

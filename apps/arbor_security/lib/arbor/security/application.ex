@@ -117,9 +117,10 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []},
       {Arbor.Security.UriRegistry, []},
-      # Ephemeral one-use delivery receipts (same-node). Last so restart
-      # loses outstanding receipts fail-closed without cascading earlier children.
-      {Arbor.Security.DeliveryReceiptBroker, []}
+      # Ephemeral one-use delivery receipts and terminal login credentials.
+      # Receipt loss also retires dependent terminal sessions fail-closed.
+      {Arbor.Security.DeliveryReceiptBroker, []},
+      {Arbor.Security.TerminalLogin, []}
     ]
   end
 end

@@ -16,7 +16,7 @@ defmodule Arbor.Multimedia.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
-      test_ignore_filters: [~r"^test/support/"],
+      test_ignore_filters: [~r"^test/support/", ~r"^test/native/"],
       deps: deps()
     ]
   end
@@ -27,11 +27,11 @@ defmodule Arbor.Multimedia.MixProject do
     [
       {:membrane_core,
        git: "http://10.42.42.6:3000/trust-arbor/membrane_core.git",
-       ref: "bc01d4f7d08522a5e5028078a082a311161b7b9c",
+       ref: "c2e9c7aff031dd600d2318b72193a4825b0da95f",
        override: true},
       {:membrane_portaudio_plugin,
        git: "http://10.42.42.6:3000/trust-arbor/membrane_portaudio_plugin.git",
-       ref: "3ecfad95d64b0edde79219c37934ac660083d9a6"},
+       ref: "c4e85f4d9ec4e080a7713f5f9878c67a658997c1"},
       {:membrane_raw_audio_format, "~> 0.12.3"}
     ]
   end

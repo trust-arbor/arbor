@@ -18,14 +18,69 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   alias Arbor.LLM.OAuth
   alias Arbor.Voice.Backend.XaiRealtime.Transport
-  alias Arbor.Voice.{BackendWorker, PcmFormat}
+  alias Arbor.Voice.Contracts.AudioTurn
+  alias Arbor.Voice.{BackendWorker, Diagnostics, PcmFormat}
 
   @default_host "api.x.ai"
   @default_port 443
   @default_path "/v1/realtime?model=grok-voice-latest"
   @authorization_error :xai_effect_not_authorized
+  # Exact diagnostic vocabulary only. Provider text and unknown field values
+  # never become log strings or atoms, and these maps do not affect acceptance.
+  @configuration_error_codes %{
+    "server_error" => :server_error,
+    "invalid_request_error" => :invalid_request,
+    "invalid_request" => :invalid_request,
+    "invalid_value" => :invalid_value,
+    "unknown_parameter" => :unknown_parameter,
+    "unsupported_parameter" => :unsupported_parameter,
+    "missing_required_parameter" => :missing_required_parameter,
+    "invalid_type" => :invalid_type,
+    "invalid_api_key" => :invalid_api_key,
+    "insufficient_quota" => :insufficient_quota,
+    "rate_limit_exceeded" => :rate_limit_exceeded,
+    "permission_denied" => :permission_denied
+  }
+  @error_types %{
+    "invalid_request_error" => :invalid_request,
+    "server_error" => :server_error
+  }
+  @configuration_error_parameters %{
+    "session" => :session,
+    "session.voice" => :session_voice,
+    "session.turn_detection" => :session_turn_detection,
+    "session.tools" => :session_tools,
+    "session.instructions" => :session_instructions,
+    "session.modalities" => :session_modalities,
+    "session.audio" => :session_audio,
+    "session.audio.input" => :input_audio,
+    "session.audio.input.format" => :input_format,
+    "session.audio.input.format.type" => :input_format_type,
+    "session.audio.input.format.rate" => :input_format_rate,
+    "session.audio.input.transport" => :input_transport,
+    "session.audio.input.transcription" => :input_transcription,
+    "session.audio.output" => :output_audio,
+    "session.audio.output.format" => :output_format,
+    "session.audio.output.format.type" => :output_format_type,
+    "session.audio.output.format.rate" => :output_format_rate,
+    "session.audio.output.transport" => :output_transport
+  }
+  @configuration_event_types %{
+    "session.created" => :session_created,
+    "session.updated" => :session_updated,
+    "conversation.created" => :conversation_created,
+    "error" => :provider_error_event,
+    "rate_limits.updated" => :rate_limits_updated,
+    "response.created" => :response_created,
+    "response.output_audio.delta" => :media_before_ack,
+    "response.output_audio.done" => :media_before_ack,
+    "response.audio.delta" => :media_before_ack,
+    "response.audio.done" => :media_before_ack,
+    "input_audio_buffer.speech_started" => :media_before_ack,
+    "input_audio_buffer.speech_stopped" => :media_before_ack,
+    "input_audio_buffer.committed" => :media_before_ack
+  }
   @send_timeout_ms 30_000
-  @max_output_bytes 65_536
   @alternate_format_fields [
     "audio_format",
     "encoding",
@@ -77,7 +132,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defmodule Session do
     @moduledoc false
-    @derive {Inspect, except: [:transport_state, :effect_authorizer, :acc]}
+    @derive {Inspect, except: [:transport_state, :effect_authorizer, :acc, :pending_audio]}
     @enforce_keys [:transport_mod, :transport_state, :clock_fun, :effect_authorizer]
     defstruct [
       :transport_mod,
@@ -86,6 +141,11 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       :effect_authorizer,
       input_format: nil,
       output_format: nil,
+      diagnostic_last_effect: :connect,
+      diagnostic_commit: false,
+      diagnostic_transcript: false,
+      diagnostic_response: false,
+      pending_audio: <<>>,
       acc: ""
     ]
   end
@@ -144,13 +204,16 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
            effect_authorizer: effect_authorizer
          }}
 
-      {:error, _reason} ->
+      {:error, _reason, :closed} ->
         {:error, :xai_connect_failed}
+
+      _uncertain ->
+        {:error, :xai_connect_failed, :cleanup_pending}
     end
   rescue
-    _exception -> {:error, :xai_connect_failed}
+    _exception -> {:error, :xai_connect_failed, :cleanup_pending}
   catch
-    _kind, _reason -> {:error, :xai_connect_failed}
+    _kind, _reason -> {:error, :xai_connect_failed, :cleanup_pending}
   end
 
   # ── configure/2 ──
@@ -162,7 +225,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       deadline = send_deadline(session)
 
       payload =
-        %{"turn_detection" => nil}
+        %{"turn_detection" => %{"type" => nil}}
         |> maybe_put("instructions", Map.get(config, :instructions))
         |> maybe_put("tools", Map.get(config, :tools))
         |> put_media(
@@ -224,7 +287,8 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
                  output_format: PcmFormat.mono_s16le(24_000)
              }}
           else
-            configuration_error(latest, :xai_audio_protocol_error)
+            Diagnostics.failure(:provider_format_acknowledgement, acknowledgement_failure(frame))
+            configuration_protocol_error(latest, :invalid_format_acknowledgement)
           end
 
         {:ok, %{"type" => "session.created", "session" => initial}} when is_map(initial) ->
@@ -235,16 +299,34 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
         {:ok, %{"type" => "conversation.created"}} ->
           await_configuration(latest, deadline)
 
+        {:ok, %{"type" => "ping"}} ->
+          # The provider also sends JSON keepalives before its acknowledgement.
+          # They grant no media authority and never renew the startup deadline.
+          await_configuration(latest, deadline)
+
         {{:error, :timeout}, _} ->
           configuration_error(latest, :timeout)
 
+        {:ok, %{"type" => "error"} = error_frame} ->
+          diagnose_configuration_error(error_frame)
+          configuration_protocol_error(latest, :provider_rejected_configuration)
+
         _ ->
-          configuration_error(latest, :xai_audio_protocol_error)
+          diagnose_unexpected_configuration_event(frame)
+          configuration_protocol_error(latest, :unexpected_provider_event)
       end
     else
-      :timeout -> configuration_error(session, :timeout)
-      {:error, :timeout} -> configuration_error(session, :timeout)
-      _ -> configuration_error(session, :xai_transport_failed)
+      :timeout ->
+        configuration_error(session, :timeout)
+
+      {:error, :timeout} ->
+        configuration_error(session, :timeout)
+
+      {:error, :timeout, tstate} ->
+        configuration_error(%{session | transport_state: tstate}, :timeout)
+
+      _ ->
+        configuration_error(session, :xai_transport_failed)
     end
   rescue
     _ -> configuration_error(session, :xai_transport_failed)
@@ -253,9 +335,142 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   end
 
   defp configuration_error(session, reason) do
+    Diagnostics.failure(:provider_configuration, reason)
     close(session)
     {:error, reason, session}
   end
+
+  defp configuration_protocol_error(session, diagnostic) do
+    Diagnostics.failure(:provider_configuration, diagnostic)
+    configuration_error(session, :xai_audio_protocol_error)
+  end
+
+  defp diagnose_configuration_error(frame),
+    do: diagnose_provider_error(frame, :provider_error_code, :provider_error_parameter)
+
+  defp diagnose_provider_error(%{"error" => error}, code_stage, parameter_stage)
+       when is_map(error) do
+    Diagnostics.failure(
+      code_stage,
+      Map.get(@configuration_error_codes, Map.get(error, "code"), :unknown)
+    )
+
+    Diagnostics.failure(
+      parameter_stage,
+      Map.get(@configuration_error_parameters, Map.get(error, "param"), :unknown)
+    )
+  end
+
+  defp diagnose_provider_error(_, code_stage, parameter_stage) do
+    Diagnostics.failure(code_stage, :unknown)
+    Diagnostics.failure(parameter_stage, :unknown)
+  end
+
+  # These fields are observations, never proof that the provider accepted a
+  # request. Keep absence distinct from an unfamiliar value without exposing
+  # messages, request IDs, transcripts, arguments, or audio in logs.
+  defp diagnose_runtime_error(session, frame) do
+    Diagnostics.failure(:provider_runtime_error_envelope, envelope_shape(frame, "error"))
+    error = if is_map(frame["error"]), do: frame["error"], else: %{}
+
+    Diagnostics.failure(:provider_runtime_error_type_shape, field_shape(error, "type"))
+    Diagnostics.failure(:provider_runtime_error_code_shape, field_shape(error, "code"))
+    Diagnostics.failure(:provider_runtime_error_parameter_shape, field_shape(error, "param"))
+
+    Diagnostics.failure(
+      :provider_runtime_error_type,
+      Map.get(@error_types, Map.get(error, "type"), :unknown)
+    )
+
+    diagnose_provider_error(
+      frame,
+      :provider_runtime_error_code,
+      :provider_runtime_error_parameter
+    )
+
+    Diagnostics.failure(:provider_runtime_last_effect, session.diagnostic_last_effect)
+    Diagnostics.failure(:provider_runtime_commit_seen, observed(session.diagnostic_commit))
+
+    Diagnostics.failure(
+      :provider_runtime_transcript_seen,
+      observed(session.diagnostic_transcript)
+    )
+
+    Diagnostics.failure(:provider_runtime_response_seen, observed(session.diagnostic_response))
+  end
+
+  defp field_shape(fields, key) do
+    case Map.fetch(fields, key) do
+      :error -> :absent
+      {:ok, nil} -> :null
+      {:ok, value} when is_binary(value) -> :binary
+      _ -> :nonbinary
+    end
+  end
+
+  defp observed(true), do: :observed
+  defp observed(_), do: :not_observed
+
+  defp diagnose_unexpected_configuration_event(frame) do
+    Diagnostics.failure(:provider_event_type, configuration_event_type(frame))
+    Diagnostics.failure(:provider_session_envelope, envelope_shape(frame, "session"))
+    Diagnostics.failure(:provider_top_level_audio, envelope_shape(frame, "audio"))
+  end
+
+  defp configuration_event_type(frame) when is_map(frame) do
+    case Map.fetch(frame, "type") do
+      :error ->
+        :missing_event_type
+
+      {:ok, type} when is_binary(type) ->
+        Map.get(@configuration_event_types, type, :unknown_event_type)
+
+      _ ->
+        :invalid_event_type
+    end
+  end
+
+  defp configuration_event_type(_), do: :invalid_event_type
+
+  defp envelope_shape(frame, key) when is_map(frame) do
+    case Map.fetch(frame, key) do
+      :error -> :absent
+      {:ok, nil} -> :null
+      {:ok, value} when is_map(value) -> :map
+      _ -> :non_map
+    end
+  end
+
+  defp envelope_shape(_, _), do: :absent
+
+  # Shape observations only; never print provider fields or use this projection
+  # to admit media. confirmed_formats?/1 remains the sole acknowledgement gate.
+  defp acknowledgement_failure(%{
+         "session" => %{"audio" => %{"input" => input, "output" => output}}
+       })
+       when is_map(input) and is_map(output) do
+    cond do
+      extra_format_fields?(input["format"]) or extra_format_fields?(output["format"]) ->
+        :conflicting_format_metadata
+
+      input["format"] != %{"type" => "audio/pcm", "rate" => 16_000} ->
+        :input_format_mismatch
+
+      output["format"] != %{"type" => "audio/pcm", "rate" => 24_000} ->
+        :output_format_mismatch
+
+      Map.get(input, "transport", "json") != "json" or
+          Map.get(output, "transport", "json") != "json" ->
+        :non_json_transport
+
+      true ->
+        :conflicting_format_metadata
+    end
+  end
+
+  defp acknowledgement_failure(_), do: :missing_audio_formats
+  defp extra_format_fields?(format) when is_map(format), do: map_size(format) > 2
+  defp extra_format_fields?(_), do: false
 
   defp confirmed_formats?(
          %{"session" => %{"audio" => %{"input" => input, "output" => output}}} = frame
@@ -369,7 +584,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
          :ok <- send_budget(session, deadline) do
       case session.transport_mod.send_frame(session.transport_state, frame, deadline) do
         {:ok, tstate} ->
-          latest = %{session | transport_state: tstate}
+          latest = %{session | transport_state: tstate} |> observe_sent(effect)
 
           case send_budget(latest, deadline) do
             :ok -> {:ok, latest}
@@ -398,6 +613,20 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   catch
     _kind, _reason -> {:error, :xai_transport_failed}
   end
+
+  # Mark only successful physical sends. A partial/ambiguous transport failure
+  # still returns and closes its latest handle without inventing a receipt.
+  defp observe_sent(session, effect) when effect in [:audio_append, :text_item] do
+    %{
+      session
+      | diagnostic_last_effect: effect,
+        diagnostic_commit: false,
+        diagnostic_transcript: false,
+        diagnostic_response: false
+    }
+  end
+
+  defp observe_sent(session, effect), do: %{session | diagnostic_last_effect: effect}
 
   defp send_deadline(session) do
     local = session.clock_fun.() + @send_timeout_ms
@@ -450,17 +679,30 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   defp recv_loop(session, deadline) do
     case remaining_budget(deadline, session.clock_fun) do
       :timeout ->
-        {:error, :timeout}
+        {:error, :timeout, session}
 
       remaining ->
-        recv_transport(session, deadline, remaining)
+        if session.pending_audio == <<>> do
+          recv_transport(session, deadline, remaining)
+        else
+          emit_audio_chunk(session, session.pending_audio)
+        end
     end
+  end
+
+  # Provider framing does not define the normalized event size. Validate each
+  # complete wire blob before exposing bytes, then drain its bounded remainder
+  # before reading any following text, tool or terminal event.
+  defp emit_audio_chunk(session, pcm) do
+    size = min(byte_size(pcm), AudioTurn.max_output_event_bytes())
+    <<chunk::binary-size(size), rest::binary>> = pcm
+    {:ok, %{session | pending_audio: rest}, {:output_audio, chunk}}
   end
 
   defp recv_transport(session, deadline, remaining) do
     case session.transport_mod.recv_frame(session.transport_state, remaining) do
       {:ok, tstate, frame} ->
-        session = %{session | transport_state: tstate}
+        session = %{session | transport_state: tstate} |> observe_received(frame)
 
         case map_event(session, frame) do
           :skip ->
@@ -476,8 +718,14 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
             {:error, reason}
         end
 
-      {:error, reason} when reason in [:timeout, :session_closed] ->
-        {:error, reason}
+      {:error, :timeout, tstate} ->
+        {:error, :timeout, %{session | transport_state: tstate}}
+
+      {:error, :timeout} ->
+        {:error, :timeout, session}
+
+      {:error, :session_closed} ->
+        {:error, :session_closed}
 
       {:error, _reason} ->
         {:error, :xai_transport_failed}
@@ -495,6 +743,21 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
     if remaining <= 0, do: :timeout, else: remaining
   end
 
+  # Exact event labels only; this does not change map_event admission or reset
+  # recv's deadline. Invalid transcript content still reaches the same reducer.
+  defp observe_received(session, %{"type" => "input_audio_buffer.committed"}),
+    do: %{session | diagnostic_commit: true}
+
+  defp observe_received(session, %{
+         "type" => "conversation.item.input_audio_transcription.completed"
+       }),
+       do: %{session | diagnostic_transcript: true}
+
+  defp observe_received(session, %{"type" => "response.created"}),
+    do: %{session | diagnostic_response: true}
+
+  defp observe_received(session, _), do: session
+
   defp map_event(
          session,
          %{"type" => "conversation.item.input_audio_transcription.completed"} = frame
@@ -505,11 +768,8 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   defp map_event(session, %{"type" => "response.output_audio.delta"} = frame) do
     with :ok <- require_audio_configuration(session),
          :ok <- validate_delta_format(frame),
-         encoded when is_binary(encoded) <- frame["delta"],
-         true <- byte_size(encoded) <= div(@max_output_bytes + 2, 3) * 4,
-         {:ok, pcm} <- PcmFormat.decode_base64(encoded),
-         true <- byte_size(pcm) <= @max_output_bytes do
-      {:ok, session, {:output_audio, pcm}}
+         {:ok, pcm} <- PcmFormat.decode_base64(frame["delta"]) do
+      emit_audio_chunk(session, pcm)
     else
       _ -> {:error, :xai_audio_protocol_error}
     end
@@ -545,6 +805,8 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   end
 
   defp map_event(session, %{"type" => "error"} = frame) do
+    diagnose_runtime_error(session, frame)
+
     {:ok, session, {:error, frame["error"]}}
   end
 
@@ -561,7 +823,14 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   end
 
   defp validate_session_formats(%{"session" => session}) when is_map(session) do
-    if alternate_format?(session) or Map.has_key?(session, "format") do
+    # The provider emits these exact legacy sentinels alongside canonical audio.
+    # Only session-level sentinels are absent declarations; nested PCM stays mandatory.
+    declarations =
+      Enum.reduce(["input_audio_format", "output_audio_format"], session, fn key, acc ->
+        if Map.get(acc, key) == "not specified", do: Map.delete(acc, key), else: acc
+      end)
+
+    if alternate_format?(declarations) or Map.has_key?(session, "format") do
       :error
     else
       case Map.fetch(session, "audio") do
@@ -627,12 +896,13 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   @impl true
   def close(%Session{} = session) do
-    _ = session.transport_mod.close(session.transport_state)
-    :ok
+    if session.transport_mod.close(session.transport_state) == :ok,
+      do: :ok,
+      else: {:error, :xai_close_failed}
   rescue
-    _exception -> :ok
+    _exception -> {:error, :xai_close_failed}
   catch
-    _kind, _reason -> :ok
+    _kind, _reason -> {:error, :xai_close_failed}
   end
 
   @impl true

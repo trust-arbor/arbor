@@ -94,6 +94,7 @@ defmodule Arbor.Orchestrator.Session do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.Consultation
   alias Arbor.Orchestrator.Session.ContextBuilder
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
@@ -178,6 +179,7 @@ defmodule Arbor.Orchestrator.Session do
     # Process-local authenticated-turn identity (nil for direct/unauthenticated sends).
     # Never enters Engine values, checkpoints, signals, or public errors.
     turn_authority: nil,
+    consultation: nil,
     # Pending and active receipt-derived memory admissions, owned by this process.
     # Kept separate from TurnAuthority and stripped from every public projection.
     private_memory_admissions: %{},
@@ -439,6 +441,36 @@ defmodule Arbor.Orchestrator.Session do
 
   def send_authenticated_message(_session, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_authenticated_message_request}
+
+  @doc """
+  Authenticated internal consultation using an already issued delivery receipt.
+  Busy, legacy, malformed-parent, or unauthenticated admission returns
+  `{:error, :unauthenticated}` without queueing. Accepted execution uses the same
+  bounded call, response envelope and runtime errors as authenticated messaging.
+  """
+  @spec consult_authenticated(
+          GenServer.server(),
+          UserMessage.t(),
+          DeliveryReceipt.t(),
+          String.t(),
+          pos_integer()
+        ) :: {:ok, PipelineResponse.t()} | {:error, term()}
+  def consult_authenticated(
+        session,
+        %UserMessage{} = message,
+        %DeliveryReceipt{} = receipt,
+        parent_voice_id,
+        timeout_ms
+      )
+      when is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(
+      session,
+      {:consult_authenticated, message, receipt, parent_voice_id},
+      timeout_ms
+    )
+  end
+
+  def consult_authenticated(_, _, _, _, _), do: {:error, :unauthenticated}
 
   @doc """
   Cancel the in-flight turn (user-initiated).
@@ -765,6 +797,24 @@ defmodule Arbor.Orchestrator.Session do
       ) do
     best_effort_discard_receipt(receipt)
     {:reply, {:error, :legacy_mode}, state}
+  end
+
+  def handle_call({:consult_authenticated, message, receipt, parent}, from, state) do
+    if state.execution_mode != :legacy and not state.turn_in_flight and state.turn_queue == [] and
+         Consultation.valid_parent?(parent) do
+      handle_authenticated_message(message, receipt, from, state, parent)
+    else
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+    end
+  rescue
+    _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+  catch
+    _, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
   end
 
   # A send arriving mid-turn is QUEUED, not rejected. Single-mind serialization:
@@ -1660,6 +1710,9 @@ defmodule Arbor.Orchestrator.Session do
     boundaries = state.steering_boundaries
 
     cond do
+      Consultation.active?(state) ->
+        :error
+
       not matching_turn_token?(state, turn_token) ->
         :error
 
@@ -2158,10 +2211,11 @@ defmodule Arbor.Orchestrator.Session do
         "completed=#{inspect(completed)}"
     )
 
-    Builders.emit_turn_signal(new_state, result)
-
-    # Phase 3: notify ActionCycleServer of chat percept
-    maybe_enqueue_chat_percept(state.agent_id, user_message.content)
+    unless Consultation.active?(new_state) do
+      Builders.emit_turn_signal(new_state, result)
+      # An internal consultation is not a second human chat percept.
+      maybe_enqueue_chat_percept(state.agent_id, user_message.content)
+    end
 
     usage = Map.get(result.context, "session.usage", %{})
 
@@ -2922,13 +2976,13 @@ defmodule Arbor.Orchestrator.Session do
   # Receipt never enters state/queue. Its opaque pending memory admission stays
   # in a private Session map until turn activation or queue/terminal cleanup.
   # Caller-supplied engagement_id is a route claim — reject before consume.
-  defp handle_authenticated_message(message, receipt, from, state) do
+  defp handle_authenticated_message(message, receipt, from, state, parent \\ nil) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
          :ok <- reject_authenticated_engagement_route(user_message),
          {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
          {:ok, authority, admission} <-
            PrivateMemory.exchange(valid_receipt, user_message, state) do
-      bind_and_admit_private_turn(user_message, authority, admission, from, state)
+      bind_and_admit_private_turn(user_message, authority, admission, from, state, parent)
     else
       {:error, :unauthenticated} ->
         best_effort_discard_receipt(receipt)
@@ -2940,12 +2994,17 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
-  defp bind_and_admit_private_turn(user_message, authority, admission, from, state) do
+  defp bind_and_admit_private_turn(user_message, authority, admission, from, state, parent) do
     with {:ok, user_message} <- bind_authenticated_engagement(user_message, authority, state),
          :ok <-
            Arbor.Security.check_private_memory_engagement(admission, user_message.engagement_id) do
       state = PrivateMemory.retain(state, authority, admission)
-      admit_authenticated_turn(user_message, authority, from, state)
+      state = if parent, do: Consultation.bind(state, authority, parent), else: state
+
+      case admit_authenticated_turn(user_message, authority, from, state) do
+        {:noreply, next} -> {:noreply, Consultation.clear_idle(next)}
+        {:reply, reply, next} -> {:reply, reply, Consultation.clear_idle(next)}
+      end
     else
       {:error, _} ->
         PrivateMemory.close_admission(admission)
@@ -3082,6 +3141,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: nil,
         turn_timeout_ref: nil,
         turn_authority: nil,
+        consultation: nil,
         private_memory_admissions: %{},
         private_memory_turn: nil,
         transcript_sync: %{},
@@ -3129,6 +3189,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_user_message: nil,
         turn_taint_evidence: nil,
         turn_authority: nil,
+        consultation: nil,
         private_memory_turn: nil,
         turn_egress_fence: nil,
         turn_token: nil,

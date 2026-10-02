@@ -379,6 +379,43 @@ defmodule Arbor.Persistence do
   end
 
   @doc """
+  Load bounded durable source messages for private-memory recovery.
+
+  This trusted storage API verifies the exact Session agent owner before reading
+  the most recent user/assistant and internal consultation entries. It preserves
+  roles, content, metadata and ordinals for source-proof validation by Memory;
+  it is not an authenticated display or cognitive-transcript API. Callers must
+  hold a current private-memory admission before interpreting these sources.
+
+  Only `:limit` is accepted (1..1000, default 1000). Results are display-shaped
+  maps in durable ordinal order. An absent Session returns an empty list; owner
+  mismatch and storage failure are explicit errors. Canonical history readers
+  continue to exclude consultation entries.
+  """
+  @spec load_private_memory_source_messages(String.t(), String.t(), keyword()) ::
+          [map()]
+          | {:error,
+             :invalid_private_memory_source_scope
+             | :invalid_private_memory_source_options
+             | :private_memory_source_owner_mismatch
+             | :private_memory_source_unavailable}
+  def load_private_memory_source_messages(session_id, agent_id, opts \\ []) do
+    with true <- private_source_identifier?(session_id) and private_source_identifier?(agent_id),
+         :ok <- validate_opts(opts, [:limit]),
+         limit when is_integer(limit) and limit in 1..1000 <- Keyword.get(opts, :limit, 1000) do
+      SessionStore.load_private_memory_source_messages(session_id, agent_id, limit)
+    else
+      false -> {:error, :invalid_private_memory_source_scope}
+      _ -> {:error, :invalid_private_memory_source_options}
+    end
+  end
+
+  defp private_source_identifier?(value) when is_binary(value),
+    do: byte_size(value) in 1..256 and String.valid?(value) and String.trim(value) != ""
+
+  defp private_source_identifier?(_), do: false
+
+  @doc """
   Validate the closed transcript-page options without reading storage.
 
   Accepts `:after` (nonnegative ordinal, default 0), `:through` (an optional

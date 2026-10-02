@@ -218,7 +218,9 @@ defmodule Arbor.Agent.SessionManager do
           session_pid,
           message,
           receipt,
-          timeout_ms
+          timeout_ms,
+          :send_authenticated_message,
+          []
         )
       else
         {:error, :session_unavailable}
@@ -234,12 +236,46 @@ defmodule Arbor.Agent.SessionManager do
   def send_authenticated_message(_agent_id, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_args}
 
+  @doc false
+  def consult_authenticated(agent_id, message, receipt, parent_voice_id, timeout_ms)
+      when is_binary(agent_id) and is_binary(parent_voice_id) and
+             is_integer(timeout_ms) and timeout_ms > 0 and
+             is_struct(message, Arbor.Contracts.Session.UserMessage) and
+             is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
+    with {:ok, session_pid} <- get_session(agent_id) do
+      session_mod = session_module()
+
+      if Code.ensure_loaded?(session_mod) and
+           function_exported?(session_mod, :consult_authenticated, 5) do
+        send_authenticated_message_via_proxy(
+          session_mod,
+          session_pid,
+          message,
+          receipt,
+          timeout_ms,
+          :consult_authenticated,
+          [parent_voice_id]
+        )
+      else
+        {:error, :session_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :session_unavailable}
+  catch
+    _, _ -> {:error, :session_unavailable}
+  end
+
+  def consult_authenticated(_, _, _, _, _), do: {:error, :invalid_args}
+
   defp send_authenticated_message_via_proxy(
          session_mod,
          session_pid,
          message,
          receipt,
-         timeout_ms
+         timeout_ms,
+         operation,
+         extra_args
        ) do
     session_timeout_ms = timeout_ms + @authenticated_call_grace_ms
 
@@ -250,7 +286,9 @@ defmodule Arbor.Agent.SessionManager do
           session_pid,
           message,
           receipt,
-          session_timeout_ms
+          session_timeout_ms,
+          operation,
+          extra_args
         )
       end)
 
@@ -275,14 +313,17 @@ defmodule Arbor.Agent.SessionManager do
 
   defp project_authenticated_session_result(result), do: result
 
-  defp invoke_authenticated_session(session_mod, session_pid, message, receipt, timeout_ms) do
+  defp invoke_authenticated_session(
+         session_mod,
+         session_pid,
+         message,
+         receipt,
+         timeout_ms,
+         operation,
+         extra_args
+       ) do
     {:session_result,
-     apply(session_mod, :send_authenticated_message, [
-       session_pid,
-       message,
-       receipt,
-       timeout_ms
-     ])}
+     apply(session_mod, operation, [session_pid, message, receipt] ++ extra_args ++ [timeout_ms])}
   rescue
     _ -> :session_unavailable
   catch

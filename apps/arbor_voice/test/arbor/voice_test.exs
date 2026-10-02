@@ -159,7 +159,7 @@ defmodule Arbor.VoiceTest do
                Voice.start_session(
                  user_id,
                  agent_id,
-                 Keyword.put(opts, :tool_router_timeout_ms, 30_001)
+                 Keyword.put(opts, :tool_router_timeout_ms, 300_001)
                )
     end
 

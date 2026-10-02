@@ -51,12 +51,22 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
 
   test "security regression: start! owns every canonical id by supervisor pid equality" do
     assert :ok = TestBootstrap.start!()
-    assert Enum.at(TestBootstrap.canonical_start_ids(), -2) == Arbor.Security.AuditJournalOwner
+    canonical_ids = TestBootstrap.canonical_start_ids()
 
-    assert List.last(TestBootstrap.canonical_start_ids()) ==
-             Arbor.Security.DeliveryReceiptBroker
+    # Assert the dependency order, not offsets from an evolving list's end.
+    # Journal loss must restart its consumers; receipt loss must retire logins.
+    dependency_order = [
+      Arbor.Security.AuditJournalOwner,
+      CapabilityStore,
+      Arbor.Security.Reflex.Registry,
+      Arbor.Security.DeliveryReceiptBroker,
+      Arbor.Security.TerminalLogin
+    ]
 
-    Enum.each(TestBootstrap.canonical_start_ids(), fn id ->
+    assert Enum.filter(canonical_ids, &(&1 in dependency_order)) == dependency_order
+    assert observed_child_ids() == Enum.reverse(canonical_ids)
+
+    Enum.each(canonical_ids, fn id ->
       owned = supervisor_child_pid(id)
       assert is_pid(owned), "#{inspect(id)} is not a live supervisor child"
       assert Process.whereis(id) == owned

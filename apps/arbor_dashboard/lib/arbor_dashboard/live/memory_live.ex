@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   Preferences, Proposals, and Code.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components

@@ -180,21 +180,28 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
 
     session_id = "agent-session-" <> agent.agent_id
 
-    {:ok, session} =
-      Session.start_link(
-        session_id: session_id,
-        agent_id: agent.agent_id,
-        turn_dot: @turn_dot,
-        start_heartbeat: false,
-        signer: fn resource -> SignedRequest.sign(resource, agent.agent_id, agent.private_key) end,
-        adapters: %{append_session_entries: append},
-        config: %{
-          "llm_provider" => "lm_studio",
-          "llm_model" => "convergence-response",
-          "stream" => false,
-          "recover_session" => false,
-          "tools" => []
-        }
+    session =
+      start_supervised!(
+        {Session,
+         [
+           session_id: session_id,
+           agent_id: agent.agent_id,
+           turn_dot: @turn_dot,
+           start_heartbeat: false,
+           signer: fn resource ->
+             SignedRequest.sign(resource, agent.agent_id, agent.private_key)
+           end,
+           adapters: %{append_session_entries: append},
+           config: %{
+             "llm_provider" => "lm_studio",
+             "llm_model" => "convergence-response",
+             "stream" => false,
+             "recover_session" => false,
+             "tools" => []
+           }
+         ]},
+        id: make_ref(),
+        restart: :temporary
       )
 
     :ok =
@@ -212,7 +219,6 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
     end)
 
     on_exit(fn ->
-      if Process.alive?(session), do: GenServer.stop(session)
       Arbor.Agent.Registry.unregister(agent.agent_id)
 
       :sys.replace_state(SessionManager, fn state ->

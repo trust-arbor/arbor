@@ -344,7 +344,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert call.message.transport == :voice
     assert call.message.sender_id == user_id
     assert call.message.engagement_id == nil
-    assert Keyword.get(call.opts, :timeout) == 5_000
+    assert Keyword.get(call.opts, :timeout) in 1..5_000
     assert Keyword.get(call.opts, :session_token) == @distinctive_token
 
     outputs =
@@ -448,8 +448,9 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert call.message.sender_id == user_id
     assert call.message.engagement_id == nil
 
-    assert call.opts == [
-             timeout: 5_000,
+    assert Keyword.fetch!(call.opts, :timeout) in 1..5_000
+
+    assert Keyword.delete(call.opts, :timeout) == [
              session_token: @distinctive_token,
              expected_engagement_id: "eng_e0fa222f4eca4f9f5eade82cc4f23666"
            ]

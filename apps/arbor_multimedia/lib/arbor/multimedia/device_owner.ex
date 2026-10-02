@@ -17,6 +17,18 @@ defmodule Arbor.Multimedia.DeviceOwner do
   end
 
   @impl true
+  def handle_call(:device_status, _from, state) do
+    status =
+      cond do
+        state.operation == nil and Fence.current() == nil -> :idle
+        state.operation == nil -> :cleanup_pending
+        state.operation.core.cancelled or state.operation.from == nil -> :cleanup_pending
+        true -> :busy
+      end
+
+    {:reply, status, state}
+  end
+
   def handle_call({:run, request, %Redacted{value: spec}, deadline}, {caller, _} = from, state) do
     cond do
       state.operation != nil or Fence.current() != nil ->
@@ -33,6 +45,44 @@ defmodule Arbor.Multimedia.DeviceOwner do
   def handle_call(_, _from, state), do: {:reply, {:error, :invalid_options}, state}
 
   @impl true
+  def handle_info(
+        {:driver_custody_register, token, worker, fence_id, session, secret},
+        %{operation: %{token: token, worker: worker, fence_id: fence_id, custody: nil} = op} =
+          state
+      )
+      when is_pid(session) and is_binary(secret) and byte_size(secret) == 32 do
+    send(self(), {:ack_native_custody, token, worker, fence_id, session, secret})
+    {:noreply, %{state | operation: %{op | custody: {session, secret}}}}
+  end
+
+  def handle_info(
+        {:ack_native_custody, token, worker, fence_id, session, secret},
+        %{
+          operation: %{
+            token: token,
+            worker: worker,
+            fence_id: fence_id,
+            custody: {session, secret}
+          }
+        } = state
+      ) do
+    send(session, {:native_custody_ack, secret, self(), worker, fence_id})
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:driver_custody_closed, token, worker, fence_id, session, secret},
+        %{
+          operation: %{
+            token: token,
+            worker: worker,
+            fence_id: fence_id,
+            custody: {session, secret}
+          }
+        } = state
+      ),
+      do: apply_event(state, {:closed, :ok})
+
   def handle_info(
         {:driver, token, %Redacted{value: event}},
         %{operation: %{token: token} = op} = state
@@ -80,9 +130,8 @@ defmodule Arbor.Multimedia.DeviceOwner do
   defp admit(state, request, spec, deadline, from) do
     fence_id = System.unique_integer([:positive, :monotonic])
     token = make_ref()
-    active = :atomics.new(1, [])
-    :atomics.put(active, 1, 1)
-    permit = %{active: active, deadline: deadline, owner: self(), caller: elem(from, 0)}
+    revoked = :atomics.new(1, [])
+    permit = %{revoked: revoked, deadline: deadline, owner: self(), caller: elem(from, 0)}
 
     with :ok <- Fence.acquire(fence_id) do
       start_worker(state, request, spec, deadline, from, token, fence_id, permit)
@@ -107,6 +156,7 @@ defmodule Arbor.Multimedia.DeviceOwner do
           caller_ref: Process.monitor(elem(from, 0)),
           worker: worker,
           worker_ref: Process.monitor(worker),
+          custody: nil,
           core: OperationCore.new(spec),
           deadline: deadline,
           timer: Process.send_after(self(), {:deadline, token}, max(0, deadline - now_ms()))
@@ -131,7 +181,7 @@ defmodule Arbor.Multimedia.DeviceOwner do
   defp perform(state, []), do: state
 
   defp perform(%{operation: op} = state, [:close | effects]) do
-    :atomics.put(op.permit.active, 1, 0)
+    :atomics.put(op.permit.revoked, 1, 1)
     send(op.worker, {:close, op.token})
     perform(state, effects)
   end
@@ -148,7 +198,7 @@ defmodule Arbor.Multimedia.DeviceOwner do
   defp expire(state), do: state |> cancel(:timeout) |> reply_pending()
 
   defp cancel(%{operation: op} = state, reason) do
-    :atomics.put(op.permit.active, 1, 0)
+    :atomics.put(op.permit.revoked, 1, 1)
     {core, effects} = OperationCore.cancel(op.core, reason)
     perform(%{state | operation: %{op | core: core}}, effects)
   end

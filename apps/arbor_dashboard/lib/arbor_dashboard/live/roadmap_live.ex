@@ -7,7 +7,7 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   Reads directly from `.arbor/roadmap/` markdown files.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components

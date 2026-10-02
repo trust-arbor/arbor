@@ -11,7 +11,7 @@ defmodule Arbor.Dashboard.Live.SettingsLive do
   delegate) and `Arbor.Dashboard.Cores.ExternalAgentsCore` (pure CRC).
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
 
   import Arbor.Web.Components
 

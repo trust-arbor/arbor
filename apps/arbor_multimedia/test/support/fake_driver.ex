@@ -25,6 +25,9 @@ defmodule Arbor.Multimedia.FakeDriver do
   end
 
   @impl true
+  def activate(_handle, _spec, _permit), do: :ok
+
+  @impl true
   def close(_handle) do
     send(Process.get(:test), {:close_attempt, self()})
 

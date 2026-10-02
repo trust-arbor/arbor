@@ -1,9 +1,11 @@
 # Arbor Multimedia
 
 A trusted local device boundary with no in-umbrella dependencies. The facade
-provides `devices/0`, `capture_pcm/1`, and `play_pcm/2`. **The default driver is
-unavailable:** this candidate qualifies the bounded owner and fake driver seam,
-not a usable native microphone/speaker implementation or completed VP-07B.
+provides `devices/0`, `capture_pcm/1`, `play_pcm/2`, `device_status/0`, and explicit
+microphone permission status/request functions. **The default driver remains
+unavailable.** The opt-in `Arbor.Multimedia.Driver.Native` implementation uses
+the reviewed bounded Membrane/PortAudio interfaces. Sealed tests qualify its
+Elixir integration; real microphone/speaker qualification remains separate.
 It performs no device enumeration, permission query/request, or playback at boot.
 
 Capture accepts a duplicate-free keyword list with required `duration_ms`
@@ -30,27 +32,45 @@ identities carry no completion authority. A VM-retained atomic fence survives co
 only exact-token positive close can clear it. If handle custody itself is lost,
 the VM remains fenced. There is no public force-clear API. An internal revocable
 permit checks the deadline and caller/coordinator liveness before effects; a
-future native driver must recheck it after every permission/setup wait.
+native driver passes the exact revocation cell into the pinned executor lease;
+there is no asynchronous cancellation mirror.
 
 Raw PCM stays in process memory, with state, message and reason redaction on
-both actual OTP owners. Startup arguments contain no PCM. Intentional trusted-VM
+the owners, native session, pipeline, feeder and collector. Startup arguments
+contain no PCM. Playback payload enters the sensitive feeder only after its
+actual process and the device process are recorded and admitted. Intentional trusted-VM
 `:sys.get_state`, tracing/debug history, arbitrary injected drivers and direct
 callback logging are outside the ordinary diagnostics policy. Driver failures
 are normalized to closed atoms. Device names reject control characters and have
 bounded UTF-8 lengths; device data has a closed shape and unique IDs.
 
 The internal Driver seam is application configuration, never a facade option.
-Its `open(spec, permit)` must return a custody handle before asynchronous native
-work, or positively attest that no resource was opened. An exception after
+Its `open(spec, permit)` returns a dormant custody handle without native effects.
+DriverWorker commits that handle before calling `activate(handle, spec, permit)`
+in a later callback. NativeSession waits for the coordinator to commit its
+private custody identity before creating a pipeline. It records the empty
+pipeline and real child PIDs before binding leases or acknowledging setup. An exception after
 unknown effects is cleanup uncertainty, never proof of closure. `close(handle)`
 returns `:ok`, a media error plus positive `:closed`, or `:cleanup_pending`.
 Stream/pipeline DOWN or a media close notification is not checked close evidence.
 
-Before adopting a concrete Membrane/PortAudio driver, review and pin the bounded
-native Source/Sink, executor generation/element cleanup barrier, permission query,
-and actual Core sensitive diagnostics changes. Renew immutable dependency/build/
-NIF admission and no-device contained proof for those changed native sources.
-Original VP-07B0 evidence covers the original pinned dependencies only.
+The concrete native driver requires the reviewed and pinned bounded
+Source/Sink, enumeration, executor generation/element cleanup barrier, permission
+query, and actual Core sensitive diagnostics changes. Dependency/build/NIF admission
+is tracked separately from this application. Original VP-07B0 evidence covers the
+original pinned dependencies only. NativeSession retains one supervised cleanup
+helper for the pinned native barrier, then joins termination of the entire recorded
+process tree. A changed native generation retains `:cleanup_pending`; process
+death alone does not prove closure. Worker death can recover through the exact
+recorded NativeSession credential only after both barriers succeed.
+
+`device_status/0` returns `:idle` only when the registered coordinator has no
+operation and the persistent fence is empty. It otherwise returns `:busy`,
+`:cleanup_pending`, or `:device_unavailable`; it never releases custody. Permission
+functions return only `:authorized`, `:denied`, `:restricted`, `:not_determined`, or
+`:unavailable`. The Darwin request is asynchronous and is followed by one status
+query; an unanswered prompt stays `:not_determined`. There are no implicit retries
+or device opens. Other platforms return `:unavailable` for this Darwin boundary.
 
 Fake-only isolated qualification:
 
@@ -61,5 +81,22 @@ cd apps/arbor_multimedia
 ```
 
 `test_helper.exs` selects a fail-closed fake before starting either owner. There
-are no passthrough mocks or hardware tests in this candidate. Live device and
-provider journeys remain later qualification gates.
+are no passthrough mocks or hardware tests in this suite.
+
+The actual-Core/plugin harness is deliberately excluded from ordinary test
+discovery. Compile the application first, then run this in a fresh isolated VM
+from the repository root, with `ARBOR_TEST_PORTAUDIO_SOURCE` set to the reviewed
+PortAudio source checkout:
+
+```sh
+./bin/mix run --no-start --no-compile --no-deps-check \
+  apps/arbor_multimedia/test/native/sealed_runner.exs
+```
+
+The harness removes the plugin code path and purges every native/permission
+module before defining marked fakes. It recompiles only the actual plugin Elixir
+source in memory; no fake BEAM is written into dependency build artifacts. It
+exercises the public Multimedia facade against the real Core pipeline machinery,
+including blocked native create, queue expiry, worker death, unknown generation,
+positive close, exact tails, custody spoof rejection, and ordinary PCM diagnostic
+redaction. Live device and provider journeys remain separate qualification gates.

@@ -213,6 +213,75 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
            |> Enum.any?(&Enum.any?(&1, fn text -> String.contains?(text, @sentinel) end))
   end
 
+  @tag :voice_consultation
+  test "internal consultation evidence recovers private memory after SQLite restart without becoming canonical history",
+       ctx do
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :fail_content, @sentinel))
+    first = start_session!(ctx, ctx.owner, ctx.session_id)
+    resource = "arbor://chat/agent/" <> ctx.owner.agent.agent_id
+
+    {:ok, signed} =
+      SignedRequest.sign(resource, ctx.owner.human.agent_id, ctx.owner.human.private_key)
+
+    {:ok, receipt} =
+      Security.authorize_and_issue_delivery_receipt(ctx.owner.human.agent_id, resource, :chat,
+        signed_request: signed,
+        expected_resource: resource
+      )
+
+    voice_id = "voice_" <> String.duplicate("d", 32)
+    message = UserMessage.from_voice(@sentinel, sender_id: ctx.owner.human.agent_id)
+
+    assert {:ok, response} =
+             Session.consult_authenticated(first, message, receipt, voice_id, 15_000)
+
+    assert response.metadata.conversation_memory == %{status: "pending", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert Session.get_state(first).messages == []
+    assert Arbor.Persistence.load_recent_session_messages(ctx.session_id) == []
+
+    [user, assistant] =
+      Arbor.Persistence.load_private_memory_source_messages(
+        ctx.session_id,
+        ctx.owner.agent.agent_id
+      )
+
+    assert user.metadata["voice_parent_id"] == voice_id
+    assert assistant.metadata["voice_parent_id"] == voice_id
+    assert user.metadata["private_memory_source"] == assistant.metadata["private_memory_source"]
+    descriptor = user.metadata["private_memory_source"]["descriptor"]
+    assert {:ok, []} = Arbor.Persistence.list_vector_records(ctx.owner.agent.agent_id, limit: 100)
+    assert :ok = GenServer.stop(first)
+    assert :ok = Supervisor.terminate_child(ctx.repo_supervisor, Repo)
+    assert {:ok, _} = Supervisor.restart_child(ctx.repo_supervisor, Repo)
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :fail_content, nil))
+    second = start_session!(ctx, ctx.owner, ctx.session_id)
+    assert {:ok, _} = turn(second, ctx.owner, "Recall the internally consulted passphrase")
+    assert_receive {:model_request, messages, _}
+    assert inspect(messages) =~ @sentinel
+    # The fact may be recalled as authorized private memory, never replayed as
+    # a second canonical user utterance in the provider's conversation history.
+    refute Enum.any?(messages, fn m ->
+             m.role == :user and Arbor.LLM.ContentPart.text_content(m.content) == @sentinel
+           end)
+
+    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 2
+
+    assert length(
+             Arbor.Persistence.load_private_memory_source_messages(
+               ctx.session_id,
+               ctx.owner.agent.agent_id
+             )
+           ) == 4
+
+    assert {:ok, _record} =
+             Arbor.Persistence.fetch_vector_record(
+               ctx.owner.agent.agent_id,
+               descriptor["source_namespace"],
+               descriptor["source_key"]
+             )
+  end
+
   test "same-agent other-human and same-human other-agent prompts never receive the owner's indexed conversation",
        ctx do
     first = start_session!(ctx, ctx.owner, ctx.session_id)
@@ -493,7 +562,11 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
              Arbor.Persistence.read_session_transcript(
                ctx.session_id,
                ctx.owner.agent.agent_id,
-               engagement.id, after: 1, through: 2, limit: 1)
+               engagement.id,
+               after: 1,
+               through: 2,
+               limit: 1
+             )
 
     observer = self()
 
@@ -747,26 +820,27 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   end
 
   defp start_session!(_ctx, owner, session_id, adapters \\ []) do
-    assert {:ok, pid} =
-             Session.start_link(
-               session_id: session_id,
-               agent_id: owner.agent.agent_id,
-               turn_dot: @real_turn_dot,
-               start_heartbeat: false,
-               adapters: Map.new(adapters),
-               signer: fn resource ->
-                 SignedRequest.sign(resource, owner.agent.agent_id, owner.agent.private_key)
-               end,
-               config: %{
-                 "llm_provider" => "lm_studio",
-                 "llm_model" => "journey-response",
-                 "stream" => false,
-                 "recover_session" => false
-               }
-             )
-
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-    pid
+    start_supervised!(
+      {Session,
+       [
+         session_id: session_id,
+         agent_id: owner.agent.agent_id,
+         turn_dot: @real_turn_dot,
+         start_heartbeat: false,
+         adapters: Map.new(adapters),
+         signer: fn resource ->
+           SignedRequest.sign(resource, owner.agent.agent_id, owner.agent.private_key)
+         end,
+         config: %{
+           "llm_provider" => "lm_studio",
+           "llm_model" => "journey-response",
+           "stream" => false,
+           "recover_session" => false
+         }
+       ]},
+      id: make_ref(),
+      restart: :temporary
+    )
   end
 
   defp turn(session, owner, text) do

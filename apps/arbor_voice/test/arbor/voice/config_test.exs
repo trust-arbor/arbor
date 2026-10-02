@@ -13,6 +13,10 @@ defmodule Arbor.Voice.ConfigTest do
 
   alias Arbor.Voice.Config
 
+  defmodule MessageOnlyAgent do
+    def send_message(_, _, _, _), do: {:ok, "ordinary"}
+  end
+
   describe "daily budget" do
     test "the literal default is 60 minutes" do
       assert Config.default_daily_budget_ms() == 3_600_000
@@ -193,21 +197,22 @@ defmodule Arbor.Voice.ConfigTest do
 
   describe "tool router timeout (VP-04E3)" do
     @tag spec: "VOICE-8"
-    test "literal default is 5000 ms and ceiling is 30000 ms" do
-      assert Config.default_tool_router_timeout_ms() == 5_000
-      assert Config.max_tool_router_timeout_ms() == 30_000
+    test "literal default is 60000 ms and ceiling is 300000 ms" do
+      assert Config.default_tool_router_timeout_ms() == 60_000
+      assert Config.max_tool_router_timeout_ms() == 300_000
     end
 
     @tag spec: "VOICE-8"
-    test "validate_tool_router_timeout_ms/1 accepts 1, default, and 30000" do
+    test "validate_tool_router_timeout_ms/1 accepts 1, default, and 300000" do
       assert {:ok, 1} = Config.validate_tool_router_timeout_ms(1)
       assert {:ok, 5_000} = Config.validate_tool_router_timeout_ms(5_000)
-      assert {:ok, 30_000} = Config.validate_tool_router_timeout_ms(30_000)
+      assert {:ok, 60_000} = Config.validate_tool_router_timeout_ms(60_000)
+      assert {:ok, 300_000} = Config.validate_tool_router_timeout_ms(300_000)
     end
 
     @tag spec: "VOICE-8"
     test "validate_tool_router_timeout_ms/1 fails closed on zero, above-ceiling, and malformed" do
-      for bad <- [0, -1, 30_001, 1.5, "5000", nil, :ms, true, %{}] do
+      for bad <- [0, -1, 300_001, 1.5, "5000", nil, :ms, true, %{}] do
         assert {:error, :invalid_config} = Config.validate_tool_router_timeout_ms(bad)
       end
     end
@@ -216,6 +221,39 @@ defmodule Arbor.Voice.ConfigTest do
     test "tool_router_timeout_ms/0 resolves to the validated default under checked-in config" do
       assert Config.tool_router_timeout_ms() ==
                Config.validate_tool_router_timeout_ms(Config.default_tool_router_timeout_ms())
+    end
+  end
+
+  describe "whole-operation deadlines" do
+    test "audio and Desk defaults leave bounded time beyond consultation" do
+      assert Config.default_audio_turn_timeout_ms() == 90_000
+      assert Config.max_audio_turn_timeout_ms() == 330_000
+      assert Config.default_desk_timeout_ms() == 120_000
+      assert Config.max_desk_timeout_ms() == 360_000
+
+      assert {:ok,
+              %{
+                tool_router_timeout_ms: 60_000,
+                audio_turn_timeout_ms: 90_000,
+                desk_timeout_ms: 120_000
+              }} =
+               Config.operation_timeouts()
+    end
+
+    test "audio and Desk bounds accept positive finite allowances and reject malformed values" do
+      for value <- [1, 90_000, 330_000],
+          do: assert({:ok, ^value} = Config.validate_audio_turn_timeout_ms(value))
+
+      for value <- [1, 120_000, 360_000],
+          do: assert({:ok, ^value} = Config.validate_desk_timeout_ms(value))
+
+      for bad <- [0, -1, nil, true, 1.5, "90000", %{}] do
+        assert {:error, :invalid_config} = Config.validate_audio_turn_timeout_ms(bad)
+        assert {:error, :invalid_config} = Config.validate_desk_timeout_ms(bad)
+      end
+
+      assert {:error, :invalid_config} = Config.validate_audio_turn_timeout_ms(330_001)
+      assert {:error, :invalid_config} = Config.validate_desk_timeout_ms(360_001)
     end
   end
 
@@ -240,6 +278,16 @@ defmodule Arbor.Voice.ConfigTest do
       assert {:error, :invalid_config} = Config.validate_agent_module(String)
       assert {:error, :invalid_config} = Config.validate_agent_module(nil)
       assert {:error, :invalid_config} = Config.validate_agent_module("Arbor.Agent")
+    end
+
+    test "private audio requires the dedicated consultation facade without changing generic validation" do
+      assert {:ok, Arbor.Agent} = Config.validate_agent_module_with_consultation(Arbor.Agent)
+      assert {:ok, MessageOnlyAgent} = Config.validate_agent_module(MessageOnlyAgent)
+
+      assert {:error, :invalid_config} =
+               Config.validate_agent_module_with_consultation(MessageOnlyAgent)
+
+      assert {:error, :invalid_config} = Config.validate_agent_module_with_consultation(nil)
     end
 
     @tag spec: "VOICE-10"

@@ -16,6 +16,7 @@ defmodule ArborVoice.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: [~r"^test/support/"],
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -34,6 +35,7 @@ defmodule ArborVoice.MixProject do
   defp deps do
     [
       {:arbor_kernel_runtime, in_umbrella: true},
+      {:arbor_multimedia, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_comms, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},

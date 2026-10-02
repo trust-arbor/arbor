@@ -25,18 +25,40 @@ defmodule Arbor.Gateway.Chat.Router do
   # WebSocket upgrade. The authenticated principal is threaded into the socket's
   # initial state; the client then `attach`es to an engagement and exchanges turns.
   get "/socket" do
-    case conn.assigns[:agent_id] do
-      principal when is_binary(principal) ->
-        conn
-        |> WebSockAdapter.upgrade(
-          Arbor.Gateway.Chat.Socket,
-          %{principal: principal},
-          timeout: 120_000
-        )
-        |> halt()
+    if conn.private[:terminal_conversation] do
+      case Arbor.Gateway.Chat.TerminalLogin.socket_state(conn) do
+        {:ok, state} ->
+          conn
+          |> delete_req_header("authorization")
+          |> WebSockAdapter.upgrade(Arbor.Gateway.Chat.Socket, state,
+            timeout: Arbor.Gateway.Chat.Socket.keepalive_options().idle_timeout_ms,
+            max_frame_size: 262_144
+          )
+          |> halt()
 
-      _ ->
-        send_resp(conn, 401, "unauthorized")
+        {:error, :session_in_use} ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> put_resp_header("cache-control", "no-store")
+          |> send_resp(409, Jason.encode!(%{error: "session_in_use"}))
+
+        _ ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
+      end
+    else
+      case conn.assigns[:agent_id] do
+        principal when is_binary(principal) ->
+          conn
+          |> WebSockAdapter.upgrade(Arbor.Gateway.Chat.Socket, %{principal: principal},
+            timeout: 120_000
+          )
+          |> halt()
+
+        _ ->
+          send_resp(conn, 401, "unauthorized")
+      end
     end
   end
 

@@ -4,6 +4,7 @@ defmodule Arbor.Voice.CleanupLease do
   use GenServer
 
   alias Arbor.Voice.Redacted
+  alias Arbor.Voice.ClosureReceipt
 
   @supervisor Arbor.Voice.CleanupLeaseSupervisor
   @cleanup_supervisor Arbor.Voice.ResourceCleanupTaskSupervisor
@@ -40,12 +41,17 @@ defmodule Arbor.Voice.CleanupLease do
           {:ok, pid(), credential()} | {:error, atom() | tuple()}
   def start(owner_pid, initial_cleanups \\ nil, opts \\ [])
 
-  def start(owner_pid, initial_cleanups, opts)
+  def start(owner_pid, initial_cleanups, opts),
+    do: start_with_receipt(owner_pid, initial_cleanups, opts, nil)
+
+  # Private ResourceOwner handoff; receipt authority is never a public option.
+  def start_with_receipt(owner_pid, initial_cleanups, opts, receipt)
       when is_pid(owner_pid) and is_list(opts) do
     if owner_pid != self() do
       {:error, :foreign_caller}
     else
-      with :ok <- validate_opts_syntax(opts),
+      with true <- ClosureReceipt.valid?(receipt, :owner, owner_pid),
+           :ok <- validate_opts_syntax(opts),
            {:ok, cleanups} <- normalize_initial_cleanups(initial_cleanups),
            {:ok, config} <- build_config(opts),
            true <- map_size(cleanups) <= config.max_cleanups,
@@ -67,7 +73,8 @@ defmodule Arbor.Voice.CleanupLease do
                Redacted.new(cleanups),
                config,
                Keyword.get(opts, :cleanup_supervisor, @cleanup_supervisor),
-               supervisor
+               supervisor,
+               receipt
              ]},
           restart: :temporary,
           shutdown: 5_000,
@@ -86,13 +93,18 @@ defmodule Arbor.Voice.CleanupLease do
     end
   end
 
-  def start(_owner_pid, _initial_cleanups, _opts), do: {:error, :invalid_cleanup_config}
+  def start_with_receipt(_owner_pid, _initial_cleanups, _opts, _receipt),
+    do: {:error, :invalid_cleanup_config}
 
   @doc false
   def start_link(owner_pid, token, cleanups, config, cleanup_supervisor, supervisor) do
+    start_link(owner_pid, token, cleanups, config, cleanup_supervisor, supervisor, nil)
+  end
+
+  def start_link(owner_pid, token, cleanups, config, cleanup_supervisor, supervisor, receipt) do
     GenServer.start_link(
       __MODULE__,
-      {owner_pid, token, cleanups, config, cleanup_supervisor, supervisor}
+      {owner_pid, token, cleanups, config, cleanup_supervisor, supervisor, receipt}
     )
   end
 
@@ -223,11 +235,12 @@ defmodule Arbor.Voice.CleanupLease do
   def status(credential), do: credential_call(credential, :status)
 
   @impl true
-  def init({owner_pid, token, cleanups, config, cleanup_supervisor, supervisor}) do
+  def init({owner_pid, token, cleanups, config, cleanup_supervisor, supervisor, receipt}) do
     Process.flag(:trap_exit, true)
     cleanups = Redacted.value(cleanups)
 
     state = %{
+      closure_receipt: ClosureReceipt.for_lease(receipt, owner_pid),
       token: token,
       owner_pid: owner_pid,
       owner_ref: Process.monitor(owner_pid),
@@ -383,6 +396,7 @@ defmodule Arbor.Voice.CleanupLease do
   defp handle_lease_call({:begin_cleanup, :fenced}, _from, state) do
     if is_nil(state.worker_pid) do
       state = state |> Map.put(:mode, :draining) |> schedule_work(0)
+      publish_completion(state)
       {:reply, :ok, state}
     else
       {:reply, {:error, :worker_active}, state}
@@ -409,6 +423,7 @@ defmodule Arbor.Voice.CleanupLease do
     with true <- valid_wait_timeout?(timeout_ms),
          {:ok, key_set} <- normalize_wait_keys(keys) do
       if keys_absent?(state, key_set) do
+        publish_completion(state)
         {:reply, :ok, state}
       else
         add_waiter(state, from, key_set, timeout_ms)
@@ -587,6 +602,8 @@ defmodule Arbor.Voice.CleanupLease do
   defp continue_current(state), do: {:noreply, state}
 
   defp continue(state) do
+    publish_completion(state)
+
     cond do
       should_stop?(state) ->
         {:stop, :normal, state}
@@ -596,6 +613,16 @@ defmodule Arbor.Voice.CleanupLease do
 
       true ->
         {:noreply, maybe_schedule_retry(state)}
+    end
+  end
+
+  defp publish_completion(state) do
+    # Draining permanently rejects new obligations. Publish only after actual
+    # successful cleanup and task/worker retirement, including retries that
+    # finish after ResourceOwner and Session have gone away.
+    if state.mode == :draining and is_nil(state.worker_pid) and is_nil(state.current) and
+         map_size(Redacted.value(state.cleanups)) == 0 do
+      ClosureReceipt.lease_drained(Map.get(state, :closure_receipt))
     end
   end
 
@@ -858,6 +885,9 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   defp notify_waiters(state) do
+    # A successful empty acknowledgement must never race ahead of its receipt.
+    publish_completion(state)
+
     {remaining, _completed} =
       Enum.reduce(state.waiters, {%{}, []}, fn {token, waiter}, {pending, completed} ->
         if keys_absent?(state, waiter.keys) do

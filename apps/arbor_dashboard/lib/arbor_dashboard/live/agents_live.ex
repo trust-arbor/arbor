@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   and reasoning history.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
@@ -286,7 +286,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
                 onmouseover="this.style.opacity='0.8';"
                 onmouseout="this.style.opacity='1';"
               >
-                ▶ Resume Chat
+                View conversation
               </button>
               <a
                 href={"/memory/#{profile.agent_id}"}
@@ -412,7 +412,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
                   cursor: pointer;
                 "
               >
-                ▶ Resume Chat
+                View conversation
               </button>
               <button
                 phx-click="delete-agent"

@@ -256,6 +256,10 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
   end
 
   test "security regression: actual worker crash current message is redacted" do
+    # This proves crash diagnostics, not deadline cleanup. A short operation
+    # deadline can put the fake into its blocking close receive before the fault
+    # message executes, especially while other isolated BEAMs are compiling.
+    Application.put_env(:arbor_multimedia, :operation_grace_ms, 2_000)
     task = Task.async(fn -> Multimedia.play_pcm(audio()) end)
     assert_receive {:opened, worker, _}
     monitor = Process.monitor(worker)
@@ -265,7 +269,7 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
       capture_log(fn ->
         :sys.replace_state(worker, fn state -> Map.delete(state, :owner) end)
         emit(worker, {:pcm, sentinel})
-        assert_receive {:DOWN, ^monitor, :process, ^worker, _}
+        assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 1_000
       end)
 
     refute logs =~ sentinel
@@ -380,11 +384,10 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
 
     fence_id = System.unique_integer([:positive, :monotonic])
     token = make_ref()
-    active = :atomics.new(1, [])
-    :atomics.put(active, 1, 1)
+    revoked = :atomics.new(1, [])
 
     permit = %{
-      active: active,
+      revoked: revoked,
       owner: dormant_owner,
       caller: self(),
       deadline: System.monotonic_time(:millisecond) + 1_000

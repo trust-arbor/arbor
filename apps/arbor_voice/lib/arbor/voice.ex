@@ -30,6 +30,8 @@ defmodule Arbor.Voice do
 
   alias Arbor.Voice.Config
   alias Arbor.Voice.Contracts.AudioTurn
+  alias Arbor.Voice.Desk
+  alias Arbor.Voice.Diagnostics
   alias Arbor.Voice.Redacted
   alias Arbor.Voice.Session
   alias Arbor.Voice.Session.JsonTerm
@@ -70,6 +72,7 @@ defmodule Arbor.Voice do
     :speech_output_timeout_ms,
     :tool_router,
     :tool_router_timeout_ms,
+    :audio_turn_timeout_ms,
     :session_token,
     :audio_mode,
     :progress_threshold_ms
@@ -109,12 +112,19 @@ defmodule Arbor.Voice do
     PCM sessions reject `text_turn/3` as `:audio_only_session` before admission;
     no prior text response can share their provider stream.
     Input PCM must match the source-admitted rate exactly. The bounded audio
-    operation has a fixed 30-second deadline across send, receive and finalization.
+    operation defaults to 90 seconds across send, consultation, receive and finalization,
+    bounded by the remaining Session budget and any enclosing Desk permit.
   * `:progress_threshold_ms` — positive integer, default 2000, hard ceiling
     30000, must not exceed the effective tool-router timeout (VOICE-11).
     Explicit malformed → `{:error, :invalid_opts}`; malformed Application
     config → `{:error, :invalid_config}`.
-  * `:tool_router_timeout_ms` — tool worker timeout (1..30000 ms).
+  * `:tool_router_timeout_ms` — consultation allowance, default 60000 ms,
+    source-owned maximum 300000 ms. Includes Agent preparation and provider work.
+  * `:audio_turn_timeout_ms` — whole audio-turn allowance, default 90000 ms,
+    source-owned maximum 330000 ms. Each tool uses only the remaining turn time.
+    Explicit operator settings for either timeout cap per-session overrides;
+    without an operator setting, overrides may use the source-owned maximum.
+    Malformed operator settings fail before resource effects.
   * `:backend_opts` — backend-specific options. The internal
     `:effect_authorizer` key is reserved for internally owned egress authority
     and is rejected when supplied by a public caller.
@@ -279,12 +289,122 @@ defmodule Arbor.Voice do
     end
   end
 
+  @doc "Start one authenticated server-owned microphone turn; returns only an opaque control id."
+  def start_desk_turn(user, agent, opts \\ []),
+    do: Desk.start(user, agent, Redacted.new(opts))
+
+  @doc "Read bounded desk status and renew its short controller lease. Never returns PCM."
+  def desk_turn_status(id), do: Desk.status(id)
+
+  @doc "Revoke one exact desk operation; pending cleanup retains device custody."
+  def cancel_desk_turn(id), do: Desk.cancel(id)
+
+  # Internal same-library custody API. The public start_session option allowlist
+  # intentionally does not accept desk_owner or caller-selected lifecycle hooks.
+  @doc false
+  def start_owned_desk_session(user, agent, opts, custody) do
+    with true <- Desk.live?(custody),
+         :ok <- validate_id(user, :user_id),
+         :ok <- validate_id(agent, :agent_id),
+         {:ok, config} <-
+           Diagnostics.observe(:desk_configuration, build_config(user, agent, opts)),
+         {:ok, config} <-
+           Diagnostics.observe(:desk_budget, bound_desk_budget(config, custody)) do
+      # Desk retains the startup receipt even when Session never starts. Direct
+      # internal callers still receive their own initially closed receipt.
+      closed =
+        case Map.get(custody, :closed) do
+          nil ->
+            cell = :atomics.new(1, [])
+            :atomics.put(cell, 1, 1)
+            cell
+
+          cell ->
+            cell
+        end
+
+      custody = Map.put(custody, :closed, closed)
+
+      case SessionSupervisor.start_session(Map.put(config, :desk_owner, custody)) do
+        {:ok, pid} ->
+          {:ok, Redacted.new(%{pid: pid, key: {user, agent}, closed: closed})}
+
+        {:error, :already_started} ->
+          {:error, :start_failed, :closed}
+
+        _ ->
+          {:error, :start_failed,
+           if(:atomics.get(closed, 1) == 1, do: :closed, else: :cleanup_pending)}
+      end
+    else
+      failure ->
+        Diagnostics.failure(:desk_admission, failure)
+        {:error, :start_failed, :closed}
+    end
+  end
+
+  # One Desk operation has a fixed outer permit, even when the ordinary voice
+  # Session allowance is longer. Reserving that whole allowance would prevent
+  # the next short turn after any consumption. Caller options may narrow these
+  # operator ceilings, but cannot raise them or extend the Desk permit.
+  defp bound_desk_budget(config, %{deadline: deadline}) when is_integer(deadline) do
+    with {:ok, session_ms} <- Config.session_budget_ms(),
+         {:ok, daily_ms} <- Config.daily_budget_ms(),
+         {:ok, desk_ms} <- Config.desk_timeout_ms(),
+         remaining_ms when remaining_ms > 0 <-
+           deadline - System.monotonic_time(:millisecond) do
+      reserved_ms =
+        Enum.min([
+          config.session_budget_ms,
+          config.daily_budget_ms,
+          session_ms,
+          daily_ms,
+          desk_ms,
+          remaining_ms
+        ])
+
+      {:ok,
+       %{
+         config
+         | session_budget_ms: reserved_ms,
+           daily_budget_ms: min(config.daily_budget_ms, daily_ms)
+       }}
+    else
+      _ -> {:error, :start_failed}
+    end
+  end
+
+  defp bound_desk_budget(_, _), do: {:error, :start_failed}
+
+  @doc false
+  def owned_desk_audio_turn(%Redacted{value: %{pid: pid, closed: closed}}, input, opts) do
+    result =
+      with {:ok, input} <- AudioTurn.new(input),
+           {:ok, operation} <- AudioTurn.options(opts),
+           do: Session.audio_turn(pid, input, operation)
+
+    case result do
+      {:error, reason} ->
+        {:error, reason, if(:atomics.get(closed, 1) == 1, do: :closed, else: :cleanup_pending)}
+
+      other ->
+        other
+    end
+  end
+
+  @doc false
+  def stop_owned_desk_session(%Redacted{value: %{pid: pid, closed: closed}}) do
+    _ = Session.stop(pid)
+    if :atomics.get(closed, 1) == 1, do: :ok, else: {:error, :cleanup_pending}
+  end
+
   # ---------------------------------------------------------------------------
   # Config construction — closed, duplicate-free option list
   # ---------------------------------------------------------------------------
 
   defp build_config(user_id, agent_id, opts) do
     with :ok <- validate_opts(opts),
+         {:ok, timeouts} <- Config.operation_timeouts(),
          {:ok, audio_mode} <- resolve_audio_mode(opts),
          {:ok, daily_ms} <- resolve_daily_budget_ms(opts),
          {:ok, session_ms} <- resolve_session_budget_ms(opts, daily_ms),
@@ -306,7 +426,20 @@ defmodule Arbor.Voice do
          {:ok, speech_output} <- resolve_speech_output(opts),
          {:ok, speech_output_timeout_ms} <- resolve_speech_output_timeout_ms(opts),
          {:ok, tool_router, router_source} <- resolve_tool_router(opts),
-         {:ok, tool_router_timeout_ms} <- resolve_tool_router_timeout_ms(opts),
+         {:ok, tool_router_timeout_ms} <-
+           resolve_operation_timeout(
+             opts,
+             :tool_router_timeout_ms,
+             timeouts.tool_router_timeout_ms,
+             Config.max_tool_router_timeout_ms()
+           ),
+         {:ok, audio_turn_timeout_ms} <-
+           resolve_operation_timeout(
+             opts,
+             :audio_turn_timeout_ms,
+             timeouts.audio_turn_timeout_ms,
+             Config.max_audio_turn_timeout_ms()
+           ),
          {:ok, tool_declarations} <- resolve_tool_declarations(tool_router, router_source),
          {:ok, progress_threshold_ms} <-
            resolve_progress_threshold_ms(opts, tool_router_timeout_ms),
@@ -315,7 +448,7 @@ defmodule Arbor.Voice do
          {:ok, trust_module} <- Config.trust_module(),
          {:ok, ai_module} <- Config.ai_module(),
          {:ok, agent_module, orchestrator_module} <-
-           resolve_coding_dispatch_collaborators(tool_declarations),
+           resolve_coding_dispatch_collaborators(tool_declarations, tool_router, audio_mode),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -343,6 +476,7 @@ defmodule Arbor.Voice do
          speech_output_timeout_ms: speech_output_timeout_ms,
          tool_router: tool_router,
          tool_router_timeout_ms: tool_router_timeout_ms,
+         audio_turn_timeout_ms: audio_turn_timeout_ms,
          tool_declarations: tool_declarations,
          progress_threshold_ms: progress_threshold_ms,
          session_token: session_token,
@@ -485,19 +619,15 @@ defmodule Arbor.Voice do
       {:error, :invalid_opts}
   end
 
-  defp resolve_tool_router_timeout_ms(opts) do
-    case Keyword.fetch(opts, :tool_router_timeout_ms) do
-      :error ->
-        case Config.tool_router_timeout_ms() do
-          {:ok, ms} -> {:ok, ms}
-          {:error, _} -> {:error, :invalid_config}
-        end
+  defp resolve_operation_timeout(opts, key, configured, maximum) do
+    # An explicit operator setting is a ceiling; absent that setting, retain
+    # bounded per-session overrides above the literal default.
+    ceiling = if Application.fetch_env(:arbor_voice, key) == :error, do: maximum, else: configured
 
-      {:ok, v} ->
-        case Config.validate_tool_router_timeout_ms(v) do
-          {:ok, ms} -> {:ok, ms}
-          {:error, _} -> {:error, :invalid_opts}
-        end
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, configured}
+      {:ok, value} when is_integer(value) and value > 0 and value <= ceiling -> {:ok, value}
+      _ -> {:error, :invalid_opts}
     end
   end
 
@@ -751,9 +881,20 @@ defmodule Arbor.Voice do
   end
 
   # Coding-dispatch collaborators are required only when the effective static
-  # catalog exposes dispatch_coding_task. Consult-only / empty routers keep the
-  # prior send_message-only agent validation and skip Orchestrator resolution.
-  defp resolve_coding_dispatch_collaborators(tool_declarations)
+  # catalog exposes dispatch_coding_task. Private audio consultation requires
+  # its dedicated Agent facade; generic/text routers retain their prior contract.
+  defp resolve_coding_dispatch_collaborators(
+         _tool_declarations,
+         Arbor.Voice.ToolRouter.PrivateConversation,
+         :pcm16
+       ) do
+    case Config.agent_module_with_consultation() do
+      {:ok, agent_module} -> {:ok, agent_module, nil}
+      _ -> {:error, :invalid_config}
+    end
+  end
+
+  defp resolve_coding_dispatch_collaborators(tool_declarations, _router, _audio_mode)
        when is_list(tool_declarations) do
     if catalog_exposes_dispatch_coding_task?(tool_declarations) do
       with {:ok, agent_module} <- Config.agent_module_with_dispatch(),

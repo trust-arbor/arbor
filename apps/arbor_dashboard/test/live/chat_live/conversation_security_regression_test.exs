@@ -1,6 +1,7 @@
 defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
   use Arbor.Dashboard.ConnCase, async: false
 
+  alias Arbor.Dashboard.Components.VoiceDeskComponent
   alias Arbor.Dashboard.Live.ChatLive
   alias Arbor.Dashboard.Live.ChatLive.Conversation
   import Phoenix.Component, only: [assign: 2]
@@ -73,6 +74,33 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     end
   end
 
+  defmodule VoiceAPI do
+    def start_desk_turn(user, agent, opts) do
+      {_state, owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+      send(owner, {:voice_start, user, agent, opts})
+      {:ok, String.duplicate("v", 43)}
+    end
+
+    def desk_turn_status(_id) do
+      {state, _owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+      Agent.get(state, &Map.get(&1, :voice_status, {:ok, %{terminal: false, state: :capture}}))
+    end
+
+    def cancel_desk_turn(id) do
+      {_state, owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+      send(owner, {:voice_cancel, id})
+      {:error, :cleanup_pending}
+    end
+  end
+
+  defmodule MultimediaAPI do
+    def request_microphone_permission do
+      {_state, owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+      send(owner, :microphone_permission_requested)
+      :authorized
+    end
+  end
+
   setup do
     keys = [:conversation_api, :conversation_test]
     previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_dashboard, &1)})
@@ -134,6 +162,224 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     assert opts[:session_token] == "proof"
     assert opts[:expected_engagement_id] == "eng_11111111111111111111111111111111"
     assert render(view) =~ "Message admitted"
+  end
+
+  test "security regression: local voice control uses socket proof and exact existing conversation",
+       %{conn: conn} do
+    enable_voice()
+    conn = voice_connection(conn)
+
+    conn =
+      Plug.Test.init_test_session(conn, %{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, html} = live(conn, "/chat?agent_id=agent_ui")
+    assert html =~ "Local voice check"
+    refute_received {:voice_start, _, _, _}
+    refute_received :microphone_permission_requested
+
+    render_click(view, "voice:loopback", %{
+      "user" => "human_attacker",
+      "session_token" => "forged",
+      "duration_ms" => "30000"
+    })
+
+    assert_received {:voice_start, "human_ui", "agent_ui", opts}
+    assert opts[:session_token] == "proof"
+    assert opts[:mode] == :loopback
+    assert opts[:duration_ms] == 3_000
+    assert opts[:expected_engagement_id] == "eng_11111111111111111111111111111111"
+    refute render(view) =~ ~s(value="proof")
+    assert has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+  end
+
+  test "security regression: remote browser cannot request host microphone or start capture", %{
+    conn: conn
+  } do
+    enable_voice()
+    conn = voice_connection(conn, {203, 0, 113, 8})
+
+    conn =
+      Plug.Test.init_test_session(conn, %{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, html} = live(conn, "/chat?agent_id=agent_ui")
+    refute html =~ "Local voice check"
+    render_click(view, "voice:talk", %{})
+    render_click(view, "voice:request-permission", %{})
+    refute_received {:voice_start, _, _, _}
+    refute_received :microphone_permission_requested
+  end
+
+  test "security regression: revoked chat authority blocks even explicit permission and recording",
+       %{conn: conn, state: state} do
+    enable_voice()
+    conn = voice_connection(conn)
+
+    conn =
+      Plug.Test.init_test_session(conn, %{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    Agent.update(state, &%{&1 | allowed: false})
+    render_click(view, "voice:talk", %{})
+    render_click(view, "voice:request-permission", %{})
+    refute_received {:voice_start, _, _, _}
+    refute_received :microphone_permission_requested
+  end
+
+  test "voice completion reloads canonical history without rendering status reply payload", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+    conn = voice_connection(conn)
+
+    conn =
+      Plug.Test.init_test_session(conn, %{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    render_click(view, "voice:talk", %{})
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_status,
+        {:ok,
+         %{
+           terminal: true,
+           state: :complete,
+           mode: :conversation,
+           error: nil,
+           result: %{reply: "unscoped-status-reply"}
+         }}
+      )
+    )
+
+    send(view.pid, {:voice_desk_poll, String.duplicate("v", 43)})
+    html = render(view)
+    assert html =~ "Voice turn complete"
+    refute html =~ "unscoped-status-reply"
+    refute has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+  end
+
+  test "security regression: revoked terminal result cannot be presented as successful completion",
+       %{conn: conn, state: state} do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    render_click(view, "voice:talk", %{})
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_status,
+        {:ok,
+         %{
+           terminal: true,
+           state: :complete,
+           mode: :conversation,
+           result: nil,
+           error: :conversation_unauthorized
+         }}
+      )
+    )
+
+    send(view.pid, {:voice_desk_poll, String.duplicate("v", 43)})
+    html = render(view)
+    assert html =~ "Conversation access changed"
+    refute html =~ "Voice turn complete"
+    refute has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+  end
+
+  test "security regression: lost scope retains disabled controls until positive desk termination",
+       %{state: state} do
+    enable_voice()
+    id = String.duplicate("v", 43)
+
+    socket =
+      socket()
+      |> VoiceDeskComponent.mount(%{address: {127, 0, 0, 1}}, %URI{host: "localhost"}, [])
+      |> Conversation.refresh()
+      |> assign(
+        voice_operation: %{id: id, user: "human_old", agent: "agent_ui", engagement: "old"}
+      )
+
+    pending = VoiceDeskComponent.poll(socket, id)
+    assert pending.assigns.voice_operation.retiring
+    assert_received {:voice_cancel, ^id}
+    still_pending = VoiceDeskComponent.poll(pending, id)
+    assert still_pending.assigns.voice_operation != nil
+
+    Agent.update(
+      state,
+      &Map.put(&1, :voice_status, {:ok, %{terminal: true, state: :cancelled, error: :cancelled}})
+    )
+
+    closed = VoiceDeskComponent.poll(still_pending, id)
+    assert closed.assigns.voice_operation == nil
+  end
+
+  test "security regression: a loopback proxy forwarding remote traffic cannot expose host audio",
+       %{conn: conn} do
+    enable_voice()
+    conn = voice_connection(conn, {127, 0, 0, 1}, [{"x-forwarded-for", "203.0.113.8"}])
+
+    conn =
+      Plug.Test.init_test_session(conn, %{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, html} = live(conn, "/chat?agent_id=agent_ui")
+    refute html =~ "Local voice check"
+    render_click(view, "voice:talk", %{})
+    refute_received {:voice_start, _, _, _}
+  end
+
+  test "security regression: missing or negative transport evidence denies voice but preserves chat",
+       %{conn: conn} do
+    enable_voice()
+
+    for headers <- [[], [{"x-arbor-voice-direct", "false"}]] do
+      connection =
+        conn
+        |> Plug.Conn.put_private(:live_view_connect_info, %{
+          peer_data: %{address: {127, 0, 0, 1}},
+          uri: %URI{host: "localhost"},
+          x_headers: headers
+        })
+        |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+      {:ok, view, html} = live(connection, "/chat?agent_id=agent_ui")
+      assert html =~ "owned private text"
+      refute html =~ "Local voice check"
+      render_click(view, "voice:talk", %{})
+      render_click(view, "voice:request-permission", %{})
+      refute_received {:voice_start, _, _, _}
+      refute_received :microphone_permission_requested
+    end
+  end
+
+  defp voice_connection(conn, address \\ {127, 0, 0, 1}, headers \\ []) do
+    Plug.Conn.put_private(conn, :live_view_connect_info, %{
+      peer_data: %{address: address},
+      uri: %URI{host: "localhost"},
+      x_headers: [{"x-arbor-voice-direct", "true"} | headers]
+    })
+  end
+
+  defp enable_voice do
+    for {key, value} <- [
+          voice_api: VoiceAPI,
+          multimedia_api: MultimediaAPI,
+          local_voice_controls: true
+        ] do
+      previous = Application.fetch_env(:arbor_dashboard, key)
+      on_exit(fn -> restore_env(:arbor_dashboard, key, previous) end)
+      Application.put_env(:arbor_dashboard, key, value)
+    end
   end
 
   test "security regression: missing forged expired and foreign proof cannot use direct query fallback" do

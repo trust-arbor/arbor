@@ -74,6 +74,92 @@ defmodule Arbor.Voice.AudioOperationTest do
     def meta(session), do: BlockingBackend.meta(session)
   end
 
+  test "audio turn reservations support bounded long allowances without extending physical send deadlines" do
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], @owner_opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+    now = System.monotonic_time(:millisecond)
+
+    assert {:ok, ticket} =
+             ResourceOwner.reserve_audio_turn(owner, format(), byte_size(@pcm), 330_000)
+
+    assert ticket.deadline_ms >= now + 329_000
+    {:ok, request} = ResourceOwner.handoff_audio(owner, ticket, @pcm)
+    assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
+    assert_receive {:audio_entered, worker, {:ok, effect_deadline}}, 1_000
+    assert effect_deadline < ticket.deadline_ms
+    assert (effect_deadline - System.monotonic_time(:millisecond)) in 1..1_000
+    send(worker, :finish_audio)
+    assert_receive :audio_callback_finished, 1_000
+    assert_receive {:voice_audio_turn_ready, ^ticket}, 1_000
+    assert :ok = ResourceOwner.cancel_audio(owner, ticket)
+    assert_receive {:audio_backend_closed, 1}, 1_000
+  end
+
+  test "audio reservation preserves an absolute deadline and rejects malformed or excessive budgets" do
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], @owner_opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+
+    for bad <- [
+          0,
+          -1,
+          330_001,
+          nil,
+          :infinity,
+          "100",
+          {:deadline, :invalid},
+          {:deadline, System.monotonic_time(:millisecond) - 1}
+        ] do
+      assert {:error, :invalid_audio} =
+               ResourceOwner.reserve_audio_turn(owner, format(), byte_size(@pcm), bad)
+    end
+
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    assert {:ok, ticket} =
+             ResourceOwner.reserve_audio_turn(
+               owner,
+               format(),
+               byte_size(@pcm),
+               {:deadline, deadline}
+             )
+
+    assert ticket.deadline_ms == deadline
+    assert :ok = ResourceOwner.cancel_audio(owner, ticket)
+    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :audio_cancelled}, :ok}
+  end
+
+  test "a queued audio reservation cannot renew an expired absolute deadline" do
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], @owner_opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+    :ok = :sys.suspend(owner)
+    parent = self()
+
+    resume =
+      spawn(fn ->
+        receive do
+          :resume ->
+            :sys.resume(owner)
+            send(parent, :owner_resumed)
+        end
+      end)
+
+    on_exit(fn -> if Process.alive?(resume), do: Process.exit(resume, :kill) end)
+    deadline = System.monotonic_time(:millisecond) + 50
+    Process.send_after(resume, :resume, 100)
+
+    assert {:error, :invalid_audio} =
+             ResourceOwner.reserve_audio_turn(
+               owner,
+               format(),
+               byte_size(@pcm),
+               {:deadline, deadline}
+             )
+
+    assert_receive :owner_resumed, 1_000
+    refute_receive {:audio_entered, _, _}
+    assert :ok = ResourceOwner.close(owner)
+  end
+
   test "malformed metadata after configure poisons the owner and cannot be reused" do
     {:ok, owner} =
       ResourceOwner.start(self(), CorruptConfiguredMetaBackend, [parent: self()], @owner_opts)
@@ -176,7 +262,11 @@ defmodule Arbor.Voice.AudioOperationTest do
     assert_receive {:audio_entered, worker, _}
     mon = Process.monitor(worker)
     assert_receive {:DOWN, ^mon, :process, ^worker, :killed}, 1_000
-    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :owner_timeout}, :ok}, 1_000
+
+    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :owner_timeout},
+                    {:error, :cleanup_pending}},
+                   1_000
+
     send(worker, :finish_audio)
     refute_receive :audio_callback_finished
   end
@@ -217,8 +307,8 @@ defmodule Arbor.Voice.AudioOperationTest do
     mon = Process.monitor(worker)
     assert {:ok, _} = Session.status(session)
     refute inspect(:sys.get_state(session), limit: :infinity) =~ @pcm
-    assert :ok = Arbor.Voice.stop_session(key)
-    assert Task.await(caller) == {:error, :session_stopped}
+    assert {:error, :cleanup_pending} = Arbor.Voice.stop_session(key)
+    assert Task.await(caller) == {:error, :cleanup_pending}
     assert_receive {:DOWN, ^mon, :process, ^worker, :killed}
     assert Enum.count(FakeLedger.calls(ledger), &match?({:consume, _, _, _}, &1)) == 1
   end
@@ -231,7 +321,7 @@ defmodule Arbor.Voice.AudioOperationTest do
     session_ref = Process.monitor(session)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 1_000
-    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 1_000
+    assert_receive {:DOWN, ^session_ref, :process, ^session, {:shutdown, :cleanup_pending}}, 1_000
     assert Enum.count(FakeLedger.calls(ledger), &match?({:consume, _, _, _}, &1)) == 1
   end
 
@@ -241,7 +331,7 @@ defmodule Arbor.Voice.AudioOperationTest do
     assert_receive {:audio_entered, worker, _}
     worker_ref = Process.monitor(worker)
     send(session, :hard_timeout)
-    assert Task.await(caller) == {:error, :budget_exhausted}
+    assert Task.await(caller) == {:error, :cleanup_pending}
     assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}
     assert Enum.count(FakeLedger.calls(ledger), &match?({:consume, _, _, _}, &1)) == 1
   end

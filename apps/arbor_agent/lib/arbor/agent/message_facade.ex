@@ -81,7 +81,7 @@ defmodule Arbor.Agent.MessageFacade do
           | :delivery_ambiguous
           | :delivery_failed
 
-  @type mode :: :text | :response
+  @type mode :: :text | :response | {:consultation, String.t()}
 
   # Elixir-native/RPC envelope binding. The exact typed envelope is hashed,
   # including metadata and timestamp; adapters must sign after setting sender_id.
@@ -113,7 +113,13 @@ defmodule Arbor.Agent.MessageFacade do
           required(:chat_response) => (term(), String.t(), keyword() -> term()),
           required(:chat_authenticated) => (term(), String.t(), term(), keyword() -> term()),
           required(:chat_response_authenticated) => (term(), String.t(), term(), keyword() ->
-                                                       term())
+                                                       term()),
+          optional(:consult_authenticated) => (term(),
+                                               String.t(),
+                                               term(),
+                                               String.t(),
+                                               keyword() ->
+                                                 term())
         }
 
   @doc false
@@ -151,6 +157,31 @@ defmodule Arbor.Agent.MessageFacade do
   def deliver_response(caller_id, target_agent_id, message, opts, collaborators)
       when is_map(collaborators) do
     deliver_with(caller_id, target_agent_id, message, opts, :response, collaborators)
+  end
+
+  @doc false
+  def consult(caller, target, message, parent_voice_id, opts) do
+    with true <-
+           is_binary(parent_voice_id) and byte_size(parent_voice_id) == 38 and
+             Regex.match?(~r/\Avoice_[0-9a-f]{32}\z/, parent_voice_id),
+         {:ok, timeout, {:session_token, _} = proof, fence_opts} <- validate_opts(opts),
+         :ok <- validate_principal_id(caller, :invalid_caller_id),
+         :ok <- validate_principal_id(target, :invalid_agent_id),
+         :ok <- validate_message_for_branch(message, caller, proof) do
+      authenticated_path(
+        caller,
+        target,
+        message,
+        timeout,
+        proof,
+        fence_opts,
+        {:consultation, parent_voice_id},
+        production_collaborators()
+      )
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :unauthorized}
+    end
   end
 
   @doc false
@@ -302,7 +333,8 @@ defmodule Arbor.Agent.MessageFacade do
       chat: &Arbor.Agent.Manager.chat/3,
       chat_response: &Arbor.Agent.Manager.chat_response/3,
       chat_authenticated: &Arbor.Agent.Manager.chat_authenticated/4,
-      chat_response_authenticated: &Arbor.Agent.Manager.chat_response_authenticated/4
+      chat_response_authenticated: &Arbor.Agent.Manager.chat_response_authenticated/4,
+      consult_authenticated: &Arbor.Agent.Manager.consult_authenticated/5
     }
   end
 
@@ -719,6 +751,15 @@ defmodule Arbor.Agent.MessageFacade do
 
           :response ->
             collaborators.chat_response_authenticated.(message, caller_id, receipt, opts)
+
+          {:consultation, parent_voice_id} ->
+            collaborators.consult_authenticated.(
+              message,
+              caller_id,
+              receipt,
+              parent_voice_id,
+              opts
+            )
         end
 
       case collaborators.recheck.(caller_id, target_agent_id, owner) do
@@ -790,6 +831,24 @@ defmodule Arbor.Agent.MessageFacade do
       :reject ->
         discard_receipt(collaborators, receipt)
         log_delivery_failure(:reply_contained_a_delivery_secret)
+        {:error, :delivery_failed}
+    end
+  end
+
+  defp admit_authenticated_result(
+         {:ok, reply},
+         {:consultation, _},
+         secrets,
+         collaborators,
+         receipt
+       )
+       when is_binary(reply) do
+    case refute_sensitive(reply, secrets) do
+      :ok ->
+        {:ok, reply}
+
+      :reject ->
+        discard_receipt(collaborators, receipt)
         {:error, :delivery_failed}
     end
   end

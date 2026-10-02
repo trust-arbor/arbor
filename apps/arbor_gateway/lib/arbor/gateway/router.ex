@@ -49,6 +49,7 @@ defmodule Arbor.Gateway.Router do
   # stuffing attempts never hit the limiter. (Skips /health so monitoring probes
   # aren't throttled.)
   plug(:rate_limit_unless_health)
+  plug(Arbor.Gateway.Chat.TerminalLogin)
   # M (codex authn.signed-request-body-parser-order): signed-request verification
   # must run BEFORE body parsing so the Ed25519 signature is verified over the
   # RAW request body and bound to exactly what downstream routes consume. The
@@ -138,6 +139,16 @@ defmodule Arbor.Gateway.Router do
   #   2. JWT bearer (OIDC, for human dashboard sessions)
   #   3. API key (shared secret, for machine-to-machine clients)
   defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+
+  defp require_auth_unless_health(
+         %{
+           method: "GET",
+           request_path: "/api/chat/socket",
+           private: %{terminal_conversation: true}
+         } = conn,
+         _opts
+       ),
+       do: conn
 
   defp require_auth_unless_health(
          %{assigns: %{signed_request_authenticated: true}} = conn,

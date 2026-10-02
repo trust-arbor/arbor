@@ -23,6 +23,10 @@ end
 
 config :logger, level: :warning
 
+# Keep tests deterministic and offline: tzdata's updater otherwise starts its
+# own HTTP poller and rewrites the bundled timezone data after application boot.
+config :tzdata, :autoupdate, :disabled
+
 # Don't start HTTP server or MCP client supervisor in tests
 config :arbor_gateway, start_server: false, mcp_client_enabled: false
 
@@ -170,6 +174,7 @@ config :arbor_memory,
 
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
+config :arbor_multimedia, start_children: false
 config :arbor_dashboard, local_dev_operator: true
 config :arbor_dashboard, auto_save_external_agent_keys: false
 

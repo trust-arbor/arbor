@@ -265,6 +265,27 @@ defmodule Arbor.Agent do
   end
 
   @doc """
+  Consult an agent internally on behalf of one source-owned Voice turn.
+
+  Requires a `:session_token` and the same caller, target and engagement gates as
+  `send_message/4`. Signed ordinary-message proofs do not authorize this separate
+  purpose. `parent_voice_id` is `voice_` followed by 32 lowercase hex digits.
+  The backend exchange remains durable and available to private memory, but is
+  not a second visible chat turn. Returns the bounded text-delivery vocabulary.
+  """
+  @spec consult_conversation(
+          String.t(),
+          String.t(),
+          Arbor.Contracts.Session.UserMessage.t(),
+          String.t(),
+          keyword()
+        ) ::
+          {:ok, String.t()} | {:error, Arbor.Agent.MessageFacade.error_reason()}
+  def consult_conversation(caller, target, message, parent_voice_id, opts \\ []) do
+    Arbor.Agent.MessageFacade.consult(caller, target, message, parent_voice_id, opts)
+  end
+
+  @doc """
   Send one `UserMessage` to a running agent and return a structured response.
 
   Text sibling: `send_message/4` (same auth/delivery branches, returns binary

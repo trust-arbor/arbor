@@ -87,11 +87,14 @@ defmodule Arbor.Voice.RealtimeBackend do
   been resolved, a backend MUST redact any subsequent connect-stage failure
   (returned or raised) to a stable, backend-specific atom rather than
   passing the raw reason through, since it could echo the resolved secret.
-  Returns `{:error, term()}` for these and other transport-level failures
-  (connection refused, TLS handshake failure, DNS) — that space is
-  genuinely open-ended and backend-specific.
+  A two-tuple `{:error, reason}` asserts no retained resources: either no handle
+  was acquired, or every acquired handle was positively closed. Return
+  `{:error, reason, :cleanup_pending}` if acquisition or rollback is uncertain.
+  The reason space includes connection refusal, TLS negotiation and DNS errors,
+  and remains backend-specific.
   """
-  @callback open(opts :: keyword()) :: {:ok, session()} | {:error, term()}
+  @callback open(opts :: keyword()) ::
+              {:ok, session()} | {:error, term()} | {:error, term(), :cleanup_pending}
 
   @doc """
   Applies or updates session-level configuration: system instructions, the
@@ -155,20 +158,25 @@ defmodule Arbor.Voice.RealtimeBackend do
   are expected to call this in a receive loop for the session's lifetime.
 
   Returns `{:error, :timeout}` when no event arrives within timeout,
+  or `{:error, :timeout, latest_session}` when partial decoding or control
+  events advanced the opaque handle. The owner retains that latest handle
+  while exposing the same nonterminal timeout to its caller.
   `{:error, :session_closed}` if the session was already closed, or
   `{:error, term()}` for transport failures (connection dropped, decode
   error).
   """
-  @callback recv(session(), timeout()) :: {:ok, session(), event()} | {:error, term()}
+  @callback recv(session(), timeout()) ::
+              {:ok, session(), event()} | {:error, :timeout, session()} | {:error, term()}
 
   @doc """
   Closes the backend connection and releases resources held for `session`.
-  Idempotent — closing an already-closed session is not an error. Always
-  returns :ok, even when the underlying close is imperfect, so callers
-  (VOICE-7's cleanup owner) can unconditionally release the session;
-  backends surface close problems via telemetry/logging instead.
+  Return `:ok` only after positive close, including an independently confirmed
+  already-closed connection. Return a bounded error for failed or uncertain
+  closure. Do not turn exceptions or worker disappearance into success: the
+  owner uses this result to retain or release exclusive cleanup custody.
   """
-  @callback close(session()) :: :ok
+  @callback close(session()) ::
+              :ok | {:error, :close_failed | :xai_close_failed | :cleanup_pending}
 
   @doc """
   Returns metadata about this session's backend: which backend

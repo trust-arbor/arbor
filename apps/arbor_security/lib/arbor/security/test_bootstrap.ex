@@ -74,7 +74,8 @@ defmodule Arbor.Security.TestBootstrap do
       Arbor.Security.AuditJournalOwner,
       Arbor.Security.CapabilityStore,
       Arbor.Security.Reflex.Registry,
-      Arbor.Security.DeliveryReceiptBroker
+      Arbor.Security.DeliveryReceiptBroker,
+      Arbor.Security.TerminalLogin
     ]
 
     # StateOwner and Broker share one token. Restarting only one half would
@@ -310,7 +311,8 @@ defmodule Arbor.Security.TestBootstrap do
            Arbor.Security.Config.audit_journal_start_opts(snapshot)},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},
-          {Arbor.Security.DeliveryReceiptBroker, []}
+          {Arbor.Security.DeliveryReceiptBroker, []},
+          {Arbor.Security.TerminalLogin, []}
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))
 

@@ -18,7 +18,10 @@ defmodule Arbor.Voice.ApplicationTest do
     Arbor.Voice.SpeechOutputTaskSupervisor,
     Arbor.Voice.ToolTaskSupervisor,
     Arbor.Voice.ResourceSupervisor,
-    Arbor.Voice.SessionSupervisor
+    Arbor.Voice.SessionSupervisor,
+    Arbor.Voice.DeskWorkerSupervisor,
+    Arbor.Voice.Presentation,
+    Arbor.Voice.DeskSupervisor
   ]
 
   test "the application supervisor is running" do

@@ -5,7 +5,7 @@ defmodule Arbor.Dashboard.Live.LandingLive do
   Shows links to sub-dashboards and basic system health information.
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
 
   import Arbor.Web.Components
 

@@ -843,7 +843,7 @@ defmodule Arbor.Comms do
   # engagement stamp and closed durable provenance envelope. Keeping this at
   # eight KiB guarantees a two KiB reserve above the assistant caller budget.
   @engagement_metadata_max_bytes 8192
-  @user_metadata_keys [:transport, :backend, :mode]
+  @user_metadata_keys [:transport, :backend, :mode, :voice_parent_id]
   # Shared atom source for assistant allowlist + all-or-none receipt keys.
   @delegation_receipt_key_atoms [
     :delegation_provider,
@@ -852,7 +852,7 @@ defmodule Arbor.Comms do
     :delegation_outcome
   ]
   @assistant_metadata_keys Enum.concat(
-                             [:transport, :backend, :mode],
+                             [:transport, :backend, :mode, :voice_parent_id],
                              @delegation_receipt_key_atoms
                            )
   # String form after allowlist bounding — derived so lists cannot drift.
@@ -899,7 +899,7 @@ defmodule Arbor.Comms do
   `:completed_at`). `content` must be nonblank, valid UTF-8, and within
   `#{@content_max_bytes}` bytes; it is converted to the existing text-block
   persistence shape (`[%{"type" => "text", "text" => content}]`). User
-  `metadata` admits only `"transport"`, `"backend"`, `"mode"`. Assistant
+  `metadata` admits only `"transport"`, `"backend"`, `"mode"`, `"voice_parent_id"`. Assistant
   metadata may additionally carry flat delegation receipt keys
   (`delegation_provider`, `delegation_task`, `delegation_task_id`,
   `delegation_outcome`) with field-specific bounds; those four keys are
@@ -907,6 +907,9 @@ defmodule Arbor.Comms do
   subset is rejected before persistence. Delegation keys supplied on the
   user entry are dropped. `"utterance_end_at"` is derived server-side from
   the user entry's `:sent_at` and cannot be supplied by the caller.
+  Optional `voice_parent_id` links both entries to one Voice operation; it must
+  match on both entries and follow the `voice_` plus 32 lowercase hex grammar.
+  This correlation label does not change entry type, visibility or authority.
   Returns an explicit error for invalid input or a failed append; never
   reports success after a failed append. `opts[:persistence]` may inject a
   test double implementing the `Arbor.Persistence` session functions.
@@ -919,6 +922,7 @@ defmodule Arbor.Comms do
          :ok <- validate_id(engagement_id, :engagement_id),
          {:ok, user_attrs} <- build_turn_entry_attrs(:user, user_entry),
          {:ok, assistant_attrs} <- build_turn_entry_attrs(:assistant, assistant_entry),
+         :ok <- validate_voice_parent_link(user_attrs.metadata, assistant_attrs.metadata),
          :ok <- validate_chronological(user_attrs.timestamp, assistant_attrs.timestamp),
          {:ok, user_taint, assistant_taint} <- engagement_turn_taints(),
          {:ok, stamped_user} <-
@@ -1190,6 +1194,12 @@ defmodule Arbor.Comms do
   defp metadata_keys_for(:user), do: @user_metadata_keys
   defp metadata_keys_for(:assistant), do: @assistant_metadata_keys
 
+  defp validate_voice_parent_link(user_metadata, assistant_metadata) do
+    if Map.get(user_metadata, "voice_parent_id") == Map.get(assistant_metadata, "voice_parent_id"),
+      do: :ok,
+      else: {:error, :invalid_voice_parent_link}
+  end
+
   # Public-boundary integrity: assistant delegation receipt keys are all-or-none.
   # Zero keys (no receipt) and exactly four keys (complete receipt) are admitted;
   # any nonempty proper subset fails before field validation and persistence.
@@ -1219,6 +1229,16 @@ defmodule Arbor.Comms do
   # caller-supplied metadata string BEFORE it is scanned for UTF-8 validity or
   # folded into the whole-map canonical JSON size check below, so
   # an oversized single value never reaches either scan.
+  defp validate_metadata_value(_kind, "voice_parent_id", value)
+       when is_binary(value) and byte_size(value) == 38 do
+    if Regex.match?(~r/\Avoice_[0-9a-f]{32}\z/, value),
+      do: :ok,
+      else: {:error, :invalid_metadata_value}
+  end
+
+  defp validate_metadata_value(_kind, "voice_parent_id", _),
+    do: {:error, :invalid_metadata_value}
+
   defp validate_metadata_value(_kind, key, v)
        when key in ["transport", "backend", "mode"] and is_binary(v) do
     if byte_size(v) <= @metadata_value_max_bytes and String.valid?(v) do

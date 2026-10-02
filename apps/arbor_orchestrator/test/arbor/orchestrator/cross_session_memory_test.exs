@@ -7,8 +7,9 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
 
   The fix (90450e66) added `session.recalled_memories` to the `build_prompt`
   node's `context_keys` in `specs/pipelines/session/turn.dot`, and taught
-  `SessionLlm.BuildPrompt`'s `turn` mode to inject those recalled memories as a
-  leading "## Relevant memories from past sessions" system-context section.
+  `SessionLlm.BuildPrompt`'s `turn` mode to inject those recalled memories.
+  They now appear under "## Retrieved memories" inside the explicitly labeled
+  Arbor context of the current user message, preserving the stable system prefix.
   Before the fix, recalled memory reached only the heartbeat — the agent
   remembered while idle but forgot mid-conversation.
 

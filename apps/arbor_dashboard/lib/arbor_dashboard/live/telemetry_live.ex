@@ -9,7 +9,7 @@ defmodule Arbor.Dashboard.Live.TelemetryLive do
   to `TelemetryComponent` (socket-first delegate) and `TelemetryCore` (pure CRC).
   """
 
-  use Phoenix.LiveView
+  use Phoenix.LiveView, log: false
   use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components

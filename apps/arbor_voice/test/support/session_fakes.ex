@@ -988,6 +988,13 @@ defmodule Arbor.Voice.Test.SessionFakes do
         {:ok, {:error, reason}} ->
           {:error, reason}
 
+        {:ok, {:hold_recv, parent, barrier}} ->
+          send(parent, {:provider_recv_held, barrier, self()})
+
+          receive do
+            {:release_recv, ^barrier} -> {:error, :timeout}
+          end
+
         {:ok, event} ->
           {:ok, session, event}
 

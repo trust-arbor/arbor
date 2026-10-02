@@ -130,6 +130,161 @@ defmodule Arbor.Persistence.SessionTranscriptTest do
     end
   end
 
+  test "consultation pairs stay durable but canonical readers exclude them before limits and heads",
+       ctx do
+    append(ctx, pair("user", "question", "answer"))
+    append(ctx, pair("consultation", "question", "internal answer"))
+    append(ctx, pair("user", "question", "final answer"))
+    append(ctx, pair("consultation", "question", "later internal answer"))
+
+    assert Repo.aggregate(from(e in SessionEntry, where: e.session_id == ^ctx.session.id), :count) ==
+             8
+
+    assert {:ok, first} = Persistence.read_conversation_page(ctx.agent, @engagement, limit: 2)
+    assert Enum.map(first.entries, & &1.entry_ordinal) == [1, 2]
+    assert %{head: 6, cursor: 2, has_more: true} = first
+
+    assert {:ok, last} =
+             Persistence.read_conversation_page(ctx.agent, @engagement,
+               after: first.cursor,
+               through: first.head,
+               limit: 2
+             )
+
+    assert Enum.map(last.entries, & &1.entry_ordinal) == [5, 6]
+    assert %{head: 6, cursor: 6, has_more: false} = last
+
+    display =
+      Persistence.load_recent_session_messages(ctx.session.session_id,
+        engagement_id: @engagement,
+        limit: 2
+      )
+
+    assert Enum.map(display, & &1.entry_ordinal) == [5, 6]
+    assert Enum.map(display, & &1.content) == ["question", "final answer"]
+    assert {:ok, %{entries: recent, head: 6, cursor: 6, truncated: true}} = read(ctx, limit: 2)
+    assert Enum.map(recent, & &1.entry_ordinal) == [5, 6]
+    assert {:ok, %{entries: [], head: 6, cursor: 6, has_more: false}} = read(ctx, after: 6)
+  end
+
+  test "private-memory recovery includes consultation roles and preserves source proof metadata",
+       ctx do
+    proof = %{"descriptor" => %{"source_id" => "owned-source"}, "stamp" => %{"opaque" => true}}
+
+    consultation =
+      pair("consultation", "private question", "private answer")
+      |> Enum.map(&put_in(&1, [:metadata, "private_memory_source"], proof))
+
+    append(ctx, pair("user", "visible question", "visible answer"))
+    append(ctx, consultation)
+    rows = Persistence.load_private_memory_source_messages(ctx.session.session_id, ctx.agent)
+    assert Enum.map(rows, & &1.entry_ordinal) == [1, 2, 3, 4]
+    assert Enum.map(rows, & &1.role) == [:user, :assistant, :user, :assistant]
+
+    recent =
+      Persistence.load_private_memory_source_messages(ctx.session.session_id, ctx.agent, limit: 2)
+
+    assert Enum.map(recent, & &1.entry_ordinal) == [3, 4]
+    assert Enum.map(recent, & &1.content) == ["private question", "private answer"]
+    assert Enum.all?(recent, &(&1.metadata["private_memory_source"] == proof))
+
+    assert Enum.all?(
+             recent,
+             &(&1.metadata["voice_parent_id"] == "voice_" <> String.duplicate("a", 32))
+           )
+  end
+
+  test "security regression: private-memory recovery checks the exact session owner", ctx do
+    append(ctx, pair("consultation", "private question", "private answer"))
+
+    assert {:error, :private_memory_source_owner_mismatch} =
+             Persistence.load_private_memory_source_messages(ctx.session.session_id, "foreign")
+
+    Repo.update_all(from(s in Session, where: s.id == ^ctx.session.id),
+      set: [agent_id: "foreign"]
+    )
+
+    assert {:error, :private_memory_source_owner_mismatch} =
+             Persistence.load_private_memory_source_messages(ctx.session.session_id, ctx.agent)
+
+    assert [] = Persistence.load_private_memory_source_messages("absent-owned-session", ctx.agent)
+  end
+
+  test "private-memory recovery rejects open options and distinguishes unavailable storage",
+       ctx do
+    for opts <- [
+          [limit: 0],
+          [limit: 1001],
+          [limit: nil],
+          [limit: 1.0],
+          [limit: 1, limit: 2],
+          [entry_types: ["consultation"]],
+          [after: 0],
+          %{},
+          [{"limit", 1}]
+        ] do
+      assert {:error, :invalid_private_memory_source_options} =
+               Persistence.load_private_memory_source_messages(
+                 ctx.session.session_id,
+                 ctx.agent,
+                 opts
+               )
+    end
+
+    for {session_id, agent_id} <- [
+          {nil, ctx.agent},
+          {"", ctx.agent},
+          {ctx.session.session_id, " "}
+        ] do
+      assert {:error, :invalid_private_memory_source_scope} =
+               Persistence.load_private_memory_source_messages(session_id, agent_id)
+    end
+
+    previous = Repo.put_dynamic_repo(:unavailable_private_memory_source_repo)
+
+    try do
+      assert {:error, :private_memory_source_unavailable} =
+               Persistence.load_private_memory_source_messages(ctx.session.session_id, ctx.agent)
+    after
+      Repo.put_dynamic_repo(previous)
+    end
+  end
+
+  test "client metadata cannot hide ordinary pairs and internal-only history has an empty cursor",
+       ctx do
+    append(ctx, pair("consultation", "internal", "internal"))
+    assert {:ok, %{entries: [], head: 0, cursor: 0}} = read(ctx)
+
+    assert {:ok, %{entries: [], head: 0, cursor: 0}} =
+             Persistence.read_conversation_page(ctx.agent, @engagement)
+
+    ordinary =
+      pair("user", "same", "same")
+      |> Enum.map(fn row ->
+        update_in(row, [:metadata], fn metadata ->
+          Map.merge(metadata, %{"internal" => true, "entry_type" => "consultation"})
+        end)
+      end)
+
+    append(ctx, ordinary)
+    assert {:ok, %{entries: entries, head: 4, cursor: 4}} = read(ctx)
+    assert Enum.map(entries, & &1.entry_ordinal) == [3, 4]
+
+    assert Enum.map(entries, & &1.content) == [
+             entry(@engagement, "same").content,
+             entry(@engagement, "same").content
+           ]
+  end
+
+  defp pair(type, user, assistant) do
+    for {role, content} <- [{"user", user}, {"assistant", assistant}] do
+      entry(@engagement, content)
+      |> Map.put(:role, role)
+      |> Map.put(:entry_type, if(type == "consultation", do: type, else: role))
+      |> put_in([:metadata, "voice_parent_id"], "voice_" <> String.duplicate("a", 32))
+    end
+  end
+
   defp read(ctx, opts \\ []),
     do: Persistence.read_session_transcript(ctx.session.session_id, ctx.agent, @engagement, opts)
 

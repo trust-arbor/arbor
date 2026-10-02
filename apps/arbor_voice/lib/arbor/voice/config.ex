@@ -48,8 +48,12 @@ defmodule Arbor.Voice.Config do
   @default_speech_output_timeout_ms 100
   @max_speech_output_timeout_ms 250
   # Tool-router timeout (VP-04E3): source-owned hard ceiling.
-  @default_tool_router_timeout_ms 5_000
-  @max_tool_router_timeout_ms 30_000
+  @default_tool_router_timeout_ms 60_000
+  @max_tool_router_timeout_ms 300_000
+  @default_audio_turn_timeout_ms 90_000
+  @max_audio_turn_timeout_ms 330_000
+  @default_desk_timeout_ms 120_000
+  @max_desk_timeout_ms 360_000
   # Progress cue threshold (VP-05B / VOICE-11): source-owned hard ceiling.
   @default_progress_threshold_ms 2_000
   @max_progress_threshold_ms 30_000
@@ -264,16 +268,16 @@ defmodule Arbor.Voice.Config do
   # Tool-router timeout (VP-04E3)
   # ---------------------------------------------------------------------------
 
-  @doc "Literal default tool-router timeout, in milliseconds (5000)."
+  @doc "Literal default tool-router timeout, in milliseconds (60000)."
   @spec default_tool_router_timeout_ms() :: pos_integer()
   def default_tool_router_timeout_ms, do: @default_tool_router_timeout_ms
 
-  @doc "Hard ceiling for tool-router timeout, in milliseconds (30000)."
+  @doc "Hard ceiling for tool-router timeout, in milliseconds (300000)."
   @spec max_tool_router_timeout_ms() :: pos_integer()
   def max_tool_router_timeout_ms, do: @max_tool_router_timeout_ms
 
   @doc """
-  Pure validation: a positive-integer tool-router timeout at most 30_000 ms.
+  Pure validation: a positive-integer tool-router timeout at most 300_000 ms.
   Source-owned hard ceiling; not bypassable via Application env.
   """
   @spec validate_tool_router_timeout_ms(term()) ::
@@ -287,7 +291,7 @@ defmodule Arbor.Voice.Config do
   @doc """
   Validated tool-router timeout in milliseconds.
 
-  Defaults to 5000 ms. A present but malformed Application config value fails
+  Defaults to 60000 ms. A present but malformed Application config value fails
   closed as `{:error, :invalid_config}`.
   """
   @spec tool_router_timeout_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
@@ -298,6 +302,63 @@ defmodule Arbor.Voice.Config do
   end
 
   # ---------------------------------------------------------------------------
+  @doc "Default whole-audio-turn allowance, including consultation and finalization (90000 ms)."
+  @spec default_audio_turn_timeout_ms() :: pos_integer()
+  def default_audio_turn_timeout_ms, do: @default_audio_turn_timeout_ms
+  @doc "Source-owned maximum audio-turn allowance (330000 ms)."
+  @spec max_audio_turn_timeout_ms() :: pos_integer()
+  def max_audio_turn_timeout_ms, do: @max_audio_turn_timeout_ms
+  @doc "Validate a positive timeout within its source-owned hard ceiling."
+  @spec validate_audio_turn_timeout_ms(term()) :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def validate_audio_turn_timeout_ms(value)
+      when is_integer(value) and value > 0 and value <= @max_audio_turn_timeout_ms,
+      do: {:ok, value}
+
+  def validate_audio_turn_timeout_ms(_), do: {:error, :invalid_config}
+  @spec audio_turn_timeout_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def audio_turn_timeout_ms do
+    :arbor_voice
+    |> Application.get_env(:audio_turn_timeout_ms, @default_audio_turn_timeout_ms)
+    |> validate_audio_turn_timeout_ms()
+  end
+
+  @doc "Default capture-to-presentation Desk allowance (120000 ms)."
+  @spec default_desk_timeout_ms() :: pos_integer()
+  def default_desk_timeout_ms, do: @default_desk_timeout_ms
+  @doc "Source-owned maximum Desk allowance (360000 ms)."
+  @spec max_desk_timeout_ms() :: pos_integer()
+  def max_desk_timeout_ms, do: @max_desk_timeout_ms
+  @doc "Validate a positive timeout within its source-owned hard ceiling."
+  @spec validate_desk_timeout_ms(term()) :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def validate_desk_timeout_ms(value)
+      when is_integer(value) and value > 0 and value <= @max_desk_timeout_ms,
+      do: {:ok, value}
+
+  def validate_desk_timeout_ms(_), do: {:error, :invalid_config}
+  @spec desk_timeout_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def desk_timeout_ms do
+    :arbor_voice
+    |> Application.get_env(:desk_timeout_ms, @default_desk_timeout_ms)
+    |> validate_desk_timeout_ms()
+  end
+
+  @doc false
+  @spec operation_timeouts() ::
+          {:ok,
+           %{
+             tool_router_timeout_ms: pos_integer(),
+             audio_turn_timeout_ms: pos_integer(),
+             desk_timeout_ms: pos_integer()
+           }}
+          | {:error, :invalid_config}
+  def operation_timeouts do
+    with {:ok, tool} <- tool_router_timeout_ms(),
+         {:ok, audio} <- audio_turn_timeout_ms(),
+         {:ok, desk} <- desk_timeout_ms() do
+      {:ok, %{tool_router_timeout_ms: tool, audio_turn_timeout_ms: audio, desk_timeout_ms: desk}}
+    end
+  end
+
   # Progress cue threshold (VP-05B / VOICE-11)
   # ---------------------------------------------------------------------------
 
@@ -405,6 +466,27 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:agent_module, Arbor.Agent)
     |> validate_agent_module()
+  end
+
+  @doc "Agent facade for private audio consultation, separate from ordinary chat delivery."
+  def agent_module_with_consultation do
+    :arbor_voice
+    |> Application.get_env(:agent_module, Arbor.Agent)
+    |> validate_agent_module_with_consultation()
+  end
+
+  @doc "Require the authenticated consultation API in addition to ordinary messaging."
+  def validate_agent_module_with_consultation(mod) do
+    with {:ok, mod} <- validate_agent_module(mod),
+         true <- {:consult_conversation, 5} in mod.module_info(:exports) do
+      {:ok, mod}
+    else
+      _ -> {:error, :invalid_config}
+    end
+  rescue
+    _ -> {:error, :invalid_config}
+  catch
+    _, _ -> {:error, :invalid_config}
   end
 
   @doc """
@@ -522,4 +604,17 @@ defmodule Arbor.Voice.Config do
   end
 
   defp validate_facade_module(_mod, _required_exports), do: {:error, :invalid_config}
+
+  @doc false
+  def desk_multimedia_module,
+    do: Application.get_env(:arbor_voice, :desk_multimedia_module, Arbor.Multimedia)
+
+  @doc false
+  def desk_voice_module, do: Application.get_env(:arbor_voice, :desk_voice_module, Arbor.Voice)
+
+  @doc false
+  def desk_comms_module, do: Application.get_env(:arbor_voice, :desk_comms_module, Arbor.Comms)
+
+  @doc false
+  def desk_session_options, do: Application.get_env(:arbor_voice, :desk_session_options, [])
 end

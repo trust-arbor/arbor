@@ -939,21 +939,25 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       end
     end)
 
-    {:ok, session} =
-      Session.start_link(
-        session_id: session_id,
-        agent_id: ctx.agent_id,
-        turn_dot: turn_path,
-        signer: ctx.agent_signer,
-        config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
-        adapters: %{
-          read_session_transcript: &empty_transcript/4,
-          ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
-          append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
-        }
+    session =
+      start_supervised!(
+        {Session,
+         [
+           session_id: session_id,
+           agent_id: ctx.agent_id,
+           turn_dot: turn_path,
+           signer: ctx.agent_signer,
+           config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
+           adapters: %{
+             read_session_transcript: &empty_transcript/4,
+             ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
+             append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
+           }
+         ]},
+        id: make_ref(),
+        restart: :temporary
       )
 
-    on_exit(fn -> if Process.alive?(session), do: GenServer.stop(session) end)
     assert {:ok, _stats} = before_stats = Memory.knowledge_stats(ctx.agent_id)
     assert {:ok, %{entry_count: 1}} = before_index = Memory.index_stats(ctx.agent_id)
 
@@ -2022,6 +2026,152 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   @tag :conversation_convergence
+  @tag :voice_consultation
+  test "security regression: consultation stays internal while ordinary queued input cannot be steered into it",
+       ctx do
+    session = completion_barrier_session!(ctx)
+    voice_id = "voice_" <> String.duplicate("a", 32)
+    receipt = issue_receipt!(ctx.human_id, ctx.resource)
+    message = user_message!(ctx.human_id, "internal consultation request")
+
+    task =
+      Task.async(fn ->
+        Session.consult_authenticated(session, message, receipt, voice_id, 15_000)
+      end)
+
+    assert_receive {:completion_model_blocked, model, token}, 5_000
+    assert_receive {:completion_transcript_read, []}, 1_000
+    active = :sys.get_state(session)
+    assert active.consultation.turn_id == active.turn_authority.turn_id
+    assert Session.get_state(session).consultation == nil
+
+    busy_receipt = issue_receipt!(ctx.human_id, ctx.resource)
+
+    assert {:error, :unauthenticated} =
+             Session.consult_authenticated(session, message, busy_receipt, voice_id, 1_000)
+
+    assert {:error, _} = Security.consume_delivery_receipt(busy_receipt, ctx.resource, :chat)
+
+    ordinary_receipt = issue_receipt!(ctx.human_id, ctx.resource)
+
+    ordinary_message = %{
+      user_message!(ctx.human_id, "ordinary queued request")
+      | transport_metadata: %{purpose: "consultation", voice_parent_id: voice_id}
+    }
+
+    ordinary =
+      Task.async(fn ->
+        Session.send_authenticated_message(session, ordinary_message, ordinary_receipt, 15_000)
+      end)
+
+    await_consultation_queue!(session, 100)
+
+    assert :none =
+             Session.take_steering(
+               session,
+               active.turn_token,
+               active.current_engagement_id,
+               {make_ref(), 1}
+             )
+
+    assert length(:sys.get_state(session).turn_queue) == 1
+    send(model, {:release_completion_model, token})
+    assert {:ok, response} = Task.await(task, 10_000)
+    assert response.content == "private completion sentinel"
+    assert_receive {:completion_append, _, [user, assistant]}, 1_000
+    assert Enum.map([user, assistant], & &1.entry_type) == ["consultation", "consultation"]
+    assert Enum.map([user, assistant], & &1.role) == ["user", "assistant"]
+    assert Enum.all?([user, assistant], &(&1.metadata["voice_parent_id"] == voice_id))
+    refute_receive {:completion_success, _}, 50
+
+    assert_receive {:completion_model_blocked, next_model, next_token}, 5_000
+    assert_receive {:completion_transcript_read, [after: 0]}, 1_000
+    next = :sys.get_state(session)
+    assert next.consultation == nil
+    assert next.messages == []
+    assert next.compactor == nil
+    refute inspect(next.transcript_sync) =~ "internal consultation request"
+    send(next_model, {:release_completion_model, next_token})
+    assert {:ok, _} = Task.await(ordinary, 10_000)
+    assert_receive {:completion_append, _, [normal_user, normal_assistant]}, 1_000
+    assert [normal_user.entry_type, normal_assistant.entry_type] == ["user", "assistant"]
+    refute Map.has_key?(normal_user.metadata, "voice_parent_id")
+    assert_receive {:completion_success, _}, 1_000
+    final = Session.get_state(session)
+    assert length(final.messages) == 2
+    refute inspect(final.messages) =~ "internal consultation request"
+    assert inspect(final.messages) =~ "ordinary queued request"
+    assert final.consultation == nil
+  end
+
+  @tag :voice_consultation
+  test "security regression: interrupted consultation preserves internal partial evidence and clears purpose",
+       ctx do
+    session = completion_barrier_session!(ctx)
+    voice_id = "voice_" <> String.duplicate("c", 32)
+    receipt = issue_receipt!(ctx.human_id, ctx.resource)
+
+    task =
+      Task.async(fn ->
+        Session.consult_authenticated(
+          session,
+          user_message!(ctx.human_id, "interrupted consultation"),
+          receipt,
+          voice_id,
+          15_000
+        )
+      end)
+
+    assert_receive {:completion_model_blocked, _model, _token}, 5_000
+    observer = self()
+
+    {:ok, subscription} =
+      Signals.subscribe(
+        "agent.*",
+        fn signal ->
+          if signal.type in [:stream_delta, :stream_finish] and
+               signal.data[:agent_id] == ctx.agent_id,
+             do: send(observer, {:consultation_stream_signal, signal})
+
+          :ok
+        end,
+        async: false
+      )
+
+    on_exit(fn -> Signals.unsubscribe(subscription) end)
+    active = :sys.get_state(session)
+    stream_state = %{active | config: Map.put(active.config, "stream", true)}
+    callback = Builders.build_engine_opts(stream_state, %{})[:on_stream]
+    callback.(%{type: :delta, data: %{text: "partial internal answer"}})
+    callback.(%{type: :finish})
+    assert :ok = Session.cancel_turn(session)
+    assert {:error, _} = Task.await(task, 5_000)
+    assert_receive {:completion_append, _, [user, assistant]}, 2_000
+    assert [user.entry_type, assistant.entry_type] == ["consultation", "consultation"]
+    assert assistant.metadata["voice_parent_id"] == voice_id
+    assert inspect(assistant.content) =~ "partial internal answer"
+    state = Session.get_state(session)
+    assert state.messages == []
+    assert state.consultation == nil
+    refute state.turn_in_flight
+    refute_receive {:completion_success, _}, 50
+    refute_receive {:consultation_stream_signal, _}, 50
+  end
+
+  defp await_consultation_queue!(session, remaining) when remaining > 0 do
+    case :sys.get_state(session).turn_queue do
+      [_] ->
+        :ok
+
+      [] ->
+        Process.sleep(5)
+        await_consultation_queue!(session, remaining - 1)
+    end
+  end
+
+  defp await_consultation_queue!(_, 0), do: flunk("ordinary message did not enter the queue")
+
+  @tag :conversation_convergence
   test "authenticated completion control persists and publishes while binding remains current",
        ctx do
     session = completion_barrier_session!(ctx)
@@ -2225,34 +2375,48 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
                async: false
              )
 
-    assert {:ok, session} =
-             Session.start_link(
-               session_id: session_id,
-               agent_id: agent_id,
-               turn_dot: path,
-               signer: ctx.agent_signer,
-               config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
-               adapters: %{
-                 read_session_transcript: &empty_transcript/4,
-                 ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
-                 append_session_entries: fn _id, entries ->
-                   send(recipient, {:completion_append, self(), entries})
+    session =
+      start_supervised!(
+        {Session,
+         [
+           session_id: session_id,
+           agent_id: agent_id,
+           turn_dot: path,
+           signer: ctx.agent_signer,
+           config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
+           adapters: %{
+             read_session_transcript: fn id, agent, engagement, read_opts ->
+               send(recipient, {:completion_transcript_read, read_opts})
 
-                   if block_append do
-                     receive do
-                       :release_completion_append -> :ok
-                     after
-                       5_000 -> raise "completion append barrier timed out"
-                     end
-                   end
+               # The internal consultation writes no canonical rows. Only
+               # its unchanged zero cursor is a valid continuation here.
+               case read_opts do
+                 [] -> empty_transcript(id, agent, engagement, [])
+                 [after: 0] -> empty_transcript(id, agent, engagement, [])
+                 _ -> {:error, :invalid_transcript_options}
+               end
+             end,
+             ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
+             append_session_entries: fn _id, entries ->
+               send(recipient, {:completion_append, self(), entries})
 
-                   {:ok, 2}
+               if block_append do
+                 receive do
+                   :release_completion_append -> :ok
+                 after
+                   5_000 -> raise "completion append barrier timed out"
                  end
-               }
-             )
+               end
+
+               {:ok, 2}
+             end
+           }
+         ]},
+        id: make_ref(),
+        restart: :temporary
+      )
 
     on_exit(fn ->
-      if Process.alive?(session), do: GenServer.stop(session)
       Signals.unsubscribe(subscription)
     end)
 

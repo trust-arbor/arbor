@@ -92,9 +92,54 @@ BEAM compile-source paths are checked against the exact candidate refs.
 Neither candidate is published or adopted into Arbor; active pins and the Linux
 baseline remain unchanged. No physical audio is enabled by this work.
 
-The next implementation slice is bounded device enumeration. Dormant
-NativeSession activation and actual capture/playback integration remain open.
-None of the fake-native results establish physical audio behavior.
+The following section supersedes that slice's implementation handoff. None of
+the fake-native results establish physical audio behavior.
+
+## Joined local driver and test entry points — 2026-09-27
+
+PortAudio candidate `c4e85f4d9ec4e080a7713f5f9878c67a658997c1` adds bounded
+enumeration with checked initialization/termination and retained uncertain native
+custody. The final host qualification passes 824 ASan/UBSan assertions and 104
+sealed Elixir tests. Actual Bundlex builds also pass; the device target uses its
+existing Unifex headers without adding a Membrane native dependency. Core remains
+`c2e9c7aff031dd600d2318b72193a4825b0da95f`.
+
+The Arbor candidate now implements dormant NativeSession handoff, sensitive
+capture/playback pipelines, the shared revocation cell, exact element custody and
+positive cleanup joins. Thirteen sealed tests exercise actual Core and plugin
+Elixir callbacks behind fake native modules. Positive resource closure and media
+completion are separate: an uncertain media ACK cannot become successful playback
+merely because the native owner later closes.
+
+The same candidate adds a bounded authenticated Desk turn, CLI commands and a
+localhost-only private-chat control. It records at 16 kHz and plays only guarded
+24 kHz provider output; loopback retains the captured format and never contacts a
+provider. A purpose-bound signing exchange produces a 90-second bearer scoped to
+the exact target and chat action. Browser actions use the existing signed-in
+conversation and pin its engagement. The initial UI has screen-only progress cues
+and fallback. See [the hands-on guide](VOICE_LOCAL_TEST_GUIDE.md).
+
+Fresh contained Linux full-umbrella compilation and actual NIF/SQLite loading pass
+against these dependency sources, with no network or sound devices. The prepared
+baseline lock is `0cbd6de1d6403587bb2e561713161d5e37306a0582ae7561353494541df54d99`;
+tree is `427d1b20fa9eaf858ab85c9a76e842963f0df6b98975e0b63087dd2a00f66b16`.
+Evidence is preserved in `tmp/preserved/voice-native-enumeration-20260927/` and
+`tmp/preserved/voice-native-enumeration-admission-20260927/`.
+
+The root-owned baseline is prepared; the new fork revisions remain unpublished.
+A local preview can run the sole managed daemon from the candidate worktree with
+the explicit root-owned candidate config after full runtime admission. This keeps
+the main checkout and global active config unchanged. Driver opt-in remains
+explicit; it does not query permission or start recording.
+
+The sealed suite now includes six joined Desk cases alongside the thirteen native
+checks: success, speech filtering, cancellation during capture and presentation,
+revocation before provider startup, and provider-receive cancellation followed by
+retry. Provider startup and retirement tests require authenticated positive close
+receipts, including failures delivered after the resource owner has exited.
+Manual microphone, speaker, provider and latency evidence remains open. Local
+source qualification does not establish that a fresh remote checkout can fetch
+the unpublished dependency pins.
 
 ## Minimal host structure
 

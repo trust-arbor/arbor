@@ -746,6 +746,37 @@ defmodule Arbor.Agent.Manager do
     end
   end
 
+  @doc false
+  def consult_authenticated(
+        %Arbor.Contracts.Session.UserMessage{} = message,
+        sender,
+        %Arbor.Contracts.Security.DeliveryReceipt{} = receipt,
+        parent_voice_id,
+        opts
+      )
+      when is_binary(sender) and is_list(opts) do
+    agent_id = Keyword.get(opts, :agent_id)
+    timeout = Keyword.get(opts, :timeout)
+
+    with true <- is_binary(agent_id) and is_integer(timeout) and timeout > 0,
+         {:ok, _pid, _meta} <- find_agent(agent_id),
+         {:ok, %Arbor.Contracts.Pipeline.Response{} = response} <-
+           Arbor.Agent.SessionManager.consult_authenticated(
+             agent_id,
+             message,
+             receipt,
+             parent_voice_id,
+             timeout
+           ) do
+      {:ok, Arbor.Contracts.Pipeline.Response.content(response)}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_args}
+    end
+  end
+
+  def consult_authenticated(_, _, _, _, _), do: {:error, :invalid_args}
+
   # ── Channels (unified message containers) ──────────────────────────
 
   @doc """

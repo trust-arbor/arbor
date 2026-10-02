@@ -654,6 +654,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       </div>
 
       <%!-- Input area --%>
+      <Arbor.Dashboard.Components.VoiceDeskComponent.controls {assigns} />
       <form
         id="conversation-composer"
         phx-hook="ConversationDraft"
@@ -675,7 +676,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           placeholder={
             if @agent_host_pid,
               do: "Type a message or /command...",
-              else: "Type /help to see commands, or start an agent..."
+              else: "Type /help for local help..."
           }
           disabled={@loading}
           style="flex: 1; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
@@ -699,31 +700,26 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
     ~H"""
     <div style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0;">
       <%!--
-        No-agent state — no UI control for spawning agents here. Per
-        .arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md,
-        the start-agent flow lives in the slash command system + the
-        Agents dashboard. ChatLive is for already-running agents.
+        Chat navigation does not start agents or grant lifecycle authority.
+        Runtime setup is an operator action through the Arbor CLI.
       --%>
       <div
         :if={@agent_host_pid == nil}
         style="color: var(--aw-text-muted, #888); font-size: 0.9em; line-height: 1.5;"
       >
-        No agent is running here. Start one with
-        <code style="background: var(--aw-bg, #1a1a1a); padding: 0.1rem 0.35rem; border-radius: 3px;">
-          /start &lt;template&gt;
-        </code>
-        — or open the
+        No agent is running here. Ask an operator to start or resume the intended
+        agent with the Arbor CLI. Use the
         <.link
           navigate="/agents"
           style="color: var(--aw-accent, #4a9eff); text-decoration: none;"
         >
           Agents dashboard
         </.link>
-        to pick one. Type
+        to open its conversation. Type
         <code style="background: var(--aw-bg, #1a1a1a); padding: 0.1rem 0.35rem; border-radius: 3px;">
           /help
         </code>
-        for the full command list.
+        for local help.
       </div>
       <%!--
         Agent-running status row. Replaces the old "Chat with Model
