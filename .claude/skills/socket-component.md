@@ -194,6 +194,12 @@ Breeze 0.5.3 assigns a term with `assign/2`; extend a renderer's assigns map wit
 strings and assert the actual HTML attribute values, rather than assuming
 ordinary boolean-attribute semantics (2026-10-01 structured-question comparison).
 
+Inspect every relevant conditional render branch before declaring a documented
+control label stale. On 2026-10-05 the running-agent branch showed “Chat” while
+the stopped-agent branch correctly showed the guide's “View conversation”.
+Match the documented action to its state instead of changing a correct guide
+from one observed branch.
+
 <!-- applied-learning: conclude-interface-comparisons-with-one-delivery-choice-per-surface -->
 <a id="applied-learning-conclude-interface-comparisons-with-one-delivery-choice-per-surface"></a>
 **Conclude interface comparisons with one delivery choice per surface.** When the user wants a selected stack, finish the spike with a concrete choice based on required capabilities and implementation cost; retain alternatives as evidence rather than implying ongoing feature parity. Preserve replaceable adapter boundaries without multiplying maintained implementations. Distinguish measured extension reuse from inferred agent authoring ease: fewer source lines do not prove fewer tokens, iterations or defects. Before promoting a prototype into a reusable library, compare existing projects at that same abstraction level; a successful renderer spike proves feasibility, not a missing ecosystem capability. Qualify remaining requirements on the selected stack, reopening the choice for material new evidence such as a close existing implementation (user clarification and prior-art review on 2026-09-27 after the ConversationKit renderer experiments).

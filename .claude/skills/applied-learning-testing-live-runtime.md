@@ -582,6 +582,14 @@ conversation (2026-09-30 private-goal prompt qualification).
 <a id="applied-learning-per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches"></a>
 **Per-app and umbrella tests can exercise different optional-runtime branches.** A focused app test may run before an optional module is loaded and validate the fallback, while an umbrella run loads the module and validates the real integration. Make the fallback at least as restrictive as the integrated policy, test loaded and unavailable paths deliberately, and do not treat two green runs as evidence that they traversed the same branch (found 2026-07-21 when `SensitivityRouter` returned `:warn` without `Arbor.Trust` in the per-app suite but `:gated` through unknown-principal trust policy in the umbrella).
 
+Choose the normal test launcher that supplies the integration's actual optional
+runtime peers before changing production dependencies. On 2026-10-05 the Gateway
+per-app suite lacked Agent and the Agent per-app journey lacked Phoenix; the
+same selectors passed from the isolated umbrella root. Check each selected
+standalone project's own lock and frozen archive closure too: the umbrella
+archives did not include Breeze's additional BackBreeze release. Preserve failed
+setup attempts and run only the unresolved groups after correcting the launcher.
+
 <!-- applied-learning: in-zsh-path-is-the-array-form-of-path -->
 <a id="applied-learning-in-zsh-path-is-the-array-form-of-path"></a>
 **In zsh, `path` is the array form of `PATH`.** Assigning `path=...` as an ordinary loop variable rewrites command lookup for the current shell, so later commands fail with `command not found`. Use a neutral name such as `wt`, `target_path`, or `candidate` when iterating over filesystem paths (found 2026-07-21 while verifying accepted worktrees before lifecycle cleanup).
@@ -705,6 +713,14 @@ counting `test` declarations undercounts those cases. Independent source review
 caught 12 declarations producing 15 conversation-binding cases before the
 operator qualification was sealed (2026-09-30).
 
+Do not subtract exclusions twice when parsing the CLI summary: stock ExUnit
+1.19.5's `3 tests, 0 failures (12 excluded)` means three selected tests. Skipped
+tests still contribute to its displayed total. On 2026-10-05 a parser rejected
+a genuinely green Agent journey by calculating minus nine. Correct the parser
+and retain the original run when its normal exit, completed summary, zero skips
+and full successful timed test names are already verified; do not rerun green
+product tests merely to repair evidence parsing.
+
 <!-- applied-learning: parenthesize-do-block-expressions-assigned-to-module-attributes -->
 <a id="applied-learning-parenthesize-do-block-expressions-assigned-to-module-attributes"></a>
 **Parenthesize do-block expressions assigned to module attributes.** In Elixir,
@@ -757,6 +773,16 @@ candidate). This also applies when committing from the main checkout: a pre-comm
 hook can run Mix even when the operator did not explicitly request compilation.
 Pass the isolated environment on the commit command itself; a preceding formatter
 invocation does not export it to later commands (reinforced 2026-09-07 integration).
+
+Explicit hook filenames still use the invoking root's formatter options unless
+registered subdirectories route them; standalone exports are not imported
+automatically. On 2026-10-05, the root hook rejected four vendored Breeze files
+because it lacked their exported `attr`/`slot` no-parentheses rules. Registering
+the standalone plugin would also require that plugin in the root dependency
+closure. When the missing rules are exported Elixir DSL options, import those
+existing public exports into the root fallback without rewriting vendor files
+or adding a lateral dependency; keep standalone sigil/plugin checks in their
+own project. Verify the unchanged hook with the intended formatter options.
 
 <!-- applied-learning: aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test -->
 <a id="applied-learning-aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test"></a>

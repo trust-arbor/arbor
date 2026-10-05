@@ -5548,7 +5548,7 @@
       "anchor": "applied-learning-a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner",
       "source_date": "2026-07-19",
       "source_incident": "live r6 on 2026-07-19 America/Chicago: irq_0f9b88fb1290267d was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred.",
-      "content_sha256": "450e4b42e4f4bc22aad0e4f4db51d1a8072cf45cedfbc5f43801c14a27db1975",
+      "content_sha256": "dca41ec10d31658f111ab88602c4271d8300f261ed5883456809a7d1968b20ca",
       "always_loaded": false
     },
     {
@@ -6016,7 +6016,7 @@
       "anchor": "applied-learning-per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 while validating SensitivityRouter in focused and umbrella test environments).",
-      "content_sha256": "b85004b49f07d4b9aaaeaf93839a9657dcf8886ecd275f43608eb1d52061031a",
+      "content_sha256": "0f446aaeb487c5349580762fd9918bfe3e666da2ccb16bbdd04d365689ec5f7e",
       "always_loaded": false
     },
     {
@@ -6549,7 +6549,7 @@
       "anchor": "applied-learning-a-green-exunit-exit-must-include-a-nonzero-intended-test-count",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 during the Phase C delegated-work canary).",
-      "content_sha256": "b43b10b32e7e016690118b6467bfbbae41a7ab920483242e9851a0474cf3281e",
+      "content_sha256": "a3e4de6438ff6f15ff4c88c61518f3953f366b263772f322e7acf12ff5e56cb3",
       "always_loaded": false
     },
     {
@@ -6848,7 +6848,7 @@
       "anchor": "applied-learning-detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while finalizing the managed ACP settlement candidate).",
-      "content_sha256": "5fe5f2164a03787355c27e2e97720caa8e7405e184931831c5ca03d3f397c057",
+      "content_sha256": "69812b15b91af17c54d62d6f98c214bb560680408a924f01f6c3e19a34b0c3b6",
       "always_loaded": false
     },
     {
@@ -9085,7 +9085,7 @@
       "source_date": "2026-09-27",
       "source_incident": "found 2026-09-27 during the Arbor adapter renderer qualification",
       "always_loaded": false,
-      "content_sha256": "f07c602e64f8de1a00872bd3de7f69beb23645dd0c6661b269f48df15eaa634d"
+      "content_sha256": "ab6820b6aa527a8d24c5f8b3f4cdbc4cd5208738b7f202d4cf9cfa8aa6917b6c"
     },
     {
       "source_ordinal": 742,

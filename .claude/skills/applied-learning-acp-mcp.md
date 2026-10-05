@@ -605,6 +605,12 @@ the next work slice and confirm the agent is running before reporting that work
 is underway (2026-09-29: voice compatibility follow-up messages remained queued
 after the worker had completed its previous patch).
 
+Repeated on 2026-10-05: hook-closure work requests sent to the completed DEV
+Breeze preparation worker stayed queued until a new `followup_task` opened a
+turn. Check the actual collaborator runtime state before reporting progress;
+a successful `send_message` receipt confirms queued context, not that the next
+work slice has started.
+
 <!-- applied-learning: acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape -->
 <a id="applied-learning-acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape"></a>
 **ACP usage extraction must follow the provider's prompt-result shape.** Prefer the bounded top-level `usage` map; when it is absent, inspect provider metadata such as `_meta.usage`. At the `AcpSession` boundary, use first-present alias semantics, accept only non-negative signed-64 integers, preserve the provider result unchanged, and exercise both cumulative session status and cost accounting. Verify a provider-shape change with a live canary rather than inferring it from zero metrics (found 2026-07-20 when Grok CLI 0.2.106 returned nonzero `inputTokens`/`outputTokens` only under `_meta.usage`, leaving the r8 report at zero before `a459458d`).
