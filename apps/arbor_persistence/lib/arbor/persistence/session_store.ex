@@ -17,6 +17,7 @@ defmodule Arbor.Persistence.SessionStore do
 
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Persistence.ConversationPage
+  alias Arbor.Persistence.ConversationWindow
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
   alias Arbor.Persistence.SessionTranscript
@@ -91,10 +92,13 @@ defmodule Arbor.Persistence.SessionStore do
   @doc """
   Return the existing session for `session_id`, or create it for `agent_id`.
 
-  Concurrent first callers converge on the same persisted row: a losing racer's
-  `create_session/2` fails on the `session_id` unique constraint, and this
-  re-fetches the winner's row instead of surfacing the conflict. Either way the
-  returned session's `agent_id` MUST match the requested `agent_id` — a
+  Concurrent first callers converge on the same persisted row. Missing SQLite
+  sessions acquire the existing bounded writer transaction and recheck the row
+  under that lock before insertion. Existing rows retain their read-only fast
+  path. PostgreSQL retains its existing unique-conflict convergence: a losing
+  first insert re-fetches the winner's row instead of surfacing the conflict.
+
+  The returned session's `agent_id` MUST match the requested `agent_id` — a
   `session_id` that already belongs to a different agent fails closed with
   `{:error, {:agent_id_mismatch, owner_agent_id, requested_agent_id}}` rather
   than silently handing back another agent's session.
@@ -109,6 +113,40 @@ defmodule Arbor.Persistence.SessionStore do
   end
 
   defp create_or_converge_session(session_id, agent_id, opts) do
+    if sqlite_repo?(Repo) and not Repo.in_transaction?() do
+      create_session_with_acquisition(session_id, agent_id, opts)
+    else
+      # A surrounding transaction already owns acquisition and settlement.
+      # PostgreSQL keeps its existing unique-conflict convergence semantics.
+      if sqlite_repo?(Repo), do: mark_effect_started()
+      create_or_converge_session_record(session_id, agent_id, opts)
+    end
+  end
+
+  defp create_session_with_acquisition(session_id, agent_id, opts) do
+    case transaction(Repo, fn ->
+           # The first read was outside this writer lock. Another first caller
+           # may have created the row before this acquisition succeeded.
+           case get_session(session_id) do
+             {:ok, session} ->
+               check_session_owner(session, agent_id)
+
+             {:error, :not_found} ->
+               mark_effect_started()
+               create_or_converge_session_record(session_id, agent_id, opts)
+           end
+         end) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, public_error(reason)}
+    end
+  rescue
+    _ -> {:error, :database_error}
+  catch
+    :exit, _ -> {:error, :database_error}
+    :throw, _ -> {:error, :database_error}
+  end
+
+  defp create_or_converge_session_record(session_id, agent_id, opts) do
     case create_session(agent_id, Keyword.put(opts, :session_id, session_id)) do
       {:ok, session} ->
         check_session_owner(session, agent_id)
@@ -669,6 +707,108 @@ defmodule Arbor.Persistence.SessionStore do
        do: :ok
 
   defp valid_conversation_ordinal_range(_, _), do: {:error, :invalid_transcript}
+
+  @doc false
+  def read_conversation_window(agent_id, engagement_id, bounds) do
+    case get_session("agent-session-#{agent_id}") do
+      {:ok, %Session{agent_id: ^agent_id} = session} ->
+        read_owned_conversation_window(session.id, engagement_id, bounds)
+
+      {:error, :not_found} ->
+        with {:ok, head} <- ConversationWindow.pinned_head(0, bounds) do
+          ConversationWindow.project([], head, false, false)
+        end
+
+      _ ->
+        {:error, :conversation_unavailable}
+    end
+  rescue
+    _ -> {:error, :conversation_unavailable}
+  catch
+    _, _ -> {:error, :conversation_unavailable}
+  end
+
+  defp read_owned_conversation_window(session_uuid, engagement_id, bounds) do
+    query =
+      from(e in SessionEntry,
+        where: e.session_id == ^session_uuid and e.entry_type in ["user", "assistant"]
+      )
+      |> maybe_engagement_filter(engagement_id)
+
+    {minimum, maximum} =
+      Repo.one(from(e in query, select: {min(e.entry_ordinal), max(e.entry_ordinal)}),
+        timeout: 5_000
+      )
+
+    with :ok <- valid_conversation_ordinal_range(minimum, maximum),
+         {:ok, head} <- ConversationWindow.pinned_head(maximum || 0, bounds) do
+      pinned = from(e in query, where: e.entry_ordinal <= ^head)
+      rows = conversation_window_rows(pinned, bounds)
+      {older, newer} = conversation_window_neighbors(pinned, rows, bounds)
+      ConversationWindow.project(rows, head, older, newer)
+    end
+  end
+
+  defp conversation_window_rows(query, bounds) do
+    query =
+      cond do
+        bounds.before ->
+          from(e in query,
+            where: e.entry_ordinal < ^bounds.before,
+            order_by: [desc: e.entry_ordinal]
+          )
+
+        bounds.after ->
+          from(e in query,
+            where: e.entry_ordinal > ^bounds.after,
+            order_by: [asc: e.entry_ordinal]
+          )
+
+        true ->
+          from(e in query, order_by: [desc: e.entry_ordinal])
+      end
+
+    rows =
+      Repo.all(
+        from(e in query,
+          limit: ^bounds.limit,
+          select: %{
+            id: e.id,
+            entry_type: e.entry_type,
+            role: e.role,
+            content: e.content,
+            timestamp: e.timestamp,
+            entry_ordinal: e.entry_ordinal,
+            metadata: e.metadata
+          }
+        ),
+        timeout: 5_000
+      )
+
+    if is_nil(bounds.after), do: Enum.reverse(rows), else: rows
+  end
+
+  defp conversation_window_neighbors(query, [first | _] = rows, _bounds) do
+    last = List.last(rows)
+
+    {
+      Repo.exists?(from(e in query, where: e.entry_ordinal < ^first.entry_ordinal),
+        timeout: 5_000
+      ),
+      Repo.exists?(from(e in query, where: e.entry_ordinal > ^last.entry_ordinal), timeout: 5_000)
+    }
+  end
+
+  defp conversation_window_neighbors(query, [], %{before: before}) when is_integer(before),
+    do: {false, Repo.exists?(from(e in query, where: e.entry_ordinal >= ^before), timeout: 5_000)}
+
+  defp conversation_window_neighbors(query, [], %{after: after_cursor})
+       when is_integer(after_cursor),
+       do:
+         {Repo.exists?(from(e in query, where: e.entry_ordinal <= ^after_cursor), timeout: 5_000),
+          false}
+
+  defp conversation_window_neighbors(_query, [], _bounds), do: {false, false}
 
   @doc """
   Load recent messages for dashboard display by session_id string.

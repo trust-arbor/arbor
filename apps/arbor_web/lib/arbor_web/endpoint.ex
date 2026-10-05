@@ -46,6 +46,26 @@ defmodule Arbor.Web.Endpoint do
         websocket: [connect_info: [:peer_data, :x_headers, :uri]]
       )
 
+      # Dependency clients precede app assets so another static tree cannot
+      # shadow the installed server's browser protocol implementation.
+      plug(Plug.Static,
+        at: "/assets/phoenix",
+        from: {:phoenix, "priv/static"},
+        gzip: false,
+        only: ~w(phoenix.mjs),
+        cache_control_for_etags: "public, max-age=0, must-revalidate",
+        cache_control_for_vsn_requests: "public, max-age=0, must-revalidate"
+      )
+
+      plug(Plug.Static,
+        at: "/assets/phoenix_live_view",
+        from: {:phoenix_live_view, "priv/static"},
+        gzip: false,
+        only: ~w(phoenix_live_view.esm.js),
+        cache_control_for_etags: "public, max-age=0, must-revalidate",
+        cache_control_for_vsn_requests: "public, max-age=0, must-revalidate"
+      )
+
       # Static files
       plug(Plug.Static,
         at: "/",

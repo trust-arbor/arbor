@@ -711,21 +711,58 @@ defmodule Arbor.Agent.Manager do
   def chat_response_authenticated(_message, _sender, _receipt, _opts),
     do: {:error, :invalid_args}
 
-  defp do_chat_response_authenticated(message, sender, receipt, agent_id, timeout) do
+  @doc false
+  # Only MessageFacade's authenticated journal continuation supplies this
+  # dedicated private argument. It is never an option on Arbor.Agent messaging.
+  def chat_command_authenticated(message, sender, receipt, binding, opts) do
+    agent_id = Keyword.get(opts, :agent_id)
+    timeout = Keyword.get(opts, :timeout)
+
+    if is_struct(message, Arbor.Contracts.Session.UserMessage) and is_binary(sender) and
+         is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) and is_map(binding) and
+         is_binary(agent_id) and is_integer(timeout) and timeout > 0 do
+      do_chat_response_authenticated(message, sender, receipt, agent_id, timeout, binding)
+    else
+      {:error, :invalid_args}
+    end
+  end
+
+  defp do_chat_response_authenticated(
+         message,
+         _sender,
+         receipt,
+         agent_id,
+         timeout,
+         binding \\ nil
+       ) do
     case find_agent(agent_id) do
       {:ok, _pid, _meta} ->
+        # Observability has no private-conversation read authority. Consumers
+        # obtain content through the authenticated transcript, not this topic.
         safe_emit(:chat_message, %{
           role: :user,
-          content: message.content,
-          sender: sender
+          channel: :private_conversation
         })
 
-        case Arbor.Agent.SessionManager.send_authenticated_message(
-               agent_id,
-               message,
-               receipt,
-               timeout
-             ) do
+        result =
+          if binding do
+            Arbor.Agent.SessionManager.send_conversation_command(
+              agent_id,
+              message,
+              receipt,
+              binding,
+              timeout
+            )
+          else
+            Arbor.Agent.SessionManager.send_authenticated_message(
+              agent_id,
+              message,
+              receipt,
+              timeout
+            )
+          end
+
+        case result do
           # Outer shape only — MessageFacade owns closed projection, secret
           # admission, assistant signal, and receipt cleanup.
           {:ok, %Arbor.Contracts.Pipeline.Response{} = response} ->

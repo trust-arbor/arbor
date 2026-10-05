@@ -1151,4 +1151,109 @@ defmodule Arbor.Voice.AudioTurnIntegrationTest do
   catch
     :exit, _ -> :owner_exited
   end
+
+  @tag :fast
+  test "PCM final speech retains matching audio beyond the legacy 60-word cap by default" do
+    text = Enum.map_join(1..63, " ", fn _ -> "word" end)
+
+    events = [
+      {:input_transcript, "Actual utterance"},
+      {:output_audio, @output},
+      {:turn_done, %{text: text}}
+    ]
+
+    %{key: key} = start_audio(events, speakable: Arbor.Voice.Speakable)
+    assert {:ok, result} = run_turn(key)
+    assert result.reply == text
+    assert %{verdict: {:speak, ^text}, spoken_text: ^text, audio: @output} = result.presentation
+    assert_receive :audio_closed
+    refute_receive {:legacy_speech, _}
+  end
+
+  @tag :fast
+  test "configured PCM speech caps truncate and per-session caps use the normal facade" do
+    previous = Application.fetch_env(:arbor_voice, :audio_speech_max_words)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_voice, :audio_speech_max_words, value)
+        :error -> Application.delete_env(:arbor_voice, :audio_speech_max_words)
+      end
+    end)
+
+    Application.put_env(:arbor_voice, :audio_speech_max_words, 60)
+    text = Enum.map_join(1..63, " ", fn _ -> "word" end)
+
+    events = [
+      {:input_transcript, "Actual utterance"},
+      {:output_audio, @output},
+      {:turn_done, %{text: text}}
+    ]
+
+    %{key: capped} = start_audio(events, speakable: Arbor.Voice.Speakable)
+    assert {:ok, result} = run_turn(capped)
+    assert result.reply == text
+    assert %{verdict: {:speak_truncated, _}, audio: nil, format: nil} = result.presentation
+    assert_receive :audio_closed
+
+    %{key: longer} =
+      start_audio(events, speakable: Arbor.Voice.Speakable, audio_speech_max_words: 120)
+
+    assert {:ok, %{presentation: %{audio: @output}}} = run_turn(longer)
+    assert_receive :audio_closed
+
+    %{key: uncapped} =
+      start_audio(events, speakable: Arbor.Voice.Speakable, audio_speech_max_words: nil)
+
+    assert {:ok, %{presentation: %{audio: @output}}} = run_turn(uncapped)
+    assert_receive :audio_closed
+    refute_receive {:legacy_speech, _}
+  end
+
+  @tag :fast
+  test "uncapped PCM speech still suppresses audio when normalization changes the guarded text" do
+    events = [
+      {:input_transcript, "Actual utterance"},
+      {:output_audio, @output},
+      {:turn_done, %{text: "first  second"}}
+    ]
+
+    %{key: key} = start_audio(events, speakable: Arbor.Voice.Speakable)
+    assert {:ok, result} = run_turn(key)
+    assert result.reply == "first  second"
+    assert %{verdict: {:speak, "first second"}, audio: nil, format: nil} = result.presentation
+    assert_receive :audio_closed
+    refute_receive {:legacy_speech, _}
+  end
+
+  @tag :fast
+  test "explicit PCM speech preference overrides an invalid unused application default" do
+    previous = Application.fetch_env(:arbor_voice, :audio_speech_max_words)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_voice, :audio_speech_max_words, value)
+        :error -> Application.delete_env(:arbor_voice, :audio_speech_max_words)
+      end
+    end)
+
+    Application.put_env(:arbor_voice, :audio_speech_max_words, :invalid)
+    text = Enum.map_join(1..63, " ", fn _ -> "word" end)
+
+    events = [
+      {:input_transcript, "Actual utterance"},
+      {:output_audio, @output},
+      {:turn_done, %{text: text}}
+    ]
+
+    for override <- [nil, 120] do
+      %{key: key} =
+        start_audio(events, speakable: Arbor.Voice.Speakable, audio_speech_max_words: override)
+
+      assert {:ok, %{presentation: %{audio: @output}}} = run_turn(key)
+      assert_receive :audio_closed
+    end
+
+    refute_receive {:legacy_speech, _}
+  end
 end

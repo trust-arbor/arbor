@@ -34,6 +34,8 @@ defmodule Arbor.Multimedia.NativeSession do
        stream: :crypto.strong_rand_bytes(32),
        closing: false,
        admitted: false,
+       finish_requested: false,
+       finish_sent: false,
        cleanup: nil,
        cleanup_ref: nil,
        cleanup_unknown: false,
@@ -155,6 +157,9 @@ defmodule Arbor.Multimedia.NativeSession do
     end
   end
 
+  def handle_info({:finish_capture, token}, %{token: token, closing: false} = state),
+    do: {:noreply, maybe_finish_capture(%{state | finish_requested: true})}
+
   def handle_info({:close, token}, %{token: token} = state), do: begin_close(state)
   def handle_info({:retry_cleanup, token}, %{token: token} = state), do: begin_close(state)
 
@@ -219,11 +224,31 @@ defmodule Arbor.Multimedia.NativeSession do
       if state.spec.kind == :playback,
         do: control(state, :feeder, {:payload, token, Redacted.new(state.spec.pcm)})
 
-      {:noreply, %{state | admitted: true, spec: Map.delete(state.spec, :pcm)}}
+      {:noreply,
+       maybe_finish_capture(%{state | admitted: true, spec: Map.delete(state.spec, :pcm)})}
     else
       fail(state, :timeout)
     end
   end
+
+  defp maybe_finish_capture(
+         %{
+           admitted: true,
+           finish_requested: true,
+           finish_sent: false,
+           spec: %{kind: :capture},
+           closing: false
+         } = state
+       ) do
+    if admitted?(state) do
+      control(state, :device, {:portaudio_finish_capture, state.startup})
+      %{state | finish_sent: true}
+    else
+      state
+    end
+  end
+
+  defp maybe_finish_capture(state), do: state
 
   defp activate_pending(
          %{registered: true, pending_activation: {spec, permit}, permit: nil} = state
@@ -320,14 +345,29 @@ defmodule Arbor.Multimedia.NativeSession do
         do: :portaudio_capture_finished,
         else: :portaudio_playback_finished
 
-    if kind == expected and disposition == :complete and frames == state.spec.frames,
-      do:
-        (
-          Driver.notify(state.permit, {:complete, frames})
-          {:noreply, state}
-        ),
-      else: fail(state, :invalid_media)
+    cond do
+      kind == expected and disposition == :complete and frames == state.spec.frames ->
+        Driver.notify(state.permit, {:complete, frames})
+        {:noreply, state}
+
+      kind == :portaudio_capture_finished and state.spec.kind == :capture and
+        disposition == :partial and state.finish_sent and is_integer(frames) and
+        frames >= 0 and frames <= state.spec.frames ->
+        Driver.notify(state.permit, {:partial, frames})
+        {:noreply, state}
+
+      true ->
+        fail(state, :invalid_media)
+    end
   end
+
+  defp child_event(
+         %{closing: false} = state,
+         :device,
+         {:portaudio_capture_finish_failed, startup, _reason}
+       )
+       when startup == state.startup,
+       do: fail(state, :finish_unavailable)
 
   defp child_event(state, :device, {:portaudio_closed, startup, result})
        when startup == state.startup do

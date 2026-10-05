@@ -1,0 +1,874 @@
+{
+  "events": [
+    {
+      "specversion": "1.0",
+      "id": "6248f8cd-5742-4bdb-ac66-c541066f7d92",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 1,
+        "kind": "command.accepted",
+        "command_id": "lost-reply",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "987a8178-7359-4608-83da-7245a15d4941",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 2,
+        "kind": "application",
+        "command_id": "lost-reply",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "lost-reply.user",
+            "role": "user",
+            "text": "One intended turn",
+            "command_id": "lost-reply"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "e180e0f0-2ab6-466f-b8c9-1336c92d4b64",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 3,
+        "kind": "application",
+        "command_id": "lost-reply",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "lost-reply.assistant",
+            "role": "assistant",
+            "text": "Echo: One intended turn",
+            "command_id": "lost-reply"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "2c947ace-074d-4813-ace4-cb1fe5274956",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 4,
+        "kind": "command.outcome",
+        "command_id": "lost-reply",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "lost-reply.assistant",
+            "text": "Echo: One intended turn"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "6d443bf0-3e77-4b89-94b2-114c289ed3ea",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 5,
+        "kind": "command.accepted",
+        "command_id": "admitted-restart",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "b9c57b26-011a-4119-8e7c-b9f9ff892491",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 6,
+        "kind": "application",
+        "command_id": "admitted-restart",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "admitted-restart.user",
+            "role": "user",
+            "text": "admitted-restart",
+            "command_id": "admitted-restart"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "54b41926-0b3a-4e1d-8c41-d4534de973a7",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 7,
+        "kind": "application",
+        "command_id": "admitted-restart",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "admitted-restart.assistant",
+            "role": "assistant",
+            "text": "Echo: admitted-restart",
+            "command_id": "admitted-restart"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "e65c9206-d470-4ed9-ae7b-67ccfbfcdf80",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 8,
+        "kind": "command.outcome",
+        "command_id": "admitted-restart",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "admitted-restart.assistant",
+            "text": "Echo: admitted-restart"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "e415656f-b219-4363-ab8b-7d9f5f2087e7",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 9,
+        "kind": "command.accepted",
+        "command_id": "keyed-crash",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "b8f0d6ba-2a47-459d-804e-75020b99c9a3",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 10,
+        "kind": "application",
+        "command_id": "keyed-crash",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "keyed-crash.user",
+            "role": "user",
+            "text": "keyed-crash",
+            "command_id": "keyed-crash"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "f521f688-6cff-469c-b7de-b5a5c7a7acc1",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 11,
+        "kind": "application",
+        "command_id": "keyed-crash",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "keyed-crash.assistant",
+            "role": "assistant",
+            "text": "Echo: keyed-crash",
+            "command_id": "keyed-crash"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "8a44009a-8d6b-4ef4-9d59-cde900cd0163",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 12,
+        "kind": "command.outcome",
+        "command_id": "keyed-crash",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "keyed-crash.assistant",
+            "text": "Echo: keyed-crash"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "ffbec464-0af0-4342-b31f-aa150354c1a3",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 13,
+        "kind": "command.accepted",
+        "command_id": "opaque-crash",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "2de8941c-bc21-4408-ba97-af13e912ec93",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 14,
+        "kind": "application",
+        "command_id": "opaque-crash",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "opaque-crash.user",
+            "role": "user",
+            "text": "Ambiguous effect",
+            "command_id": "opaque-crash"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "39d0af52-ac79-40fc-ac27-56e56b572e62",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 15,
+        "kind": "command.outcome",
+        "command_id": "opaque-crash",
+        "payload": {
+          "status": "uncertain",
+          "output": null,
+          "error": {
+            "code": "effect_unknown",
+            "message": "Effect intent exists but the external effect cannot be reconciled safely.",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "bd7bef8e-6b13-4f4c-b04b-c3ae115360f2",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 16,
+        "kind": "command.accepted",
+        "command_id": "stream-reconnect",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "7a3b6be0-90a9-4e1d-b4f6-2a7534ddc577",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 17,
+        "kind": "application",
+        "command_id": "stream-reconnect",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "stream-reconnect.user",
+            "role": "user",
+            "text": "Streaming partial text must become the exact final message",
+            "command_id": "stream-reconnect"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "ccc68221-0ac8-4316-aa1d-927d9ebc2c2f",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 18,
+        "kind": "application",
+        "command_id": "stream-reconnect",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "stream-reconnect.assistant",
+            "role": "assistant",
+            "text": "Echo: Streaming partial text must become the exact final message",
+            "command_id": "stream-reconnect"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "d5acea32-42d7-4948-8cba-85b598d8ddb6",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 19,
+        "kind": "command.outcome",
+        "command_id": "stream-reconnect",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "stream-reconnect.assistant",
+            "text": "Echo: Streaming partial text must become the exact final message"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "1bb02356-690a-4810-b2a8-a66423dfd0ae",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 20,
+        "kind": "command.accepted",
+        "command_id": "live-speech",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "700db508-0003-4aff-afb0-abf6b67335fa",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 21,
+        "kind": "application",
+        "command_id": "live-speech",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "live-speech.user",
+            "role": "user",
+            "text": "This live message is spoken once",
+            "command_id": "live-speech"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "a8ae7b61-b1e1-4bfa-822b-783955a6b014",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 22,
+        "kind": "application",
+        "command_id": "live-speech",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "live-speech.assistant",
+            "role": "assistant",
+            "text": "Echo: This live message is spoken once",
+            "command_id": "live-speech"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "f12a2f47-5e22-48ec-8336-64f1e3c1cf57",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 23,
+        "kind": "command.outcome",
+        "command_id": "live-speech",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "live-speech.assistant",
+            "text": "Echo: This live message is spoken once"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "88b9ef8b-d9cf-4b78-b160-bf96d4436b24",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 24,
+        "kind": "command.accepted",
+        "command_id": "checkpoint-interruption",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "91f01a58-8eae-4036-ba14-9a677e6cf9ac",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 25,
+        "kind": "application",
+        "command_id": "checkpoint-interruption",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "checkpoint-interruption.user",
+            "role": "user",
+            "text": "checkpoint-interruption",
+            "command_id": "checkpoint-interruption"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "af7212fd-3206-4663-85e7-7a497499dbff",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 26,
+        "kind": "application",
+        "command_id": "checkpoint-interruption",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "checkpoint-interruption.assistant",
+            "role": "assistant",
+            "text": "Echo: checkpoint-interruption",
+            "command_id": "checkpoint-interruption"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "028acc1a-028c-4306-9307-c70e6ab91658",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 27,
+        "kind": "command.outcome",
+        "command_id": "checkpoint-interruption",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "checkpoint-interruption.assistant",
+            "text": "Echo: checkpoint-interruption"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "601aa22a-efcd-4ff9-ae3b-3c607bde163f",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 28,
+        "kind": "command.accepted",
+        "command_id": "speech-omission",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "d734a919-2ce5-41e8-b0eb-cce6b54e6856",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 29,
+        "kind": "application",
+        "command_id": "speech-omission",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "speech-omission.user",
+            "role": "user",
+            "text": "A claimed utterance may be omitted by interruption",
+            "command_id": "speech-omission"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "cbcbe400-8f48-4279-bd73-3b8386c9847f",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 30,
+        "kind": "application",
+        "command_id": "speech-omission",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "speech-omission.assistant",
+            "role": "assistant",
+            "text": "Echo: A claimed utterance may be omitted by interruption",
+            "command_id": "speech-omission"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "62e64444-f4f5-4447-a338-e7a26dd7790d",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 31,
+        "kind": "command.outcome",
+        "command_id": "speech-omission",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "speech-omission.assistant",
+            "text": "Echo: A claimed utterance may be omitted by interruption"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "f9f7fbdc-5270-41fd-a457-efbab4bbcc58",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 32,
+        "kind": "command.accepted",
+        "command_id": "oversized-rejected",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "20fd9c3a-b7d0-44e0-ac95-efa084c9511b",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 33,
+        "kind": "application",
+        "command_id": "oversized-rejected",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "oversized-rejected.user",
+            "role": "user",
+            "text": "Corrected admissible input",
+            "command_id": "oversized-rejected"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "76b3f558-99bd-447c-86e2-455a55a95243",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 34,
+        "kind": "application",
+        "command_id": "oversized-rejected",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "oversized-rejected.assistant",
+            "role": "assistant",
+            "text": "Echo: Corrected admissible input",
+            "command_id": "oversized-rejected"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "61e71e94-98a3-4e53-a6ae-5eec34b908ff",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 35,
+        "kind": "command.outcome",
+        "command_id": "oversized-rejected",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "oversized-rejected.assistant",
+            "text": "Echo: Corrected admissible input"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "008bb396-d52b-4a5d-b0f9-5a08d9f0a989",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 36,
+        "kind": "command.accepted",
+        "command_id": "revoked-progress",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "161c3834-b83f-4878-b65a-f19b9af327b0",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 37,
+        "kind": "application",
+        "command_id": "revoked-progress",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "revoked-progress.user",
+            "role": "user",
+            "text": "revoked-progress",
+            "command_id": "revoked-progress"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "01e007a1-c48d-4a19-a80e-16d43cfa64c8",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 38,
+        "kind": "application",
+        "command_id": "revoked-progress",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "revoked-progress.assistant",
+            "role": "assistant",
+            "text": "Echo: revoked-progress",
+            "command_id": "revoked-progress"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "3a7b6741-02a4-4561-9921-d5184cb8d5e3",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 39,
+        "kind": "command.outcome",
+        "command_id": "revoked-progress",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "revoked-progress.assistant",
+            "text": "Echo: revoked-progress"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "c79d4f1e-2c53-4947-b38d-33fc54ba7bb4",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 40,
+        "kind": "command.accepted",
+        "command_id": "authorized-continues",
+        "payload": {
+          "name": "chat.send"
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "8e6c8b77-bb66-4cfd-91d9-11bc55c1f9ef",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 41,
+        "kind": "application",
+        "command_id": "authorized-continues",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "authorized-continues.user",
+            "role": "user",
+            "text": "authorized-continues",
+            "command_id": "authorized-continues"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "f45c0b93-69b5-4cda-a58a-52996fc540c8",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 42,
+        "kind": "application",
+        "command_id": "authorized-continues",
+        "payload": {
+          "name": "conversation.message",
+          "data": {
+            "id": "authorized-continues.assistant",
+            "role": "assistant",
+            "text": "Echo: authorized-continues",
+            "command_id": "authorized-continues"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "fed88fe0-c5e6-4a0f-bc30-973d9d39a2b2",
+      "source": "urn:experiment:dasp:host",
+      "type": "dasp.update.v1",
+      "datacontenttype": "application/json",
+      "data": {
+        "session_id": "shared-conversation",
+        "sequence": 43,
+        "kind": "command.outcome",
+        "command_id": "authorized-continues",
+        "payload": {
+          "status": "completed",
+          "output": {
+            "message_id": "authorized-continues.assistant",
+            "text": "Echo: authorized-continues"
+          },
+          "error": null
+        }
+      }
+    }
+  ]
+}

@@ -237,6 +237,93 @@ defmodule Arbor.Agent.SessionManager do
     do: {:error, :invalid_args}
 
   @doc false
+  def send_conversation_command(agent_id, message, receipt, binding, timeout_ms)
+      when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms > 0 and
+             is_struct(message, Arbor.Contracts.Session.UserMessage) and
+             is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) and is_map(binding) do
+    with {:ok, session_pid} <- get_session(agent_id) do
+      session_mod = session_module()
+
+      if Code.ensure_loaded?(session_mod) and
+           function_exported?(session_mod, :send_conversation_command, 5) do
+        send_authenticated_message_via_proxy(
+          session_mod,
+          session_pid,
+          message,
+          receipt,
+          timeout_ms,
+          :send_conversation_command,
+          [binding]
+        )
+      else
+        {:error, :session_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :session_unavailable}
+  catch
+    _, _ -> {:error, :session_unavailable}
+  end
+
+  def send_conversation_command(_, _, _, _, _), do: {:error, :invalid_args}
+
+  @doc false
+  def conversation_activity(agent_id, subject, receipt, scope, ids, timeout_ms),
+    do:
+      conversation_control(
+        agent_id,
+        :conversation_activity,
+        [subject, receipt, scope, ids],
+        timeout_ms
+      )
+
+  @doc false
+  def cancel_conversation_command(agent_id, subject, receipt, scope, id, timeout_ms),
+    do:
+      conversation_control(
+        agent_id,
+        :cancel_conversation_command,
+        [subject, receipt, scope, id],
+        timeout_ms
+      )
+
+  defp conversation_control(agent_id, operation, args, timeout_ms)
+       when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms in 1..30_000 do
+    with {:ok, pid} <- get_session(agent_id),
+         module = session_module(),
+         true <- Code.ensure_loaded?(module) and function_exported?(module, operation, 6) do
+      task =
+        Task.async(fn ->
+          try do
+            apply(module, operation, [pid | args] ++ [timeout_ms + @authenticated_call_grace_ms])
+          rescue
+            _ -> {:error, :session_unavailable}
+          catch
+            _, _ -> {:error, :session_unavailable}
+          end
+        end)
+
+      case Task.yield(task, timeout_ms) do
+        {:ok, result} ->
+          result
+
+        _ ->
+          Task.shutdown(task, :brutal_kill)
+          {:error, :session_unavailable}
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :session_unavailable}
+    end
+  rescue
+    _ -> {:error, :session_unavailable}
+  catch
+    _, _ -> {:error, :session_unavailable}
+  end
+
+  defp conversation_control(_, _, _, _), do: {:error, :invalid_args}
+
+  @doc false
   def consult_authenticated(agent_id, message, receipt, parent_voice_id, timeout_ms)
       when is_binary(agent_id) and is_binary(parent_voice_id) and
              is_integer(timeout_ms) and timeout_ms > 0 and

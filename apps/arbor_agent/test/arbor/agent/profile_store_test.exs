@@ -123,7 +123,8 @@ defmodule Arbor.Agent.ProfileStoreTest do
 
       agent_id = "agent_profile_failed_durable_write"
 
-      assert {:error, :profile_write_failed} =
+      # A backend error does not prove whether a durable effect happened.
+      assert {:error, :outcome_unknown} =
                agent_id
                |> make_profile()
                |> ProfileStore.store_profile()

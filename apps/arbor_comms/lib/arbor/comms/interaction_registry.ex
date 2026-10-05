@@ -176,6 +176,13 @@ defmodule Arbor.Comms.InteractionRegistry do
   end
 
   @doc false
+  def respond_conversation(scope, %{request_id: request_id} = operation, actor_id, proof) do
+    with_authority(request_id, :respond_conversation, [scope, operation, actor_id, proof])
+  end
+
+  def respond_conversation(_, _, _, _), do: {:error, :invalid_interaction_answer}
+
+  @doc false
   def resolve_authenticated(request_id, response, metadata, actor_id, session_token)
       when is_binary(request_id) and is_map(metadata) do
     with_authority(request_id, :respond_authenticated, [

@@ -112,6 +112,88 @@ defmodule Arbor.Orchestrator do
   def classify_run_result(_result), do: {:error, :invalid_run_result}
   @type run_credential :: function() | SigningAuthority.t()
 
+  @doc """
+  Pin the current executable code of a compiled parent-owned native graph when
+  an action declares mandatory Actions-facade admission ownership.
+
+  This is a runtime code snapshot, not approval or permission. Owner-absent
+  graphs keep their ordinary behavior. Existing binding inputs are preserved;
+  the Engine validates them and never repairs an incomplete reviewed manifest.
+  Session and Heartbeat call this before releasing their actual graph worker.
+
+  Owner-declared action nodes must use their exact published Jido/catalog name.
+  Dotted facade aliases are not rewritten into execution-manifest bindings.
+  """
+  @spec pin_native_execution(Graph.t(), keyword()) :: {:ok, keyword()} | {:error, atom()}
+  def pin_native_execution(%Graph{compiled: true} = graph, opts) when is_list(opts) do
+    binding_keys = [
+      :execution_manifest,
+      :execution_manifest_digest,
+      :pinned_action_bindings,
+      :pinned_handler_bindings,
+      :pinned_node_bindings,
+      :run_authorization
+    ]
+
+    with true <- Keyword.keyword?(opts),
+         {:ok, declared?} <- native_facade_owner_declared?(graph) do
+      cond do
+        Enum.any?(binding_keys, &Keyword.has_key?(opts, &1)) ->
+          {:ok, opts}
+
+        not declared? ->
+          {:ok, opts}
+
+        Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor) !=
+            Arbor.Orchestrator.ActionsExecutor ->
+          {:error, :native_execution_binding_refused}
+
+        true ->
+          with {:ok, catalog} <- ActionCatalog.snapshot(),
+               {:ok, {manifest, digest}} <-
+                 ExecutionManifest.build(graph, catalog, RunAuthorization.graph_hash(graph)) do
+            {:ok,
+             Keyword.merge(opts, execution_manifest: manifest, execution_manifest_digest: digest)}
+          else
+            _ -> {:error, :native_execution_binding_refused}
+          end
+      end
+    else
+      _ -> {:error, :native_execution_binding_refused}
+    end
+  rescue
+    _ -> {:error, :native_execution_binding_refused}
+  catch
+    _, _ -> {:error, :native_execution_binding_refused}
+  end
+
+  def pin_native_execution(_, _), do: {:error, :native_execution_binding_refused}
+
+  defp native_facade_owner_declared?(graph) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.reduce_while({:ok, false}, fn node, {:ok, declared?} ->
+      if Arbor.Orchestrator.Handlers.Registry.node_type(node) == "exec" and
+           node.attrs["target"] == "action" do
+        case Arbor.Actions.authorization_admission_owner(node.attrs["action"]) do
+          {:ok, :ordinary} ->
+            {:cont, {:ok, declared?}}
+
+          {:ok, :actions_facade} ->
+            if Arbor.Orchestrator.Handlers.Registry.resolve(node) ==
+                 Arbor.Orchestrator.Handlers.ExecHandler,
+               do: {:cont, {:ok, true}},
+               else: {:halt, {:error, :native_execution_binding_refused}}
+
+          _ ->
+            {:halt, {:error, :native_execution_binding_refused}}
+        end
+      else
+        {:cont, {:ok, declared?}}
+      end
+    end)
+  end
+
   @doc "Parse a DOT source string into a Graph struct."
   @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, term()}
   def parse(dot_source) when is_binary(dot_source), do: Parser.parse(dot_source)

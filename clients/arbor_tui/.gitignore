@@ -5,4 +5,5 @@
 erl_crash.dump
 *.ez
 arbor-tui
+arbor-tui-legacy
 /cover/

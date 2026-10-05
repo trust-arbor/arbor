@@ -28,6 +28,12 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
     def run(_params, context) do
       send(Map.fetch!(context, :test_pid), :outcome_probe_ran)
 
+      send(context.test_pid, {
+        :source_context_observation,
+        Map.has_key?(context, :conversation_source),
+        Process.get({Arbor.Actions, :conversation_source}, :absent)
+      })
+
       case Map.fetch!(context, :behaviour) do
         :succeed -> {:ok, %{done: true}}
         {:return_error, reason} -> {:error, reason}
@@ -54,6 +60,17 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
     def authorization_resource(_params), do: {:ok, @resource}
   end
 
+  defmodule PendingApprovalProbe do
+    # Only the notification seam is sealed. The public Actions call still uses
+    # the real Trust policy, Security grant and requires-approval decision.
+    def healthy?, do: true
+
+    def request(attrs, _opts) do
+      send(self(), {:pending_approval_requested, attrs.agent_id, attrs.resource_uri})
+      {:ok, "req_call_outcome_pending_contract"}
+    end
+  end
+
   setup do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
@@ -67,6 +84,9 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
       {:arbor_security, :strict_identity_mode, false},
       {:arbor_security, :uri_registry_enforcement, false},
       {:arbor_security, :consensus_escalation_enabled, false},
+      {:arbor_security, :consensus_module, PendingApprovalProbe},
+      {:arbor_security, :interaction_router, PendingApprovalProbe},
+      {:arbor_security, :use_interaction_router_for_approval, true},
       {:arbor_security, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, true}
@@ -104,6 +124,30 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
     assert %{result: {:error, _}, effect_admitted: false, outcome: :refused} =
              call(unauthorized, :succeed)
 
+    refute_received :outcome_probe_ran
+  end
+
+  test "security regression: Trust pending approval retains its request ID without admitting an effect",
+       %{agent_id: agent_id} do
+    {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
+    Enum.each(capabilities, &Arbor.Security.revoke(&1.id))
+
+    assert {:ok, _} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: @resource,
+               constraints: %{requires_approval: true}
+             )
+
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+
+    assert %{
+             result: {:ok, :pending_approval, "req_call_outcome_pending_contract"},
+             effect_admitted: false,
+             outcome: nil
+           } = call(agent_id, :succeed)
+
+    assert_received {:pending_approval_requested, ^agent_id, @resource}
     refute_received :outcome_probe_ran
   end
 
@@ -163,6 +207,46 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
              effect_admitted: true,
              outcome: nil
            } = call(agent_id, {:nested, unauthorized})
+  end
+
+  test "security regression: private source control is stripped from action context and restored after all exits",
+       %{agent_id: agent_id} do
+    source = %{session_pid: self(), generation: make_ref(), handle: {self(), make_ref()}}
+
+    for behaviour <- [:succeed, :raise, :exit, :throw] do
+      _ =
+        Arbor.Actions.authorize_and_execute_with_outcome(agent_id, OutcomeProbeAction, %{}, %{
+          test_pid: self(),
+          behaviour: behaviour,
+          conversation_source: source
+        })
+
+      assert_receive {:source_context_observation, false, {:present, ^source}}
+      assert %{result: {:ok, %{done: true}}} = call(agent_id, :succeed)
+      assert_receive {:source_context_observation, false, :absent}
+    end
+  end
+
+  test "security regression: synchronous nested native calls retain private source without exposing it",
+       %{agent_id: agent_id} do
+    source = %{session_pid: self(), generation: make_ref(), handle: {self(), make_ref()}}
+
+    assert %{result: {:ok, %{inner_admitted: true}}} =
+             Arbor.Actions.authorize_and_execute_with_outcome(
+               agent_id,
+               OutcomeProbeAction,
+               %{},
+               %{
+                 test_pid: self(),
+                 behaviour: {:nested, agent_id},
+                 conversation_source: source
+               }
+             )
+
+    assert_receive {:source_context_observation, false, {:present, ^source}}
+    assert_receive {:source_context_observation, false, {:present, ^source}}
+    assert %{result: {:ok, %{done: true}}} = call(agent_id, :succeed)
+    assert_receive {:source_context_observation, false, :absent}
   end
 
   defp call(agent_id, behaviour) do

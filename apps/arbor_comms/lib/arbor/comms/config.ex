@@ -109,7 +109,24 @@ defmodule Arbor.Comms.Config do
   def conversation_persistence_module,
     do: Application.get_env(:arbor_comms, :conversation_persistence_module, Arbor.Persistence)
 
+  @doc "Public persistence facade for the authoritative private conversation directory."
+  def conversation_directory_persistence_module,
+    do:
+      Application.get_env(
+        :arbor_comms,
+        :conversation_directory_persistence_module,
+        Arbor.Persistence
+      )
+
   @doc "Returns the explicit durable target for the conversation ingress journal."
+  def conversation_command_index_persistence_module,
+    do:
+      Application.get_env(
+        :arbor_comms,
+        :conversation_command_index_persistence_module,
+        Arbor.Persistence
+      )
+
   def conversation_journal do
     config = Application.get_env(:arbor_comms, :conversation_journal, [])
 

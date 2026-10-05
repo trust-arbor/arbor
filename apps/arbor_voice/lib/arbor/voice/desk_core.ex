@@ -13,7 +13,7 @@ defmodule Arbor.Voice.DeskCore do
     :mode,
     :expected_engagement_id
   ]
-  def options(user, agent, opts, server_node) do
+  def options(user, agent, opts, server_node, recording) do
     with true <- id?(user) and id?(agent),
          true <- is_list(opts) and Keyword.keyword?(opts),
          keys <- Keyword.keys(opts),
@@ -22,8 +22,10 @@ defmodule Arbor.Voice.DeskCore do
          true <- proof?(opts),
          mode <- Keyword.get(opts, :mode, :conversation),
          true <- mode in [:conversation, :loopback],
-         duration <- Keyword.get(opts, :duration_ms, 3_000),
-         true <- is_integer(duration) and duration in 100..10_000,
+         duration <- Keyword.get(opts, :duration_ms, recording.default_ms),
+         true <-
+           is_integer(duration) and duration >= recording.min_ms and
+             duration <= recording.max_ms,
          input <- Keyword.get(opts, :input_device, :default),
          output <- Keyword.get(opts, :output_device, :default),
          true <- device?(input) and device?(output),
@@ -36,6 +38,7 @@ defmodule Arbor.Voice.DeskCore do
          user: user,
          agent: agent,
          duration_ms: duration,
+         minimum_duration_ms: recording.min_ms,
          input_device: input,
          output_device: output,
          mode: mode,
@@ -158,6 +161,8 @@ defmodule Arbor.Voice.DeskCore do
              :permission_denied,
              :unsupported_format,
              :capture_failed,
+             :recording_too_short,
+             :finish_unavailable,
              :playback_failed,
              :invalid_presentation,
              :cleanup_pending,

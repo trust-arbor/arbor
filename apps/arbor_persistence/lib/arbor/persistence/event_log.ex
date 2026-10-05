@@ -218,6 +218,18 @@ defmodule Arbor.Persistence.EventLog do
               {:ok, String.t() | nil} | {:error, term()}
 
   @doc """
+  Read at most five exact event IDs and one pinned stream head without replay.
+
+  `:max_event_number` pins an existing inclusive head (zero pins an empty
+  snapshot). Without it, the backend captures its current head. Missing optional
+  command transitions are omitted; wrong-stream records, missing pinned heads,
+  malformed records and fingerprint mismatches fail closed. Returns records,
+  not identity fingerprints. The caller validates domain transition order.
+  """
+  @callback read_event_records(stream_id(), [String.t()], opts()) ::
+              {:ok, %{events: [Event.t()], head: Event.t() | nil}} | {:error, term()}
+
+  @doc """
   Read at most the current head event for a stream.
 
   With no freshness option this returns the ordinary current head. With
@@ -333,6 +345,7 @@ defmodule Arbor.Persistence.EventLog do
     stream_absent: 2,
     read_stream_range: 2,
     event_identity: 3,
+    read_event_records: 3,
     subscribe: 3,
     list_streams: 1,
     stream_count: 1,

@@ -11,8 +11,9 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.Agent.{Executor, Lifecycle, Manager, ReasoningLoop}
+  alias Arbor.Agent.{Executor, Lifecycle, ReasoningLoop}
   alias Arbor.Dashboard.Components.GraduationComponent
+  alias Arbor.Dashboard.ConversationNavigationCore
   alias Arbor.Trust
   alias Arbor.Web.{Helpers, SignalLive}
 
@@ -91,36 +92,47 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     {:noreply, socket}
   end
 
-  def handle_event("chat-agent", %{"id" => agent_id}, socket) do
-    {:noreply, push_navigate(socket, to: "/chat?agent_id=#{agent_id}")}
+  def handle_event("chat-agent", params, socket) do
+    case ConversationNavigationCore.target_path(params["id"]) do
+      {:ok, path} ->
+        {:noreply, push_navigate(socket, to: path)}
+
+      {:error, :invalid_target} ->
+        {:noreply, put_flash(socket, :error, "Conversation link is invalid.")}
+    end
   end
 
   def handle_event("stop-agent", %{"id" => agent_id}, socket) do
-    Manager.stop_agent(agent_id)
-    {running, profiles} = safe_load_agents()
-
-    socket =
-      socket
-      |> assign(
-        running_count: length(running),
-        profile_count: length(profiles),
-        running_ids: safe_running_ids()
-      )
-      |> stream(:agents, profiles, reset: true)
-
-    {:noreply, socket}
+    {:noreply, manage_agent(socket, :stop, agent_id)}
   end
 
   def handle_event("delete-agent", %{"id" => agent_id}, socket) do
-    Lifecycle.destroy(agent_id)
-    {running, profiles} = safe_load_agents()
+    {:noreply, manage_agent(socket, :destroy, agent_id)}
+  end
 
-    socket =
-      socket
-      |> assign(running_count: length(running), profile_count: length(profiles))
-      |> stream(:agents, profiles, reset: true)
+  defp manage_agent(socket, operation, target) do
+    # Event parameters select only the target. Actor and proof come exclusively
+    # from the browser session assigned by Nav; local-dev access grants nothing.
+    actor = socket.assigns[:current_agent_id]
+    token = socket.assigns[:session_token]
 
-    {:noreply, socket}
+    result =
+      try do
+        case operation do
+          :stop -> Arbor.Agent.authorize_stop(actor, target, session_token: token)
+          :destroy -> Arbor.Agent.authorize_destroy(actor, target, session_token: token)
+        end
+      rescue
+        _ -> {:error, :management_unavailable}
+      catch
+        _, _ -> {:error, :management_unavailable}
+      end
+
+    case result do
+      :ok -> reload_agents(socket)
+      {:ok, :pending_approval, _} -> put_flash(socket, :info, "Agent management needs approval.")
+      _ -> put_flash(socket, :error, "Agent management was refused.")
+    end
   end
 
   defp reload_graduations(%{assigns: %{selected_agent: nil}} = socket), do: socket

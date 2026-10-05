@@ -132,6 +132,328 @@ defmodule Arbor.Security do
     Arbor.Security.InvocationAudit.observe_authorization(result, principal_id, resource_uri)
   end
 
+  @doc "Validate closed notice facts and conservative payload-bound provenance; grants no authority."
+  def validate_notice_publication_value(scope, value),
+    do: Arbor.Security.ConversationNoticeCore.value(scope, value)
+
+  @doc "Validate closed notice scope facts without granting resource authority."
+  def validate_notice_publication_scope(scope),
+    do: Arbor.Security.ConversationNoticeCore.scope(scope)
+
+  @doc false
+  def validate_native_notice_mailbox(principal, mailbox) do
+    with true <- is_map(mailbox) and not is_struct(mailbox),
+         true <-
+           Enum.sort(Map.keys(mailbox)) ==
+             Enum.sort(~w(mailbox_id recipient_subject_id owner_id engagement_id)),
+         true <- Arbor.Security.ConversationNoticeCore.mailbox?(mailbox["mailbox_id"]),
+         {:ok, scope} <-
+           validate_notice_publication_scope(%{
+             owner_id: mailbox["owner_id"],
+             target_agent_id: principal,
+             engagement_id: mailbox["engagement_id"]
+           }),
+         {:ok, _subject_scope} <-
+           validate_notice_publication_scope(%{
+             scope
+             | owner_id: mailbox["recipient_subject_id"]
+           }) do
+      {:ok, mailbox}
+    else
+      _ -> {:error, :invalid_notice}
+    end
+  end
+
+  @doc "Digest exact immutable notice facts; timestamps and source generations are excluded."
+  def notice_publication_facts_digest(scope, value),
+    do: Arbor.Security.ConversationNoticeCore.digest(scope, value)
+
+  @doc "Pure exact-domain payload for an existing scoped notice read."
+  defdelegate conversation_notice_read_request_payload(subject, target, page, expected),
+    to: Arbor.Security.ConversationNoticeReadCore,
+    as: :payload
+
+  @doc """
+  Fresh scoped visual read admission. The continuation receives only its pinned
+  owner and a same-stack release check. Private proof and exact selected grant
+  remain in this boundary and never enter a wire record or action parameters.
+  """
+  def with_authenticated_conversation_notice_read(subject, target, payload, opts, continuation)
+      when is_function(continuation, 2) do
+    resource = "arbor://chat/agent/" <> target
+
+    with true <- Keyword.keyword?(opts),
+         expected = Keyword.get(opts, :expected_engagement_id),
+         true <-
+           Arbor.Security.ConversationNoticeReadCore.valid_payload?(
+             payload,
+             subject,
+             target,
+             expected
+           ),
+         {:ok, proof_opts} <- validate_conversation_operation_opts(opts),
+         :ok <- bind_conversation_operation_proof(subject, payload, proof_opts),
+         :ok <- require_exact_active_identity(target),
+         {:ok, :authorized, cap, _auth, _safe} <-
+           chat_authorization_decision(subject, resource, proof_opts),
+         :ok <- reusable_conversation_capability(cap),
+         :ok <- conversation_stateless_constraints(cap.constraints, resource) do
+      if String.starts_with?(subject, "human_") do
+        with {:ok, owner} <- resolve_conversation_owner(subject) do
+          digest = capability_notice_digest(cap)
+
+          release = fn scope, page ->
+            recheck_notice_visual_release(
+              subject,
+              target,
+              owner,
+              expected,
+              resource,
+              cap.id,
+              digest,
+              proof_opts,
+              scope,
+              page,
+              payload
+            )
+          end
+
+          continuation.(owner, release)
+        end
+      else
+        {:error, :notice_subject_required}
+      end
+    else
+      {:error, :unsupported_conversation_capability} = error -> error
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  # An exact same-owner visual sink, not provider export or speech permission.
+  # This is a continuation recheck; it neither authenticates another request nor
+  # consumes the already-admitted signed nonce or a use/rate allowance.
+  defp recheck_notice_visual_release(
+         subject,
+         target,
+         owner,
+         expected,
+         resource,
+         cap_id,
+         digest,
+         proof_opts,
+         scope,
+         page,
+         payload
+       ) do
+    # Bound/validate producer bytes before the last fresh authority check. Even
+    # malformed data must not disguise a concurrent loss of human authority.
+    page_validation =
+      Arbor.Security.ConversationNoticeReadCore.validate_page(scope, page, payload)
+
+    with true <- scope == %{owner_id: owner, target_agent_id: target, engagement_id: expected},
+         :ok <- require_exact_active_identity(target),
+         :ok <- require_exact_active_identity(subject),
+         {:ok, ^owner} <- resolve_conversation_owner(subject),
+         :ok <- recheck_notice_lease(subject, target, owner, proof_opts),
+         :ok <-
+           check_reflexes(subject, build_reflex_context(resource, :chat, []), resource, :chat, []),
+         opts = [verify_identity: false, exact_capability_id: cap_id],
+         {:ok, :authorized, cap, _} <-
+           AuthDecision.evaluate(build_auth_context(subject, opts), resource, :chat, opts),
+         true <- capability_notice_digest(cap) == digest,
+         :ok <- reusable_conversation_capability(cap),
+         :ok <- conversation_stateless_constraints(cap.constraints, resource) do
+      page_validation
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  end
+
+  defp recheck_notice_lease(subject, target, owner, opts) do
+    case Keyword.fetch(opts, :session_token) do
+      {:ok, token} ->
+        case recheck_conversation_session(subject, target, owner, token) do
+          {:ok, :authorized} -> :ok
+          _ -> {:error, :unauthorized}
+        end
+
+      :error ->
+        :ok
+    end
+  end
+
+  @doc false
+  defdelegate begin_native_notice_profile_mutation(principal),
+    to: Arbor.Security.NativeNoticeBroker,
+    as: :begin_profile_mutation
+
+  @doc false
+  defdelegate finish_native_notice_profile_mutation(ticket),
+    to: Arbor.Security.NativeNoticeBroker,
+    as: :finish_profile_mutation
+
+  @doc false
+  defdelegate open_native_notice_source(authority),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :open_source
+
+  @doc false
+  defdelegate delegate_native_notice_worker(source, worker),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :delegate_worker
+
+  @doc false
+  defdelegate claim_native_notice_worker(bootstrap),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :claim_worker
+
+  @doc false
+  defdelegate native_notice_action_resource(params),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :resource
+
+  @doc false
+  defdelegate prepare_native_notice_publication(params, taints),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :prepare
+
+  @doc false
+  defdelegate activate_native_notice_publication(prepared),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :activate
+
+  @doc false
+  defdelegate native_notice_publication_value(params),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :peek
+
+  @doc false
+  defdelegate consume_native_notice_commit(scope, value),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :consume_value
+
+  @doc false
+  defdelegate reconcile_native_notice_commit(scope, value),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :reconcile_value
+
+  @doc false
+  defdelegate finish_native_notice_publication(params, outcome),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :finish
+
+  @doc false
+  defdelegate close_native_notice_worker(),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :close_worker
+
+  @doc false
+  defdelegate discard_native_notice_publication(),
+    to: Arbor.Security.NativeConversationNotices,
+    as: :discard
+
+  # Internal selected decision seam. It returns no usable publication receipt;
+  # only the native broker holds it through the worker/Trust/taint admission.
+  @doc false
+  def prepare_native_notice_capability(principal, resource, payload, proof) do
+    opts = [signed_request: proof, verify_identity: true, expected_resource: payload]
+
+    with true <- match?(%SignedRequest{agent_id: ^principal, payload: ^payload}, proof),
+         :ok <- require_exact_active_identity(principal),
+         :ok <-
+           check_reflexes(
+             principal,
+             build_reflex_context(resource, :execute, []),
+             resource,
+             :execute,
+             []
+           ),
+         {:ok, disposition, cap, auth} <-
+           AuthDecision.evaluate(build_auth_context(principal, opts), resource, :execute, opts),
+         true <- disposition in [:authorized, :requires_approval],
+         :ok <- reusable_conversation_capability(cap),
+         true <- is_nil(cap.session_id) and is_nil(cap.task_id) and is_nil(cap.principal_scope),
+         :ok <- conversation_stateless_constraints(cap.constraints, resource) do
+      {:ok,
+       %{
+         principal: principal,
+         resource: resource,
+         capability: cap,
+         auth: auth,
+         capability_digest: capability_notice_digest(cap)
+       }}
+    else
+      {:error, :unsupported_conversation_capability} -> {:error, :unsupported_notice_capability}
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  @doc false
+  def recheck_native_notice_capability(decision) do
+    case native_notice_current_capability(decision) do
+      {:ok, _cap} -> :ok
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  @doc false
+  def consume_native_notice_capability(decision) do
+    with {:ok, cap} <- native_notice_current_capability(decision) do
+      # The fresh proof was already checked once during private preparation.
+      # Never emit it or its body-bearing expected payload in observability.
+      handle_authorized(cap, decision.auth, decision.principal, decision.resource, :execute, [])
+    end
+  end
+
+  defp native_notice_current_capability(decision) do
+    with true <- is_map(decision) and not is_struct(decision),
+         true <-
+           Enum.sort(Map.keys(decision)) ==
+             Enum.sort([:principal, :resource, :capability, :auth, :capability_digest]),
+         %Capability{id: id} <- decision.capability,
+         :ok <- require_exact_active_identity(decision.principal),
+         :ok <-
+           check_reflexes(
+             decision.principal,
+             build_reflex_context(decision.resource, :execute, []),
+             decision.resource,
+             :execute,
+             []
+           ),
+         opts = [verify_identity: false, exact_capability_id: id],
+         {:ok, :authorized, cap, _auth} <-
+           AuthDecision.evaluate(
+             build_auth_context(decision.principal, opts),
+             decision.resource,
+             :execute,
+             opts
+           ),
+         true <- capability_notice_digest(cap) == decision.capability_digest,
+         :ok <- reusable_conversation_capability(cap),
+         :ok <- conversation_stateless_constraints(cap.constraints, decision.resource) do
+      {:ok, cap}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp capability_notice_digest(cap),
+    do: Base.encode16(:crypto.hash(:sha256, Capability.signing_payload(cap)), case: :lower)
+
   @doc "Run a trusted adapter invocation with durable source-owned attempt/decision/outcome evidence. Never accepts a caller invocation id."
   def with_invocation_audit(attributes, fun),
     do: Arbor.Security.InvocationAudit.run(attributes, fun)
@@ -768,10 +1090,80 @@ defmodule Arbor.Security do
     _, _ -> {:error, :unauthorized}
   end
 
+  @doc """
+  Authenticate one conversation control operation and bind its receipt to its payload.
+
+  The owning conversation boundary supplies the closed serialized operation. A
+  signed proof must contain these exact bytes. The winning source recomputes the
+  payload and consumes this one-use receipt; it cannot be used as a chat delivery
+  or private-memory admission. Chat admission, canonical ownership, audit and
+  allowance effects are shared with ordinary conversation receipts.
+
+  Either proof mode may supply a compare-only `:expected_engagement_id` fence.
+  The receipt stores that fence privately; the operation source must compare it
+  with its resolved engagement. This does not grant approval-answer authority.
+  """
+  @spec authorize_and_issue_conversation_operation_receipt(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
+          {:ok, DeliveryReceipt.t()}
+          | {:error, :unauthorized | :unsupported_conversation_capability}
+  def authorize_and_issue_conversation_operation_receipt(principal, resource, payload, opts) do
+    with :ok <- validate_conversation_authorization_request(principal, resource, :chat),
+         true <- valid_conversation_operation_payload?(payload),
+         {:ok, proof_opts} <- validate_conversation_operation_opts(opts),
+         :ok <- bind_conversation_operation_proof(principal, payload, proof_opts),
+         {:ok, receipt} <-
+           issue_chat_receipt(principal, resource, proof_opts, :deny_pending, payload) do
+      {:ok, receipt}
+    else
+      {:error, :unsupported_conversation_capability} = error -> error
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp valid_conversation_operation_payload?(payload),
+    do: is_binary(payload) and byte_size(payload) in 1..131_072 and String.valid?(payload)
+
+  defp validate_conversation_operation_opts(opts) do
+    with true <- is_list(opts) and Keyword.keyword?(opts),
+         keys = Keyword.keys(opts),
+         true <- length(keys) == length(Enum.uniq(keys)),
+         true <-
+           Enum.all?(keys, &(&1 in [:session_token, :signed_request, :expected_engagement_id])),
+         true <- valid_issue_engagement_fence?(opts),
+         {:ok, proof_opts} <- validate_issue_opts(Keyword.delete(opts, :expected_engagement_id)) do
+      {:ok, Keyword.merge(proof_opts, Keyword.take(opts, [:expected_engagement_id]))}
+    else
+      _ -> {:error, :invalid_opts}
+    end
+  end
+
+  defp bind_conversation_operation_proof(principal, payload, opts) do
+    case Keyword.fetch(opts, :signed_request) do
+      {:ok, %SignedRequest{agent_id: ^principal, payload: ^payload}} -> :ok
+      :error -> :ok
+      _ -> {:error, :unauthorized}
+    end
+  end
+
   # Source-owned chat admission policy shared by both receipt facades. Select and
   # authenticate exactly once. Reject unsupported continuations and unresolved
   # owners before the authorization effect handler spends use/rate allowances.
-  defp issue_chat_receipt(principal, resource, proof_opts, approval_policy) do
+  defp issue_chat_receipt(
+         principal,
+         resource,
+         proof_opts,
+         approval_policy,
+         operation_payload \\ nil
+       ) do
     {expected_engagement_id, proof_opts} = Keyword.pop(proof_opts, :expected_engagement_id)
 
     with :ok <- validate_conversation_authorization_request(principal, resource, :chat),
@@ -791,12 +1183,22 @@ defmodule Arbor.Security do
 
       case InvocationAudit.observe_authorization(authorization, principal, resource) do
         {:ok, :authorized} ->
-          DeliveryReceiptBroker.issue_conversation(
-            principal,
-            resource,
-            canonical_owner,
-            expected_engagement_id
-          )
+          if is_nil(operation_payload) do
+            DeliveryReceiptBroker.issue_conversation(
+              principal,
+              resource,
+              canonical_owner,
+              expected_engagement_id
+            )
+          else
+            DeliveryReceiptBroker.issue_conversation_operation(
+              principal,
+              resource,
+              canonical_owner,
+              expected_engagement_id,
+              :crypto.hash(:sha256, operation_payload)
+            )
+          end
 
         {:ok, :pending_approval, _} ->
           {:error, :pending_approval}
@@ -1110,6 +1512,40 @@ defmodule Arbor.Security do
 
   def consume_delivery_receipt(_receipt, _resource_uri, _action),
     do: {:error, :invalid_receipt}
+
+  @doc """
+  Consume a conversation control receipt against the source's recomputed payload.
+
+  Returns only the authenticated subject, pinned owner and compare-only fence.
+  Payload or resource mismatch spends the receipt, preventing later reuse.
+  The owning source still checks current access, engagement and operation state.
+  """
+  @spec consume_conversation_operation_receipt(term(), String.t(), String.t()) ::
+          {:ok,
+           %{
+             principal_id: String.t(),
+             canonical_owner_id: String.t(),
+             expected_engagement_id: String.t() | nil
+           }}
+          | {:error, :invalid_receipt | :broker_unavailable}
+  def consume_conversation_operation_receipt(receipt, resource, payload) do
+    with true <- is_binary(resource),
+         true <- valid_conversation_operation_payload?(payload),
+         {:ok, token} <- DeliveryReceipt.bearer_token(receipt) do
+      DeliveryReceiptBroker.consume_conversation_operation(
+        token,
+        resource,
+        :crypto.hash(:sha256, payload)
+      )
+    else
+      _ -> {:error, :invalid_receipt}
+    end
+  rescue
+    _ -> {:error, :invalid_receipt}
+  catch
+    :throw, _ -> {:error, :invalid_receipt}
+    :exit, _ -> {:error, :broker_unavailable}
+  end
 
   @doc """
   Discard a delivery receipt. Idempotent for well-shaped receipts; reveals no

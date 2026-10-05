@@ -18,12 +18,26 @@ defmodule Arbor.Comms.ConversationRead do
   @spec read_user_conversation_page(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, atom()}
   def read_user_conversation_page(agent_id, verified_principal, opts \\ []) do
+    read(agent_id, verified_principal, opts, :page)
+  end
+
+  def read_user_conversation_window(agent_id, verified_principal, opts \\ []) do
+    read(agent_id, verified_principal, opts, :window)
+  end
+
+  defp read(agent_id, verified_principal, opts, kind) do
     persistence = Config.conversation_persistence_module()
 
-    with {:ok, _bounds} <- persistence.normalize_conversation_page_options(opts),
+    {normalize, fetch} =
+      case kind do
+        :page -> {:normalize_conversation_page_options, :read_conversation_page}
+        :window -> {:normalize_conversation_window_options, :read_conversation_window}
+      end
+
+    with {:ok, _bounds} <- apply(persistence, normalize, [opts]),
          {:ok, engagement} <-
            Arbor.Comms.resolve_user_engagement(agent_id, verified_principal),
-         {:ok, page} <- persistence.read_conversation_page(agent_id, engagement.id, opts) do
+         {:ok, page} <- apply(persistence, fetch, [agent_id, engagement.id, opts]) do
       {:ok, Map.put(page, :engagement_id, engagement.id)}
     else
       {:error, reason}

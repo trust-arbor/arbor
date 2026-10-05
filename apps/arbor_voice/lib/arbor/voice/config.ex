@@ -54,6 +54,9 @@ defmodule Arbor.Voice.Config do
   @max_audio_turn_timeout_ms 330_000
   @default_desk_timeout_ms 120_000
   @max_desk_timeout_ms 360_000
+  @default_desk_recording_ms 10_000
+  @min_desk_recording_ms 100
+  @max_desk_recording_ms 30_000
   # Progress cue threshold (VP-05B / VOICE-11): source-owned hard ceiling.
   @default_progress_threshold_ms 2_000
   @max_progress_threshold_ms 30_000
@@ -225,6 +228,35 @@ defmodule Arbor.Voice.Config do
     |> validate_budget_cas_max_retries()
   end
 
+  @doc "Default PCM speech word limit: nil keeps the existing text and PCM byte bounds only."
+  @spec default_audio_speech_max_words() :: nil
+  def default_audio_speech_max_words, do: nil
+
+  @doc "Validate a PCM speech word limit; positive caps must fit the stock guard pointers."
+  @spec validate_audio_speech_max_words(term()) ::
+          {:ok, pos_integer() | nil} | {:error, :invalid_config}
+  def validate_audio_speech_max_words(nil), do: {:ok, nil}
+
+  def validate_audio_speech_max_words(value) when is_integer(value) and value > 0 do
+    if value >= Arbor.Voice.Speakable.minimum_max_words(),
+      do: {:ok, value},
+      else: {:error, :invalid_config}
+  end
+
+  def validate_audio_speech_max_words(_), do: {:error, :invalid_config}
+
+  @doc """
+  PCM final-speech word cap, configurable with `config :arbor_voice, audio_speech_max_words: 120`.
+  Defaults to nil (no word truncation). Text turns and fixed cues keep Speakable's legacy default.
+  Malformed configured caps fail before PCM Session resource effects.
+  """
+  @spec audio_speech_max_words() :: {:ok, pos_integer() | nil} | {:error, :invalid_config}
+  def audio_speech_max_words do
+    :arbor_voice
+    |> Application.get_env(:audio_speech_max_words, default_audio_speech_max_words())
+    |> validate_audio_speech_max_words()
+  end
+
   # ---------------------------------------------------------------------------
   # Speech-output acceptance timeout (VP-04E2R1)
   # ---------------------------------------------------------------------------
@@ -341,6 +373,33 @@ defmodule Arbor.Voice.Config do
     |> Application.get_env(:desk_timeout_ms, @default_desk_timeout_ms)
     |> validate_desk_timeout_ms()
   end
+
+  @doc """
+  Validated Desk recording duration policy in milliseconds. The default is
+  10 seconds; operators may narrow the device-supported 100–30000 ms interval
+  with `:desk_recording_min_ms` and `:desk_recording_max_ms`, and choose a default
+  with `:desk_recording_default_ms`. Malformed or inconsistent values fail closed.
+  These settings do not extend the operation deadline or voice budget.
+  """
+  @spec desk_recording_options() :: {:ok, map()} | {:error, :invalid_config}
+  def desk_recording_options do
+    validate_desk_recording_options(%{
+      default_ms:
+        Application.get_env(:arbor_voice, :desk_recording_default_ms, @default_desk_recording_ms),
+      min_ms: Application.get_env(:arbor_voice, :desk_recording_min_ms, @min_desk_recording_ms),
+      max_ms: Application.get_env(:arbor_voice, :desk_recording_max_ms, @max_desk_recording_ms)
+    })
+  end
+
+  @doc "Pure validation of the recording policy against the native capture interval."
+  @spec validate_desk_recording_options(term()) :: {:ok, map()} | {:error, :invalid_config}
+  def validate_desk_recording_options(%{default_ms: default, min_ms: min, max_ms: max} = options)
+      when map_size(options) == 3 and is_integer(default) and is_integer(min) and
+             is_integer(max) and min >= @min_desk_recording_ms and max <= @max_desk_recording_ms and
+             min <= default and default <= max,
+      do: {:ok, options}
+
+  def validate_desk_recording_options(_), do: {:error, :invalid_config}
 
   @doc false
   @spec operation_timeouts() ::

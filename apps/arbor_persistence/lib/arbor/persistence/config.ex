@@ -10,6 +10,12 @@ defmodule Arbor.Persistence.Config do
 
   alias Arbor.Persistence.VectorStore.Unsupported
 
+  @doc "Returns the Persistence-owned SQL repository used by conversation projections."
+  def sql_repository do
+    repo = Application.get_env(:arbor_persistence, :sql_repository, Arbor.Persistence.Repo)
+    if is_atom(repo) and not is_nil(repo), do: {:ok, repo}, else: {:error, :invalid_config}
+  end
+
   @doc "Returns the configured vector-store backend or the fail-closed adapter."
   @spec vector_store_backend() :: {:ok, module()} | {:error, :invalid_config}
   def vector_store_backend do

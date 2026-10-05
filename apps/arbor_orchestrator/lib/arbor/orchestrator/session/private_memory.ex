@@ -324,7 +324,10 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
   def close(state, %TurnAuthority{turn_id: turn_id}) do
     {admission, remaining} = Map.pop(admissions(state), turn_id)
     close_admission(admission)
-    Map.put(state, :private_memory_admissions, remaining)
+
+    state
+    |> Map.put(:private_memory_admissions, remaining)
+    |> Map.update(:conversation_bindings, %{}, &Map.delete(&1, turn_id))
   end
 
   def close(state, nil), do: state
@@ -367,7 +370,11 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
         end
       end)
 
-    Map.put(state, :private_memory_admissions, remaining)
+    state
+    |> Map.put(:private_memory_admissions, remaining)
+    |> Map.update(:conversation_bindings, %{}, fn bindings ->
+      Map.filter(bindings, fn {turn_id, _} -> MapSet.member?(retained, turn_id) end)
+    end)
   end
 
   defp retain_active(ids, %{turn_in_flight: true, turn_authority: %TurnAuthority{turn_id: id}}),

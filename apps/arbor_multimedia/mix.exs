@@ -31,7 +31,7 @@ defmodule Arbor.Multimedia.MixProject do
        override: true},
       {:membrane_portaudio_plugin,
        git: "http://10.42.42.6:3000/trust-arbor/membrane_portaudio_plugin.git",
-       ref: "c4e85f4d9ec4e080a7713f5f9878c67a658997c1"},
+       ref: "1270de06ce99f3cd025a4416239f85986e7e4589"},
       {:membrane_raw_audio_format, "~> 0.12.3"}
     ]
   end

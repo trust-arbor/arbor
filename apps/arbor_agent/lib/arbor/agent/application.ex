@@ -48,6 +48,7 @@ defmodule Arbor.Agent.Application do
              collection: "agent_profiles"},
             id: :arbor_agent_profiles
           ),
+          Arbor.Agent.ProfileAuthorityOwner,
           # User config store (per-user settings, API keys, preferences)
           Supervisor.child_spec(
             {Arbor.Persistence.BufferedStore,

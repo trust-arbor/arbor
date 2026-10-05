@@ -75,6 +75,7 @@ defmodule Arbor.Security.TestBootstrap do
       Arbor.Security.CapabilityStore,
       Arbor.Security.Reflex.Registry,
       Arbor.Security.DeliveryReceiptBroker,
+      Arbor.Security.NativeNoticeBroker,
       Arbor.Security.TerminalLogin
     ]
 
@@ -312,6 +313,7 @@ defmodule Arbor.Security.TestBootstrap do
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},
           {Arbor.Security.DeliveryReceiptBroker, []},
+          {Arbor.Security.NativeNoticeBroker, []},
           {Arbor.Security.TerminalLogin, []}
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))

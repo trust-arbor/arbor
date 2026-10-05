@@ -61,8 +61,8 @@ defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
     end
   end
 
-  describe "human-review reduction end-to-end (Phase 4)" do
-    test "approving a gate reduces the reviewed key's taint via :human_review" do
+  describe "protected human-review boundary" do
+    test "security regression: an ordinary callback cannot reduce reviewed taint" do
       dot = """
       digraph H {
         start [shape=Mdiamond]
@@ -82,8 +82,8 @@ defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
           interviewer: interviewer
         )
 
-      # A human approved -> the reviewed key is reduced from :untrusted to :trusted.
-      assert result.taint["seed"].level == :trusted
+      assert result.final_outcome.status == :fail
+      assert result.taint["seed"].level == :untrusted
     end
   end
 end

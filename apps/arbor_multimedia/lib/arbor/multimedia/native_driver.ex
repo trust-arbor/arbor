@@ -42,6 +42,23 @@ defmodule Arbor.Multimedia.Driver.Native do
   end
 
   @impl true
+  def manual_capture_finish_supported? do
+    Code.ensure_loaded?(Membrane.PortAudio.Source) and
+      function_exported?(Membrane.PortAudio.Source, :manual_capture_finish_supported?, 0) and
+      apply(Membrane.PortAudio.Source, :manual_capture_finish_supported?, []) == true
+  end
+
+  @impl true
+  def finish(handle) do
+    if manual_capture_finish_supported?() do
+      send(handle.pid, {:finish_capture, handle.token})
+      :ok
+    else
+      {:error, :finish_unavailable}
+    end
+  end
+
+  @impl true
   def close(handle) do
     # Dormant phase has never owned a pipeline or issued native work. Atomically
     # close it before sending shutdown; a queued activation can no longer win.

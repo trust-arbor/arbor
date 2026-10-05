@@ -483,7 +483,10 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
              Security.authorize_and_issue_delivery_receipt(
                c.caller,
                "arbor://memory/read/" <> c.caller,
-               :read, session_token: c.token, expected_engagement_id: @fence)
+               :read,
+               session_token: c.token,
+               expected_engagement_id: @fence
+             )
 
     assert DeliveryReceiptBroker.stats().issued == before
     # Invalid fence options did not consume the signed proof nonce or rate allowance.
@@ -545,6 +548,187 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
 
     assert {:error, :unauthorized} =
              Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
+  end
+
+  test "security regression: operation receipt consumes only the exact operation bytes once", c do
+    grant(c)
+    payload = Jason.encode!(["arbor.conversation.cancel.v1", c.caller, c.target, "command_one"])
+    assert {:ok, receipt} = issue_operation(c, payload)
+    assert {:ok, owner} = Security.conversation_receipt_owner(receipt, c.caller, c.target)
+    assert owner == c.caller
+    refute inspect(receipt) =~ payload
+
+    assert {:ok,
+            %{
+              principal_id: subject,
+              canonical_owner_id: canonical_owner,
+              expected_engagement_id: nil
+            } = binding} =
+             Security.consume_conversation_operation_receipt(receipt, c.resource, payload)
+
+    assert subject == c.caller
+    assert canonical_owner == c.caller
+    assert map_size(binding) == 3
+
+    assert {:error, :invalid_receipt} =
+             Security.consume_conversation_operation_receipt(receipt, c.resource, payload)
+  end
+
+  test "security regression: cross-operation and cross-resource attempts burn operation receipts",
+       c do
+    grant(c)
+    payload = "cancel command_one"
+
+    for {resource, attempted} <- [
+          {c.resource, "cancel command_two"},
+          {c.resource, "activity command_one"},
+          {c.resource <> "_other", payload},
+          {c.resource, payload <> " "}
+        ] do
+      assert {:ok, receipt} = issue_operation(c, payload)
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_conversation_operation_receipt(receipt, resource, attempted)
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_conversation_operation_receipt(receipt, c.resource, payload)
+    end
+  end
+
+  test "security regression: operation proof cannot become a delivery or private-memory admission",
+       c do
+    grant(c)
+    payload = "answer exact pending choice"
+    assert {:ok, delivery_attempt} = issue_operation(c, payload)
+
+    assert {:error, :invalid_receipt} =
+             Security.consume_delivery_receipt(delivery_attempt, c.resource, :chat)
+
+    assert {:error, :invalid_receipt} =
+             Security.consume_conversation_operation_receipt(
+               delivery_attempt,
+               c.resource,
+               payload
+             )
+
+    assert {:ok, memory_attempt} = issue_operation(c, payload)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.exchange_private_memory_receipt(memory_attempt, c.target, c.caller, %{
+               session_id: "session_operation",
+               turn_id: "turn_operation"
+             })
+
+    assert {:error, :invalid_receipt} =
+             Security.consume_conversation_operation_receipt(memory_attempt, c.resource, payload)
+
+    assert {:ok, ordinary} = issue(c)
+
+    assert {:error, :invalid_receipt} =
+             Security.consume_conversation_operation_receipt(ordinary, c.resource, payload)
+  end
+
+  test "security regression: signed operation mismatch spends neither proof nonce nor allowance",
+       c do
+    grant(c, constraints: %{rate_limit: 1})
+    payload = "cancel command_one at " <> @fence
+    assert {:ok, proof} = SignedRequest.sign(payload, c.caller, c.private_key)
+    before = DeliveryReceiptBroker.stats().issued
+
+    assert {:error, :unauthorized} =
+             Security.authorize_and_issue_conversation_operation_receipt(
+               c.caller,
+               c.resource,
+               "cancel command_two at " <> @fence,
+               signed_request: proof,
+               expected_engagement_id: @fence
+             )
+
+    assert DeliveryReceiptBroker.stats().issued == before
+
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_conversation_operation_receipt(
+               c.caller,
+               c.resource,
+               payload,
+               signed_request: proof,
+               expected_engagement_id: @fence
+             )
+
+    assert {:ok, %{principal_id: subject, expected_engagement_id: @fence}} =
+             Security.consume_conversation_operation_receipt(receipt, c.resource, payload)
+
+    assert subject == c.caller
+
+    assert {:error, :unauthorized} =
+             Security.authorize_and_issue_conversation_operation_receipt(
+               c.caller,
+               c.resource,
+               payload,
+               signed_request: proof,
+               expected_engagement_id: @fence
+             )
+  end
+
+  test "security regression: operation receipt pins linked owner and original human proof subject",
+       c do
+    owner = other_human!("operation-owner")
+    grant(c)
+
+    Application.put_env(:arbor_security, :conversation_owner_test_aliases, %{
+      c.caller => owner.caller
+    })
+
+    assert {:ok, receipt} = issue_operation(c, "choice", expected_engagement_id: @fence)
+
+    assert {:ok,
+            %{principal_id: subject, canonical_owner_id: pinned, expected_engagement_id: @fence}} =
+             Security.consume_conversation_operation_receipt(receipt, c.resource, "choice")
+
+    assert subject == c.caller
+    assert pinned == owner.caller
+
+    assert {:error, :unauthorized} = issue_operation(%{c | token: owner.token}, "choice")
+  end
+
+  test "security regression: invalid operation inputs refuse before authorization effects", c do
+    grant(c, constraints: %{rate_limit: 1})
+    before = DeliveryReceiptBroker.stats().issued
+
+    for payload <- [nil, "", <<255>>, String.duplicate("x", 131_073)] do
+      assert {:error, :unauthorized} = issue_operation(c, payload)
+    end
+
+    for opts <- [
+          [session_token: c.token, expected_engagement_id: nil],
+          [session_token: c.token, expected_engagement_id: "eng_invalid"],
+          [session_token: c.token, session_token: c.token],
+          [session_token: c.token, identity_verified: true],
+          [session_token: c.token, signed_request: %{}],
+          [session_token: c.token, task_id: "override"]
+        ] do
+      assert {:error, :unauthorized} =
+               Security.authorize_and_issue_conversation_operation_receipt(
+                 c.caller,
+                 c.resource,
+                 "choice",
+                 opts
+               )
+    end
+
+    assert DeliveryReceiptBroker.stats().issued == before
+    assert {:ok, receipt} = issue_operation(c, "choice")
+    assert :ok = Security.discard_delivery_receipt(receipt)
+    assert {:error, :unauthorized} = issue_operation(c, "choice")
+  end
+
+  defp issue_operation(c, payload, opts \\ []) do
+    Security.authorize_and_issue_conversation_operation_receipt(
+      c.caller,
+      c.resource,
+      payload,
+      [session_token: c.token] ++ opts
+    )
   end
 
   defp other_human!(name) do

@@ -7,8 +7,10 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   History and command-journal pages have independent cursors. No agent-wide
   signal is a private transcript, and no socket attachment grants capabilities.
-  Legacy server slash commands, cancellation and approvals remain unavailable
-  until their own authenticated operation contracts are implemented.
+  Durable cancellation and source-owned choices use separately bound operations.
+  Terminal credentials authorize chat; protected approval still requires a
+  general human session and its original approval capability. Legacy controls
+  and server slash commands remain unavailable.
   """
   @behaviour WebSock
   alias Arbor.Gateway.Chat.Protocol
@@ -100,10 +102,17 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   # A fresh read is also the attachment operation. The host chooses the private
   # engagement from authenticated ownership, never from a client routing field.
-  defp do_dispatch(%{operation: :history} = req, state) do
-    case call(:conversation_history, [state.principal, req.target, proof_opts(req)]) do
+  defp do_dispatch(%{operation: operation} = req, state) when operation in [:history, :window] do
+    function = if operation == :window, do: :conversation_window, else: :conversation_history
+
+    case call(function, [state.principal, req.target, proof_opts(req)]) do
       {:ok, page} ->
-        push({:conversation_history, Map.put(page, :agent_id, req.target)}, %{
+        event = if operation == :window, do: :conversation_window, else: :conversation_history
+
+        # Remote renderers additionally verify the socket's authenticated target.
+        data = Map.put(page, :agent_id, req.target)
+
+        push({event, data}, %{
           state
           | agent_id: req.target,
             engagement_id: page.engagement_id
@@ -116,6 +125,33 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp do_dispatch(%{target: target}, %{agent_id: attached} = state) when target != attached,
     do: push({:error, :not_attached}, state)
+
+  defp do_dispatch(%{operation: :notices} = req, state) do
+    case call(:conversation_notices, [state.principal, req.target, proof_opts(req)]) do
+      {:ok, page} when is_map(page) ->
+        cond do
+          page[:target_agent_id] != state.agent_id or page[:engagement_id] != state.engagement_id ->
+            push({:error, :conversation_scope_changed}, state)
+
+          not notice_page_fields?(page) or private_control_fields?(page) ->
+            push({:error, :conversation_unavailable}, state)
+
+          byte_size(Protocol.encode({:conversation_notices, page})) > 131_072 ->
+            push({:error, :page_too_large}, state)
+
+          true ->
+            # The facade owns authorization and the closed notice page. Preserve
+            # its shape; the SDK uses target_agent_id rather than added agent_id.
+            push({:conversation_notices, page}, state)
+        end
+
+      {:error, reason} ->
+        push({:error, reason}, state)
+
+      _ ->
+        push({:error, :conversation_unavailable}, state)
+    end
+  end
 
   defp do_dispatch(%{operation: :submit, input: %{text: "/" <> _}} = _req, state),
     do: push({:error, :server_commands_unavailable}, state)
@@ -145,6 +181,141 @@ defmodule Arbor.Gateway.Chat.Socket do
     result = call(:conversation_events, [state.principal, req.target, req.input, proof_opts(req)])
     publish(result, :conversation_events, state)
   end
+
+  defp do_dispatch(%{operation: :activity} = req, state) do
+    result = call(:conversation_activity, [state.principal, req.target, proof_opts(req)])
+    publish_control(result, :conversation_activity, req, state)
+  end
+
+  defp do_dispatch(%{operation: :cancel} = req, state) do
+    result =
+      call(:cancel_conversation_command, [state.principal, req.target, req.input, proof_opts(req)])
+
+    publish_control(result, :conversation_cancellation, req, state)
+  end
+
+  defp do_dispatch(%{operation: :interactions} = req, state) do
+    result =
+      call(:conversation_interactions, [state.principal, req.target, req.input, proof_opts(req)])
+
+    publish_control(result, :conversation_interactions, req, state)
+  end
+
+  defp do_dispatch(
+         %{operation: :interaction_approval},
+         %{auth_mode: :conversation_session} = state
+       ),
+       do: push({:error, :approval_answer_required}, state)
+
+  defp do_dispatch(%{operation: operation} = req, state)
+       when operation in [:interaction_choice, :interaction_approval] do
+    function =
+      if operation == :interaction_choice,
+        do: :answer_conversation_choice,
+        else: :answer_conversation_approval
+
+    result = call(function, [state.principal, req.target, req.input, proof_opts(req)])
+    publish_control(result, :conversation_interaction_answer, req, state)
+  end
+
+  # Only host-returned scope and exact accepted selectors can correlate a reply.
+  # No renderer-supplied engagement, label or cached prompt establishes authority.
+  defp publish_control({:ok, value}, type, req, state) when is_map(value) do
+    with true <- value[:engagement_id] == state.engagement_id,
+         true <- correlated_control?(req, value),
+         data = Map.put(value, :agent_id, req.target),
+         true <- not private_control_fields?(data),
+         true <- byte_size(Jason.encode!(data)) <= 131_584 do
+      push({type, data}, state)
+    else
+      _ -> push({:error, :conversation_unavailable}, state)
+    end
+  rescue
+    _ -> push({:error, :conversation_unavailable}, state)
+  end
+
+  defp publish_control({:error, reason}, _type, _req, state), do: push({:error, reason}, state)
+
+  defp publish_control(_, _type, _req, state),
+    do: push({:error, :conversation_unavailable}, state)
+
+  defp correlated_control?(%{operation: :activity}, %{commands: commands})
+       when is_list(commands) do
+    length(commands) <= 50 and
+      Enum.all?(commands, &(is_map(&1) and control_command_id?(&1[:command_id]))) and
+      length(Enum.uniq_by(commands, & &1.command_id)) == length(commands)
+  end
+
+  defp correlated_control?(%{operation: :cancel, input: id}, %{command_id: id}), do: true
+
+  defp correlated_control?(%{operation: :interactions, input: id}, %{
+         command_id: id,
+         interactions: prompts
+       })
+       when is_list(prompts) do
+    length(prompts) <= 50 and
+      Enum.all?(
+        prompts,
+        &(is_map(&1) and &1[:command_id] == id and
+            bounded_control_id?(&1[:request_id]) and bounded_control_id?(&1[:operation_id]) and
+            &1[:revision] === 1)
+      ) and
+      length(Enum.uniq_by(prompts, & &1.request_id)) == length(prompts)
+  end
+
+  defp correlated_control?(%{operation: operation, input: input}, value)
+       when operation in [:interaction_choice, :interaction_approval],
+       do:
+         Enum.all?(
+           [:command_id, :request_id, :operation_id, :revision],
+           &(Map.get(value, &1) === Map.fetch!(input, &1))
+         )
+
+  defp correlated_control?(_, _), do: false
+
+  defp control_command_id?(id),
+    do: is_binary(id) and byte_size(id) in 1..128 and Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, id)
+
+  defp bounded_control_id?(id),
+    do: is_binary(id) and byte_size(id) in 1..256 and String.valid?(id)
+
+  defp notice_page_fields?(page) do
+    Enum.sort(Map.keys(page)) ==
+      [
+        :complete,
+        :engagement_id,
+        :has_older,
+        :head,
+        :next_before,
+        :notices,
+        :owner_id,
+        :target_agent_id,
+        :through
+      ]
+  end
+
+  defp private_control_fields?(map) when is_map(map) do
+    Enum.any?(map, fn {key, value} ->
+      key in [
+        :signed_request,
+        :session_token,
+        :conversation_source,
+        :receipt,
+        :proof,
+        "signed_request",
+        "session_token",
+        "conversation_source",
+        "receipt",
+        "proof"
+      ] or
+        private_control_fields?(value)
+    end)
+  end
+
+  defp private_control_fields?(list) when is_list(list),
+    do: Enum.any?(list, &private_control_fields?/1)
+
+  defp private_control_fields?(_), do: false
 
   # The client fence is only an expected identity; it cannot choose a route.
   # The first history may carry a reconnect fence, verified by the host before

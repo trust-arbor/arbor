@@ -26,6 +26,9 @@ defmodule Arbor.Multimedia.DriverWorker do
        handle: nil,
        activation: :crypto.strong_rand_bytes(32),
        opened: false,
+       activated: false,
+       finish_requested: false,
+       finish_sent: false,
        closing: false
      }}
   end
@@ -59,7 +62,7 @@ defmodule Arbor.Multimedia.DriverWorker do
     if Driver.admitted?(state.permit) do
       case safe_activate(state.driver, handle, spec, state.permit) do
         :ok ->
-          {:noreply, state}
+          maybe_finish(%{state | activated: true})
 
         _ ->
           notify(state, {:error, :driver_failed})
@@ -70,6 +73,9 @@ defmodule Arbor.Multimedia.DriverWorker do
       request_close(state)
     end
   end
+
+  def handle_info({:finish, token}, %{token: token, closing: false} = state),
+    do: maybe_finish(%{state | finish_requested: true})
 
   def handle_info({:close, token}, %{token: token} = state), do: request_close(state)
   def handle_info(:retry_close, state), do: close(%{state | closing: false})
@@ -164,6 +170,36 @@ defmodule Arbor.Multimedia.DriverWorker do
     _ -> {:error, :cleanup_pending}
   catch
     _, _ -> {:error, :cleanup_pending}
+  end
+
+  defp maybe_finish(
+         %{
+           activated: true,
+           finish_requested: true,
+           finish_sent: false,
+           handle: %Redacted{value: handle}
+         } = state
+       ) do
+    state = %{state | finish_sent: true}
+
+    if Driver.admitted?(state.permit) and safe_finish(state.driver, handle) == :ok do
+      {:noreply, state}
+    else
+      notify(state, {:error, :finish_unavailable})
+      request_close(state)
+    end
+  end
+
+  defp maybe_finish(state), do: {:noreply, state}
+
+  defp safe_finish(driver, handle) do
+    if Driver.manual_finish_supported?(driver),
+      do: driver.finish(handle),
+      else: {:error, :finish_unavailable}
+  rescue
+    _ -> {:error, :finish_unavailable}
+  catch
+    _, _ -> {:error, :finish_unavailable}
   end
 
   defp safe_activate(driver, handle, spec, permit) do

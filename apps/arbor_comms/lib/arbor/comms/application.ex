@@ -19,6 +19,7 @@ defmodule Arbor.Comms.Application do
       # long-lived table owner). Started before the Supervisor so engagements
       # resolve stably from boot.
       Arbor.Comms.EngagementStore,
+      Arbor.Comms.ConversationActivity,
       Arbor.Comms.Supervisor
     ]
 

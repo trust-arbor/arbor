@@ -157,6 +157,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   @impl Arbor.Persistence.EventLog
+  def read_event_records(stream_id, ids, opts) do
+    with {:ok, bound} <-
+           Arbor.Persistence.EventLog.EventRecords.validate_request(stream_id, ids, opts) do
+      GenServer.call(Keyword.fetch!(opts, :name), {:read_event_records, stream_id, ids, bound})
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream_head(stream_id, opts) do
     with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
       name = Keyword.fetch!(opts, :name)
@@ -766,6 +774,61 @@ defmodule Arbor.Persistence.EventLog.ETS do
           if identity_history_unavailable?(state),
             do: {:error, :identity_history_unavailable},
             else: {:ok, nil}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:read_event_records, stream_id, ids, bound}, _from, state) do
+    pin = bound || Map.get(state.stream_versions, stream_id, 0)
+    head = exact_stream_event(state, stream_id, pin)
+
+    reply =
+      cond do
+        state.mode == :projection ->
+          {:error, :head_unavailable}
+
+        pin > 0 and is_nil(head) ->
+          {:error, :head_unavailable}
+
+        identity_history_unavailable?(state) ->
+          {:error, :identity_history_unavailable}
+
+        true ->
+          Enum.reduce_while(ids, {:ok, []}, fn id, {:ok, acc} ->
+            case :ets.lookup(state.id_table, id) do
+              [] ->
+                {:cont, {:ok, acc}}
+
+              [{^id, identity}] ->
+                case normalize_identity(identity) do
+                  {:ok, _fingerprint, ^stream_id, number, _position} when number > pin ->
+                    {:cont, {:ok, acc}}
+
+                  {:ok, fingerprint, ^stream_id, number, _position} ->
+                    case exact_stream_event(state, stream_id, number) do
+                      %Event{} = event ->
+                        {:cont, {:ok, [%Event{event | operation_fingerprint: fingerprint} | acc]}}
+
+                      _ ->
+                        {:halt, {:error, :event_records_unavailable}}
+                    end
+
+                  _ ->
+                    {:halt, {:error, :event_records_invalid}}
+                end
+            end
+          end)
+          |> case do
+            {:ok, events} ->
+              Arbor.Persistence.EventLog.EventRecords.validate_result(stream_id, ids, bound, %{
+                events: Enum.sort_by(events, & &1.event_number),
+                head: head
+              })
+
+            error ->
+              error
+          end
       end
 
     {:reply, reply, state}
@@ -3121,5 +3184,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
         identity_metadata_consistent: false,
         identity_history: {:unavailable, reason}
     }
+  end
+
+  defp exact_stream_event(state, stream, number) do
+    with [{{^stream, ^number}, position}] <- :ets.lookup(state.stream_table, {stream, number}),
+         [{^position, event}] <- :ets.lookup(state.global_table, position) do
+      event
+    else
+      _ -> nil
+    end
   end
 end

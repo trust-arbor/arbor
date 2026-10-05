@@ -8,6 +8,8 @@ defmodule Arbor.Multimedia.OperationCore do
       chunks: [],
       bytes: 0,
       completed: false,
+      finish_requested: false,
+      target_frames: Map.get(spec, :frames),
       ended_at: nil,
       result: nil,
       closed: false,
@@ -24,7 +26,7 @@ defmodule Arbor.Multimedia.OperationCore do
       when is_binary(pcm) do
     bytes = state.bytes + byte_size(pcm)
 
-    if byte_size(pcm) > 0 and rem(byte_size(pcm), 2) == 0 and bytes <= state.spec.frames * 2 do
+    if byte_size(pcm) > 0 and rem(byte_size(pcm), 2) == 0 and bytes <= state.target_frames * 2 do
       next = %{state | chunks: [:binary.copy(pcm) | state.chunks], bytes: bytes}
       if completed, do: complete_capture(next), else: {next, []}
     else
@@ -32,7 +34,7 @@ defmodule Arbor.Multimedia.OperationCore do
     end
   end
 
-  def event(%{completed: true, spec: %{frames: frames}} = state, {:complete, frames}, _now),
+  def event(%{completed: true, target_frames: frames} = state, {:complete, frames}, _now),
     do: {state, []}
 
   def event(
@@ -41,6 +43,31 @@ defmodule Arbor.Multimedia.OperationCore do
         ended_at
       ) do
     complete_capture(%{state | completed: true, ended_at: ended_at})
+  end
+
+  def event(
+        %{completed: true, finish_requested: true, target_frames: frames} = state,
+        {:partial, frames},
+        _now
+      ),
+      do: {state, []}
+
+  def event(
+        %{completed: false, finish_requested: true, spec: %{kind: :capture}} = state,
+        {:partial, frames},
+        ended_at
+      )
+      when is_integer(frames) and frames >= 0 do
+    cond do
+      frames > state.spec.frames or state.bytes > frames * 2 ->
+        fail(state, :invalid_media)
+
+      frames < state.spec.minimum_frames ->
+        fail(state, :recording_too_short)
+
+      true ->
+        complete_capture(%{state | completed: true, target_frames: frames, ended_at: ended_at})
+    end
   end
 
   def event(
@@ -69,6 +96,16 @@ defmodule Arbor.Multimedia.OperationCore do
   def event(state, {:error, reason}, _now), do: fail(state, PcmCore.error(reason))
   def event(state, _, _now), do: fail(state, :invalid_media)
 
+  def finish(
+        %{cancelled: false, completed: false, spec: %{kind: :capture, minimum_frames: _}} = state
+      ) do
+    if state.finish_requested,
+      do: {state, []},
+      else: {%{state | finish_requested: true}, [:finish]}
+  end
+
+  def finish(state), do: {state, []}
+
   def cancel(%{cancelled: true} = state, _reason), do: {state, []}
 
   def cancel(state, reason) do
@@ -82,7 +119,7 @@ defmodule Arbor.Multimedia.OperationCore do
   end
 
   defp complete_capture(state) do
-    if state.bytes == state.spec.frames * 2 do
+    if state.bytes == state.target_frames * 2 do
       audio = %{
         pcm: state.chunks |> Enum.reverse() |> :erlang.iolist_to_binary(),
         sample_rate: state.spec.sample_rate,

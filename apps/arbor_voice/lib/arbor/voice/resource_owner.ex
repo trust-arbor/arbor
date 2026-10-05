@@ -513,6 +513,12 @@ defmodule Arbor.Voice.ResourceOwner do
     case state.audio_reservation do
       %{ticket: ^ticket, bytes: bytes, disposition: disposition} = reservation
       when is_binary(pcm) and byte_size(pcm) == bytes ->
+        # Receive work uses the turn allowance; cleanup keeps its separate budget.
+        handoff_timeout_ms =
+          if disposition == :receive,
+            do: BackendWorker.max_deadline_distance_ms(),
+            else: state.config.close_timeout_ms
+
         with true <- state.phase == :open and not state.poisoned,
              true <- worker_credential(state).generation == ticket.generation,
              true <- now_ms() < ticket.deadline_ms,
@@ -525,7 +531,7 @@ defmodule Arbor.Voice.ResourceOwner do
                  {if(disposition == :receive, do: :audio_turn, else: :audio), ticket},
                  state,
                  ticket.id,
-                 min(ticket.deadline_ms, now_ms() + state.config.close_timeout_ms)
+                 min(ticket.deadline_ms, now_ms() + handoff_timeout_ms)
                ) do
           if disposition == :close, do: cancel_timer(reservation.timer_ref)
           {:reply, :ok, %{next | audio_reservation: nil}}

@@ -354,13 +354,44 @@ defmodule Arbor.Agent do
 
   The versioned JSON array binds operation, original proof subject, full target,
   input, supplied page bounds and the compare-only expected engagement fence.
-  Version 2 has seven array elements; absent page/fence values encode as null. The timeout
-  and proof are not part of this payload. Sign the returned bytes without an HTTP
+  Existing version 2 operations have seven array elements. Window reads use the
+  separate five-element `arbor.conversation.window.v1` array. Absent bounds and
+  fences encode as null. The timeout and proof are not part of this payload.
+  Sign the returned bytes without an HTTP
   method/path prefix; never reuse a nonce across operations or retries.
   """
   def conversation_request_payload(operation, caller_id, target_agent_id, input, opts \\ []) do
     ConversationFacade.request_payload(operation, caller_id, target_agent_id, input, opts)
   end
+
+  @doc """
+  List an authenticated human's durable private conversations with current chat access.
+
+  Requires exactly one general browser `:session_token` or fresh operation-bound
+  `:signed_request`. Linked identities share only canonical conversation ownership;
+  grants and revocation remain those of the exact proof subject. `:limit` is 1..100
+  (default 20); `:cursor` is a nonnegative position in the live activity order.
+  A page may contain no authorized rows while `:has_more` is true. It is not a
+  stable history snapshot. Storage/owner/proof failures stay explicit errors.
+  Names and 160-grapheme previews are released only after per-agent checks.
+  """
+  def list_conversations(caller_id, opts \\ []),
+    do: Arbor.Agent.ConversationDirectory.run(:list, caller_id, nil, opts)
+
+  @doc """
+  Resolve a deep-link reference inside the authenticated human's private directory.
+
+  The server derives its target; an engagement ID grants no authority. Foreign,
+  absent or currently denied references return `:not_found`. Subsequent transcript
+  reads and sends still use fresh proof and the returned engagement as a comparison
+  fence. Options admit only exactly one general session token or signed request.
+  """
+  def resolve_conversation_reference(caller_id, engagement_id, opts \\ []),
+    do: Arbor.Agent.ConversationDirectory.run(:reference, caller_id, engagement_id, opts)
+
+  @doc "Build distinct exact signed bytes for :list or :reference without altering v2/window operation payloads."
+  def conversation_index_request_payload(operation, caller_id, input, opts \\ []),
+    do: Arbor.Agent.ConversationDirectory.request_payload(operation, caller_id, input, opts)
 
   @doc "Read one owned command with fresh proof and current release authorization."
   def conversation_command(caller_id, target_agent_id, command_id, opts \\ []) do
@@ -390,6 +421,112 @@ defmodule Arbor.Agent do
   """
   def conversation_history(caller_id, target_agent_id, opts \\ []) do
     ConversationFacade.run(:history, caller_id, target_agent_id, nil, opts)
+  end
+
+  @doc """
+  Read a bounded, authenticated notice page from an existing private human
+  conversation. Requires a fresh proof and exact expected engagement fence.
+  Notice ordinals and pagination are independent from transcript and activity.
+  """
+  def conversation_notices(subject, target, opts \\ []),
+    do: Arbor.Agent.ConversationNotices.read(subject, target, opts)
+
+  @doc "Pure payload for a fresh existing-scope notice read."
+  def conversation_notice_request_payload(subject, target, opts \\ []),
+    do: Arbor.Agent.ConversationNotices.request_payload(subject, target, opts)
+
+  @doc "Fresh authenticated bounded command activity."
+  def conversation_activity(caller_id, target_agent_id, opts \\ []) do
+    Arbor.Agent.ConversationFacade.run(:activity, caller_id, target_agent_id, nil, opts)
+  end
+
+  @doc """
+  Persist intent to cancel one original source command before contacting its
+  Session. The acknowledgement distinguishes requested from confirmed stop.
+  """
+  def cancel_conversation_command(caller_id, target_agent_id, command_id, opts \\ []) do
+    Arbor.Agent.ConversationFacade.run(:cancel, caller_id, target_agent_id, command_id, opts)
+  end
+
+  @doc """
+  Read source-bound choices and approvals for one private conversation command.
+  Requires fresh chat proof. This grants no authority to answer an approval.
+  """
+  def conversation_interactions(caller_id, target_agent_id, command_id, opts \\ []) do
+    Arbor.Agent.ConversationInteractions.run(
+      :interactions,
+      caller_id,
+      target_agent_id,
+      command_id,
+      opts
+    )
+  end
+
+  @doc """
+  Answer the exact pending choice, including its command, request, operation,
+  revision and choice IDs. The owning source checks and consumes fresh proof.
+  """
+  def answer_conversation_choice(caller_id, target_agent_id, input, opts \\ []) do
+    Arbor.Agent.ConversationInteractions.run(
+      :interaction_choice,
+      caller_id,
+      target_agent_id,
+      input,
+      opts
+    )
+  end
+
+  @doc """
+  Answer the exact pending approval with a current general human session and
+  the original request's scoped approval-answer authority. A terminal chat
+  session alone cannot answer a protected approval.
+  """
+  def answer_conversation_approval(caller_id, target_agent_id, input, opts \\ []) do
+    Arbor.Agent.ConversationInteractions.run(
+      :interaction_approval,
+      caller_id,
+      target_agent_id,
+      input,
+      opts
+    )
+  end
+
+  @doc """
+  Build the closed payload to sign for an interaction read or answer.
+  The optional engagement ID is a compare-only continuity fence.
+  """
+  def conversation_interaction_request_payload(
+        operation,
+        caller_id,
+        target_agent_id,
+        input,
+        expected_engagement_id \\ nil
+      ) do
+    Arbor.Agent.ConversationInteractions.request_payload(
+      operation,
+      caller_id,
+      target_agent_id,
+      input,
+      expected_engagement_id
+    )
+  end
+
+  @doc """
+  Read a bounded latest/older/newer private transcript window with fresh proof.
+
+  `:before` and `:after` are exclusive ordinal selectors; omit both for the
+  latest window. `:through` pins its head, and `:limit` is 1..100 (default 20).
+  Returned entries are ascending and source-identified. Navigation flags and
+  first/last ordinals concern transcript entries, never command-journal cursors.
+  The server derives the engagement; `:expected_engagement_id` only compares it.
+
+  Signed callers bind the distinct `arbor.conversation.window.v1` payload from
+  `conversation_request_payload(:window, caller, target, nil, opts)`. Existing
+  history, events and command v2 payloads are unchanged. Reads are authorized
+  again immediately before private output is released.
+  """
+  def conversation_window(caller_id, target_agent_id, opts \\ []) do
+    ConversationFacade.run(:window, caller_id, target_agent_id, nil, opts)
   end
 
   # ===========================================================================
@@ -608,6 +745,9 @@ defmodule Arbor.Agent do
 
   - `caller_id` - The ID of the entity requesting the stop
   - `agent_id` - The agent to stop
+  - `opts` - Existing Gateway signed proof, or only `:session_token` for a
+    general human session. Present session proof always uses the strict session
+    path and cannot be combined with other authority options.
 
   ## Returns
 
@@ -620,15 +760,28 @@ defmodule Arbor.Agent do
           :ok
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | :not_found}
-  def authorize_stop(caller_id, agent_id, opts \\ []) do
+  def authorize_stop(caller_id, agent_id, opts \\ [])
+
+  def authorize_stop(caller_id, agent_id, opts) when is_binary(agent_id) do
     resource = "arbor://agent/stop/#{agent_id}"
 
-    case authorize(caller_id, resource, :stop, opts) do
+    authorization =
+      if is_list(opts) and Keyword.keyword?(opts) do
+        if Keyword.has_key?(opts, :session_token),
+          do: authorize_management_session(caller_id, agent_id, resource, :stop, opts),
+          else: authorize(caller_id, resource, :stop, opts)
+      else
+        {:error, :invalid_management_options}
+      end
+
+    case authorization do
       :ok -> stop(agent_id)
       {:ok, :pending_approval, _proposal_id} = pending -> pending
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
+
+  def authorize_stop(_, _, _), do: {:error, {:unauthorized, :invalid_management_options}}
 
   @doc """
   Create an agent with authorization check.
@@ -685,6 +838,28 @@ defmodule Arbor.Agent do
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
+
+  @doc """
+  Destroy an exact agent using a general human session proof.
+
+  Requires `arbor://agent/lifecycle/destroy/{agent_id}` and an active general
+  human session belonging to `caller_id`. Only `:session_token` is accepted;
+  missing, mixed or malformed proof never falls back to the legacy two-argument
+  management API. Pending approval returns without deleting any agent data.
+  """
+  @spec authorize_destroy(String.t(), String.t(), keyword()) ::
+          :ok | {:ok, :pending_approval, String.t()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_destroy(caller_id, agent_id, opts) when is_binary(agent_id) do
+    resource = "arbor://agent/lifecycle/destroy/#{agent_id}"
+
+    case authorize_management_session(caller_id, agent_id, resource, :destroy, opts) do
+      :ok -> destroy_agent(agent_id)
+      {:ok, :pending_approval, _proposal_id} = pending -> pending
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  def authorize_destroy(_, _, _), do: {:error, {:unauthorized, :invalid_management_options}}
 
   @doc """
   Restore an agent with authorization check.
@@ -1056,6 +1231,37 @@ defmodule Arbor.Agent do
       {:error, :security_unavailable}
     end
   end
+
+  # Browser management has a closed proof grammar. Never forward caller flags
+  # such as :identity_verified or convert a rejected session into legacy auth.
+  defp authorize_management_session(caller_id, agent_id, resource, action, opts) do
+    with true <- valid_management_id?(caller_id, "human_"),
+         true <- valid_management_id?(agent_id, "agent_"),
+         [{:session_token, token}] <- opts,
+         true <- is_binary(token) and byte_size(token) in 1..4096,
+         true <- security_available?() do
+      case Arbor.Security.authorize(caller_id, resource, action, session_token: token) do
+        {:ok, :authorized} -> :ok
+        {:ok, :pending_approval, _proposal_id} = pending -> pending
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :security_unavailable}
+      end
+    else
+      false -> {:error, :management_authority_required}
+      _ -> {:error, :invalid_management_options}
+    end
+  rescue
+    _ -> {:error, :security_unavailable}
+  catch
+    _, _ -> {:error, :security_unavailable}
+  end
+
+  defp valid_management_id?(id, prefix) when is_binary(id) do
+    byte_size(id) <= 256 and String.starts_with?(id, prefix) and
+      Regex.match?(~r/\A(?:human|agent)_[A-Za-z0-9_-]+\z/, id)
+  end
+
+  defp valid_management_id?(_, _), do: false
 
   # When the caller forwards a `:signed_request` it has ALREADY verified (the
   # gateway's SignedRequestAuth verifies the Ed25519 per-request signature, binds

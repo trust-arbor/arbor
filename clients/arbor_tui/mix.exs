@@ -28,7 +28,7 @@ defmodule ArborTui.MixProject do
   defp escript do
     [
       main_module: ArborTui.CLI,
-      name: "arbor-tui"
+      name: "arbor-tui-legacy"
     ]
   end
 

@@ -43,6 +43,16 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
 
   # --- Dispatch ---
 
+  # ComposeHandler preserves the original node for execution binding. Select
+  # the canonical mode here without mutating the node or its manifest identity.
+  defp handle_type("compose", node, context, opts) do
+    case Map.get(node.attrs, "mode", "invoke") do
+      "invoke" -> handle_type("graph.invoke", node, context, opts)
+      "compose" -> handle_type("graph.compose", node, context, opts)
+      mode -> fail("unknown graph composition mode: #{mode}")
+    end
+  end
+
   defp handle_type("graph.invoke", node, context, opts) do
     with {:ok, dot_source} <- resolve_graph_source(node, context, opts),
          {:ok, child_context_values} <- build_child_context(node, context),
@@ -300,6 +310,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
       :pinned_handler_bindings,
       :pinned_node_bindings,
       :memory_write_policy,
+      :conversation_source,
       :resumable
     ]
 

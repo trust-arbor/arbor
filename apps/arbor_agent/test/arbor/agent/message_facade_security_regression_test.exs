@@ -1815,7 +1815,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       refute Process.alive?(observed)
     end
 
-    test "security regression: text and structured success emit one user and one assistant signal" do
+    test "security regression: authenticated private text and structured replies emit metadata only" do
       n = System.unique_integer([:positive])
       caller = register_active_human!()
       target = "agent_msgfacade_sig_#{n}"
@@ -1863,11 +1863,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  session_token: token
                )
 
-      assert_receive {:agent_signal, %{data: %{role: :user, content: "signal path"}}},
-                     1_000
-
-      assert_receive {:agent_signal, %{data: %{role: :assistant, content: "signal-ok"}}},
-                     1_000
+      assert_receive {:agent_signal, %{data: user_metadata}}, 1_000
+      assert user_metadata == %{role: :user, channel: :private_conversation}
+      assert_receive {:agent_signal, %{data: assistant_metadata}}, 1_000
+      assert assistant_metadata == %{role: :assistant, channel: :private_conversation}
 
       refute_receive {:agent_signal, _}, 100
 
@@ -1887,11 +1886,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  session_token: token2
                )
 
-      assert_receive {:agent_signal, %{data: %{role: :user, content: "signal path"}}},
-                     1_000
-
-      assert_receive {:agent_signal, %{data: %{role: :assistant, content: "signal-struct"}}},
-                     1_000
+      assert_receive {:agent_signal, %{data: user_metadata}}, 1_000
+      assert user_metadata == %{role: :user, channel: :private_conversation}
+      assert_receive {:agent_signal, %{data: assistant_metadata}}, 1_000
+      assert assistant_metadata == %{role: :assistant, channel: :private_conversation}
 
       refute_receive {:agent_signal, _}, 100
     end
@@ -2005,7 +2003,8 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                )
 
       assert_receive {:echoed_bearer, bearer}, 1_000
-      assert_receive {:agent_signal, %{data: %{role: :user, content: "echo probe"}}}, 1_000
+      assert_receive {:agent_signal, %{data: user_metadata}}, 1_000
+      assert user_metadata == %{role: :user, channel: :private_conversation}
       # No assistant signal — admission rejected before emit.
       refute_receive {:agent_signal, %{data: %{role: :assistant}}}, 200
       refute_receive {:agent_signal, _}, 50

@@ -3,14 +3,14 @@ defmodule Arbor.Dashboard.Live.LandingLiveTest do
 
   describe "LandingLive" do
     test "renders landing page header", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/console")
 
       assert html =~ "Arbor Dashboard"
       assert html =~ "Agent orchestration control plane"
     end
 
     test "shows navigation cards", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/console")
 
       assert html =~ "Signals"
       assert html =~ "Evaluation"
@@ -23,14 +23,14 @@ defmodule Arbor.Dashboard.Live.LandingLiveTest do
     end
 
     test "shows coming soon cards", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/console")
 
       assert html =~ "Trust &amp; Security"
       assert html =~ "Coming Soon"
     end
 
     test "shows system info section", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/console")
 
       assert html =~ "System Info"
       assert html =~ "OTP Release"
@@ -38,7 +38,7 @@ defmodule Arbor.Dashboard.Live.LandingLiveTest do
     end
 
     test "shows stat cards with signal data", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/console")
 
       assert html =~ "Signals"
       assert html =~ "Subscriptions"

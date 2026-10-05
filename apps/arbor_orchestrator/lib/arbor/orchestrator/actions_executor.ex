@@ -113,6 +113,45 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   def resolve_execution_binding(_name, _opts), do: {:error, :invalid_action_name}
 
   @doc false
+  def authorization_resource(name, args, workdir, opts \\ [])
+
+  def authorization_resource(name, args, workdir, opts)
+      when is_binary(name) and is_map(args) and is_binary(workdir) and is_list(opts) do
+    with :ok <- reject_mixed_signing_credentials(opts, args),
+         {:ok, binding} <- resolve_execution_binding(name, opts),
+         {:ok, action_module} <- verify_execution_binding(name, binding),
+         {:ok, owner} <- Arbor.Actions.authorization_admission_owner(action_module),
+         :ok <- verify_admission_owner_binding(owner, binding),
+         {:ok, resource} <-
+           action_authorization_resource(
+             action_module,
+             action_params(args, action_module, normalize_workdir(workdir))
+           ) do
+      {:ok, %{resource: resource, admission_owner: owner}}
+    else
+      _ -> {:error, :invalid_action_authorization_resource}
+    end
+  rescue
+    _ -> {:error, :invalid_action_authorization_resource}
+  catch
+    _, _ -> {:error, :invalid_action_authorization_resource}
+  end
+
+  def authorization_resource(_name, _args, _workdir, _opts),
+    do: {:error, :invalid_action_authorization_resource}
+
+  defp verify_admission_owner_binding(:ordinary, _binding), do: :ok
+
+  defp verify_admission_owner_binding(:actions_facade, %{pinned_binding: pinned})
+       when is_map(pinned) do
+    if pinned["authorization_admission_owner"] == "actions_facade",
+      do: :ok,
+      else: {:error, :native_execution_binding_refused}
+  end
+
+  defp verify_admission_owner_binding(_, _), do: {:error, :native_execution_binding_refused}
+
+  @doc false
   @spec execute_bound(String.t(), map(), String.t(), map(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
   def execute_bound(name, args, workdir, binding, opts \\ []) do
@@ -264,6 +303,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     :logs_root,
     :resumable,
     :memory_write_policy,
+    :conversation_source,
     :max_depth
   ]
 
@@ -347,11 +387,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          {:ok, execution_binding_context} <- execution_binding_context(opts),
          {:ok, workspace_registry_server} <- coding_workspace_registry_server(opts),
          {:ok, retry_workdir_guard} <- capture_retry_workdir_guard(workdir, agent_id) do
-      params =
-        args
-        |> atomize_known_keys(action_module)
-        |> maybe_resolve_file_paths(action_module, workdir)
-        |> maybe_inject_workdir(action_module, workdir)
+      params = action_params(args, action_module, workdir)
 
       case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
         :ok ->
@@ -421,6 +457,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                   end
                 end)
                 |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
+                |> Map.merge(Map.new(Keyword.take(opts, [:conversation_source])))
 
               execute_authorized_action(
                 agent_id,
@@ -634,6 +671,13 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp nested_engine_opts(opts, action_module, boundary_ref) do
+    # Only the reviewed child-Engine launch actions receive this private source
+    # carrier. Ordinary action-visible context must not expose the live handle.
+    opts =
+      if action_module in @nested_engine_action_modules,
+        do: opts,
+        else: Keyword.delete(opts, :conversation_source)
+
     forwarded =
       opts
       |> Keyword.take(@nested_engine_opt_keys)
@@ -1288,6 +1332,13 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   # Atomize string keys using the action's schema as an allowlist.
+  defp action_params(args, action_module, workdir) do
+    args
+    |> atomize_known_keys(action_module)
+    |> maybe_resolve_file_paths(action_module, workdir)
+    |> maybe_inject_workdir(action_module, workdir)
+  end
+
   defp atomize_known_keys(args, action_module) do
     schema = action_module.to_tool().parameters_schema
     known_atoms = extract_schema_keys(schema)
@@ -1956,7 +2007,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp sign_with_authority_for_module(authority, action_module, params) do
     with {:ok, resource} <- action_authorization_resource(action_module, params),
          {:ok, signed_request} <- Arbor.Security.sign_with_authority(authority, resource) do
-      Logger.debug("[ActionsExecutor] Authority-signed for #{resource}")
+      Logger.debug(
+        "[ActionsExecutor] Authority-signed for #{logged_resource(action_module, resource)}"
+      )
+
       {:ok, signed_request}
     else
       {:error, reason} ->
@@ -1968,12 +2022,17 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
+  defp logged_resource(Arbor.Actions.Comms.PublishConversationNotice, _resource),
+    do: "private conversation notice"
+
+  defp logged_resource(_module, resource), do: resource
+
   defp sign_for_module(nil, _action_module, _params), do: nil
 
   defp sign_for_module(signer, action_module, params) when is_function(signer, 1) do
     with {:ok, resource} <- action_authorization_resource(action_module, params),
          {:ok, signed_request} <- signer.(resource) do
-      Logger.debug("[ActionsExecutor] Signed for #{resource}")
+      Logger.debug("[ActionsExecutor] Signed for #{logged_resource(action_module, resource)}")
       signed_request
     else
       {:error, reason} ->
@@ -1997,9 +2056,17 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       end
 
     case result do
-      {:ok, "arbor://" <> _rest = resource} -> {:ok, resource}
-      {:error, _reason} = error -> error
-      _other -> {:error, :invalid_action_authorization_resource}
+      {:ok, "arbor://" <> _rest = resource} when byte_size(resource) <= 4_096 ->
+        if String.valid?(resource) and
+             Arbor.Contracts.Security.CapabilityUri.valid?(resource),
+           do: {:ok, resource},
+           else: {:error, :invalid_action_authorization_resource}
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :invalid_action_authorization_resource}
     end
   end
 

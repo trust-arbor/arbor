@@ -999,4 +999,40 @@ defmodule Arbor.Voice.SessionTest do
       end
     end
   end
+
+  test "PCM speech word limits fail closed before startup and do not affect text-mode configuration" do
+    ctx = lifecycle_opts()
+    {user, agent} = unique_ids()
+    pcm_opts = Keyword.put(ctx.opts, :audio_mode, :pcm16)
+
+    for bad <- [0, -1, 7, "60", true, %{}] do
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user,
+                 agent,
+                 Keyword.put(pcm_opts, :audio_speech_max_words, bad)
+               )
+    end
+
+    assert {:error, :invalid_opts} =
+             Voice.start_session(user, agent, Keyword.put(ctx.opts, :audio_speech_max_words, nil))
+
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).starts == 0
+
+    previous = Application.fetch_env(:arbor_voice, :audio_speech_max_words)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_voice, :audio_speech_max_words, value)
+        :error -> Application.delete_env(:arbor_voice, :audio_speech_max_words)
+      end
+    end)
+
+    Application.put_env(:arbor_voice, :audio_speech_max_words, :invalid)
+    assert {:error, :invalid_config} = Voice.start_session(user, agent, pcm_opts)
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).starts == 0
+    assert {:ok, key} = Voice.start_session(user, agent, ctx.opts)
+    assert {:ok, %{state: :ready}} = Voice.session_status(key)
+    assert :ok = Voice.stop_session(key)
+  end
 end

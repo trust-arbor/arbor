@@ -80,6 +80,78 @@ defmodule Arbor.Multimedia.NativeDriverChecks do
     assert Multimedia.device_status() == :idle
   end
 
+  test "public manual finish joins queued native PCM and checked cleanup through the actual pipeline" do
+    assert Multimedia.manual_capture_finish_supported?()
+    ArborNativeFake.set(:completion, false)
+    ArborNativeFake.set(:finish_frames, 1_600)
+    {task, control} = manual_capture()
+    assert_receive {:effect, {:create, :source, element, resource}}
+    assert_receive {:effect, {:start, :source, ^resource}}
+    assert :ok = Multimedia.finish_capture(control)
+    assert_receive {:effect, {:finish, ^resource, ^element, stream}}
+    assert Task.yield(task, 0) == nil
+    refute_receive {:effect, {:destroy, ^resource}}, 20
+    pcm = :binary.copy(<<29, 0>>, 1_600)
+    send(element, {:portaudio_correlated_payload, stream, pcm})
+    assert {:ok, %{audio: %{pcm: ^pcm}, utterance_ended_at: %DateTime{}}} = Task.await(task)
+    assert_receive {:effect, {:destroy, ^resource}}
+    refute Process.alive?(element)
+    assert Multimedia.device_status() == :idle
+  end
+
+  test "native empty and short manual captures cannot reach successful media results" do
+    ArborNativeFake.set(:completion, false)
+
+    for frames <- [0, 799] do
+      ArborNativeFake.set(:finish_frames, frames)
+      {task, control} = manual_capture()
+      assert_receive {:effect, {:create, :source, element, resource}}
+      assert_receive {:effect, {:start, :source, ^resource}}
+      assert :ok = Multimedia.finish_capture(control)
+      assert_receive {:effect, {:finish, ^resource, ^element, stream}}
+
+      if frames > 0,
+        do: send(element, {:portaudio_correlated_payload, stream, :binary.copy(<<1, 0>>, frames)})
+
+      assert {:error, :recording_too_short} = Task.await(task)
+      assert_receive {:effect, {:destroy, ^resource}}
+      refute Process.alive?(element)
+      assert Multimedia.device_status() == :idle
+    end
+  end
+
+  test "security regression: cancellation during a partial frame join discards audio and closes native custody" do
+    ArborNativeFake.set(:completion, false)
+    ArborNativeFake.set(:finish_frames, 1_600)
+    {task, control} = manual_capture()
+    assert_receive {:effect, {:create, :source, element, resource}}
+    assert_receive {:effect, {:start, :source, ^resource}}
+    assert :ok = Multimedia.finish_capture(control)
+    assert_receive {:effect, {:finish, ^resource, ^element, _}}
+    Process.unlink(task.pid)
+    Process.exit(task.pid, :kill)
+    assert_receive {:effect, {:destroy, ^resource}}, 2_000
+    eventually(fn -> assert Multimedia.device_status() == :idle end)
+    refute Process.alive?(element)
+    assert {:error, :invalid_control} = Multimedia.finish_capture(control)
+  end
+
+  defp manual_capture do
+    controller = self()
+    tag = make_ref()
+
+    task =
+      Task.async(fn ->
+        Multimedia.capture_pcm([duration_ms: 1_000, sample_rate: 8_000],
+          controller: {controller, tag},
+          minimum_duration_ms: 100
+        )
+      end)
+
+    assert_receive {:multimedia_capture_control, ^tag, control}
+    {task, control}
+  end
+
   test "actual Core playback accepts an exact non-buffer tail and closes every process" do
     pcm = :binary.copy(<<12, 34>>, 513)
 

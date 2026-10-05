@@ -589,6 +589,7 @@ defmodule Arbor.LLM.ToolLoop do
         |> maybe_put_executor_opt(:task_id, Keyword.get(opts, :task_id))
         |> maybe_put_executor_opt(:session_id, Keyword.get(opts, :session_id))
         |> maybe_put_executor_opt(:memory_write_policy, Keyword.get(opts, :memory_write_policy))
+        |> Keyword.merge(Keyword.take(opts, [:conversation_source]))
 
       {:ok, %{execution_principal: execution_principal, executor_opts: executor_opts}}
     end
@@ -669,6 +670,7 @@ defmodule Arbor.LLM.ToolLoop do
         :pinned_action_bindings,
         :pinned_handler_bindings,
         :memory_write_policy,
+        :conversation_source,
         :signing_authority
       ],
       executor_opts,
@@ -1099,7 +1101,8 @@ defmodule Arbor.LLM.ToolLoop do
         :llm_call_authorizer,
         :on_steer_check,
         :tool_taint,
-        :memory_write_policy
+        :memory_write_policy,
+        :conversation_source
       ])
 
     single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)

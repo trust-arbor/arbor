@@ -29,6 +29,48 @@ defmodule Arbor.Voice.Session.AudioPresentationCore do
 
   def render(_), do: @silent
 
+  @doc "Return the unchanged presentation and a fixed primary observation reason."
+  def render_with_reason(input) do
+    presentation = render(input)
+    {presentation, presentation_reason(presentation, input)}
+  end
+
+  defp presentation_reason(%{audio: audio}, _input) when is_binary(audio),
+    do: :audio_retained
+
+  defp presentation_reason(_presentation, %{verdict: {tag, text}, guarded_text: guarded} = input)
+       when tag in [:speak, :speak_truncated, :screen_only] and text == guarded do
+    cond do
+      not AudioTurn.text?(guarded) -> :invalid_guard
+      tag == :screen_only -> :screen_only_classification
+      tag == :speak_truncated -> :truncated_guard
+      true -> withheld_audio_reason(input, guarded)
+    end
+  end
+
+  defp presentation_reason(_presentation, _input), do: :invalid_guard
+
+  defp withheld_audio_reason(
+         %{
+           provider_terminal_text: provider_text,
+           final_text: final_text,
+           audio: audio,
+           audio_format: format,
+           authorized_format: authorized
+         },
+         guarded
+       ) do
+    cond do
+      provider_text != final_text -> :raw_text_mismatch
+      final_text != guarded -> :guard_text_mismatch
+      format != authorized or PcmFormat.validate(format) != :ok -> :format_mismatch
+      match?(%Redacted{value: []}, audio) -> :provider_audio_absent
+      true -> :invalid_provider_audio
+    end
+  end
+
+  defp withheld_audio_reason(_input, _guarded), do: :invalid_presentation_input
+
   defp maybe_audio(%{verdict: {:speak, guarded}} = presentation, %{
          provider_terminal_text: provider_text,
          final_text: final_text,

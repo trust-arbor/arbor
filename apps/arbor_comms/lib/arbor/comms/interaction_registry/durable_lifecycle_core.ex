@@ -22,8 +22,9 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   """
 
   alias Arbor.Contracts.Comms.Interaction
+  alias Arbor.Comms.ConversationInteractionsCore
 
-  @schema_version 2
+  @schema_version 3
   @legacy_schema_version 1
   @max_identifier_bytes 256
   @max_string_bytes 16_384
@@ -48,7 +49,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     "updated_at_unix_ms"
   ]
 
-  @record_keys @legacy_record_keys ++ ["dispatch"]
+  @v2_record_keys @legacy_record_keys ++ ["dispatch"]
+  @record_keys @v2_record_keys ++ ["conversation_attachment", "verified_response"]
 
   @dispatch_keys [
     "status",
@@ -127,6 +129,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
            "accepted_at_unix_ms" => nil
          },
          "terminal" => nil,
+         "conversation_attachment" => nil,
+         "verified_response" => nil,
          "admitted_at_unix_ms" => now_ms,
          "updated_at_unix_ms" => now_ms
        }}
@@ -141,6 +145,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   def decode(record) when is_map(record) do
     case record["schema_version"] do
       @schema_version -> decode_current(record)
+      2 -> upgrade_v2(record)
       @legacy_schema_version -> decode_legacy(record)
       _ -> {:error, :unsupported_schema_version}
     end
@@ -150,6 +155,10 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   defp decode_current(record) do
     with :ok <- exact_keys(record, @record_keys, :record),
+         :ok <-
+           ConversationInteractionsCore.validate_attachment(record["conversation_attachment"]),
+         :ok <- ConversationInteractionsCore.validate_evidence(record["verified_response"]),
+         :ok <- validate_conversation_identity(record),
          :ok <- validate_schema_version(record["schema_version"]),
          :ok <- validate_identifier(record["operation_id"], :operation_id),
          :ok <- validate_identifier(record["request_id"], :request_id),
@@ -173,6 +182,35 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     end
   end
 
+  defp upgrade_v2(record) do
+    with :ok <- exact_keys(record, @v2_record_keys, :record) do
+      record
+      |> Map.put("schema_version", @schema_version)
+      |> Map.put("conversation_attachment", nil)
+      |> Map.put("verified_response", nil)
+      |> decode_current()
+    end
+  end
+
+  defp validate_conversation_identity(record) do
+    attachment = record["conversation_attachment"]
+    evidence = record["verified_response"]
+
+    attachment_matches =
+      is_nil(attachment) or attachment["operation_id"] == record["operation_id"]
+
+    evidence_matches =
+      is_nil(evidence) or
+        (record["status"] == "responded" and
+           evidence["request_id"] == record["request_id"] and
+           evidence["operation_id"] == record["operation_id"] and
+           evidence["revision"] == 1)
+
+    if attachment_matches and evidence_matches,
+      do: :ok,
+      else: {:error, :invalid_conversation_identity}
+  end
+
   defp decode_legacy(record) do
     with :ok <- exact_keys(record, @legacy_record_keys, :record),
          :ok <- validate_identifier(record["operation_id"], :operation_id),
@@ -193,6 +231,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
       upgraded =
         record
         |> Map.put("schema_version", @schema_version)
+        |> Map.put("conversation_attachment", nil)
+        |> Map.put("verified_response", nil)
         |> Map.put("dispatch", legacy_dispatch(record))
 
       decode_current(upgraded)

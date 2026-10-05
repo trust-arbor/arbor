@@ -91,4 +91,35 @@ defmodule Arbor.Voice.Session.AudioPresentationCoreTest do
                AudioPresentationCore.render(malformed)
     end
   end
+
+  test "presentation observations preserve exact render output and distinguish withheld PCM" do
+    cases = [
+      {input(), :audio_retained},
+      {%{input() | audio: Redacted.new([])}, :provider_audio_absent},
+      {%{input() | final_text: "Changed authoritative text"}, :raw_text_mismatch},
+      {%{input() | verdict: {:speak, "See your screen."}, guarded_text: "See your screen."},
+       :guard_text_mismatch},
+      {%{input() | authorized_format: PcmFormat.mono_s16le(16_000)}, :format_mismatch},
+      {%{input() | audio_format: nil}, :format_mismatch},
+      {%{input() | audio: Redacted.new([<<1>>])}, :invalid_provider_audio},
+      {%{input() | audio: <<1, 2>>}, :invalid_provider_audio},
+      {%{
+         input()
+         | verdict: {:speak_truncated, "See your screen."},
+           guarded_text: "See your screen."
+       }, :truncated_guard},
+      {%{input() | verdict: {:screen_only, "See your screen."}, guarded_text: "See your screen."},
+       :screen_only_classification},
+      {%{input() | verdict: :speak}, :invalid_guard},
+      {%{input() | guarded_text: "mismatched guard"}, :invalid_guard},
+      {%{input() | verdict: {:speak, ""}, guarded_text: ""}, :invalid_guard},
+      {%{verdict: {:speak, "Hello"}, guarded_text: "Hello"}, :invalid_presentation_input},
+      {%{}, :invalid_guard}
+    ]
+
+    for {candidate, reason} <- cases do
+      assert {AudioPresentationCore.render(candidate), reason} ==
+               AudioPresentationCore.render_with_reason(candidate)
+    end
+  end
 end

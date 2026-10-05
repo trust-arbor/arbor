@@ -125,6 +125,7 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://comms/send",
     "arbor://comms/poll",
     "arbor://comms/notify/session",
+    "arbor://comms/notice/publish",
     "arbor://comms/channel",
 
     # Signals facade — restricted-topic subscription authorization. Used in

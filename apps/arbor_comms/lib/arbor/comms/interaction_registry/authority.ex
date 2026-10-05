@@ -6,6 +6,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   require Logger
 
   alias Arbor.Comms.Config
+  alias Arbor.Comms.{ConversationJournal, ConversationJournalCore, ConversationInteractionsCore}
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRegistry.DurableStore
   alias Arbor.Contracts.Coding.PendingApprovalIdentity
@@ -134,6 +135,31 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   def respond_authenticated(request_id, response, metadata, actor_id, session_token),
     do: call({:respond_authenticated, request_id, response, metadata, actor_id, session_token})
 
+  @doc false
+  def open_conversation_source(binding, session_pid, generation),
+    do: call({:open_conversation_source, binding, session_pid, generation})
+
+  @doc false
+  def retire_conversation_source({pid, ref}, reason) when is_pid(pid) and is_reference(ref),
+    do: call(pid, {:retire_conversation_source, ref, reason})
+
+  def retire_conversation_source(_, _), do: {:error, :invalid_source}
+
+  @doc false
+  def request_conversation_interaction({pid, ref}, spec, timeout_ms)
+      when is_pid(pid) and is_reference(ref),
+      do: call(pid, {:request_conversation_interaction, ref, spec, timeout_ms})
+
+  def request_conversation_interaction(_, _, _), do: {:error, :invalid_source}
+
+  @doc false
+  def conversation_interactions(scope, command_id),
+    do: call({:conversation_interactions, scope, command_id})
+
+  @doc false
+  def respond_conversation(scope, operation, actor_id, proof),
+    do: call({:respond_conversation, scope, operation, actor_id, proof})
+
   @impl true
   def format_status(status) when is_map(status) do
     status |> Map.put(:state, :redacted) |> Map.put(:message, :redacted)
@@ -187,6 +213,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   def init(opts) do
     base = %{
       entries: %{},
+      conversation_sources: %{},
+      source_monitors: %{},
       tracker: Keyword.get(opts, :tracker, Arbor.Comms.InteractionRegistry),
       pubsub: Keyword.get(opts, :pubsub_server, Arbor.Comms.PubSub),
       authority_node: node(),
@@ -203,6 +231,151 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   end
 
   @impl true
+  def handle_call(
+        {:open_conversation_source, binding, session_pid, generation},
+        {caller, _},
+        state
+      ) do
+    with true <- caller == session_pid and is_pid(session_pid) and is_reference(generation),
+         true <- map_size(state.conversation_sources) < 128,
+         %{scope: scope, command_id: command_id} <- binding,
+         {:ok, command} <- ConversationJournal.get(scope, command_id),
+         {:ok, identity} <- ConversationJournal.validate_binding(binding, scope, command.text) do
+      ref = make_ref()
+      monitor = Process.monitor(session_pid)
+
+      source = %{
+        session_pid: session_pid,
+        generation: generation,
+        binding: binding,
+        scope: scope,
+        command: identity,
+        id: fresh_id("source"),
+        session_id: fresh_id("session"),
+        monitor: monitor,
+        live?: true
+      }
+
+      state =
+        state
+        |> put_in([:conversation_sources, ref], source)
+        |> put_in([:source_monitors, monitor], ref)
+
+      {:reply, {:ok, {self(), ref}}, state}
+    else
+      _ -> {:reply, {:error, :invalid_source}, state}
+    end
+  end
+
+  def handle_call({:retire_conversation_source, ref, reason}, {caller, _}, state) do
+    case state.conversation_sources[ref] do
+      %{session_pid: ^caller} ->
+        {reply, state} = retire_source(state, ref, reason)
+        {:reply, reply, state}
+
+      _ ->
+        {:reply, {:error, :invalid_source}, state}
+    end
+  end
+
+  def handle_call({:request_conversation_interaction, ref, spec, timeout_ms}, {caller, _}, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    with %{session_pid: ^caller, live?: true} = source <- state.conversation_sources[ref],
+         true <- Process.alive?(caller),
+         true <- conversation_prompt_capacity?(state, source),
+         true <- is_integer(timeout_ms) and timeout_ms in 1..300_000,
+         {:ok, command} <- ConversationJournal.get(source.scope, source.command.command_id),
+         {:ok, identity} <-
+           ConversationJournal.validate_binding(source.binding, source.scope, command.text),
+         true <- identity == source.command,
+         {:ok, interaction, attachment, operation_id} <- source_interaction(source, spec),
+         {:ok, data} <-
+           DurableLifecycleCore.new(
+             interaction,
+             operation_id,
+             Atom.to_string(state.authority_node),
+             state.authority_epoch,
+             now_ms()
+           ),
+         data = Map.put(data, "conversation_attachment", attachment),
+         {:ok, data} <- arm_initial_deadline(data, now_ms() + timeout_ms, now_ms()),
+         {:ok, record} <- durable_insert(interaction.request_id, data) do
+      case adopt_durable_record(state, record, :inserted) do
+        {:reply, {:ok, :inserted, _}, next_state} ->
+          {:ok, receipt} = durable_receipt(next_state, interaction.request_id)
+          {:reply, {:ok, Map.put(receipt, :agent_id, interaction.agent_id)}, next_state}
+
+        other ->
+          other
+      end
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_source}, state}
+    end
+  end
+
+  def handle_call({:conversation_interactions, scope, command_id}, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    with :ok <- ConversationJournalCore.validate_scope(scope),
+         :ok <- ConversationJournalCore.validate_id(command_id),
+         {:ok, _} <- ConversationJournal.get(scope, command_id) do
+      prompts =
+        state.entries
+        |> Enum.filter(fn {_id, entry} ->
+          ConversationInteractionsCore.matches?(
+            Map.get(entry, :conversation_attachment),
+            scope,
+            command_id
+          )
+        end)
+        |> Enum.sort_by(fn {id, entry} ->
+          {if(entry.status == :pending, do: 0, else: 1), id}
+        end)
+        |> Enum.take(32)
+        |> Enum.map(fn {id, entry} ->
+          ConversationInteractionsCore.project(
+            entry.conversation_attachment,
+            id,
+            entry.status,
+            entry.owner_deadline
+          )
+        end)
+
+      {:reply, {:ok, %{interactions: prompts}}, state}
+    else
+      _ -> {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:respond_conversation, scope, operation, actor_id, proof}, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+    request_id = if is_map(operation), do: operation[:request_id]
+
+    with :ok <- ConversationJournalCore.validate_scope(scope),
+         %{status: :pending, conversation_attachment: attachment} = entry <-
+           state.entries[request_id],
+         true <- ConversationInteractionsCore.matches?(attachment, scope, operation[:command_id]),
+         true <- source_live?(state, attachment),
+         {:ok, response, metadata} <- conversation_answer(entry, operation, actor_id, proof),
+         :ok <-
+           authenticate_conversation_answer(scope, operation, actor_id, proof, attachment["kind"]),
+         {:ok, next_state, %{status: :responded}} <-
+           durable_apply_transition(
+             state,
+             request_id,
+             entry,
+             {:verified_respond, response, metadata,
+              conversation_evidence(actor_id, request_id, attachment, operation)}
+           ) do
+      {:reply, {:ok, entry.interaction, response, metadata}, next_state}
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :interaction_unavailable}, state}
+    end
+  end
+
   def handle_call({:admit, %Interaction{} = interaction, opts}, _from, state) do
     admit_call(state, interaction, opts)
   end
@@ -400,13 +573,50 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       ) do
     state = state |> expire_due_pending() |> prune_terminals()
 
-    with %{status: :pending, interaction: %Interaction{kind: :approval} = interaction} <-
+    with %{status: :pending, interaction: %Interaction{kind: :approval} = interaction} =
+           original_entry <-
            Map.get(state.entries, request_id),
+         true <- is_nil(Map.get(original_entry, :conversation_attachment)),
          decision when decision in [:approved, :rejected] <-
            approval_decision(interaction, response, metadata),
          {:ok, identity} <- PendingApprovalIdentity.from_interaction(interaction),
          :ok <- authorize_human_answer(identity, actor_id, token) do
-      case handle_call({:respond, request_id, response, metadata}, from, state) do
+      transition_result =
+        if original_entry.durability == :node_restart do
+          evidence = %{
+            "responder_id" => actor_id,
+            "request_id" => request_id,
+            "operation_id" => original_entry.operation_id,
+            "revision" => 1,
+            "response" => Atom.to_string(decision)
+          }
+
+          case durable_apply_transition(
+                 state,
+                 request_id,
+                 original_entry,
+                 {:verified_respond, response, metadata, evidence}
+               ) do
+            {:ok, next, %{status: :responded}} ->
+              {:reply, {:ok, interaction}, next}
+
+            {:ok, next, %{status: status}} ->
+              {:reply, {:error, {:already_terminal, status}}, next}
+
+            {:already, next, status} ->
+              {:reply, {:error, {:already_terminal, status}}, next}
+
+            {:conflict, next, status} ->
+              {:reply, {:error, {:already_terminal, status}}, next}
+
+            {:error, error, next} ->
+              {:reply, {:error, error}, next}
+          end
+        else
+          handle_call({:respond, request_id, response, metadata}, from, state)
+        end
+
+      case transition_result do
         {:reply, {:ok, _} = reply, next_state} ->
           entry = Map.fetch!(next_state.entries, request_id)
           entry = Map.put(entry, :verified_human_id, actor_id)
@@ -424,6 +634,9 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     state = state |> expire_due_pending() |> prune_terminals()
 
     case Map.get(state.entries, request_id) do
+      %{conversation_attachment: attachment} when is_map(attachment) ->
+        {:reply, {:error, :scoped_answer_required}, state}
+
       %{durability: :node_restart} = entry ->
         durable_respond(state, request_id, entry, response, metadata)
 
@@ -544,6 +757,17 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
          )}
 
       _stale_or_terminal ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    case state.source_monitors[monitor] do
+      nil ->
+        {:noreply, state}
+
+      ref ->
+        {_reply, state} = retire_source(state, ref, :source_down)
         {:noreply, state}
     end
   end
@@ -1054,6 +1278,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       {:ok,
        %{
          durability: :node_restart,
+         conversation_attachment: data["conversation_attachment"],
+         verified_response: data["verified_response"],
          record: nil,
          operation_id: data["operation_id"],
          authority_epoch: data["authority_epoch"],
@@ -1404,6 +1630,24 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
         result =
           case transition do
+            {:verified_respond, response, metadata, evidence} ->
+              with {:ok, data} <-
+                     DurableLifecycleCore.respond(
+                       entry.record.data,
+                       response,
+                       metadata,
+                       authority_node,
+                       state.authority_epoch,
+                       now
+                     ),
+                   data =
+                     if(data["status"] == "responded",
+                       do: Map.put(data, "verified_response", evidence),
+                       else: data
+                     ),
+                   {:ok, data} <- DurableLifecycleCore.decode(data),
+                   do: {:ok, data}
+
             {:respond, response, metadata} ->
               DurableLifecycleCore.respond(
                 entry.record.data,
@@ -1566,6 +1810,9 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       nil ->
         {:reply, :not_found}
 
+      %{conversation_attachment: attachment} when is_map(attachment) ->
+        {:reply, {:error, :scoped_delivery_required}}
+
       entry ->
         cond do
           Map.has_key?(state.dispatch_claims, request_id) ->
@@ -1587,6 +1834,9 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         end
     end
   end
+
+  defp dispatch_entry_due?(_state, _request_id, %{conversation_attachment: attachment}, _now)
+       when is_map(attachment), do: false
 
   defp dispatch_entry_due?(
          state,
@@ -2189,6 +2439,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
              state.authority_epoch,
              now
            ),
+         {:ok, claimed} <- retire_recovered_source(claimed, state, now),
          replacement = Record.update(record, claimed) do
       case DurableStore.compare_and_swap(record.key, record, replacement) do
         {:ok, %Record{} = stored} -> {:ok, stored}
@@ -2357,13 +2608,260 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
           :not_found
       end
 
-    case {result, Map.get(entry, :verified_human_id)} do
+    case {result,
+          Map.get(entry, :verified_human_id) ||
+            get_in(entry, [:verified_response, "responder_id"])} do
       {{:ok, evidence}, human_id} when is_binary(human_id) ->
         {:ok, Map.put(evidence, :verified_human_id, human_id)}
 
       _ ->
         result
     end
+  end
+
+  defp source_interaction(source, %{kind: :choice} = spec) do
+    operation_id = fresh_id("op")
+
+    with :ok <- ConversationInteractionsCore.validate_spec(spec),
+         {:ok, attachment} <-
+           ConversationInteractionsCore.attachment(
+             source.scope,
+             source.command,
+             source.id,
+             source.session_id,
+             operation_id,
+             spec
+           ),
+         {:ok, interaction} <-
+           Interaction.new(%{
+             kind: :decision,
+             agent_id: source.scope.agent_id,
+             user_id: source.scope.principal_id,
+             description: spec.text,
+             metadata: %{}
+           }) do
+      {:ok, interaction, attachment, operation_id}
+    end
+  end
+
+  defp source_interaction(source, {:approval, %Interaction{kind: :approval} = interaction}) do
+    operation_id = fresh_id("op")
+
+    with true <- interaction.agent_id == source.scope.agent_id,
+         {:ok, identity} <- PendingApprovalIdentity.from_interaction(interaction),
+         true <- identity["task_id"] == source.command.task_id,
+         true <-
+           is_binary(interaction.description) and String.valid?(interaction.description) and
+             byte_size(interaction.description) in 1..4096,
+         {:ok, projection} <-
+           ConversationInteractionsCore.approval_projection(
+             identity,
+             interaction.description,
+             interaction.metadata
+           ),
+         interaction = %{
+           interaction
+           | metadata: projection.metadata,
+             description: projection.text
+         },
+         {:ok, attachment} <-
+           ConversationInteractionsCore.attachment(
+             source.scope,
+             source.command,
+             source.id,
+             source.session_id,
+             operation_id,
+             %{
+               kind: :choice,
+               text: interaction.description,
+               choices: [
+                 %{id: "approve", label: "Approve"},
+                 %{id: "deny", label: "Deny"},
+                 %{id: "rework", label: "Rework"}
+               ]
+             }
+           ) do
+      {:ok, interaction, Map.put(attachment, "kind", "approval"), operation_id}
+    else
+      _ -> {:error, :invalid_protected_source}
+    end
+  end
+
+  defp source_interaction(_, _), do: {:error, :unsupported_protected_gate}
+
+  defp conversation_prompt_capacity?(state, source) do
+    Enum.count(state.entries, fn {_id, entry} ->
+      entry.status == :pending and
+        get_in(entry, [:conversation_attachment, "source_id"]) == source.id
+    end) < 32
+  end
+
+  defp source_live?(state, attachment) do
+    Enum.any?(state.conversation_sources, fn {_ref, source} ->
+      source.id == attachment["source_id"] and source.live? and Process.alive?(source.session_pid)
+    end)
+  end
+
+  defp retire_source(state, ref, reason) do
+    case state.conversation_sources[ref] do
+      nil ->
+        {{:error, :invalid_source}, state}
+
+      source ->
+        Process.demonitor(source.monitor, [:flush])
+
+        state =
+          state
+          |> update_in([:conversation_sources], &Map.delete(&1, ref))
+          |> update_in([:source_monitors], &Map.delete(&1, source.monitor))
+
+        pending =
+          Enum.filter(state.entries, fn {_id, entry} ->
+            entry.status == :pending and
+              get_in(entry, [:conversation_attachment, "source_id"]) == source.id
+          end)
+
+        Enum.reduce(pending, {:ok, state}, fn {id, entry}, {reply, acc} ->
+          case durable_apply_transition(acc, id, entry, {:abandon, reason}) do
+            {:ok, next, _} -> {reply, next}
+            {:already, next, _} -> {reply, next}
+            {:conflict, next, _} -> {reply, next}
+            {:error, error, next} -> {{:error, error}, next}
+          end
+        end)
+    end
+  end
+
+  defp retire_recovered_source(%{"conversation_attachment" => nil} = data, _state, _now),
+    do: {:ok, data}
+
+  defp retire_recovered_source(data, state, now),
+    do:
+      DurableLifecycleCore.abandon(
+        data,
+        :source_lost,
+        Atom.to_string(state.authority_node),
+        state.authority_epoch,
+        now
+      )
+
+  defp authenticate_conversation_answer(
+         scope,
+         operation,
+         actor_id,
+         %{receipt: receipt, expected_engagement_id: expected} = proof,
+         kind
+       ) do
+    tag = if kind == "approval", do: :interaction_approval, else: :interaction_choice
+
+    keys =
+      if kind == "approval",
+        do: [:receipt, :expected_engagement_id, :session_token],
+        else: [:receipt, :expected_engagement_id]
+
+    with true <- Enum.sort(Map.keys(proof)) == Enum.sort(keys),
+         true <- is_nil(expected) or expected == scope.engagement_id,
+         {:ok, payload} <-
+           ConversationInteractionsCore.request_payload(
+             tag,
+             actor_id,
+             scope.agent_id,
+             operation,
+             expected
+           ),
+         {:ok,
+          %{principal_id: ^actor_id, canonical_owner_id: owner, expected_engagement_id: ^expected}} <-
+           Arbor.Security.consume_conversation_operation_receipt(
+             receipt,
+             "arbor://chat/agent/" <> scope.agent_id,
+             payload
+           ),
+         true <- owner == scope.principal_id,
+         {:ok, :authorized} <-
+           Arbor.Security.recheck_conversation_owner(actor_id, scope.agent_id, scope.principal_id),
+         {:ok, %{id: id}} <-
+           Arbor.Comms.resolve_user_engagement(scope.agent_id, scope.principal_id),
+         true <- id == scope.engagement_id do
+      :ok
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp authenticate_conversation_answer(_, _, _, _, _), do: {:error, :unauthorized}
+
+  defp conversation_answer(
+         %{conversation_attachment: %{"kind" => "choice"} = attachment} = entry,
+         operation,
+         _actor,
+         _proof
+       ) do
+    with {:ok, response} <-
+           ConversationInteractionsCore.answer(
+             attachment,
+             operation,
+             entry.interaction.request_id
+           ),
+         do: {:ok, response, %{}}
+  end
+
+  defp conversation_answer(
+         %{conversation_attachment: %{"kind" => "approval"} = attachment} = entry,
+         operation,
+         actor,
+         %{session_token: token}
+       ) do
+    with true <-
+           is_map(operation) and
+             Enum.sort(Map.keys(operation)) ==
+               Enum.sort([:command_id, :request_id, :operation_id, :revision, :decision, :note]),
+         true <-
+           operation.command_id == attachment["command_id"] and
+             operation.request_id == entry.interaction.request_id and
+             operation.operation_id == attachment["operation_id"] and operation.revision == 1,
+         {:ok, response, metadata} <- protected_answer(operation.decision, operation.note),
+         {:ok, identity} <- PendingApprovalIdentity.from_interaction(entry.interaction),
+         :ok <- authorize_human_answer(identity, actor, token) do
+      {:ok, response, metadata}
+    else
+      _ -> {:error, :approval_answer_required}
+    end
+  end
+
+  defp conversation_answer(_, _, _, _), do: {:error, :approval_answer_required}
+
+  defp protected_answer(decision, note) when decision in [:approve, "approve"] do
+    with {:ok, normalized} <- ApprovalAnswer.validate_note(note) do
+      {:ok, :approved, if(normalized == "", do: %{}, else: %{note: normalized})}
+    end
+  end
+
+  defp protected_answer(decision, note) when decision in [:deny, "deny", :rework, "rework"] do
+    normalized = if decision in [:deny, "deny"], do: :deny, else: :rework
+    metadata = %{decision: Atom.to_string(normalized), note: note}
+
+    with {:ok, _} <- ApprovalAnswer.validate_note(note) do
+      case ApprovalAnswer.normalize(:rejected, metadata) do
+        {:ok, ^normalized, _} -> {:ok, :rejected, metadata}
+        _ -> {:error, :invalid_interaction_answer}
+      end
+    else
+      _ -> {:error, :invalid_interaction_answer}
+    end
+  end
+
+  defp protected_answer(_, _), do: {:error, :invalid_interaction_answer}
+
+  defp conversation_evidence(actor, request_id, attachment, operation) do
+    response = Map.get(operation, :choice_id) || to_string(Map.get(operation, :decision))
+
+    %{
+      "responder_id" => actor,
+      "request_id" => request_id,
+      "operation_id" => attachment["operation_id"],
+      "revision" => 1,
+      "response" => response
+    }
   end
 
   defp authorize_human_answer(identity, actor_id, token) do

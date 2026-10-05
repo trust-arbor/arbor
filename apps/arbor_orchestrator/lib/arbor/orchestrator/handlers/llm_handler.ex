@@ -547,17 +547,31 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             "OK in #{elapsed}ms, response=#{resp_len} chars"
         )
 
-        emit_llm_signal(:llm_call_completed, %{
+        completion_signal = %{
           agent_id: agent_id,
           node_id: node.id,
           provider: provider,
           model: model,
           duration_ms: elapsed,
           response_length: resp_len,
-          response_preview:
-            if(is_binary(response_text), do: String.slice(response_text, 0..200), else: nil),
           use_tools: use_tools
-        })
+        }
+
+        # The Session-owned egress seam identifies a private ordinary turn.
+        # Keep response content on its authenticated conversation read path;
+        # autonomous and standalone operator calls retain their existing preview.
+        completion_signal =
+          if session_turn_egress_seam?(opts) do
+            completion_signal
+          else
+            Map.put(
+              completion_signal,
+              :response_preview,
+              if(is_binary(response_text), do: String.slice(response_text, 0..200), else: nil)
+            )
+          end
+
+        emit_llm_signal(:llm_call_completed, completion_signal)
 
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
@@ -1479,6 +1493,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> Keyword.merge(credential_opts)
             |> Keyword.merge(authority_opts)
             |> Keyword.merge(Keyword.take(opts, [:memory_write_policy]))
+            |> Keyword.merge(Keyword.take(opts, [:conversation_source]))
             |> maybe_put_provider_usage_context(opts)
             |> maybe_add_stream_callback(on_stream)
             |> maybe_put_llm_call_authorizer(opts)
@@ -1797,6 +1812,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> maybe_restrict_memory_write_runtime(call_opts)
       |> strip_turn_private_opts()
       |> Keyword.delete(:memory_write_policy)
+      |> Keyword.delete(:conversation_source)
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1827,6 +1843,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> maybe_restrict_memory_write_runtime(call_opts)
       |> strip_turn_private_opts()
       |> Keyword.delete(:memory_write_policy)
+      |> Keyword.delete(:conversation_source)
 
     run_id = Keyword.get(call_opts, :run_id)
 

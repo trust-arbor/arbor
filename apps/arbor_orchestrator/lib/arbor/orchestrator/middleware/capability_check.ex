@@ -123,9 +123,10 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp check_all_resources(token, _agent_id, []), do: token
 
   defp check_all_resources(token, agent_id, [resource | rest]) do
-    with {:ok, auth_opts} <- build_auth_opts(token, resource),
+    with {:ok, resource, mode} <- resolve_authorization_resource(token, resource),
+         {:ok, auth_opts} <- build_auth_opts(token, resource),
          :ok <- authorize_caller(token, resource, auth_opts) do
-      case authorize_resource(token, agent_id, resource, auth_opts) do
+      case authorize_resource(token, agent_id, resource, auth_opts, mode) do
         {:ok, :authorized} ->
           check_all_resources(token, agent_id, rest)
 
@@ -175,7 +176,118 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   # SigningAuthority path: fixed Arbor.Security facade only — never consults
   # Config.security_module (test doubles must not affect this path).
   # Present invalid :signing_authority (including nil) fails closed — never legacy.
-  defp authorize_resource(token, agent_id, resource, auth_opts) do
+  defp resolve_authorization_resource(token, resource) do
+    case source_bound_native_action(token, resource) do
+      mode when mode in [:fixed_conversation, :fixed_facade] ->
+        with {:ok, %{resource: effective, admission_owner: owner}} <-
+               Arbor.Orchestrator.Handlers.ExecHandler.authorization_resource(
+                 token.node,
+                 token.context,
+                 token.assigns.run_authorization
+               ),
+             true <- mode != :fixed_facade or owner == :actions_facade do
+          # Keep the original fixed-boundary classification. A parameterized
+          # resource cannot downgrade this into an ordinary spending gate.
+          {:ok, effective, mode}
+        else
+          _ -> {:error, :invalid_action_authorization_resource}
+        end
+
+      :unsupported ->
+        {:error, :source_bound_native_boundary_required}
+
+      :ordinary ->
+        {:ok, resource, :ordinary}
+
+      {:error, _} ->
+        {:error, :invalid_action_admission_owner}
+    end
+  end
+
+  defp authorize_resource(token, agent_id, resource, auth_opts, mode)
+       when mode in [:fixed_conversation, :fixed_facade] do
+    # Mandatory Actions facade owns effect admission and exact approval. This
+    # membership preflight never consumes allowance or creates an unattached
+    # approval, including autonomous workers without a human command source.
+    preflight_native_action(token, agent_id, resource, auth_opts, mode)
+  end
+
+  defp authorize_resource(token, agent_id, resource, auth_opts, :ordinary),
+    do: authorize_ordinary_resource(token, agent_id, resource, auth_opts)
+
+  defp source_bound_native_action(token, resource) do
+    action_name = Map.get(token.node.attrs, "action")
+
+    action? =
+      Registry.node_type(token.node) == "exec" and
+        Map.get(token.node.attrs, "target") == "action" and
+        resource != @orchestrator_uri_prefix <> "exec" and
+        resource == action_resource(action_name)
+
+    mode =
+      cond do
+        not action? ->
+          :ordinary
+
+        Map.has_key?(token.assigns, :conversation_source) ->
+          :fixed_conversation
+
+        true ->
+          case Arbor.Actions.authorization_admission_owner(action_name) do
+            {:ok, :ordinary} -> :ordinary
+            {:ok, :actions_facade} -> :fixed_facade
+            _ -> {:error, :invalid_action_admission_owner}
+          end
+      end
+
+    if mode in [:fixed_conversation, :fixed_facade] do
+      if Map.get(token.assigns, :execution_handler) == Arbor.Orchestrator.Handlers.ExecHandler and
+           Map.get(token.assigns, :actions_executor) == Arbor.Orchestrator.ActionsExecutor and
+           RunAuthorization.verify_handler(
+             token.assigns.run_authorization,
+             token.node,
+             Arbor.Orchestrator.Handlers.ExecHandler
+           ) == :ok,
+         do: mode,
+         else: :unsupported
+    else
+      mode
+    end
+  end
+
+  defp preflight_native_action(token, agent_id, resource, auth_opts, mode) do
+    with :ok <- validate_native_preflight_source(token, mode),
+         {:ok, normalized} <-
+           Arbor.Security.normalize_authorization_resource_uri(resource, auth_opts),
+         {:ok, capabilities} <-
+           Arbor.Security.list_capabilities(
+             agent_id,
+             RunAuthorization.scope_opts(token.assigns.run_authorization)
+           ),
+         true <-
+           Enum.any?(
+             capabilities,
+             &Arbor.Security.capability_authorizes?(&1, normalized, auth_opts)
+           ) do
+      {:ok, :authorized}
+    else
+      _ -> {:error, :native_action_preflight_refused}
+    end
+  end
+
+  defp validate_native_preflight_source(_token, :fixed_facade), do: :ok
+
+  defp validate_native_preflight_source(token, :fixed_conversation) do
+    with %{session_pid: session_pid, generation: generation, handle: {authority_pid, source_ref}} =
+           source <- token.assigns.conversation_source,
+         true <- map_size(source) == 3,
+         true <- is_pid(session_pid) and is_pid(authority_pid),
+         true <- is_reference(generation) and is_reference(source_ref),
+         do: :ok,
+         else: (_ -> {:error, :native_action_preflight_refused})
+  end
+
+  defp authorize_ordinary_resource(token, agent_id, resource, auth_opts) do
     case Map.fetch(token.assigns, :signing_authority) do
       {:ok, %SigningAuthority{} = authority} ->
         case SigningAuthority.canonicalize(authority) do
@@ -210,7 +322,8 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
         with {:ok, path_opts} <- path_auth_opts(token.node, resource, authority.workdir),
              {:ok, signer_opts} <- signer_auth_opts(token.assigns, resource) do
-          {:ok, base ++ path_opts ++ signer_opts}
+          source_opts = Map.to_list(Map.take(token.assigns, [:conversation_source]))
+          {:ok, base ++ path_opts ++ signer_opts ++ source_opts}
         end
 
       {:ok, _invalid} ->

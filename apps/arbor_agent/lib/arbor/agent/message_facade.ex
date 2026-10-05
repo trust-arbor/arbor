@@ -64,7 +64,13 @@ defmodule Arbor.Agent.MessageFacade do
                         :receipt,
                         "receipt",
                         :bearer_token,
-                        "bearer_token"
+                        "bearer_token",
+                        :command_binding,
+                        "command_binding",
+                        :conversation_command_binding,
+                        "conversation_command_binding",
+                        :claim_token,
+                        "claim_token"
                       ])
 
   @type error_reason ::
@@ -245,11 +251,52 @@ defmodule Arbor.Agent.MessageFacade do
           end
         end
 
+      deliver_command =
+        if message do
+          fn binding ->
+            try do
+              deliver_authenticated(
+                collaborators,
+                {:command, binding},
+                message,
+                caller,
+                target,
+                timeout,
+                receipt,
+                [binding.claim_token | secrets]
+              )
+            after
+              discard.()
+            end
+          end
+        end
+
       try do
         result =
           with {:ok, owner} <- collaborators.receipt_owner.(receipt, caller, target) do
             continuation.(%{
               deliver: deliver,
+              deliver_command: deliver_command,
+              observe: fn scope, ids, read_timeout ->
+                Arbor.Agent.SessionManager.conversation_activity(
+                  target,
+                  caller,
+                  receipt,
+                  scope,
+                  ids,
+                  read_timeout
+                )
+              end,
+              cancel: fn scope, id, cancel_timeout ->
+                Arbor.Agent.SessionManager.cancel_conversation_command(
+                  target,
+                  caller,
+                  receipt,
+                  scope,
+                  id,
+                  cancel_timeout
+                )
+              end,
               discard: discard,
               authenticated_principal_id: caller,
               canonical_owner_id: owner
@@ -274,6 +321,87 @@ defmodule Arbor.Agent.MessageFacade do
           {:error, :delivery_failed}
       end
     end
+  end
+
+  @doc false
+  def with_authenticated_operation_receipt(caller, target, payload, opts, continuation)
+      when is_binary(payload) and byte_size(payload) <= 131_072 and is_function(continuation, 1) do
+    collaborators = production_collaborators()
+
+    with {:ok, _timeout, proof, fence_opts} <- validate_operation_opts(opts),
+         :ok <- require_proof(proof),
+         :ok <- validate_principal_id(caller, :invalid_caller_id),
+         :ok <- validate_principal_id(target, :invalid_agent_id),
+         {:ok, receipt} <-
+           issue_receipt(
+             fn principal, resource, _action, proof_opts ->
+               Arbor.Security.authorize_and_issue_conversation_operation_receipt(
+                 principal,
+                 resource,
+                 payload,
+                 proof_opts
+               )
+             end,
+             caller,
+             "arbor://chat/agent/" <> target,
+             proof,
+             fence_opts
+           ) do
+      discard = fn -> discard_receipt(collaborators, receipt) end
+
+      try do
+        with {:ok, owner} <- collaborators.receipt_owner.(receipt, caller, target) do
+          continuation.(%{
+            receipt: receipt,
+            discard: discard,
+            authenticated_principal_id: caller,
+            canonical_owner_id: owner,
+            observe: fn scope, query, timeout ->
+              Arbor.Agent.SessionManager.conversation_activity(
+                target,
+                caller,
+                receipt,
+                scope,
+                query,
+                timeout
+              )
+            end,
+            cancel: fn scope, query, timeout ->
+              Arbor.Agent.SessionManager.cancel_conversation_command(
+                target,
+                caller,
+                receipt,
+                scope,
+                query,
+                timeout
+              )
+            end
+          })
+        end
+      after
+        discard.()
+      end
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  def with_authenticated_operation_receipt(_, _, _, _, _), do: {:error, :invalid_opts}
+
+  defp validate_operation_opts(opts) do
+    with true <- Keyword.keyword?(opts) and not has_duplicate_keys?(opts),
+         {:ok, timeout, proof, _} <- validate_opts(Keyword.delete(opts, :expected_engagement_id)),
+         fence <- Keyword.get(opts, :expected_engagement_id),
+         true <-
+           is_nil(fence) or (is_binary(fence) and Regex.match?(~r/\Aeng_[0-9a-f]{32}\z/, fence)) do
+      {:ok, timeout, proof, if(is_nil(fence), do: [], else: [expected_engagement_id: fence])}
+    else
+      _ -> {:error, :invalid_opts}
+    end
+  rescue
+    _ -> {:error, :invalid_opts}
   end
 
   defp require_proof(@proof_absent), do: {:error, :unauthorized}
@@ -334,6 +462,7 @@ defmodule Arbor.Agent.MessageFacade do
       chat_response: &Arbor.Agent.Manager.chat_response/3,
       chat_authenticated: &Arbor.Agent.Manager.chat_authenticated/4,
       chat_response_authenticated: &Arbor.Agent.Manager.chat_response_authenticated/4,
+      command_authenticated: &Arbor.Agent.Manager.chat_command_authenticated/5,
       consult_authenticated: &Arbor.Agent.Manager.consult_authenticated/5
     }
   end
@@ -577,6 +706,7 @@ defmodule Arbor.Agent.MessageFacade do
 
   defp validate_message_for_branch(%UserMessage{} = message, caller_id, proof) do
     with :ok <- validate_content(message.content),
+         :ok <- Arbor.Comms.validate_conversation_ingress_metadata(message.transport_metadata),
          :ok <- validate_sender(message.sender_id, caller_id) do
       case proof do
         @proof_absent ->
@@ -752,6 +882,9 @@ defmodule Arbor.Agent.MessageFacade do
           :response ->
             collaborators.chat_response_authenticated.(message, caller_id, receipt, opts)
 
+          {:command, binding} ->
+            collaborators.command_authenticated.(message, caller_id, receipt, binding, opts)
+
           {:consultation, parent_voice_id} ->
             collaborators.consult_authenticated.(
               message,
@@ -764,7 +897,8 @@ defmodule Arbor.Agent.MessageFacade do
 
       case collaborators.recheck.(caller_id, target_agent_id, owner) do
         {:ok, :authorized} ->
-          admit_authenticated_result(result, mode, secrets, collaborators, receipt)
+          projection_mode = if match?({:command, _}, mode), do: :response, else: mode
+          admit_authenticated_result(result, projection_mode, secrets, collaborators, receipt)
 
         _ ->
           discard_receipt(collaborators, receipt)
@@ -894,13 +1028,12 @@ defmodule Arbor.Agent.MessageFacade do
     :exit, _ -> :ok
   end
 
-  # Assistant signal is emitted only after call-local secret admission succeeds,
-  # so a malicious Session cannot surface proof/bearer via chat_message before reject.
+  # Admission controls the private reply. The agent-wide observability topic
+  # has no conversation read authority, so it receives only fixed metadata.
   defp emit_assistant_signal(text) when is_binary(text) do
     Arbor.Signals.emit(:agent, :chat_message, %{
       role: :assistant,
-      content: text,
-      sender: "Agent"
+      channel: :private_conversation
     })
 
     :ok

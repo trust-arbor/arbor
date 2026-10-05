@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.1",
+  "stage": "notice-extension-after-renderer-baseline",
+  "baseline_event_kinds": [
+    "admitted",
+    "message",
+    "settled",
+    "tool_started",
+    "tool_finished",
+    "approval_requested",
+    "approval_resolved"
+  ],
+  "event_kinds": [
+    "admitted",
+    "message",
+    "settled",
+    "tool_started",
+    "tool_finished",
+    "approval_requested",
+    "approval_resolved",
+    "notice"
+  ],
+  "baseline_block_types": [
+    "message",
+    "command",
+    "tool",
+    "approval"
+  ],
+  "fixtures": {
+    "v1/conversation.json": "Completed chat, pending tool and protected approval, uncertain outcome",
+    "v1/lifecycle.json": "Approval response and tool completion followed by a completed response",
+    "v1/recovery.json": "Exact duplicate replay yields the same state as the conversation fixture",
+    "v1/dasp-import.json": "43 retained updates from the prior real host crash experiment",
+    "v1/notice.json": "Passive notice added after adapters passed their baseline; existing plain-text rendering fallback"
+  },
+  "extension": {
+    "kind": "notice",
+    "block_type": "notice",
+    "fixture_version": "1.1",
+    "speech_policy": "silent",
+    "baseline_core_evidence": "measurements/baseline-core.json"
+  }
+}

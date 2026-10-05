@@ -34,6 +34,9 @@ defmodule Arbor.Agent.Profile do
     field(:identity, map(), default: nil)
     field(:keychain_ref, String.t(), default: nil)
     field(:auto_start, boolean(), default: false)
+    # Explicit operator-provisioned native mailbox destinations. No ambient
+    # human, last-user or Registry metadata fallback supplies these bindings.
+    field(:notice_mailboxes, [map()], default: [])
     field(:metadata, map(), default: %{})
     field(:created_at, DateTime.t())
     field(:version, pos_integer(), default: 1)
@@ -66,6 +69,7 @@ defmodule Arbor.Agent.Profile do
       "identity" => serialize_identity(profile.identity),
       "keychain_ref" => profile.keychain_ref,
       "auto_start" => profile.auto_start,
+      "notice_mailboxes" => profile.notice_mailboxes,
       "metadata" => profile.metadata,
       "created_at" => if(profile.created_at, do: DateTime.to_iso8601(profile.created_at))
     }
@@ -87,6 +91,7 @@ defmodule Arbor.Agent.Profile do
       identity: deserialize_identity(map["identity"] || legacy_identity(map["identity_ref"])),
       keychain_ref: map["keychain_ref"],
       auto_start: map["auto_start"] || false,
+      notice_mailboxes: map["notice_mailboxes"] || [],
       metadata: normalize_metadata(map["metadata"]),
       created_at: maybe_datetime(map["created_at"]),
       version: map["version"] || 1

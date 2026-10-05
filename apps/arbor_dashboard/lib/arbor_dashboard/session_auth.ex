@@ -24,6 +24,20 @@ defmodule Arbor.Dashboard.SessionAuth do
   end
 
   def reject_socket(socket) do
+    # Preserve the exact authenticated subject before clearing identity. The
+    # pinned LiveView channel flushes pending events before its redirect; Home
+    # keeps a receiver mounted even when a target-switch composer is absent.
+    socket =
+      if is_binary(socket.assigns[:current_agent_id]) do
+        socket
+        |> Phoenix.LiveView.push_event("conversation-access-denied", %{})
+        |> Phoenix.LiveView.push_event("conversation-home-clear", %{
+          subject: socket.assigns.current_agent_id
+        })
+      else
+        socket
+      end
+
     socket =
       socket
       |> Phoenix.Component.assign(

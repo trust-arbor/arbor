@@ -25,6 +25,21 @@ defmodule Arbor.Multimedia.PcmCore do
     end
   end
 
+  def capture_control(spec, opts, local_node) do
+    with {:ok, options} <- options(opts, [:controller, :minimum_duration_ms]),
+         {controller, correlation} <- options[:controller],
+         true <-
+           is_pid(controller) and node(controller) == local_node and is_reference(correlation),
+         minimum <- Map.get(options, :minimum_duration_ms, 100),
+         true <- is_integer(minimum) and minimum >= 100 and minimum <= spec.duration_ms,
+         true <- rem(minimum * spec.sample_rate, 1000) == 0 do
+      {:ok, Map.put(spec, :minimum_frames, div(minimum * spec.sample_rate, 1000)),
+       {controller, correlation}}
+    else
+      _ -> {:error, :invalid_options}
+    end
+  end
+
   def playback(audio, opts) do
     with {:ok, options} <- options(opts, [:device_id]),
          %{pcm: pcm, sample_rate: rate, channels: 1, sample_format: :s16le} <- audio,
@@ -68,6 +83,8 @@ defmodule Arbor.Multimedia.PcmCore do
              :unsupported_format,
              :device_busy,
              :capture_failed,
+             :recording_too_short,
+             :finish_unavailable,
              :playback_failed,
              :driver_failed,
              :invalid_devices,

@@ -1,0 +1,2387 @@
+defmodule Breeze.ChildServer do
+  @moduledoc false
+
+  use GenServer
+
+  alias Breeze.Renderer.InputRouting
+  alias Breeze.Theme.Probe, as: ThemeProbe
+
+  def start(opts) do
+    GenServer.start(__MODULE__, opts)
+  end
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  def metadata(pid, opts \\ []) do
+    GenServer.call(pid, {:metadata, opts})
+  end
+
+  def input_routing_changed?(pid, opts \\ []) do
+    GenServer.call(pid, {:input_routing_changed?, opts})
+  end
+
+  def runtime_state(pid, timeout \\ 5_000) do
+    GenServer.call(pid, :runtime_state, timeout)
+  end
+
+  def runtime_pids(pid, timeout \\ 1_000) do
+    GenServer.call(pid, :runtime_pids, timeout)
+  end
+
+  def layout_snapshot(pid) do
+    GenServer.call(pid, :layout_snapshot)
+  end
+
+  def render(pid, opts) do
+    GenServer.call(pid, {:render, opts})
+  end
+
+  def render_snapshot(pid, opts) do
+    GenServer.call(pid, {:render_snapshot, opts})
+  end
+
+  def dispatch_input(pid, input, opts \\ []) do
+    GenServer.call(pid, {:input, input, opts})
+  end
+
+  def dispatch_global_keybindings(pid, input, opts \\ []) do
+    GenServer.call(pid, {:global_input, input, opts})
+  end
+
+  def set_focus(pid, focused) do
+    GenServer.call(pid, {:set_focus, focused})
+  end
+
+  def dispatch_event(pid, change, event) do
+    GenServer.call(pid, {:event, change, event})
+  end
+
+  def update_assigns(pid, assigns) do
+    GenServer.call(pid, {:update_assigns, assigns})
+  end
+
+  def dispatch_info(pid, message, terminal \\ nil, opts \\ []) do
+    GenServer.call(pid, {:info, message, terminal, opts})
+  end
+
+  def put_global_keybindings(pid, keybindings) do
+    GenServer.call(pid, {:put_global_keybindings, keybindings})
+  end
+
+  @doc false
+  def put_terminal(pid, terminal) do
+    GenServer.call(pid, {:put_terminal, terminal})
+  end
+
+  @doc false
+  def put_clipboard(pid, clipboard), do: GenServer.call(pid, {:put_clipboard, clipboard})
+
+  def put_theme(pid, theme, opts \\ []) do
+    GenServer.call(pid, {:put_theme, theme, opts})
+  end
+
+  @impl true
+  def init(opts) do
+    apply_process_flags(Keyword.get(opts, :process_flags, []))
+
+    view = Keyword.fetch!(opts, :view)
+    terminal = Keyword.get(opts, :terminal)
+    theme_input = Keyword.get(opts, :theme_source, Keyword.get(opts, :theme))
+    theme = Breeze.Theme.new(theme_input, terminal: terminal)
+
+    apply_theme_defaults? =
+      Keyword.get(
+        opts,
+        :apply_theme_defaults?,
+        Breeze.Theme.defaults_enabled?(theme_input)
+      )
+
+    start_opts = Keyword.get(opts, :start_opts, [])
+    runtime_state = Keyword.get(opts, :runtime_state)
+    restore_state_theme? = Keyword.get(opts, :restore_state_theme?, true)
+    invalidate = Keyword.get(opts, :invalidate)
+    global_keybindings = Keyword.get(opts, :global_keybindings, [])
+
+    external_assigns =
+      opts
+      |> Keyword.get(:assigns, %{})
+      |> Map.new()
+
+    initial_assigns =
+      external_assigns
+      |> Map.update(:breeze, %{keybindings: []}, fn
+        breeze when is_map(breeze) -> Map.put_new(breeze, :keybindings, [])
+        _ -> %{keybindings: []}
+      end)
+      |> Map.put(:__invalidate__, invalidate)
+
+    term = %Breeze.Term{
+      view: view,
+      server: Keyword.get(opts, :server),
+      terminal: terminal,
+      clipboard: Keyword.get(opts, :clipboard, %{osc52: :unknown, supported: false}),
+      theme: theme,
+      theme_source: theme_input,
+      apply_theme_defaults?: apply_theme_defaults?,
+      render_tree?: Keyword.get(opts, :render_tree?, false) == true,
+      global_keybindings: global_keybindings,
+      assigns: initial_assigns,
+      external_assigns: external_assigns
+    }
+
+    term = sync_theme_assigns(term)
+
+    term =
+      if is_nil(runtime_state) and Code.ensure_loaded?(view) and
+           function_exported?(view, :mount, 2) do
+        {:ok, mounted_term} = view.mount(start_opts, term)
+        mounted_term
+      else
+        term
+      end
+
+    term = maybe_restore_state(term, runtime_state, restore_state_theme?)
+    term = %{term | paste_generation: make_ref(), paste_reset_generation: make_ref()}
+    maybe_probe_system_theme(term.theme, term.terminal, term.server)
+    term = sync_theme_assigns(term)
+    {:ok, term}
+  end
+
+  defp apply_process_flags(flags) when is_list(flags) do
+    Enum.each(flags, fn
+      {flag, value} when flag in [:min_heap_size, :min_bin_vheap_size, :fullsweep_after] ->
+        Process.flag(flag, value)
+
+      _flag ->
+        :ok
+    end)
+  end
+
+  defp apply_process_flags(_flags), do: :ok
+
+  @impl true
+  def handle_call({:metadata, opts}, _from, term) do
+    metadata_term =
+      if Keyword.has_key?(opts, :focused) do
+        %{term | focused: Keyword.get(opts, :focused)}
+      else
+        term
+      end
+
+    {:reply,
+     %{
+       focused: metadata_term.focused,
+       paste_generation: metadata_term.paste_generation,
+       paste_reset_generation: metadata_term.paste_reset_generation,
+       view: metadata_term.view,
+       theme: metadata_term.theme,
+       apply_theme_defaults?: metadata_term.apply_theme_defaults?,
+       active_keybindings: active_keybindings(metadata_term),
+       focused_implicit_id: focused_implicit_id(metadata_term, metadata_term.focused),
+       focused_implicit_meta: focused_implicit_meta(metadata_term, metadata_term.focused),
+       focus_meta: metadata_term.focus_meta,
+       assigns: metadata_term.assigns,
+       implicit_state: metadata_term.implicit_state,
+       implicit_meta: metadata_term.implicit_meta
+     }, term}
+  end
+
+  def handle_call({:input_routing_changed?, opts}, _from, term) do
+    probe_term = input_routing_probe_term(term, opts)
+    desired_signature = input_routing_signature(probe_term)
+    focused_implicit_id = focused_implicit_id(probe_term, probe_term.focused)
+
+    implicit_state = probe_term.retained_implicit_state |> Map.merge(probe_term.implicit_state)
+
+    previous_elements = probe_term.retained_elements |> Map.merge(probe_term.elements)
+
+    changed? =
+      InputRouting.structure_changed?(
+        probe_term.input_routing_signature,
+        desired_signature,
+        probe_term.focused
+      ) or
+        InputRouting.focused_implicit_changed?(
+          desired_signature,
+          focused_implicit_id,
+          Map.get(implicit_state, focused_implicit_id),
+          Map.get(probe_term.implicit_meta, focused_implicit_id, %{}),
+          Map.get(previous_elements, focused_implicit_id)
+        ) or live_children_routing_changed?(desired_signature, probe_term, opts)
+
+    {:reply, changed?, term}
+  end
+
+  def handle_call(:runtime_state, _from, term) do
+    {:reply, Breeze.Runtime.State.capture_view(term), term}
+  end
+
+  def handle_call(:runtime_pids, _from, term) do
+    {:reply, child_runtime_pids(term), term}
+  end
+
+  def handle_call(:layout_snapshot, _from, term) do
+    {:reply, %{elements: term.elements, mouse_targets: term.mouse_targets}, term}
+  end
+
+  def handle_call({:render, opts}, _from, term) do
+    {term, acc, box, _decorations} = render_term(term, opts)
+    box = maybe_compact_snapshot_box(box, opts)
+    {:reply, {:ok, acc, box}, term}
+  catch
+    {:breeze_render_crash, crash} -> {:reply, {:crash, crash}, term}
+  end
+
+  def handle_call({:render_snapshot, opts}, _from, term) do
+    {term, acc, box, decorations} = render_term(term, opts)
+    box = maybe_compact_snapshot_box(box, opts)
+
+    {:reply, {:ok, acc, box, decorations}, term}
+  catch
+    {:breeze_render_crash, crash} -> {:reply, {:crash, crash}, term}
+  end
+
+  def handle_call({:event, change, event}, _from, term) do
+    touched_term = touch_interaction(term)
+    reply_from_input_result(handle_event(change, event, touched_term), touched_term)
+  end
+
+  def handle_call({:input, input, opts}, _from, term) do
+    touched_term = touch_interaction(term)
+    reply_from_input_result(process_input(input, touched_term, opts), touched_term, opts)
+  end
+
+  def handle_call({:global_input, input, opts}, _from, term) do
+    touched_term = touch_interaction(term)
+    event = normalize_key_event(input)
+
+    case Breeze.GlobalKeybindings.dispatch(event, touched_term) do
+      :continue ->
+        {:reply, {:noreply, touched_term.focused, false}, touched_term}
+
+      reply ->
+        reply_from_input_result(reply, touched_term, opts)
+    end
+  end
+
+  def handle_call({:set_focus, focused}, _from, term) do
+    next_term =
+      term
+      |> Map.put(:focused, focused)
+      |> Map.put(:allow_unfocused?, is_nil(focused))
+      |> then(&apply_focus_transitions(term, &1))
+
+    {:reply, {:noreply, next_term.focused, next_term != term}, next_term}
+  end
+
+  def handle_call({:info, message, terminal, opts}, _from, term) do
+    term = maybe_put_terminal(term, terminal)
+    reply_from_result(handle_view_info(term.view, message, term), term, opts)
+  end
+
+  def handle_call({:put_global_keybindings, keybindings}, _from, term) do
+    {:reply, :ok, %{term | global_keybindings: keybindings}}
+  end
+
+  def handle_call({:put_terminal, terminal}, _from, term) do
+    Enum.each(term.children, fn
+      {_id, %{pid: pid}} when is_pid(pid) ->
+        if Process.alive?(pid), do: put_terminal(pid, terminal)
+
+      _child ->
+        :ok
+    end)
+
+    {:reply, :ok, %{term | terminal: terminal}}
+  end
+
+  def handle_call({:put_clipboard, clipboard}, _from, term) do
+    Enum.each(term.children, fn
+      {_id, %{pid: pid}} when is_pid(pid) ->
+        if Process.alive?(pid), do: put_clipboard(pid, clipboard)
+
+      _ ->
+        :ok
+    end)
+
+    {:reply, :ok, sync_theme_assigns(%{term | clipboard: clipboard})}
+  end
+
+  def handle_call({:put_theme, theme_input, opts}, _from, term) do
+    theme = Breeze.Theme.new(theme_input, terminal: term.terminal)
+
+    next_term =
+      %{
+        term
+        | theme: theme,
+          theme_source: theme_input,
+          apply_theme_defaults?:
+            Keyword.get(opts, :apply_theme_defaults?, Breeze.Theme.defaults_enabled?(theme_input))
+      }
+      |> sync_theme_assigns()
+      |> put_child_themes(theme_input)
+
+    maybe_probe_system_theme(next_term.theme, next_term.terminal, next_term.server)
+
+    if Keyword.get(opts, :notify?, true) do
+      notify_invalidate(next_term)
+    end
+
+    {:reply, :ok, next_term}
+  end
+
+  def handle_call({:update_assigns, assigns}, _from, term) do
+    next_term =
+      term
+      |> apply_external_assigns(Map.new(assigns))
+      |> sync_theme_assigns()
+
+    notify_invalidate(next_term)
+    {:reply, :ok, next_term}
+  end
+
+  defp maybe_compact_snapshot_box(box, opts) do
+    if Keyword.get(opts, :compact_snapshot, false) do
+      %{box | children: [], layer_map: %{}, fixed_layer_map: %{}}
+    else
+      box
+    end
+  end
+
+  @impl true
+  def handle_info({:breeze_theme_palette, key, _status}, term) do
+    if requested_system_theme?(term.theme) and palette_notification_matches?(term.terminal, key) do
+      theme =
+        term.theme_source
+        |> Kernel.||(term.theme)
+        |> Breeze.Theme.normalize_requested_source()
+        |> Breeze.Theme.new(terminal: term.terminal)
+
+      next_term =
+        %{term | theme: theme}
+        |> sync_theme_assigns()
+        |> cascade_theme_if_changed(term)
+
+      if next_term != term, do: notify_invalidate(next_term)
+      {:noreply, next_term}
+    else
+      {:noreply, term}
+    end
+  end
+
+  def handle_info({:child_invalidated, child_id}, term) do
+    notify_invalidate(term, child_id)
+    {:noreply, term}
+  end
+
+  def handle_info({:breeze_flash_timeout, id, token}, term) do
+    next_term = Breeze.View.__expire_flash__(term, id, token)
+    notify_invalidate(next_term)
+    {:noreply, next_term}
+  end
+
+  def handle_info(message, term) do
+    term = maybe_put_terminal(term, term.terminal)
+
+    case handle_view_info(term.view, message, term) do
+      {:noreply, next_term} ->
+        next_term = cascade_info_theme_change(next_term, term)
+        notify_invalidate(next_term)
+        {:noreply, next_term}
+
+      {:noreply, next_term, opts} ->
+        next_term = cascade_info_theme_change(next_term, term)
+        maybe_notify_invalidate(next_term, opts)
+        {:noreply, next_term}
+
+      {:stop, next_term} ->
+        next_term = cascade_info_theme_change(next_term, term)
+        notify_invalidate(next_term)
+        {:stop, :normal, next_term}
+
+      {:stop, next_term, opts} ->
+        next_term = cascade_info_theme_change(next_term, term)
+        maybe_notify_invalidate(next_term, opts)
+        {:stop, :normal, next_term}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, term) do
+    Breeze.ChildViewSupervisor.stop(term.child_view_supervisor)
+    :ok
+  end
+
+  defp reply_from_result({:noreply, next_term}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+
+    maybe_probe_system_theme(next_term.theme, next_term.terminal, next_term.server)
+
+    next_term =
+      next_term
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, opts)
+    {:reply, {:noreply, next_term.focused}, next_term}
+  end
+
+  defp reply_from_result({:noreply, next_term, result_opts}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+
+    maybe_probe_system_theme(next_term.theme, next_term.terminal, next_term.server)
+
+    next_term =
+      next_term
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, merge_invalidation_opt(result_opts, opts))
+    {:reply, {:noreply, next_term.focused}, next_term}
+  end
+
+  defp reply_from_result({:stop, next_term}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, opts)
+    {:stop, :normal, {:stop, next_term.focused}, next_term}
+  end
+
+  defp reply_from_result({:stop, next_term, result_opts}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, merge_invalidation_opt(result_opts, opts))
+    {:stop, :normal, {:stop, next_term.focused}, next_term}
+  end
+
+  defp maybe_put_terminal(term, nil), do: term
+  defp maybe_put_terminal(term, terminal), do: %{term | terminal: terminal}
+
+  defp maybe_restore_state(term, nil, _restore_state_theme?), do: term
+
+  defp maybe_restore_state(
+         %Breeze.Term{view: view} = term,
+         %Breeze.Runtime.State.View{
+           term: %Breeze.Term{view: view} = state_term,
+           children: children
+         },
+         restore_state_theme?
+       ) do
+    invalidate = Map.get(term.assigns, :__invalidate__)
+
+    assigns =
+      case state_term.assigns do
+        assigns when is_map(assigns) -> Map.put(assigns, :__invalidate__, invalidate)
+        _assigns -> term.assigns
+      end
+
+    {theme_source, theme, apply_theme_defaults?} =
+      if restore_state_theme? do
+        theme_source = state_term.theme_source
+
+        {
+          theme_source,
+          Breeze.Theme.new(theme_source || state_term.theme, terminal: term.terminal),
+          state_term.apply_theme_defaults?
+        }
+      else
+        {term.theme_source, term.theme, term.apply_theme_defaults?}
+      end
+
+    restored =
+      %{
+        state_term
+        | server: term.server,
+          clipboard: term.clipboard,
+          terminal: term.terminal,
+          reader: term.reader,
+          theme: theme,
+          theme_source: theme_source,
+          apply_theme_defaults?: apply_theme_defaults?,
+          assigns: assigns,
+          children: %{},
+          render_timer: nil,
+          render_tree?: term.render_tree?
+      }
+      |> sync_theme_assigns()
+
+    restore_state_children(restored, children, restore_state_theme?)
+  end
+
+  defp maybe_restore_state(%Breeze.Term{view: view}, runtime_state, _restore_state_theme?) do
+    raise ArgumentError,
+          "runtime state view does not match #{inspect(view)}: #{inspect(runtime_state)}"
+  end
+
+  defp handle_view_info(view, message, term) do
+    if view_callback_exported?(view, :handle_info, 2) do
+      view.handle_info(message, term)
+    else
+      {:noreply, term}
+    end
+  end
+
+  defp handle_view_event(view, change, event, term) do
+    if view_callback_exported?(view, :handle_event, 3) do
+      normalize_result(view.handle_event(change, event, term), term)
+    else
+      {:noreply, term}
+    end
+  end
+
+  defp view_callback_exported?(view, name, arity) do
+    Code.ensure_loaded?(view) and function_exported?(view, name, arity)
+  end
+
+  defp maybe_probe_system_theme(theme, terminal, server) do
+    if requested_system_theme?(theme) and Breeze.Theme.probe_status(theme) != :ready do
+      if is_pid(server), do: send(server, {:ensure_runtime_palette, :system})
+      ThemeProbe.ensure_runtime_palette_async(terminal, self())
+    else
+      :ok
+    end
+  end
+
+  defp requested_system_theme?(theme), do: Breeze.Theme.requested_system?(theme)
+
+  defp palette_notification_matches?(%Termite.Terminal{reader: reader}, {:reader, reader})
+       when not is_nil(reader),
+       do: true
+
+  defp palette_notification_matches?(_terminal, _key), do: false
+
+  defp sync_theme_assigns(%{theme: theme, assigns: assigns} = term) when is_map(assigns) do
+    assigns =
+      assigns
+      |> maybe_put_theme_assign(:theme_status, Breeze.Theme.probe_status(theme) || :ready)
+      |> maybe_put_theme_assign(:actual_theme_mode, theme.mode)
+      |> put_breeze_assign(:theme, breeze_theme_assign(term))
+      |> put_breeze_assign(:keybindings, active_keybindings(term))
+      |> put_breeze_assign(:terminal, breeze_terminal_assign(term))
+      |> put_breeze_assign(:clipboard, term.clipboard)
+      |> put_breeze_assign(:breakpoint, breeze_breakpoint_assign(term))
+      |> put_breeze_assign_new(:flash, [])
+
+    %{term | assigns: assigns}
+  end
+
+  defp sync_theme_assigns(term), do: term
+
+  defp apply_external_assigns(
+         %{assigns: assigns, external_assigns: external_assigns} = term,
+         next_external
+       )
+       when is_map(assigns) and is_map(external_assigns) do
+    preserved = Map.drop(assigns, Map.keys(external_assigns))
+    %{term | assigns: Map.merge(preserved, next_external), external_assigns: next_external}
+  end
+
+  defp apply_external_assigns(term, next_external), do: %{term | external_assigns: next_external}
+
+  defp maybe_put_theme_assign(assigns, key, value) do
+    if Map.has_key?(assigns, key), do: Map.put(assigns, key, value), else: assigns
+  end
+
+  defp put_breeze_assign(assigns, key, value) do
+    Map.update(assigns, :breeze, %{key => value}, fn
+      breeze when is_map(breeze) -> Map.put(breeze, key, value)
+      _ -> %{key => value}
+    end)
+  end
+
+  defp put_breeze_assign_new(assigns, key, value) do
+    Map.update(assigns, :breeze, %{key => value}, fn
+      breeze when is_map(breeze) -> Map.put_new(breeze, key, value)
+      _ -> %{key => value}
+    end)
+  end
+
+  defp breeze_terminal_assign(%{terminal: %{size: %{width: width, height: height}}}),
+    do: %{width: width, height: height}
+
+  defp breeze_terminal_assign(_term), do: nil
+
+  defp breeze_breakpoint_assign(term) do
+    case breeze_terminal_assign(term) do
+      %{width: width} -> Breeze.Style.breakpoint(width)
+      _terminal -> Breeze.Style.breakpoint(nil)
+    end
+  end
+
+  defp breeze_theme_assign(%{theme: theme, assigns: assigns}) do
+    current = get_in(assigns, [:breeze, :theme]) || %{}
+    name = Map.get(current, :name) || Map.get(current, "name") || theme.name || theme.mode
+
+    %{
+      name: name,
+      actual_mode: theme.mode,
+      status: Breeze.Theme.probe_status(theme) || :ready
+    }
+  end
+
+  defp render_term(term, opts) do
+    previous_term = term
+    explicit_focus? = Keyword.has_key?(opts, :focused)
+    term = maybe_put_terminal(term, Keyword.get(opts, :terminal))
+    term = prune_dead_children(term)
+
+    theme =
+      Breeze.Theme.new(term.theme_source || term.theme || Keyword.get(opts, :theme),
+        terminal: term.terminal
+      )
+
+    term = %{term | theme: theme}
+    term = %{term | focused: Keyword.get(opts, :focused, term.focused)}
+    term = sync_theme_assigns(term)
+
+    initial_implicit_state =
+      Keyword.get(opts, :implicit_state, %{})
+      |> Map.merge(term.retained_implicit_state)
+      |> Map.merge(term.implicit_state)
+
+    previous_elements = Map.merge(term.retained_elements, term.elements)
+
+    opts =
+      opts
+      |> Keyword.put(:implicit_state, initial_implicit_state)
+      |> Keyword.put(:previous_elements, previous_elements)
+      |> Keyword.put(:theme, theme)
+      |> Keyword.put(:theme_source, term.theme_source || term.theme)
+      |> Keyword.put(:apply_theme_defaults, term.apply_theme_defaults?)
+      |> Keyword.put(:render_tree?, Keyword.get(opts, :render_tree?, term.render_tree?))
+
+    profile_scope = Keyword.get(opts, :profile_scope)
+    profile_label = profile_label(term, opts)
+
+    final_opts =
+      opts
+      |> Keyword.put(:focused, term.focused)
+      |> Keyword.put(:implicit_state, initial_implicit_state)
+      |> Keyword.put(:implicit_meta, term.implicit_meta)
+      |> Keyword.put(:last_render_at, term.last_render_at)
+      |> Keyword.put(:last_interaction_at, term.last_interaction_at)
+      |> Keyword.put(:animation_now, System.monotonic_time(:millisecond))
+
+    {term, final_opts} =
+      if Keyword.has_key?(opts, :live_view) do
+        {term, final_opts}
+      else
+        preload_and_attach_live_view(term, final_opts)
+      end
+
+    {term, bootstrapped_initial_render_state?} =
+      maybe_bootstrap_initial_render_state(
+        term,
+        final_opts,
+        initial_implicit_state,
+        explicit_focus?,
+        profile_scope,
+        profile_label
+      )
+
+    first_pass_implicit_state =
+      if bootstrapped_initial_render_state?, do: term.implicit_state, else: initial_implicit_state
+
+    final_opts =
+      final_opts
+      |> Keyword.put(:focused, term.focused)
+      |> Keyword.put(:implicit_state, first_pass_implicit_state)
+      |> Keyword.put(:implicit_meta, term.implicit_meta)
+      |> Keyword.put(:previous_elements, previous_elements)
+
+    term = sync_theme_assigns(term)
+
+    initial_implicit_state = term.implicit_state
+    initial_implicit_meta = term.implicit_meta
+    initial_focus = term.focused
+    initial_keybindings = get_in(term.assigns, [:breeze, :keybindings]) || []
+
+    {term, acc, box} =
+      render_pass(term, final_opts, profile_scope, profile_label, explicit_focus?)
+
+    term = sync_theme_assigns(term)
+
+    {term, acc, box} =
+      if implicit_state_rerender_needed?(
+           term.implicit_state,
+           initial_implicit_state,
+           term.implicit_meta
+         ) or
+           term.implicit_meta != initial_implicit_meta or
+           term.focused != initial_focus or
+           layout_rerender_needed?(term, previous_elements) or
+           (get_in(term.assigns, [:breeze, :keybindings]) || []) != initial_keybindings do
+        rerender_keybindings = get_in(term.assigns, [:breeze, :keybindings]) || []
+
+        rerender_opts =
+          final_opts
+          |> Keyword.put(:focused, term.focused)
+          |> Keyword.put(:implicit_state, term.implicit_state)
+          |> Keyword.put(:implicit_meta, term.implicit_meta)
+          |> Keyword.put(:previous_elements, term.elements)
+
+        {term, acc, box} =
+          render_pass(term, rerender_opts, profile_scope, profile_label, explicit_focus?)
+
+        term = sync_theme_assigns(term)
+
+        if (get_in(term.assigns, [:breeze, :keybindings]) || []) != rerender_keybindings do
+          final_rerender_opts =
+            rerender_opts
+            |> Keyword.put(:focused, term.focused)
+            |> Keyword.put(:implicit_state, term.implicit_state)
+            |> Keyword.put(:implicit_meta, term.implicit_meta)
+            |> Keyword.put(:previous_elements, term.elements)
+
+          render_pass(term, final_rerender_opts, profile_scope, profile_label, explicit_focus?)
+        else
+          {term, acc, box}
+        end
+      else
+        {term, acc, box}
+      end
+
+    term = sync_theme_assigns(term)
+    term = retain_inactive_render_state(previous_term, term)
+    term = apply_focus_transitions(previous_term, term)
+
+    decorations =
+      profile(profile_scope, profile_label, :decorations_us, fn ->
+        extract_async_decorations(term)
+      end)
+
+    term = %{term | last_render_at: System.monotonic_time(:millisecond)}
+
+    {term, acc, box, decorations}
+  end
+
+  defp maybe_bootstrap_initial_render_state(
+         term,
+         opts,
+         implicit_state,
+         explicit_focus?,
+         profile_scope,
+         profile_label
+       ) do
+    if is_nil(term.last_render_at) do
+      prepass_opts =
+        opts
+        |> Keyword.put(:implicit_state, implicit_state)
+        |> Keyword.delete(:live_view)
+        |> Keyword.put(:live_placeholder, true)
+        |> Keyword.put(:layout_prepass, true)
+
+      {acc, box} =
+        profile(profile_scope, profile_label, :bootstrap_render_tree_us, fn ->
+          Breeze.Renderer.render_tree(term.view, term.assigns, prepass_opts)
+        end)
+
+      %{dimensions: dimensions} =
+        profile(profile_scope, profile_label, :bootstrap_layout_us, fn ->
+          BackBreeze.Box.render_structured_with_dimensions(box, prepass_opts)
+        end)
+
+      %{elements: elements, mouse_targets: mouse_targets} =
+        profile(profile_scope, profile_label, :bootstrap_build_layout_us, fn ->
+          Breeze.RenderState.build_layout(
+            acc,
+            dimensions,
+            Map.get(acc, :live_dimensions, %{})
+          )
+        end)
+
+      bootstrap =
+        profile(profile_scope, profile_label, :bootstrap_state_us, fn ->
+          Breeze.RenderState.bootstrap(
+            %{term | implicit_state: implicit_state},
+            acc
+          )
+        end)
+
+      focus_memory =
+        Breeze.Focus.remember_focus(
+          term.focus_memory,
+          term.focused,
+          bootstrap.focus_meta
+        )
+
+      focused =
+        if explicit_focus? do
+          term.focused
+        else
+          trapped_scope = Breeze.Focus.trapped_scope?(bootstrap.focusables, bootstrap.focus_meta)
+
+          if term.allow_unfocused? and is_nil(term.focused) and not trapped_scope do
+            nil
+          else
+            Breeze.Focus.normalize_focus(
+              term.focused,
+              bootstrap.focusables,
+              bootstrap.focus_meta,
+              focus_memory
+            )
+          end
+        end
+
+      {%{
+         term
+         | implicit_state: bootstrap.implicit_state,
+           implicit_meta: bootstrap.implicit_meta,
+           focusables: bootstrap.focusables,
+           focus_meta: bootstrap.focus_meta,
+           focus_memory: focus_memory,
+           focused: focused,
+           paste_generation: focus_paste_generation(term, focused),
+           elements: elements,
+           mouse_targets: mouse_targets
+       }, true}
+    else
+      {term, false}
+    end
+  end
+
+  defp implicit_state_rerender_needed?(next_state, previous_state, meta) do
+    changed_ids =
+      next_state
+      |> Map.keys()
+      |> Kernel.++(Map.keys(previous_state))
+      |> Enum.uniq()
+
+    Enum.any?(changed_ids, fn id ->
+      Map.get(next_state, id) != Map.get(previous_state, id) and
+        get_in(meta, [id, :state_change_requires_rerender]) != false
+    end)
+  end
+
+  defp requires_layout_rerender?(term) do
+    Enum.any?(term.implicit_meta, fn
+      {_id, %{requires_layout_rerender: true}} -> true
+      _ -> false
+    end)
+  end
+
+  defp layout_rerender_needed?(term, previous_elements) do
+    requires_layout_rerender?(term) and
+      Enum.any?(term.implicit_meta, fn
+        {id, %{requires_layout_rerender: true}} ->
+          Map.get(term.elements, id) != Map.get(previous_elements, id)
+
+        _ ->
+          false
+      end)
+  end
+
+  defp retain_inactive_render_state(previous_term, next_term) do
+    retained_elements =
+      previous_term.retained_elements
+      |> Map.merge(previous_term.elements)
+      |> Map.drop(Map.keys(next_term.elements))
+
+    retained_implicit_state =
+      previous_term.retained_implicit_state
+      |> Map.merge(previous_term.implicit_state)
+      |> Map.drop(Map.keys(next_term.implicit_state))
+
+    %{
+      next_term
+      | retained_elements: retained_elements,
+        retained_implicit_state: retained_implicit_state
+    }
+  end
+
+  defp render_pass(term, opts, profile_scope, profile_label, explicit_focus?) do
+    term = %{term | implicit_state: Keyword.get(opts, :implicit_state, term.implicit_state)}
+
+    {acc, box} =
+      profile(profile_scope, profile_label, :child_render_us, fn ->
+        Breeze.Renderer.render(term.view, term.assigns, opts)
+      end)
+
+    term =
+      profile(profile_scope, profile_label, :render_state_us, fn ->
+        Breeze.RenderState.build(term, acc)
+      end)
+
+    term = %{term | input_routing_signature: Map.get(acc, :input_routing_signature)}
+
+    focus_meta = Breeze.Focus.build_meta(acc.elements, term.implicit_state)
+
+    focus_memory =
+      Breeze.Focus.remember_focus(
+        term.focus_memory,
+        term.focused,
+        term.focus_meta
+      )
+
+    focused =
+      if explicit_focus? do
+        term.focused
+      else
+        trapped_scope = Breeze.Focus.trapped_scope?(acc.focusables, focus_meta)
+
+        if term.allow_unfocused? and is_nil(term.focused) and not trapped_scope do
+          nil
+        else
+          Breeze.Focus.normalize_focus(
+            term.focused,
+            acc.focusables,
+            focus_meta,
+            focus_memory
+          )
+        end
+      end
+
+    term = %{
+      term
+      | focus_meta: focus_meta,
+        focus_memory: focus_memory,
+        focused: focused,
+        paste_generation: focus_paste_generation(term, focused),
+        allow_unfocused?: term.allow_unfocused? and is_nil(focused)
+    }
+
+    {term, acc, box}
+  end
+
+  defp input_routing_signature(term) do
+    implicit_state = term.retained_implicit_state |> Map.merge(term.implicit_state)
+
+    Breeze.Renderer.input_routing_signature(
+      term.view,
+      term.assigns,
+      terminal: term.terminal,
+      theme: term.theme,
+      theme_source: term.theme_source,
+      apply_theme_defaults: term.apply_theme_defaults?,
+      focused: term.focused,
+      implicit_state: implicit_state,
+      implicit_meta: term.implicit_meta
+    )
+  end
+
+  defp input_routing_probe_term(term, opts) do
+    case Keyword.fetch(opts, :assigns) do
+      {:ok, assigns} -> term |> apply_external_assigns(Map.new(assigns)) |> sync_theme_assigns()
+      :error -> term
+    end
+  end
+
+  defp live_children_routing_changed?(desired_signature, term, opts) do
+    live_children = Keyword.get(opts, :live_children, term.children)
+    live_prefix = Keyword.get(opts, :live_prefix)
+
+    Enum.any?(InputRouting.live_entries(desired_signature), fn {id, attrs} ->
+      child_id = live_probe_id(live_prefix, id)
+      child = Map.get(live_children, child_id)
+      focused? = InputRouting.contains_focus?(id, term.focused)
+
+      live_child_routing_changed?(child, attrs, focused?, live_children, child_id)
+    end)
+  end
+
+  defp live_child_routing_changed?(%{pid: pid} = child, attrs, focused?, live_children, child_id)
+       when is_pid(pid) do
+    desired_view = fetch_live_attr(attrs, :view, nil)
+    desired_start_opts = fetch_live_attr(attrs, :start_opts, [])
+    desired_assigns = fetch_live_attr(attrs, :assigns, %{}) |> Map.new()
+
+    if Process.alive?(pid) do
+      mount_changed? = desired_view != child.view or desired_start_opts != child.start_opts
+      should_probe? = focused? or desired_assigns != Map.get(child, :assigns, %{})
+
+      route_changed? =
+        safe_input_routing_changed?(pid,
+          assigns: desired_assigns,
+          live_children: live_children,
+          live_prefix: child_id
+        )
+
+      mount_changed? or (should_probe? and route_changed?)
+    else
+      focused?
+    end
+  end
+
+  defp live_child_routing_changed?(_child, _attrs, _focused?, _live_children, _child_id) do
+    true
+  end
+
+  defp live_probe_id(nil, id), do: id
+  defp live_probe_id(prefix, id), do: prefix <> "::" <> id
+
+  defp safe_input_routing_changed?(pid, opts) do
+    Breeze.ChildServer.input_routing_changed?(pid, opts)
+  catch
+    :exit, _reason -> true
+  end
+
+  defp normalize_result({:noreply, next_term}, _term), do: {:noreply, next_term}
+  defp normalize_result({:noreply, next_term, opts}, _term), do: {:noreply, next_term, opts}
+  defp normalize_result({:stop, next_term}, _term), do: {:stop, next_term}
+  defp normalize_result({:stop, next_term, opts}, _term), do: {:stop, next_term, opts}
+
+  defp process_input(%{"paste" => text} = event, term, opts) when is_binary(text) do
+    # Paste reaches only a focused opt-in implicit, never a keybinding or a
+    # view's ordinary input handler, even when its body is a key name.
+    if paste_scope_matches?(event, term) do
+      case dispatch_paste_hierarchy(term, event, opts) do
+        nil ->
+          if Breeze.InputCapture.accepts_paste?(focused_implicit_meta(term, term.focused)) and
+               paste_target_matches?(event, term) do
+            case dispatch_focused_implicit_event(event, term) do
+              :continue -> {:noreply, term}
+              reply -> reply
+            end
+          else
+            {:noreply, term}
+          end
+
+        reply ->
+          reply
+      end
+    else
+      {:noreply, term}
+    end
+  end
+
+  defp process_input(%{"key" => key} = event, term, opts) when key in ["\t", "Tab"] do
+    event
+    |> Breeze.InputCapture.normalize_focus_key()
+    |> process_input(term, opts)
+  end
+
+  defp process_input("\t", term, opts) do
+    if focused_implicit_captures_key?("\t", term) do
+      dispatch_key_input("\t", term, opts)
+    else
+      focus_next(term)
+    end
+  end
+
+  defp process_input("ShiftTab", term, opts) do
+    if focused_implicit_captures_key?("ShiftTab", term) do
+      dispatch_key_input("ShiftTab", term, opts)
+    else
+      focus_previous(term)
+    end
+  end
+
+  defp process_input(%{"mouse" => mouse} = event, term, opts) do
+    case mouse_target(term, mouse) do
+      nil ->
+        handle_view_event(term.view, :input, event, term)
+
+      target ->
+        event = put_mouse_target_fields(term, target, event)
+        live_children = Keyword.get(opts, :live_children, term.children)
+
+        case dispatch_live_mouse_target(term, target, event, live_children, opts) do
+          {:ok, reply} ->
+            reply
+
+          :bubble ->
+            normalize_result(term.view.handle_event(:input, event, term), term)
+
+          :not_live ->
+            dispatch_mouse_target(event, mouse, target, term)
+        end
+    end
+  end
+
+  defp process_input(key, term, opts) do
+    dispatch_key_input(key, term, opts)
+  end
+
+  defp paste_scope_matches?(%{"paste_target" => {_, _, _, scopes}}, term) when is_list(scopes) do
+    Enum.any?(scopes, fn {owner, generation} ->
+      owner == self() and generation == term.paste_generation
+    end)
+  end
+
+  defp paste_scope_matches?(%{"paste_target" => _}, _term), do: false
+  defp paste_scope_matches?(_decoded, _term), do: true
+
+  defp paste_target_matches?(%{"paste_target" => {owner, id, instance, _scopes}}, term) do
+    owner == self() and id == focused_implicit_id(term, term.focused) and
+      case Map.get(term.implicit_state, id) do
+        {_, state} -> state[:__breeze_instance_ref__] == instance
+        _ -> false
+      end
+  end
+
+  defp paste_target_matches?(%{"paste_target" => _}, _term), do: false
+  defp paste_target_matches?(_decoded, _term), do: true
+
+  defp dispatch_mouse_target(event, mouse, target, term) do
+    term =
+      case mouse_focus_target(target, mouse, term) do
+        nil -> term
+        focused -> %{term | focused: focused}
+      end
+
+    handle_event(:input, event, term, target)
+  end
+
+  defp put_mouse_target_fields(term, target, %{"mouse" => mouse} = event) do
+    event
+    |> Map.put("target", target)
+    |> Map.put("focused", term.focused)
+    |> Map.put("row", mouse_row(term, target, mouse))
+    |> Map.put("col", mouse_col(term, target, mouse))
+  end
+
+  defp dispatch_key_input(key, term, opts) do
+    event = normalize_key_event(key)
+
+    steps =
+      cond do
+        focused_implicit_captures_key?(event, term) ->
+          [:hierarchy, :focused_implicit, :local, :global, :view_direct]
+
+        printable_key?(event) ->
+          [:hierarchy, :focused_implicit, :local, :global, :view_direct]
+
+        true ->
+          [:global, :hierarchy, :local, :view]
+      end
+      |> maybe_skip_global(Keyword.get(opts, :skip_global, false))
+
+    dispatch_input_steps(steps, event, key, term)
+  end
+
+  defp focus_next(term) do
+    focusables = Breeze.Focus.active_focusables(term.focusables, term.focus_meta)
+    index = Enum.find_index(focusables, &(&1 == term.focused))
+    trapped_scope = Breeze.Focus.trapped_scope?(term.focusables, term.focus_meta)
+
+    focused =
+      cond do
+        focusables == [] -> nil
+        trapped_scope && is_integer(index) -> Enum.at(focusables, index + 1) || hd(focusables)
+        is_integer(index) -> Enum.at(focusables, index + 1)
+        true -> hd(focusables)
+      end
+
+    {:noreply, %{term | focused: focused, allow_unfocused?: is_nil(focused)}}
+  end
+
+  defp focus_previous(term) do
+    focusables = Breeze.Focus.active_focusables(term.focusables, term.focus_meta)
+    index = Enum.find_index(focusables, &(&1 == term.focused))
+    trapped_scope = Breeze.Focus.trapped_scope?(term.focusables, term.focus_meta)
+
+    focused =
+      cond do
+        focusables == [] -> nil
+        trapped_scope && index == 0 -> List.last(focusables)
+        trapped_scope && is_integer(index) -> Enum.at(focusables, index - 1)
+        index == 0 -> nil
+        index == nil -> List.last(focusables)
+        true -> Enum.at(focusables, index - 1)
+      end
+
+    {:noreply, %{term | focused: focused, allow_unfocused?: is_nil(focused)}}
+  end
+
+  defp maybe_skip_global(steps, true), do: List.delete(steps, :global)
+  defp maybe_skip_global(steps, _skip?), do: steps
+
+  defp handle_event(change, event, term, target_id \\ nil) do
+    target_id = target_id || term.focused
+
+    {view_state, implicit_consumed, term} =
+      Breeze.RenderState.dispatch_implicit_event(
+        term,
+        target_id,
+        event,
+        &handle_implicit_change/4
+      )
+
+    cond do
+      view_state == :stop ->
+        {:stop, term}
+
+      match?({:stop, opts} when is_list(opts), view_state) ->
+        {:stop, term, elem(view_state, 1)}
+
+      match?({:noreply, opts} when is_list(opts), view_state) and implicit_consumed ->
+        {:noreply, term, elem(view_state, 1)}
+
+      implicit_consumed ->
+        {:noreply, term}
+
+      true ->
+        handle_view_event(term.view, change, event, term)
+    end
+  end
+
+  defp handle_implicit_change(term, _id, change, event) do
+    handle_view_event(term.view, change, event, term)
+  end
+
+  defp dispatch_input_hierarchy(term, key) do
+    term
+    |> focused_child_chain()
+    |> Enum.reduce_while(nil, fn {child_id, %{pid: pid}}, _acc ->
+      local_focused = strip_live_prefix(term.focused, child_id)
+      if local_focused, do: Breeze.ChildServer.set_focus(pid, local_focused)
+
+      reply = Breeze.ChildServer.dispatch_input(pid, key) |> namespace_child_reply(child_id)
+
+      case reply do
+        {:noreply, _focused, true} -> {:halt, reply}
+        {:stop, _focused, _consumed} -> {:halt, reply}
+        _ -> {:cont, nil}
+      end
+    end)
+  end
+
+  defp dispatch_paste_hierarchy(term, event, opts) do
+    # Walk through the nearest live owner while each parent is handling this
+    # call. Every owner validates its own generation before descending; a
+    # focus/reset callback cannot interleave with native paste insertion.
+    live_children = Keyword.get(opts, :live_children, term.children)
+
+    case %{term | children: live_children} |> focused_child_chain() |> List.last() do
+      {child_id, %{pid: pid}} ->
+        local_focused = strip_live_prefix(term.focused, child_id)
+        if local_focused, do: Breeze.ChildServer.set_focus(pid, local_focused)
+
+        descendants =
+          Enum.reduce(live_children, %{}, fn {id, child}, acc ->
+            if String.starts_with?(id, child_id <> "::"),
+              do: Map.put(acc, strip_live_prefix(id, child_id), child),
+              else: acc
+          end)
+
+        child_opts =
+          if Keyword.has_key?(opts, :live_children), do: [live_children: descendants], else: []
+
+        Breeze.ChildServer.dispatch_input(pid, event, child_opts)
+        |> namespace_child_reply(child_id)
+
+      nil ->
+        nil
+    end
+  end
+
+  defp normalize_key_event(%{"key" => _} = event), do: event
+  defp normalize_key_event(key), do: %{"key" => key}
+
+  defp dispatch_input_steps([:global | rest], event, key, term) do
+    case Breeze.GlobalKeybindings.dispatch(event, term) do
+      :continue -> dispatch_input_steps(rest, event, key, term)
+      reply -> reply
+    end
+  end
+
+  defp dispatch_input_steps([:hierarchy | rest], event, key, term) do
+    case dispatch_input_hierarchy(term, key) do
+      nil -> dispatch_input_steps(rest, event, key, term)
+      reply -> reply
+    end
+  end
+
+  defp dispatch_input_steps([:focused_implicit | rest], event, key, term) do
+    case dispatch_focused_implicit_event(event, term) do
+      :continue -> dispatch_input_steps(rest, event, key, term)
+      reply -> reply
+    end
+  end
+
+  defp dispatch_input_steps([:local | rest], event, key, term) do
+    case dispatch_local_keybindings(event, term) do
+      :continue -> dispatch_input_steps(rest, event, key, term)
+      reply -> reply
+    end
+  end
+
+  defp dispatch_input_steps([:view | _rest], event, _key, term) do
+    handle_event(:input, event, term)
+  end
+
+  defp dispatch_input_steps([:view_direct | _rest], event, _key, term) do
+    handle_view_event(term.view, :input, event, term)
+  end
+
+  defp dispatch_local_keybindings(event, term) do
+    case Breeze.Keybindings.dispatch(event, current_view_keybindings(term), term) do
+      :continue -> :continue
+      {:stop, term} -> {:stop, term}
+      {:noreply, term} -> {:noreply, term}
+    end
+  end
+
+  defp dispatch_focused_implicit_event(event, term) do
+    {view_state, implicit_consumed, term} =
+      Breeze.RenderState.dispatch_implicit_event(
+        term,
+        term.focused,
+        event,
+        &handle_implicit_change/4
+      )
+
+    cond do
+      view_state == :stop ->
+        {:stop, term}
+
+      match?({:stop, opts} when is_list(opts), view_state) ->
+        {:stop, term, elem(view_state, 1)}
+
+      match?({:noreply, opts} when is_list(opts), view_state) and implicit_consumed ->
+        {:noreply, term, elem(view_state, 1)}
+
+      implicit_consumed ->
+        {:noreply, term}
+
+      true ->
+        :continue
+    end
+  end
+
+  defp focused_implicit_captures_key?(event, term) do
+    term
+    |> focused_implicit_meta(term.focused)
+    |> Breeze.InputCapture.captures_key?(event)
+  end
+
+  defp printable_key?(%{"key" => key} = event) when is_binary(key) do
+    batched_printable_event?(event) or
+      (not truthy_modifier?(Map.get(event, "ctrlKey")) and
+         not truthy_modifier?(Map.get(event, "altKey")) and
+         not truthy_modifier?(Map.get(event, "metaKey")) and
+         printable_key?(key))
+  end
+
+  defp printable_key?(key) when is_binary(key) do
+    Breeze.Printable.single_key?(key)
+  end
+
+  defp printable_key?(_key), do: false
+
+  defp batched_printable_event?(%{"__batched_printable__" => true, "key" => key})
+       when is_binary(key) do
+    Breeze.Printable.text?(key)
+  end
+
+  defp batched_printable_event?(_event), do: false
+
+  defp truthy_modifier?(value), do: value in [true, "true"]
+
+  defp preload_and_attach_live_view(term, opts) do
+    discovered =
+      term.view.render(term.assigns)
+      |> Breeze.Template.render_to_tree(term.assigns)
+      |> collect_live_nodes([])
+      |> Enum.reverse()
+      |> Enum.uniq_by(&elem(&1, 0))
+
+    term = term |> reconcile_children(discovered) |> ensure_children(discovered)
+
+    if discovered == [] do
+      {term, opts}
+    else
+      live_view = fn attrs, child_opts ->
+        render_live_child(attrs, child_opts, term)
+      end
+
+      {term, Keyword.put(opts, :live_view, live_view)}
+    end
+  end
+
+  defp collect_live_nodes(nodes, acc) when is_list(nodes) do
+    Enum.reduce(nodes, acc, fn
+      {:live, attrs}, acc ->
+        [{fetch_live_attr!(attrs, :id), attrs} | acc]
+
+      {:box, _attrs, children}, acc ->
+        collect_live_nodes(children, acc)
+
+      {_tag, _attrs, children}, acc when is_list(children) ->
+        collect_live_nodes(children, acc)
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp ensure_children(term, live_children) do
+    term = ensure_child_view_supervisor(term, live_children)
+
+    Enum.reduce(live_children, term, fn {id, attrs}, acc ->
+      view = fetch_live_attr!(attrs, :view)
+      start_opts = fetch_live_attr(attrs, :start_opts, [])
+      assigns = fetch_live_attr(attrs, :assigns, %{}) |> Map.new()
+
+      case Map.get(acc.children, id) do
+        %{pid: pid, view: ^view, start_opts: ^start_opts} = child when is_pid(pid) ->
+          cond do
+            not Process.alive?(pid) ->
+              shutdown_child(acc.child_view_supervisor, child)
+              put_in(acc.children[id], start_child!(id, attrs, acc))
+
+            true ->
+              if Map.get(acc.children[id], :assigns, %{}) == assigns do
+                acc
+              else
+                :ok = update_assigns(pid, assigns)
+                put_in(acc.children[id].assigns, assigns)
+              end
+          end
+
+        %{pid: _pid, ref: _ref} = child ->
+          shutdown_child(acc.child_view_supervisor, child)
+          put_in(acc.children[id], start_child!(id, attrs, acc))
+
+        nil ->
+          put_in(acc.children[id], start_child!(id, attrs, acc))
+      end
+    end)
+  end
+
+  defp ensure_child_view_supervisor(term, []), do: term
+
+  defp ensure_child_view_supervisor(%{child_view_supervisor: supervisor} = term, _children)
+       when is_pid(supervisor) do
+    term
+  end
+
+  defp ensure_child_view_supervisor(term, _children) do
+    {:ok, supervisor} = Breeze.ChildViewSupervisor.start_link()
+    %{term | child_view_supervisor: supervisor}
+  end
+
+  defp reconcile_children(term, live_children) do
+    seen = Map.new(live_children)
+
+    children =
+      Enum.reduce(term.children, %{}, fn {id, child}, acc ->
+        case Map.fetch(seen, id) do
+          {:ok, attrs} ->
+            child =
+              child
+              |> Map.put(:attrs, attrs)
+              |> Map.put(:persistent, fetch_live_attr(attrs, :persistent, false))
+
+            Map.put(acc, id, child)
+
+          :error ->
+            if Map.get(child, :persistent, false) do
+              Map.put(acc, id, child)
+            else
+              shutdown_child(term.child_view_supervisor, child)
+              acc
+            end
+        end
+      end)
+
+    %{term | children: children}
+  end
+
+  defp put_child_themes(term, theme_input) do
+    Enum.each(term.children, fn
+      {_id, %{pid: pid}} when is_pid(pid) ->
+        if Process.alive?(pid) do
+          :ok =
+            Breeze.ChildServer.put_theme(pid, theme_input,
+              apply_theme_defaults?: term.apply_theme_defaults?,
+              notify?: false
+            )
+        end
+
+      _child ->
+        :ok
+    end)
+
+    term
+  end
+
+  defp cascade_theme_if_changed(next_term, previous_term) do
+    if theme_changed?(next_term, previous_term) do
+      put_child_themes(next_term, next_term.theme_source || next_term.theme)
+    else
+      next_term
+    end
+  end
+
+  defp theme_changed?(next_term, previous_term) do
+    next_term.theme != previous_term.theme or next_term.theme_source != previous_term.theme_source or
+      next_term.apply_theme_defaults? != previous_term.apply_theme_defaults?
+  end
+
+  defp cascade_info_theme_change(next_term, previous_term) do
+    next_term = apply_focus_transitions(previous_term, next_term)
+
+    next_term
+    |> sync_theme_assigns()
+    |> cascade_theme_if_changed(previous_term)
+  end
+
+  defp start_child!(id, attrs, term) do
+    view = fetch_live_attr!(attrs, :view)
+    start_opts = fetch_live_attr(attrs, :start_opts, [])
+    assigns = fetch_live_attr(attrs, :assigns, %{}) |> Map.new()
+    parent = self()
+
+    invalidate = fn
+      nil -> send(parent, {:child_invalidated, id})
+      child_id -> send(parent, {:child_invalidated, live_id(id, child_id)})
+    end
+
+    {:ok, pid} =
+      Breeze.ChildViewSupervisor.start_child(
+        term.child_view_supervisor,
+        view: view,
+        start_opts: start_opts,
+        assigns: assigns,
+        server: term.server,
+        terminal: term.terminal,
+        clipboard: term.clipboard,
+        theme: term.theme,
+        theme_source: term.theme_source,
+        global_keybindings: term.global_keybindings,
+        apply_theme_defaults?: term.apply_theme_defaults?,
+        render_tree?: term.render_tree?,
+        invalidate: invalidate
+      )
+
+    %{
+      pid: pid,
+      ref: Process.monitor(pid),
+      view: view,
+      start_opts: start_opts,
+      assigns: assigns,
+      attrs: attrs,
+      persistent: fetch_live_attr(attrs, :persistent, false)
+    }
+  end
+
+  defp restore_state_children(term, children, restore_state_theme?) do
+    term =
+      if map_size(children) == 0 do
+        term
+      else
+        ensure_child_view_supervisor(term, Map.to_list(children))
+      end
+
+    Enum.reduce(children, term, fn {id, child}, acc ->
+      put_in(
+        acc.children[id],
+        start_state_child!(id, child, acc, restore_state_theme?)
+      )
+    end)
+  end
+
+  defp start_state_child!(
+         id,
+         %{
+           view: view,
+           start_opts: start_opts,
+           assigns: assigns,
+           state: runtime_state
+         } = child,
+         term,
+         restore_state_theme?
+       ) do
+    parent = self()
+    persistent = Map.get(child, :persistent, false)
+
+    invalidate = fn
+      nil -> send(parent, {:child_invalidated, id})
+      child_id -> send(parent, {:child_invalidated, live_id(id, child_id)})
+    end
+
+    {:ok, pid} =
+      Breeze.ChildViewSupervisor.start_child(
+        term.child_view_supervisor,
+        view: view,
+        start_opts: start_opts,
+        assigns: assigns,
+        runtime_state: runtime_state,
+        restore_state_theme?: restore_state_theme?,
+        server: term.server,
+        terminal: term.terminal,
+        clipboard: term.clipboard,
+        theme: term.theme,
+        theme_source: term.theme_source,
+        global_keybindings: term.global_keybindings,
+        apply_theme_defaults?: term.apply_theme_defaults?,
+        render_tree?: term.render_tree?,
+        invalidate: invalidate
+      )
+
+    %{
+      pid: pid,
+      ref: Process.monitor(pid),
+      view: view,
+      start_opts: start_opts,
+      assigns: assigns,
+      attrs: [
+        id: id,
+        view: view,
+        start_opts: start_opts,
+        assigns: assigns,
+        persistent: persistent
+      ],
+      persistent: persistent
+    }
+  end
+
+  defp render_live_child(attrs, child_opts, term) do
+    id = fetch_live_attr!(attrs, :id)
+    terminal = Keyword.get(child_opts, :live_terminal, term.terminal)
+    full_prefix = live_id(Keyword.get(child_opts, :live_prefix), id)
+    viewport = Keyword.get(child_opts, :live_viewport)
+
+    case Map.get(term.children, id) do
+      %{pid: pid} when is_pid(pid) ->
+        if Process.alive?(pid) do
+          case Breeze.ChildServer.render_snapshot(pid,
+                 focused: strip_live_prefix(term.focused, id),
+                 implicit_state: %{},
+                 terminal: terminal,
+                 theme: term.theme,
+                 theme_source: term.theme_source || term.theme,
+                 render_tree?: Keyword.get(child_opts, :render_tree?, term.render_tree?),
+                 live_prefix: full_prefix
+               ) do
+            {:ok, child_acc, child_box, _decorations} ->
+              layout_snapshot = Breeze.ChildServer.layout_snapshot(pid)
+
+              {:rendered, id, child_acc, child_box,
+               translate_live_dimensions(
+                 layout_snapshot.elements,
+                 viewport,
+                 full_prefix,
+                 child_box
+               )}
+
+            _ ->
+              :preloaded
+          end
+        else
+          :preloaded
+        end
+
+      _ ->
+        :preloaded
+    end
+  end
+
+  defp prune_dead_children(term) do
+    alive_children =
+      term.children
+      |> Enum.filter(fn {_id, child} -> is_pid(child.pid) and Process.alive?(child.pid) end)
+      |> Map.new()
+
+    %{term | children: alive_children}
+  end
+
+  defp child_runtime_pids(term) do
+    descendants =
+      term.children
+      |> Map.values()
+      |> Enum.flat_map(fn
+        %{pid: pid} when is_pid(pid) ->
+          Breeze.ChildServer.runtime_pids(pid)
+
+        _child ->
+          []
+      end)
+
+    [self() | descendants]
+    |> Enum.filter(&(is_pid(&1) and Process.alive?(&1)))
+    |> Enum.uniq()
+  catch
+    :exit, _reason -> [self()]
+  end
+
+  defp shutdown_child(supervisor, child) do
+    Breeze.ChildViewSupervisor.terminate_child(supervisor, Map.get(child, :pid))
+
+    case Map.get(child, :ref) do
+      ref when is_reference(ref) -> Process.demonitor(ref, [:flush])
+      _ref -> :ok
+    end
+
+    :ok
+  end
+
+  defp focused_child_chain(%{focused: nil}), do: []
+
+  defp focused_child_chain(%{focused: focused, children: children}) do
+    children
+    |> Enum.filter(fn {id, _child} ->
+      focused == id or String.starts_with?(focused, id <> "::")
+    end)
+    |> Enum.sort_by(fn {id, _child} -> String.length(id) end, :desc)
+  end
+
+  defp namespace_child_reply({:stop, focused}, child_id),
+    do: {:stop, namespace_child_focus(focused, child_id)}
+
+  defp namespace_child_reply({:stop, focused, consumed}, child_id),
+    do: {:stop, namespace_child_focus(focused, child_id), consumed}
+
+  defp namespace_child_reply({:noreply, focused}, child_id),
+    do: {:noreply, namespace_child_focus(focused, child_id)}
+
+  defp namespace_child_reply({:noreply, nil, true}, child_id),
+    do: {:noreply, child_id, true}
+
+  defp namespace_child_reply({:noreply, focused, consumed}, child_id),
+    do: {:noreply, namespace_child_focus(focused, child_id), consumed}
+
+  defp namespace_child_focus(nil, _child_id), do: nil
+  defp namespace_child_focus(focused, child_id), do: child_id <> "::" <> focused
+
+  defp dispatch_live_mouse_target(term, target, event, live_children, opts) do
+    case live_child_for_target(live_children, target) do
+      nil ->
+        :not_live
+
+      {child_id, %{pid: pid}} when is_pid(pid) ->
+        reply =
+          pid
+          |> Breeze.ChildServer.dispatch_input(
+            translate_mouse_event_for_child(term, child_id, event),
+            Keyword.take(opts, [:invalidate])
+          )
+          |> namespace_mouse_child_reply(child_id, term.focused, live_mouse_focus_event?(event))
+
+        case reply do
+          {:noreply, _focused, true} -> {:ok, reply}
+          {:stop, _focused, _consumed} -> {:ok, reply}
+          _ -> :bubble
+        end
+    end
+  end
+
+  defp live_child_for_target(children, target) when is_map(children) and is_binary(target) do
+    children
+    |> Enum.filter(fn {id, _child} ->
+      target == id or String.starts_with?(target, id <> "::")
+    end)
+    |> Enum.max_by(fn {id, _child} -> String.length(id) end, fn -> nil end)
+  end
+
+  defp live_child_for_target(_children, _target), do: nil
+
+  defp namespace_mouse_child_reply({kind, focused}, child_id, current_focused, focus_event?)
+       when kind in [:noreply, :stop] do
+    {kind, mouse_child_focus(focused, child_id, current_focused, focus_event?)}
+  end
+
+  defp namespace_mouse_child_reply(
+         {kind, focused, consumed},
+         child_id,
+         current_focused,
+         focus_event?
+       )
+       when kind in [:noreply, :stop] do
+    {kind, mouse_child_focus(focused, child_id, current_focused, focus_event?), consumed}
+  end
+
+  defp mouse_child_focus(focused, child_id, current_focused, true),
+    do: namespace_child_focus(focused, child_id) || current_focused
+
+  defp mouse_child_focus(_focused, _child_id, current_focused, false), do: current_focused
+
+  defp live_mouse_focus_event?(%{"mouse" => %{"button" => "left", "action" => "press"}}),
+    do: true
+
+  defp live_mouse_focus_event?(_event), do: false
+
+  defp translate_mouse_event_for_child(term, child_id, %{"mouse" => mouse} = event) do
+    case live_child_origin(term, child_id) do
+      %{left: left, top: top} ->
+        mouse =
+          mouse
+          |> Map.put("x", max(mouse["x"] - left, 0))
+          |> Map.put("y", max(mouse["y"] - top, 0))
+
+        event
+        |> Map.put("mouse", mouse)
+        |> Map.drop(["target", "focused", "row", "col"])
+
+      nil ->
+        Map.drop(event, ["target", "focused", "row", "col"])
+    end
+  end
+
+  defp live_child_origin(term, child_id) do
+    cond do
+      match?(%Breeze.Viewport{}, Map.get(term.elements, child_id)) ->
+        Map.fetch!(term.elements, child_id)
+
+      match?(%Breeze.Viewport{}, Map.get(term.retained_elements, child_id)) ->
+        Map.fetch!(term.retained_elements, child_id)
+
+      is_map(Map.get(term.mouse_targets, child_id)) ->
+        Map.take(Map.fetch!(term.mouse_targets, child_id), [:left, :top])
+
+      true ->
+        nil
+    end
+  end
+
+  defp strip_live_prefix(nil, _live_id), do: nil
+
+  defp strip_live_prefix(id, live_id) do
+    prefix = live_id <> "::"
+
+    if String.starts_with?(id, prefix) do
+      String.replace_prefix(id, prefix, "")
+    end
+  end
+
+  defp live_id(nil, id), do: id
+  defp live_id(prefix, id), do: prefix <> "::" <> id
+
+  defp active_keybindings(term) do
+    Breeze.Keybindings.merge_visible([
+      focused_child_keybindings(term),
+      Breeze.Keybindings.visible(current_view_keybindings(term)),
+      Breeze.GlobalKeybindings.visible(term)
+    ])
+  end
+
+  defp focused_child_keybindings(term) do
+    case focused_child_chain(term) do
+      [{child_id, %{pid: pid}} | _] ->
+        case safe_child_metadata(pid, focused: strip_live_prefix(term.focused, child_id)) do
+          %{active_keybindings: keybindings} when is_list(keybindings) -> keybindings
+          _ -> []
+        end
+
+      [] ->
+        []
+    end
+  end
+
+  defp current_view_keybindings(term) do
+    local = Map.get(term, :local_keybindings, [])
+    focused_local = get_in(term.focus_keybindings, [term.focused]) || []
+    local ++ focused_local
+  end
+
+  defp safe_child_metadata(pid, opts) do
+    Breeze.ChildServer.metadata(pid, opts)
+  catch
+    :exit, _reason -> %{}
+  end
+
+  defp translate_live_dimensions(elements, %{left: left, top: top} = viewport, prefix, child_box)
+       when is_map(elements) do
+    translated_elements =
+      Map.new(elements, fn {id, viewport} ->
+        translated_id =
+          case id do
+            value when is_binary(value) ->
+              if String.starts_with?(value, prefix <> "::"),
+                do: value,
+                else: prefix <> "::" <> value
+          end
+
+        {translated_id,
+         %{
+           left: left + Map.get(viewport, :left, 0),
+           top: top + Map.get(viewport, :top, 0),
+           width: Map.get(viewport, :width, 0),
+           height: Map.get(viewport, :height, 0),
+           viewport_width: Map.get(viewport, :viewport_width, 0),
+           viewport_height: Map.get(viewport, :viewport_height, 0),
+           content_width: Map.get(viewport, :content_width, 0),
+           content_height: Map.get(viewport, :content_height, 0)
+         }}
+      end)
+
+    Map.put(
+      translated_elements,
+      prefix,
+      live_root_dimensions(translated_elements, viewport, child_box)
+    )
+  end
+
+  defp translate_live_dimensions(_elements, _viewport, _prefix, _child_box), do: %{}
+
+  defp live_root_dimensions(translated_elements, viewport, child_box) do
+    width = Map.get(viewport, :width, 0)
+    height = Map.get(viewport, :height, 0)
+
+    if width > 0 and height > 0 do
+      %{
+        left: Map.get(viewport, :left, 0),
+        top: Map.get(viewport, :top, 0),
+        width: width,
+        height: height,
+        viewport_width: Map.get(viewport, :viewport_width, width),
+        viewport_height: Map.get(viewport, :viewport_height, height),
+        content_width: Map.get(viewport, :content_width, width),
+        content_height: Map.get(viewport, :content_height, height)
+      }
+    else
+      case child_root_dimensions(viewport, child_box) do
+        nil ->
+          translated_elements
+          |> Map.values()
+          |> Enum.reduce(nil, fn dims, acc ->
+            left = Map.get(dims, :left, 0)
+            top = Map.get(dims, :top, 0)
+            right = left + max(Map.get(dims, :width, 0) - 1, 0)
+            bottom = top + max(Map.get(dims, :height, 0) - 1, 0)
+
+            case acc do
+              nil ->
+                %{left: left, top: top, right: right, bottom: bottom}
+
+              acc ->
+                %{
+                  left: min(acc.left, left),
+                  top: min(acc.top, top),
+                  right: max(acc.right, right),
+                  bottom: max(acc.bottom, bottom)
+                }
+            end
+          end)
+          |> case do
+            nil ->
+              %{
+                left: Map.get(viewport, :left, 0),
+                top: Map.get(viewport, :top, 0),
+                width: 0,
+                height: 0,
+                viewport_width: 0,
+                viewport_height: 0,
+                content_width: 0,
+                content_height: 0
+              }
+
+            bounds ->
+              width = max(bounds.right - bounds.left + 1, 0)
+              height = max(bounds.bottom - bounds.top + 1, 0)
+
+              %{
+                left: bounds.left,
+                top: bounds.top,
+                width: width,
+                height: height,
+                viewport_width: width,
+                viewport_height: height,
+                content_width: width,
+                content_height: height
+              }
+          end
+
+        root_dims ->
+          root_dims
+      end
+    end
+  end
+
+  defp child_root_dimensions(%{left: left, top: top}, %{width: width, height: height})
+       when is_integer(width) and width > 0 and is_integer(height) and height > 0 do
+    %{
+      left: left,
+      top: top,
+      width: width,
+      height: height,
+      viewport_width: width,
+      viewport_height: height,
+      content_width: width,
+      content_height: height
+    }
+  end
+
+  defp child_root_dimensions(_viewport, _child_box), do: nil
+
+  defp fetch_live_attr!(attrs, key) do
+    Map.get(attrs, key) || Map.fetch!(attrs, Atom.to_string(key))
+  end
+
+  defp fetch_live_attr(attrs, key, default) do
+    Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key), default)
+  end
+
+  defp extract_async_decorations(term) do
+    Enum.reduce(term.implicit_state, [], fn
+      {id, {mod, implicit}}, acc ->
+        every_ms = get_in(term.implicit_meta, [id, :rerender_every])
+        box = Map.get(term.rendered_boxes, id)
+        layout = Map.get(term.elements, id)
+
+        if is_integer(every_ms) and every_ms > 0 and match?(%BackBreeze.Box{}, box) and
+             function_exported?(mod, :animate, 5) do
+          [
+            %{
+              id: id,
+              owner_id: id,
+              mod: mod,
+              state: implicit,
+              box: box,
+              layout: layout,
+              flags: focus_flags(term, id),
+              every_ms: every_ms,
+              active_when_pending: get_in(term.implicit_meta, [id, :active_when_pending]) == true,
+              active_when_focused: get_in(term.implicit_meta, [id, :active_when_focused]) == true
+            }
+            | acc
+          ]
+        else
+          acc
+        end
+
+      _, acc ->
+        acc
+    end)
+    |> Enum.reverse()
+  end
+
+  defp focus_flags(term, id) do
+    focused = term.focused == id
+
+    if focused, do: [focused: true], else: []
+  end
+
+  defp touch_interaction(term) do
+    %{term | last_interaction_at: System.monotonic_time(:millisecond)}
+  end
+
+  defp reply_from_input_result(result, term, opts \\ [])
+
+  defp reply_from_input_result({:noreply, next_term}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+
+    maybe_probe_system_theme(next_term.theme, next_term.terminal, next_term.server)
+
+    next_term =
+      next_term
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, opts)
+    {:reply, {:noreply, next_term.focused, next_term != term}, next_term}
+  end
+
+  defp reply_from_input_result({:noreply, next_term, result_opts}, term, opts)
+       when is_list(result_opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+
+    maybe_probe_system_theme(next_term.theme, next_term.terminal, next_term.server)
+
+    next_term =
+      next_term
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    invalidate? = Keyword.get(result_opts, :invalidate, true)
+    maybe_notify_invalidate(next_term, merge_invalidation_opt(result_opts, opts))
+    {:reply, {:noreply, next_term.focused, invalidate? and next_term != term}, next_term}
+  end
+
+  defp reply_from_input_result({:noreply, focused, consumed}, term, opts) do
+    next_term = Breeze.View.focus(term, focused)
+    maybe_notify_invalidate(next_term, opts)
+    {:reply, {:noreply, next_term.focused, consumed}, next_term}
+  end
+
+  defp reply_from_input_result({:stop, next_term}, term, opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    maybe_notify_invalidate(next_term, opts)
+    {:stop, :normal, {:stop, next_term.focused, true}, next_term}
+  end
+
+  defp reply_from_input_result({:stop, next_term, result_opts}, term, opts)
+       when is_list(result_opts) do
+    next_term =
+      term
+      |> apply_focus_transitions(next_term)
+      |> sync_theme_assigns()
+      |> cascade_theme_if_changed(term)
+
+    invalidate? = Keyword.get(result_opts, :invalidate, true)
+    maybe_notify_invalidate(next_term, merge_invalidation_opt(result_opts, opts))
+    {:stop, :normal, {:stop, next_term.focused, invalidate?}, next_term}
+  end
+
+  defp reply_from_input_result({:stop, focused, consumed}, term, opts) do
+    next_term = Breeze.View.focus(term, focused)
+    maybe_notify_invalidate(next_term, opts)
+    {:stop, :normal, {:stop, next_term.focused, consumed}, next_term}
+  end
+
+  defp apply_focus_transitions(prev_term, next_term) do
+    next_term =
+      if implicit_instances(prev_term) != implicit_instances(next_term) and
+           prev_term.paste_reset_generation == next_term.paste_reset_generation do
+        %{next_term | paste_reset_generation: make_ref()}
+      else
+        next_term
+      end
+
+    next_term =
+      if (prev_term.focused != next_term.focused or
+            focused_instance(prev_term) != focused_instance(next_term)) and
+           prev_term.paste_generation == next_term.paste_generation do
+        %{next_term | paste_generation: make_ref()}
+      else
+        next_term
+      end
+
+    prev_implicit_id = focused_implicit_id(prev_term, prev_term.focused)
+    next_implicit_id = focused_implicit_id(next_term, next_term.focused)
+
+    next_term =
+      if prev_implicit_id && prev_implicit_id != next_implicit_id do
+        case Map.get(next_term.implicit_state, prev_implicit_id) do
+          {mod, state} ->
+            if function_exported?(mod, :blur, 1) do
+              Breeze.RenderState.put_implicit_state(
+                next_term,
+                prev_implicit_id,
+                mod,
+                mod.blur(state)
+              )
+            else
+              next_term
+            end
+
+          _ ->
+            next_term
+        end
+      else
+        next_term
+      end
+
+    next_term
+  end
+
+  defp focus_paste_generation(term, focused),
+    do: if(term.focused == focused, do: term.paste_generation, else: make_ref())
+
+  defp focused_instance(term) do
+    case Map.get(term.implicit_state, focused_implicit_id(term, term.focused)) do
+      {mod, implicit} -> {mod, implicit[:__breeze_instance_ref__]}
+      _ -> nil
+    end
+  end
+
+  defp implicit_instances(term),
+    do:
+      Map.new(term.implicit_state, fn {id, {mod, implicit}} ->
+        {id, {mod, implicit[:__breeze_instance_ref__]}}
+      end)
+
+  defp focused_implicit_id(_term, nil), do: nil
+
+  defp focused_implicit_id(term, focused) do
+    cond do
+      Map.has_key?(term.implicit_state, focused) ->
+        focused
+
+      true ->
+        get_in(term.focus_meta, [focused, :implicit_owner])
+    end
+  end
+
+  defp focused_implicit_meta(term, focused) do
+    case focused_implicit_id(term, focused) do
+      nil -> %{}
+      id -> Map.get(term.implicit_meta, id, %{})
+    end
+  end
+
+  defp notify_invalidate(term), do: notify_invalidate(term, nil)
+
+  defp notify_invalidate(term, child_id) do
+    case Map.get(term.assigns, :__invalidate__) do
+      fun when is_function(fun, 1) -> fun.(child_id)
+      fun when is_function(fun, 0) -> fun.()
+      _ -> :ok
+    end
+  end
+
+  defp maybe_notify_invalidate(term, opts) do
+    if Keyword.get(opts, :invalidate, true) do
+      notify_invalidate(term)
+    else
+      :ok
+    end
+  end
+
+  defp merge_invalidation_opt(result_opts, call_opts) do
+    if Keyword.get(call_opts, :invalidate, true) do
+      result_opts
+    else
+      Keyword.put(result_opts, :invalidate, false)
+    end
+  end
+
+  defp mouse_target(term, %{"x" => x, "y" => y}) do
+    term.mouse_targets
+    |> Enum.map(fn {id, bounds} -> {id, mouse_target_bounds(term, bounds)} end)
+    |> Enum.filter(fn {_id, bounds} ->
+      is_integer(bounds[:left]) and is_integer(bounds[:right]) and is_integer(bounds[:top]) and
+        is_integer(bounds[:bottom]) and x >= bounds.left and x <= bounds.right and
+        y >= bounds.top and y <= bounds.bottom
+    end)
+    |> Enum.sort_by(fn {id, bounds} ->
+      area = (bounds.right - bounds.left + 1) * (bounds.bottom - bounds.top + 1)
+      {-mouse_target_layer(term, id), area, bounds.top, bounds.left}
+    end)
+    |> List.first()
+    |> case do
+      {id, _bounds} -> id
+      nil -> nil
+    end
+  end
+
+  defp mouse_target_bounds(term, bounds) when is_map(bounds) do
+    bounds
+    |> expand_full_mouse_axis(
+      :width,
+      :content_width,
+      :viewport_width,
+      :left,
+      :right,
+      term_width(term)
+    )
+    |> expand_full_mouse_axis(
+      :height,
+      :content_height,
+      :viewport_height,
+      :top,
+      :bottom,
+      term_height(term)
+    )
+  end
+
+  defp mouse_target_bounds(_term, bounds), do: bounds
+
+  defp mouse_target_layer(term, id) do
+    owner = get_in(term.focus_meta, [id, :implicit_owner])
+
+    [id, owner]
+    |> Enum.map(&rendered_box_layer(term, &1))
+    |> Enum.max()
+  end
+
+  defp rendered_box_layer(_term, nil), do: 0
+
+  defp rendered_box_layer(term, id) do
+    case Map.get(term.rendered_boxes, id) do
+      %BackBreeze.Box{layer: layer} when is_integer(layer) -> layer
+      _box -> 0
+    end
+  end
+
+  defp expand_full_mouse_axis(
+         bounds,
+         axis,
+         content_axis,
+         viewport_axis,
+         start_axis,
+         end_axis,
+         size
+       ) do
+    start = Map.get(bounds, start_axis)
+
+    if full_mouse_dimension?(bounds, axis, content_axis, viewport_axis) and is_integer(size) and
+         is_integer(start) do
+      extent = max(size - start, 0)
+
+      bounds
+      |> Map.put(axis, extent)
+      |> Map.put(end_axis, start + max(extent - 1, 0))
+    else
+      bounds
+    end
+  end
+
+  defp full_mouse_dimension?(bounds, axis, content_axis, viewport_axis) do
+    Map.get(bounds, axis) in [:full, :screen] or
+      Map.get(bounds, content_axis) in [:full, :screen] or
+      Map.get(bounds, viewport_axis) in [:full, :screen]
+  end
+
+  defp term_width(%{terminal: %Termite.Terminal{size: %{width: width}}}), do: width
+  defp term_width(_term), do: nil
+
+  defp term_height(%{terminal: %Termite.Terminal{size: %{height: height}}}), do: height
+  defp term_height(_term), do: nil
+
+  defp mouse_row(term, target, %{"y" => y}) do
+    bounds = Map.fetch!(term.mouse_targets, target)
+    box = Map.get(term.rendered_boxes, target)
+    top_inset = border_inset(box, :top)
+    max(y - bounds.top - top_inset, 0)
+  end
+
+  defp mouse_col(term, target, %{"x" => x}) do
+    bounds = Map.fetch!(term.mouse_targets, target)
+    box = Map.get(term.rendered_boxes, target)
+    left_inset = border_inset(box, :left)
+    max(x - bounds.left - left_inset, 0)
+  end
+
+  defp border_inset(%BackBreeze.Box{style: %{border: border}}, side) do
+    if Map.get(border, side), do: 1, else: 0
+  end
+
+  defp border_inset(_, _side), do: 0
+
+  defp mouse_focus_target(target, %{"button" => "left", "action" => "press"}, term) do
+    cond do
+      target in term.focusables ->
+        target
+
+      owner = get_in(term.focus_meta, [target, :implicit_owner]) ->
+        if owner in term.focusables, do: owner
+
+      true ->
+        nil
+    end
+  end
+
+  defp mouse_focus_target(_target, _mouse, _term), do: nil
+
+  defp profile_label(term, opts) do
+    case Keyword.get(opts, :live_prefix) do
+      nil -> inspect(term.view)
+      prefix -> prefix <> " " <> inspect(term.view)
+    end
+  end
+
+  defp profile(nil, _label, _metric, fun), do: fun.()
+
+  defp profile(scope, label, metric, fun) do
+    Breeze.Telemetry.span(
+      [:breeze, :render],
+      %{scope: scope, label: label, metric: metric},
+      fun
+    )
+  end
+end

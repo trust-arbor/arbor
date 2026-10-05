@@ -93,6 +93,16 @@ defmodule Arbor.Trust.Store do
       {:error, :not_found}
   end
 
+  @doc false
+  def get_cached_profile(agent_id) do
+    case :ets.lookup(@table_name, agent_id) do
+      [{^agent_id, profile}] -> {:ok, profile}
+      [] -> {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :not_found}
+  end
+
   @doc """
   Check if a profile exists.
   """

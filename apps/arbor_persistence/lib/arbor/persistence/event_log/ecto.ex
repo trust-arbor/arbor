@@ -950,6 +950,64 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     from(e in query, where: e.event_number <= ^max_event_number)
   end
 
+  @impl Arbor.Persistence.EventLog
+  def read_event_records(stream_id, event_ids, opts \\ []) do
+    reader = Arbor.Persistence.EventLog.EventRecords
+
+    with {:ok, bound} <- reader.validate_request(stream_id, event_ids, opts) do
+      repo = Keyword.get(opts, :repo, Repo)
+
+      head_condition =
+        if is_nil(bound) do
+          head_number =
+            from(e in EventSchema, where: e.stream_id == ^stream_id, select: max(e.event_number))
+
+          dynamic([e], e.stream_id == ^stream_id and e.event_number == subquery(head_number))
+        else
+          dynamic([e], e.stream_id == ^stream_id and e.event_number == ^bound)
+        end
+
+      # A single statement captures records and the head in one read snapshot.
+      # In particular it does not acquire SQLite's configured IMMEDIATE writer
+      # transaction lock. Both OR branches use existing exact-ID/stream indexes.
+      condition = dynamic([e], e.id in ^event_ids or ^head_condition)
+
+      records =
+        from(e in EventSchema,
+          where: ^condition,
+          order_by: [asc: e.event_number],
+          limit: ^(length(event_ids) + 1)
+        )
+        |> repo.all(timeout: 5_000)
+        |> Enum.map(&EventSchema.to_event/1)
+
+      owned = Enum.filter(records, &(&1.stream_id == stream_id))
+
+      head =
+        if is_nil(bound),
+          do: Enum.max_by(owned, & &1.event_number, fn -> nil end),
+          else: Enum.find(owned, &(&1.event_number == bound))
+
+      pin = if head, do: head.event_number, else: 0
+
+      cond do
+        length(owned) != length(records) ->
+          {:error, :event_records_invalid}
+
+        is_integer(bound) and bound > 0 and is_nil(head) ->
+          {:error, :head_unavailable}
+
+        true ->
+          events = Enum.filter(records, &(&1.id in event_ids and &1.event_number <= pin))
+          reader.validate_result(stream_id, event_ids, bound, %{events: events, head: head})
+      end
+    end
+  rescue
+    _ -> {:error, :backend_unavailable}
+  catch
+    _, _ -> {:error, :backend_unavailable}
+  end
+
   @doc """
   Read the current stream head, optionally requiring backend-owned freshness.
 

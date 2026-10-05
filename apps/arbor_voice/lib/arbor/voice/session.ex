@@ -419,6 +419,7 @@ defmodule Arbor.Voice.Session do
           transcript_opts: config.transcript_opts,
           # Private only — never in status/format_status/signals content.
           speakable: config.speakable,
+          audio_speech_max_words: Map.get(config, :audio_speech_max_words),
           speech_output: config.speech_output,
           # Source-owned acceptance bound (1..250 ms); never in public status.
           speech_output_timeout_ms: config.speech_output_timeout_ms,
@@ -1810,25 +1811,36 @@ defmodule Arbor.Voice.Session do
 
   defp audio_presentation(state, data, final_text) do
     with :ok <- ConversationAuthority.recheck(state.conversation_binding),
-         verdict <- state.speakable.render(final_text, []),
+         verdict <-
+           state.speakable.render(final_text, max_words: state.audio_speech_max_words),
          guarded <- state.speakable.tts_guard!(verdict),
          :ok <- ConversationAuthority.recheck(state.conversation_binding) do
-      AudioPresentationCore.render(%{
-        provider_terminal_text: data.provider_terminal_text,
-        final_text: final_text,
-        verdict: verdict,
-        guarded_text: guarded,
-        audio: data.audio,
-        audio_format: data.output_format,
-        authorized_format: state.audio_formats.output_format
-      })
+      {presentation, reason} =
+        AudioPresentationCore.render_with_reason(%{
+          provider_terminal_text: data.provider_terminal_text,
+          final_text: final_text,
+          verdict: verdict,
+          guarded_text: guarded,
+          audio: data.audio,
+          audio_format: data.output_format,
+          authorized_format: state.audio_formats.output_format
+        })
+
+      Diagnostics.presentation_observation(reason)
+      presentation
     else
-      _ -> AudioPresentationCore.render(%{})
+      _ ->
+        Diagnostics.presentation_observation(:presentation_authority_unavailable)
+        AudioPresentationCore.render(%{})
     end
   rescue
-    _ -> AudioPresentationCore.render(%{})
+    _ ->
+      Diagnostics.presentation_observation(:presentation_error)
+      AudioPresentationCore.render(%{})
   catch
-    _, _ -> AudioPresentationCore.render(%{})
+    _, _ ->
+      Diagnostics.presentation_observation(:presentation_error)
+      AudioPresentationCore.render(%{})
   end
 
   defp finish_audio_error(state, turn, reason) do

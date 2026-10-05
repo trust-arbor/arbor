@@ -41,6 +41,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   @runtime_action_keys Enum.sort(["execution_idempotency" | @legacy_runtime_action_keys])
   @legacy_action_keys Enum.sort(@legacy_runtime_action_keys ++ ~w(description parameters_schema))
   @action_keys Enum.sort(@runtime_action_keys ++ ~w(description parameters_schema))
+  @owner_action_keys Enum.sort(["authorization_admission_owner" | @action_keys])
   @handler_keys ~w(beam_sha256 handler_type module)
   @stack_entry_keys ~w(beam_sha256 module slot)
   @node_binding_keys ~w(handler_type node_id stack)
@@ -1081,7 +1082,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp compare_action_runtime_binding(action_name, expected, actual) do
-    keys = runtime_action_keys(expected)
+    keys = runtime_action_keys(expected) ++ ["authorization_admission_owner"]
     expected_runtime = Map.take(expected, keys)
     actual_runtime = Map.take(actual, keys)
 
@@ -1249,6 +1250,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
          :ok <- validate_nonblank(action["resource_uri"], :action_resource_uri),
          true <- action["effect_class"] in @effect_classes,
          :ok <- validate_action_replay_binding(action),
+         :ok <- validate_action_admission_owner(action),
          true <- is_boolean(action["egress_declared"]),
          true <- is_boolean(action["egress_tier_resolver"]),
          true <- is_boolean(action["egress_destination_resolver"]),
@@ -1265,9 +1267,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   defp require_action_keys(action) do
     keys = Map.keys(action) |> Enum.sort()
 
-    if keys in [@legacy_action_keys, @action_keys],
+    if keys in [@legacy_action_keys, @action_keys, @owner_action_keys],
       do: :ok,
       else: {:error, {:unexpected_execution_manifest_keys, :action}}
+  end
+
+  defp validate_action_admission_owner(action) do
+    case Map.fetch(action, "authorization_admission_owner") do
+      :error -> :ok
+      {:ok, "actions_facade"} -> :ok
+      _ -> {:error, :invalid_action_binding}
+    end
   end
 
   defp validate_action_replay_binding(action) do

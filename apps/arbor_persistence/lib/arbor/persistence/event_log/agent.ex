@@ -161,6 +161,29 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
+  def read_event_records(stream_id, ids, opts) do
+    reader = Arbor.Persistence.EventLog.EventRecords
+
+    with {:ok, bound} <- reader.validate_request(stream_id, ids, opts) do
+      Agent.get(Keyword.fetch!(opts, :name), fn state ->
+        pin = bound || Map.get(state.versions, stream_id, 0)
+        head = get_in(state.stream_index, [stream_id, pin])
+
+        events =
+          ids
+          |> Enum.map(&Map.get(state.event_index, &1))
+          |> Enum.reject(&is_nil/1)
+          |> Enum.filter(&(&1.event_number <= pin))
+          |> Enum.sort_by(& &1.event_number)
+
+        if pin > 0 and is_nil(head),
+          do: {:error, :head_unavailable},
+          else: reader.validate_result(stream_id, ids, bound, %{events: events, head: head})
+      end)
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_all(opts) do
     name = Keyword.fetch!(opts, :name)
     from_pos = Keyword.get(opts, :from, 0)
@@ -286,7 +309,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
           event
           | event_number: new_ver,
             global_position: new_gpos,
-            stream_id: stream_id
+            stream_id: stream_id,
+            operation_fingerprint: EventLog.event_fingerprint(stream_id, event)
         }
 
         {[persisted_event | acc], new_ver, new_gpos}

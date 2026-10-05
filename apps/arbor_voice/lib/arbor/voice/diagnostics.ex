@@ -189,6 +189,33 @@ defmodule Arbor.Voice.Diagnostics do
     :unexpected_result
   ]
 
+  @presentation_reasons [
+    :audio_retained,
+    :invalid_guard,
+    :screen_only_classification,
+    :truncated_guard,
+    :raw_text_mismatch,
+    :guard_text_mismatch,
+    :format_mismatch,
+    :provider_audio_absent,
+    :invalid_provider_audio,
+    :invalid_presentation_input,
+    :presentation_authority_unavailable,
+    :presentation_error
+  ]
+
+  # Deliberate speech suppression is an observation, not an operation failure.
+  # Only fixed labels enter the logger; no text, PCM, proof or operation ID.
+  def presentation_observation(reason) do
+    reason = if reason in @presentation_reasons, do: reason, else: :unclassified
+    Logger.info("[Voice] presentation observation reason=#{reason}")
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   def observe(stage, {:error, reason} = result) do
     failure(stage, reason)
     result

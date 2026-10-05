@@ -173,3 +173,19 @@ defmodule Arbor.Actions.TestFixtures.BoundContextBatchCompositeAction do
     result
   end
 end
+
+defmodule Arbor.Actions.TestFixtures.BoundFacadeOwnerAction do
+  @moduledoc false
+  use Jido.Action,
+    name: "bound_facade_owner_action",
+    description: "Declared facade owner used to verify final execution binding",
+    schema: []
+
+  def authorization_admission_owner, do: :actions_facade
+
+  @impl true
+  def run(_params, context) do
+    send(Map.fetch!(context, :test_pid), :bound_facade_owner_executed)
+    {:ok, %{executed: true}}
+  end
+end

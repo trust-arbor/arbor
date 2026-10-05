@@ -64,6 +64,91 @@ defmodule Arbor.LLM do
   }
 
   @type generate_opts :: keyword()
+  @provider_client_option_keys [
+    :adapters,
+    :default_provider,
+    :model_catalog,
+    :middleware,
+    :stream_middleware
+  ]
+
+  @doc """
+  Configure the default provider client from trusted host-owned options.
+
+  Accepts the existing Client construction options: `:adapters` maps provider
+  strings to module atoms; `:default_provider` is a string or nil;
+  `:model_catalog` is `:llmdb` or a provider-string map of model-map lists;
+  `:middleware` and `:stream_middleware` are lists of two-argument functions.
+  Omitted options retain the Client constructor defaults. Duplicate or unknown
+  keys and malformed values return `{:error, :invalid_provider_client_config}`
+  before changing the active client.
+
+  This replaces process-wide host configuration, not conversation authority.
+  It does not discover credentials, call a provider, or validate/load adapter
+  modules. Requests retain their ordinary routing, deadline, response and
+  security gates; existing requests keep their already-captured client.
+  """
+  @spec configure_provider_client(keyword()) ::
+          :ok | {:error, :invalid_provider_client_config}
+  def configure_provider_client(opts) do
+    if valid_provider_client_options?(opts) do
+      opts |> Client.new() |> Client.set_default_client()
+    else
+      {:error, :invalid_provider_client_config}
+    end
+  end
+
+  @doc """
+  Clear the trusted host's configured default provider client.
+
+  Returns `:ok` even when no client is configured. Future calls resume the
+  existing lazy environment configuration; already-captured clients and
+  request ownership are unchanged. This does not revoke conversation access.
+  """
+  @spec clear_provider_client() :: :ok
+  def clear_provider_client, do: Client.clear_default_client()
+
+  defp valid_provider_client_options?(opts) do
+    Keyword.keyword?(opts) and
+      length(opts) <= length(@provider_client_option_keys) and
+      length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))) and
+      Enum.all?(opts, fn {key, value} ->
+        key in @provider_client_option_keys and valid_provider_client_value?(key, value)
+      end)
+  end
+
+  defp valid_provider_client_value?(:adapters, value) when is_map(value) do
+    Enum.all?(value, fn {provider, module} ->
+      provider_string?(provider) and is_atom(module) and module not in [nil, true, false]
+    end)
+  end
+
+  defp valid_provider_client_value?(:default_provider, nil), do: true
+  defp valid_provider_client_value?(:default_provider, value), do: provider_string?(value)
+  defp valid_provider_client_value?(:model_catalog, :llmdb), do: true
+
+  defp valid_provider_client_value?(:model_catalog, value) when is_map(value) do
+    Enum.all?(value, fn {provider, models} ->
+      provider_string?(provider) and provider_model_maps?(models)
+    end)
+  end
+
+  defp valid_provider_client_value?(key, value)
+       when key in [:middleware, :stream_middleware],
+       do: provider_middleware?(value)
+
+  defp valid_provider_client_value?(_key, _value), do: false
+
+  defp provider_string?(value), do: is_binary(value) and String.valid?(value)
+  defp provider_model_maps?([]), do: true
+  defp provider_model_maps?([model | rest]) when is_map(model), do: provider_model_maps?(rest)
+  defp provider_model_maps?(_), do: false
+  defp provider_middleware?([]), do: true
+
+  defp provider_middleware?([function | rest]) when is_function(function, 2),
+    do: provider_middleware?(rest)
+
+  defp provider_middleware?(_), do: false
 
   @doc """
   Observe the current stock tool-capable Client/ReqLLM composition without inference.

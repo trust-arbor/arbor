@@ -387,6 +387,40 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
     end
   end
 
+  describe "canonical compose dispatch" do
+    test "invoke mode runs a child through the canonical ComposeHandler" do
+      node = node("compose", %{"mode" => "invoke", "graph_source_key" => "child.dot"})
+
+      outcome =
+        Arbor.Orchestrator.Handlers.ComposeHandler.execute(
+          node,
+          Context.new(%{"child.dot" => @minimal_child}),
+          @graph,
+          []
+        )
+
+      assert outcome.status == :success
+      assert outcome.context_updates["subgraph.test_node.status"] == "success"
+      assert outcome.context_updates["subgraph.test_node.nodes_completed"] == 2
+    end
+
+    test "compose mode reads its selected source through the canonical ComposeHandler" do
+      node = node("compose", %{"mode" => "compose", "source_key" => "generated.dot"})
+
+      outcome =
+        Arbor.Orchestrator.Handlers.ComposeHandler.execute(
+          node,
+          Context.new(%{"generated.dot" => @minimal_child}),
+          @graph,
+          []
+        )
+
+      assert outcome.status == :success
+      assert outcome.context_updates["subgraph.test_node.status"] == "success"
+      assert outcome.context_updates["subgraph.test_node.nodes_completed"] == 2
+    end
+  end
+
   # --- SubgraphHandler: graph.compose ---
 
   describe "graph.compose" do

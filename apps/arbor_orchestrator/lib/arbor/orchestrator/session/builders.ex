@@ -141,6 +141,22 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # inserted into Engine values or returned as standalone options.
     opts = maybe_put_steer_check(opts, opts_overrides)
     opts = Keyword.put(opts, :initial_values, initial_values)
+    # Only the Session-owned command binding supplies an authoritative task ID.
+    # UserMessage metadata remains compatibility input, not RunAuthorization.
+    opts =
+      case Keyword.get(opts_overrides, :task_id) do
+        id when is_binary(id) and id != "" -> Keyword.put(opts, :task_id, id)
+        _ -> opts
+      end
+
+    opts =
+      case Keyword.fetch(opts_overrides, :conversation_source) do
+        {:ok, source} when not is_nil(source) -> Keyword.put(opts, :conversation_source, source)
+        {:ok, nil} -> opts
+        :error -> opts
+      end
+
+    opts = maybe_put_event_callback(opts, state, opts_overrides)
 
     # Wire streaming callback with source tag so the dashboard can
     # route turn deltas to chat and heartbeat deltas to the heartbeat panel.
@@ -153,7 +169,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     if Map.get(state.config || %{}, "stream", true) == false do
       opts
     else
-      Keyword.put(opts, :on_stream, build_stream_callback(state, source))
+      Keyword.put(opts, :on_stream, build_stream_callback(state, source, opts_overrides))
     end
   end
 
@@ -244,41 +260,97 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end
   end
 
-  defp build_stream_callback(state, source) do
+  defp maybe_put_event_callback(opts, state, opts_overrides) do
+    case {Keyword.get(opts_overrides, :source), Keyword.get(opts_overrides, :steering_binding)} do
+      {:turn, {token, _}} when is_reference(token) ->
+        pid = state.pid
+        consultation? = Consultation.active?(state)
+
+        Keyword.put(opts, :on_event, fn event ->
+          if not consultation? and is_pid(pid) do
+            case progress_projection(event) do
+              nil -> :ok
+              progress -> send(pid, {:turn_progress, token, progress})
+            end
+          end
+        end)
+
+      _ ->
+        opts
+    end
+  end
+
+  # Arbitrary Engine context, notes, paths, errors and tool payloads do not enter
+  # this bounded native progress projection.
+  defp progress_projection(%{type: type} = event)
+       when type in [
+              :pipeline_started,
+              :pipeline_completed,
+              :pipeline_failed,
+              :stage_started,
+              :stage_completed,
+              :stage_failed,
+              :stage_retrying
+            ] do
+    node_id = Map.get(event, :node_id)
+
+    if is_nil(node_id) or
+         (is_binary(node_id) and byte_size(node_id) <= 256 and String.valid?(node_id)),
+       do: %{type: type, node_id: node_id},
+       else: nil
+  end
+
+  defp progress_projection(_), do: nil
+
+  defp build_stream_callback(state, source, opts_overrides) do
     agent_id = state.agent_id
     session_id = state.session_id
     session_pid = state.pid
     consultation? = Consultation.active?(state)
+    generation = Keyword.get(opts_overrides, :steering_binding)
 
     fn event ->
       case event do
         %{type: :delta, data: data} ->
           text = Map.get(data, :text) || Map.get(data, "text", "")
 
-          # Durable accumulation (streaming partial preservation, Option A): hand
-          # each chat-turn chunk to the Session GenServer so the partial survives a
-          # turn-task crash/cancel/timeout. The signal below stays for the
-          # dashboard's live render. Only :turn streams feed the turn buffer.
-          if source == :turn and is_pid(session_pid) and text != "" do
-            send(session_pid, {:stream_chunk, text})
-          end
+          if source == :turn do
+            case generation do
+              {token, _} when is_reference(token) and is_pid(session_pid) ->
+                if is_binary(text) and text != "",
+                  do: send(session_pid, {:turn_stream, token, {:delta, text}})
 
-          unless consultation? do
-            ResultProcessor.emit_signal(:agent, :stream_delta, %{
-              agent_id: agent_id,
-              session_id: session_id,
-              text: text,
-              source: source
-            })
+              _ ->
+                :ok
+            end
+          else
+            unless consultation? do
+              ResultProcessor.emit_signal(:agent, :stream_delta, %{
+                agent_id: agent_id,
+                session_id: session_id,
+                text: text,
+                source: source
+              })
+            end
           end
 
         %{type: :finish} ->
-          unless consultation? do
-            ResultProcessor.emit_signal(:agent, :stream_finish, %{
-              agent_id: agent_id,
-              session_id: session_id,
-              source: source
-            })
+          if source == :turn do
+            case generation do
+              {token, _} when is_reference(token) and is_pid(session_pid) ->
+                send(session_pid, {:turn_stream, token, :finish})
+
+              _ ->
+                :ok
+            end
+          else
+            unless consultation? do
+              ResultProcessor.emit_signal(:agent, :stream_finish, %{
+                agent_id: agent_id,
+                session_id: session_id,
+                source: source
+              })
+            end
           end
 
         _ ->

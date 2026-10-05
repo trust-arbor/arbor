@@ -28,6 +28,7 @@ defmodule ArborNativeFake do
         hold: false,
         close: :ok,
         completion: true,
+        finish_frames: nil,
         permission: :authorized
       })
 
@@ -92,6 +93,16 @@ defmodule ArborNativeFake do
     if bytes == r.frames * 2, do: :ready, else: :ok
   end
 
+  def finish(resource) do
+    r = Process.get(resource)
+    event({:finish, resource, r.owner, r.token})
+
+    case get(:finish_frames) do
+      nil -> :ok
+      frames -> {:ok, frames}
+    end
+  end
+
   def destroy(resource) do
     event({:destroy, resource})
 
@@ -113,7 +124,7 @@ defmodule Membrane.PortAudio.Source.Native do
     do: ArborNativeFake.create(:source, owner, rate, frames, token)
 
   def start(resource), do: ArborNativeFake.start(resource)
-  def finish(_), do: :ok
+  def finish(resource), do: ArborNativeFake.finish(resource)
   def destroy(resource), do: ArborNativeFake.destroy(resource)
   def reclaim, do: :empty
 end

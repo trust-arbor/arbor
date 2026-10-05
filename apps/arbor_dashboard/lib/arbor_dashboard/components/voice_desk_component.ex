@@ -5,56 +5,75 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
   alias Arbor.Dashboard.Live.ChatLive.Conversation
 
   def mount(socket, peer, uri, headers) do
-    assign(socket,
-      voice_local:
-        Config.local_voice_controls?() and loopback?(peer) and local_uri?(uri) and
-          direct?(headers),
-      voice_operation: nil,
-      voice_message: "Start with a 3-second microphone and speaker check.",
-      voice_error: false
-    )
+    recording = recording_options()
+
+    socket =
+      assign(socket,
+        voice_local:
+          Config.local_voice_controls?() and loopback?(peer) and local_uri?(uri) and
+            direct?(headers),
+        voice_operation: nil,
+        voice_message: "Choose a recording length, then test the microphone and speaker.",
+        voice_error: false,
+        voice_recording: recording,
+        voice_duration_text: if(recording, do: seconds(recording.default_ms), else: ""),
+        voice_duration_ms: nil,
+        voice_duration_error: nil
+      )
+
+    validate_duration(socket, recording, socket.assigns.voice_duration_text)
+  end
+
+  def event(socket, "duration", %{"seconds" => value}) do
+    if is_nil(socket.assigns.voice_operation) do
+      validate_duration(socket, recording_options(), value)
+    else
+      socket
+    end
   end
 
   def event(socket, action, _params) when action in ["loopback", "talk"] do
     socket = Conversation.refresh(socket)
 
     if allowed?(socket) and is_nil(socket.assigns.voice_operation) do
-      mode = if action == "loopback", do: :loopback, else: :conversation
-      user = socket.assigns.current_agent_id
-      agent = socket.assigns.agent_id
-      token = socket.assigns.session_token
+      socket = validate_duration(socket, recording_options(), socket.assigns.voice_duration_text)
 
-      opts = [
-        session_token: token,
-        duration_ms: 3_000,
-        mode: mode,
-        origin_node: node(),
-        expected_engagement_id: socket.assigns.conversation_engagement_id
-      ]
-
-      case safe_call(Config.voice_api(), :start_desk_turn, [user, agent, opts]) do
-        {:ok, id} when is_binary(id) and byte_size(id) == 43 ->
-          Process.send_after(self(), {:voice_desk_poll, id}, 100)
-
-          assign(socket,
-            voice_operation: %{
-              id: id,
-              user: user,
-              agent: agent,
-              engagement: socket.assigns.conversation_engagement_id
-            },
-            voice_message: "Checking conversation access…",
-            voice_error: false
-          )
-
-        {:error, reason} ->
-          message(socket, reason)
-
-        _ ->
-          message(socket, :unavailable)
+      if is_integer(socket.assigns.voice_duration_ms) do
+        start_recording(socket, action)
+      else
+        socket
       end
     else
       message(socket, :unavailable)
+    end
+  end
+
+  def event(socket, "finish", _params) do
+    socket = Conversation.refresh(socket)
+
+    case socket.assigns.voice_operation do
+      %{id: id, can_finish: true} = op ->
+        if allowed?(socket) and current_scope?(socket, op) do
+          case safe_call(Config.voice_api(), :finish_desk_turn, [id]) do
+            :ok ->
+              assign(socket,
+                voice_operation: Map.put(op, :can_finish, false),
+                voice_message: "Finishing recording and closing the microphone…",
+                voice_error: false
+              )
+
+            {:error, reason} ->
+              message(socket, reason)
+
+            _ ->
+              message(socket, :finish_unavailable)
+          end
+        else
+          retire(socket, id)
+        end
+
+      _ ->
+        socket
     end
   end
 
@@ -108,6 +127,46 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
 
   def event(socket, _, _), do: socket
 
+  defp start_recording(socket, action) do
+    mode = if action == "loopback", do: :loopback, else: :conversation
+    user = socket.assigns.current_agent_id
+    agent = socket.assigns.agent_id
+    token = socket.assigns.session_token
+
+    opts = [
+      session_token: token,
+      duration_ms: socket.assigns.voice_duration_ms,
+      mode: mode,
+      origin_node: node(),
+      expected_engagement_id: socket.assigns.conversation_engagement_id
+    ]
+
+    case safe_call(Config.voice_api(), :start_desk_turn, [user, agent, opts]) do
+      {:ok, id} when is_binary(id) and byte_size(id) == 43 ->
+        Process.send_after(self(), {:voice_desk_poll, id}, 100)
+
+        assign(socket,
+          voice_operation: %{
+            id: id,
+            user: user,
+            agent: agent,
+            duration_ms: socket.assigns.voice_duration_ms,
+            can_finish: false,
+            mode: mode,
+            engagement: socket.assigns.conversation_engagement_id
+          },
+          voice_message: "Checking conversation access…",
+          voice_error: false
+        )
+
+      {:error, reason} ->
+        message(socket, reason)
+
+      _ ->
+        message(socket, :unavailable)
+    end
+  end
+
   def poll(socket, id) do
     case socket.assigns[:voice_operation] do
       %{id: ^id} = operation ->
@@ -131,10 +190,7 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     case safe_call(Config.voice_api(), :desk_turn_status, [id]) do
       {:ok, %{terminal: true, state: :complete, mode: mode, error: nil, result: result}}
       when is_map(result) ->
-        text =
-          if mode == :loopback,
-            do: "Loopback complete. You should have heard your 3-second recording.",
-            else: "Voice turn complete. The transcript is in this conversation."
+        text = completion_message(mode, result[:disposition])
 
         send(self(), :refresh_conversation)
         assign(socket, voice_operation: nil, voice_message: text, voice_error: false)
@@ -142,14 +198,32 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
       {:ok, %{terminal: true, error: reason}} ->
         socket |> assign(voice_operation: nil) |> message(reason)
 
-      {:ok, %{terminal: false, state: state}} ->
+      {:ok, %{terminal: false, state: state} = status} ->
         Process.send_after(self(), {:voice_desk_poll, id}, 250)
-        assign(socket, voice_message: phase(state), voice_error: false)
+
+        assign(socket,
+          voice_operation:
+            Map.put(socket.assigns.voice_operation, :can_finish, status[:can_finish] == true),
+          voice_message: phase(state, socket.assigns.voice_operation[:duration_ms]),
+          voice_error: false
+        )
 
       _ ->
         retire(socket, id)
     end
   end
+
+  defp completion_message(:loopback, :played),
+    do: "Loopback complete. Your recording has finished playing."
+
+  defp completion_message(_mode, :played),
+    do: "Voice turn complete. The response finished playing through the host speaker."
+
+  defp completion_message(_mode, :screen_only),
+    do: "Voice turn complete. The response is on screen; no audio was played."
+
+  defp completion_message(_mode, _disposition),
+    do: "Voice turn complete. The transcript is in this conversation."
 
   defp retire(socket, id) do
     safe_call(Config.voice_api(), :cancel_desk_turn, [id])
@@ -215,15 +289,79 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     _, _ -> {:error, :unavailable}
   end
 
-  defp phase(:capture), do: "Recording for 3 seconds — speak now."
-  defp phase(:starting), do: "Connecting voice…"
-  defp phase(:turn), do: "Working on your voice turn…"
-  defp phase(:presenting), do: "Playing through the host speaker…"
+  defp recording_options do
+    case safe_call(Config.voice_api(), :desk_recording_options, []) do
+      {:ok, %{default_ms: default, min_ms: min, max_ms: max} = options}
+      when map_size(options) == 3 and is_integer(min) and is_integer(max) and
+             is_integer(default) and min > 0 and min <= default and default <= max ->
+        options
 
-  defp phase(:cleanup_pending),
+      _ ->
+        nil
+    end
+  end
+
+  defp validate_duration(socket, nil, _value) do
+    assign(socket,
+      voice_recording: nil,
+      voice_duration_text: "",
+      voice_duration_ms: nil,
+      voice_duration_error: "Recording settings are unavailable. Check the host configuration."
+    )
+  end
+
+  defp validate_duration(socket, recording, value) do
+    # Keep decimal seconds exact: never round a floating-point input into a
+    # different duration. Browser fields are untrusted just like click payloads.
+    value = if is_binary(value) and byte_size(value) <= 16, do: value, else: ""
+
+    duration =
+      if Regex.match?(~r/\A(?:0|[1-9][0-9]{0,2})(?:\.[0-9]{1,3})?\z/, value) do
+        case String.split(value, ".") do
+          [whole] ->
+            String.to_integer(whole) * 1_000
+
+          [whole, fraction] ->
+            String.to_integer(whole) * 1_000 +
+              String.to_integer(String.pad_trailing(fraction, 3, "0"))
+        end
+      end
+
+    valid = is_integer(duration) and duration >= recording.min_ms and duration <= recording.max_ms
+
+    assign(socket,
+      voice_recording: recording,
+      voice_duration_text: value,
+      voice_duration_ms: if(valid, do: duration),
+      voice_duration_error:
+        if(!valid,
+          do:
+            "Choose a recording length from #{seconds(recording.min_ms)} to #{seconds(recording.max_ms)} seconds."
+        )
+    )
+  end
+
+  defp seconds(ms) do
+    whole = Integer.to_string(div(ms, 1_000))
+    fraction = ms |> rem(1_000) |> Integer.to_string() |> String.pad_leading(3, "0")
+    if fraction == "000", do: whole, else: whole <> "." <> String.trim_trailing(fraction, "0")
+  end
+
+  defp phase(:preparing_capture, _), do: "Starting microphone—wait to speak."
+
+  defp phase(:capture, duration) when is_integer(duration),
+    do: "Recording for #{seconds(duration)} seconds — speak now."
+
+  defp phase(:capture, _), do: "Recording — speak now."
+  defp phase(:finishing, _), do: "Finishing recording and closing the microphone…"
+  defp phase(:starting, _), do: "Connecting voice…"
+  defp phase(:turn, _), do: "Working on your voice turn…"
+  defp phase(:presenting, _), do: "Playing through the host speaker…"
+
+  defp phase(:cleanup_pending, _),
     do: "Waiting for audio to close. A new recording is blocked until cleanup finishes."
 
-  defp phase(_), do: "Checking conversation access…"
+  defp phase(_, _), do: "Checking conversation access…"
 
   defp message(socket, reason),
     do: assign(socket, voice_message: error(reason), voice_error: true)
@@ -245,6 +383,12 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
   defp error(:capture_failed),
     do: "The microphone recording could not be completed. Try the mic and speaker check."
 
+  defp error(:recording_too_short),
+    do: "The recording was too short. Record at least the configured minimum before finishing."
+
+  defp error(:finish_unavailable),
+    do: "The recording could not finish early. Wait for its current status before starting again."
+
   defp error(:start_failed),
     do: "Recording finished, but the voice session could not start."
 
@@ -252,7 +396,14 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     do: "The recording was captured, but the voice response could not be completed."
 
   defp error(:budget_exhausted), do: "The voice budget is exhausted."
-  defp error(:cancelled), do: "Recording cancelled. Audio is closed."
+
+  defp error(:invalid_config),
+    do: "Recording settings are unavailable. Check the host configuration."
+
+  defp error(:invalid_desk_options),
+    do: "Recording settings changed. Choose a supported recording length."
+
+  defp error(:cancelled), do: "Voice operation cancelled. Audio is closed."
   defp error(:timeout), do: "The voice turn timed out and audio is closed."
 
   defp error(_),
@@ -265,6 +416,10 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
       |> assign_new(:voice_operation, fn -> nil end)
       |> assign_new(:voice_error, fn -> false end)
       |> assign_new(:voice_message, fn -> "" end)
+      |> assign_new(:voice_recording, fn -> nil end)
+      |> assign_new(:voice_duration_text, fn -> "" end)
+      |> assign_new(:voice_duration_ms, fn -> nil end)
+      |> assign_new(:voice_duration_error, fn -> nil end)
 
     assigns =
       assign(
@@ -286,13 +441,42 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
           Local voice check
         </strong>
         <span style="font-size: 0.75rem; color: var(--aw-text-muted, #aaa);">
-          3 seconds · one turn
+          Timed recording · one turn
         </span>
       </div>
       <p style="font-size: 0.8rem; margin: 0.4rem 0 0.65rem; color: var(--aw-text-muted, #aaa);">
         Uses the microphone and speaker on this Arbor host. Loopback stays on this machine.
         A voice turn sends your recording to the configured speech provider.
       </p>
+      <form id="voice-duration-form" phx-change="voice:duration" phx-submit="voice:duration">
+        <label for="voice-duration" style="font-size: 0.8rem;">
+          Recording length (seconds)
+        </label>
+        <input
+          id="voice-duration"
+          name="seconds"
+          type="number"
+          min={@voice_recording && seconds(@voice_recording.min_ms)}
+          max={@voice_recording && seconds(@voice_recording.max_ms)}
+          step="0.001"
+          value={@voice_duration_text}
+          disabled={!@voice_allowed || @voice_operation != nil || @voice_recording == nil}
+          aria-describedby="voice-duration-help"
+          aria-invalid={to_string(@voice_duration_error != nil)}
+          style="width: 5rem; margin: 0 0.4rem 0.5rem;"
+        />
+        <p id="voice-duration-help" style="font-size: 0.75rem; margin: 0 0 0.65rem;">
+          <%= if @voice_duration_error do %>
+            {@voice_duration_error}
+          <% else %>
+            <span :if={@voice_recording}>
+              {seconds(@voice_recording.min_ms)}–{seconds(@voice_recording.max_ms)} seconds.
+            </span>
+            Your choice stays for subsequent turns while this page is open.
+            Cancel stops the current audio operation. Any conversation text already saved is kept.
+          <% end %>
+        </p>
+      </form>
       <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
         <button
           type="button"
@@ -316,8 +500,10 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
           type="button"
           phx-click="voice:loopback"
           class="aw-btn aw-btn-sm aw-btn-primary"
-          style={disabled_style(!@voice_allowed || @voice_operation != nil)}
-          disabled={!@voice_allowed || @voice_operation != nil}
+          style={
+            disabled_style(!@voice_allowed || @voice_operation != nil || @voice_duration_ms == nil)
+          }
+          disabled={!@voice_allowed || @voice_operation != nil || @voice_duration_ms == nil}
         >
           Test mic &amp; speaker
         </button>
@@ -325,10 +511,21 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
           type="button"
           phx-click="voice:talk"
           class="aw-btn aw-btn-sm"
-          style={disabled_style(!@voice_allowed || @voice_operation != nil)}
-          disabled={!@voice_allowed || @voice_operation != nil}
+          style={
+            disabled_style(!@voice_allowed || @voice_operation != nil || @voice_duration_ms == nil)
+          }
+          disabled={!@voice_allowed || @voice_operation != nil || @voice_duration_ms == nil}
         >
           Record voice turn
+        </button>
+        <button
+          :if={@voice_operation != nil && @voice_operation[:can_finish] == true}
+          type="button"
+          phx-click="voice:finish"
+          class="aw-btn aw-btn-sm aw-btn-primary"
+          disabled={!@voice_allowed}
+        >
+          {if @voice_operation[:mode] == :loopback, do: "Finish and play", else: "Finish and send"}
         </button>
         <button
           :if={@voice_operation != nil}

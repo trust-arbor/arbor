@@ -9,9 +9,29 @@ defmodule Arbor.Comms.ConversationJournalCore do
   @types %{
     "arbor.conversation.admitted.v1" => "admitted",
     "arbor.conversation.dispatch_started.v1" => "dispatch_started",
-    "arbor.conversation.settled.v1" => "settled"
+    "arbor.conversation.settled.v1" => "settled",
+    "arbor.conversation.cancel_requested.v2" => "cancel_requested",
+    "arbor.conversation.cancel_acknowledged.v2" => "cancel_acknowledged"
   }
   @scope_keys [:principal_id, :agent_id, :engagement_id]
+
+  def control_request_payload(operation, caller, target, input, page, expected_engagement)
+      when operation in [:activity, :cancel] do
+    cursor = Keyword.get(page, :cursor)
+    encoded_cursor = if cursor, do: [cursor.admitted_event_number, cursor.command_id], else: nil
+
+    Jason.encode!([
+      if(operation == :activity,
+        do: "arbor.conversation.activity.v1",
+        else: "arbor.conversation.cancel.v1"
+      ),
+      caller,
+      target,
+      input,
+      [encoded_cursor, Keyword.get(page, :limit), Keyword.get(page, :control_timeout)],
+      expected_engagement
+    ])
+  end
 
   def new(scope), do: %{scope: scope, cursor: 0, commands: %{}}
 
@@ -43,6 +63,32 @@ defmodule Arbor.Comms.ConversationJournalCore do
   end
 
   def validate_command(_), do: {:error, :invalid_command}
+
+  @doc false
+  # Transport metadata is caller data, never the source of private command
+  # authority. These names are reserved at every authenticated ingress.
+  def validate_ingress_metadata(metadata) do
+    if contains_binding_key?(metadata), do: {:error, :invalid_message}, else: :ok
+  end
+
+  defp contains_binding_key?(value) when is_map(value) do
+    Enum.any?(Map.to_list(value), fn {key, nested} ->
+      key in [
+        :command_binding,
+        "command_binding",
+        :conversation_command_binding,
+        "conversation_command_binding",
+        :claim_token,
+        "claim_token"
+      ] or
+        contains_binding_key?(nested)
+    end)
+  end
+
+  defp contains_binding_key?([head | tail]),
+    do: contains_binding_key?(head) or contains_binding_key?(tail)
+
+  defp contains_binding_key?(_), do: false
 
   def validate_outcome(%{status: :completed, text: text} = outcome) do
     if exact_keys?(outcome, [:status, :text]) and bounded_string?(text, 131_072, true),
@@ -80,6 +126,29 @@ defmodule Arbor.Comms.ConversationJournalCore do
 
   def show(command), do: Map.delete(command, :claim_token)
 
+  def task_id(scope, id), do: "conversation_" <> digest({scope, id})
+
+  # Sparse exact command records are bounded to the five permanent event IDs.
+  # Other commands may occupy the intervening source positions. The ordered
+  # transition reducer still validates this command's complete known chain.
+  def from_command_events(scope, events, head) when is_list(events) and length(events) <= 5 do
+    Enum.reduce_while(Enum.sort_by(events, & &1.event_number), {:ok, new(scope)}, fn event,
+                                                                                     {:ok, state} ->
+      with true <- event.event_number > state.cursor and event.event_number <= head,
+           {:ok, next, _} <- apply_event(%{state | cursor: event.event_number - 1}, event) do
+        {:cont, {:ok, next}}
+      else
+        _ -> {:halt, {:error, :invalid_journal}}
+      end
+    end)
+    |> case do
+      {:ok, state} -> {:ok, %{state | cursor: head}}
+      error -> error
+    end
+  end
+
+  def from_command_events(_, _, _), do: {:error, :invalid_journal}
+
   def decide(state, {:admit, %{id: id, text: text}}) do
     case Map.fetch(state.commands, id) do
       {:ok, %{text: ^text} = command} ->
@@ -105,7 +174,7 @@ defmodule Arbor.Comms.ConversationJournalCore do
 
   def decide(state, {:claim, id, token}) do
     case Map.fetch(state.commands, id) do
-      {:ok, %{status: :admitted}} ->
+      {:ok, %{status: :admitted, cancellation: %{status: :none}}} ->
         {:append, "arbor.conversation.dispatch_started.v1", "dispatch_started",
          %{"schema_version" => 1, "command_id" => id, "token" => token}}
 
@@ -142,12 +211,106 @@ defmodule Arbor.Comms.ConversationJournalCore do
     end
   end
 
+  def decide(state, {:cancel, id}) do
+    case Map.fetch(state.commands, id) do
+      {:ok, %{cancellation: %{status: :none}}} ->
+        {:append, "arbor.conversation.cancel_requested.v2", "cancel_requested",
+         %{"schema_version" => 2, "command_id" => id}}
+
+      {:ok, command} ->
+        {:return, show(command)}
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  def decide(state, {:ack_cancel, id, claim_token, termination})
+      when termination in [:never_dispatched, :queued_removed, :engine_terminated] do
+    case Map.fetch(state.commands, id) do
+      {:ok,
+       %{
+         claim_token: ^claim_token,
+         cancellation: %{status: :confirmed, termination: ^termination}
+       } = command} ->
+        {:return, show(command)}
+
+      {:ok, %{claim_token: ^claim_token, cancellation: %{status: :requested}} = command} ->
+        if termination == :never_dispatched == is_nil(command.claim_token) do
+          {:append, "arbor.conversation.cancel_acknowledged.v2", "cancel_acknowledged",
+           %{
+             "schema_version" => 2,
+             "command_id" => id,
+             "token" => claim_token,
+             "termination" => Atom.to_string(termination)
+           }}
+        else
+          {:error, :invalid_cancellation}
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_cancellation}
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  # A pinned head may belong to another command. Validate its closed domain
+  # envelope before accepting the position; fingerprints alone do not admit an
+  # unknown journal schema or kind. Exact records then validate the full chain.
+  def valid_event_envelope?(event, scope) do
+    with %{id: event_id, stream_id: stream, type: type, data: data} <- event,
+         true <- stream == stream_id(scope),
+         {:ok, kind} <- Map.fetch(@types, type),
+         %{"command_id" => id, "schema_version" => schema} <- data,
+         :ok <- validate_id(id),
+         true <- event_id == event_id(scope, id, kind),
+         true <- schema == if(kind in ["cancel_requested", "cancel_acknowledged"], do: 2, else: 1) do
+      valid_kind_data?(kind, data, scope)
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_kind_data?("admitted", data, scope),
+    do:
+      exact_keys?(
+        data,
+        ~w(schema_version command_id name text principal_id agent_id engagement_id)
+      ) and
+        data["name"] == "chat.send" and data["principal_id"] == scope.principal_id and
+        data["agent_id"] == scope.agent_id and data["engagement_id"] == scope.engagement_id and
+        validate_command(%{id: data["command_id"], text: data["text"]}) == :ok
+
+  defp valid_kind_data?("dispatch_started", data, _scope),
+    do: exact_keys?(data, ~w(schema_version command_id token)) and valid_token?(data["token"])
+
+  defp valid_kind_data?("settled", data, _scope),
+    do:
+      exact_keys?(data, ~w(schema_version command_id token outcome)) and
+        valid_token?(data["token"]) and
+        match?({:ok, _}, decode_outcome(data["outcome"]))
+
+  defp valid_kind_data?("cancel_requested", data, _scope),
+    do: exact_keys?(data, ~w(schema_version command_id))
+
+  defp valid_kind_data?("cancel_acknowledged", data, _scope),
+    do:
+      exact_keys?(data, ~w(schema_version command_id token termination)) and
+        data["termination"] in ["never_dispatched", "queued_removed", "engine_terminated"] and
+        if(data["termination"] == "never_dispatched",
+          do: is_nil(data["token"]),
+          else: valid_token?(data["token"])
+        )
+
   def apply_event(state, event) do
     with %{id: id, stream_id: stream, event_number: cursor, type: type, data: data} <- event,
          true <- stream == stream_id(state.scope),
          true <- cursor == state.cursor + 1,
          {:ok, kind} <- Map.fetch(@types, type),
-         %{"command_id" => command_id, "schema_version" => 1} <- data,
+         %{"command_id" => command_id, "schema_version" => schema} <- data,
+         true <- schema == if(kind in ["cancel_requested", "cancel_acknowledged"], do: 2, else: 1),
          :ok <- validate_id(command_id),
          true <- id == event_id(state.scope, command_id, kind),
          {:ok, command} <- reduce_command(state, kind, data, cursor) do
@@ -184,6 +347,7 @@ defmodule Arbor.Comms.ConversationJournalCore do
          status: :admitted,
          claim_token: nil,
          outcome: nil,
+         cancellation: %{status: :none},
          admitted_cursor: cursor,
          updated_cursor: cursor
        })}
@@ -195,7 +359,8 @@ defmodule Arbor.Comms.ConversationJournalCore do
   defp reduce_command(state, "dispatch_started", data, cursor) do
     with true <- exact_keys?(data, ~w(schema_version command_id token)),
          true <- valid_token?(data["token"]),
-         {:ok, %{status: :admitted} = command} <- Map.fetch(state.commands, data["command_id"]) do
+         {:ok, %{status: :admitted, cancellation: %{status: :none}} = command} <-
+           Map.fetch(state.commands, data["command_id"]) do
       {:ok,
        %{command | status: :dispatch_started, claim_token: data["token"], updated_cursor: cursor}}
     else
@@ -213,6 +378,42 @@ defmodule Arbor.Comms.ConversationJournalCore do
       {:ok, %{command | status: outcome.status, outcome: outcome, updated_cursor: cursor}}
     else
       _ -> {:error, :invalid_settlement}
+    end
+  end
+
+  defp reduce_command(state, "cancel_requested", data, cursor) do
+    with true <- exact_keys?(data, ~w(schema_version command_id)),
+         {:ok, %{cancellation: %{status: :none}} = command} <-
+           Map.fetch(state.commands, data["command_id"]) do
+      {:ok, %{command | cancellation: %{status: :requested}, updated_cursor: cursor}}
+    else
+      _ -> {:error, :invalid_cancellation}
+    end
+  end
+
+  defp reduce_command(state, "cancel_acknowledged", data, cursor) do
+    termination =
+      case data["termination"] do
+        "never_dispatched" -> :never_dispatched
+        "queued_removed" -> :queued_removed
+        "engine_terminated" -> :engine_terminated
+        _ -> nil
+      end
+
+    with true <- exact_keys?(data, ~w(schema_version command_id token termination)),
+         true <- not is_nil(termination),
+         {:ok, %{cancellation: %{status: :requested}} = command} <-
+           Map.fetch(state.commands, data["command_id"]),
+         true <- command.claim_token == data["token"],
+         true <- termination == :never_dispatched == is_nil(command.claim_token) do
+      {:ok,
+       %{
+         command
+         | cancellation: %{status: :confirmed, termination: termination},
+           updated_cursor: cursor
+       }}
+    else
+      _ -> {:error, :invalid_cancellation}
     end
   end
 

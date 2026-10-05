@@ -5,17 +5,35 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
 
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Human.{Answer, AutoApproveInterviewer, Question}
+  alias Arbor.Orchestrator.Human.{Answer, Question}
 
   @impl true
-  def execute(node, _context, graph, opts) do
+  def execute(node, context, graph, opts) do
+    if Map.has_key?(node.attrs, "reviews_keys") or Map.has_key?(node.attrs, "review_on_choice") do
+      %Outcome{status: :fail, failure_reason: "unsupported protected human review gate"}
+    else
+      if opts[:conversation_source] != nil and
+           Enum.any?(
+             Graph.outgoing_edges(graph, node.id),
+             &(Map.get(&1.attrs, "condition", "") not in ["", nil])
+           ) do
+        %Outcome{status: :fail, failure_reason: "unsupported conditional conversation choice"}
+      else
+        execute_choice(node, context, graph, opts)
+      end
+    end
+  end
+
+  defp execute_choice(node, _context, graph, opts) do
     choices =
       graph
       |> Graph.outgoing_edges(node.id)
-      |> Enum.map(fn edge ->
+      |> Enum.with_index(1)
+      |> Enum.map(fn {edge, index} ->
         label = Map.get(edge.attrs, "label", edge.to)
 
         %{
+          id: "choice_#{index}",
           key: accelerator_key(label),
           label: label,
           to: edge.to
@@ -60,17 +78,13 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
 
           %Outcome{
             status: :success,
-            preferred_label: selected.label,
+            preferred_label: preferred_label(selected, choices),
             suggested_next_ids: [selected.to],
             context_updates: %{
               "human.gate.selected" => selected.key,
               "human.gate.label" => selected.label
             },
-            # Human-review taint reduction (taint-rebuild Phase 4): when this gate
-            # declares reviewed keys AND the operator picked the approval choice,
-            # the reviewed data is reduced via :human_review (a human vouched for
-            # it). Rejection / other choices do NOT reduce.
-            taint_reductions: review_reductions(node, selected)
+            taint_reductions: []
           }
 
         {:retry, reason} ->
@@ -85,41 +99,53 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
   @impl true
   def idempotency, do: :side_effecting
 
-  # Build the human-review taint reductions for an approved gate. Returns [] unless
-  # the node declares `reviews_keys` AND `review_on_choice`, and the operator's
-  # selection matches that approval choice (by accelerator key, label, or target
-  # node id). Target level defaults to :trusted; `review_target="derived"` for a
-  # weaker vouch.
-  defp review_reductions(node, selected) do
-    keys = parse_keys(Map.get(node.attrs, "reviews_keys"))
-    on_choice = Map.get(node.attrs, "review_on_choice")
+  defp ask_interviewer(question, opts) do
+    case opts[:conversation_source] do
+      %{session_pid: pid, generation: generation, handle: handle}
+      when is_pid(pid) and is_reference(generation) ->
+        ask_conversation(question, pid, generation, handle)
 
-    if keys != [] and is_binary(on_choice) and approval_choice?(selected, on_choice) do
-      target = parse_review_target(Map.get(node.attrs, "review_target", "trusted"))
-      Enum.map(keys, &{&1, target, :human_review})
+      nil ->
+        ask_configured_interviewer(question, opts)
+
+      _ ->
+        %Answer{value: :skipped}
+    end
+  rescue
+    _ -> %Answer{value: :skipped}
+  catch
+    _, _ -> %Answer{value: :skipped}
+  end
+
+  defp ask_conversation(question, pid, generation, handle) do
+    timeout_ms =
+      if is_number(question.timeout_seconds),
+        do: trunc(question.timeout_seconds * 1000),
+        else: 300_000
+
+    spec = %{
+      kind: :choice,
+      text: question.text,
+      choices: Enum.map(question.options, &%{id: &1.id, label: &1.label})
+    }
+
+    with {:ok, receipt} <-
+           GenServer.call(pid, {:conversation_interaction, generation, handle, spec, timeout_ms}),
+         {:ok, {:choice, choice_id}, _metadata} <-
+           Arbor.Comms.await_durable_interaction_response(
+             receipt.request_id,
+             receipt.agent_id,
+             operation_id: receipt.operation_id,
+             owner_deadline_unix_ms: receipt.owner_deadline_unix_ms
+           ),
+         selected when is_map(selected) <- Enum.find(question.options, &(&1.id == choice_id)) do
+      %Answer{value: choice_id, selected_option: selected}
     else
-      []
+      _ -> %Answer{value: :skipped}
     end
   end
 
-  defp parse_keys(nil), do: []
-
-  defp parse_keys(csv) when is_binary(csv) do
-    csv |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-  end
-
-  defp parse_keys(_), do: []
-
-  defp approval_choice?(selected, on_choice) do
-    to_string(selected.key) == on_choice or
-      to_string(selected.label) == on_choice or
-      to_string(selected.to) == on_choice
-  end
-
-  defp parse_review_target("derived"), do: :derived
-  defp parse_review_target(_), do: :trusted
-
-  defp ask_interviewer(question, opts) do
+  defp ask_configured_interviewer(question, opts) do
     interviewer = opts[:interviewer]
 
     raw_answer =
@@ -133,7 +159,7 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
         {module, module_opts} when is_atom(module) and is_list(module_opts) ->
           safe_module_ask(module, question, module_opts)
 
-        module when is_atom(module) ->
+        module when is_atom(module) and module not in [nil, true, false] ->
           safe_module_ask(module, question, [])
 
         _ ->
@@ -141,7 +167,7 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
             [answer | _] = opts[:human_answers] ++ [:skipped]
             %Answer{value: answer}
           else
-            AutoApproveInterviewer.ask(question, [])
+            %Answer{value: :skipped}
           end
       end
 
@@ -152,7 +178,7 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
     Code.ensure_loaded(module)
     apply(module, :ask, [question, module_opts])
   rescue
-    _ -> AutoApproveInterviewer.ask(question, [])
+    _ -> %Answer{value: :skipped}
   end
 
   defp select_choice(%Answer{value: :timeout}, question, choices, node) do
@@ -165,21 +191,35 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
   defp select_choice(%Answer{value: :skipped}, _question, _choices, _node),
     do: {:fail, "human skipped interaction"}
 
-  defp select_choice(%Answer{selected_option: %{to: to}}, _question, choices, _node) do
-    {:ok, Enum.find(choices, List.first(choices), &(&1.to == to))}
+  defp select_choice(%Answer{selected_option: selected}, _question, choices, _node)
+       when is_map(selected) do
+    case Enum.filter(choices, &(&1 == selected)) do
+      [choice] -> {:ok, choice}
+      _ -> {:fail, "invalid human gate selection"}
+    end
   end
 
   defp select_choice(%Answer{value: value}, _question, choices, _node) do
     value_string = to_string(value)
 
     selected =
-      Enum.find(choices, List.first(choices), fn choice ->
-        String.downcase(choice.key) == String.downcase(value_string) or
+      Enum.filter(choices, fn choice ->
+        choice.id == value_string or
+          String.downcase(choice.key) == String.downcase(value_string) or
           String.downcase(choice.label) == String.downcase(value_string) or
           String.downcase(choice.to) == String.downcase(value_string)
       end)
 
-    {:ok, selected}
+    case selected do
+      [choice] -> {:ok, choice}
+      _ -> {:fail, "invalid or ambiguous human gate selection"}
+    end
+  end
+
+  # The Engine resolves preferred labels before target ids. Repeated display
+  # labels must therefore leave only the exact selected target as routing data.
+  defp preferred_label(selected, choices) do
+    if Enum.count(choices, &(&1.label == selected.label)) == 1, do: selected.label, else: nil
   end
 
   defp accelerator_key(label) do

@@ -12,6 +12,12 @@ defmodule Arbor.Comms.ConversationReadTest do
     def normalize_conversation_page_options(opts),
       do: Arbor.Persistence.normalize_conversation_page_options(opts)
 
+    def normalize_conversation_window_options(opts),
+      do: Arbor.Persistence.normalize_conversation_window_options(opts)
+
+    def read_conversation_window(agent, engagement, opts),
+      do: read_conversation_page(agent, engagement, opts)
+
     def read_conversation_page(_, _, _) do
       case Process.get(:conversation_read_fault) do
         :raise -> raise "private storage detail"
@@ -137,6 +143,65 @@ defmodule Arbor.Comms.ConversationReadTest do
              Comms.read_user_conversation_page(ctx.agent, ctx.principal)
 
     assert id == ctx.own.id
+  end
+
+  test "security regression window binds the verified owner and filters foreign rows before limiting",
+       ctx do
+    {:ok, session} = Persistence.ensure_session("agent-session-#{ctx.agent}", ctx.agent)
+
+    assert {:ok, 3} =
+             Persistence.append_session_entries(session.id, [
+               entry(ctx.own.id, "owner"),
+               entry(ctx.other.id, "foreign"),
+               entry(ctx.own.id, "latest")
+             ])
+
+    assert {:ok,
+            %{
+              engagement_id: id,
+              head: 3,
+              first: 3,
+              last: 3,
+              entries: [%{content: "latest"}],
+              has_older: true
+            }} =
+             Comms.read_user_conversation_window(ctx.agent, ctx.principal, limit: 1)
+
+    assert id == ctx.own.id
+
+    assert {:ok, %{engagement_id: other, entries: [%{content: "foreign"}]}} =
+             Comms.read_user_conversation_window(ctx.agent, ctx.foreign)
+
+    assert other == ctx.other.id
+  end
+
+  test "security regression window rejects routing overrides before resolving corrupted ownership",
+       ctx do
+    EngagementStore.put(%{ctx.own | owner_tenant: ctx.foreign})
+
+    for opts <- [
+          [engagement_id: ctx.other.id],
+          [principal_id: ctx.foreign],
+          [before: 1, after: 0],
+          [before: nil]
+        ] do
+      assert {:error, :invalid_options} =
+               Comms.read_user_conversation_window(ctx.agent, ctx.principal, opts)
+    end
+
+    assert {:error, :invalid_engagement} =
+             Comms.read_user_conversation_window(ctx.agent, ctx.principal)
+  end
+
+  test "window storage exceptions never become false empty-history success", ctx do
+    Application.put_env(:arbor_comms, :conversation_persistence_module, FaultPersistence)
+
+    for fault <- [:raise, :exit, :throw, :empty, :error] do
+      Process.put(:conversation_read_fault, fault)
+
+      assert {:error, :conversation_unavailable} =
+               Comms.read_user_conversation_window(ctx.agent, ctx.principal)
+    end
   end
 
   test "security regression includes the engagement envelope in the one MiB page bound", ctx do

@@ -33,7 +33,8 @@ defmodule Arbor.Voice.Speakable do
   ## Options
 
   * `:max_words` — maximum words in the final spoken string; it must fit the
-    escalation phrase and sensitive-content pointer
+    escalation phrase and sensitive-content pointer. Explicit nil disables only
+    word-count truncation; classification and non-verbal shaping still apply.
   * `:classifier` — arity-1 fun that returns:
     `:public`, `:internal`, `:confidential`, `:restricted`, or `{:error, term()}`
   * `:escalation_phrase` — phrase appended to truncated output
@@ -74,9 +75,14 @@ defmodule Arbor.Voice.Speakable do
     raise ArgumentError, "expected a valid Speakable verdict tuple"
   end
 
+  @doc "Smallest positive word cap that fits the stock escalation and sensitivity pointers."
+  @spec minimum_max_words() :: pos_integer()
+  def minimum_max_words,
+    do: max(count_words(@default_escalation_phrase), count_words(@sensitive_pointer))
+
   defp validate_opts!(max_words, escalation_phrase) do
-    unless is_integer(max_words) and max_words > 0 do
-      raise ArgumentError, "max_words must be a positive integer"
+    unless is_nil(max_words) or (is_integer(max_words) and max_words > 0) do
+      raise ArgumentError, "max_words must be nil or a positive integer"
     end
 
     unless is_binary(escalation_phrase) and String.trim(escalation_phrase) != "" do
@@ -86,7 +92,7 @@ defmodule Arbor.Voice.Speakable do
     phrase_words = count_words(escalation_phrase)
     minimum_words = max(phrase_words, count_words(@sensitive_pointer))
 
-    if minimum_words > max_words do
+    if not is_nil(max_words) and minimum_words > max_words do
       raise ArgumentError,
             "max_words must be at least #{minimum_words} to fit required voice pointers"
     end
@@ -250,6 +256,12 @@ defmodule Arbor.Voice.Speakable do
     |> String.replace(~r/\s+/, " ")
     |> String.trim()
   end
+
+  defp enforce_budget(%{text: text, structure_removed: false}, nil, _escalation_phrase),
+    do: {:speak, text}
+
+  defp enforce_budget(%{text: text, structure_removed: true}, nil, escalation_phrase),
+    do: {:speak_truncated, append_escalation(text, escalation_phrase)}
 
   defp enforce_budget(
          %{text: text, structure_removed: structure_removed},

@@ -1,6 +1,12 @@
 defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
   use Arbor.Dashboard.ConnCase, async: false
 
+  # Retained ChatLive behavior uses a test-only endpoint; production /chat redirects.
+  @endpoint Arbor.Dashboard.Test.LegacyChatEndpoint
+  setup do
+    Arbor.Dashboard.Test.LegacyChatFixture.start!()
+  end
+
   alias Arbor.Dashboard.Components.VoiceDeskComponent
   alias Arbor.Dashboard.Live.ChatLive
   alias Arbor.Dashboard.Live.ChatLive.Conversation
@@ -75,6 +81,19 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
   end
 
   defmodule VoiceAPI do
+    def desk_recording_options do
+      {state, _owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+
+      Agent.get(
+        state,
+        &Map.get(
+          &1,
+          :voice_recording_options,
+          {:ok, %{default_ms: 10_000, min_ms: 100, max_ms: 30_000}}
+        )
+      )
+    end
+
     def start_desk_turn(user, agent, opts) do
       {_state, owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
       send(owner, {:voice_start, user, agent, opts})
@@ -84,6 +103,22 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     def desk_turn_status(_id) do
       {state, _owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
       Agent.get(state, &Map.get(&1, :voice_status, {:ok, %{terminal: false, state: :capture}}))
+    end
+
+    def finish_desk_turn(id) do
+      {state, owner} = Application.fetch_env!(:arbor_dashboard, :conversation_test)
+      send(owner, {:voice_finish, id})
+
+      Agent.update(
+        state,
+        &Map.put(
+          &1,
+          :voice_status,
+          {:ok, %{terminal: false, state: :finishing, can_finish: false}}
+        )
+      )
+
+      :ok
     end
 
     def cancel_desk_turn(id) do
@@ -186,10 +221,184 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     assert_received {:voice_start, "human_ui", "agent_ui", opts}
     assert opts[:session_token] == "proof"
     assert opts[:mode] == :loopback
-    assert opts[:duration_ms] == 3_000
+    assert opts[:duration_ms] == 10_000
     assert opts[:expected_engagement_id] == "eng_11111111111111111111111111111111"
     refute render(view) =~ ~s(value="proof")
     assert has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+  end
+
+  test "voice cue waits for sample delivery before telling the user to speak", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_status,
+        {:ok, %{terminal: false, state: :preparing_capture, can_finish: true}}
+      )
+    )
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    render_click(view, "voice:talk", %{})
+    id = String.duplicate("v", 43)
+    send(view.pid, {:voice_desk_poll, id})
+    assert render(view) =~ "Starting microphone—wait to speak."
+    refute render(view) =~ "speak now"
+    assert has_element?(view, "#voice-desk button[phx-click='voice:finish']")
+
+    Agent.update(
+      state,
+      &Map.put(&1, :voice_status, {:ok, %{terminal: false, state: :capture, can_finish: true}})
+    )
+
+    send(view.pid, {:voice_desk_poll, id})
+    assert render(view) =~ "speak now"
+  end
+
+  test "voice duration uses operator settings, preserves exact milliseconds, and persists across turns",
+       %{conn: conn, state: state} do
+    enable_voice()
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_recording_options,
+        {:ok, %{default_ms: 4_500, min_ms: 1_001, max_ms: 12_999}}
+      )
+    )
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    assert has_element?(view, "#voice-duration[value='4.5'][min='1.001'][max='12.999']")
+
+    view |> form("#voice-duration-form", %{"seconds" => "7.501"}) |> render_change()
+    render_click(view, "voice:talk", %{})
+    assert_received {:voice_start, "human_ui", "agent_ui", first}
+    assert first[:duration_ms] == 7_501
+
+    # A forged change while capture owns the device cannot change this turn or
+    # the user's saved choice. The status names the actual admitted duration.
+    render_change(view, "voice:duration", %{"seconds" => "2"})
+    send(view.pid, {:voice_desk_poll, String.duplicate("v", 43)})
+    assert render(view) =~ "Recording for 7.501 seconds"
+    assert has_element?(view, "#voice-duration[value='7.501'][disabled]")
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_status,
+        {:ok, %{terminal: true, state: :complete, mode: :conversation, error: nil, result: %{}}}
+      )
+    )
+
+    send(view.pid, {:voice_desk_poll, String.duplicate("v", 43)})
+    assert render(view) =~ "Voice turn complete"
+    assert has_element?(view, "#voice-duration[value='7.501']:not([disabled])")
+    render_click(view, "voice:loopback", %{})
+    assert_received {:voice_start, "human_ui", "agent_ui", second}
+    assert second[:duration_ms] == 7_501
+    assert second[:mode] == :loopback
+  end
+
+  test "voice duration rejects malformed and out-of-range input before recording", %{conn: conn} do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+
+    for value <- [
+          "",
+          "0.099",
+          "30.001",
+          "-1",
+          "1e1",
+          "1.0001",
+          "NaN",
+          %{},
+          String.duplicate("1", 100)
+        ] do
+      render_change(view, "voice:duration", %{"seconds" => value})
+      assert has_element?(view, "#voice-duration[aria-invalid='true']")
+      assert has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+      render_click(view, "voice:talk", %{})
+      refute_received {:voice_start, _, _, _}
+    end
+
+    render_change(view, "voice:duration", %{"seconds" => "0.1"})
+    render_click(view, "voice:loopback", %{})
+    assert_received {:voice_start, "human_ui", "agent_ui", opts}
+    assert opts[:duration_ms] == 100
+  end
+
+  test "voice duration rechecks operator limits immediately before starting", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    assert has_element?(view, "#voice-duration[value='10']")
+
+    Agent.update(
+      state,
+      &Map.put(
+        &1,
+        :voice_recording_options,
+        {:ok, %{default_ms: 3_000, min_ms: 100, max_ms: 5_000}}
+      )
+    )
+
+    render_click(view, "voice:talk", %{})
+    refute_received {:voice_start, _, _, _}
+    assert has_element?(view, "#voice-duration[value='10'][max='5'][aria-invalid='true']")
+    assert render(view) =~ "Choose a recording length from 0.1 to 5 seconds."
+
+    render_change(view, "voice:duration", %{"seconds" => "5"})
+    render_click(view, "voice:talk", %{})
+    assert_received {:voice_start, "human_ui", "agent_ui", opts}
+    assert opts[:duration_ms] == 5_000
+  end
+
+  test "unavailable voice duration policy disables recording without requesting devices",
+       %{conn: conn, state: state} do
+    enable_voice()
+    Agent.update(state, &Map.put(&1, :voice_recording_options, {:error, :invalid_config}))
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    assert render(view) =~ "Recording settings are unavailable"
+    assert has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+    render_click(view, "voice:talk", %{})
+    refute_received {:voice_start, _, _, _}
+    refute_received :microphone_permission_requested
   end
 
   test "security regression: remote browser cannot request host microphone or start capture", %{
@@ -223,6 +432,64 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     render_click(view, "voice:request-permission", %{})
     refute_received {:voice_start, _, _, _}
     refute_received :microphone_permission_requested
+  end
+
+  test "voice finish is advertised only by active status and invokes the public control", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    render_click(view, "voice:talk", %{})
+    id = String.duplicate("v", 43)
+    refute has_element?(view, "#voice-desk button[phx-click='voice:finish']")
+
+    Agent.update(
+      state,
+      &Map.put(&1, :voice_status, {:ok, %{terminal: false, state: :capture, can_finish: true}})
+    )
+
+    send(view.pid, {:voice_desk_poll, id})
+    assert render(view) =~ "Finish and send"
+    render_click(view, "voice:finish", %{})
+    assert_received {:voice_finish, ^id}
+    refute has_element?(view, "#voice-desk button[phx-click='voice:finish']")
+    assert render(view) =~ "Finishing recording and closing the microphone"
+    assert has_element?(view, "#voice-desk button[phx-click='voice:cancel']")
+  end
+
+  test "security regression: finishing voice rechecks current conversation authority", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+    render_click(view, "voice:talk", %{})
+    id = String.duplicate("v", 43)
+
+    Agent.update(
+      state,
+      &Map.put(&1, :voice_status, {:ok, %{terminal: false, state: :capture, can_finish: true}})
+    )
+
+    send(view.pid, {:voice_desk_poll, id})
+    assert render(view) =~ "Finish and send"
+    Agent.update(state, &%{&1 | allowed: false})
+    render_click(view, "voice:finish", %{})
+    refute_received {:voice_finish, _}
+    assert_received {:voice_cancel, ^id}
   end
 
   test "voice completion reloads canonical history without rendering status reply payload", %{
@@ -624,4 +891,47 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
 
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
+
+  test "voice completion distinguishes played audio from screen-only presentation", %{
+    conn: conn,
+    state: state
+  } do
+    enable_voice()
+
+    conn =
+      conn
+      |> voice_connection()
+      |> Plug.Test.init_test_session(%{"agent_id" => "human_ui", "session_token" => "proof"})
+
+    {:ok, view, _} = live(conn, "/chat?agent_id=agent_ui")
+
+    for {disposition, expected} <- [
+          {:played, "The response finished playing through the host speaker."},
+          {:screen_only, "The response is on screen; no audio was played."}
+        ] do
+      render_click(view, "voice:talk", %{})
+
+      Agent.update(
+        state,
+        &Map.put(
+          &1,
+          :voice_status,
+          {:ok,
+           %{
+             terminal: true,
+             state: :complete,
+             mode: :conversation,
+             error: nil,
+             result: %{disposition: disposition, reply: "private-status-payload"}
+           }}
+        )
+      )
+
+      send(view.pid, {:voice_desk_poll, String.duplicate("v", 43)})
+      html = render(view)
+      assert html =~ expected
+      refute html =~ "private-status-payload"
+      refute has_element?(view, "#voice-desk button[phx-click='voice:talk'][disabled]")
+    end
+  end
 end

@@ -229,7 +229,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
       context: context,
       graph: graph,
       logs_root: Keyword.get(opts, :logs_root, ""),
-      assigns: build_assigns(context, opts, node)
+      assigns: Map.put(build_assigns(context, opts, node), :execution_handler, handler)
     }
 
     # Run before_node middleware
@@ -269,8 +269,12 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
 
     assigns = %{
       authorization: Keyword.get(opts, :authorization, false),
-      run_authorization: authority
+      run_authorization: authority,
+      actions_executor: Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor)
     }
+
+    # Source is private control from the owning run, never from graph values.
+    assigns = Map.merge(assigns, Map.new(Keyword.take(opts, [:conversation_source])))
 
     assigns =
       case authority do

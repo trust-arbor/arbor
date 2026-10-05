@@ -13,6 +13,37 @@ defmodule Arbor.Voice.ConfigTest do
 
   alias Arbor.Voice.Config
 
+  describe "Desk recording duration policy" do
+    test "accepts native boundaries, exact milliseconds, and a narrowed operator range" do
+      for options <- [
+            %{default_ms: 10_000, min_ms: 100, max_ms: 30_000},
+            %{default_ms: 100, min_ms: 100, max_ms: 100},
+            %{default_ms: 30_000, min_ms: 30_000, max_ms: 30_000},
+            %{default_ms: 1_501, min_ms: 1_001, max_ms: 12_999}
+          ] do
+        assert {:ok, ^options} = Config.validate_desk_recording_options(options)
+      end
+    end
+
+    test "rejects malformed, inconsistent, or device-unsupported recording policies" do
+      for bad <- [
+            nil,
+            %{},
+            %{default_ms: 10_000, min_ms: 99, max_ms: 30_000},
+            %{default_ms: 10_000, min_ms: 100, max_ms: 30_001},
+            %{default_ms: 99, min_ms: 100, max_ms: 30_000},
+            %{default_ms: 30_001, min_ms: 100, max_ms: 30_000},
+            %{default_ms: 1_000, min_ms: 2_000, max_ms: 1_000},
+            %{default_ms: "1000", min_ms: 100, max_ms: 30_000},
+            %{default_ms: 1_000, min_ms: 100.0, max_ms: 30_000},
+            %{default_ms: 1_000, min_ms: 100, max_ms: 30_000.0},
+            %{default_ms: 1_000, min_ms: 100, max_ms: 30_000, extra: true}
+          ] do
+        assert {:error, :invalid_config} = Config.validate_desk_recording_options(bad)
+      end
+    end
+  end
+
   defmodule MessageOnlyAgent do
     def send_message(_, _, _, _), do: {:ok, "ordinary"}
   end
@@ -303,6 +334,23 @@ defmodule Arbor.Voice.ConfigTest do
       assert {:ok, Arbor.Orchestrator} = Config.validate_orchestrator_module(Arbor.Orchestrator)
       assert {:error, :invalid_config} = Config.validate_orchestrator_module(String)
       assert {:error, :invalid_config} = Config.validate_orchestrator_module(nil)
+    end
+  end
+
+  describe "PCM final-speech word limit" do
+    test "defaults to no word truncation and accepts pointer-safe positive caps" do
+      assert Config.default_audio_speech_max_words() == nil
+      assert {:ok, nil} = Config.validate_audio_speech_max_words(nil)
+
+      for value <- [Arbor.Voice.Speakable.minimum_max_words(), 60, 120] do
+        assert {:ok, ^value} = Config.validate_audio_speech_max_words(value)
+      end
+    end
+
+    test "rejects malformed caps and caps that cannot fit the existing guard pointers" do
+      for bad <- [0, -1, 7, 1.5, "60", true, %{}, []] do
+        assert {:error, :invalid_config} = Config.validate_audio_speech_max_words(bad)
+      end
     end
   end
 end

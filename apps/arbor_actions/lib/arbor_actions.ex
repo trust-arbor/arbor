@@ -1696,6 +1696,46 @@ defmodule Arbor.Actions do
   defp pipeline_internal_allowed?(_), do: false
 
   defp do_authorize_and_execute_authorized(agent_id, action_module, params, context) do
+    # Keep the source handle out of action parameters, action-visible context,
+    # outcomes and checkpoints. Nested synchronous facade calls inherit it only
+    # for this stack; always restore the prior owner, including on exceptions.
+    key = {__MODULE__, :conversation_source}
+    previous = Process.get(key, :absent)
+
+    case Map.fetch(context, :conversation_source) do
+      {:ok, source} -> Process.put(key, {:present, source})
+      :error -> :ok
+    end
+
+    try do
+      do_authorize_and_execute_in_source(
+        agent_id,
+        action_module,
+        params,
+        Map.delete(context, :conversation_source)
+      )
+    after
+      if previous == :absent, do: Process.delete(key), else: Process.put(key, previous)
+    end
+  end
+
+  defp do_authorize_and_execute_in_source(
+         agent_id,
+         Arbor.Actions.Comms.PublishConversationNotice = module,
+         params,
+         context
+       ) do
+    Arbor.Actions.NativeConversationNotice.execute(
+      agent_id,
+      params,
+      context,
+      fn admitted_context ->
+        execute_authorized_action(agent_id, module, params, admitted_context)
+      end
+    )
+  end
+
+  defp do_authorize_and_execute_in_source(agent_id, action_module, params, context) do
     # Extract signing data for action-level auth, but keep it in context
     # so facade-level auth (e.g., File.authorize_file_op) can also use it.
     signed_request = Map.get(context, :signed_request)
@@ -1780,6 +1820,7 @@ defmodule Arbor.Actions do
       |> Keyword.put(:egress_destination, egress_destination)
       |> maybe_put_auth_scope(:task_id, context_value(clean_context, :task_id))
       |> maybe_put_auth_scope(:session_id, context_value(clean_context, :session_id))
+      |> maybe_put_conversation_source()
       |> maybe_put_approved_invocation(clean_context)
       |> Keyword.put(
         :approval_context,
@@ -1850,6 +1891,12 @@ defmodule Arbor.Actions do
         end
 
       {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      # Trust preserves its historical refusal-shaped pending result. Native
+      # executors need the original request ID to await a human answer; pending
+      # still means no effect was admitted, never authorization to execute.
+      {:error, {:pending_approval, proposal_id}} when is_binary(proposal_id) ->
         {:ok, :pending_approval, proposal_id}
 
       {:error, _reason} ->
@@ -2149,9 +2196,14 @@ defmodule Arbor.Actions do
   end
 
   defp runtime_action_descriptor_keys(binding) do
-    if Map.has_key?(binding, "execution_idempotency"),
-      do: @runtime_action_descriptor_keys,
-      else: @legacy_runtime_action_descriptor_keys
+    # Admission ownership is a safety declaration. Unlike the optional legacy
+    # replay field, its omission can never project it out of the actual code.
+    keys =
+      if Map.has_key?(binding, "execution_idempotency"),
+        do: @runtime_action_descriptor_keys,
+        else: @legacy_runtime_action_descriptor_keys
+
+    Enum.sort(["authorization_admission_owner" | keys])
   end
 
   defp compatible_action_binding?(expected, actual)
@@ -2220,6 +2272,32 @@ defmodule Arbor.Actions do
   # Public API — Action discovery
   # ===========================================================================
 
+  @doc "Declared effect admission owner from actual loaded action code; never an authority grant."
+  def authorization_admission_owner(action) when is_binary(action) do
+    with {:ok, module} <- name_to_module(action), do: authorization_admission_owner(module)
+  end
+
+  def authorization_admission_owner(module) when is_atom(module) do
+    with {:module, ^module} <- Code.ensure_loaded(module) do
+      if function_exported?(module, :authorization_admission_owner, 0) do
+        case module.authorization_admission_owner() do
+          :actions_facade -> {:ok, :actions_facade}
+          _ -> {:error, :invalid_action_admission_owner}
+        end
+      else
+        {:ok, :ordinary}
+      end
+    else
+      _ -> {:error, :invalid_action_admission_owner}
+    end
+  rescue
+    _ -> {:error, :invalid_action_admission_owner}
+  catch
+    _, _ -> {:error, :invalid_action_admission_owner}
+  end
+
+  def authorization_admission_owner(_), do: {:error, :invalid_action_admission_owner}
+
   @doc """
   Return the loaded execution identity for an action module.
 
@@ -2240,20 +2318,26 @@ defmodule Arbor.Actions do
          {:ok, effect_class} <- runtime_effect_class(action_module),
          {:ok, execution_idempotency} <-
            runtime_execution_idempotency(action_module, effect_class),
-         {:ok, resource_uri} <- runtime_resource_uri(action_module) do
-      {:ok,
-       %{
-         "name" => action_name,
-         "module" => Atom.to_string(action_module),
-         "beam_sha256" => beam_sha256,
-         "resource_uri" => resource_uri,
-         "effect_class" => Atom.to_string(effect_class),
-         "execution_idempotency" => Atom.to_string(execution_idempotency),
-         "egress_declared" => effect_class == :network_egress,
-         "egress_tier_resolver" => function_exported?(action_module, :egress_tier, 2),
-         "egress_destination_resolver" =>
-           function_exported?(action_module, :egress_destination, 2)
-       }}
+         {:ok, resource_uri} <- runtime_resource_uri(action_module),
+         {:ok, admission_owner} <- authorization_admission_owner(action_module) do
+      descriptor = %{
+        "name" => action_name,
+        "module" => Atom.to_string(action_module),
+        "beam_sha256" => beam_sha256,
+        "resource_uri" => resource_uri,
+        "effect_class" => Atom.to_string(effect_class),
+        "execution_idempotency" => Atom.to_string(execution_idempotency),
+        "egress_declared" => effect_class == :network_egress,
+        "egress_tier_resolver" => function_exported?(action_module, :egress_tier, 2),
+        "egress_destination_resolver" => function_exported?(action_module, :egress_destination, 2)
+      }
+
+      descriptor =
+        if admission_owner == :actions_facade,
+          do: Map.put(descriptor, "authorization_admission_owner", "actions_facade"),
+          else: descriptor
+
+      {:ok, descriptor}
     else
       {:error, _reason} = error -> error
       _other -> {:error, :action_module_unavailable}
@@ -2594,7 +2678,8 @@ defmodule Arbor.Actions do
       ],
       comms: [
         Arbor.Actions.Comms.SendMessage,
-        Arbor.Actions.Comms.PollMessages
+        Arbor.Actions.Comms.PollMessages,
+        Arbor.Actions.Comms.PublishConversationNotice
       ],
       channel: [
         Arbor.Actions.Channel.List,
@@ -3296,6 +3381,10 @@ defmodule Arbor.Actions do
   Emit action started signal.
   """
   @spec emit_started(module(), map()) :: :ok
+  def emit_started(Arbor.Actions.Comms.PublishConversationNotice = module, _params) do
+    Signals.emit(:action, :started, %{action: module.name(), params: %{private: true}})
+  end
+
   def emit_started(action_module, params) do
     Signals.emit(:action, :started, %{
       action: action_module.name(),
@@ -3307,6 +3396,10 @@ defmodule Arbor.Actions do
   Emit action completed signal.
   """
   @spec emit_completed(module(), map()) :: :ok
+  def emit_completed(Arbor.Actions.Comms.PublishConversationNotice = module, _result) do
+    Signals.emit(:action, :completed, %{action: module.name(), result: %{private: true}})
+  end
+
   def emit_completed(action_module, result) do
     Signals.emit(:action, :completed, %{
       action: action_module.name(),
@@ -3318,6 +3411,10 @@ defmodule Arbor.Actions do
   Emit action failed signal.
   """
   @spec emit_failed(module(), term()) :: :ok
+  def emit_failed(Arbor.Actions.Comms.PublishConversationNotice = module, _error) do
+    Signals.emit(:action, :failed, %{action: module.name(), error: :notice_publication_refused})
+  end
+
   def emit_failed(action_module, error) do
     Signals.emit(:action, :failed, %{
       action: action_module.name(),
@@ -3883,6 +3980,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Comms.SendMessage => "arbor://comms/send",
     Arbor.Actions.Comms.PollMessages => "arbor://comms/poll",
     Arbor.Actions.Comms.NotifySession => "arbor://comms/notify/session",
+    Arbor.Actions.Comms.PublishConversationNotice => "arbor://comms/notice/publish",
 
     # Channel facade — arbor://comms/channel/{operation}
     Arbor.Actions.Channel.List => "arbor://comms/channel/list",
@@ -4250,4 +4348,11 @@ defmodule Arbor.Actions do
 
   defp maybe_put_auth_scope(opts, _key, nil), do: opts
   defp maybe_put_auth_scope(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp maybe_put_conversation_source(opts) do
+    case Process.get({__MODULE__, :conversation_source}, :absent) do
+      {:present, source} -> Keyword.put(opts, :conversation_source, source)
+      :absent -> opts
+    end
+  end
 end

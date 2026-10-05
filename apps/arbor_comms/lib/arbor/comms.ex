@@ -27,6 +27,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
+  alias Arbor.Comms.Config
   alias Arbor.Comms.EngagementStore
   alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
@@ -38,7 +39,6 @@ defmodule Arbor.Comms do
   alias Arbor.Contracts.Security.TaintEnvelope
   require Logger
 
-  alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
 
   @doc "Request a human interaction through the public comms facade."
@@ -885,6 +885,91 @@ defmodule Arbor.Comms do
     end
   end
 
+  @doc "Publish an exact private worker-admitted notice to its provisioned existing scope without creating scope."
+  def publish_conversation_notice(params) do
+    with {:ok, %{scope: scope, value: value}} <-
+           Arbor.Security.native_notice_publication_value(params) do
+      result =
+        apply(Config.conversation_persistence_module(), :append_native_conversation_notice, [
+          scope,
+          value
+        ])
+
+      case result do
+        {:ok, %{notice: %{ordinal: ordinal}, disposition: disposition}}
+        when disposition in [:inserted, :existing] and is_integer(ordinal) ->
+          Arbor.Security.finish_native_notice_publication(params, :stored)
+          {:ok, %{status: :stored, ordinal: ordinal}}
+
+        {:error, reason}
+        when reason in [
+               :unauthorized,
+               :native_notice_source_required,
+               :notice_conflict,
+               :invalid_notice,
+               :invalid_notice_scope,
+               :notice_too_large,
+               :notice_approval_required,
+               :unsupported_notice_capability,
+               :notice_publication_refused
+             ] ->
+          Arbor.Security.finish_native_notice_publication(params, :refused)
+          {:error, :notice_publication_refused}
+
+        _ ->
+          Arbor.Security.finish_native_notice_publication(params, :uncertain)
+          {:error, :notice_publication_uncertain}
+      end
+    else
+      _ -> {:error, :notice_publication_refused}
+    end
+  rescue
+    _ ->
+      Arbor.Security.finish_native_notice_publication(params, :uncertain)
+      {:error, :notice_publication_uncertain}
+  catch
+    _, _ ->
+      Arbor.Security.finish_native_notice_publication(params, :uncertain)
+      {:error, :notice_publication_uncertain}
+  end
+
+  @doc "Source-owned bounded notice projection; the authenticated Agent facade owns read admission."
+  def conversation_notice_page(scope, opts),
+    do:
+      apply(Config.conversation_persistence_module(), :read_conversation_notice_page, [
+        scope,
+        opts
+      ])
+
+  @doc false
+  def existing_user_conversation_scope(agent_id, owner_id, engagement_id) do
+    scope = %{owner_id: owner_id, target_agent_id: agent_id, engagement_id: engagement_id}
+
+    with {:ok, ^scope} <- Arbor.Security.validate_notice_publication_scope(scope),
+         {:ok,
+          %{
+            agent_id: ^agent_id,
+            owner_tenant: ^owner_id,
+            engagement_id: ^engagement_id,
+            scope: "user",
+            visibility: "private"
+          }} <-
+           apply(
+             Config.conversation_directory_persistence_module(),
+             :read_user_conversation_record,
+             [owner_id, engagement_id]
+           ) do
+      {:ok, scope}
+    else
+      {:error, :not_found} -> {:error, :not_found}
+      _ -> {:error, :conversation_unavailable}
+    end
+  rescue
+    _ -> {:error, :conversation_unavailable}
+  catch
+    _, _ -> {:error, :conversation_unavailable}
+  end
+
   @doc """
   Record one completed two-sided turn as exactly two ordered, atomically
   appended session entries under `"agent-session-\#{agent_id}"`.
@@ -985,6 +1070,26 @@ defmodule Arbor.Comms do
     to: Arbor.Comms.ConversationRead
 
   @doc """
+  Read a latest, older or newer text window for a source-verified private owner.
+
+  External callers use `Arbor.Agent.conversation_window/3` for authentication.
+  Options are `:before` or `:after` (exclusive), `:through`, and `:limit`.
+  Neither caller-selected engagement IDs nor authorization overrides are accepted.
+  """
+  defdelegate read_user_conversation_window(agent_id, verified_principal, opts \\ []),
+    to: Arbor.Comms.ConversationRead
+
+  @doc "List durable private user records for a source-verified owner; transport callers use Arbor.Agent.list_conversations/2."
+  defdelegate list_user_conversation_records(verified_owner, opts \\ []),
+    to: Arbor.Comms.ConversationDirectory,
+    as: :list
+
+  @doc "Resolve a durable private reference within a source-verified owner's directory; naming an ID grants no access."
+  defdelegate read_user_conversation_record(verified_owner, engagement_id),
+    to: Arbor.Comms.ConversationDirectory,
+    as: :reference
+
+  @doc """
   Durably admit a command for a source-verified private conversation scope.
 
   The trusted host supplies `%{principal_id: id, agent_id: id, engagement_id: id}`.
@@ -1006,6 +1111,21 @@ defmodule Arbor.Comms do
   defdelegate claim_conversation_command(scope, command_id),
     to: Arbor.Comms.ConversationJournal,
     as: :claim
+
+  @doc false
+  defdelegate bind_conversation_command_claim(scope, command_id, claim_token),
+    to: Arbor.Comms.ConversationJournal,
+    as: :bind_claim
+
+  @doc false
+  defdelegate validate_conversation_command_binding(binding, scope, text),
+    to: Arbor.Comms.ConversationJournal,
+    as: :validate_binding
+
+  @doc false
+  defdelegate validate_conversation_ingress_metadata(metadata),
+    to: Arbor.Comms.ConversationJournalCore,
+    as: :validate_ingress_metadata
 
   @doc "Save an immutable delivery outcome using the winning worker's private claim token."
   defdelegate settle_conversation_command(scope, command_id, claim_token, outcome),
@@ -1396,4 +1516,64 @@ defmodule Arbor.Comms do
   catch
     _, _ -> {:error, :durable_provenance_unavailable}
   end
+
+  @doc false
+  defdelegate conversation_command_task_id(scope, id),
+    to: Arbor.Comms.ConversationJournalCore,
+    as: :task_id
+
+  @doc false
+  defdelegate conversation_command_activity(scope, opts \\ []),
+    to: Arbor.Comms.ConversationActivity,
+    as: :read
+
+  @doc false
+  defdelegate request_conversation_command_cancellation(scope, id),
+    to: Arbor.Comms.ConversationJournal,
+    as: :cancel
+
+  @doc false
+  defdelegate acknowledge_conversation_command_cancellation(binding, termination),
+    to: Arbor.Comms.ConversationJournal,
+    as: :acknowledge_cancel
+
+  @doc false
+  defdelegate open_conversation_source(binding, session_pid, generation),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :open_source
+
+  @doc false
+  defdelegate retire_conversation_source(handle, reason \\ :source_retired),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :retire_source
+
+  @doc false
+  defdelegate request_conversation_interaction(handle, spec, timeout_ms),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :request
+
+  @doc false
+  defdelegate conversation_interactions(scope, command_id),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :list
+
+  @doc false
+  defdelegate respond_conversation_interaction(scope, operation, actor_id, proof),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :respond
+
+  @doc false
+  defdelegate conversation_control_request_payload(
+                operation,
+                caller,
+                target,
+                input,
+                page,
+                expected_engagement
+              ), to: Arbor.Comms.ConversationJournalCore, as: :control_request_payload
+
+  @doc false
+  defdelegate conversation_interaction_request_payload(operation, caller, target, input, opts),
+    to: Arbor.Comms.ConversationInteractions,
+    as: :request_payload
 end

@@ -23,7 +23,8 @@ defmodule Arbor.Dashboard.Router do
       layout: {Arbor.Web.Layouts, :app},
       session: {__MODULE__, :live_session_data, []},
       on_mount: Arbor.Dashboard.Nav do
-      live "/", LandingLive
+      live "/", ConversationLive
+      live "/console", LandingLive
       live "/signals", SignalsLive
       live "/eval", EvalLive
       live "/consensus", ConsensusLive
@@ -31,12 +32,19 @@ defmodule Arbor.Dashboard.Router do
       live "/agents", AgentsLive
       live "/monitor", MonitorLive
       live "/roadmap", RoadmapLive
-      live "/chat", ChatLive
+      live "/home", ConversationLive
+      live "/c/:engagement_id", ConversationLive
+      live "/conversation/:agent_id", ConversationLive
       live "/channels", ChannelsLive
       live "/memory", MemoryLive
       live "/memory/:agent_id", MemoryLive
       live "/telemetry", TelemetryLive
       live "/settings", SettingsLive
     end
+  end
+
+  scope "/" do
+    pipe_through :browser
+    get "/chat", Arbor.Dashboard.LegacyChatController, :index
   end
 end

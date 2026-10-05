@@ -110,11 +110,18 @@ CLI use today. It does not speak DASP, and it does not require a DASP client.
   external servers, health. `ex_mcp` 1.3.0 is pinned to `protocol_mode:
   :legacy_only`.
 - CLI via `mix arbor.*`, run through `./bin/mix`.
-- Terminal client in `clients/arbor_tui`.
-- Voice (`Arbor.Voice`): an authenticated text turn, and one bounded PCM turn
-  that does not open a capture or playback device. The next utterance needs a
-  new session. DASP conformance and live-audio binding are not done. See
-  [docs/arbor/CONVERSATION_VOICE_CONVERGENCE.md](docs/arbor/CONVERSATION_VOICE_CONVERGENCE.md).
+- Terminal: `arbor-tui` in `clients/arbor_breeze`, using Breeze and shared
+  ConversationKit/Client packages. `arbor-tui-legacy` in `clients/arbor_tui`
+  retains the previous TermUI client for explicit rollback.
+- Voice (`Arbor.Voice`): authenticated text and one-shot PCM turns share the
+  private conversation. The local Desk captures and plays the Arbor host's audio
+  through direct localhost Dashboard controls, with configurable recording length,
+  sample-readiness cues, early Finish and Cancel. Final PCM speech has a configurable
+  word cap (default `nil`) and exact-text, format and authorization guards; the UI
+  distinguishes playback from screen-only completion. Each utterance uses a fresh
+  Session. DASP conformance and continuous microphone streaming remain outside
+  this interface. See [local voice checks](docs/arbor/VOICE_LOCAL_TEST_GUIDE.md) and
+  [voice convergence](docs/arbor/CONVERSATION_VOICE_CONVERGENCE.md).
 - Signal (`Arbor.Comms`, via `signal-cli`) can send and receive. Limitless is
   a second inbound channel. Signal as a full engagement surface is still
   planned. It is not a DASP client.

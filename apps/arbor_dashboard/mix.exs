@@ -37,6 +37,8 @@ defmodule Arbor.Dashboard.MixProject do
 
   defp deps do
     [
+      {:conversation_kit, path: "../../packages/conversation_kit"},
+      {:conversation_kit_arbor, path: "../../packages/conversation_kit_arbor"},
       # Umbrella dependencies (Level 0-1)
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_web, in_umbrella: true},

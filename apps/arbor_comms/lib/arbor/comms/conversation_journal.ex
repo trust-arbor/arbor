@@ -39,7 +39,7 @@ defmodule Arbor.Comms.ConversationJournal do
       with :ok <- Core.validate_scope(scope),
            :ok <- Core.validate_id(id),
            {:ok, target} <- target(),
-           {:ok, state, _events, _head} <- load(target, scope, 0, nil, 0) do
+           {:ok, state} <- load_command(target, scope, id) do
         Core.get(state, id)
       end
     end)
@@ -56,6 +56,54 @@ defmodule Arbor.Comms.ConversationJournal do
     end)
   end
 
+  @doc false
+  # A private bearer for the winning delivery worker, separate from UserMessage
+  # metadata and every journal projection. A binding is not a chat receipt: the
+  # Session must independently authenticate and resolve the same owner/scope.
+  def bind_claim(scope, id, claim_token) do
+    binding = %{scope: scope, command_id: id, claim_token: claim_token}
+
+    guarded(fn ->
+      with {:ok, _} <- live_binding_command(binding, scope), do: {:ok, binding}
+    end)
+  end
+
+  @doc false
+  def validate_binding(binding, scope, text) do
+    guarded(fn ->
+      with {:ok, %{id: id, text: saved_text}} <- live_binding_command(binding, scope),
+           :ok <- Core.validate_command(%{id: id, text: text}),
+           true <- text == saved_text do
+        task_id = Core.task_id(scope, id)
+
+        {:ok, %{command_id: id, task_id: task_id}}
+      else
+        _ -> {:error, :invalid_claim}
+      end
+    end)
+  end
+
+  # Binding the winner needs only the live bearer. Execution admission always
+  # separately validates a bounded, nonempty binary and the saved exact text;
+  # nil is never an execution-text wildcard.
+  defp live_binding_command(binding, scope) do
+    with %{scope: ^scope, command_id: id, claim_token: token} <- binding,
+         true <- map_size(binding) == 3,
+         :ok <- Core.validate_scope(scope),
+         :ok <- Core.validate_id(id),
+         true <- Core.valid_token?(token),
+         {:ok, target} <- target(),
+         {:ok, state} <- load_command(target, scope, id),
+         {:ok,
+          %{status: :dispatch_started, claim_token: ^token, cancellation: %{status: :none}} =
+            command} <-
+           Map.fetch(state.commands, id) do
+      {:ok, command}
+    else
+      _ -> {:error, :invalid_claim}
+    end
+  end
+
   def settle(scope, id, claim_token, outcome) do
     guarded(fn ->
       with :ok <- Core.validate_scope(scope),
@@ -67,6 +115,129 @@ defmodule Arbor.Comms.ConversationJournal do
       else
         false -> {:error, :invalid_claim}
         {:error, _} = error -> error
+      end
+    end)
+  end
+
+  def cancel(scope, id) do
+    guarded(fn ->
+      with :ok <- Core.validate_scope(scope),
+           :ok <- Core.validate_id(id),
+           {:ok, target} <- target(),
+           {:ok, command} <- mutate(target, scope, {:cancel, id}, @max_attempts) do
+        if command.status == :admitted do
+          mutate(target, scope, {:ack_cancel, id, nil, :never_dispatched}, @max_attempts)
+        else
+          {:ok, command}
+        end
+      end
+    end)
+  end
+
+  def acknowledge_cancel(binding, termination) do
+    guarded(fn ->
+      with %{scope: scope, command_id: id, claim_token: token} <- binding,
+           true <- map_size(binding) == 3 and Core.valid_token?(token),
+           :ok <- Core.validate_scope(scope),
+           :ok <- Core.validate_id(id),
+           true <- termination in [:queued_removed, :engine_terminated],
+           {:ok, target} <- target() do
+        mutate(target, scope, {:ack_cancel, id, token, termination}, @max_attempts)
+      else
+        _ -> {:error, :invalid_cancellation}
+      end
+    end)
+  end
+
+  @doc false
+  def index_scope(scope),
+    do: %{
+      owner_id: scope.principal_id,
+      target_agent_id: scope.agent_id,
+      engagement_id: scope.engagement_id,
+      stream_id: Core.stream_id(scope)
+    }
+
+  @doc false
+  def source_head(scope) do
+    guarded(fn ->
+      with :ok <- Core.validate_scope(scope),
+           {:ok, target} <- target(),
+           {:ok, event} <-
+             Persistence.read_stream_head(
+               target.name,
+               target.backend,
+               Core.stream_id(scope),
+               target.opts
+             ),
+           {:ok, cursor} <- head_cursor(event, scope),
+           do: {:ok, cursor}
+    end)
+  end
+
+  @doc false
+  def projection_page(scope, watermark) do
+    guarded(fn ->
+      with {:ok, target} <- target(),
+           {:ok, head} <- source_head(scope),
+           true <- is_integer(watermark) and watermark >= 0 and watermark <= head,
+           {:ok, page} <-
+             if(watermark == head,
+               do: {:ok, []},
+               else:
+                 Persistence.read_stream_range(
+                   target.name,
+                   target.backend,
+                   Core.stream_id(scope),
+                   Keyword.merge(target.opts, from: watermark + 1, to: head, limit: @page_size)
+                 )
+             ),
+           true <- is_list(page) and length(page) <= @page_size,
+           true <- watermark == head or page != [],
+           true <-
+             Enum.with_index(page, watermark + 1)
+             |> Enum.all?(fn {event, n} ->
+               event.event_number == n and valid_stored_event?(event, scope)
+             end) do
+        through =
+          case List.last(page) do
+            nil -> watermark
+            event -> event.event_number
+          end
+
+        ids = page |> Enum.map(& &1.data["command_id"]) |> Enum.uniq()
+
+        Enum.reduce_while(ids, {:ok, []}, fn id, {:ok, rows} ->
+          with :ok <- Core.validate_id(id),
+               {:ok, state} <- load_command(target, scope, id, through),
+               {:ok, command} <- Core.get(state, id) do
+            row = %{
+              command_id: id,
+              admitted_event_number: command.admitted_cursor,
+              delivery_status: Atom.to_string(command.status),
+              cancellation_status: Atom.to_string(command.cancellation.status),
+              cancellation_termination:
+                case Map.get(command.cancellation, :termination) do
+                  nil -> nil
+                  term -> Atom.to_string(term)
+                end,
+              source_event_number: command.updated_cursor
+            }
+
+            {:cont, {:ok, [row | rows]}}
+          else
+            _ -> {:halt, {:error, :invalid_journal}}
+          end
+        end)
+        |> case do
+          {:ok, rows} ->
+            {:ok, %{rows: Enum.reverse(rows), from: watermark, to: through, head: head}}
+
+          error ->
+            error
+        end
+      else
+        _ -> {:error, :invalid_journal}
       end
     end)
   end
@@ -109,7 +280,14 @@ defmodule Arbor.Comms.ConversationJournal do
   defp mutate(_target, _scope, _operation, 0), do: {:error, :journal_busy}
 
   defp mutate(target, scope, operation, attempts) do
-    with {:ok, state, _events, _head} <- load(target, scope, 0, nil, 0) do
+    with {:ok, state} <-
+           load_command(
+             target,
+             scope,
+             operation_id(operation),
+             nil,
+             match?({:admit, _}, operation)
+           ) do
       case Core.decide(state, operation) do
         {:return, command} ->
           {:ok, command}
@@ -128,6 +306,7 @@ defmodule Arbor.Comms.ConversationJournal do
           case commit(target, event, state.cursor) do
             {:ok, committed} ->
               with {:ok, updated, _public} <- Core.apply_event(state, committed) do
+                Arbor.Comms.ConversationActivity.enqueue(scope)
                 mutation_result(updated, operation)
               end
 
@@ -147,7 +326,14 @@ defmodule Arbor.Comms.ConversationJournal do
   end
 
   defp resolve_identity_conflict(target, scope, operation) do
-    with {:ok, state, _events, _head} <- load(target, scope, 0, nil, 0) do
+    with {:ok, state} <-
+           load_command(
+             target,
+             scope,
+             operation_id(operation),
+             nil,
+             match?({:admit, _}, operation)
+           ) do
       case Core.decide(state, operation) do
         {:return, command} -> {:ok, command}
         {:error, _} = error -> error
@@ -159,6 +345,73 @@ defmodule Arbor.Comms.ConversationJournal do
   defp mutation_result(_state, {:claim, _id, claim_token}), do: {:ok, claim_token}
   defp mutation_result(state, {:admit, command}), do: Core.get(state, command.id)
   defp mutation_result(state, {:settle, id, _token, _outcome}), do: Core.get(state, id)
+  defp mutation_result(state, {:cancel, id}), do: Core.get(state, id)
+  defp mutation_result(state, {:ack_cancel, id, _, _}), do: Core.get(state, id)
+
+  defp operation_id({:admit, command}), do: command.id
+  defp operation_id(operation), do: elem(operation, 1)
+
+  defp load_command(target, scope, id, through \\ nil, admission? \\ false) do
+    ids =
+      Enum.map(
+        ~w(admitted dispatch_started settled cancel_requested cancel_acknowledged),
+        &Core.event_id(scope, id, &1)
+      )
+
+    base_opts = Keyword.delete(target.opts, :timeout_ms)
+
+    opts =
+      if is_nil(through), do: base_opts, else: Keyword.put(base_opts, :max_event_number, through)
+
+    with {:ok, %{events: events, head: head}} <-
+           Persistence.read_event_records(
+             target.name,
+             target.backend,
+             Core.stream_id(scope),
+             ids,
+             opts
+           ),
+         {:ok, cursor} <- head_cursor(head, scope),
+         true <- Enum.all?(events, &valid_stored_event?(&1, scope)),
+         {:ok, state} <- Core.from_command_events(scope, events, cursor),
+         true <- Enum.all?(Map.keys(state.commands), &(&1 == id)) do
+      {:ok, state}
+    else
+      {:error, :event_records_invalid} when admission? ->
+        admission_identity_conflict(target, scope, id)
+
+      _ ->
+        {:error, :invalid_journal}
+    end
+  end
+
+  # Permanent command IDs are global to an owner. A destination change can
+  # therefore make the bounded exact-ID reader refuse another stream's records.
+  # Preserve the existing admission conflict result only after establishing that
+  # the intended stream has no admission identity and its factual head is valid.
+  # The identity is a fingerprint, never a substitute for an event record.
+  defp admission_identity_conflict(target, scope, id) do
+    with {:ok, nil} <-
+           Persistence.event_identity(
+             target.name,
+             target.backend,
+             Core.stream_id(scope),
+             Core.event_id(scope, id, "admitted"),
+             Keyword.take(target.opts, [:repo, :name])
+           ),
+         {:ok, head} <-
+           Persistence.read_stream_head(
+             target.name,
+             target.backend,
+             Core.stream_id(scope),
+             target.opts
+           ),
+         {:ok, _} <- head_cursor(head, scope) do
+      {:error, :command_conflict}
+    else
+      _ -> {:error, :invalid_journal}
+    end
+  end
 
   defp commit(target, event, expected_version) do
     opts = Keyword.put(target.opts, :expected_version, expected_version)
@@ -258,7 +511,8 @@ defmodule Arbor.Comms.ConversationJournal do
            event,
          true <- stream == Core.stream_id(scope) and agent_id == scope.agent_id,
          true <- map_size(metadata) == 1 and Core.valid_token?(attempt) do
-      Persistence.committed_event_matches_submission?(stream, event, event)
+      Core.valid_event_envelope?(event, scope) and
+        Persistence.committed_event_matches_submission?(stream, event, event)
     else
       _ -> false
     end

@@ -36,6 +36,32 @@ defmodule Arbor.Trust.ApprovalGuard do
   @spec enabled?() :: boolean()
   def enabled?, do: Config.approval_guard_enabled?()
 
+  @doc false
+  def check_notice_publication(capability, principal_id, resource_uri) do
+    # Same confirmation and ceiling decision as the ordinary guard, without
+    # private payload-bearing proposal, log or approval signal emission. This
+    # finite mailbox feature has no human approval route yet.
+    policy = Config.policy_module()
+
+    mode =
+      if Code.ensure_loaded?(policy) and
+           function_exported?(policy, :notice_confirmation_mode, 2),
+         do: apply(policy, :notice_confirmation_mode, [principal_id, resource_uri]),
+         else: :deny
+
+    cond do
+      mode == :deny -> {:error, :policy_denied}
+      approval_required?(capability) -> {:error, :notice_approval_required}
+      mode == :auto -> :ok
+      mode == :gated and pre_approved_bypasses_ceiling?(capability, resource_uri) -> :ok
+      true -> {:error, :notice_approval_required}
+    end
+  rescue
+    _ -> {:error, :policy_denied}
+  catch
+    _, _ -> {:error, :policy_denied}
+  end
+
   defp check_with_policy(capability, principal_id, resource_uri, opts) do
     case get_confirmation_mode(principal_id, resource_uri, opts) do
       :auto ->
@@ -119,6 +145,10 @@ defmodule Arbor.Trust.ApprovalGuard do
   end
 
   defp get_confirmation_mode(principal_id, resource_uri, opts) do
+    confirmation_mode_for(principal_id, resource_uri, opts, true)
+  end
+
+  defp confirmation_mode_for(principal_id, resource_uri, opts, report?) do
     policy = Config.policy_module()
 
     cond do
@@ -134,16 +164,16 @@ defmodule Arbor.Trust.ApprovalGuard do
         apply(policy, :confirmation_mode, [principal_id, resource_uri])
 
       true ->
-        warn_trust_unavailable(principal_id, resource_uri, :not_loaded)
+        if report?, do: warn_trust_unavailable(principal_id, resource_uri, :not_loaded)
         :gated
     end
   rescue
     e ->
-      warn_trust_unavailable(principal_id, resource_uri, {:raised, e})
+      if report?, do: warn_trust_unavailable(principal_id, resource_uri, {:raised, e})
       :gated
   catch
     :exit, reason ->
-      warn_trust_unavailable(principal_id, resource_uri, {:exit, reason})
+      if report?, do: warn_trust_unavailable(principal_id, resource_uri, {:exit, reason})
       :gated
   end
 

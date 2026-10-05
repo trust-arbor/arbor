@@ -466,6 +466,57 @@ defmodule Arbor.Persistence do
     end
   end
 
+  @doc "Validate latest/older/newer text-window bounds before any storage read."
+  defdelegate normalize_conversation_window_options(opts),
+    to: Arbor.Persistence.ConversationWindow,
+    as: :normalize_options
+
+  @doc """
+  Read a bounded text-only window from an already authenticated engagement.
+
+  This is a trusted storage API; external callers use
+  `Arbor.Agent.conversation_window/3`. With neither `:before` nor `:after`, it
+  returns the latest entries. Those exclusive ordinal selectors read older or
+  newer entries respectively; they cannot appear together. `:through` pins an
+  append-only snapshot and `:limit` accepts 1..100 (default 20).
+
+  Entries retain source IDs and ascending ordinal order, including legal gaps.
+  `:first`, `:last`, `:has_older`, and `:has_newer` describe navigation within the
+  pinned `:head`; an empty window uses zero first/last ordinals. The canonical
+  Session owner is verified and engagement filtering precedes all limits.
+  Text/encoded page bounds and private-field exclusions match history pages.
+  """
+  def read_conversation_window(agent_id, engagement_id, opts \\ []) do
+    with {:ok, bounds} <- normalize_conversation_window_options(opts),
+         :ok <- ConversationPage.validate_identifiers(agent_id, engagement_id) do
+      SessionStore.read_conversation_window(agent_id, engagement_id, bounds)
+    end
+  end
+
+  @doc "Validate the bounded live private-directory position and page limit before storage."
+  defdelegate normalize_conversation_directory_options(opts),
+    to: Arbor.Persistence.ConversationDirectory,
+    as: :normalize_options
+
+  @doc """
+  List only durable user/private engagement records for an already verified human owner.
+
+  This trusted storage API does not authenticate a transport. External callers use
+  `Arbor.Agent.list_conversations/2`. `:limit` accepts 1..100 (default 20), and
+  `:cursor` is a nonnegative position (default 0) in the live activity order.
+  Activity derives from that engagement's stamped conversation entries and durable notices,
+  falling back to its update time when empty. The position is not a frozen snapshot.
+  No cache fallback, transcript body, arbitrary metadata or foreign-owner record is returned.
+  """
+  defdelegate list_user_conversation_records(verified_owner, opts \\ []),
+    to: Arbor.Persistence.ConversationDirectory,
+    as: :list
+
+  @doc "Read one durable user/private engagement record inside an already verified owner's directory."
+  defdelegate read_user_conversation_record(verified_owner, engagement_id),
+    to: Arbor.Persistence.ConversationDirectory,
+    as: :reference
+
   # ---------------------------------------------------------------
   # Authorized API (for agent callers)
   # ---------------------------------------------------------------
@@ -1445,6 +1496,45 @@ defmodule Arbor.Persistence do
     end
   end
 
+  @doc "Read at most five exact event records and their pinned head, without stream replay."
+  def read_event_records(name, backend, stream_id, event_ids, opts \\ []) do
+    reader = Arbor.Persistence.EventLog.EventRecords
+
+    with :ok <- validate_store_name(name),
+         {:ok, bound} <- reader.validate_request(stream_id, event_ids, opts),
+         true <-
+           is_atom(backend) and Code.ensure_loaded?(backend) and
+             function_exported?(backend, :read_event_records, 3),
+         {:ok, result} <-
+           backend.read_event_records(stream_id, event_ids, Keyword.put(opts, :name, name)) do
+      reader.validate_result(stream_id, event_ids, bound, result)
+    else
+      false -> {:error, :event_records_not_supported}
+      {:error, _} = error -> error
+      _ -> {:error, :event_records_invalid}
+    end
+  rescue
+    _ -> {:error, :backend_unavailable}
+  catch
+    _, _ -> {:error, :backend_unavailable}
+  end
+
+  @doc "Atomically project one bounded committed journal page and its durable watermark."
+  def project_conversation_commands(scope, rows, source_cursors),
+    do: Arbor.Persistence.ConversationCommandIndex.project_page(scope, rows, source_cursors)
+
+  @doc "Project one consecutive committed source cursor; does not authorize any effect."
+  def project_conversation_command(scope, row, source_cursor),
+    do: Arbor.Persistence.ConversationCommandIndex.project(scope, row, source_cursor)
+
+  @doc "Read at most 50 command observations, filtering exact original scope before limit."
+  def read_conversation_commands(scope, opts \\ []),
+    do: Arbor.Persistence.ConversationCommandIndex.read(scope, opts)
+
+  @doc "Read the durable projected stream watermark, independent of the authoritative journal head."
+  def conversation_command_index_watermark(scope),
+    do: Arbor.Persistence.ConversationCommandIndex.watermark(scope)
+
   @doc "Read the current stream head, optionally bounded by backend-owned freshness."
   @spec read_stream_head(atom(), module(), String.t(), keyword()) ::
           {:ok, Event.t() | nil} | {:error, term()}
@@ -1950,4 +2040,46 @@ defmodule Arbor.Persistence do
   end
 
   defp validate_engagement_id_opt(v), do: {:error, {:invalid_opt_value, :engagement_id, v}}
+
+  @doc """
+  Append one source-authorized notice to an existing private user engagement.
+
+  This storage boundary does not authenticate callers or mint publisher authority.
+  The higher source gate must verify proof, capability and source before calling.
+  Scope is exactly owner_id/target_agent_id/engagement_id. Value is exactly
+  notice_id/recipient_subject_id/kind/text/provenance. Duplicate facts retain the
+  first server timestamp/ordinal; changed facts conflict. Notice and durable Home
+  activity commit atomically. No Session or transcript row is created.
+  """
+  defdelegate append_conversation_notice(scope, value),
+    to: Arbor.Persistence.ConversationNoticeStore,
+    as: :append
+
+  @doc """
+  Append from the actual admitted native worker. Inside the acquired SQL
+  transaction, fresh lower Security source/owner/policy/grant checks run before
+  INSERT. Identical existing facts recheck that admission without another charge.
+  No proof, callback, source handle or caller identity option is accepted here.
+  """
+  defdelegate append_native_conversation_notice(scope, value),
+    to: Arbor.Persistence.ConversationNoticeStore,
+    as: :append_native
+
+  @doc "Read-only exact-facts reconciliation after an uncertain notice append reply."
+  defdelegate reconcile_conversation_notice(scope, value),
+    to: Arbor.Persistence.ConversationNoticeStore,
+    as: :reconcile
+
+  @doc """
+  Read a fresh SQL snapshot of already authorized scoped notices, newest ordinal
+  first. Options are :limit (default20, maximum50), :before (strictly older) and
+  :through (inclusive pinned ordinal). Scope precedes every limit. The whole
+  envelope is at most129024 encoded bytes, reserving2048 for higher host wrappers.
+  next_before is the last included ordinal; no notice text is truncated or skipped.
+  recipient_subject_id is readonly provenance for independent verification.
+  facts_digest and all source/proof/control fields stay private.
+  """
+  defdelegate read_conversation_notice_page(scope, opts \\ []),
+    to: Arbor.Persistence.ConversationNoticeStore,
+    as: :read
 end

@@ -153,6 +153,22 @@ defmodule Arbor.Trust.Policy do
     mode_to_confirmation(effective_mode(agent_id, resource_uri, opts))
   end
 
+  @doc false
+  def notice_confirmation_mode(agent_id, resource_uri) do
+    with {:ok, snapshot} <- PolicyHost.snapshot(),
+         {:ok, profile} <- Arbor.Trust.Store.get_cached_profile(agent_id) do
+      # Same host ceiling/model-rule resolution, with no profile DB/cache-miss
+      # fallback while the publication caller owns an SQL writer transaction.
+      mode = ProfileResolver.effective_mode(profile, resource_uri, public_host_opts([], snapshot))
+
+      mode_to_confirmation(
+        ProfileResolver.most_restrictive([mode, caller_ceiling_mode([], resource_uri)])
+      )
+    else
+      _ -> :deny
+    end
+  end
+
   @doc """
   Get the agent's egress mode for a resolved egress tier (2026-06-14
   URI-addressing-vs-classification decision).

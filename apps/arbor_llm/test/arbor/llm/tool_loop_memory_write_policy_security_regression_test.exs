@@ -34,7 +34,8 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
              ContentPart.tool_call("call_#{round}", "memory_remember", %{
                "round" => round,
                "content" => "private turn content",
-               "memory_write_policy" => "allow"
+               "memory_write_policy" => "allow",
+               "conversation_source" => "model cannot choose the approval owner"
              })
            ],
            raw: %{}
@@ -124,6 +125,44 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
     for round <- 0..2 do
       assert_receive {:provider_request, :complete, ^round, opts}
       refute Keyword.has_key?(opts, :memory_write_policy)
+    end
+  end
+
+  for authorization <- [false, true], mode <- [:complete, :stream] do
+    test "security regression: source control reaches native tools but never provider opts authorization=#{authorization} via #{mode}" do
+      source = %{session_pid: self(), generation: make_ref(), handle: {self(), make_ref()}}
+
+      assert {:ok, %{content: "done"}} =
+               run_loop(unquote(authorization), unquote(mode), conversation_source: source)
+
+      for _round <- 0..1 do
+        assert_receive {:executor_request, "memory_remember", args, opts}
+        assert args["conversation_source"] == "model cannot choose the approval owner"
+        assert Keyword.fetch!(opts, :conversation_source) == source
+      end
+
+      for round <- 0..2 do
+        mode = unquote(mode)
+        assert_receive {:provider_request, ^mode, ^round, opts}
+        refute Keyword.has_key?(opts, :conversation_source)
+      end
+    end
+  end
+
+  test "security regression: supplied invalid source control remains present for native fail-closed validation" do
+    for authorization <- [false, true] do
+      assert {:ok, %{content: "done"}} =
+               run_loop(authorization, :complete, conversation_source: nil)
+
+      for _round <- 0..1 do
+        assert_receive {:executor_request, "memory_remember", _args, opts}
+        assert Keyword.fetch!(opts, :conversation_source) == nil
+      end
+
+      for round <- 0..2 do
+        assert_receive {:provider_request, :complete, ^round, opts}
+        refute Keyword.has_key?(opts, :conversation_source)
+      end
     end
   end
 

@@ -10,6 +10,12 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
   """
   use Arbor.Dashboard.ConnCase, async: false
 
+  # Retained ChatLive behavior uses a test-only endpoint; production /chat redirects.
+  @endpoint Arbor.Dashboard.Test.LegacyChatEndpoint
+  setup do
+    Arbor.Dashboard.Test.LegacyChatFixture.start!()
+  end
+
   alias Arbor.Agent.Orchestration
   alias Arbor.Comms
   alias Arbor.Comms.InteractionRegistry
@@ -196,21 +202,24 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     assert_mode(ctx, :auto)
   end
 
-  test "ChatLive passes Nav human proof into the actual winning answer and Trust evidence", ctx do
+  test "security regression: retained ChatLive refuses approval answers even with a valid human proof",
+       ctx do
     request = request!(ctx)
     {:ok, view, _} = live(authenticated_conn(ctx), "/chat")
 
-    render_click(view, "approve-tool", %{
-      "id" => request.request_id,
-      "caller_id" => "human_forged"
-    })
+    html =
+      render_click(view, "approve-tool", %{
+        "id" => request.request_id,
+        "caller_id" => "human_forged"
+      })
 
-    assert {:ok, evidence} = Comms.get_answered_approval(request.request_id)
-    assert evidence.verified_human_id == ctx.human_id
+    assert html =~ "Approvals are unavailable in this private conversation"
+    assert :not_found = Comms.get_answered_approval(request.request_id)
+    assert Enum.any?(Comms.pending_interactions(), &(&1.request_id == request.request_id))
     assert {:ok, status} = Trust.graduation_status(ctx.agent_id, @prefix, proof(ctx))
-    assert status.verified_human_approvals == 1
+    assert status.verified_human_approvals == 0
     assert status.unknown_approvals == 0
-    assert status.pending
+    refute status.pending
   end
 
   test "security regression: ChatLive cannot downgrade a missing socket token into a legacy answer",

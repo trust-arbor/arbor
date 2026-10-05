@@ -10,6 +10,7 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
     Application.put_env(:arbor_multimedia, :driver, Arbor.Multimedia.FakeDriver)
     Application.put_env(:arbor_multimedia, :fake_test, self())
     Application.put_env(:arbor_multimedia, :fake_open, :ok)
+    Application.put_env(:arbor_multimedia, :fake_finish_supported, true)
     Application.put_env(:arbor_multimedia, :operation_grace_ms, 200)
     Fence.release(Fence.current())
 
@@ -22,7 +23,7 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
     on_exit(fn ->
       Fence.release(Fence.current())
 
-      for key <- [:fake_test, :fake_open, :operation_grace_ms],
+      for key <- [:fake_test, :fake_open, :fake_finish_supported, :operation_grace_ms],
           do: Application.delete_env(:arbor_multimedia, key)
     end)
 
@@ -40,6 +41,199 @@ defmodule Arbor.Multimedia.DeviceOwnerTest do
     send(worker, {:close_result, :ok})
     assert {:ok, %{audio: %{pcm: ^pcm}, utterance_ended_at: %DateTime{}}} = Task.await(task)
     assert Fence.current() == nil
+  end
+
+  test "public finish returns exact partial audio only after checked close" do
+    {task, control, worker} = manual_capture()
+    assert :ok = Multimedia.finish_capture(control)
+    assert_receive {:finish_attempt, ^worker}
+    pcm = :binary.copy(<<12, 34>>, 1_600)
+    emit(worker, {:partial, 1_600})
+    assert Task.yield(task, 0) == nil
+    emit(worker, {:pcm, pcm})
+    assert_receive {:close_attempt, ^worker}
+    assert Task.yield(task, 0) == nil
+    assert Multimedia.device_status() == :busy
+    send(worker, {:close_result, :ok})
+    assert {:ok, %{audio: %{pcm: ^pcm}}} = Task.await(task)
+    assert Multimedia.device_status() == :idle
+    assert {:error, :invalid_control} = Multimedia.finish_capture(control)
+  end
+
+  test "security regression: finish requires both private control and designated controller" do
+    {task, control, worker} = manual_capture()
+    assert {:error, :invalid_control} = Multimedia.finish_capture(:crypto.strong_rand_bytes(32))
+
+    assert {:error, :invalid_control} =
+             Task.async(fn -> Multimedia.finish_capture(control) end) |> Task.await()
+
+    refute_receive {:finish_attempt, _}, 20
+    assert :ok = Multimedia.finish_capture(control)
+    assert :ok = Multimedia.finish_capture(control)
+    assert_receive {:finish_attempt, ^worker}
+    refute_receive {:finish_attempt, _}, 20
+    emit(worker, {:partial, 0})
+    finish_close(worker)
+    assert {:error, :recording_too_short} = Task.await(task)
+  end
+
+  test "manual finish cannot upgrade discarded audio after capture caller loss" do
+    {task, control, worker} = manual_capture()
+    Process.unlink(task.pid)
+    Process.exit(task.pid, :kill)
+    assert_receive {:close_attempt, ^worker}
+    assert {:error, :finish_unavailable} = Multimedia.finish_capture(control)
+    emit(worker, {:partial, 800})
+    emit(worker, {:pcm, :binary.copy(<<12, 34>>, 800)})
+    assert Fence.current() != nil
+    send(worker, {:close_result, :ok})
+    eventually(fn -> assert Fence.current() == nil end)
+  end
+
+  test "controller loss discards recording while caller waits for positive close" do
+    parent = self()
+
+    controller =
+      spawn(fn ->
+        receive do
+          {:multimedia_capture_control, _, control} ->
+            send(parent, {:control_received, control})
+
+            receive do
+              :stop -> :ok
+            end
+        end
+      end)
+
+    task =
+      Task.async(fn ->
+        Multimedia.capture_pcm([duration_ms: 1_000, sample_rate: 8_000],
+          controller: {controller, make_ref()}
+        )
+      end)
+
+    assert_receive {:opened, worker, _}
+    assert_receive {:control_received, _}
+    send(controller, :stop)
+    assert_receive {:close_attempt, ^worker}
+    assert Task.yield(task, 0) == nil
+    send(worker, {:close_result, :ok})
+    assert {:error, :caller_down} = Task.await(task)
+    assert Multimedia.device_status() == :idle
+  end
+
+  test "unsupported manual driver is rejected before any device effect while timed capture remains available" do
+    Application.put_env(:arbor_multimedia, :fake_finish_supported, false)
+    refute Multimedia.manual_capture_finish_supported?()
+
+    assert {:error, :finish_unavailable} =
+             Multimedia.capture_pcm([duration_ms: 100, sample_rate: 8_000],
+               controller: {self(), make_ref()}
+             )
+
+    refute_receive {:opened, _, _}, 20
+    task = Task.async(fn -> Multimedia.capture_pcm(duration_ms: 100, sample_rate: 8_000) end)
+    assert_receive {:opened, worker, _}
+    emit(worker, {:pcm, :binary.copy(<<1, 0>>, 800)})
+    emit(worker, {:complete, 800})
+    finish_close(worker)
+    assert {:ok, _} = Task.await(task)
+  end
+
+  test "capture readiness receipt follows the first valid PCM chunk exactly once" do
+    {task, control, worker, tag} = readiness_capture()
+    refute_receive {:multimedia_capture_started, _, _}, 20
+
+    emit(worker, {:pcm, <<1, 0>>})
+    assert_receive {:multimedia_capture_started, ^tag, ^control}
+    emit(worker, {:pcm, <<2, 0>>})
+    refute_receive {:multimedia_capture_started, _, _}, 20
+
+    emit(worker, {:pcm, :binary.copy(<<3, 0>>, 7_998)})
+    emit(worker, {:complete, 8_000})
+    finish_close(worker)
+    assert {:ok, %{audio: %{pcm: pcm}}} = Task.await(task)
+    assert byte_size(pcm) == 16_000
+    refute_receive {:multimedia_capture_started, _, _}, 20
+  end
+
+  test "completed capture cannot announce readiness from buffered PCM arriving later" do
+    {task, _control, worker, _tag} = readiness_capture()
+    emit(worker, {:complete, 8_000})
+    emit(worker, {:pcm, :binary.copy(<<1, 0>>, 8_000)})
+    finish_close(worker)
+    assert {:ok, %{audio: %{pcm: pcm}}} = Task.await(task)
+    assert byte_size(pcm) == 16_000
+    refute_receive {:multimedia_capture_started, _, _}, 20
+  end
+
+  test "stale and invalid PCM cannot announce capture readiness", %{owner: owner} do
+    {task, _control, worker, _tag} = readiness_capture()
+    send(owner, {:driver, make_ref(), Arbor.Multimedia.Redacted.new({:pcm, <<1, 0>>})})
+    refute_receive {:multimedia_capture_started, _, _}, 20
+
+    emit(worker, {:pcm, <<1>>})
+    finish_close(worker)
+    assert {:error, :invalid_media} = Task.await(task)
+    refute_receive {:multimedia_capture_started, _, _}, 20
+  end
+
+  test "capture caller cancellation suppresses a late readiness receipt" do
+    {task, _control, worker, _tag} = readiness_capture()
+    Process.unlink(task.pid)
+    Process.exit(task.pid, :kill)
+    assert_receive {:close_attempt, ^worker}
+
+    emit(worker, {:pcm, <<1, 0>>})
+    send(worker, {:close_result, :ok})
+    eventually(fn -> assert Multimedia.device_status() == :idle end)
+    refute_receive {:multimedia_capture_started, _, _}, 20
+  end
+
+  test "expired capture cannot announce readiness from late PCM" do
+    Application.put_env(:arbor_multimedia, :operation_grace_ms, 1)
+    {task, _control, worker, _tag} = readiness_capture(100)
+    assert {:error, :cleanup_pending} = Task.await(task, 1_000)
+    assert_receive {:close_attempt, ^worker}
+
+    emit(worker, {:pcm, <<1, 0>>})
+    send(worker, {:close_result, :ok})
+    eventually(fn -> assert Multimedia.device_status() == :idle end)
+    refute_receive {:multimedia_capture_started, _, _}, 20
+  end
+
+  defp readiness_capture(duration_ms \\ 1_000) do
+    controller = self()
+    tag = make_ref()
+
+    task =
+      Task.async(fn ->
+        Multimedia.capture_pcm([duration_ms: duration_ms, sample_rate: 8_000],
+          controller: {controller, tag},
+          minimum_duration_ms: 100
+        )
+      end)
+
+    assert_receive {:multimedia_capture_control, ^tag, control}
+    assert_receive {:opened, worker, _}
+    {task, control, worker, tag}
+  end
+
+  defp manual_capture do
+    controller = self()
+    tag = make_ref()
+
+    task =
+      Task.async(fn ->
+        Multimedia.capture_pcm([duration_ms: 1_000, sample_rate: 8_000],
+          controller: {controller, tag},
+          minimum_duration_ms: 100
+        )
+      end)
+
+    assert_receive {:multimedia_capture_control, ^tag, control}
+    assert_receive {:opened, worker, _}
+    {task, control, worker}
   end
 
   test "playback exact completion cannot succeed on pipeline start or DOWN" do

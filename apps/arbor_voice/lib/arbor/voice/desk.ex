@@ -15,7 +15,8 @@ defmodule Arbor.Voice.Desk do
   @lease_ms 3_000
 
   def start(user, agent, %Redacted{value: opts}) do
-    with {:ok, options} <- DeskCore.options(user, agent, opts, node()),
+    with {:ok, recording} <- Config.desk_recording_options(),
+         {:ok, options} <- DeskCore.options(user, agent, opts, node(), recording),
          {:ok, timeouts} <- Config.operation_timeouts() do
       options = Map.put(options, :timeout_ms, timeouts.desk_timeout_ms)
       id = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
@@ -38,6 +39,7 @@ defmodule Arbor.Voice.Desk do
 
   def status(id), do: request(id, :status)
   def cancel(id), do: request(id, :cancel)
+  def finish(id), do: request(id, :finish_capture)
 
   defp request(id, request) do
     if DeskCore.operation_id?(id) do
@@ -94,6 +96,10 @@ defmodule Arbor.Voice.Desk do
            binding: nil,
            proof: nil,
            captured: nil,
+           capture_tag: nil,
+           capture_control: nil,
+           capture_started: false,
+           finish_requested: false,
            session: nil,
            session_closed: false,
            startup_closed: nil,
@@ -125,6 +131,32 @@ defmodule Arbor.Voice.Desk do
 
     state = enforce_deadline(state)
     {:reply, {:ok, public(state)}, state}
+  end
+
+  def handle_call(:finish_capture, _from, state) do
+    state = enforce_deadline(state)
+
+    cond do
+      not finishable?(state) and
+          not (state.finish_requested and state.phase == :capture and is_nil(state.cancellation)) ->
+        {:reply, {:error, :finish_unavailable}, state}
+
+      state.finish_requested ->
+        {:reply, :ok, state}
+
+      ConversationAuthority.recheck(state.binding) != :ok ->
+        {:reply, {:error, :conversation_unauthorized},
+         cancel_state(state, :conversation_unauthorized)}
+
+      not live?(state.permit) or now() >= state.lease_until ->
+        {:reply, {:error, :finish_unavailable}, enforce_deadline(state)}
+
+      true ->
+        case state.multimedia.finish_capture(Redacted.value(state.capture_control)) do
+          :ok -> {:reply, :ok, %{state | finish_requested: true}}
+          _ -> {:reply, {:error, :finish_unavailable}, cancel_state(state, :finish_unavailable)}
+        end
+    end
   end
 
   def handle_call(:cancel, _from, state) do
@@ -160,6 +192,31 @@ defmodule Arbor.Voice.Desk do
     end
 
     {:noreply, launch(state, :admitting, fun)}
+  end
+
+  def handle_info(
+        {:multimedia_capture_control, tag, control},
+        %{capture_tag: tag, capture_control: nil, phase: :capture, cancellation: nil} = state
+      )
+      when is_reference(tag) and is_binary(control) and byte_size(control) == 32,
+      do: {:noreply, %{state | capture_control: Redacted.new(control)}}
+
+  def handle_info(
+        {:multimedia_capture_started, tag, control},
+        %{
+          capture_tag: tag,
+          capture_control: %Redacted{value: control},
+          capture_started: false,
+          phase: :capture,
+          cancellation: nil
+        } = state
+      )
+      when is_reference(tag) and is_binary(control) and byte_size(control) == 32 do
+    state = enforce_deadline(state)
+
+    if is_nil(state.cancellation) and live?(state.permit),
+      do: {:noreply, %{state | capture_started: true}},
+      else: {:noreply, state}
   end
 
   def handle_info({:desk_work, token, %Redacted{value: result}}, %{work: %{token: token}} = state) do
@@ -235,14 +292,37 @@ defmodule Arbor.Voice.Desk do
 
   defp completed(state, :admitting, {:ok, proof, binding}) do
     opts = Redacted.value(state.options)
-    state = %{state | proof: proof, binding: binding, device_used: true, device_closed: false}
+    tag = make_ref()
+    controller = self()
+    manual = manual_finish_supported?(state.multimedia)
+
+    state = %{
+      state
+      | proof: proof,
+        binding: binding,
+        device_used: true,
+        device_closed: false,
+        capture_tag: if(manual, do: tag),
+        capture_control: nil,
+        capture_started: false,
+        finish_requested: false
+    }
 
     effect = fn ->
-      state.multimedia.capture_pcm(
+      capture_opts = [
         duration_ms: opts.duration_ms,
         sample_rate: 16_000,
         device_id: opts.input_device
-      )
+      ]
+
+      if manual do
+        state.multimedia.capture_pcm(capture_opts,
+          controller: {controller, tag},
+          minimum_duration_ms: opts.minimum_duration_ms
+        )
+      else
+        state.multimedia.capture_pcm(capture_opts)
+      end
     end
 
     launch(state, :capture, guarded(state, effect))
@@ -253,9 +333,15 @@ defmodule Arbor.Voice.Desk do
 
     with true <-
            audio.sample_rate == 16_000 and audio.channels == 1 and audio.sample_format == :s16le,
-         true <- is_binary(audio.pcm) and byte_size(audio.pcm) == opts.duration_ms * 32,
+         true <- captured_size?(audio.pcm, opts, state.finish_requested),
          %DateTime{} <- ended do
-      state = %{state | captured: Redacted.new(captured), device_closed: true}
+      state = %{
+        state
+        | captured: Redacted.new(captured),
+          device_closed: true,
+          capture_control: nil,
+          capture_tag: nil
+      }
 
       if opts.mode == :loopback do
         p = %{
@@ -269,7 +355,7 @@ defmodule Arbor.Voice.Desk do
           state
           | result: %{
               capture_frames: div(byte_size(audio.pcm), 2),
-              capture_duration_ms: opts.duration_ms
+              capture_duration_ms: div(byte_size(audio.pcm), 32)
             }
         }
 
@@ -417,6 +503,8 @@ defmodule Arbor.Voice.Desk do
       state
       | cancellation: state.cancellation || DeskCore.error(reason),
         captured: nil,
+        capture_control: nil,
+        capture_tag: nil,
         result: nil
     }
 
@@ -478,7 +566,17 @@ defmodule Arbor.Voice.Desk do
     :atomics.put(state.permit.revoked, 1, 1)
     Registry.unregister(Arbor.Voice.Registry, :desk_active)
     Process.send_after(self(), :retire, 60_000)
-    %{state | terminal: true, phase: phase, captured: nil, proof: nil, session: nil}
+
+    %{
+      state
+      | terminal: true,
+        phase: phase,
+        captured: nil,
+        capture_control: nil,
+        capture_tag: nil,
+        proof: nil,
+        session: nil
+    }
   end
 
   defp public(state) do
@@ -487,14 +585,51 @@ defmodule Arbor.Voice.Desk do
     %{
       operation_id: state.id,
       mode: Redacted.value(state.options).mode,
-      state:
-        if(state.cancellation && not state.terminal, do: :cleanup_pending, else: state.phase),
+      state: public_phase(state),
+      can_finish: finishable?(state),
       terminal: state.terminal,
       elapsed_ms: max(0, now() - state.started_at),
       cue: state.cue,
       result: if(authorized, do: state.result, else: nil),
       error: if(authorized, do: state.error, else: :conversation_unauthorized)
     }
+  end
+
+  defp public_phase(%{cancellation: reason, terminal: false}) when not is_nil(reason),
+    do: :cleanup_pending
+
+  defp public_phase(%{phase: :capture, finish_requested: true}), do: :finishing
+  defp public_phase(%{phase: :capture, capture_started: false}), do: :preparing_capture
+  defp public_phase(state), do: state.phase
+
+  defp finishable?(state),
+    do:
+      state.phase == :capture and is_nil(state.cancellation) and
+        not state.terminal and not state.finish_requested and
+        match?(%Redacted{}, state.capture_control)
+
+  defp captured_size?(pcm, opts, manual) when is_binary(pcm) do
+    bytes = byte_size(pcm)
+
+    if manual,
+      do:
+        rem(bytes, 2) == 0 and bytes >= opts.minimum_duration_ms * 32 and
+          bytes <= opts.duration_ms * 32,
+      else: bytes == opts.duration_ms * 32
+  end
+
+  defp captured_size?(_, _, _), do: false
+
+  defp manual_finish_supported?(multimedia) do
+    Code.ensure_loaded?(multimedia) and
+      function_exported?(multimedia, :manual_capture_finish_supported?, 0) and
+      function_exported?(multimedia, :capture_pcm, 2) and
+      function_exported?(multimedia, :finish_capture, 1) and
+      multimedia.manual_capture_finish_supported?() == true
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   defp resolve_proof(security, opts) do

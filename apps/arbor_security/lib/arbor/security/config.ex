@@ -77,6 +77,11 @@ defmodule Arbor.Security.Config do
   @max_signing_authority_bootstrap_grace_ms 3_600_000
   @default_signing_authority_broker_call_timeout_ms 5_000
   @max_signing_authority_broker_call_timeout_ms 30_000
+
+  @doc "Trusted native notice source adapter; absent configuration denies publication."
+  def native_notice_source_authorizer,
+    do: Application.get_env(:arbor_security, :native_notice_source_authorizer)
+
   @enforcement_toggle_persistent_key {__MODULE__, :enforcement_toggles}
   @enforcement_toggle_claim_table __MODULE__.EnforcementToggleClaim
   @enforcement_toggle_claim_key :claimed

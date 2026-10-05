@@ -15,6 +15,36 @@ defmodule Arbor.Actions.Comms do
 
   alias Arbor.Actions
 
+  defmodule PublishConversationNotice do
+    @moduledoc "Publish a private native-source notice to an explicitly provisioned human mailbox."
+    use Jido.Action,
+      name: "comms_publish_conversation_notice",
+      description: "Publish a private notice to an existing provisioned conversation mailbox",
+      category: "comms",
+      tags: ["comms", "conversation", "notice"],
+      schema: [
+        mailbox_id: [type: :string, required: true],
+        notice_id: [type: :string, required: true],
+        kind: [type: :string, required: true],
+        text: [type: :string, required: true]
+      ]
+
+    def taint_roles, do: %{mailbox_id: :control, notice_id: :control, kind: :control, text: :data}
+    def effect_class, do: :local_write
+    def execution_idempotency, do: :side_effecting
+    def requires_authenticated_principal?, do: true
+    def authorization_admission_owner, do: :actions_facade
+    def authorization_resource(params), do: Arbor.Security.native_notice_action_resource(params)
+    @impl true
+    def run(params, context) do
+      with {:ok, _principal} <- Actions.authorized_principal(context, __MODULE__) do
+        apply(Arbor.Actions.Config.comms_module(), :publish_conversation_notice, [params])
+      else
+        _ -> {:error, :notice_publication_refused}
+      end
+    end
+  end
+
   defmodule SendMessage do
     @moduledoc """
     Send a message through a communication channel.

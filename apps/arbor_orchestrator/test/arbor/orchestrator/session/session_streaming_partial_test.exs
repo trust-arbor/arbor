@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
   crash, user cancel, or turn-timeout), whatever the assistant streamed so far is
   persisted as an :interrupted / :cancelled AssistantMessage instead of being lost.
 
-  Covers the accumulator (`{:stream_chunk}`), the finalize logic
+  Covers the generation-bound accumulator (`{:turn_stream}`), the finalize logic
   (`Builders.apply_turn_interruption/3`), and all three trigger handlers via direct
   callback calls (no live streaming turn needed).
   """
@@ -82,6 +82,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       turn_count: 0,
       messages: [],
       turn_in_flight: true,
+      turn_token: make_ref(),
       turn_from: nil,
       turn_caller_ref: nil,
       turn_started_at: System.monotonic_time(),
@@ -101,16 +102,18 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
   # interruption persist is still fire-and-forget Task.start — give it a moment to land
   defp settle, do: :timer.sleep(60)
 
-  describe "{:stream_chunk} accumulation" do
+  describe "generation-bound stream accumulation" do
     test "appends chunks and stamps first_token_at on the first non-empty chunk" do
       state = session(streaming_buffer: buffer(""))
 
-      {:noreply, s1} = Session.handle_info({:stream_chunk, "Hel"}, state)
+      {:noreply, s1} =
+        Session.handle_info({:turn_stream, state.turn_token, {:delta, "Hel"}}, state)
+
       assert s1.streaming_buffer.content == "Hel"
       assert %DateTime{} = s1.streaming_buffer.first_token_at
       first_ts = s1.streaming_buffer.first_token_at
 
-      {:noreply, s2} = Session.handle_info({:stream_chunk, "lo"}, s1)
+      {:noreply, s2} = Session.handle_info({:turn_stream, state.turn_token, {:delta, "lo"}}, s1)
       assert s2.streaming_buffer.content == "Hello"
       # first_token_at is sticky — set once, never moved
       assert s2.streaming_buffer.first_token_at == first_ts
@@ -118,7 +121,9 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
 
     test "drops chunks when there is no active buffer (late chunk after finalize)" do
       state = session(streaming_buffer: nil)
-      assert {:noreply, ^state} = Session.handle_info({:stream_chunk, "ignored"}, state)
+
+      assert {:noreply, ^state} =
+               Session.handle_info({:turn_stream, state.turn_token, {:delta, "ignored"}}, state)
     end
   end
 

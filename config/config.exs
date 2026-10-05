@@ -5,6 +5,8 @@ import Config
 config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin]
 
 # Common configuration for all Arbor apps
+config :arbor_security, :native_notice_source_authorizer, Arbor.Agent.NoticeSourceAuthority
+
 config :logger,
   level: :info
 

@@ -1,4 +1,9 @@
-# arbor-tui
+# arbor-tui-legacy
+
+This is the previous TermUI client, retained for explicit rollback. The default
+`arbor-tui` is built from [clients/arbor_breeze](../arbor_breeze/README.md).
+Building this directory produces `arbor-tui-legacy`; it does not replace the
+Breeze executable. Its signing, preferences and remembered state remain unchanged.
 
 A terminal chat client for Arbor — an escript built on
 [`term_ui`](https://github.com/pcharbon70/term_ui) (pure-Elixir Elm Architecture)
@@ -27,11 +32,11 @@ follow — that's the cost of decoupling.)
 ## Build & run
 
 ```bash
-mix deps.get
-mix escript.build
-./arbor-tui                       # no flags required — resumes the last agent, or starts unattached
-./arbor-tui --agent agent_30b4…   # attach to a specific agent
-./arbor-tui [--url ws://localhost:4000] [--key PATH]
+../../bin/mix deps.get --check-locked
+../../bin/mix escript.build
+./arbor-tui-legacy                       # no flags required — resumes the last agent, or starts unattached
+./arbor-tui-legacy --agent agent_30b4…   # attach to a specific agent
+./arbor-tui-legacy [--url ws://localhost:4000] [--key PATH]
 ```
 
 No flag is required. With no agent resolved (no flag, no config, no remembered
@@ -77,7 +82,7 @@ agent = agent_30b455…
 
 On a successful attach the client writes the agent id to `~/.arbor/tui.state`
 (same `key = value` format, `last_agent = agent_…`). This is **auto-written**
-state — keep it separate from the user-edited `tui.conf`. A bare `arbor-tui`
+state — keep it separate from the user-edited `tui.conf`. A bare `arbor-tui-legacy`
 then resumes the previous agent. An explicit `--agent` or config `agent` always
 wins over the remembered one.
 

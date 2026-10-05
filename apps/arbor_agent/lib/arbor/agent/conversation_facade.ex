@@ -59,11 +59,47 @@ defmodule Arbor.Agent.ConversationFacade do
             %{UserMessage.from_string(input.text) | sender_id: caller}
           end
 
-        collaborators.authenticate.(caller, target, message, auth_opts, fn ownership ->
+        authenticate =
+          if operation in [:activity, :cancel] and
+               Map.has_key?(collaborators, :authenticate_operation) do
+            payload =
+              encode_request(operation, caller, target, input, page_opts, expected_engagement)
+
+            operation_opts =
+              if expected_engagement,
+                do: Keyword.put(auth_opts, :expected_engagement_id, expected_engagement),
+                else: auth_opts
+
+            fn continuation ->
+              collaborators.authenticate_operation.(
+                caller,
+                target,
+                payload,
+                operation_opts,
+                continuation
+              )
+            end
+          else
+            fn continuation ->
+              collaborators.authenticate.(caller, target, message, auth_opts, continuation)
+            end
+          end
+
+        authenticate.(fn ownership ->
           with {:ok, scope} <- resolve_scope(collaborators, ownership.canonical_owner_id, target),
                :ok <- check_engagement_fence(scope, expected_engagement),
                :ok <- currently_authorized(scope, ownership, collaborators) do
-            dispatch(operation, scope, input, page_opts, ownership, collaborators)
+            dispatch(
+              operation,
+              scope,
+              input,
+              if(operation in [:activity, :cancel],
+                do: Keyword.put(page_opts, :_expected_engagement, expected_engagement),
+                else: page_opts
+              ),
+              ownership,
+              collaborators
+            )
           end
         end)
       end
@@ -77,7 +113,7 @@ defmodule Arbor.Agent.ConversationFacade do
 
   @doc false
   def request_payload(operation, caller, target, input, opts) do
-    with true <- operation in [:submit, :command, :events, :history],
+    with true <- operation in [:submit, :command, :events, :history, :window, :activity, :cancel],
          true <- valid_principal?(caller) and valid_principal?(target),
          {:ok, _auth, page, expected_engagement} <- validate_opts(operation, opts),
          :ok <- validate_input(operation, input) do
@@ -103,6 +139,33 @@ defmodule Arbor.Agent.ConversationFacade do
       _ ->
         {:error, :unauthorized}
     end
+  end
+
+  defp encode_request(operation, caller, target, input, page, expected_engagement)
+       when operation in [:activity, :cancel] do
+    Arbor.Comms.conversation_control_request_payload(
+      operation,
+      caller,
+      target,
+      input,
+      page,
+      expected_engagement
+    )
+  end
+
+  defp encode_request(:window, caller, target, nil, page, expected_engagement) do
+    Jason.encode!([
+      "arbor.conversation.window.v1",
+      caller,
+      target,
+      [
+        Keyword.get(page, :before),
+        Keyword.get(page, :after),
+        Keyword.get(page, :through),
+        Keyword.get(page, :limit)
+      ],
+      expected_engagement
+    ])
   end
 
   defp encode_request(operation, caller, target, input, page, expected_engagement) do
@@ -144,14 +207,19 @@ defmodule Arbor.Agent.ConversationFacade do
   defp production_collaborators do
     %{
       authenticate: &MessageFacade.with_authenticated_receipt/5,
+      authenticate_operation: &MessageFacade.with_authenticated_operation_receipt/5,
       resolve: &Arbor.Comms.resolve_user_engagement/2,
       recheck: &Arbor.Security.recheck_conversation_owner/3,
       admit: &Arbor.Comms.admit_conversation_command/2,
       get: &Arbor.Comms.get_conversation_command/2,
       claim: &Arbor.Comms.claim_conversation_command/2,
+      bind_claim: &Arbor.Comms.bind_conversation_command_claim/3,
       settle: &Arbor.Comms.settle_conversation_command/4,
       events: &Arbor.Comms.conversation_events/3,
       history: &Arbor.Comms.read_user_conversation_page/3,
+      window: &Arbor.Comms.read_user_conversation_window/3,
+      activity: &Arbor.Comms.conversation_command_activity/2,
+      cancel: &Arbor.Comms.request_conversation_command_cancellation/2,
       start_worker: fn work ->
         Task.Supervisor.start_child(Config.conversation_task_supervisor(), work)
       end
@@ -161,7 +229,8 @@ defmodule Arbor.Agent.ConversationFacade do
   defp dispatch(:submit, scope, command, _page, ownership, collaborators) do
     case collaborators.admit.(scope, command) do
       {:ok, admitted} ->
-        if admitted.status == :admitted do
+        if admitted.status == :admitted and
+             Map.get(admitted, :cancellation, %{status: :none}).status == :none do
           work = fn -> execute(scope, command.id, ownership, collaborators) end
 
           case collaborators.start_worker.(work) do
@@ -205,6 +274,107 @@ defmodule Arbor.Agent.ConversationFacade do
     release(result, scope, ownership, collaborators)
   end
 
+  defp dispatch(:window, scope, _input, page, ownership, collaborators) do
+    result = collaborators.window.(scope.agent_id, scope.principal_id, page)
+    release(result, scope, ownership, collaborators)
+  end
+
+  defp dispatch(:activity, scope, _input, page, ownership, collaborators) do
+    result =
+      with {:ok, indexed} <- collaborators.activity.(scope, Keyword.take(page, [:cursor, :limit])) do
+        ids = Enum.map(indexed.commands, & &1.command_id)
+
+        live =
+          case ownership.observe.(
+                 scope,
+                 %{
+                   ids: ids,
+                   page: Keyword.take(page, [:cursor, :limit, :control_timeout]),
+                   expected_engagement: Keyword.get(page, :_expected_engagement)
+                 },
+                 Keyword.get(page, :control_timeout, 5_000)
+               ) do
+            {:ok, %{commands: commands}} -> Map.new(commands, &{&1.command_id, &1})
+            _ -> %{}
+          end
+
+        commands =
+          Enum.map(indexed.commands, fn command ->
+            Map.merge(command, Map.get(live, command.command_id, %{}))
+          end)
+
+        {:ok, bounded_activity(%{indexed | commands: commands})}
+      end
+
+    release(result, scope, ownership, collaborators)
+  end
+
+  defp dispatch(:cancel, scope, id, page, ownership, collaborators) do
+    result =
+      with {:ok, command} <- collaborators.cancel.(scope, id) do
+        command =
+          if command.cancellation.status == :requested do
+            case ownership.cancel.(
+                   scope,
+                   %{
+                     id: id,
+                     page: Keyword.take(page, [:control_timeout]),
+                     expected_engagement: Keyword.get(page, :_expected_engagement)
+                   },
+                   Keyword.get(page, :control_timeout, 10_000)
+                 ) do
+              {:ok, %{termination: termination}}
+              when termination in [:queued_removed, :engine_terminated] ->
+                case collaborators.get.(scope, id) do
+                  {:ok, acknowledged} -> acknowledged
+                  _ -> command
+                end
+
+              _ ->
+                command
+            end
+          else
+            command
+          end
+
+        {:ok,
+         %{
+           command_id: id,
+           task_id: Arbor.Comms.conversation_command_task_id(scope, id),
+           delivery_status: command.status,
+           cancellation: command.cancellation,
+           termination_observation:
+             if(command.cancellation.status == :confirmed, do: :confirmed, else: :unconfirmed),
+           engagement_id: scope.engagement_id
+         }}
+      end
+
+    release(result, scope, ownership, collaborators)
+  end
+
+  defp bounded_activity(result) do
+    Enum.reduce_while(
+      result.commands,
+      Map.put(%{result | commands: []}, :truncated, false),
+      fn command, bounded ->
+        candidate = %{bounded | commands: bounded.commands ++ [command]}
+
+        if byte_size(Jason.encode!(candidate)) <= @max_reply_bytes do
+          {:cont, candidate}
+        else
+          cursor =
+            case List.last(bounded.commands) do
+              nil -> nil
+              last -> %{admitted_event_number: last.admitted_cursor, command_id: last.command_id}
+            end
+
+          {:halt, Map.merge(bounded, %{truncated: true, has_more: true, next_cursor: cursor})}
+        end
+      end
+    )
+    |> Map.put_new(:truncated, false)
+  end
+
   defp execute(scope, id, ownership, collaborators) do
     # Never verify a signed nonce twice. These source-owned checks follow
     # fresh cryptographic authentication and recheck live identity/capability.
@@ -212,7 +382,7 @@ defmodule Arbor.Agent.ConversationFacade do
          {:ok, token} <- collaborators.claim.(scope, id) do
       outcome =
         case currently_authorized(scope, ownership, collaborators) do
-          :ok -> delivery_outcome(ownership.deliver)
+          :ok -> deliver_claimed_command(scope, id, token, ownership, collaborators)
           _ -> @unknown
         end
 
@@ -228,6 +398,23 @@ defmodule Arbor.Agent.ConversationFacade do
     end
   after
     ownership.discard.()
+  end
+
+  defp deliver_claimed_command(scope, id, token, ownership, collaborators) do
+    case Map.get(collaborators, :bind_claim) do
+      bind when is_function(bind, 3) ->
+        with {:ok, binding} <- bind.(scope, id, token),
+             deliver when is_function(deliver, 1) <- Map.get(ownership, :deliver_command) do
+          delivery_outcome(fn -> deliver.(binding) end)
+        else
+          _ -> @unknown
+        end
+
+      nil ->
+        # Existing isolated collaborator fixtures do not represent production
+        # claim authority. The fixed production map always takes the bound path.
+        delivery_outcome(ownership.deliver)
+    end
   end
 
   defp delivery_outcome(deliver) do
@@ -273,8 +460,14 @@ defmodule Arbor.Agent.ConversationFacade do
            scope.agent_id,
            scope.principal_id
          ) do
-      {:ok, :authorized} -> :ok
-      _ -> {:error, :unauthorized}
+      {:ok, :authorized} ->
+        case resolve_scope(collaborators, scope.principal_id, scope.agent_id) do
+          {:ok, ^scope} -> :ok
+          _ -> {:error, :conversation_scope_changed}
+        end
+
+      _ ->
+        {:error, :unauthorized}
     end
   rescue
     _ -> {:error, :unauthorized}
@@ -307,17 +500,39 @@ defmodule Arbor.Agent.ConversationFacade do
         :command -> @proof_keys ++ [:expected_engagement_id]
         :events -> @proof_keys ++ [:through, :limit, :expected_engagement_id]
         :history -> @proof_keys ++ [:after, :through, :limit, :expected_engagement_id]
+        :window -> @proof_keys ++ [:before, :after, :through, :limit, :expected_engagement_id]
+        :activity -> @proof_keys ++ [:cursor, :limit, :control_timeout, :expected_engagement_id]
+        :cancel -> @proof_keys ++ [:control_timeout, :expected_engagement_id]
       end
 
     if Keyword.keyword?(opts) and
          not (Keyword.has_key?(opts, :session_token) and Keyword.has_key?(opts, :signed_request)) and
          length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))) and
          Enum.all?(Keyword.keys(opts), &(&1 in allowed)) do
-      page = Keyword.take(opts, [:after, :through, :limit])
+      page_keys =
+        case operation do
+          :window -> [:before, :after, :through, :limit]
+          operation when operation in [:activity, :cancel] -> [:cursor, :limit, :control_timeout]
+          _ -> [:after, :through, :limit]
+        end
+
+      page = Keyword.take(opts, page_keys)
 
       expected_engagement = Keyword.get(opts, :expected_engagement_id)
 
-      if valid_page?(page) and valid_engagement_fence?(expected_engagement) do
+      valid_page =
+        case operation do
+          :window ->
+            match?({:ok, _}, Arbor.Persistence.normalize_conversation_window_options(page))
+
+          operation when operation in [:activity, :cancel] ->
+            valid_control_page?(page)
+
+          _ ->
+            valid_page?(page)
+        end
+
+      if valid_page and valid_engagement_fence?(expected_engagement) do
         {:ok, Keyword.take(opts, @proof_keys ++ [:timeout]), page, expected_engagement}
       else
         {:error, :invalid_opts}
@@ -338,6 +553,22 @@ defmodule Arbor.Agent.ConversationFacade do
 
   defp valid_engagement_fence?(_), do: false
 
+  defp valid_control_page?(page) do
+    Enum.all?(page, fn
+      {:limit, n} ->
+        is_integer(n) and n in 1..50
+
+      {:control_timeout, n} ->
+        is_integer(n) and n in 1..30_000
+
+      {:cursor, %{admitted_event_number: n, command_id: id} = cursor} ->
+        map_size(cursor) == 2 and is_integer(n) and n > 0 and valid_id?(id)
+
+      _ ->
+        false
+    end)
+  end
+
   defp valid_page?(page) do
     Enum.all?(page, fn
       {:limit, limit} -> is_integer(limit) and limit in 1..100
@@ -347,16 +578,23 @@ defmodule Arbor.Agent.ConversationFacade do
 
   defp validate_input(:submit, %{id: id, text: text} = command) when map_size(command) == 2 do
     if valid_id?(id) and is_binary(text) and byte_size(text) in 1..@max_text_bytes and
-         String.valid?(text) and String.trim(text) != "",
+         String.valid?(text) and String.trim(text) != "" and
+         not String.starts_with?(String.trim_leading(text), "/"),
        do: :ok,
        else: {:error, :invalid_command}
   end
+
+  defp validate_input(:activity, nil), do: :ok
+
+  defp validate_input(:cancel, id),
+    do: if(valid_id?(id), do: :ok, else: {:error, :invalid_command})
 
   defp validate_input(:command, id),
     do: if(valid_id?(id), do: :ok, else: {:error, :invalid_command})
 
   defp validate_input(:events, cursor) when is_integer(cursor) and cursor >= 0, do: :ok
   defp validate_input(:history, nil), do: :ok
+  defp validate_input(:window, nil), do: :ok
   defp validate_input(_operation, _input), do: {:error, :invalid_command}
 
   defp valid_id?(id) when is_binary(id), do: String.valid?(id) and Regex.match?(@id_pattern, id)

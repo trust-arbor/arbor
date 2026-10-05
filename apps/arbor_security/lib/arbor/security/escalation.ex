@@ -177,7 +177,19 @@ defmodule Arbor.Security.Escalation do
       metadata: metadata
     }
 
-    case router.request(attrs, []) do
+    # Private source control travels outside the interaction and its metadata.
+    # Presence matters: an invalid supplied source must fail at the configured
+    # router instead of falling back to an unrelated approval request.
+    router_opts =
+      case opts do
+        options when is_list(options) ->
+          Keyword.take(options, [:conversation_source])
+
+        options when is_map(options) ->
+          options |> Map.take([:conversation_source]) |> Map.to_list()
+      end
+
+    case router.request(attrs, router_opts) do
       {:ok, request_id} ->
         {:ok, :pending_approval, request_id}
 

@@ -75,6 +75,7 @@ defmodule Arbor.Voice do
     :audio_turn_timeout_ms,
     :session_token,
     :audio_mode,
+    :audio_speech_max_words,
     :progress_threshold_ms
   ]
 
@@ -114,6 +115,12 @@ defmodule Arbor.Voice do
     Input PCM must match the source-admitted rate exactly. The bounded audio
     operation defaults to 90 seconds across send, consultation, receive and finalization,
     bounded by the remaining Session budget and any enclosing Desk permit.
+  * `:audio_speech_max_words` — PCM final-speech word cap; nil (the default)
+    disables word truncation while retaining text/PCM byte bounds and all speech
+    guards. Positive caps must fit the stock guard pointers. Overrides the
+    `:arbor_voice` Application default, including through `:desk_session_options`.
+    This option is PCM-only; text turns and fixed progress cues retain the legacy
+    Speakable limit. Malformed option/config values fail before resource effects.
   * `:progress_threshold_ms` — positive integer, default 2000, hard ceiling
     30000, must not exceed the effective tool-router timeout (VOICE-11).
     Explicit malformed → `{:error, :invalid_opts}`; malformed Application
@@ -289,12 +296,19 @@ defmodule Arbor.Voice do
     end
   end
 
+  @doc "Validated default and allowed recording durations (milliseconds) for local Desk controls."
+  @spec desk_recording_options() :: {:ok, map()} | {:error, :invalid_config}
+  def desk_recording_options, do: Config.desk_recording_options()
+
   @doc "Start one authenticated server-owned microphone turn; returns only an opaque control id."
   def start_desk_turn(user, agent, opts \\ []),
     do: Desk.start(user, agent, Redacted.new(opts))
 
   @doc "Read bounded desk status and renew its short controller lease. Never returns PCM."
   def desk_turn_status(id), do: Desk.status(id)
+
+  @doc "Finish the active recording early; captured audio is sent only after positive device cleanup."
+  def finish_desk_turn(id), do: Desk.finish(id)
 
   @doc "Revoke one exact desk operation; pending cleanup retains device custody."
   def cancel_desk_turn(id), do: Desk.cancel(id)
@@ -406,6 +420,7 @@ defmodule Arbor.Voice do
     with :ok <- validate_opts(opts),
          {:ok, timeouts} <- Config.operation_timeouts(),
          {:ok, audio_mode} <- resolve_audio_mode(opts),
+         {:ok, audio_speech_max_words} <- resolve_audio_speech_max_words(opts, audio_mode),
          {:ok, daily_ms} <- resolve_daily_budget_ms(opts),
          {:ok, session_ms} <- resolve_session_budget_ms(opts, daily_ms),
          {:ok, backend} <- resolve_backend(opts),
@@ -464,6 +479,7 @@ defmodule Arbor.Voice do
          backend: backend,
          backend_opts: backend_opts,
          audio_mode: audio_mode,
+         audio_speech_max_words: audio_speech_max_words,
          signals: signals,
          wall_clock: wall_clock,
          monotonic_clock: mono_clock,
@@ -494,6 +510,25 @@ defmodule Arbor.Voice do
       :error -> {:ok, :text}
       {:ok, :pcm16} -> {:ok, :pcm16}
       _ -> {:error, :invalid_opts}
+    end
+  end
+
+  defp resolve_audio_speech_max_words(opts, :text) do
+    if Keyword.has_key?(opts, :audio_speech_max_words),
+      do: {:error, :invalid_opts},
+      else: {:ok, nil}
+  end
+
+  defp resolve_audio_speech_max_words(opts, :pcm16) do
+    case Keyword.fetch(opts, :audio_speech_max_words) do
+      :error ->
+        Config.audio_speech_max_words()
+
+      {:ok, value} ->
+        case Config.validate_audio_speech_max_words(value) do
+          {:ok, validated} -> {:ok, validated}
+          {:error, _} -> {:error, :invalid_opts}
+        end
     end
   end
 

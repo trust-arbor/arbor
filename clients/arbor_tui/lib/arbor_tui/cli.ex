@@ -1,10 +1,10 @@
 defmodule ArborTui.CLI do
   @moduledoc """
-  escript entry point for the Arbor TUI client.
+  escript entry point for the legacy Arbor TermUI client.
 
   Usage:
 
-      arbor-tui [--agent agent_30b4…] [--url ws://localhost:4000] [--key PATH]
+      arbor-tui-legacy [--agent agent_30b4…] [--url ws://localhost:4000] [--key PATH]
 
   No flag is required. Settings resolve with the precedence **CLI flag > config
   file (`~/.arbor/tui.conf`) > env var > built-in default** (see
@@ -50,7 +50,7 @@ defmodule ArborTui.CLI do
   end
 
   defp abort(reason) do
-    IO.puts(:stderr, "arbor-tui: #{format_error(reason)}")
+    IO.puts(:stderr, "arbor-tui-legacy: #{format_error(reason)}")
     System.halt(1)
   end
 

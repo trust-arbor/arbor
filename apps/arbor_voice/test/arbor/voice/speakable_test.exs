@@ -231,4 +231,39 @@ defmodule Arbor.Voice.SpeakableTest do
   defp allow_classifier(_text), do: :public
 
   defp word_count(text), do: length(String.split(text, ~r/\s+/, trim: true))
+
+  test "explicit nil removes word truncation while legacy callers retain the 60-word budget" do
+    text = Enum.map_join(1..70, " ", fn _ -> "word" end)
+
+    assert {:speak, ^text} =
+             Speakable.render(text, max_words: nil, classifier: &allow_classifier/1)
+
+    assert {:speak_truncated, _} = Speakable.render(text, classifier: &allow_classifier/1)
+
+    assert {:speak_truncated, capped} =
+             Speakable.render(text, max_words: 60, classifier: &allow_classifier/1)
+
+    assert word_count(capped) <= 60
+  end
+
+  test "nil word limit preserves normalization, non-verbal shaping and sensitivity refusal" do
+    assert {:speak, "first second"} =
+             Speakable.render("first  second", max_words: nil, classifier: &allow_classifier/1)
+
+    assert {:speak_truncated, shaped} =
+             Speakable.render("Before. ```elixir\nprivate_code\n``` After.",
+               max_words: nil,
+               classifier: &allow_classifier/1
+             )
+
+    refute shaped =~ "private_code"
+    assert String.ends_with?(shaped, @default_escalation_phrase)
+
+    assert {:screen_only, @sensitive_pointer} =
+             Speakable.render("private", max_words: nil, classifier: fn _ -> :restricted end)
+
+    for bad <- [0, -1, false, "60"] do
+      assert_raise ArgumentError, fn -> Speakable.render("Hello", max_words: bad) end
+    end
+  end
 end

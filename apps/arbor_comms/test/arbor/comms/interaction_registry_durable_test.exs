@@ -134,7 +134,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     {:ok, path: path}
   end
 
-  test "security regression: cold durable answer never reconstructs human proof from persisted metadata" do
+  test "security regression: cold durable answer retains owner-verified human proof independently of metadata" do
     ctx = ApprovalFixture.setup!()
     ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
 
@@ -166,7 +166,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
     assert evidence.decision == :approve
-    refute Map.has_key?(evidence, :verified_human_id)
+    assert evidence.verified_human_id == ctx.human_id
 
     assert {:error, _} =
              Arbor.Comms.respond_to_interaction_authenticated(
@@ -432,8 +432,15 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
         now + 1
       )
 
-    pending_v1 = pending_v2 |> Map.put("schema_version", 1) |> Map.delete("dispatch")
-    terminal_v1 = terminal_v2 |> Map.put("schema_version", 1) |> Map.delete("dispatch")
+    pending_v1 =
+      pending_v2
+      |> Map.put("schema_version", 1)
+      |> Map.drop(["dispatch", "conversation_attachment", "verified_response"])
+
+    terminal_v1 =
+      terminal_v2
+      |> Map.put("schema_version", 1)
+      |> Map.drop(["dispatch", "conversation_attachment", "verified_response"])
 
     :ok = Backend.put_raw(pending_id, Record.new(pending_id, pending_v1), path)
     :ok = Backend.put_raw(terminal_id, Record.new(terminal_id, terminal_v1), path)
@@ -442,8 +449,8 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     pending_record = assert_dispatch_status(pending_id, "pending")
     terminal_record = assert_dispatch_status(terminal_id, "cancelled")
-    assert pending_record.data["schema_version"] == 2
-    assert terminal_record.data["schema_version"] == 2
+    assert pending_record.data["schema_version"] == 3
+    assert terminal_record.data["schema_version"] == 3
     assert terminal_record.data["status"] == "responded"
 
     Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})

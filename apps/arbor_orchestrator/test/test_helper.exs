@@ -30,7 +30,7 @@ end
 
 :ok = Arbor.Security.TestBootstrap.start!()
 
-ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed])
+ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed, :isolated_repo])
 
 if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
      Process.whereis(Arbor.Shell.Supervisor) != nil do

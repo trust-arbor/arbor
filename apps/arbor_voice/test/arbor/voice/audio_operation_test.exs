@@ -87,12 +87,90 @@ defmodule Arbor.Voice.AudioOperationTest do
     assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
     assert_receive {:audio_entered, worker, {:ok, effect_deadline}}, 1_000
     assert effect_deadline < ticket.deadline_ms
-    assert (effect_deadline - System.monotonic_time(:millisecond)) in 1..1_000
+    remaining = effect_deadline - System.monotonic_time(:millisecond)
+    assert remaining in 119_000..BackendWorker.max_deadline_distance_ms()
     send(worker, :finish_audio)
     assert_receive :audio_callback_finished, 1_000
     assert_receive {:voice_audio_turn_ready, ^ticket}, 1_000
     assert :ok = ResourceOwner.cancel_audio(owner, ticket)
     assert_receive {:audio_backend_closed, 1}, 1_000
+  end
+
+  @tag :security_regression
+  test "receive handoff preserves its turn deadline through work beyond the cleanup budget" do
+    opts = Keyword.put(@owner_opts, :close_timeout_ms, 500)
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+    owner_ref = Process.monitor(owner)
+    deadline = System.monotonic_time(:millisecond) + 2_000
+
+    {:ok, ticket} =
+      ResourceOwner.reserve_audio_turn(owner, format(), byte_size(@pcm), {:deadline, deadline})
+
+    assert ticket.deadline_ms == deadline
+    {:ok, request} = ResourceOwner.handoff_audio(owner, ticket, @pcm)
+    assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
+    assert_receive {:audio_entered, worker, {:ok, effect_deadline}}, 1_000
+    assert effect_deadline == deadline
+    Process.send_after(worker, :finish_audio, 700)
+    assert_receive :audio_callback_finished, 1_000
+    assert_receive {:voice_audio_turn_ready, ^ticket}, 1_000
+    assert :ok = ResourceOwner.cancel_audio(owner, ticket)
+    assert_receive {:audio_backend_closed, 1}, 1_000
+    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :audio_cancelled}, :ok}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}
+    refute_receive {:voice_audio_operation_result, ^ticket, _, _}
+  end
+
+  @tag :security_regression
+  test "receive handoff expiration fences blocked work without claiming positive closure" do
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], @owner_opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+    owner_ref = Process.monitor(owner)
+    {:ok, ticket} = ResourceOwner.reserve_audio_turn(owner, format(), byte_size(@pcm), 200)
+    {:ok, request} = ResourceOwner.handoff_audio(owner, ticket, @pcm)
+    assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
+    assert_receive {:audio_entered, worker, {:ok, effect_deadline}}, 1_000
+    assert effect_deadline == ticket.deadline_ms
+    worker_ref = Process.monitor(worker)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 1_000
+
+    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :owner_timeout},
+                    {:error, :cleanup_pending}},
+                   1_000
+
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}, 1_000
+    send(worker, :finish_audio)
+    refute_receive :audio_callback_finished
+    refute_receive {:voice_audio_turn_ready, ^ticket}
+    refute_receive {:audio_backend_closed, _}
+    refute_receive {:voice_audio_operation_result, ^ticket, _, _}
+  end
+
+  @tag :security_regression
+  test "receive handoff cancellation fences blocked work without claiming positive closure" do
+    opts = Keyword.put(@owner_opts, :close_timeout_ms, 500)
+    {:ok, owner} = ResourceOwner.start(self(), BlockingBackend, [parent: self()], opts)
+    on_exit(fn -> ResourceOwner.close(owner) end)
+    owner_ref = Process.monitor(owner)
+    {:ok, ticket} = ResourceOwner.reserve_audio_turn(owner, format(), byte_size(@pcm), 2_000)
+    {:ok, request} = ResourceOwner.handoff_audio(owner, ticket, @pcm)
+    assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
+    assert_receive {:audio_entered, worker, _}, 1_000
+    worker_ref = Process.monitor(worker)
+    assert :ok = ResourceOwner.cancel_audio(owner, ticket)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 1_000
+
+    assert_receive {:voice_audio_operation_result, ^ticket, {:error, :audio_cancelled},
+                    {:error, :cleanup_pending}},
+                   1_000
+
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}, 1_000
+    send(worker, :finish_audio)
+    refute_receive :audio_callback_finished
+    refute_receive {:voice_audio_turn_ready, ^ticket}
+    refute_receive {:audio_backend_closed, _}
+    refute_receive {:voice_audio_operation_result, ^ticket, _, _}
   end
 
   test "audio reservation preserves an absolute deadline and rejects malformed or excessive budgets" do

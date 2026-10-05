@@ -17,7 +17,24 @@ defmodule Arbor.Gateway.Chat.SocketTest.Host do
     end
   end
 
+  def conversation_window(caller, target, opts) do
+    with :ok <- authenticate(:window, caller, target, nil, opts) do
+      {:ok,
+       %{
+         engagement_id: Process.get(:engagement_id, "eng_11111111111111111111111111111111"),
+         entries: [],
+         head: 0,
+         first: 0,
+         last: 0,
+         has_older: false,
+         has_newer: false
+       }}
+    end
+  end
+
   def submit_conversation_command(caller, target, command, opts) do
+    send(self(), {:submit_facade_called, caller, target, command.id})
+
     with :ok <- authenticate(:submit, caller, target, command, opts) do
       case Process.get({:command, command.id}) do
         nil ->
@@ -133,6 +150,10 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     {:ok, payload} =
       Arbor.Agent.conversation_request_payload(operation, "human_owner", target, input, opts)
 
+    signed_frame(payload, key)
+  end
+
+  defp signed_frame(payload, key) do
     {:ok, proof} = SignedRequest.sign(payload, "human_owner", key)
 
     auth = %{
@@ -165,6 +186,23 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     end
   end
 
+  test "signed window is an authenticated attachment and leaves v2 command transport usable", %{
+    state: state,
+    key: key
+  } do
+    {event, attached} = drive(frame(:window, nil, key), state)
+    assert event["type"] == "conversation_window"
+
+    assert Enum.sort(Map.keys(event["data"])) ==
+             ~w(agent_id engagement_id entries first has_newer has_older head last)
+
+    assert attached.agent_id == "agent_a"
+    assert attached.engagement_id == "eng_11111111111111111111111111111111"
+    {reply, _} = drive(frame(:submit, %{id: "window-send", text: "hello"}, key), attached)
+    assert reply["type"] == "conversation_command"
+    assert_receive {:dispatch, "window-send"}
+  end
+
   test "security regression: attached socket cannot submit an unsigned legacy send", %{
     state: state
   } do
@@ -184,6 +222,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
 
     for {operation, input} <- [
           history: nil,
+          window: nil,
           events: 0,
           command: "existing",
           submit: %{id: "new", text: "hello"}
@@ -293,9 +332,41 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     key: key
   } do
     {_, state} = drive(frame(:history, nil, key), state)
+    slash = %{id: "slash", text: "/model other"}
+    opts = [expected_engagement_id: state.engagement_id]
 
-    assert {%{"reason" => "server_commands_unavailable"}, _} =
-             drive(frame(:submit, %{id: "slash", text: "/model other"}, key), state)
+    assert {:error, :invalid_command} =
+             Arbor.Agent.conversation_request_payload(
+               :submit,
+               "human_owner",
+               "agent_a",
+               slash,
+               opts
+             )
+
+    {:ok, valid_payload} =
+      Arbor.Agent.conversation_request_payload(
+        :submit,
+        "human_owner",
+        "agent_a",
+        %{slash | text: "ordinary message"},
+        opts
+      )
+
+    # Deliberately bypass the SDK's slash refusal at the raw-wire boundary.
+    # Sign the final bytes so this exercises Gateway's independent command gate.
+    payload =
+      valid_payload
+      |> Jason.decode!()
+      |> List.update_at(4, fn [id, _text] -> [id, slash.text] end)
+      |> Jason.encode!()
+
+    assert {%{"type" => "error", "reason" => "server_commands_unavailable"}, _} =
+             drive(signed_frame(payload, key), state)
+
+    refute_receive {:submit_facade_called, _, _, _}
+    refute_receive {:dispatch, _}
+    assert Process.get({:command, "slash"}) == nil
 
     for type <- ["cancel", "list_engagements", "list_approvals", "approve", "deny"] do
       assert {%{"reason" => "unauthorized"}, _} = drive(Jason.encode!(%{type: type}), state)

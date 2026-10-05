@@ -11,7 +11,7 @@ defmodule Arbor.Multimedia do
   The default driver fails closed until the reviewed native prerequisites are
   adopted and qualified. There is no implicit device or permission probe at boot.
   """
-  alias Arbor.Multimedia.{DeviceOwner, Fence, PcmCore, Redacted}
+  alias Arbor.Multimedia.{DeviceOwner, Driver, Fence, PcmCore, Redacted}
 
   @type audio :: %{pcm: binary(), sample_rate: pos_integer(), channels: 1, sample_format: :s16le}
 
@@ -63,12 +63,54 @@ defmodule Arbor.Multimedia do
     with {:ok, spec} <- PcmCore.capture(opts), do: run(spec)
   end
 
+  @doc "Whether the configured driver supports returning a manually finished capture."
+  @spec manual_capture_finish_supported?() :: boolean()
+  def manual_capture_finish_supported? do
+    driver = Application.get_env(:arbor_multimedia, :driver, Driver.Unavailable)
+    Driver.manual_finish_supported?(driver)
+  end
+
+  @doc """
+  Start bounded capture with a private manual-finish control.
+
+  The local `controller: {pid, correlation_ref}` receives
+  `{:multimedia_capture_control, correlation_ref, control}`. Only that controller
+  holding the opaque control can request finish. Control delivery does not mean
+  capture has started. After the first valid PCM chunk while capture is active,
+  the same controller
+  receives `{:multimedia_capture_started, correlation_ref, control}` once. This
+  confirms sample delivery, not audio quality or capture completion; it carries
+  no audio. Early finish remains supported before this receipt.
+  `minimum_duration_ms` defaults
+  to 100. Short recordings fail after cleanup; no silence is invented.
+  The caller still waits for exact captured bytes and positive device closure.
+  Controller or caller loss cancels and discards capture.
+  """
+  @spec capture_pcm(keyword(), keyword()) ::
+          {:ok, %{audio: audio(), utterance_ended_at: DateTime.t()}} | {:error, atom()}
+  def capture_pcm(opts, control_opts) do
+    with {:ok, spec} <- PcmCore.capture(opts),
+         {:ok, spec, controller} <- PcmCore.capture_control(spec, control_opts, node()) do
+      run(spec, controller)
+    end
+  end
+
+  @doc "Request early capture completion. Acknowledgement is not audio or cleanup completion."
+  @spec finish_capture(binary()) :: :ok | {:error, atom()}
+  def finish_capture(control) when is_binary(control) and byte_size(control) == 32 do
+    GenServer.call(DeviceOwner, {:finish_capture, Redacted.new(control)}, 1_000)
+  catch
+    :exit, _ -> {:error, :finish_unavailable}
+  end
+
+  def finish_capture(_), do: {:error, :invalid_control}
+
   @spec play_pcm(audio(), keyword()) :: :ok | {:error, atom()}
   def play_pcm(audio, opts \\ []) do
     with {:ok, spec} <- PcmCore.playback(audio, opts), do: run(spec)
   end
 
-  defp run(spec) do
+  defp run(spec, controller \\ nil) do
     request = make_ref()
     grace = Application.get_env(:arbor_multimedia, :operation_grace_ms, 2_000)
     # Internal configuration may shorten test deadlines, never public opts.
@@ -77,7 +119,11 @@ defmodule Arbor.Multimedia do
     deadline = System.monotonic_time(:millisecond) + timeout
 
     try do
-      GenServer.call(DeviceOwner, {:run, request, Redacted.new(spec), deadline}, timeout + 100)
+      GenServer.call(
+        DeviceOwner,
+        {:run, request, Redacted.new(spec), deadline, Redacted.new(controller)},
+        timeout + 100
+      )
     catch
       :exit, {:timeout, _} ->
         if pid = Process.whereis(DeviceOwner), do: send(pid, {:cancel, request, self()})

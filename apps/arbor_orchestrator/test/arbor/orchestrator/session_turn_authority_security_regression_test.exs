@@ -2141,7 +2141,13 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     on_exit(fn -> Signals.unsubscribe(subscription) end)
     active = :sys.get_state(session)
     stream_state = %{active | config: Map.put(active.config, "stream", true)}
-    callback = Builders.build_engine_opts(stream_state, %{})[:on_stream]
+
+    callback =
+      Builders.build_engine_opts(stream_state, %{},
+        source: :turn,
+        steering_binding: {active.turn_token, active.turn_user_message.engagement_id}
+      )[:on_stream]
+
     callback.(%{type: :delta, data: %{text: "partial internal answer"}})
     callback.(%{type: :finish})
     assert :ok = Session.cancel_turn(session)
@@ -2223,7 +2229,16 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       session = completion_barrier_session!(ctx)
       task = start_completion_barrier_turn!(session, ctx)
       assert_receive {:completion_model_blocked, model, token}, 5_000
-      send(session, {:stream_chunk, "private partial sentinel"})
+      active = :sys.get_state(session)
+      stream_state = %{active | config: Map.put(active.config, "stream", true)}
+
+      stream =
+        Builders.build_engine_opts(stream_state, %{},
+          source: :turn,
+          steering_binding: {active.turn_token, active.turn_user_message.engagement_id}
+        )[:on_stream]
+
+      stream.(%{type: :delta, data: %{text: "private partial sentinel"}})
       active = :sys.get_state(session)
       assert active.streaming_buffer.content == "private partial sentinel"
       deny_completion_binding!(ctx, :revocation)

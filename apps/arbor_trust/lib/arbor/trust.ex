@@ -413,6 +413,10 @@ defmodule Arbor.Trust do
     to: CapabilityEnforcementMatrix,
     as: :row_for
 
+  @doc "Read current notice approval policy without minting, authorizing, emitting or escalating."
+  def check_notice_publication_policy(capability, principal_id, resource_uri),
+    do: ApprovalGuard.check_notice_publication(capability, principal_id, resource_uri)
+
   @doc """
   Authorize an operation through the policy layer.
 

@@ -183,6 +183,12 @@ defmodule Arbor.Orchestrator.Session do
     # Pending and active receipt-derived memory admissions, owned by this process.
     # Kept separate from TurnAuthority and stripped from every public projection.
     private_memory_admissions: %{},
+    # Winning durable journal claims, keyed by source TurnAuthority. Private
+    # process state only: never graph context, checkpoint, renderer or wire.
+    conversation_bindings: %{},
+    conversation_source: nil,
+    turn_termination_observation: :unconfirmed,
+    turn_progress: nil,
     # Source-owned route, recovery sources and stage correlation. Never public
     # or checkpointed; only the admission map above contains opaque handles.
     private_memory_turn: nil,
@@ -441,6 +447,38 @@ defmodule Arbor.Orchestrator.Session do
 
   def send_authenticated_message(_session, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_authenticated_message_request}
+
+  @doc false
+  def send_conversation_command(
+        session,
+        %UserMessage{} = message,
+        %DeliveryReceipt{} = receipt,
+        binding,
+        timeout_ms
+      )
+      when is_map(binding) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(session, {:send_conversation_command, message, receipt, binding}, timeout_ms)
+  end
+
+  def send_conversation_command(_, _, _, _, _), do: {:error, :unauthenticated}
+
+  @doc false
+  def conversation_activity(session, subject, receipt, scope, query, timeout_ms),
+    do:
+      GenServer.call(
+        session,
+        {:conversation_activity, subject, receipt, scope, query},
+        timeout_ms
+      )
+
+  @doc false
+  def cancel_conversation_command(session, subject, receipt, scope, query, timeout_ms),
+    do:
+      GenServer.call(
+        session,
+        {:cancel_conversation_command, subject, receipt, scope, query},
+        timeout_ms
+      )
 
   @doc """
   Authenticated internal consultation using an already issued delivery receipt.
@@ -853,6 +891,101 @@ defmodule Arbor.Orchestrator.Session do
       {:reply, {:error, :unauthenticated}, state}
   end
 
+  def handle_call({:send_conversation_command, message, receipt, binding}, from, state) do
+    if state.execution_mode == :legacy do
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :legacy_mode}, state}
+    else
+      handle_authenticated_message(message, receipt, from, state, nil, binding)
+    end
+  rescue
+    _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+  catch
+    _, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+  end
+
+  def handle_call({:conversation_activity, subject, receipt, scope, query}, _from, state) do
+    result =
+      with :ok <-
+             authenticate_conversation_control(:activity, subject, receipt, scope, query, state),
+           true <- is_list(query.ids) and length(query.ids) <= 50 do
+        commands =
+          Enum.flat_map(query.ids, fn id ->
+            case live_conversation_observation(state, scope, id) do
+              nil -> []
+              command -> [command]
+            end
+          end)
+
+        with :ok <- recheck_control_scope(subject, scope, state), do: {:ok, %{commands: commands}}
+      else
+        _ -> {:error, :unauthorized}
+      end
+
+    best_effort_discard_receipt(receipt)
+    {:reply, result, state}
+  rescue
+    _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthorized}, state}
+  catch
+    _, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthorized}, state}
+  end
+
+  def handle_call({:cancel_conversation_command, subject, receipt, scope, query}, _from, state) do
+    with :ok <- authenticate_conversation_control(:cancel, subject, receipt, scope, query, state),
+         {:ok, %{cancellation: %{status: :requested}}} <-
+           Arbor.Comms.get_conversation_command(scope, query.id),
+         :ok <- recheck_control_scope(subject, scope, state) do
+      {termination, next} = cancel_bound_conversation(state, scope, query.id)
+
+      result =
+        with :ok <- recheck_control_scope(subject, scope, next),
+             do: {:ok, %{termination: termination}}
+
+      best_effort_discard_receipt(receipt)
+      {:reply, result, next}
+    else
+      _ ->
+        best_effort_discard_receipt(receipt)
+        {:reply, {:error, :unauthorized}, state}
+    end
+  rescue
+    _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthorized}, state}
+  catch
+    _, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthorized}, state}
+  end
+
+  def handle_call({:conversation_interaction, generation, handle, spec, timeout_ms}, _from, state) do
+    result =
+      with true <- matching_engine_turn_token?(state, generation),
+           true <- state.conversation_source == handle and not is_nil(handle),
+           true <- terminal_conversation_authorized?(state),
+           %{binding: binding} <- conversation_binding(state, state.turn_authority),
+           {:ok, _} <-
+             Arbor.Comms.validate_conversation_command_binding(
+               binding,
+               binding.scope,
+               state.turn_user_message.content
+             ) do
+        Arbor.Comms.request_conversation_interaction(handle, spec, timeout_ms)
+      else
+        _ -> {:error, :source_retired}
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call({:update_private_goal, message, receipt, goal_id, attrs}, _from, state) do
     reply = update_authenticated_private_goal(message, receipt, goal_id, attrs, state)
     {:reply, reply, state}
@@ -1049,15 +1182,23 @@ defmodule Arbor.Orchestrator.Session do
 
     session_pid = self()
     turn_graph = state.turn_graph
+    notice_worker_ref = make_ref()
+    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(state.signing_authority)
 
     # Load-bearing: deactivate fence BEFORE send so Session cannot observe an
     # active fence while handling the terminal result. The `after` block is an
     # idempotent crash/exit backstop only. Session remains sole revocation owner.
     task_fn = fn ->
+      Arbor.Orchestrator.NativeNoticeWorker.await(notice_worker_ref, session_pid)
+
       try do
         result =
           try do
-            Engine.run(turn_graph, engine_opts)
+            if revalidate_command_binding(user_message, turn_authority, state) == :ok do
+              Engine.run(turn_graph, engine_opts)
+            else
+              {:error, :invalid_claim}
+            end
           rescue
             e -> {:error, {:engine_crash, Exception.message(e)}}
           end
@@ -1066,6 +1207,7 @@ defmodule Arbor.Orchestrator.Session do
         send(session_pid, {:turn_result, turn_token, user_message, result})
       after
         TurnEgress.deactivate_fence(fence)
+        Arbor.Security.close_native_notice_worker()
       end
     end
 
@@ -1082,6 +1224,7 @@ defmodule Arbor.Orchestrator.Session do
         {pid, ref}
       end
 
+    Arbor.Orchestrator.NativeNoticeWorker.release(task_pid, notice_worker_ref, notice_source)
     caller_pid = elem(from, 0)
     caller_ref = Process.monitor(caller_pid)
 
@@ -1102,6 +1245,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_taint_evidence: prepared.turn_taint_evidence,
         turn_authority: turn_authority,
         private_memory_turn: prepared.private_memory_turn,
+        conversation_source: prepared.conversation_source,
         turn_egress_fence: fence,
         turn_token: turn_token,
         steer_froms: [],
@@ -1163,8 +1307,12 @@ defmodule Arbor.Orchestrator.Session do
 
   defp user_message_task_id(_), do: nil
 
-  defp active_turn_task_id(%{turn_user_message: user_message}),
-    do: user_message_task_id(user_message)
+  defp active_turn_task_id(%{turn_user_message: user_message} = state) do
+    case conversation_binding(state, state.turn_authority) do
+      %{task_id: task_id} -> task_id
+      _ -> user_message_task_id(user_message)
+    end
+  end
 
   defp active_turn_task_id(_), do: nil
 
@@ -1228,8 +1376,8 @@ defmodule Arbor.Orchestrator.Session do
 
   defp purge_queued_task(state, task_id) when is_binary(task_id) do
     {kept, removed} =
-      Enum.split_with(state.turn_queue || [], fn {user_message, _authority, _from} ->
-        user_message_task_id(user_message) != task_id
+      Enum.split_with(state.turn_queue || [], fn {user_message, authority, _from} ->
+        queued_turn_task_id(state, user_message, authority) != task_id
       end)
 
     Enum.each(removed, fn {_msg, _authority, from} ->
@@ -1239,6 +1387,9 @@ defmodule Arbor.Orchestrator.Session do
     %{state | turn_queue: kept}
     |> PrivateMemory.prune()
   end
+
+  defp queued_turn_task_id(state, message, authority),
+    do: conversation_task_id(state, authority) || user_message_task_id(message)
 
   defp do_cancel_active_turn(state, reason, reply \\ {:error, :cancelled})
 
@@ -1278,7 +1429,7 @@ defmodule Arbor.Orchestrator.Session do
     state = %{state | turn_queue: rest}
 
     cond do
-      task_cancelled?(state, user_message_task_id(user_message)) ->
+      task_cancelled?(state, queued_turn_task_id(state, user_message, turn_authority)) ->
         safe_reply(from, {:error, :cancelled})
         send(self(), :drain_queue)
         {:noreply, PrivateMemory.close(state, turn_authority)}
@@ -1289,7 +1440,17 @@ defmodule Arbor.Orchestrator.Session do
         {:noreply, PrivateMemory.close(state, turn_authority)}
 
       true ->
-        start_turn(user_message, turn_authority, from, state)
+        case start_turn(user_message, turn_authority, from, state) do
+          {:noreply, %{turn_in_flight: false, turn_queue: [_ | _]} = idle} ->
+            # A refused admission frees the mind just like a completed turn.
+            # Continue FIFO only while idle; an asynchronous preflight owns
+            # the generation and must finish before the next queue drain.
+            send(self(), :drain_queue)
+            {:noreply, idle}
+
+          result ->
+            result
+        end
     end
   end
 
@@ -1418,14 +1579,25 @@ defmodule Arbor.Orchestrator.Session do
   # turn Task) sends each chunk here so the partial survives a Task crash. We
   # accumulate into the in-flight buffer; if there's no active buffer (late chunk
   # after the turn already finalized), drop it.
-  def handle_info({:stream_chunk, text}, %{streaming_buffer: buf} = state)
-      when is_map(buf) and is_binary(text) do
-    first_token_at = buf.first_token_at || if(text != "", do: DateTime.utc_now())
-    updated = %{buf | content: buf.content <> text, first_token_at: first_token_at}
-    {:noreply, %{state | streaming_buffer: updated}}
+  def handle_info({:turn_stream, token, event}, state) do
+    if matching_engine_turn_token?(state, token) and terminal_conversation_authorized?(state) do
+      admit_turn_stream(event, state)
+    else
+      {:noreply, state}
+    end
   end
 
+  # Unqualified legacy producer messages cannot contribute to a later turn.
   def handle_info({:stream_chunk, _text}, state), do: {:noreply, state}
+
+  def handle_info({:turn_progress, token, progress}, state) do
+    if matching_engine_turn_token?(state, token) and not Consultation.active?(state) and
+         terminal_conversation_authorized?(state) and valid_turn_progress?(progress) do
+      {:noreply, %{state | turn_progress: progress}}
+    else
+      {:noreply, state}
+    end
+  end
 
   # Hung-task safety net: if the turn task neither completed nor crashed within
   # the timeout, preserve the partial as :interrupted (reason :timeout), kill the
@@ -1522,6 +1694,10 @@ defmodule Arbor.Orchestrator.Session do
     task_pid = state.turn_task_pid
 
     TurnEgress.deactivate_fence(state.turn_egress_fence)
+    retire_conversation_source(state.conversation_source, :source_retired)
+
+    memory_closed =
+      if Keyword.get(opts, :close_memory?, true), do: close_memory_observed(state), else: :ok
 
     state =
       if Keyword.get(opts, :close_memory?, true),
@@ -1530,36 +1706,65 @@ defmodule Arbor.Orchestrator.Session do
 
     lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(task_pid)})
 
-    try do
-      if kill_task? do
-        kill_task_and_await_down(state)
+    termination =
+      try do
+        observation =
+          if kill_task? do
+            proof = kill_task_and_await_down(state)
 
-        lifecycle_probe(:task_kill_awaited, %{
-          task_alive?: task_alive?(task_pid),
-          task_pid: task_pid
-        })
-      else
-        if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+            lifecycle_probe(:task_kill_awaited, %{
+              task_alive?: task_alive?(task_pid),
+              task_pid: task_pid
+            })
+
+            proof
+          else
+            if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+            :unconfirmed
+          end
+
+        if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+        demonitor_steering_callers(state)
+        observation
+      rescue
+        _ -> :unconfirmed
+      catch
+        _, _ -> :unconfirmed
       end
-
-      if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-      demonitor_steering_callers(state)
-    rescue
-      _ -> :ok
-    catch
-      _, _ -> :ok
-    end
 
     # Revoke only after kill has been observed (or task was already dead).
     lifecycle_probe(:before_revoke, %{task_alive?: task_alive?(task_pid)})
 
-    TurnEgress.safe_revoke_disclosure(
-      TurnEgress.disclosure_id_from_authority(state.turn_authority)
-    )
+    disclosure_revoked =
+      revoke_disclosure_observed(TurnEgress.disclosure_id_from_authority(state.turn_authority))
 
     lifecycle_probe(:revoked, %{task_alive?: task_alive?(task_pid)})
 
-    state
+    proof =
+      if memory_closed == :ok and disclosure_revoked == :ok, do: termination, else: :unconfirmed
+
+    %{state | turn_termination_observation: proof}
+  end
+
+  defp close_memory_observed(state) do
+    case PrivateMemory.for_authority(state, state.turn_authority) do
+      nil -> :ok
+      admission -> Arbor.Security.close_private_memory_admission(admission)
+    end
+  rescue
+    _ -> :unconfirmed
+  catch
+    _, _ -> :unconfirmed
+  end
+
+  defp revoke_disclosure_observed(nil), do: :ok
+
+  defp revoke_disclosure_observed(id) do
+    Arbor.Security.revoke(id)
+  rescue
+    _ -> :unconfirmed
+  catch
+    _, _ -> :unconfirmed
   end
 
   defp task_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
@@ -1589,11 +1794,11 @@ defmodule Arbor.Orchestrator.Session do
     cond do
       not is_pid(pid) ->
         if is_reference(ref), do: Process.demonitor(ref, [:flush])
-        :ok
+        :unconfirmed
 
       not Process.alive?(pid) ->
         if is_reference(ref), do: Process.demonitor(ref, [:flush])
-        :ok
+        :engine_terminated
 
       is_reference(ref) ->
         # Do not flush before kill — we need this DOWN for ordering.
@@ -1609,15 +1814,15 @@ defmodule Arbor.Orchestrator.Session do
 
   defp await_task_down(ref) when is_reference(ref) do
     receive do
-      {:DOWN, ^ref, :process, _pid, _reason} -> :ok
+      {:DOWN, ^ref, :process, _pid, _reason} -> :engine_terminated
     after
       @task_kill_await_ms ->
         Process.demonitor(ref, [:flush])
-        :ok
+        :unconfirmed
     end
   end
 
-  defp await_task_down(_), do: :ok
+  defp await_task_down(_), do: :unconfirmed
 
   defp demonitor_steering_callers(state) do
     Enum.each(state.steer_caller_ownership || [], fn
@@ -1853,7 +2058,7 @@ defmodule Arbor.Orchestrator.Session do
          acc
        ) do
     cond do
-      task_cancelled?(state, user_message_task_id(user_message)) ->
+      task_cancelled?(state, queued_turn_task_id(state, user_message, queued_authority)) ->
         safe_reply(caller_from, {:error, :cancelled})
         scan_steering_queue(rest, state, engagement_id, acc)
 
@@ -1928,7 +2133,8 @@ defmodule Arbor.Orchestrator.Session do
          state,
          engagement_id
        ) do
-    current_steering_owner?(state.turn_authority, state.agent_id) and
+    is_nil(conversation_binding(state, queued_authority)) and
+      current_steering_owner?(state.turn_authority, state.agent_id) and
       current_steering_owner?(queued_authority, state.agent_id) and
       steering_authority_match?(
         state.turn_authority,
@@ -2516,10 +2722,298 @@ defmodule Arbor.Orchestrator.Session do
     # Queue residence is not current proof of private ownership. Revalidate
     # before switching transcripts or activating the broker admission.
     case bind_authenticated_engagement(message, authority, state) do
-      {:ok, ^message} -> :ok
+      {:ok, ^message} -> revalidate_command_binding(message, authority, state)
       _ -> {:error, :private_memory_admission_unavailable}
     end
   end
+
+  defp authenticate_conversation_control(operation, subject, receipt, scope, query, state) do
+    input = if operation == :activity, do: nil, else: query.id
+
+    payload =
+      Arbor.Comms.conversation_control_request_payload(
+        operation,
+        subject,
+        state.agent_id,
+        input,
+        query.page,
+        query.expected_engagement
+      )
+
+    with :ok <- recheck_control_scope(subject, scope, state),
+         {:ok,
+          %{principal_id: ^subject, canonical_owner_id: owner, expected_engagement_id: fence}} <-
+           Arbor.Security.consume_conversation_operation_receipt(
+             receipt,
+             "arbor://chat/agent/" <> state.agent_id,
+             payload
+           ),
+         true <- owner == scope.principal_id and fence == query.expected_engagement,
+         true <- is_nil(fence) or fence == scope.engagement_id do
+      recheck_control_scope(subject, scope, state)
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp recheck_control_scope(subject, scope, state) do
+    with true <- scope.agent_id == state.agent_id,
+         {:ok, :authorized} <-
+           Arbor.Security.recheck_conversation_owner(subject, state.agent_id, scope.principal_id),
+         {:ok,
+          %Arbor.Contracts.Comms.Engagement{
+            id: id,
+            agent_id: target,
+            owner_tenant: owner,
+            scope: :user,
+            visibility: :private
+          }} <-
+           Arbor.Comms.resolve_user_engagement(state.agent_id, scope.principal_id),
+         true <-
+           id == scope.engagement_id and target == scope.agent_id and owner == scope.principal_id do
+      :ok
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp exact_bound_command?(binding, scope, id),
+    do: is_map(binding) and binding.binding.scope == scope and binding.command_id == id
+
+  defp live_conversation_observation(state, scope, id) do
+    active = conversation_binding(state, state.turn_authority)
+
+    cond do
+      exact_bound_command?(active, scope, id) and
+        matching_engine_turn_token?(state, state.turn_token) and
+        task_alive?(state.turn_task_pid) and
+        not Consultation.active?(state) and terminal_conversation_authorized?(state) ->
+        content =
+          case state.streaming_buffer do
+            %{content: text} when is_binary(text) -> text
+            _ -> ""
+          end
+
+        {preview, truncated} = bounded_preview(content)
+
+        %{
+          command_id: id,
+          execution: :running,
+          preview: preview,
+          preview_truncated: truncated,
+          progress:
+            if(valid_turn_progress?(state.turn_progress), do: state.turn_progress, else: nil)
+        }
+
+      Enum.any?(state.turn_queue, fn {_message, authority, _from} ->
+        exact_bound_command?(conversation_binding(state, authority), scope, id)
+      end) ->
+        %{command_id: id, execution: :queued}
+
+      true ->
+        nil
+    end
+  end
+
+  defp bounded_preview(text) do
+    if byte_size(text) <= 32_768 and String.valid?(text) do
+      {text, false}
+    else
+      prefix = binary_part(text, 0, min(byte_size(text), 32_768))
+      {valid_utf8_prefix(prefix), true}
+    end
+  end
+
+  defp valid_utf8_prefix(text) do
+    case :unicode.characters_to_binary(text, :utf8, :utf8) do
+      valid when is_binary(valid) -> valid
+      {:error, valid, _} -> valid
+      {:incomplete, valid, _} -> valid
+    end
+  end
+
+  defp cancel_bound_conversation(state, scope, id) do
+    {removed, kept} =
+      Enum.split_with(state.turn_queue, fn {_message, authority, _from} ->
+        exact_bound_command?(conversation_binding(state, authority), scope, id)
+      end)
+
+    if removed != [] do
+      next =
+        Enum.reduce(removed, %{state | turn_queue: kept}, fn {_message, authority, from}, acc ->
+          safe_reply(from, {:error, :cancelled})
+          PrivateMemory.close(acc, authority)
+        end)
+
+      send(self(), :drain_queue)
+      {_message, authority, _from} = hd(removed)
+      %{binding: binding} = conversation_binding(state, authority)
+      {ack_bound_cancellation(binding, :queued_removed), PrivateMemory.prune(next)}
+    else
+      active = conversation_binding(state, state.turn_authority)
+
+      if exact_bound_command?(active, scope, id) and state.turn_in_flight and
+           is_reference(state.turn_token) do
+        next = cleanup_turn_terminal(state, kill_task?: true)
+
+        proof =
+          cond do
+            private_memory_stage?(state, :index) ->
+              :unconfirmed
+
+            private_memory_stage?(state, :preflight) and
+                next.turn_termination_observation == :engine_terminated ->
+              :queued_removed
+
+            true ->
+              next.turn_termination_observation
+          end
+
+        finalize_partial(next, :cancelled, :task_cancelled)
+        reply_turn(next, {:error, :cancelled})
+        send(self(), :drain_queue)
+        {ack_bound_cancellation(active.binding, proof), reset_turn(next)}
+      else
+        {:unconfirmed, state}
+      end
+    end
+  end
+
+  defp ack_bound_cancellation(binding, proof)
+       when proof in [:queued_removed, :engine_terminated] do
+    case Arbor.Comms.acknowledge_conversation_command_cancellation(binding, proof) do
+      {:ok, %{cancellation: %{status: :confirmed, termination: ^proof}}} -> proof
+      _ -> :unconfirmed
+    end
+  end
+
+  defp ack_bound_cancellation(_, _), do: :unconfirmed
+
+  defp open_conversation_source(state, authority, generation) do
+    case conversation_binding(state, authority) do
+      %{binding: binding} ->
+        case Arbor.Comms.open_conversation_source(binding, self(), generation) do
+          {:ok, {pid, ref} = handle} when is_pid(pid) and is_reference(ref) -> {:ok, handle}
+          _ -> {:error, :turn_preparation_refused}
+        end
+
+      nil ->
+        {:ok, nil}
+
+      _ ->
+        {:error, :turn_preparation_refused}
+    end
+  rescue
+    _ -> {:error, :turn_preparation_refused}
+  catch
+    _, _ -> {:error, :turn_preparation_refused}
+  end
+
+  defp retire_conversation_source(handle, reason) do
+    if is_tuple(handle), do: Arbor.Comms.retire_conversation_source(handle, reason)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp validate_command_binding(nil, _message, _authority, _state), do: {:ok, nil}
+
+  defp validate_command_binding(binding, message, authority, state) do
+    scope = %{
+      principal_id: authority.canonical_owner_id,
+      agent_id: state.agent_id,
+      engagement_id: message.engagement_id
+    }
+
+    Arbor.Comms.validate_conversation_command_binding(binding, scope, message.content)
+  end
+
+  defp retain_command_binding(state, _authority, nil, nil), do: state
+
+  defp retain_command_binding(state, authority, binding, execution) do
+    put_in(
+      state.conversation_bindings[authority.turn_id],
+      Map.put(execution, :binding, binding)
+    )
+  end
+
+  defp conversation_binding(state, %TurnAuthority{turn_id: turn_id}),
+    do: Map.get(state.conversation_bindings, turn_id)
+
+  defp conversation_binding(_state, _authority), do: nil
+
+  defp conversation_task_id(state, authority) do
+    case conversation_binding(state, authority) do
+      %{task_id: task_id} -> task_id
+      _ -> nil
+    end
+  end
+
+  defp revalidate_command_binding(message, authority, state) do
+    case conversation_binding(state, authority) do
+      nil ->
+        :ok
+
+      %{binding: binding, task_id: task_id, command_id: command_id} ->
+        case validate_command_binding(binding, message, authority, state) do
+          {:ok, %{task_id: ^task_id, command_id: ^command_id}} -> :ok
+          _ -> {:error, :invalid_claim}
+        end
+    end
+  end
+
+  defp admit_turn_stream({:delta, text}, %{streaming_buffer: buf} = state)
+       when is_map(buf) and is_binary(text) do
+    first_token_at = buf.first_token_at || if(text != "", do: DateTime.utc_now())
+    updated = %{buf | content: buf.content <> text, first_token_at: first_token_at}
+
+    unless Consultation.active?(state) do
+      Builders.emit_signal(:agent, :stream_delta, %{
+        agent_id: state.agent_id,
+        session_id: state.session_id,
+        # Ordinary turn content remains in the generation-bound private buffer.
+        # Agent-wide signals are observable without conversation permission.
+        delta_length: byte_size(text),
+        source: :turn
+      })
+    end
+
+    {:noreply, %{state | streaming_buffer: updated}}
+  end
+
+  defp admit_turn_stream(:finish, state) do
+    unless Consultation.active?(state) do
+      Builders.emit_signal(:agent, :stream_finish, %{
+        agent_id: state.agent_id,
+        session_id: state.session_id,
+        source: :turn
+      })
+    end
+
+    {:noreply, state}
+  end
+
+  defp admit_turn_stream(_, state), do: {:noreply, state}
+
+  defp valid_turn_progress?(%{type: type, node_id: node_id} = progress)
+       when map_size(progress) == 2 do
+    type in [
+      :pipeline_started,
+      :pipeline_completed,
+      :pipeline_failed,
+      :stage_started,
+      :stage_completed,
+      :stage_failed,
+      :stage_retrying
+    ] and
+      (is_nil(node_id) or
+         (is_binary(node_id) and byte_size(node_id) <= 256 and String.valid?(node_id) and
+            Regex.match?(~r/\A[A-Za-z0-9_.:-]+\z/, node_id)))
+  end
+
+  defp valid_turn_progress?(_), do: false
 
   defp do_start_turn(user_message, turn_authority, from, state) do
     state = maybe_switch_engagement(state, user_message.engagement_id)
@@ -2790,51 +3284,76 @@ defmodule Arbor.Orchestrator.Session do
              route,
              frozen_tier
            ) do
-      try do
-        authorizer =
-          TurnEgress.build_taint_authorizer(%{
+      case open_conversation_source(state, turn_authority, turn_token) do
+        {:ok, conversation_source} ->
+          prepared_cleanup = %{
+            conversation_source: conversation_source,
             fence: fence,
-            frozen_route: route,
-            frozen_tier: frozen_tier,
-            agent_id: state.agent_id,
-            session_id: state.session_id,
-            turn_id: authority && authority.turn_id,
-            human_id: authority && authority.authenticated_principal_id,
-            disclosure_capability_id: TurnEgress.disclosure_id_from_authority(authority)
-          })
+            cap_id: cap_id
+          }
 
-        engine_opts =
-          state
-          |> Builders.build_engine_opts(final_values,
-            source: :turn,
-            steering_binding: {turn_token, user_message.engagement_id}
-          )
-          |> Keyword.put(:initial_taint, initial_taint)
-          |> Keyword.put(:frozen_egress_route, route)
-          |> Keyword.put(:turn_egress_authorizer, authorizer)
-          |> freeze_memory_write_policy(turn_authority)
-          |> maybe_put_provider_route_input(route_input)
+          try do
+            authorizer =
+              TurnEgress.build_taint_authorizer(%{
+                fence: fence,
+                frozen_route: route,
+                frozen_tier: frozen_tier,
+                agent_id: state.agent_id,
+                session_id: state.session_id,
+                turn_id: authority && authority.turn_id,
+                human_id: authority && authority.authenticated_principal_id,
+                disclosure_capability_id: TurnEgress.disclosure_id_from_authority(authority)
+              })
 
-        {:ok,
-         %{
-           authority: authority,
-           fence: fence,
-           cap_id: cap_id,
-           turn_token: turn_token,
-           engine_opts: engine_opts,
-           turn_taint_evidence: turn_taint_evidence,
-           values: final_values,
-           private_memory_turn: state.private_memory_turn
-         }}
-      rescue
-        _ ->
-          TurnEgress.deactivate_fence(fence)
-          TurnEgress.safe_revoke_disclosure(cap_id)
-          {:error, :turn_preparation_refused}
-      catch
-        _, _ ->
-          TurnEgress.deactivate_fence(fence)
-          TurnEgress.safe_revoke_disclosure(cap_id)
+            engine_opts =
+              state
+              |> Builders.build_engine_opts(final_values,
+                source: :turn,
+                steering_binding: {turn_token, user_message.engagement_id},
+                task_id: conversation_task_id(state, turn_authority),
+                conversation_source:
+                  if(is_nil(conversation_source),
+                    do: nil,
+                    else: %{
+                      session_pid: self(),
+                      generation: turn_token,
+                      handle: conversation_source
+                    }
+                  )
+              )
+              |> Keyword.put(:initial_taint, initial_taint)
+              |> Keyword.put(:frozen_egress_route, route)
+              |> Keyword.put(:turn_egress_authorizer, authorizer)
+              |> freeze_memory_write_policy(turn_authority)
+              |> maybe_put_provider_route_input(route_input)
+
+            {:ok, engine_opts} =
+              Arbor.Orchestrator.pin_native_execution(state.turn_graph, engine_opts)
+
+            {:ok,
+             %{
+               authority: authority,
+               fence: fence,
+               cap_id: cap_id,
+               turn_token: turn_token,
+               engine_opts: engine_opts,
+               conversation_source: conversation_source,
+               turn_taint_evidence: turn_taint_evidence,
+               values: final_values,
+               private_memory_turn: state.private_memory_turn
+             }}
+          rescue
+            _ ->
+              cleanup_prepared_partial(prepared_cleanup)
+              {:error, :turn_preparation_refused}
+          catch
+            _, _ ->
+              cleanup_prepared_partial(prepared_cleanup)
+              {:error, :turn_preparation_refused}
+          end
+
+        {:error, _} ->
+          cleanup_prepared_partial(%{fence: fence, cap_id: cap_id})
           {:error, :turn_preparation_refused}
       end
     else
@@ -2849,6 +3368,7 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp cleanup_prepared_partial(prepared) when is_map(prepared) do
+    retire_conversation_source(Map.get(prepared, :conversation_source), :source_retired)
     TurnEgress.deactivate_fence(Map.get(prepared, :fence))
     TurnEgress.safe_revoke_disclosure(Map.get(prepared, :cap_id))
     :ok
@@ -2976,13 +3496,21 @@ defmodule Arbor.Orchestrator.Session do
   # Receipt never enters state/queue. Its opaque pending memory admission stays
   # in a private Session map until turn activation or queue/terminal cleanup.
   # Caller-supplied engagement_id is a route claim — reject before consume.
-  defp handle_authenticated_message(message, receipt, from, state, parent \\ nil) do
+  defp handle_authenticated_message(message, receipt, from, state, parent \\ nil, binding \\ nil) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
          :ok <- reject_authenticated_engagement_route(user_message),
          {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
          {:ok, authority, admission} <-
            PrivateMemory.exchange(valid_receipt, user_message, state) do
-      bind_and_admit_private_turn(user_message, authority, admission, from, state, parent)
+      bind_and_admit_private_turn(
+        user_message,
+        authority,
+        admission,
+        from,
+        state,
+        parent,
+        binding
+      )
     else
       {:error, :unauthenticated} ->
         best_effort_discard_receipt(receipt)
@@ -2994,11 +3522,21 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
-  defp bind_and_admit_private_turn(user_message, authority, admission, from, state, parent) do
+  defp bind_and_admit_private_turn(
+         user_message,
+         authority,
+         admission,
+         from,
+         state,
+         parent,
+         binding
+       ) do
     with {:ok, user_message} <- bind_authenticated_engagement(user_message, authority, state),
+         {:ok, execution} <- validate_command_binding(binding, user_message, authority, state),
          :ok <-
            Arbor.Security.check_private_memory_engagement(admission, user_message.engagement_id) do
       state = PrivateMemory.retain(state, authority, admission)
+      state = retain_command_binding(state, authority, binding, execution)
       state = if parent, do: Consultation.bind(state, authority, parent), else: state
 
       case admit_authenticated_turn(user_message, authority, from, state) do
@@ -3022,7 +3560,7 @@ defmodule Arbor.Orchestrator.Session do
 
   defp admit_authenticated_turn(user_message, authority, from, state) do
     cond do
-      task_cancelled?(state, user_message_task_id(user_message)) ->
+      task_cancelled?(state, queued_turn_task_id(state, user_message, authority)) ->
         {:reply, {:error, :cancelled}, PrivateMemory.close(state, authority)}
 
       state.turn_in_flight ->
@@ -3052,7 +3590,8 @@ defmodule Arbor.Orchestrator.Session do
 
   # Exact native key set only — embellished forged struct maps fail closed.
   defp canonicalize_authenticated_user_message(%UserMessage{} = msg) do
-    if Enum.sort(Map.keys(msg)) == @user_message_native_keys do
+    if Enum.sort(Map.keys(msg)) == @user_message_native_keys and
+         Arbor.Comms.validate_conversation_ingress_metadata(msg.transport_metadata) == :ok do
       {:ok,
        %UserMessage{
          content: msg.content,
@@ -3143,6 +3682,10 @@ defmodule Arbor.Orchestrator.Session do
         turn_authority: nil,
         consultation: nil,
         private_memory_admissions: %{},
+        conversation_bindings: %{},
+        conversation_source: nil,
+        turn_termination_observation: :unconfirmed,
+        turn_progress: nil,
         private_memory_turn: nil,
         transcript_sync: %{},
         turn_egress_fence: nil,
@@ -3190,6 +3733,8 @@ defmodule Arbor.Orchestrator.Session do
         turn_taint_evidence: nil,
         turn_authority: nil,
         consultation: nil,
+        conversation_source: nil,
+        turn_termination_observation: :unconfirmed,
         private_memory_turn: nil,
         turn_egress_fence: nil,
         turn_token: nil,
@@ -3197,6 +3742,7 @@ defmodule Arbor.Orchestrator.Session do
         steering_message_count: 0,
         steering_byte_count: 0,
         streaming_buffer: nil,
+        turn_progress: nil,
         turn_timeout_ref: nil
     }
     |> PrivateMemory.prune()

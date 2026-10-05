@@ -61,7 +61,8 @@ defmodule Arbor.Voice.DeskLateCleanupTest do
     def recv(%{mode: :success, events: [event | rest]} = state, _),
       do: {:ok, %{state | events: rest}, event}
 
-    def recv(%{mode: :hold}, _) do
+    def recv(%{mode: :hold, parent: parent}, _) do
+      send(parent, :audio_receiving)
       Process.sleep(5)
       {:error, :timeout}
     end
@@ -231,6 +232,7 @@ defmodule Arbor.Voice.DeskLateCleanupTest do
     FakeLedger.set_consume_mode(ledger, :error)
     assert {:ok, id} = record(user)
     assert_receive :audio_received, 1_000
+    assert_receive :audio_receiving, 1_000
     [{session, _}] = Registry.lookup(Arbor.Voice.Registry, {user, "fixture-agent"})
     Process.exit(session, :kill)
     assert %{terminal: false} = await(id, &(&1.state == :cleanup_pending))

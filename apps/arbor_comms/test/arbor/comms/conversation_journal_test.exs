@@ -14,7 +14,9 @@ defmodule Arbor.Comms.ConversationJournalTest do
     LostReceiptBackend,
     ContentionBackend,
     GapBackend,
+    EmptyRangeBackend,
     UnavailableBackend,
+    ExactUnavailableBackend,
     MismatchedAckBackend
   }
 
@@ -87,6 +89,56 @@ defmodule Arbor.Comms.ConversationJournalTest do
 
     assert {:ok, %{status: :admitted}} =
              Journal.admit(%{@scope | principal_id: "different"}, @command)
+  end
+
+  test "security regression: a private command binding requires the live winning claim and exact source scope/text" do
+    assert {:ok, _} = Arbor.Comms.admit_conversation_command(@scope, @command)
+    assert {:ok, token} = Arbor.Comms.claim_conversation_command(@scope, @command.id)
+
+    assert {:ok, binding} =
+             Arbor.Comms.bind_conversation_command_claim(@scope, @command.id, token)
+
+    assert {:ok, %{command_id: "cmd_1", task_id: task_id}} =
+             Arbor.Comms.validate_conversation_command_binding(binding, @scope, @command.text)
+
+    assert String.starts_with?(task_id, "conversation_")
+
+    for {candidate, scope, text} <- [
+          {%{binding | claim_token: String.duplicate("0", 64)}, @scope, @command.text},
+          {binding, %{@scope | principal_id: "human_other"}, @command.text},
+          {binding, %{@scope | agent_id: "agent_other"}, @command.text},
+          {binding, %{@scope | engagement_id: "eng_other"}, @command.text},
+          {binding, @scope, @command.text <> " "},
+          {binding, @scope, nil},
+          {binding, @scope, 7},
+          {binding, @scope, ""},
+          {binding, @scope, " "},
+          {binding, @scope, String.duplicate("a", 32_769)},
+          {Map.put(binding, :task_id, "caller_task"), @scope, @command.text}
+        ] do
+      assert {:error, :invalid_claim} =
+               Arbor.Comms.validate_conversation_command_binding(candidate, scope, text)
+    end
+
+    assert {:ok, _} =
+             Arbor.Comms.settle_conversation_command(@scope, @command.id, token, %{
+               status: :uncertain,
+               reason: :delivery_unknown
+             })
+
+    assert {:error, :invalid_claim} =
+             Arbor.Comms.validate_conversation_command_binding(binding, @scope, @command.text)
+
+    assert {:ok, command} = Arbor.Comms.get_conversation_command(@scope, @command.id)
+    refute Map.has_key?(command, :claim_token)
+  end
+
+  test "security regression: an empty projection range behind a factual source head cannot advance or spin" do
+    assert {:ok, _} = Arbor.Comms.admit_conversation_command(@scope, @command)
+    use_backend(EmptyRangeBackend)
+    assert {:ok, 1} = Journal.source_head(@scope)
+    assert {:error, :invalid_journal} = Journal.projection_page(@scope, 0)
+    assert {:ok, %{rows: [], from: 1, to: 1, head: 1}} = Journal.projection_page(@scope, 1)
   end
 
   test "lost append receipt is reconciled before issuing a claim" do
@@ -175,6 +227,11 @@ defmodule Arbor.Comms.ConversationJournalTest do
     assert {:error, :invalid_journal} = Journal.events(@scope, 0)
     use_backend(UnavailableBackend)
     assert {:error, :offline} = Journal.events(@scope, 0)
+    use_backend(ExactUnavailableBackend)
+
+    assert {:error, :invalid_journal} =
+             Arbor.Comms.admit_conversation_command(@scope, %{id: "source_offline", text: "x"})
+
     use_backend(Arbor.Persistence.EventLog.ETS)
     assert {:error, :journal_not_durable} = Journal.admit(@scope, %{id: "volatile", text: "x"})
     use_backend(Arbor.Persistence.EventLog.Ecto)
@@ -196,6 +253,76 @@ defmodule Arbor.Comms.ConversationJournalTest do
              )
 
     assert {:error, :invalid_journal} = Journal.events(@scope, 0)
+    assert {:error, :invalid_journal} = Arbor.Comms.get_conversation_command(@scope, @command.id)
+
+    assert {:error, :invalid_journal} =
+             Arbor.Comms.claim_conversation_command(@scope, @command.id)
+  end
+
+  test "security regression: durable cancellation before claim survives reconstruction and never grants dispatch" do
+    assert {:ok, _} = Arbor.Comms.admit_conversation_command(@scope, @command)
+
+    assert {:ok,
+            %{
+              status: :admitted,
+              cancellation: %{status: :confirmed, termination: :never_dispatched}
+            } = original} =
+             Arbor.Comms.request_conversation_command_cancellation(@scope, @command.id)
+
+    assert {:ok, ^original} =
+             Arbor.Comms.request_conversation_command_cancellation(@scope, @command.id)
+
+    assert {:error, :already_claimed} =
+             Arbor.Comms.claim_conversation_command(@scope, @command.id)
+
+    assert {:ok, ^original} = Arbor.Comms.get_conversation_command(@scope, @command.id)
+    assert {:ok, %{events: events, head: 3}} = Arbor.Comms.conversation_events(@scope, 0)
+    assert Enum.map(events, & &1.kind) == ["admitted", "cancel_requested", "cancel_acknowledged"]
+
+    assert {:error, :not_found} =
+             Arbor.Comms.request_conversation_command_cancellation(@scope, "missing")
+  end
+
+  test "security regression: cancellation intent invalidates exact claim and cannot rewrite terminal delivery" do
+    for status <- [:completed, :uncertain] do
+      command = %{@command | id: "terminal-#{status}"}
+      assert {:ok, _} = Arbor.Comms.admit_conversation_command(@scope, command)
+      assert {:ok, token} = Arbor.Comms.claim_conversation_command(@scope, command.id)
+
+      assert {:ok, binding} =
+               Arbor.Comms.bind_conversation_command_claim(@scope, command.id, token)
+
+      assert {:ok, %{cancellation: %{status: :requested}}} =
+               Arbor.Comms.request_conversation_command_cancellation(@scope, command.id)
+
+      assert {:error, :invalid_claim} =
+               Arbor.Comms.validate_conversation_command_binding(binding, @scope, command.text)
+
+      outcome =
+        if status == :completed,
+          do: %{status: :completed, text: "immutable"},
+          else: %{status: :uncertain, reason: :delivery_unknown}
+
+      assert {:ok, _} =
+               Arbor.Comms.settle_conversation_command(@scope, command.id, token, outcome)
+
+      assert {:ok,
+              %{
+                status: ^status,
+                outcome: ^outcome,
+                cancellation: %{status: :confirmed, termination: :engine_terminated}
+              }} =
+               Arbor.Comms.acknowledge_conversation_command_cancellation(
+                 binding,
+                 :engine_terminated
+               )
+
+      assert {:error, :invalid_cancellation} =
+               Arbor.Comms.acknowledge_conversation_command_cancellation(
+                 binding,
+                 :never_dispatched
+               )
+    end
   end
 
   defp parallel(count, fun) do
@@ -228,6 +355,9 @@ defmodule Arbor.Comms.ConversationJournalTest do
 
     def read_stream_range(stream, opts),
       do: EctoBackend.read_stream_range(stream, opts)
+
+    def read_event_records(stream, ids, opts),
+      do: EctoBackend.read_event_records(stream, ids, opts)
   end
 
   defmodule LostReceiptBackend do
@@ -237,6 +367,7 @@ defmodule Arbor.Comms.ConversationJournalTest do
     defdelegate reconcile_append(operation, opts), to: Backend
     defdelegate read_stream_head(stream, opts), to: Backend
     defdelegate read_stream_range(stream, opts), to: Backend
+    defdelegate read_event_records(stream, ids, opts), to: Backend
 
     def append(stream, events, opts) do
       with {:ok, _} <- Backend.append(stream, events, opts),
@@ -251,6 +382,7 @@ defmodule Arbor.Comms.ConversationJournalTest do
     defdelegate reconcile_append(operation, opts), to: Backend
     defdelegate read_stream_head(stream, opts), to: Backend
     defdelegate read_stream_range(stream, opts), to: Backend
+    defdelegate read_event_records(stream, ids, opts), to: Backend
 
     def append(stream, [event] = events, opts) do
       if Agent.get_and_update(Arbor.Comms.ConversationJournalTest.Contention, &{not &1, true}) do
@@ -274,6 +406,7 @@ defmodule Arbor.Comms.ConversationJournalTest do
   end
 
   defmodule GapBackend do
+    defdelegate read_event_records(stream, ids, opts), to: Backend
     defdelegate durability_class(opts), to: Backend
     defdelegate append(stream, events, opts), to: Backend
     defdelegate reconcile_append(operation, opts), to: Backend
@@ -285,11 +418,21 @@ defmodule Arbor.Comms.ConversationJournalTest do
     end
   end
 
+  defmodule EmptyRangeBackend do
+    defdelegate durability_class(opts), to: Backend
+    defdelegate append(stream, events, opts), to: Backend
+    defdelegate reconcile_append(operation, opts), to: Backend
+    defdelegate read_stream_head(stream, opts), to: Backend
+    defdelegate read_event_records(stream, ids, opts), to: Backend
+    def read_stream_range(_, _), do: {:ok, []}
+  end
+
   defmodule MismatchedAckBackend do
     defdelegate durability_class(opts), to: Backend
     defdelegate reconcile_append(operation, opts), to: Backend
     defdelegate read_stream_head(stream, opts), to: Backend
     defdelegate read_stream_range(stream, opts), to: Backend
+    defdelegate read_event_records(stream, ids, opts), to: Backend
 
     def append(stream, events, opts) do
       with {:ok, [event]} <- Backend.append(stream, events, opts) do
@@ -303,6 +446,17 @@ defmodule Arbor.Comms.ConversationJournalTest do
     defdelegate append(stream, events, opts), to: Backend
     defdelegate reconcile_append(operation, opts), to: Backend
     defdelegate read_stream_range(stream, opts), to: Backend
+    defdelegate read_event_records(stream, ids, opts), to: Backend
     def read_stream_head(_, _), do: {:error, :offline}
+  end
+
+  defmodule ExactUnavailableBackend do
+    defdelegate durability_class(opts), to: Backend
+    defdelegate append(stream, events, opts), to: Backend
+    defdelegate reconcile_append(operation, opts), to: Backend
+    defdelegate read_stream_head(stream, opts), to: Backend
+    defdelegate read_stream_range(stream, opts), to: Backend
+    def event_identity(_, _, _), do: {:ok, nil}
+    def read_event_records(_, _, _), do: {:error, :backend_unavailable}
   end
 end

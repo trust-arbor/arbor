@@ -1,0 +1,9 @@
+/_build/
+/deps/
+/doc/
+/.elixir_ls/
+/cover/
+/arbor-tui
+/arbor-breeze
+erl_crash.dump
+*.ez

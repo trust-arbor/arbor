@@ -1,0 +1,271 @@
+{
+  "source_report": "dasp-session-experiment-20260926/runs/2026-09-26T23-34-12.528Z-dBbYHN/report.json",
+  "source_sha256": "62fb5a2cf7bf4e7db74c48a33700496452d26d432ac186ce3282136216f79591",
+  "protocol_revision": "980f80664bbb0393de4322797aab1fb71e175b9f",
+  "state": {
+    "messages": [
+      {
+        "id": "lost-reply.user",
+        "role": "user",
+        "text": "One intended turn",
+        "command_id": "lost-reply"
+      },
+      {
+        "id": "lost-reply.assistant",
+        "role": "assistant",
+        "text": "Echo: One intended turn",
+        "command_id": "lost-reply"
+      },
+      {
+        "id": "admitted-restart.user",
+        "role": "user",
+        "text": "admitted-restart",
+        "command_id": "admitted-restart"
+      },
+      {
+        "id": "admitted-restart.assistant",
+        "role": "assistant",
+        "text": "Echo: admitted-restart",
+        "command_id": "admitted-restart"
+      },
+      {
+        "id": "keyed-crash.user",
+        "role": "user",
+        "text": "keyed-crash",
+        "command_id": "keyed-crash"
+      },
+      {
+        "id": "keyed-crash.assistant",
+        "role": "assistant",
+        "text": "Echo: keyed-crash",
+        "command_id": "keyed-crash"
+      },
+      {
+        "id": "opaque-crash.user",
+        "role": "user",
+        "text": "Ambiguous effect",
+        "command_id": "opaque-crash"
+      },
+      {
+        "id": "stream-reconnect.user",
+        "role": "user",
+        "text": "Streaming partial text must become the exact final message",
+        "command_id": "stream-reconnect"
+      },
+      {
+        "id": "stream-reconnect.assistant",
+        "role": "assistant",
+        "text": "Echo: Streaming partial text must become the exact final message",
+        "command_id": "stream-reconnect"
+      },
+      {
+        "id": "live-speech.user",
+        "role": "user",
+        "text": "This live message is spoken once",
+        "command_id": "live-speech"
+      },
+      {
+        "id": "live-speech.assistant",
+        "role": "assistant",
+        "text": "Echo: This live message is spoken once",
+        "command_id": "live-speech"
+      },
+      {
+        "id": "checkpoint-interruption.user",
+        "role": "user",
+        "text": "checkpoint-interruption",
+        "command_id": "checkpoint-interruption"
+      },
+      {
+        "id": "checkpoint-interruption.assistant",
+        "role": "assistant",
+        "text": "Echo: checkpoint-interruption",
+        "command_id": "checkpoint-interruption"
+      },
+      {
+        "id": "speech-omission.user",
+        "role": "user",
+        "text": "A claimed utterance may be omitted by interruption",
+        "command_id": "speech-omission"
+      },
+      {
+        "id": "speech-omission.assistant",
+        "role": "assistant",
+        "text": "Echo: A claimed utterance may be omitted by interruption",
+        "command_id": "speech-omission"
+      },
+      {
+        "id": "oversized-rejected.user",
+        "role": "user",
+        "text": "Corrected admissible input",
+        "command_id": "oversized-rejected"
+      },
+      {
+        "id": "oversized-rejected.assistant",
+        "role": "assistant",
+        "text": "Echo: Corrected admissible input",
+        "command_id": "oversized-rejected"
+      },
+      {
+        "id": "revoked-progress.user",
+        "role": "user",
+        "text": "revoked-progress",
+        "command_id": "revoked-progress"
+      },
+      {
+        "id": "revoked-progress.assistant",
+        "role": "assistant",
+        "text": "Echo: revoked-progress",
+        "command_id": "revoked-progress"
+      },
+      {
+        "id": "authorized-continues.user",
+        "role": "user",
+        "text": "authorized-continues",
+        "command_id": "authorized-continues"
+      },
+      {
+        "id": "authorized-continues.assistant",
+        "role": "assistant",
+        "text": "Echo: authorized-continues",
+        "command_id": "authorized-continues"
+      }
+    ],
+    "commands": {
+      "lost-reply": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "lost-reply.assistant",
+            "text": "Echo: One intended turn"
+          },
+          "error": null
+        }
+      },
+      "admitted-restart": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "admitted-restart.assistant",
+            "text": "Echo: admitted-restart"
+          },
+          "error": null
+        }
+      },
+      "keyed-crash": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "keyed-crash.assistant",
+            "text": "Echo: keyed-crash"
+          },
+          "error": null
+        }
+      },
+      "opaque-crash": {
+        "name": "chat.send",
+        "status": "uncertain",
+        "outcome": {
+          "status": "uncertain",
+          "output": null,
+          "error": {
+            "code": "effect_unknown",
+            "message": "Effect intent exists but the external effect cannot be reconciled safely.",
+            "retryable": false
+          }
+        }
+      },
+      "stream-reconnect": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "stream-reconnect.assistant",
+            "text": "Echo: Streaming partial text must become the exact final message"
+          },
+          "error": null
+        }
+      },
+      "live-speech": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "live-speech.assistant",
+            "text": "Echo: This live message is spoken once"
+          },
+          "error": null
+        }
+      },
+      "checkpoint-interruption": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "checkpoint-interruption.assistant",
+            "text": "Echo: checkpoint-interruption"
+          },
+          "error": null
+        }
+      },
+      "speech-omission": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "speech-omission.assistant",
+            "text": "Echo: A claimed utterance may be omitted by interruption"
+          },
+          "error": null
+        }
+      },
+      "oversized-rejected": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "oversized-rejected.assistant",
+            "text": "Echo: Corrected admissible input"
+          },
+          "error": null
+        }
+      },
+      "revoked-progress": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "revoked-progress.assistant",
+            "text": "Echo: revoked-progress"
+          },
+          "error": null
+        }
+      },
+      "authorized-continues": {
+        "name": "chat.send",
+        "status": "completed",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "authorized-continues.assistant",
+            "text": "Echo: authorized-continues"
+          },
+          "error": null
+        }
+      }
+    }
+  },
+  "cursor": 43
+}

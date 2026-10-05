@@ -35,6 +35,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.Conversation do
     |> refresh()
   end
 
+  def refresh(%{assigns: %{conversation_surface: true}} = socket),
+    do: Arbor.Dashboard.Live.ConversationLive.Surface.refresh_access(socket)
+
   def refresh(socket) do
     if socket.assigns[:group_mode] or is_nil(socket.assigns[:agent_id]) or
          socket.assigns.conversation_rebind_required do

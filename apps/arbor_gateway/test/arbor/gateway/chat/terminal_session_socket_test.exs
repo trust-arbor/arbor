@@ -22,6 +22,9 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest.Host do
   def conversation_history(principal, target, opts),
     do: result(:history, principal, target, nil, opts)
 
+  def conversation_window(principal, target, opts),
+    do: result(:window, principal, target, nil, opts)
+
   def submit_conversation_command(principal, target, input, opts),
     do: result(:submit, principal, target, input, opts)
 
@@ -154,6 +157,7 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
 
     for {operation, input} <- [
           history: nil,
+          window: nil,
           submit: %{id: "stable_command", text: "hello"},
           command: "stable_command",
           events: 0
@@ -166,6 +170,7 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
 
       assert event["type"] in [
                "conversation_history",
+               "conversation_window",
                "conversation_command",
                "conversation_events"
              ]
@@ -219,6 +224,7 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
 
     for {operation, input} <- [
           history: nil,
+          window: nil,
           submit: %{id: "stable_command", text: "hello"},
           command: "stable_command",
           events: 0
@@ -238,6 +244,7 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
     for loss <- [:revoked, :invalid_binding, :remapped],
         {operation, input} <- [
           history: nil,
+          window: nil,
           submit: %{id: "stable_command", text: "hello"},
           command: "stable_command",
           events: 0
@@ -276,6 +283,34 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
     {event, _} = drive(frame(:submit, %{id: "stable_command", text: "hello"}), state)
     assert event == %{"type" => "error", "reason" => "unauthorized"}
     assert_receive {:terminal_dispatch, :submit, _, _, _, _}
+  end
+
+  test "initial window attaches a human session without replaying transcript history", %{
+    state: state
+  } do
+    Process.put(
+      :host_result,
+      {:ok,
+       %{
+         engagement_id: @engagement,
+         entries: [],
+         head: 0,
+         first: 0,
+         last: 0,
+         has_older: false,
+         has_newer: false
+       }}
+    )
+
+    {event, attached} = drive(frame(:window, nil, "human_owner", "agent_a", limit: 20), state)
+    assert event["type"] == "conversation_window"
+    assert event["data"]["agent_id"] == "agent_a"
+    assert attached.agent_id == "agent_a" and attached.engagement_id == @engagement
+    assert_receive {:terminal_dispatch, :window, "human_owner", "agent_a", nil, opts}
+    assert opts[:session_token] == @proof
+    assert opts[:limit] == 20
+    refute_receive {:terminal_dispatch, :history, _, _, _, _}
+    Socket.terminate(:normal, attached)
   end
 
   test "security regression: attachment fences remain required and ownership changes retire scope",
@@ -383,9 +418,24 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
 
   test "legacy commands and agent-wide signals stay unavailable for sessions", %{state: state} do
     state = attach(state)
+    slash = %{id: "slash", text: "/model other"}
 
-    assert {%{"reason" => "server_commands_unavailable"}, _} =
-             drive(frame(:submit, %{id: "slash", text: "/model other"}), state)
+    assert {:error, :invalid_command} =
+             Arbor.Agent.conversation_request_payload(:submit, "human_owner", "agent_a", slash,
+               expected_engagement_id: @engagement
+             )
+
+    envelope = frame(:submit, %{slash | text: "ordinary message"}) |> Jason.decode!()
+
+    # A raw caller can bypass the public payload builder; Gateway must refuse it.
+    payload =
+      envelope["payload"]
+      |> Jason.decode!()
+      |> List.update_at(4, fn [id, _text] -> [id, slash.text] end)
+      |> Jason.encode!()
+
+    assert {%{"type" => "error", "reason" => "server_commands_unavailable"}, _} =
+             drive(envelope |> Map.put("payload", payload) |> Jason.encode!(), state)
 
     refute_receive {:terminal_dispatch, _, _, _, _, _}
     assert {:ok, ^state} = Socket.handle_info({:chat_signal, %{text: "foreign"}}, state)

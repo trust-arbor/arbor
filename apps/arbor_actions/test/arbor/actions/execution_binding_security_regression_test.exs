@@ -292,6 +292,37 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
     assert "beam_sha256" in fields
   end
 
+  test "security regression: final facade binding cannot omit or change declared admission ownership" do
+    module = Arbor.Actions.TestFixtures.BoundFacadeOwnerAction
+    assert {:ok, descriptor} = Arbor.Actions.runtime_descriptor(module)
+    assert descriptor["authorization_admission_owner"] == "actions_facade"
+    context = binding_context(%{descriptor["name"] => descriptor}) |> Map.put(:test_pid, self())
+    assert {:ok, %{executed: true}} = Arbor.Actions.execute_action(module, %{}, context)
+    assert_received :bound_facade_owner_executed
+
+    for mutate <- [
+          &Map.delete(&1, "authorization_admission_owner"),
+          &Map.put(&1, "authorization_admission_owner", "ordinary"),
+          &(Map.delete(&1, "authorization_admission_owner")
+            |> Map.delete("execution_idempotency"))
+        ] do
+      changed = mutate.(descriptor)
+      context = binding_context(%{descriptor["name"] => changed}) |> Map.put(:test_pid, self())
+
+      for invoke <- [
+            fn -> Arbor.Actions.execute_action(module, %{}, context) end,
+            fn -> Arbor.Actions.authorize_and_execute("system", module, %{}, context) end
+          ] do
+        assert {:error,
+                {:execution_binding_rejected,
+                 {:action_binding_mismatch, "bound_facade_owner_action", fields}}} = invoke.()
+
+        assert "authorization_admission_owner" in fields
+        refute_received :bound_facade_owner_executed
+      end
+    end
+  end
+
   test "security regression: same-module hot reload is rejected before action execution" do
     module = BoundNestedInnerAction
     {:ok, descriptor} = Arbor.Actions.runtime_descriptor(module)

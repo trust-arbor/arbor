@@ -7,6 +7,7 @@
 children = [
   {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
   {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
+  Arbor.Agent.ProfileAuthorityOwner,
   Arbor.Agent.Registry,
   Arbor.Agent.SessionManager,
   Arbor.Agent.Supervisor

@@ -191,6 +191,37 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   @doc false
+  def authorization_resource(node, context, %RunAuthorization{} = authority) do
+    opts = [
+      pinned_action_bindings: authority.pinned_action_bindings,
+      execution_manifest_digest: authority.execution_manifest_digest
+    ]
+
+    with "action" <- Map.get(node.attrs, "target"),
+         :ok <- RunAuthorization.verify_handler(authority, node, __MODULE__),
+         :ok <-
+           RunAuthorization.verify_execution_module(
+             authority,
+             node,
+             "exec:action",
+             ActionsExecutor
+           ),
+         {:ok, args, _param_taint} <- build_action_args(node.id, node.attrs, context) do
+      ActionsExecutor.authorization_resource(
+        Map.get(node.attrs, "action"),
+        args,
+        authority.workdir,
+        opts
+      )
+    else
+      _ -> {:error, :invalid_action_authorization_resource}
+    end
+  end
+
+  def authorization_resource(_node, _context, _authority),
+    do: {:error, :invalid_action_authorization_resource}
+
+  @doc false
   def execution_delegates(node), do: execution_delegates(node, [])
 
   @doc false
@@ -286,6 +317,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_execution_binding(authority)
             |> maybe_put_nested_engine_controls(opts, authority)
             |> Keyword.merge(Keyword.take(opts, [:memory_write_policy, :routine_effect_token]))
+            # Process-local source control comes only from the owning Engine
+            # options. Graph attributes and JSON context never supply it.
+            |> Keyword.merge(Keyword.take(opts, [:conversation_source]))
             |> maybe_put_approval_timeout(opts)
             |> maybe_put_execution_id(opts)
             |> maybe_put_transcript_sink(opts)
@@ -613,6 +647,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     opts
     |> Keyword.put(:run_authorization, authority)
     |> maybe_put_nested_signing_credentials(engine_opts)
+    |> Keyword.merge(Keyword.take(engine_opts, [:conversation_source]))
     |> Keyword.put(:max_depth, Keyword.get(engine_opts, :max_depth, 3))
   end
 

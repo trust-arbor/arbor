@@ -1,0 +1,150 @@
+{
+  "schema_version": "1.1",
+  "id": "shared-demo",
+  "events": [
+    {
+      "id": "event-1",
+      "revision": 1,
+      "kind": "admitted",
+      "data": {
+        "command_id": "hello",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "event-2",
+      "revision": 2,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "hello.user",
+          "command_id": "hello",
+          "role": "user",
+          "text": "Can one conversation work across devices?"
+        }
+      }
+    },
+    {
+      "id": "event-3",
+      "revision": 3,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "hello.assistant",
+          "command_id": "hello",
+          "role": "assistant",
+          "text": "Yes. The conversation is shared; each device chooses how to present it."
+        }
+      }
+    },
+    {
+      "id": "event-4",
+      "revision": 4,
+      "kind": "settled",
+      "data": {
+        "command_id": "hello",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "hello.assistant",
+            "text": "Yes. The conversation is shared; each device chooses how to present it."
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "event-5",
+      "revision": 5,
+      "kind": "admitted",
+      "data": {
+        "command_id": "research",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "event-6",
+      "revision": 6,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "research.user",
+          "command_id": "research",
+          "role": "user",
+          "text": "Compare the interface options and prepare a recommendation."
+        }
+      }
+    },
+    {
+      "id": "event-7",
+      "revision": 7,
+      "kind": "tool_started",
+      "data": {
+        "id": "tool-search",
+        "command_id": "research",
+        "name": "search",
+        "text": "Looking up interface capabilities"
+      }
+    },
+    {
+      "id": "event-8",
+      "revision": 8,
+      "kind": "approval_requested",
+      "data": {
+        "id": "approval-access",
+        "command_id": "research",
+        "text": "Allow access to the private planning document?",
+        "protected": true
+      }
+    },
+    {
+      "id": "event-9",
+      "revision": 9,
+      "kind": "admitted",
+      "data": {
+        "command_id": "unclear",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "event-10",
+      "revision": 10,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "unclear.user",
+          "command_id": "unclear",
+          "role": "user",
+          "text": "Was the earlier external action completed?"
+        }
+      }
+    },
+    {
+      "id": "event-11",
+      "revision": 11,
+      "kind": "settled",
+      "data": {
+        "command_id": "unclear",
+        "outcome": {
+          "status": "uncertain",
+          "output": null,
+          "error": {
+            "code": "effect_unknown",
+            "message": "The host could not establish whether the external action completed.",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "id": "event-12",
+      "revision": 12,
+      "kind": "notice",
+      "data": {
+        "id": "host-advisory",
+        "text": "This conversation is available on another device.",
+        "severity": "info"
+      }
+    }
+  ]
+}

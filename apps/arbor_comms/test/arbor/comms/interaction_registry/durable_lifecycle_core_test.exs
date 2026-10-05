@@ -19,6 +19,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                "admitted_at_unix_ms",
                "authority_epoch",
                "authority_node",
+               "conversation_attachment",
                "dispatch",
                "interaction",
                "operation_id",
@@ -27,10 +28,11 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                "schema_version",
                "status",
                "terminal",
-               "updated_at_unix_ms"
+               "updated_at_unix_ms",
+               "verified_response"
              ]
 
-      assert record["schema_version"] == 2
+      assert record["schema_version"] == 3
 
       assert record["dispatch"] == %{
                "status" => "pending",
@@ -200,10 +202,10 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
       legacy_pending =
         record
         |> Map.put("schema_version", 1)
-        |> Map.delete("dispatch")
+        |> Map.drop(["dispatch", "conversation_attachment", "verified_response"])
 
       assert {:ok, upgraded_pending} = DurableLifecycleCore.decode(legacy_pending)
-      assert upgraded_pending["schema_version"] == 2
+      assert upgraded_pending["schema_version"] == 3
       assert upgraded_pending["dispatch"]["status"] == "pending"
       assert upgraded_pending["dispatch"]["next_attempt_at_unix_ms"] == @now
       assert DurableLifecycleCore.dispatch_due?(upgraded_pending, @now)
@@ -221,10 +223,10 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
       legacy_terminal =
         terminal
         |> Map.put("schema_version", 1)
-        |> Map.delete("dispatch")
+        |> Map.drop(["dispatch", "conversation_attachment", "verified_response"])
 
       assert {:ok, upgraded_terminal} = DurableLifecycleCore.decode(legacy_terminal)
-      assert upgraded_terminal["schema_version"] == 2
+      assert upgraded_terminal["schema_version"] == 3
       assert upgraded_terminal["dispatch"]["status"] == "cancelled"
       refute DurableLifecycleCore.dispatch_due?(upgraded_terminal, @now + 2)
     end

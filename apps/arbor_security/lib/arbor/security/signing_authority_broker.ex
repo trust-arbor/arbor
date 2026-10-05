@@ -238,6 +238,20 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc false
+  def owned_identity(authority) do
+    with {:ok, canonical} <- SigningAuthority.canonicalize(authority) do
+      call({:owned_identity, canonical, self()})
+    end
+  end
+
+  @doc false
+  def recorded_identity(authority, owner) when is_pid(owner) do
+    with {:ok, canonical} <- SigningAuthority.canonicalize(authority) do
+      call({:owned_identity, canonical, owner})
+    end
+  end
+
   @doc """
   Open a persistent signing authority directly from a possession proof.
   """
@@ -784,6 +798,18 @@ defmodule Arbor.Security.SigningAuthorityBroker do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:owned_identity, authority, owner}, _from, state) do
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, %{owner_pid: ^owner} = entry} <- authorize_authority(authority, state) do
+        {:ok, %{principal_id: entry.principal_id, purpose: entry.purpose}}
+      else
+        _ -> {:error, :native_notice_source_required}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:sign, authority, payload}, _from, state) do

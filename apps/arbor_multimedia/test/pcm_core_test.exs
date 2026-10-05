@@ -140,4 +140,88 @@ defmodule Arbor.Multimedia.PcmCoreTest do
     assert {%{result: {:error, :invalid_media}}, [:close]} =
              OperationCore.event(state, {:complete, 2}, nil)
   end
+
+  test "manual capture validates its local controller and minimum without widening capture limits" do
+    {:ok, spec} = PcmCore.capture(duration_ms: 1_000, sample_rate: 16_000)
+    controller = {self(), make_ref()}
+
+    assert {:ok, %{minimum_frames: 4_000}, ^controller} =
+             PcmCore.capture_control(
+               spec,
+               [controller: controller, minimum_duration_ms: 250],
+               node()
+             )
+
+    for options <- [
+          [controller: controller, minimum_duration_ms: 99],
+          [controller: controller, minimum_duration_ms: 1_001],
+          [controller: {self(), "untrusted"}],
+          [controller: controller, controller: controller],
+          [controller: controller, native_finish: true],
+          []
+        ] do
+      assert {:error, :invalid_options} = PcmCore.capture_control(spec, options, node())
+    end
+
+    assert {:error, :invalid_options} =
+             PcmCore.capture_control(spec, [controller: controller], :other@host)
+  end
+
+  test "manual completion joins its smaller terminal count in either order and still waits for close" do
+    {:ok, spec} = PcmCore.capture(duration_ms: 1_000, sample_rate: 8_000)
+    spec = Map.put(spec, :minimum_frames, 800)
+    pcm = :binary.copy(<<23, 42>>, 1_600)
+    now = ~U[2026-10-02 00:00:00Z]
+
+    for events <- [[{:pcm, pcm}, {:partial, 1_600}], [{:partial, 1_600}, {:pcm, pcm}]] do
+      {initial, [:finish]} = OperationCore.finish(OperationCore.new(spec))
+
+      {state, effects} =
+        Enum.reduce(events, {initial, []}, fn event, {state, _} ->
+          OperationCore.event(state, event, now)
+        end)
+
+      assert effects == [:close]
+      refute state.closed
+      assert {:ok, %{audio: %{pcm: ^pcm}, utterance_ended_at: ^now}} = state.result
+      assert {%{closed: true}, [:settle]} = OperationCore.event(state, {:closed, :ok}, now)
+    end
+  end
+
+  test "security regression: partial completion needs finish intent and cannot survive cancellation" do
+    {:ok, spec} = PcmCore.capture(duration_ms: 1_000, sample_rate: 8_000)
+    core = OperationCore.new(Map.put(spec, :minimum_frames, 800))
+
+    assert {%{result: {:error, :invalid_media}}, [:close]} =
+             OperationCore.event(core, {:partial, 800}, nil)
+
+    {finishing, [:finish]} = OperationCore.finish(core)
+    {cancelled, [:close]} = OperationCore.cancel(finishing, :timeout)
+
+    for event <- [{:partial, 800}, {:pcm, :binary.copy(<<1, 0>>, 800)}] do
+      assert {^cancelled, []} = OperationCore.event(cancelled, event, nil)
+    end
+
+    assert cancelled.chunks == []
+
+    assert {%{result: {:error, :timeout}}, [:settle]} =
+             OperationCore.event(cancelled, {:closed, :ok}, nil)
+  end
+
+  test "manual capture rejects empty short and overflowing audio without padding" do
+    {:ok, spec} = PcmCore.capture(duration_ms: 1_000, sample_rate: 8_000)
+
+    {core, [:finish]} =
+      OperationCore.finish(OperationCore.new(Map.put(spec, :minimum_frames, 800)))
+
+    for frames <- [0, 799] do
+      assert {%{result: {:error, :recording_too_short}, chunks: []}, [:close]} =
+               OperationCore.event(core, {:partial, frames}, nil)
+    end
+
+    {joined, []} = OperationCore.event(core, {:partial, 800}, nil)
+
+    assert {%{result: {:error, :invalid_media}}, [:close]} =
+             OperationCore.event(joined, {:pcm, :binary.copy(<<1, 0>>, 801)}, nil)
+  end
 end

@@ -67,6 +67,83 @@ defmodule Arbor.Gateway.Chat.ProtocolTest do
     end
   end
 
+  test "distinct window payload decodes latest older and newer session requests" do
+    for {bounds, opts} <- [
+          {[nil, nil, nil, nil], []},
+          {[8, nil, 10, 2], [before: 8, through: 10, limit: 2]},
+          {[nil, 3, 10, 2], [after: 3, through: 10, limit: 2]}
+        ] do
+      payload =
+        Jason.encode!(["arbor.conversation.window.v1", "human_owner", "agent_a", bounds, nil])
+
+      wire = Jason.encode!(%{payload: payload, authentication: "conversation_session"})
+
+      assert {:ok,
+              %{
+                operation: :window,
+                caller: "human_owner",
+                target: "agent_a",
+                input: nil,
+                opts: ^opts
+              }} = Protocol.decode_session(wire)
+    end
+  end
+
+  test "security regression window grammar rejects mixed selectors malformed bounds and v2 reinterpretation" do
+    for bounds <- [
+          [1, 0, nil, 20],
+          [0, nil, nil, 20],
+          [nil, -1, nil, 20],
+          [nil, nil, nil, 101],
+          [nil, nil, nil, 0],
+          [3, nil, 2, 20],
+          [nil, 3, 2, 20],
+          ["1", nil, nil, 20]
+        ] do
+      payload =
+        Jason.encode!(["arbor.conversation.window.v1", "human_owner", "agent_a", bounds, nil])
+
+      assert {:error, :unauthorized} =
+               Protocol.decode_session(
+                 Jason.encode!(%{payload: payload, authentication: "conversation_session"})
+               )
+    end
+
+    payload =
+      Jason.encode!([
+        "arbor.conversation.v2",
+        "window",
+        "human_owner",
+        "agent_a",
+        nil,
+        [nil, nil, 20],
+        nil
+      ])
+
+    assert {:error, :unauthorized} =
+             Protocol.decode_session(
+               Jason.encode!(%{payload: payload, authentication: "conversation_session"})
+             )
+  end
+
+  test "window response retains its distinct type and closed data envelope" do
+    data = %{
+      agent_id: "agent_a",
+      engagement_id: "eng_11111111111111111111111111111111",
+      entries: [],
+      head: 0,
+      first: 0,
+      last: 0,
+      has_older: false,
+      has_newer: false
+    }
+
+    assert {"conversation_window", %{"data" => actual}} =
+             decode_type(Protocol.encode({:conversation_window, data}))
+
+    assert actual == Jason.decode!(Jason.encode!(data))
+  end
+
   defp decode_type(json) do
     {:ok, %{"type" => type} = m} = Jason.decode(json)
     {type, Map.delete(m, "type")}

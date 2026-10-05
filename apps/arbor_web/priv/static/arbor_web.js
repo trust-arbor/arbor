@@ -30,16 +30,79 @@ ArborWebHooks.ScrollToBottom = {
 };
 
 /**
- * ClearOnSubmit - Clear a form after successful submission.
- * Listens for the "clear_form" event from the server.
- *
+ * ConversationScroll - Follow latest messages until the reader scrolls away.
+ * Retain a visible message anchor while browsing or refreshing older history.
+ */
+ArborWebHooks.ConversationScroll = {
+  mounted() {
+    this.follow = this.el.dataset.mode === "latest";
+    this.previousMode = this.el.dataset.mode;
+    this.previousWindow = this.el.dataset.window;
+    this.onScroll = () => {
+      this.follow = this.el.dataset.mode === "latest" &&
+        this.el.scrollHeight - this.el.clientHeight - this.el.scrollTop < 48;
+    };
+    this.el.addEventListener("scroll", this.onScroll, {passive: true});
+    if (this.follow) this.el.scrollTop = this.el.scrollHeight;
+  },
+  beforeUpdate() {
+    this.previousTop = this.el.scrollTop;
+    const top = this.el.getBoundingClientRect().top;
+    const row = [...this.el.querySelectorAll("[data-conversation-message]")]
+      .find(element => element.getBoundingClientRect().bottom > top);
+    this.anchor = row ? {id: row.id, offset: row.getBoundingClientRect().top - top} : null;
+  },
+  updated() {
+    const mode = this.el.dataset.mode;
+    if (mode === "latest" && (this.follow || this.previousMode !== "latest")) {
+      this.el.scrollTop = this.el.scrollHeight;
+      this.follow = true;
+    } else {
+      const anchor = this.anchor && [...this.el.querySelectorAll("[data-conversation-message]")]
+        .find(element => element.id === this.anchor.id);
+      if (anchor) {
+        this.el.scrollTop += anchor.getBoundingClientRect().top -
+          this.el.getBoundingClientRect().top - this.anchor.offset;
+      } else {
+        this.el.scrollTop = this.previousWindow === this.el.dataset.window ? (this.previousTop || 0) : 0;
+      }
+      this.follow = false;
+    }
+    this.previousMode = mode;
+    this.previousWindow = this.el.dataset.window;
+  },
+  destroyed() { this.el.removeEventListener("scroll", this.onScroll); }
+};
+
+/**
+ * ClearOnSubmit - Clear a form after the server emits "clear_form".
  * Usage: <form phx-hook="ClearOnSubmit" phx-submit="send">...</form>
- * Server: push_event(socket, "clear_form", %{})
  */
 ArborWebHooks.ClearOnSubmit = {
   mounted() {
     this.handleEvent("clear_form", () => {
       this.el.reset();
+    });
+  }
+};
+
+/**
+ * Keep a denial receiver mounted across an asynchronous target switch. Only
+ * the exact authenticated subject's per-tab drafts/outboxes are erased; an
+ * ordinary switch emits no denial and preserves each conversation's draft.
+ */
+ArborWebHooks.ConversationHome = {
+  mounted() {
+    this.handleEvent("conversation-home-clear", ({subject}) => {
+      if (typeof subject !== "string" || subject.length > 256 ||
+          !/^human_[A-Za-z0-9_-]+$/.test(subject)) return;
+      const prefix = `arbor-conversation:${subject}:`;
+      try {
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && key.startsWith(prefix)) sessionStorage.removeItem(key);
+        }
+      } catch (_) {}
     });
   }
 };
@@ -52,18 +115,19 @@ ArborWebHooks.ClearOnSubmit = {
 ArborWebHooks.ConversationDraft = {
   mounted() {
     this.key = null;
-    this.state = {draft: "", pending: null};
+    this.state = {draft: "", revision: 0, pending: null};
     this.onInput = () => {
       if (!this.key) return;
       this.state.draft = this.input().value;
+      this.state.revision++;
       this.save();
     };
     this.onSubmit = () => {
       if (!this.key) return;
-      const text = this.input().value.trim();
-      if (!text || text.startsWith("/")) return;
+      const text = this.el.dataset.conversationPlainText === "true" ? this.input().value : this.input().value.trim();
+      if (!text.trim() || (text.startsWith("/") && this.el.dataset.conversationPlainText !== "true")) return;
       if (!this.state.pending) {
-        this.state.pending = {id: crypto.randomUUID(), text};
+        this.state.pending = {id: crypto.randomUUID(), text, revision: this.state.revision};
       }
       this.el.querySelector('[name="command_id"]').value = this.state.pending.id;
       this.state.draft = this.input().value;
@@ -72,11 +136,27 @@ ArborWebHooks.ConversationDraft = {
     this.el.addEventListener("input", this.onInput);
     // Capture runs before LiveView serializes the form at document level.
     this.el.addEventListener("submit", this.onSubmit, true);
+    this.onKeydown = event => {
+      if (this.el.dataset.conversationPlainText === "true" && event.key === "Enter" &&
+          (event.ctrlKey || event.metaKey) && !event.isComposing) {
+        const submit = this.el.querySelector('button[type="submit"]');
+        if (submit && !submit.disabled) {
+          event.preventDefault();
+          this.el.requestSubmit();
+        }
+      }
+    };
+    this.el.addEventListener("keydown", this.onKeydown);
     this.handleEvent("conversation-completed", payload => {
       if (this.state.pending?.id !== payload.id) return;
+      const unchanged = this.state.pending.revision === this.state.revision;
       this.state.pending = null;
-      if (this.state.draft.trim() === payload.text) this.state.draft = "";
-      if (this.input().value.trim() === payload.text) this.input().value = "";
+      const exact = this.el.dataset.conversationPlainText === "true";
+      if (unchanged && (exact ? this.state.draft : this.state.draft.trim()) === payload.text) this.state.draft = "";
+      if (unchanged && (exact ? this.input().value : this.input().value.trim()) === payload.text) {
+        this.input().value = "";
+        this.pushEvent("update-input", {message: ""});
+      }
       this.save();
     });
     this.handleEvent("conversation-clear-pending", payload => {
@@ -86,7 +166,7 @@ ArborWebHooks.ConversationDraft = {
     });
     this.handleEvent("conversation-access-denied", () => {
       try { if (this.key) sessionStorage.removeItem(this.key); } catch (_) {}
-      this.state = {draft: "", pending: null};
+      this.state = {draft: "", revision: 0, pending: null};
       this.input().value = "";
       this.key = null;
     });
@@ -106,17 +186,19 @@ ArborWebHooks.ConversationDraft = {
     this.key = key;
     try {
       const saved = JSON.parse(sessionStorage.getItem(key));
-      this.state = saved && typeof saved.draft === "string" ? saved : {draft: "", pending: null};
-    } catch (_) { this.state = {draft: "", pending: null}; }
+      this.state = saved && typeof saved.draft === "string" ? saved : {draft: "", revision: 0, pending: null};
+      if (!Number.isSafeInteger(this.state.revision) || this.state.revision < 0) this.state.revision = 0;
+    } catch (_) { this.state = {draft: "", revision: 0, pending: null}; }
     this.input().value = this.state.draft;
     this.pushEvent("update-input", {message: this.state.draft});
-    if (this.state.pending) this.pushEvent("conversation:restore", this.state.pending);
+    if (this.state.pending) this.pushEvent("conversation:restore", {id: this.state.pending.id, text: this.state.pending.text});
   },
   updated() { this.restore(); },
   reconnected() { this.restore(true); },
   destroyed() {
     this.el.removeEventListener("input", this.onInput);
     this.el.removeEventListener("submit", this.onSubmit, true);
+    this.el.removeEventListener("keydown", this.onKeydown);
   }
 };
 

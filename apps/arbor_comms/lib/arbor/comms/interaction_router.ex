@@ -150,6 +150,11 @@ defmodule Arbor.Comms.InteractionRouter do
     |> publish_response(request_id, response, metadata)
   end
 
+  @doc false
+  def publish_conversation_response(%Interaction{} = interaction, response, metadata) do
+    publish_response({:ok, interaction}, interaction.request_id, response, metadata)
+  end
+
   defp publish_response(result, request_id, response, metadata) do
     case result do
       {:ok, interaction} ->
@@ -471,6 +476,42 @@ defmodule Arbor.Comms.InteractionRouter do
   ## Private — request flow
 
   defp do_request(%Interaction{} = interaction, opts) do
+    case Keyword.fetch(opts, :conversation_source) do
+      {:ok, source} -> request_source_bound(interaction, source)
+      :error -> do_request_unscoped(interaction, opts)
+    end
+  end
+
+  # This control is passed only in private execution options by the Security
+  # producer. The Session validates its exact live generation before it calls
+  # Comms admission; no fallback may publish an unattached protected request.
+  defp request_source_bound(
+         %Interaction{kind: :approval} = interaction,
+         %{session_pid: pid, generation: generation, handle: {authority_pid, source_ref}} = source
+       )
+       when is_pid(pid) and is_pid(authority_pid) and is_reference(generation) and
+              is_reference(source_ref) do
+    with true <- map_size(source) == 3,
+         {:ok, receipt} <-
+           GenServer.call(
+             pid,
+             {:conversation_interaction, generation, source.handle, {:approval, interaction},
+              300_000},
+             5_000
+           ) do
+      {:ok, receipt.request_id}
+    else
+      _ -> {:error, :invalid_protected_source}
+    end
+  rescue
+    _ -> {:error, :invalid_protected_source}
+  catch
+    _, _ -> {:error, :invalid_protected_source}
+  end
+
+  defp request_source_bound(_, _), do: {:error, :invalid_protected_source}
+
+  defp do_request_unscoped(%Interaction{} = interaction, opts) do
     adapter_map = Keyword.get(opts, :adapter_map, InteractionDelivery.configured_adapters())
     durability = Keyword.get(opts, :durability, :volatile)
 

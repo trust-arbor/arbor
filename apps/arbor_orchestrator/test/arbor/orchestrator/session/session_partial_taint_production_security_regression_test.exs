@@ -103,7 +103,16 @@ defmodule Arbor.Orchestrator.Session.SessionPartialTaintProductionSecurityRegres
     assert_receive {:partial_provider_started, provider_pid, request}, 2_000
     assert Enum.all?(request.messages, &(&1.metadata == %{}))
 
-    send(pid, {:stream_chunk, "partial source-owned output"})
+    active = :sys.get_state(pid)
+    stream_state = %{active | config: Map.put(active.config, "stream", true)}
+
+    stream =
+      Arbor.Orchestrator.Session.Builders.build_engine_opts(stream_state, %{},
+        source: :turn,
+        steering_binding: {active.turn_token, active.turn_user_message.engagement_id}
+      )[:on_stream]
+
+    stream.(%{type: :delta, data: %{text: "partial source-owned output"}})
     assert Session.get_state(pid).streaming_buffer.content == "partial source-owned output"
 
     case mode do

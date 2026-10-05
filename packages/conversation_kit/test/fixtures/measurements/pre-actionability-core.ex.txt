@@ -1,0 +1,417 @@
+defmodule ConversationKit do
+  @moduledoc """
+  Dependency-free conversation reducer and semantic projections.
+
+  Events are authoritative, ordered JSON data. Intents and speech descriptions are
+  data for a host to interpret, never authorization or evidence of execution.
+  Temporary progress belongs to a separate, disposable map.
+  """
+
+  import Kernel, except: [apply: 2]
+
+  @max_text_bytes 16_000
+  @kinds ~w(admitted message settled tool_started tool_finished approval_requested approval_resolved)
+
+  @doc "Construct a conversation; the caller supplies its stable identity."
+  def new(id \\ "demo") when is_binary(id) do
+    %{
+      "id" => id,
+      "revision" => 0,
+      "events" => [],
+      "messages" => [],
+      "commands" => %{},
+      "tools" => [],
+      "approvals" => [],
+      "notices" => []
+    }
+  end
+
+  @doc "Apply one contiguous authoritative event or an exact duplicate."
+  def apply(state, event) when is_map(state) do
+    cond do
+      not valid_event?(event) ->
+        {:error, :invalid_event}
+
+      event["revision"] <= state["revision"] ->
+        if Enum.at(state["events"], event["revision"] - 1) == event,
+          do: {:ok, state},
+          else: {:error, :conflicting_duplicate}
+
+      event["revision"] != state["revision"] + 1 ->
+        {:error, :revision_gap}
+
+      Enum.any?(state["events"], &(&1["id"] == event["id"])) ->
+        {:error, :reused_event_id}
+
+      true ->
+        case reduce(state, event["kind"], event["data"]) do
+          {:ok, next} ->
+            {:ok,
+             %{next | "revision" => event["revision"], "events" => state["events"] ++ [event]}}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  def apply(_, _), do: {:error, :invalid_state}
+
+  @doc "Replay a batch transactionally: errors never return a partial checkpoint."
+  def replay(events, state \\ new())
+
+  def replay(events, state) when is_list(events) do
+    Enum.reduce_while(events, {:ok, state}, fn event, {:ok, current} ->
+      case apply(current, event) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  def replay(_, _), do: {:error, :invalid_events}
+
+  @doc "Closed event validation. Unknown kinds stop replay before cursor advancement."
+  def valid_event?(event) do
+    exact?(event, ~w(id revision kind data)) and id?(event["id"]) and
+      is_integer(event["revision"]) and event["revision"] > 0 and
+      event["kind"] in @kinds and valid_data?(event["kind"], event["data"])
+  end
+
+  @doc "Project durable state to semantic blocks. Renderers retain native layout and input."
+  def project(state) do
+    commands =
+      state["commands"]
+      |> Map.values()
+      |> Enum.sort_by(& &1["revision"])
+
+    message_blocks =
+      Enum.map(state["messages"], fn message ->
+        %{
+          "type" => "message",
+          "id" => message["id"],
+          "text" => message["text"],
+          "role" => message["role"],
+          "status" => state["commands"][message["command_id"]]["status"]
+        }
+      end)
+
+    command_blocks =
+      commands
+      |> Enum.reject(&(&1["status"] == "completed"))
+      |> Enum.map(fn command ->
+        error = if command["outcome"], do: command["outcome"]["error"], else: nil
+        suffix = if error, do: ": " <> error["message"], else: ""
+
+        %{
+          "type" => "command",
+          "id" => command["id"],
+          "status" => command["status"],
+          "text" => "Command " <> command["id"] <> ": " <> command["status"] <> suffix
+        }
+      end)
+
+    tool_blocks = Enum.map(state["tools"], &Map.put(&1, "type", "tool"))
+    approval_blocks = Enum.map(state["approvals"], &Map.put(&1, "type", "approval"))
+
+    %{
+      "id" => state["id"],
+      "revision" => state["revision"],
+      "messages" => state["messages"],
+      "commands" => commands,
+      "tools" => state["tools"],
+      "approvals" => state["approvals"],
+      "notices" => state["notices"],
+      "blocks" => message_blocks ++ command_blocks ++ tool_blocks ++ approval_blocks,
+      "speech" => speech(state)
+    }
+  end
+
+  @doc "Normalize a user intent; authoritative events alone change conversation state."
+  def intent(state, "send", params) do
+    if exact?(params, ["text"]) and text?(params["text"]) and
+         String.trim(params["text"]) != "" do
+      {:ok, intent_data(state, "chat.send", params)}
+    else
+      {:error, :invalid_intent}
+    end
+  end
+
+  def intent(state, "cancel", params) do
+    if exact?(params, ["command_id"]) and pending?(state, params["command_id"]) do
+      {:ok, intent_data(state, "chat.cancel", params)}
+    else
+      {:error, :command_not_pending}
+    end
+  end
+
+  def intent(state, "approve", params) do
+    approval =
+      if is_map(params),
+        do: Enum.find(state["approvals"], &(&1["id"] == params["approval_id"])),
+        else: nil
+
+    if exact?(params, ~w(approval_id decision)) and
+         params["decision"] in ~w(approved denied) and approval != nil and
+         approval["status"] == "pending" and pending?(state, approval["command_id"]) do
+      {:ok, intent_data(state, "approval.respond", params)}
+    else
+      {:error, :approval_not_pending}
+    end
+  end
+
+  def intent(_, _, _), do: {:error, :unknown_intent}
+
+  @doc "Reduce disposable progress independently of durable conversation revisions."
+  def progress(local, update) when is_map(local) do
+    if exact?(update, ~w(command_id text)) and id?(update["command_id"]) and
+         text?(update["text"]) do
+      {:ok, Map.put(local, update["command_id"], update["text"])}
+    else
+      {:error, :invalid_progress}
+    end
+  end
+
+  def progress(_, _), do: {:error, :invalid_progress}
+
+  defp intent_data(state, name, params) do
+    %{"name" => name, "conversation_id" => state["id"], "input" => params}
+  end
+
+  defp reduce(state, "admitted", data) do
+    command_id = data["command_id"]
+
+    if Map.has_key?(state["commands"], command_id) do
+      {:error, :command_already_admitted}
+    else
+      command = %{
+        "id" => command_id,
+        "name" => data["name"],
+        "status" => "pending",
+        "outcome" => nil,
+        "revision" => state["revision"] + 1
+      }
+
+      {:ok, %{state | "commands" => Map.put(state["commands"], command_id, command)}}
+    end
+  end
+
+  defp reduce(state, "message", %{"message" => message}) do
+    cond do
+      not pending?(state, message["command_id"]) ->
+        {:error, :command_not_pending}
+
+      Enum.any?(state["messages"], &(&1["id"] == message["id"])) ->
+        {:error, :message_already_exists}
+
+      true ->
+        {:ok, %{state | "messages" => state["messages"] ++ [message]}}
+    end
+  end
+
+  defp reduce(state, "settled", data) do
+    command_id = data["command_id"]
+    outcome = data["outcome"]
+
+    cond do
+      not pending?(state, command_id) ->
+        {:error, :command_not_pending}
+
+      outcome["status"] == "completed" and not matching_output?(state, command_id, outcome) ->
+        {:error, :completion_without_matching_message}
+
+      true ->
+        command = %{
+          state["commands"][command_id]
+          | "status" => outcome["status"],
+            "outcome" => outcome
+        }
+
+        {:ok, %{state | "commands" => Map.put(state["commands"], command_id, command)}}
+    end
+  end
+
+  defp reduce(state, "tool_started", data) do
+    cond do
+      not pending?(state, data["command_id"]) -> {:error, :command_not_pending}
+      Enum.any?(state["tools"], &(&1["id"] == data["id"])) -> {:error, :tool_already_exists}
+      true -> {:ok, %{state | "tools" => state["tools"] ++ [Map.put(data, "status", "running")]}}
+    end
+  end
+
+  defp reduce(state, "tool_finished", data) do
+    case Enum.find(state["tools"], &(&1["id"] == data["id"])) do
+      %{"status" => "running"} = tool ->
+        if pending?(state, tool["command_id"]) do
+          tools =
+            Enum.map(
+              state["tools"],
+              &if(&1["id"] == data["id"], do: Map.merge(&1, data), else: &1)
+            )
+
+          {:ok, %{state | "tools" => tools}}
+        else
+          {:error, :command_not_pending}
+        end
+
+      _ ->
+        {:error, :tool_not_running}
+    end
+  end
+
+  defp reduce(state, "approval_requested", data) do
+    cond do
+      not pending?(state, data["command_id"]) ->
+        {:error, :command_not_pending}
+
+      Enum.any?(state["approvals"], &(&1["id"] == data["id"])) ->
+        {:error, :approval_already_exists}
+
+      true ->
+        {:ok,
+         %{state | "approvals" => state["approvals"] ++ [Map.put(data, "status", "pending")]}}
+    end
+  end
+
+  defp reduce(state, "approval_resolved", data) do
+    case Enum.find(state["approvals"], &(&1["id"] == data["id"])) do
+      %{"status" => "pending"} = approval ->
+        if pending?(state, approval["command_id"]) do
+          approvals =
+            Enum.map(state["approvals"], fn item ->
+              if item["id"] == data["id"],
+                do: Map.put(item, "status", data["decision"]),
+                else: item
+            end)
+
+          {:ok, %{state | "approvals" => approvals}}
+        else
+          {:error, :command_not_pending}
+        end
+
+      _ ->
+        {:error, :approval_not_pending}
+    end
+  end
+
+  defp matching_output?(state, command_id, outcome) do
+    output = outcome["output"]
+
+    Enum.any?(state["messages"], fn message ->
+      message["command_id"] == command_id and message["role"] == "assistant" and
+        message["id"] == output["message_id"] and message["text"] == output["text"]
+    end)
+  end
+
+  defp pending?(state, command_id) do
+    case state["commands"][command_id] do
+      %{"status" => "pending"} -> true
+      _ -> false
+    end
+  end
+
+  defp speech(state) do
+    utterances =
+      state["messages"]
+      |> Enum.filter(fn message ->
+        message["role"] == "assistant" and
+          state["commands"][message["command_id"]]["status"] == "completed"
+      end)
+      |> Enum.map(fn message ->
+        %{"type" => "utterance", "utterance_id" => message["id"], "text" => message["text"]}
+      end)
+
+    escalations =
+      state["approvals"]
+      |> Enum.filter(&(&1["status"] == "pending" and &1["protected"]))
+      |> Enum.map(fn approval ->
+        %{
+          "type" => "screen_required",
+          "interaction_id" => approval["id"],
+          "text" => "Review the pending approval on screen."
+        }
+      end)
+
+    utterances ++ escalations
+  end
+
+  defp valid_data?("admitted", data),
+    do:
+      exact?(data, ~w(command_id name)) and id?(data["command_id"]) and
+        data["name"] == "chat.send"
+
+  defp valid_data?("message", data),
+    do: exact?(data, ["message"]) and valid_message?(data["message"])
+
+  defp valid_data?("settled", data),
+    do:
+      exact?(data, ~w(command_id outcome)) and id?(data["command_id"]) and
+        valid_outcome?(data["outcome"])
+
+  defp valid_data?("tool_started", data),
+    do:
+      exact?(data, ~w(id command_id name text)) and id?(data["id"]) and id?(data["command_id"]) and
+        name?(data["name"]) and text?(data["text"])
+
+  defp valid_data?("tool_finished", data),
+    do:
+      exact?(data, ~w(id status text)) and id?(data["id"]) and
+        data["status"] in ~w(completed failed cancelled) and text?(data["text"])
+
+  defp valid_data?("approval_requested", data),
+    do:
+      exact?(data, ~w(id command_id text protected)) and id?(data["id"]) and
+        id?(data["command_id"]) and text?(data["text"]) and is_boolean(data["protected"])
+
+  defp valid_data?("approval_resolved", data),
+    do:
+      exact?(data, ~w(id decision)) and id?(data["id"]) and
+        data["decision"] in ~w(approved denied)
+
+  defp valid_message?(message) do
+    exact?(message, ~w(id role text command_id)) and id?(message["id"]) and
+      id?(message["command_id"]) and message["role"] in ~w(user assistant) and
+      text?(message["text"])
+  end
+
+  defp valid_outcome?(outcome) do
+    exact?(outcome, ~w(status output error)) and
+      case outcome["status"] do
+        "completed" ->
+          output = outcome["output"]
+
+          exact?(output, ~w(message_id text)) and id?(output["message_id"]) and
+            text?(output["text"]) and outcome["error"] == nil
+
+        status when status in ["failed", "uncertain"] ->
+          outcome["output"] == nil and valid_error?(outcome["error"])
+
+        "cancelled" ->
+          outcome["output"] == nil and outcome["error"] == nil
+
+        _ ->
+          false
+      end
+  end
+
+  defp valid_error?(error) do
+    exact?(error, ~w(code message retryable)) and name?(error["code"]) and
+      text?(error["message"]) and is_boolean(error["retryable"])
+  end
+
+  defp exact?(map, keys),
+    do: is_map(map) and map_size(map) == length(keys) and Enum.all?(keys, &Map.has_key?(map, &1))
+
+  defp text?(value),
+    do: is_binary(value) and String.valid?(value) and byte_size(value) <= @max_text_bytes
+
+  defp id?(value),
+    do:
+      is_binary(value) and byte_size(value) in 1..128 and
+        String.match?(value, ~r/\A[A-Za-z0-9._:-]+\z/)
+
+  defp name?(value),
+    do:
+      is_binary(value) and byte_size(value) in 1..128 and
+        String.match?(value, ~r/\A[a-z][a-z0-9_.-]*\z/)
+end

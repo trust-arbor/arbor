@@ -1,5 +1,5 @@
 defmodule Arbor.Voice.DiagnosticsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   import ExUnit.CaptureLog
   alias Arbor.Voice.Contracts.AudioTurn
   alias Arbor.Voice.Diagnostics
@@ -402,5 +402,55 @@ defmodule Arbor.Voice.DiagnosticsTest do
       assert {:continue, next} = AudioTurnCore.reduce(current, {:output_audio, chunk})
       next
     end)
+  end
+
+  test "security regression: presentation observations log only fixed reasons without failure labels" do
+    previous = Logger.get_module_level(Diagnostics)
+    :ok = Logger.put_module_level(Diagnostics, :info)
+
+    on_exit(fn ->
+      case previous do
+        [{Diagnostics, level}] -> Logger.put_module_level(Diagnostics, level)
+        [] -> Logger.delete_module_level(Diagnostics)
+      end
+    end)
+
+    secret = "private-presentation-text-audio-proof-ID-sentinel"
+
+    reasons = [
+      :audio_retained,
+      :invalid_guard,
+      :screen_only_classification,
+      :truncated_guard,
+      :raw_text_mismatch,
+      :guard_text_mismatch,
+      :format_mismatch,
+      :provider_audio_absent,
+      :invalid_provider_audio,
+      :invalid_presentation_input,
+      :presentation_authority_unavailable,
+      :presentation_error
+    ]
+
+    log =
+      capture_log(fn ->
+        for reason <- reasons do
+          assert :ok = Diagnostics.presentation_observation(reason)
+        end
+
+        for unknown <- [secret, %{proof: secret}, {:error, secret}, :unknown_private_reason] do
+          assert :ok = Diagnostics.presentation_observation(unknown)
+        end
+      end)
+
+    for reason <- reasons do
+      assert log =~ "presentation observation reason=#{reason}"
+    end
+
+    assert length(Regex.scan(~r/presentation observation reason=unclassified/, log)) == 4
+    refute log =~ "operation failed"
+    refute log =~ secret
+    refute log =~ "proof"
+    refute log =~ "unknown_private_reason"
   end
 end

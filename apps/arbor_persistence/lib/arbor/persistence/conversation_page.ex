@@ -60,7 +60,8 @@ defmodule Arbor.Persistence.ConversationPage do
     end
   end
 
-  defp project_entries(rows) do
+  @doc false
+  def project_entries(rows) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
       case project_entry(row) do
         {:ok, entry} -> {:cont, {:ok, [entry | acc]}}

@@ -1,7 +1,7 @@
 defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   use Arbor.Dashboard.ConnCase, async: false
 
-  alias Arbor.Dashboard.{Nav, OidcAuth}
+  alias Arbor.Dashboard.{Nav, OidcAuth, SessionAuth}
   alias Arbor.Security.SessionToken
 
   @moduletag :fast
@@ -106,6 +106,26 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
              live_isolated(conn, HookView, session: session(:expired))
   end
 
+  test "security regression: session denial queues exact-subject private storage clearing before redirect" do
+    assert {:cont, authorized} = Nav.on_mount(:default, %{}, session(:valid), socket())
+    Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
+    assert {:halt, denied} = SessionAuth.guard_socket(authorized)
+
+    assert Phoenix.LiveView.Utils.get_push_events(denied) == [
+             ["conversation-access-denied", %{}],
+             ["conversation-home-clear", %{subject: @subject}]
+           ]
+
+    assert denied.redirected == {:redirect, %{status: 302, to: "/auth/login"}}
+
+    for key <- [:current_agent_id, :current_user_display_name, :session_token, :tenant_context],
+        do: assert(is_nil(denied.assigns[key]))
+
+    refute denied.assigns.local_dev_operator?
+    refute denied.assigns.authenticated?
+    refute inspect(Phoenix.LiveView.Utils.get_push_events(denied)) =~ "rotated-test-secret"
+  end
+
   test "security regression: event hook redirects invalidated proof before private callback", %{
     conn: conn
   } do
@@ -114,6 +134,8 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
 
     Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
     render_click(view, "effect")
+    assert_push_event(view, "conversation-access-denied", %{})
+    assert_push_event(view, "conversation-home-clear", %{subject: @subject})
     assert_redirect(view, "/auth/login")
     refute_received :private_event_callback
   end
@@ -126,6 +148,8 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
 
     Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
     send(view.pid, :effect)
+    assert_push_event(view, "conversation-access-denied", %{})
+    assert_push_event(view, "conversation-home-clear", %{subject: @subject})
     assert_redirect(view, "/auth/login")
     refute_received :private_info_callback
   end
@@ -147,7 +171,10 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   end
 
   defp socket do
-    %Phoenix.LiveView.Socket{view: HookView, private: %{lifecycle: %Phoenix.LiveView.Lifecycle{}}}
+    %Phoenix.LiveView.Socket{
+      view: HookView,
+      private: %{lifecycle: %Phoenix.LiveView.Lifecycle{}, live_temp: %{push_events: nil}}
+    }
   end
 
   defp session(kind) do

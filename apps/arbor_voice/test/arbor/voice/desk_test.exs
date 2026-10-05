@@ -96,6 +96,37 @@ defmodule Arbor.Voice.DeskTest do
     end
   end
 
+  defmodule ManualMultimedia do
+    def manual_capture_finish_supported?, do: true
+    defdelegate capture_pcm(opts), to: Multimedia
+    defdelegate play_pcm(audio, opts), to: Multimedia
+    defdelegate device_status(), to: Multimedia
+
+    def capture_pcm(opts, control_opts) do
+      {controller, tag} = Keyword.fetch!(control_opts, :controller)
+      control = :crypto.strong_rand_bytes(32)
+      F.put(:manual_control, {controller, control})
+      F.put(:device_status, :busy)
+      send(controller, {:multimedia_capture_control, tag, control})
+      F.event({:manual_capture, opts, control_opts, self()})
+
+      receive do
+        {:captured_result, result} ->
+          F.put(:device_status, :idle)
+          result
+      end
+    end
+
+    def finish_capture(control) do
+      if F.get(:manual_control) == {self(), control} do
+        F.event(:manual_finish_requested)
+        :ok
+      else
+        {:error, :invalid_control}
+      end
+    end
+  end
+
   defmodule Turn do
     def start_owned_desk_session(user, agent, opts, custody),
       do:
@@ -166,7 +197,10 @@ defmodule Arbor.Voice.DeskTest do
       desk_multimedia_module: Multimedia,
       desk_voice_module: Turn,
       desk_comms_module: Comms,
-      desk_session_options: []
+      desk_session_options: [],
+      desk_recording_default_ms: 10_000,
+      desk_recording_min_ms: 100,
+      desk_recording_max_ms: 30_000
     ]
 
     prev = for {k, _} <- env, do: {k, Application.fetch_env(:arbor_voice, k)}
@@ -208,6 +242,222 @@ defmodule Arbor.Voice.DeskTest do
         (
           Process.sleep(10)
           done(id, n - 1)
+        )
+  end
+
+  test "public Desk uses the ten-second recording default when duration is omitted" do
+    assert {:ok, %{default_ms: 10_000, min_ms: 100, max_ms: 30_000}} =
+             Voice.desk_recording_options()
+
+    assert {:ok, id} =
+             Voice.start_desk_turn("desk-user", "desk-agent",
+               session_token: "fixture-token",
+               mode: :loopback
+             )
+
+    assert %{state: :complete, result: %{capture_frames: 160_000, capture_duration_ms: 10_000}} =
+             done(id)
+
+    assert_receive {:capture, [duration_ms: 10_000, sample_rate: 16_000, device_id: :default], _}
+  end
+
+  test "public Desk passes the exact operator default to capture" do
+    Application.put_env(:arbor_voice, :desk_recording_default_ms, 7_501)
+
+    assert {:ok, %{default_ms: 7_501}} = Voice.desk_recording_options()
+
+    assert {:ok, id} =
+             Voice.start_desk_turn("desk-user", "desk-agent",
+               session_token: "fixture-token",
+               mode: :loopback
+             )
+
+    assert %{state: :complete, result: %{capture_frames: 120_016, capture_duration_ms: 7_501}} =
+             done(id)
+
+    assert_receive {:capture, [duration_ms: 7_501, sample_rate: 16_000, device_id: :default], _}
+  end
+
+  test "public Desk accepts the native thirty-second capture ceiling" do
+    assert {:ok, id} = start(mode: :loopback, duration_ms: 30_000)
+
+    assert %{state: :complete, result: %{capture_frames: 480_000, capture_duration_ms: 30_000}} =
+             done(id)
+
+    assert_receive {:capture, [duration_ms: 30_000, sample_rate: 16_000, device_id: :default], _}
+  end
+
+  test "public Desk rejects durations outside the operator policy before capture" do
+    Application.put_env(:arbor_voice, :desk_recording_default_ms, 1_500)
+    Application.put_env(:arbor_voice, :desk_recording_min_ms, 1_000)
+    Application.put_env(:arbor_voice, :desk_recording_max_ms, 2_000)
+
+    for duration <- [999, 2_001, "1500", 1_500.0, nil] do
+      assert {:error, :invalid_desk_options} = start(duration_ms: duration)
+    end
+
+    refute_received {:capture, _, _}
+    refute_received {:session, _, _, _, _}
+  end
+
+  test "public Desk fails closed on inconsistent recording configuration" do
+    Application.put_env(:arbor_voice, :desk_recording_max_ms, 500)
+    assert {:error, :invalid_config} = Voice.desk_recording_options()
+    assert {:error, :invalid_config} = start()
+    refute_received {:capture, _, _}
+  end
+
+  test "public Desk waits for the exact sample-delivery receipt before advertising capture" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    assert {:ok, id} = start(duration_ms: 1_000, mode: :loopback)
+    assert_receive {:manual_capture, _, control_opts, worker}
+    assert %{state: :preparing_capture, can_finish: true} = finishable(id)
+    {controller, control} = F.get(:manual_control)
+    {^controller, tag} = Keyword.fetch!(control_opts, :controller)
+
+    send(controller, {:multimedia_capture_started, make_ref(), control})
+    assert {:ok, %{state: :preparing_capture}} = Voice.desk_turn_status(id)
+    send(controller, {:multimedia_capture_started, tag, :crypto.strong_rand_bytes(32)})
+    assert {:ok, %{state: :preparing_capture}} = Voice.desk_turn_status(id)
+
+    send(controller, {:multimedia_capture_started, tag, control})
+    assert {:ok, %{state: :capture, can_finish: true}} = Voice.desk_turn_status(id)
+    send(controller, {:multimedia_capture_started, tag, control})
+    assert {:ok, %{state: :capture}} = Voice.desk_turn_status(id)
+
+    send(worker, {:captured_result, captured(:binary.copy(<<1, 0>>, 16_000))})
+    assert %{state: :complete} = done(id)
+    send(controller, {:multimedia_capture_started, tag, control})
+    assert {:ok, %{state: :complete}} = Voice.desk_turn_status(id)
+  end
+
+  test "cancelled Desk ignores a late capture-started receipt" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    assert {:ok, id} = start(duration_ms: 1_000)
+    assert_receive {:manual_capture, _, control_opts, worker}
+    assert %{state: :preparing_capture} = finishable(id)
+    {controller, control} = F.get(:manual_control)
+    {^controller, tag} = Keyword.fetch!(control_opts, :controller)
+    monitor = Process.monitor(worker)
+    assert {:error, :cleanup_pending} = Voice.cancel_desk_turn(id)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}
+
+    send(controller, {:multimedia_capture_started, tag, control})
+    assert {:ok, %{state: :cleanup_pending}} = Voice.desk_turn_status(id)
+    F.put(:device_status, :idle)
+    assert %{state: :cancelled, error: :cancelled} = done(id)
+    refute_received {:session, _, _, _, _}
+  end
+
+  test "public Desk manually finishes exact partial audio and passes the configured minimum" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    Application.put_env(:arbor_voice, :desk_recording_min_ms, 250)
+    assert {:ok, id} = start(duration_ms: 10_000)
+    assert_receive {:manual_capture, opts, control_opts, worker}
+    assert opts[:duration_ms] == 10_000
+    assert control_opts[:minimum_duration_ms] == 250
+    assert %{state: :preparing_capture, can_finish: true} = finishable(id)
+    assert :ok = Voice.finish_desk_turn(id)
+    assert_received :manual_finish_requested
+
+    assert {:ok, %{state: :finishing, can_finish: false, terminal: false}} =
+             Voice.desk_turn_status(id)
+
+    {controller, control} = F.get(:manual_control)
+    {^controller, tag} = Keyword.fetch!(control_opts, :controller)
+    send(controller, {:multimedia_capture_started, tag, control})
+    assert {:ok, %{state: :finishing}} = Voice.desk_turn_status(id)
+
+    refute_receive {:session, _, _, _, _}, 20
+    pcm = :binary.copy(<<19, 0>>, 4_800)
+    send(worker, {:captured_result, captured(pcm)})
+    assert %{state: :complete} = done(id)
+    assert_received {:turn, %{pcm: ^pcm}, _}
+    assert {:error, :finish_unavailable} = Voice.finish_desk_turn(id)
+  end
+
+  test "manual loopback reports actual captured duration and never starts a provider" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    assert {:ok, id} = start(duration_ms: 1_000, mode: :loopback)
+    assert_receive {:manual_capture, _, _, worker}
+    finishable(id)
+    assert :ok = Voice.finish_desk_turn(id)
+    pcm = :binary.copy(<<11, 0>>, 3_200)
+    send(worker, {:captured_result, captured(pcm)})
+
+    assert %{state: :complete, result: %{capture_frames: 3_200, capture_duration_ms: 200}} =
+             done(id)
+
+    assert_received {:play, %{pcm: ^pcm}, _, _}
+    refute_received {:session, _, _, _, _}
+  end
+
+  test "security regression: manual finish rechecks authority before retaining captured audio" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    assert {:ok, id} = start(duration_ms: 1_000)
+    assert_receive {:manual_capture, _, _, _}
+    finishable(id)
+    F.put(:authorized, false)
+    assert {:error, :conversation_unauthorized} = Voice.finish_desk_turn(id)
+    refute_received :manual_finish_requested
+    F.put(:device_status, :idle)
+    assert %{state: :cancelled, error: :conversation_unauthorized} = done(id)
+    refute_received {:session, _, _, _, _}
+  end
+
+  test "short manual recording fails closed and cancel remains a discard operation" do
+    Application.put_env(:arbor_voice, :desk_multimedia_module, ManualMultimedia)
+    assert {:ok, id} = start(duration_ms: 1_000)
+    assert_receive {:manual_capture, _, _, worker}
+    finishable(id)
+    assert :ok = Voice.finish_desk_turn(id)
+    send(worker, {:captured_result, {:error, :recording_too_short}})
+    assert %{state: :cancelled, error: :recording_too_short} = done(id)
+    refute_received {:session, _, _, _, _}
+
+    assert {:ok, second} = start(duration_ms: 1_000)
+    assert_receive {:manual_capture, _, _, worker}
+    finishable(second)
+    monitor = Process.monitor(worker)
+    assert {:error, :cleanup_pending} = Voice.cancel_desk_turn(second)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}
+    assert {:error, :finish_unavailable} = Voice.finish_desk_turn(second)
+    F.put(:device_status, :idle)
+    assert %{state: :cancelled, error: :cancelled} = done(second)
+    refute_received {:session, _, _, _, _}
+  end
+
+  test "unsupported multimedia facade retains timed capture without advertising finish" do
+    F.put(:capture, :hold)
+    assert {:ok, id} = start()
+    assert_receive {:capture, _, worker}
+    assert {:ok, %{can_finish: false, state: :preparing_capture}} = Voice.desk_turn_status(id)
+    assert {:error, :finish_unavailable} = Voice.finish_desk_turn(id)
+    F.put(:device_status, :idle)
+    send(worker, :release)
+    assert done(id).state == :complete
+  end
+
+  defp captured(pcm),
+    do:
+      {:ok,
+       %{
+         audio: %{pcm: pcm, sample_rate: 16_000, channels: 1, sample_format: :s16le},
+         utterance_ended_at: ~U[2026-10-02 00:00:00Z]
+       }}
+
+  defp finishable(id, attempts \\ 100)
+  defp finishable(_, 0), do: flunk("manual capture control was not delivered")
+
+  defp finishable(id, attempts) do
+    {:ok, status} = Voice.desk_turn_status(id)
+
+    if status.can_finish,
+      do: status,
+      else:
+        (
+          Process.sleep(10)
+          finishable(id, attempts - 1)
         )
   end
 

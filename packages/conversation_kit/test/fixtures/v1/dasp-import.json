@@ -1,0 +1,555 @@
+{
+  "schema_version": "1.0",
+  "id": "shared-conversation",
+  "events": [
+    {
+      "id": "6248f8cd-5742-4bdb-ac66-c541066f7d92",
+      "revision": 1,
+      "kind": "admitted",
+      "data": {
+        "command_id": "lost-reply",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "987a8178-7359-4608-83da-7245a15d4941",
+      "revision": 2,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "lost-reply.user",
+          "role": "user",
+          "text": "One intended turn",
+          "command_id": "lost-reply"
+        }
+      }
+    },
+    {
+      "id": "e180e0f0-2ab6-466f-b8c9-1336c92d4b64",
+      "revision": 3,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "lost-reply.assistant",
+          "role": "assistant",
+          "text": "Echo: One intended turn",
+          "command_id": "lost-reply"
+        }
+      }
+    },
+    {
+      "id": "2c947ace-074d-4813-ace4-cb1fe5274956",
+      "revision": 4,
+      "kind": "settled",
+      "data": {
+        "command_id": "lost-reply",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "lost-reply.assistant",
+            "text": "Echo: One intended turn"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "6d443bf0-3e77-4b89-94b2-114c289ed3ea",
+      "revision": 5,
+      "kind": "admitted",
+      "data": {
+        "command_id": "admitted-restart",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "b9c57b26-011a-4119-8e7c-b9f9ff892491",
+      "revision": 6,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "admitted-restart.user",
+          "role": "user",
+          "text": "admitted-restart",
+          "command_id": "admitted-restart"
+        }
+      }
+    },
+    {
+      "id": "54b41926-0b3a-4e1d-8c41-d4534de973a7",
+      "revision": 7,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "admitted-restart.assistant",
+          "role": "assistant",
+          "text": "Echo: admitted-restart",
+          "command_id": "admitted-restart"
+        }
+      }
+    },
+    {
+      "id": "e65c9206-d470-4ed9-ae7b-67ccfbfcdf80",
+      "revision": 8,
+      "kind": "settled",
+      "data": {
+        "command_id": "admitted-restart",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "admitted-restart.assistant",
+            "text": "Echo: admitted-restart"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "e415656f-b219-4363-ab8b-7d9f5f2087e7",
+      "revision": 9,
+      "kind": "admitted",
+      "data": {
+        "command_id": "keyed-crash",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "b8f0d6ba-2a47-459d-804e-75020b99c9a3",
+      "revision": 10,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "keyed-crash.user",
+          "role": "user",
+          "text": "keyed-crash",
+          "command_id": "keyed-crash"
+        }
+      }
+    },
+    {
+      "id": "f521f688-6cff-469c-b7de-b5a5c7a7acc1",
+      "revision": 11,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "keyed-crash.assistant",
+          "role": "assistant",
+          "text": "Echo: keyed-crash",
+          "command_id": "keyed-crash"
+        }
+      }
+    },
+    {
+      "id": "8a44009a-8d6b-4ef4-9d59-cde900cd0163",
+      "revision": 12,
+      "kind": "settled",
+      "data": {
+        "command_id": "keyed-crash",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "keyed-crash.assistant",
+            "text": "Echo: keyed-crash"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "ffbec464-0af0-4342-b31f-aa150354c1a3",
+      "revision": 13,
+      "kind": "admitted",
+      "data": {
+        "command_id": "opaque-crash",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "2de8941c-bc21-4408-ba97-af13e912ec93",
+      "revision": 14,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "opaque-crash.user",
+          "role": "user",
+          "text": "Ambiguous effect",
+          "command_id": "opaque-crash"
+        }
+      }
+    },
+    {
+      "id": "39d0af52-ac79-40fc-ac27-56e56b572e62",
+      "revision": 15,
+      "kind": "settled",
+      "data": {
+        "command_id": "opaque-crash",
+        "outcome": {
+          "status": "uncertain",
+          "output": null,
+          "error": {
+            "code": "effect_unknown",
+            "message": "Effect intent exists but the external effect cannot be reconciled safely.",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "id": "bd7bef8e-6b13-4f4c-b04b-c3ae115360f2",
+      "revision": 16,
+      "kind": "admitted",
+      "data": {
+        "command_id": "stream-reconnect",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "7a3b6be0-90a9-4e1d-b4f6-2a7534ddc577",
+      "revision": 17,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "stream-reconnect.user",
+          "role": "user",
+          "text": "Streaming partial text must become the exact final message",
+          "command_id": "stream-reconnect"
+        }
+      }
+    },
+    {
+      "id": "ccc68221-0ac8-4316-aa1d-927d9ebc2c2f",
+      "revision": 18,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "stream-reconnect.assistant",
+          "role": "assistant",
+          "text": "Echo: Streaming partial text must become the exact final message",
+          "command_id": "stream-reconnect"
+        }
+      }
+    },
+    {
+      "id": "d5acea32-42d7-4948-8cba-85b598d8ddb6",
+      "revision": 19,
+      "kind": "settled",
+      "data": {
+        "command_id": "stream-reconnect",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "stream-reconnect.assistant",
+            "text": "Echo: Streaming partial text must become the exact final message"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "1bb02356-690a-4810-b2a8-a66423dfd0ae",
+      "revision": 20,
+      "kind": "admitted",
+      "data": {
+        "command_id": "live-speech",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "700db508-0003-4aff-afb0-abf6b67335fa",
+      "revision": 21,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "live-speech.user",
+          "role": "user",
+          "text": "This live message is spoken once",
+          "command_id": "live-speech"
+        }
+      }
+    },
+    {
+      "id": "a8ae7b61-b1e1-4bfa-822b-783955a6b014",
+      "revision": 22,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "live-speech.assistant",
+          "role": "assistant",
+          "text": "Echo: This live message is spoken once",
+          "command_id": "live-speech"
+        }
+      }
+    },
+    {
+      "id": "f12a2f47-5e22-48ec-8336-64f1e3c1cf57",
+      "revision": 23,
+      "kind": "settled",
+      "data": {
+        "command_id": "live-speech",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "live-speech.assistant",
+            "text": "Echo: This live message is spoken once"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "88b9ef8b-d9cf-4b78-b160-bf96d4436b24",
+      "revision": 24,
+      "kind": "admitted",
+      "data": {
+        "command_id": "checkpoint-interruption",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "91f01a58-8eae-4036-ba14-9a677e6cf9ac",
+      "revision": 25,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "checkpoint-interruption.user",
+          "role": "user",
+          "text": "checkpoint-interruption",
+          "command_id": "checkpoint-interruption"
+        }
+      }
+    },
+    {
+      "id": "af7212fd-3206-4663-85e7-7a497499dbff",
+      "revision": 26,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "checkpoint-interruption.assistant",
+          "role": "assistant",
+          "text": "Echo: checkpoint-interruption",
+          "command_id": "checkpoint-interruption"
+        }
+      }
+    },
+    {
+      "id": "028acc1a-028c-4306-9307-c70e6ab91658",
+      "revision": 27,
+      "kind": "settled",
+      "data": {
+        "command_id": "checkpoint-interruption",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "checkpoint-interruption.assistant",
+            "text": "Echo: checkpoint-interruption"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "601aa22a-efcd-4ff9-ae3b-3c607bde163f",
+      "revision": 28,
+      "kind": "admitted",
+      "data": {
+        "command_id": "speech-omission",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "d734a919-2ce5-41e8-b0eb-cce6b54e6856",
+      "revision": 29,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "speech-omission.user",
+          "role": "user",
+          "text": "A claimed utterance may be omitted by interruption",
+          "command_id": "speech-omission"
+        }
+      }
+    },
+    {
+      "id": "cbcbe400-8f48-4279-bd73-3b8386c9847f",
+      "revision": 30,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "speech-omission.assistant",
+          "role": "assistant",
+          "text": "Echo: A claimed utterance may be omitted by interruption",
+          "command_id": "speech-omission"
+        }
+      }
+    },
+    {
+      "id": "62e64444-f4f5-4447-a338-e7a26dd7790d",
+      "revision": 31,
+      "kind": "settled",
+      "data": {
+        "command_id": "speech-omission",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "speech-omission.assistant",
+            "text": "Echo: A claimed utterance may be omitted by interruption"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "f9f7fbdc-5270-41fd-a457-efbab4bbcc58",
+      "revision": 32,
+      "kind": "admitted",
+      "data": {
+        "command_id": "oversized-rejected",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "20fd9c3a-b7d0-44e0-ac95-efa084c9511b",
+      "revision": 33,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "oversized-rejected.user",
+          "role": "user",
+          "text": "Corrected admissible input",
+          "command_id": "oversized-rejected"
+        }
+      }
+    },
+    {
+      "id": "76b3f558-99bd-447c-86e2-455a55a95243",
+      "revision": 34,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "oversized-rejected.assistant",
+          "role": "assistant",
+          "text": "Echo: Corrected admissible input",
+          "command_id": "oversized-rejected"
+        }
+      }
+    },
+    {
+      "id": "61e71e94-98a3-4e53-a6ae-5eec34b908ff",
+      "revision": 35,
+      "kind": "settled",
+      "data": {
+        "command_id": "oversized-rejected",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "oversized-rejected.assistant",
+            "text": "Echo: Corrected admissible input"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "008bb396-d52b-4a5d-b0f9-5a08d9f0a989",
+      "revision": 36,
+      "kind": "admitted",
+      "data": {
+        "command_id": "revoked-progress",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "161c3834-b83f-4878-b65a-f19b9af327b0",
+      "revision": 37,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "revoked-progress.user",
+          "role": "user",
+          "text": "revoked-progress",
+          "command_id": "revoked-progress"
+        }
+      }
+    },
+    {
+      "id": "01e007a1-c48d-4a19-a80e-16d43cfa64c8",
+      "revision": 38,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "revoked-progress.assistant",
+          "role": "assistant",
+          "text": "Echo: revoked-progress",
+          "command_id": "revoked-progress"
+        }
+      }
+    },
+    {
+      "id": "3a7b6741-02a4-4561-9921-d5184cb8d5e3",
+      "revision": 39,
+      "kind": "settled",
+      "data": {
+        "command_id": "revoked-progress",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "revoked-progress.assistant",
+            "text": "Echo: revoked-progress"
+          },
+          "error": null
+        }
+      }
+    },
+    {
+      "id": "c79d4f1e-2c53-4947-b38d-33fc54ba7bb4",
+      "revision": 40,
+      "kind": "admitted",
+      "data": {
+        "command_id": "authorized-continues",
+        "name": "chat.send"
+      }
+    },
+    {
+      "id": "8e6c8b77-bb66-4cfd-91d9-11bc55c1f9ef",
+      "revision": 41,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "authorized-continues.user",
+          "role": "user",
+          "text": "authorized-continues",
+          "command_id": "authorized-continues"
+        }
+      }
+    },
+    {
+      "id": "f45c0b93-69b5-4cda-a58a-52996fc540c8",
+      "revision": 42,
+      "kind": "message",
+      "data": {
+        "message": {
+          "id": "authorized-continues.assistant",
+          "role": "assistant",
+          "text": "Echo: authorized-continues",
+          "command_id": "authorized-continues"
+        }
+      }
+    },
+    {
+      "id": "fed88fe0-c5e6-4a0f-bc30-973d9d39a2b2",
+      "revision": 43,
+      "kind": "settled",
+      "data": {
+        "command_id": "authorized-continues",
+        "outcome": {
+          "status": "completed",
+          "output": {
+            "message_id": "authorized-continues.assistant",
+            "text": "Echo: authorized-continues"
+          },
+          "error": null
+        }
+      }
+    }
+  ]
+}

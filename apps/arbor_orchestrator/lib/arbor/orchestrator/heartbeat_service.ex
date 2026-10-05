@@ -402,15 +402,30 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   defp do_start_heartbeat_task(state) do
-    service_pid = self()
     values = build_heartbeat_values(state)
-    engine_opts = build_engine_opts(state, values)
+    opts = build_engine_opts(state, values)
+
+    case Arbor.Orchestrator.pin_native_execution(state.heartbeat_graph, opts) do
+      {:ok, engine_opts} ->
+        do_start_heartbeat_task(state, engine_opts)
+
+      {:error, reason} ->
+        record_heartbeat_failure(state, {:heartbeat_execution_binding_refused, reason})
+    end
+  end
+
+  defp do_start_heartbeat_task(state, engine_opts) do
+    service_pid = self()
+    notice_worker_ref = make_ref()
+    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(state.signing_authority)
     heartbeat_graph = state.heartbeat_graph
     engine_runner = state.engine_runner
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor
 
     task_fn = fn ->
+      Arbor.Orchestrator.NativeNoticeWorker.await(notice_worker_ref, service_pid)
+
       result =
         try do
           engine_runner.(heartbeat_graph, engine_opts)
@@ -422,6 +437,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
             )
 
             {:error, {:engine_crash, Exception.message(e)}}
+        after
+          Arbor.Security.close_native_notice_worker()
         end
 
       send(service_pid, {:heartbeat_result, self(), result})
@@ -436,6 +453,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
     case task_result do
       {:ok, pid} ->
+        Arbor.Orchestrator.NativeNoticeWorker.release(pid, notice_worker_ref, notice_source)
         ref = Process.monitor(pid)
 
         %{

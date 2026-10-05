@@ -1,11 +1,5 @@
 defmodule Arbor.Dashboard.Nav do
   @moduledoc false
-  @doc """
-  LiveView on_mount hook that sets shared navigation assigns.
-
-  Assigns `app_name`, `nav_items`, and `node_info` so the
-  `Arbor.Web.Layouts` app template renders the header and nav bar.
-  """
 
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4]
@@ -15,8 +9,8 @@ defmodule Arbor.Dashboard.Nav do
   alias Arbor.Dashboard.Live.{
     AgentsLive,
     ChannelsLive,
-    ChatLive,
     ConsensusLive,
+    ConversationLive,
     EvalLive,
     EventsLive,
     LandingLive,
@@ -29,7 +23,8 @@ defmodule Arbor.Dashboard.Nav do
   }
 
   @nav_entries [
-    %{href: "/", label: "Home", icon: "\u{1F3E0}", view: LandingLive},
+    %{href: "/", label: "Home", icon: "\u{1F3E0}", view: ConversationLive},
+    %{href: "/console", label: "Console", icon: "\u{2B22}", view: LandingLive},
     %{href: "/signals", label: "Signals", icon: "\u{1F4E1}", view: SignalsLive},
     %{href: "/eval", label: "Eval", icon: "\u{1F4CA}", view: EvalLive},
     %{href: "/consensus", label: "Consensus", icon: "\u{1F5F3}", view: ConsensusLive},
@@ -38,12 +33,35 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},
     %{href: "/channels", label: "Channels", icon: "\u{1F4E2}", view: ChannelsLive},
-    %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive},
     %{href: "/memory", label: "Memory", icon: "\u{1F9E0}", view: MemoryLive},
     %{href: "/telemetry", label: "Telemetry", icon: "\u{1F4C8}", view: TelemetryLive},
     %{href: "/settings", label: "Settings", icon: "\u{2699}", view: SettingsLive}
   ]
 
+  @conversation_nav_entries [
+    %{href: "/", label: "Home", icon: "\u{1F3E0}", view: ConversationLive},
+    %{href: "/console", label: "Console", icon: "\u{2B22}", view: LandingLive}
+  ]
+
+  @doc """
+  Navigation for a Dashboard view. Conversation pages expose the private Home
+  and operator Console; other pages retain their existing operator routes.
+  """
+  def items_for(current_view) do
+    entries =
+      if current_view == ConversationLive,
+        do: @conversation_nav_entries,
+        else: @nav_entries
+
+    Enum.map(entries, &Map.put(&1, :active, &1.view == current_view))
+  end
+
+  @doc """
+  LiveView on_mount hook that sets shared navigation assigns.
+
+  Assigns `app_name`, `nav_items`, and `node_info` so the
+  `Arbor.Web.Layouts` app template renders the header and nav bar.
+  """
   def on_mount(:default, _params, session, socket) do
     oidc? = OidcAuth.configured?()
 
@@ -61,10 +79,7 @@ defmodule Arbor.Dashboard.Nav do
     agent_id = session["agent_id"]
     display_name = session["user_display_name"]
 
-    nav_items =
-      Enum.map(@nav_entries, fn entry ->
-        Map.put(entry, :active, entry.view == current_view)
-      end)
+    nav_items = items_for(current_view)
 
     # Build TenantContext for multi-user support (nil when no OIDC session)
     tenant_context = build_tenant_context(agent_id, display_name)

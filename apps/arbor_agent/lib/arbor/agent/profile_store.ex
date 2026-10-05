@@ -70,11 +70,13 @@ defmodule Arbor.Agent.ProfileStore do
     "agent_id",
     "template",
     "initial_capabilities",
+    "notice_mailboxes",
     "metadata",
     "version",
     :agent_id,
     :template,
     :initial_capabilities,
+    :notice_mailboxes,
     :metadata,
     :version
   ]
@@ -87,12 +89,27 @@ defmodule Arbor.Agent.ProfileStore do
   Serializes the profile and persists via BufferedStore (ETS + backend).
   """
   @spec store_profile(Profile.t()) :: :ok | {:error, term()}
-  def store_profile(%Profile{agent_id: agent_id} = profile) do
+  def store_profile(%Profile{} = profile), do: Arbor.Agent.ProfileAuthorityOwner.store(profile)
+
+  defp owned_store_profile(%Profile{agent_id: agent_id} = profile) do
     if available?() do
       record =
         Record.new(agent_id, Profile.serialize(profile), id: "agent_profile:#{agent_id}")
 
-      BufferedStore.put(agent_id, record, name: @store_name)
+      with_notice_mutation(agent_id, fn ->
+        case Arbor.Persistence.buffered_store_acknowledged_put(@store_name, agent_id, record) do
+          {:ok, confirmed} ->
+            if confirmed_profile_put?(confirmed, record),
+              do: :ok,
+              else: {:error, :outcome_unknown}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, reason}
+
+          _ ->
+            {:error, :outcome_unknown}
+        end
+      end)
     else
       {:error, :store_unavailable}
     end
@@ -225,17 +242,32 @@ defmodule Arbor.Agent.ProfileStore do
   @doc """
   Delete a profile from the store.
   """
-  @spec delete_profile(String.t()) :: :ok
-  def delete_profile(agent_id) when is_binary(agent_id) do
-    if available?() do
-      BufferedStore.delete(agent_id, name: @store_name)
-    end
+  @spec delete_profile(String.t()) :: :ok | {:error, atom()}
+  def delete_profile(agent_id) when is_binary(agent_id),
+    do: Arbor.Agent.ProfileAuthorityOwner.delete(agent_id)
 
-    # Also remove legacy JSON file if it exists
-    path = legacy_profile_path(agent_id)
-    File.rm(path)
+  defp owned_delete_profile(agent_id) do
+    with_notice_mutation(agent_id, fn ->
+      result =
+        if available?(),
+          do: Arbor.Persistence.buffered_store_acknowledged_delete(@store_name, agent_id),
+          else: {:error, :store_unavailable}
 
-    :ok
+      case result do
+        :ok ->
+          case File.rm(legacy_profile_path(agent_id)) do
+            :ok -> :ok
+            {:error, :enoent} -> :ok
+            {:error, _} -> {:error, :legacy_profile_delete_failed}
+          end
+
+        {:error, reason} when is_atom(reason) ->
+          {:error, reason}
+
+        _ ->
+          {:error, :outcome_unknown}
+      end
+    end)
   end
 
   @doc """
@@ -315,29 +347,156 @@ defmodule Arbor.Agent.ProfileStore do
   """
   @spec apply_authority_mutation(Record.t(), map()) ::
           {:ok, __MODULE__.MutationResult.t()} | {:error, term()}
-  def apply_authority_mutation(%Record{} = observed, governed) do
+  def apply_authority_mutation(%Record{} = observed, governed),
+    do: Arbor.Agent.ProfileAuthorityOwner.mutate(observed, governed)
+
+  def apply_authority_mutation(_observed, _governed), do: {:error, :invalid_request}
+
+  defp owned_apply_authority_mutation(%Record{} = observed, governed) do
     with :ok <- validate_observed_record(observed),
          :ok <- attest_mutation_authority(),
          {:ok, intended_data} <- prepare_intended(observed.data, governed) do
       replacement = %{observed | data: intended_data}
 
-      case stability_check(observed) do
-        {:stable, _current} ->
-          apply_authority_cas(observed, intended_data, replacement)
+      with_notice_mutation(observed.key, fn ->
+        case stability_check(observed) do
+          {:stable, _current} ->
+            apply_authority_cas(observed, intended_data, replacement)
 
-        {:conflict, record} ->
-          {:ok, %__MODULE__.MutationResult{outcome: :conflict, record: record}}
+          {:conflict, record} ->
+            {:ok, %__MODULE__.MutationResult{outcome: :conflict, record: record}}
 
-        {:outcome_unknown} ->
-          {:ok, %__MODULE__.MutationResult{outcome: :outcome_unknown, record: nil}}
+          {:outcome_unknown} ->
+            {:ok, %__MODULE__.MutationResult{outcome: :outcome_unknown, record: nil}}
 
-        {:error, _reason} = error ->
-          error
-      end
+          {:error, _reason} = error ->
+            error
+        end
+      end)
     end
   end
 
-  def apply_authority_mutation(_observed, _governed), do: {:error, :invalid_request}
+  @doc false
+  def notice_authority_snapshot(principal),
+    do: Arbor.Agent.ProfileAuthorityOwner.notice_snapshot(principal)
+
+  @doc false
+  def apply_owned_profile_operation(operation, value) do
+    if self() == Process.whereis(Arbor.Agent.ProfileAuthorityOwner) do
+      case {operation, value} do
+        {:store, %Profile{} = profile} ->
+          owned_store_profile(profile)
+
+        {:delete, principal} when is_binary(principal) ->
+          owned_delete_profile(principal)
+
+        {:migrate, %Profile{} = profile} ->
+          owned_migrate_profile(profile)
+
+        {:mutate, {%Record{} = observed, governed}} ->
+          owned_apply_authority_mutation(observed, governed)
+
+        {:notice_snapshot, principal} ->
+          authority_mutation_snapshot(principal)
+
+        _ ->
+          {:error, :invalid_request}
+      end
+    else
+      {:error, :authority_unavailable}
+    end
+  end
+
+  # Migration is insert-only under the fixed authority owner. A legacy file
+  # observed outside the lane cannot overwrite a newer durable Profile; CAS
+  # fences the backend slot even against trusted writers outside this owner.
+  defp owned_migrate_profile(%Profile{agent_id: principal} = profile) do
+    if available?() do
+      case Arbor.Persistence.buffered_store_authoritative_get(@store_name, principal) do
+        {:ok, stored} ->
+          {:ok, {:existing, stored}}
+
+        {:error, :not_found} ->
+          record =
+            Record.new(principal, Profile.serialize(profile), id: "agent_profile:#{principal}")
+
+          with_notice_mutation(principal, fn ->
+            case Arbor.Persistence.buffered_store_acknowledged_compare_and_swap(
+                   @store_name,
+                   principal,
+                   :not_found,
+                   record
+                 ) do
+              {:ok, confirmed} ->
+                if confirmed_profile_put?(confirmed, record),
+                  do: {:ok, :inserted},
+                  else: {:error, :outcome_unknown}
+
+              {:error, :conflict} ->
+                case Arbor.Persistence.buffered_store_authoritative_get(@store_name, principal) do
+                  {:ok, stored} -> {:ok, {:existing, stored}}
+                  _ -> {:error, :outcome_unknown}
+                end
+
+              {:error, reason} when is_atom(reason) ->
+                {:error, reason}
+
+              _ ->
+                {:error, :outcome_unknown}
+            end
+          end)
+
+        {:error, reason} when is_atom(reason) ->
+          {:error, reason}
+
+        _ ->
+          {:error, :outcome_unknown}
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  end
+
+  defp confirmed_profile_put?(%Record{} = stored, %Record{} = intended) do
+    stored.key == intended.key and stored.id == intended.id and
+      is_integer(stored.generation) and stored.generation >= 1 and
+      is_integer(stored.revision) and stored.revision >= 1 and
+      valid_optional_timestamp?(stored.inserted_at) and
+      valid_optional_timestamp?(stored.updated_at) and
+      same_persisted_json?(stored.data, intended.data) and
+      same_persisted_json?(stored.metadata, intended.metadata)
+  end
+
+  defp confirmed_profile_put?(_, _), do: false
+
+  defp same_persisted_json?(left, right) when is_map(left) and is_map(right) do
+    with {:ok, left_json} <- Jason.encode(left),
+         {:ok, left_value} <- Jason.decode(left_json),
+         {:ok, right_json} <- Jason.encode(right),
+         {:ok, right_value} <- Jason.decode(right_json) do
+      left_value == right_value
+    else
+      _ -> false
+    end
+  end
+
+  defp same_persisted_json?(_, _), do: false
+
+  # All native source generations retire before the durable operation and stay
+  # retired even when its outcome cannot be confirmed. No ambiguous write retry.
+  defp with_notice_mutation(principal, operation) do
+    case Arbor.Security.begin_native_notice_profile_mutation(principal) do
+      {:ok, ticket} ->
+        try do
+          operation.()
+        after
+          Arbor.Security.finish_native_notice_profile_mutation(ticket)
+        end
+
+      _ ->
+        {:error, :authority_unavailable}
+    end
+  end
 
   defp do_migrate_json_profiles do
     dir = legacy_agents_dir()
@@ -347,7 +506,6 @@ defmodule Arbor.Agent.ProfileStore do
         count =
           files
           |> Enum.filter(&String.ends_with?(&1, ".agent.json"))
-          |> Enum.reject(&profile_exists_in_store?/1)
           |> Enum.count(&migrate_single_profile/1)
 
         {:ok, count}
@@ -357,18 +515,12 @@ defmodule Arbor.Agent.ProfileStore do
     end
   end
 
-  defp profile_exists_in_store?(file) do
-    agent_id = String.replace_suffix(file, ".agent.json", "")
-    BufferedStore.exists?(agent_id, name: @store_name)
-  end
-
   defp migrate_single_profile(file) do
     agent_id = String.replace_suffix(file, ".agent.json", "")
 
     case read_json_profile(agent_id) do
       {:ok, profile} ->
-        store_profile(profile)
-        true
+        match?({:ok, :inserted}, Arbor.Agent.ProfileAuthorityOwner.migrate(profile))
 
       {:error, _} ->
         false
@@ -411,14 +563,26 @@ defmodule Arbor.Agent.ProfileStore do
             "JSON profiles are deprecated, use BufferedStore (Postgres)"
         )
 
-        # Lazy-migrate into store and remove JSON file
+        # Only a confirmed insert removes legacy data. A concurrently newer
+        # record wins, and its current value is returned rather than stale JSON.
         if available?() do
-          store_profile(profile)
-          path = legacy_profile_path(agent_id)
-          File.rm(path)
-        end
+          case Arbor.Agent.ProfileAuthorityOwner.migrate(profile) do
+            {:ok, :inserted} ->
+              File.rm(legacy_profile_path(agent_id))
+              {:ok, profile}
 
-        {:ok, profile}
+            {:ok, {:existing, stored}} ->
+              case unwrap_record(stored) do
+                data when is_map(data) and not is_struct(data) -> Profile.deserialize(data)
+                _ -> {:error, :invalid_profile_record}
+              end
+
+            _ ->
+              {:ok, profile}
+          end
+        else
+          {:ok, profile}
+        end
 
       {:error, _} = error ->
         error

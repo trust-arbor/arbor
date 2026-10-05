@@ -1,6 +1,12 @@
 defmodule Arbor.Dashboard.Live.ChatLiveTest do
   use Arbor.Dashboard.ConnCase, async: false
 
+  # Retained ChatLive behavior uses a test-only endpoint; production /chat redirects.
+  @endpoint Arbor.Dashboard.Test.LegacyChatEndpoint
+  setup do
+    Arbor.Dashboard.Test.LegacyChatFixture.start!()
+  end
+
   defmodule FakeChatOrchestration do
     @moduledoc false
 

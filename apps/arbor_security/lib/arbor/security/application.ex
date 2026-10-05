@@ -120,6 +120,7 @@ defmodule Arbor.Security.Application do
       # Ephemeral one-use delivery receipts and terminal login credentials.
       # Receipt loss also retires dependent terminal sessions fail-closed.
       {Arbor.Security.DeliveryReceiptBroker, []},
+      {Arbor.Security.NativeNoticeBroker, []},
       {Arbor.Security.TerminalLogin, []}
     ]
   end

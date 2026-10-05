@@ -12,6 +12,23 @@ defmodule Arbor.Multimedia.Driver do
   @callback activate(term(), map(), map()) :: :ok | {:error, atom()}
   @callback close(term()) :: :ok | {:error, atom(), :closed} | {:error, :cleanup_pending}
 
+  # Optional, additive capability. finish acknowledges the request only; a
+  # correlated {:partial, frames} plus checked close settles actual media.
+  @callback manual_capture_finish_supported?() :: boolean()
+  @callback finish(term()) :: :ok | {:error, :finish_unavailable}
+  @optional_callbacks manual_capture_finish_supported?: 0, finish: 1
+
+  def manual_finish_supported?(driver) do
+    Code.ensure_loaded?(driver) and
+      function_exported?(driver, :manual_capture_finish_supported?, 0) and
+      function_exported?(driver, :finish, 1) and
+      driver.manual_capture_finish_supported?() == true
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
   def admitted?(permit) do
     :atomics.get(permit.revoked, 1) == 0 and
       System.monotonic_time(:millisecond) < permit.deadline and

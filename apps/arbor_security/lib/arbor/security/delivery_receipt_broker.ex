@@ -97,6 +97,20 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     )
   end
 
+  def issue_conversation_operation(principal, resource, canonical_owner, expected, digest)
+      when is_binary(digest) and byte_size(digest) == 32 do
+    safe_call(
+      __MODULE__,
+      {:issue_conversation_operation, principal, resource, canonical_owner, expected, digest}
+    )
+  end
+
+  def consume_conversation_operation(token, resource, digest)
+      when is_binary(token) and is_binary(resource) and is_binary(digest) and
+             byte_size(digest) == 32 do
+    safe_call(__MODULE__, {:consume_conversation_operation, token, resource, digest})
+  end
+
   def conversation_owner(token, principal, resource),
     do: safe_call(__MODULE__, {:conversation_owner, token, principal, resource})
 
@@ -208,6 +222,21 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
+  def handle_call(
+        {:issue_conversation_operation, principal, resource, owner, expected, digest},
+        from,
+        state
+      ) do
+    case handle_call({:issue_conversation, principal, resource, owner, expected}, from, state) do
+      {:reply, {:ok, receipt}, next} ->
+        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
+        {:reply, {:ok, receipt}, put_in(next, [:entries, token, :operation_digest], digest)}
+
+      other ->
+        other
+    end
+  end
+
   def handle_call({:conversation_owner, token, principal, resource}, _from, state) do
     now = state.clock.()
 
@@ -244,7 +273,8 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
         state = bump(state, :expired) |> bump(:rejected_consume)
         {:reply, {:error, :invalid_receipt}, state}
 
-      %{resource_uri: ^resource_uri, action: ^action, principal_id: principal_id} ->
+      %{resource_uri: ^resource_uri, action: ^action, principal_id: principal_id} = entry
+      when not is_map_key(entry, :operation_digest) ->
         state = bump(state, :consumed)
         {:reply, {:ok, principal_id}, state}
 
@@ -252,6 +282,36 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
         # Token already removed — cannot retry against another target.
         state = bump(state, :rejected_consume)
         {:reply, {:error, :invalid_receipt}, state}
+    end
+  end
+
+  def handle_call({:consume_conversation_operation, token, resource, digest}, _from, state) do
+    now = state.clock.()
+    {entry, entries} = Map.pop(state.entries, token)
+    state = %{state | entries: entries}
+
+    case entry do
+      %{expires_at_ms: expiry} when expiry <= now ->
+        {:reply, {:error, :invalid_receipt}, bump(state, :expired) |> bump(:rejected_consume)}
+
+      %{
+        resource_uri: ^resource,
+        action: :chat,
+        operation_digest: ^digest,
+        principal_id: principal,
+        canonical_owner_id: owner,
+        expected_engagement_id: expected
+      } ->
+        binding = %{
+          principal_id: principal,
+          canonical_owner_id: owner,
+          expected_engagement_id: expected
+        }
+
+        {:reply, {:ok, binding}, bump(state, :consumed)}
+
+      _ ->
+        {:reply, {:error, :invalid_receipt}, bump(state, :rejected_consume)}
     end
   end
 
@@ -278,7 +338,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     case entry do
       %{principal_id: ^sender_id, resource_uri: ^resource, action: :chat, expires_at_ms: expiry} =
           entry
-      when expiry > now ->
+      when expiry > now and not is_map_key(entry, :operation_digest) ->
         with true <- map_size(state.memory_admissions) < state.max_entries,
              {:ok, canonical_owner} <- Arbor.Security.resolve_conversation_owner(sender_id),
              true <- Map.get(entry, :canonical_owner_id, canonical_owner) == canonical_owner do
