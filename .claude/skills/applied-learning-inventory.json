@@ -3375,7 +3375,7 @@
       "anchor": "applied-learning-do-not-run-real-process-setup-deadline-tests-under-asynchronous-suite-load",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 when the full Shell suite intermittently returned `:timeout_during_setup` from the PortSession timeout regression).",
-      "content_sha256": "546a675f775e996be259e4c87d3641992d4bb42ac3f21f0ea557c6384ec73239",
+      "content_sha256": "13f7a186f249578d4fca378768cccb54f30266014d9b8b33de90505bfb639a1f",
       "always_loaded": false
     },
     {

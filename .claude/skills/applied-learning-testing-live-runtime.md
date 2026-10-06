@@ -777,6 +777,12 @@ A focused pass followed by a combined-run timing miss is evidence to inspect,
 not a reason to retry unchanged or lengthen product deadlines; timing alone
 does not identify parallel contention as its cause (2026-10-05).
 
+A trace observation timeout also includes signing-authority setup. Compare the
+exact predecessor first, then use a bounded test observation interval without
+changing product deadlines or authorization assertions (2026-10-06: both accepted
+ActionRuntime fixtures missed the default 100 ms interval; 2,000 ms preserved
+the existing 3,000 ms task deadline and passed on both revisions).
+
 <!-- applied-learning: test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape -->
 <a id="applied-learning-test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape"></a>
 **Test pure consumers with the exact producer envelope, not a convenient synthetic shape.** A standalone core test can validate every local invariant while still accepting a map layout that its real upstream never emits. Mirror the producer's closed atom/string key placement, grouping, revision fields, and serialized scalar forms in the consumer fixture, then run both suites together; the Apple execution core originally passed against a flat purpose map while `Arbor.Actions.Mix.projections_for_resource/2` emitted grouped `read_only` / `read_write` lists (found 2026-07-14 composing the Phase 6 projection boundary).
