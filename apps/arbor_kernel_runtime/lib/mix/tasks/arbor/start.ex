@@ -584,6 +584,9 @@ defmodule Mix.Tasks.Arbor.Start do
       {:done_timeout, result} ->
         {:error, result}
 
+      {:done_failed, result} ->
+        {:error, result}
+
       {:continue, remaining} ->
         observation = observe_started_apps(node, remaining)
         classified = Readiness.classify_observation(expected, observation)
@@ -597,6 +600,9 @@ defmodule Mix.Tasks.Arbor.Start do
             :ok
 
           {:done_timeout, result} ->
+            {:error, result}
+
+          {:done_failed, result} ->
             {:error, result}
 
           {:continue, remaining_after} ->

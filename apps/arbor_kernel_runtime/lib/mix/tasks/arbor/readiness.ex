@@ -27,6 +27,7 @@ defmodule Mix.Tasks.Arbor.Readiness do
   @type poll_decision ::
           :done_ready
           | {:done_timeout, readiness_result() | :unreachable | :no_observation}
+          | {:done_failed, readiness_result()}
           | {:continue, remaining_ms :: non_neg_integer()}
 
   @doc """
@@ -113,11 +114,12 @@ defmodule Mix.Tasks.Arbor.Readiness do
   end
 
   @doc """
-  Decides whether a readiness poll loop should stop, time out, or continue.
+  Decides whether a readiness poll loop should succeed, fail, time out, or continue.
 
   `last_result` is the most recent classification (or `:unreachable` / `:no_observation`
   before any successful observation). Absolute deadlines are caller-owned; this
-  helper only interprets remaining time vs the last known state.
+  helper interprets remaining time vs the last known state. A node lost during
+  application startup fails immediately; an RPC timeout still uses the phase budget.
   """
   @spec poll_decision(integer(), integer(), readiness_result() | :unreachable | :no_observation) ::
           poll_decision()
@@ -128,6 +130,9 @@ defmodule Mix.Tasks.Arbor.Readiness do
     cond do
       last_result == :ready ->
         :done_ready
+
+      match?({:observation_unavailable, {:badrpc, :nodedown}}, last_result) ->
+        {:done_failed, last_result}
 
       remaining <= 0 ->
         {:done_timeout, last_result}
@@ -188,6 +193,19 @@ defmodule Mix.Tasks.Arbor.Readiness do
       Expected apps: #{length(expected)}
       Started:       #{length(present)}/#{length(expected)}
       Missing:       #{format_app_list(missing)}
+    """
+    |> String.trim()
+  end
+
+  def timeout_diagnostic(
+        {:observation_unavailable, {:badrpc, :nodedown}},
+        expected,
+        _app_timeout_ms
+      ) do
+    """
+    Arbor node became unreachable during application startup (RPC reported :nodedown).
+      Expected apps: #{format_app_list(expected)}
+      OS process state is not inferred from this RPC result.
     """
     |> String.trim()
   end

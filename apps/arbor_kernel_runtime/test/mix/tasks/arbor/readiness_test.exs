@@ -133,6 +133,26 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
                {:done_timeout, unavailable}
     end
 
+    test "node loss regression ends application readiness without waiting for the deadline" do
+      lost =
+        Readiness.classify_observation(
+          [:arbor_kernel_runtime, :arbor_gateway],
+          {:error, {:badrpc, :nodedown}}
+        )
+
+      assert Readiness.poll_decision(600_000, 1_000, lost) == {:done_failed, lost}
+      assert Readiness.poll_decision(600_000, 600_000, lost) == {:done_failed, lost}
+      assert Readiness.poll_decision(600_000, 600_001, lost) == {:done_failed, lost}
+
+      timed_out_rpc = {:observation_unavailable, {:badrpc, :timeout}}
+
+      assert Readiness.poll_decision(600_000, 1_000, timed_out_rpc) ==
+               {:continue, 599_000}
+
+      assert Readiness.poll_decision(600_000, 600_000, timed_out_rpc) ==
+               {:done_timeout, timed_out_rpc}
+    end
+
     test "positive remaining continues with remaining budget" do
       partial = {:partial, [:arbor_gateway], [:arbor_kernel_runtime]}
       assert Readiness.poll_decision(5_000, 3_000, partial) == {:continue, 2_000}
@@ -181,6 +201,21 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
       assert msg =~ "600 seconds"
       assert msg =~ "Missing:"
       assert msg =~ "arbor_gateway"
+    end
+
+    test "node loss regression reports early failure without claiming OS death or elapsed budget" do
+      msg =
+        Readiness.timeout_diagnostic(
+          {:observation_unavailable, {:badrpc, :nodedown}},
+          @expected,
+          600_000
+        )
+
+      assert msg =~ "became unreachable during application startup"
+      assert msg =~ ":nodedown"
+      assert msg =~ "OS process state is not inferred"
+      refute msg =~ "within 600 seconds"
+      refute msg =~ "node is reachable"
     end
 
     test "distinguishes unavailable RPC observation" do
