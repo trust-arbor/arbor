@@ -12,6 +12,14 @@ Read this when implementing independent review, binding findings, validation rew
 <a id="applied-learning-do-not-update-the-live-node-s-build-path-during-an-execution-binding-pinned-run"></a>
 **Do not update the live node's build path during an execution-binding-pinned run.** A coding manifest can correctly pin the module object currently loaded by the server while a foreground Mix command has already written a newer BEAM to the main checkout's `_build/dev`; a later live reload then changes executable identity mid-run and the Engine correctly rejects the next node with `handler_binding_mismatch`. Run every verification in a worktree with an isolated build path, reconcile or restart the live node before dispatch, and preflight loaded-object versus `:code.which` file identity so stale runtime state fails before the worker starts (found 2026-07-10 while dogfooding the Phase 6 cross-app workflow).
 
+Bind any deferred authorization to the actual resolved handler/executor at the
+execution boundary, not verification of an assumed default. An unpinned run can
+validate its registry before starting and resolve a different registered handler
+later. Pass the actual execution argument privately into the admission decision;
+reject overrides unless their own full authorization boundary is qualified
+(found 2026-10-03 by a source-bound native action regression that installed an
+exec handler after Engine preparation).
+
 <!-- applied-learning: a-bound-composite-action-that-launches-a-nested-dot-graph-needs-authority-propagation-declared-child-bindings-and-exact-child-action-capabilities -->
 <a id="applied-learning-a-bound-composite-action-that-launches-a-nested-dot-graph-needs-authority-propagation-declared-child-bindings-and-exact-child-action-capabilities"></a>
 **A bound composite action that launches a nested DOT graph needs authority propagation, declared child bindings, and exact child-action capabilities.** Forward the full parent `RunAuthorization` ephemerally through the action/runtime bridge so `Engine.run/2` derives a distinct child authority, and make the reviewed parent manifest explicitly pin every action/capability/egress binding reachable only inside that child graph. The executing agent must also hold each nested action's canonical URI: `arbor://consensus/decide` does not authorize `arbor://action/consensus/decide_review`. Dropping the parent looks like `:nested_action_binding_removed`; forwarding it without declaring the child action correctly fails the subset check; missing agent authority fails at the nested node and can surface to the parent as `:no_decision_in_result`. Never fix this by clearing the active binding, reusing the parent unchanged, broadening the action subtree, or disabling nested authorization (found 2026-07-10 and confirmed live 2026-07-17 when `council_review_change` completed reviewers but could not execute the nested `consensus_decide_review` node).

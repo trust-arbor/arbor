@@ -94,6 +94,18 @@ unrelated commit appear ancestral or hide an untracked mutation.
 <a id="applied-learning-git-status-shape-is-not-a-workspace-fingerprint"></a>
 **Git status shape is not a workspace fingerprint.** Rewriting an already-dirty or already-untracked file can leave `git status --porcelain` byte-for-byte unchanged. Turn-progress fingerprints must bind HEAD, staged index identities, and the actual content/metadata of every changed or untracked path. Bound paths/manifests/content and fail the inspect action closed on command, read, race, or limit errors; only the fixed digest may cross the Engine's JSON boundary (found 2026-07-15 while reviewing the owner-observed outcome fix).
 
+A clean-checkout guard must distinguish successful Git execution from a clean
+worktree. Inspect the exact public status and phase receipts before changing
+source; nonempty combined stdout/stderr alone does not identify a dirty path.
+Preserve an unexpected generated diagnostic without reading or deleting its
+contents: require a regular nonsymlink source, an exclusive private same-filesystem
+destination, no overwrite, and matching inode/device/size/mtime/mode/link-count/owner
+across the rename, then recheck cleanliness. Retain the failed attempt. Aggregate
+receipts must include the last completed phase and a fixed non-sensitive failure
+enum even when a semantic refusal happens before the phase is appended; missing
+aggregate rows are not source-identity or process-liveness evidence (2026-10-05 Main
+adoption stopped safely on an untracked Erlang crash dump).
+
 <!-- applied-learning: an-in-process-test-formatter-is-not-a-hostile-code-proof-channel -->
 <a id="applied-learning-an-in-process-test-formatter-is-not-a-hostile-code-proof-channel"></a>
 **An in-process test formatter is not a hostile-code proof channel.** Candidate ExUnit/project code shares the BEAM with a generated formatter, so it can discover or replace formatter state, forge a schema-valid artifact, mutate shared dependencies, or halt with a chosen status. A two-revision coding gate must either run only after binding review of an exact immutable tree and name that limited assurance honestly, or use a genuinely external attested runtime; a random path, custom formatter, or container alone does not establish hostile-runtime integrity (found 2026-07-10 adversarially reviewing the Phase 5 security-regression runner).
@@ -105,6 +117,12 @@ unrelated commit appear ancestral or hide an untracked mutation.
 <!-- applied-learning: file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated -->
 <a id="applied-learning-file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated"></a>
 **`File.cp_r/2` preserves symlink targets; a copied tree is not automatically isolated.** Absolute symlinks inside a dependency tree still point back to the original tree after copying. Security-sensitive snapshots must inspect every copied symlink, reject source targets outside the trusted source root, and rewrite allowed internal links to targets inside the destination before treating the copy as private (verified 2026-07-10 while isolating two-revision validation dependencies).
+
+Retained-artifact inventories must also preserve empty directories and their
+parents. A files-and-links-only inventory omitted an accepted empty dependency
+`priv` target on 2026-10-04, so the confined copied link dangled before compilation.
+Bind the exact accepted empty-directory set and validate it before copying links;
+preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: reused-detached-worktree-build-paths-can-retain-stale-priv-symlinks -->
 <a id="applied-learning-reused-detached-worktree-build-paths-can-retain-stale-priv-symlinks"></a>
@@ -444,6 +462,14 @@ guard after the commit exists, leaving a preserved commit but a failed pipeline.
 exact diff before approval, then leave the worktree untouched until the task reaches a terminal
 state; inspect the preserved branch only afterward (found 2026-08-21 during reviewed-commit
 approval for the TaskArtifacts/readiness fixes).
+Even a read-only `git diff --quiet HEAD` can refresh index file-stat metadata.
+On 2026-10-04, Root's locked Jido bundle preparation changed only the inventory
+row for `deps/jido_sandbox/.git/index`; all 31 mode/blob/stage-zero rows and raw
+tracked working blobs still matched the exact locked commit and tree. Use
+`GIT_OPTIONAL_LOCKS=0` for authorized metadata-only observations; those reads
+preserved the observed index digest. Retain the failed guard and verify the
+specific operational change without restoring the old index or exempting the
+whole Git directory. This does not authorize inspection during an active mutation.
 
 <!-- applied-learning: verify-retained-candidate-ancestry-before-defining-a-replay-range -->
 <a id="applied-learning-verify-retained-candidate-ancestry-before-defining-a-replay-range"></a>

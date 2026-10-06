@@ -194,6 +194,49 @@ Breeze 0.5.3 assigns a term with `assign/2`; extend a renderer's assigns map wit
 strings and assert the actual HTML attribute values, rather than assuming
 ordinary boolean-attribute semantics (2026-10-01 structured-question comparison).
 
+Check inherited text colors against actual computed backgrounds in the browser.
+Undefined theme variables can silently select a light fallback while retaining
+light text from the parent. The notice controls had contrast near 1.2:1 despite
+passing renderer tests; the corrected forest palette measured at least 12.7:1
+in the sampled desktop/mobile text. Static stylesheet reproduction proves that
+color correction, while mounted behavior, disabled states and a full
+accessibility audit require their own evidence (2026-10-03).
+
+Exercise activating the current route as well as selecting a different row.
+The 2026-10-04 actual Home/mobile journey preserved draft/history and focused
+Main after current-row activation, but kept its rail expanded: same-URL routing
+did not perform the new-reference cleanup. Dismiss presentation state with an
+explicit rail-activation event, preserving authenticated route resolution and
+the current connection/composer. Retain the unchanged native keyboard journey
+as the failure witness and later acceptance check.
+
+Retain unsent review fields in bounded presentation state keyed by authenticated
+scope and exact command/request/operation/revision. LiveView 1.1.33 patches
+unfocused selects and textareas from server HTML; a form rendered with empty
+values and no change event can lose its decision and note during ordinary
+polling. The 2026-10-04 native rework journey left both fields empty and never
+settled the review; source inspection confirms this retention defect, although
+the precise patch timing was not instrumented. Exercise fill, focus away, a
+completed normal poll, retained values and one native submit. A mounted submit
+helper bypasses native required-field validation. Match a poll wait to its exact
+controls element; a permanently idle Main element can satisfy a broad busy
+selector prematurely. A click racing a read should reach the existing bounded,
+freshly authorized control queue; do not discard it merely because a read is
+busy or create a second mutation path.
+
+Tie device instructions to producer readiness, not worker launch or permission
+to control an operation. The 2026-10-05 voice desk displayed “speak now” before
+PortAudio startup; even its Finish control arrived before the stream started.
+Wait for checked startup or authenticated, validated sample flow before inviting
+speech, and ignore readiness from cancelled or older operations.
+
+Report presentation disposition separately from successful text publication.
+On 2026-10-05 a 63-word voice reply crossed an implicit 60-word speech cap,
+so shaping changed its text and the exact-text guard correctly withheld PCM.
+Make speech-length policy configurable, expose text-only completion, and diagnose
+withheld audio using fixed reason labels; never bypass the speech guard to make
+a successful transcript look like successful playback.
+
 Inspect every relevant conditional render branch before declaring a documented
 control label stale. On 2026-10-05 the running-agent branch showed “Chat” while
 the stopped-agent branch correctly showed the guide's “View conversation”.

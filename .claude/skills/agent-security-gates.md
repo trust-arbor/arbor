@@ -86,13 +86,21 @@ another one. It doubles as user documentation — anyone standing up agents need
 - **Symptom:** the agent has the cap but the tool never executes — it loops or
   times out, silently waiting on an approval an autonomous run can't answer (default
   `baseline` is `:ask`).
-- **Action:** set the resource to `:allow` (or `baseline: :allow` for a sandboxed eval):
+- **Action:** set an explicit resource rule through the public facade, preserving
+  the profile's other rules:
   ```elixir
-  Arbor.Trust.Store.update_profile(agent_id, fn p ->
-    %{p | baseline: :allow} |> Arbor.Trust.Authority.set_rule(uri, :allow)
-  end)
+  {:ok, profile} = Arbor.Trust.get_trust_profile(agent_id)
+  Arbor.Trust.ensure_trust_profile(agent_id, rules: Map.put(profile.rules, uri, :allow))
   ```
-  `:allow` only steps aside the *approval* gate — the taint/egress gate still applies.
+  Use `:ask` when testing human approval. A bare `baseline: :allow` is constrained
+  to `:block` unless the host explicitly permits permissive baselines; a finite
+  resource rule is evaluated separately. Keep that host restriction enabled.
+  A missing Manager can hide this restriction by making policy resolve a fallback
+  profile, so verify public readiness and the real stored profile first
+  (reconfirmed 2026-10-04 during protected profile-read qualification).
+  An explicit `:allow` rule permits automatic use under trust policy; a held
+  capability's `requires_approval` constraint still requires approval. Taint,
+  capability, and egress checks also remain in force.
 
 ## 5. The egress gate is ENFORCING by default (dev + prod)
 
@@ -641,6 +649,13 @@ another one. It doubles as user documentation — anyone standing up agents need
   `Arbor.Contracts.Security.TaintEnvelope` (versioned, payload-digest-bound,
   deliberately separate from the process-local `%Taint{}`) so provenance cannot be
   stripped or swapped in transit.
+- **A fixed conservative label must dominate the actual source (2026-10-03).**
+  A durable `untrusted/internal` label still downgrades a hostile or restricted
+  source. Join the actual private aggregate/parameter dimensions monotonically
+  before payload binding; missing or malformed source metadata requires the
+  absorbing hostile/restricted fallback or an explicit refusal. A taint-policy
+  pass is not evidence for a weaker stored label. Private source-chain details
+  may be projected away without claiming that the content became clean.
 - **Useful test when assigning a level:** not "did an LLM see it?" but *"could an
   adversary have influenced this byte?"* No → `:trusted`. Came out of a model →
   `:derived` floor. Came from outside → `:untrusted`.
@@ -943,7 +958,7 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 
 <!-- applied-learning: template-capability-grants-may-need-runtime-uri-expansion -->
 <a id="applied-learning-template-capability-grants-may-need-runtime-uri-expansion"></a>
-**Template capability grants may need runtime URI expansion.** Agent templates and trust presets can declare the human-readable coarse gate (`arbor://orchestrator/execute`), but mandatory Engine middleware authorizes per-node runtime resources like `arbor://orchestrator/execute/exec`. A trust rule prefix can stay bare, but a capability grant must be subtree-scoped (`/**`) or the session pipeline fails closed after `classify` with an empty CLI response. Diagnose by inspecting the node status checkpoint, not just the top-level turn summary (found 2026-07-07 while debugging `arbor.agent chat` for coding agents).
+**Template capability grants may need runtime URI expansion.** Agent templates and trust presets can declare the human-readable coarse gate (`arbor://orchestrator/execute`), but mandatory Engine middleware authorizes per-node runtime resources like `arbor://orchestrator/execute/exec`. A trust rule prefix can stay bare; a capability covering the entire subtree needs `/**`, while a narrowly scoped fixture can grant each exact required URI. Compiled graphs also declare effect capabilities: a `compute` grant alone does not cover `arbor://orchestrator/execute/llm_query`. Inspect `CapabilityCheck.capability_resources/1` and the actual rejected node/envelope before changing grants or extending waits. Keep the production middleware enabled and provision the exact execution principal through the public Security and Trust facades. Diagnose the node status checkpoint, not just the top-level turn summary (found 2026-07-07 during CLI chat and reconfirmed 2026-10-04 when a real private-Branch privacy fixture failed before reaching its controlled provider).
 
 <!-- applied-learning: trust-policy-rules-match-by-uri-prefix-not-glob-never-write -->
 <a id="applied-learning-trust-policy-rules-match-by-uri-prefix-not-glob-never-write"></a>
@@ -1107,6 +1122,7 @@ client (2026-09-29 terminal/MCP authentication audit).
 
 <a id="gate-new-action-uri-needs-cap-and-trust-rule-on-execution-principal"></a>
 **Gate: a NEW action URI needs BOTH a capability AND a trust rule on the EXECUTION PRINCIPAL — `mix arbor.coding.grant` now closes both layers for the execution principal.** Hit 2026-08-31 dispatching fleet-dispatch-v1 (first `design_council_review` use on omats). Historical behavior through 2026-08-31: the grant loop filtered findings to `authenticated_caller` and granted only to the key-file caller, so `arbor.coding.grant` could print "converged" while the coordinator still lacked caps (`authority_horizon_missing` with `principal_role=execution_principal`). As of 2026-09-01 the Mix task grants each missing URI to the principal the finding names (key-file caller and `--agent-id` coordinator) and converges only when no role has missing findings. As of 2026-09-03 it also, after capability convergence, installs a bare-prefix trust rule on the execution principal for each required `arbor://action/coding/` URI with `user_match: nil` and effective `:block`/`:ask`, mirroring same-parent sibling coding-rule modes (`:auto` on today's coding-agent profiles). Remaining manual cases: `--no-trust-rules`, or a refuse (`:no_siblings` / `:conflicting_siblings` / wildcard/root). Symptom if the trust layer is still open: the pipeline reaches the action and dies `design_council_failed` with `ApprovalGuard ... Policy denied` (`user_match: nil`, egress-classed baseline `:block`). Action: run `mix arbor.coding.grant` for the plan (both layers). Verify with `Arbor.Trust.explain/2`. Do not hand-type `Arbor.Trust.Store.update_profile` / `Arbor.Trust.Authority.set_rule` as the operator path.
+
 <!-- applied-learning: separate-stateful-authorization-from-non-consuming-continuation-checks -->
 <a id="applied-learning-separate-stateful-authorization-from-non-consuming-continuation-checks"></a>
 **Separate stateful authorization from non-consuming continuation checks.** `Arbor.Security.authorize/4` consumes rate allowances and `max_uses`, potentially revoking an exhausted grant. Do not repeat it as a read-only release or dispatch predicate. Authenticate once, charge once, and use a Security-owned continuation check that retains active identity, current capability, reflex, delegation, approval and stateless constraints. A split decision/effect path must also retain the public facade's `InvocationAudit.observe_authorization/3` failure gate before issuing authority. Reject unsupported finite-use continuation before charging; never accept a missing grant to work around automatic revocation. Verify a one-token rate allowance, explicit revocation, suspended identity and failed audit sink (found 2026-09-26 while implementing durable conversation ingress).
@@ -1114,3 +1130,22 @@ client (2026-09-29 terminal/MCP authentication audit).
 <!-- applied-learning: check-conversation-authority-before-allowance-effects-and-again-before-publication -->
 <a id="applied-learning-check-conversation-authority-before-allowance-effects-and-again-before-publication"></a>
 **Check conversation authority before allowance effects and again before publication.** Bind a signed request to the exact operation and preserve its proof subject separately from the canonical conversation owner. Resolve that owner and reject unsupported finite-use chat grants before spending allowances. Accepted-turn continuations recheck current subject grants and the pinned owner without charging the request again; check at transcript commit and response publication, not only admission. A post-commit denial suppresses disclosure but does not undo the committed pair. (found 2026-09-27 in alias, rate-limit and blocked-turn convergence regressions).
+
+Reply admission does not authorize every observability subscriber to read that
+reply. Keep private user/assistant content and recipient identity off agent-wide
+signals, including the normal successful path; publish fixed metadata and let
+surfaces read through scoped authenticated APIs. Subscribe as an ordinary
+observer and prove both public text and structured replies still succeed while
+their events contain no private fields. A bearer-echo rejection test alone
+misses ordinary private-message leakage (2026-10-03 native notice signal witness).
+
+Trace compute and streaming separately from final reply publication. Session
+stream deltas and LlmHandler completion previews have different producers; a
+transform-only successful turn cannot qualify either. Retain content in the
+current generation's private buffer and scoped activity read, while shared
+signals carry lengths and lifecycle metadata. Reuse Session-owned process-local
+purpose evidence rather than a caller-controlled context flag, and preserve
+separately intended autonomous/operator behavior. Verify actual provider chunks
+through public ingress, authorized prefix reads, final SQL and an unprivileged
+signal observer with matched predecessor/candidate sources (source-confirmed
+2026-10-04; qualification remains separate from preparation).

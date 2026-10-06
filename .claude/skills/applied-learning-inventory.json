@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 744,
+  "entry_count": 746,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -39,7 +39,7 @@
       "anchor": "applied-learning-a-rotating-oauth-refresh-token-cannot-be-safely-cloned-into-two-independently-refreshing-stores",
       "source_date": "2026-07-18",
       "source_incident": "found 2026-07-18 during council smoke).",
-      "content_sha256": "c841c5baf48995188c62163869a9c14bd39f67465be8b8f626bca644f8efc1a2",
+      "content_sha256": "aed151575e0d42adb4b20edb0a8bf260cfd8ddbdadfc258a79e83ec987737508",
       "always_loaded": false
     },
     {
@@ -147,7 +147,7 @@
       "anchor": "applied-learning-match-the-exact-split-shape-when-a-delimiter-proves-structure",
       "source_date": "2026-07-17",
       "source_incident": "found 2026-07-17 while parsing ACP `toolCallId` values).",
-      "content_sha256": "3d843f9fedb5a5e8f8123d37a2490d3567f17b14459bcaa62a4b7e0b11ea13a5",
+      "content_sha256": "15617055496df2f0215bbbc6ff321599d666979b93ae92cd604fda8df87478d8",
       "always_loaded": false
     },
     {
@@ -195,7 +195,7 @@
       "anchor": "applied-learning-test-applications-can-be-running-while-required-children-are-deliberately-absent",
       "source_date": "2026-07-13",
       "source_incident": "found 2026-07-13 during Phase 6 shell diagnostics).",
-      "content_sha256": "e029160cde6811247a4ff4f79ebcd7c8e1c09258eb99f1c64a6a1b498d9eb9a4",
+      "content_sha256": "ac074a333c6b324b36546a5901bddd06943a17996668ef54437bb872bd946fa0",
       "always_loaded": false
     },
     {
@@ -603,7 +603,7 @@
       "anchor": "applied-learning-template-capability-grants-may-need-runtime-uri-expansion",
       "source_date": "2026-07-07",
       "source_incident": "found 2026-07-07 while debugging `arbor.agent chat` for coding agents).",
-      "content_sha256": "5b01172a7d11b3be1278d784f49ee36bffe913124377a4016f1bedb04649d461",
+      "content_sha256": "d6ef58f2fcf75ae2a07e5eeb049443eb9df804c725cf99b47212002e1467ed7d",
       "always_loaded": false
     },
     {
@@ -639,7 +639,7 @@
       "anchor": "applied-learning-dbconnection-timeout-does-not-bound-time-already-spent-in-the-pool-queue",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 while testing EventLog append deadlines with an exhausted one-connection PostgreSQL pool).",
-      "content_sha256": "488726079d07e3b9325fe043337bd9df44792e6e788429668c466ce1611f6f47",
+      "content_sha256": "2f3fbd845bf03d659b8ed213cfff5bc4a0dacbbc299d4d08919a28950e3a8d58",
       "always_loaded": false
     },
     {
@@ -771,7 +771,7 @@
       "anchor": "applied-learning-budget-multi-leg-action-timeouts-against-the-enclosing-wall-clock",
       "source_date": "2026-07-10",
       "source_incident": "found 2026-07-10 during security-regression profile activation).",
-      "content_sha256": "f44c53a4fedac3cff47186e33db9edbf7d7d6b8cb2bd08ef8b40a4321a0cff60",
+      "content_sha256": "3bffb40b9570acc9c288be4513b57742a295df5dfc6983eba52a4488a9bee69a",
       "always_loaded": false
     },
     {
@@ -819,7 +819,7 @@
       "anchor": "applied-learning-do-not-update-the-live-node-s-build-path-during-an-execution-binding-pinned-run",
       "source_date": "2026-07-10",
       "source_incident": "found 2026-07-10 while dogfooding the Phase 6 cross-app workflow).",
-      "content_sha256": "e13a861a5a0f79d6a0ce3063e723610b3f1d4fb6b2325464bf915547b6765c46",
+      "content_sha256": "cb87f32f320a5f4d270e53055f0e0627a1366c727626ce0a4a13144a9399466c",
       "always_loaded": false
     },
     {
@@ -939,7 +939,7 @@
       "anchor": "applied-learning-cancellation-and-verification-must-not-reuse-mutating-scope-allocators",
       "source_date": null,
       "source_incident": null,
-      "content_sha256": "e0f4783d2b7f8234bce3a65422cc953b2ddf03cc8213b55ddbced2069cd6177c",
+      "content_sha256": "56c1eb1b5d815e70b4274eaef2f3d55a866e8b28babe17049c5457259b7f4d34",
       "always_loaded": false
     },
     {
@@ -1023,7 +1023,7 @@
       "anchor": "applied-learning-bounded-prompt-payloads-must-remain-structurally-valid",
       "source_date": "2026-07-12",
       "source_incident": "found 2026-07-12 in recovery and review feedback).",
-      "content_sha256": "0a641b608647cb0e892f8708ad025368461a441f05bf7e494f1b055df016a7f9",
+      "content_sha256": "1ead295a37cdef789c5785e806393583d08d3387d68f3fef83cd8992a9b2ad03",
       "always_loaded": false
     },
     {
@@ -1371,7 +1371,7 @@
       "anchor": "applied-learning-git-status-shape-is-not-a-workspace-fingerprint",
       "source_date": "2026-07-15",
       "source_incident": "found 2026-07-15 while reviewing the owner-observed outcome fix).",
-      "content_sha256": "7fe64fe1b0431dac529e669ebf87a010fabc6e74f34c342d20298743b2535655",
+      "content_sha256": "a052d787250d07d6c2923a2104805dca6a7eadfe9d7efcb111f14746edf90a4b",
       "always_loaded": false
     },
     {
@@ -1419,7 +1419,7 @@
       "anchor": "applied-learning-file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated",
       "source_date": "2026-07-10",
       "source_incident": "verified 2026-07-10 while isolating two-revision validation dependencies).",
-      "content_sha256": "5c610aedea55cc1f97face0990fbdf8e73e0cb852bed412a279badff9569d320",
+      "content_sha256": "393e9788f21334ec019a2d3282d73824397217362653ccc9eb70cfc02beae220",
       "always_loaded": false
     },
     {
@@ -2151,7 +2151,7 @@
       "anchor": "applied-learning-derived-summaries-cannot-replace-independently-recorded-cleanup-evidence",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing coding benchmark acceptance integrity).",
-      "content_sha256": "1d82dd9978c800a3c86172c54e8abb41fb33f8c99129fb509a00857802498b9e",
+      "content_sha256": "1b034b7f0fe58540301465568c929640a427ab3c9e11dca781ee0c1b6364ada4",
       "always_loaded": false
     },
     {
@@ -2427,7 +2427,7 @@
       "anchor": "applied-learning-trace-the-actual-external-process-owner-on-every-execution-branch-before-claiming-tree-cleanup",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing CapShell timeout ownership).",
-      "content_sha256": "4bd0592e6979fbebe4758435a2f41cf75f782fd1318d31278a0483edaa6af861",
+      "content_sha256": "6911811a3971b1ebf59c477f99fb96e91a8638f42aa8943e1ed33d785c1ce1de",
       "always_loaded": false
     },
     {
@@ -2523,7 +2523,7 @@
       "anchor": "applied-learning-cleanup-absence-checks-must-distinguish-absent-from-unqueryable",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing workspace cleanup receipts).",
-      "content_sha256": "23a960f37ec116e1a2b7fa6ede14dc1048e54f10c5706ad1c75374d01dfc5a83",
+      "content_sha256": "dfb387be766b6d097225b48d5259c6787b82544f056f7ecaac78372a3ea36d10",
       "always_loaded": false
     },
     {
@@ -2643,7 +2643,7 @@
       "anchor": "applied-learning-format-status-2-does-not-make-secret-bearing-genserver-state-private",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 probing the MCP verified-request handler).",
-      "content_sha256": "53a641d64523be12372b225107f13e43d3843d3db4f7eefcdcc1fb0017724816",
+      "content_sha256": "74a0b936287e9fb108c724491673649b43c150057ac31f2e3952c64a9a4a91f2",
       "always_loaded": false
     },
     {
@@ -3123,7 +3123,7 @@
       "anchor": "applied-learning-distribution-readiness-is-not-application-readiness",
       "source_date": "2026-07-13",
       "source_incident": "found 2026-07-13 recovering the Phase 6 delegator runtime).",
-      "content_sha256": "3597238b104dadfff07640fe40dd3f8ac1667f085526451b5cb649e9bf364d9b",
+      "content_sha256": "00251c8c5bc6e3cb97db5a63823ccee794560562aa9d46e429a06c87d9ee02df",
       "always_loaded": false
     },
     {
@@ -3375,7 +3375,7 @@
       "anchor": "applied-learning-do-not-run-real-process-setup-deadline-tests-under-asynchronous-suite-load",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 when the full Shell suite intermittently returned `:timeout_during_setup` from the PortSession timeout regression).",
-      "content_sha256": "5c26c49df45c2d2fc3776bba7b94fda9bced9acd7ea3aff2576c203b0f286771",
+      "content_sha256": "546a675f775e996be259e4c87d3641992d4bb42ac3f21f0ea557c6384ec73239",
       "always_loaded": false
     },
     {
@@ -3471,7 +3471,7 @@
       "anchor": "applied-learning-test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 composing the Phase 6 projection boundary).",
-      "content_sha256": "22724ff7d5ef1657ff8f2d02446bb63c2e7b228cacba62ab94c706a79570c865",
+      "content_sha256": "689f07efd8b8ecfe5470308608998a6b4b4485a86c62f178c12ea8c9e4f67d9a",
       "always_loaded": false
     },
     {
@@ -3639,7 +3639,7 @@
       "anchor": "applied-learning-map-decoding-can-erase-duplicate-json-members-before-closed-schema-validation",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 reviewing the Apple unit-intent journal).",
-      "content_sha256": "209eeb23dc4260ccd545ddb20908b33a26a3a2796e61ab9cea26b31b20b710c4",
+      "content_sha256": "55a959d1fe38fb5b1c9232972e453d1191b103bdd7ca903dce62bff16d1ba8d2",
       "always_loaded": false
     },
     {
@@ -3939,7 +3939,7 @@
       "anchor": "applied-learning-boot-lifecycle-normalization-must-publish-durable-authority-before-hot-state",
       "source_date": "2026-07-15",
       "source_incident": "found 2026-07-15 strengthening the real application-restart proof).",
-      "content_sha256": "bb0692bee43e5978587cfa0e538d157274ac4ea4c370f7fd98fc5fcd2fa3f4f5",
+      "content_sha256": "e4a09943127f98fa4e85ced8ff71ea5f43fe6f6c8fb945249ae3ef7596d32a97",
       "always_loaded": false
     },
     {
@@ -4251,7 +4251,7 @@
       "anchor": "applied-learning-a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority",
       "source_date": "2026-07-16",
       "source_incident": "found 2026-07-16 reviewing validation-resource restart cleanup).",
-      "content_sha256": "dc5adf0cf79b77538f14d5628deb79f72a292c7c36a5a0c37bfbca50a5a41b32",
+      "content_sha256": "a6b392035326825ae1b13268229bc7f2b0b7ce7f25fb5dd0974738d7f975a2a9",
       "always_loaded": false
     },
     {
@@ -4419,7 +4419,7 @@
       "anchor": "applied-learning-a-durable-store-and-its-json-mirror-can-preserve-different-scalar-representations",
       "source_date": "2026-07-16",
       "source_incident": "found 2026-07-16 exposing validation failures after terminal recovery).",
-      "content_sha256": "d22225a645f7a2cea22dc5d658feddb5b7ac6ff2a2b0de9973e8547faae92320",
+      "content_sha256": "e9d8a076bd3078d949f47fc493f7688d9915190757ddba03a0b4191cd53548dd",
       "always_loaded": false
     },
     {
@@ -5367,7 +5367,7 @@
       "anchor": "applied-learning-contained-durable-store-fixtures-need-a-private-trusted-parent",
       "source_date": "2026-07-18",
       "source_incident": "found 2026-07-18 in `WorkspaceRetentionRestartTest`).",
-      "content_sha256": "829f0825029ef86246bebd2e3ca110a0634626b78ccd3d5bad20b511d6a12e32",
+      "content_sha256": "0341f81f45f1d6c01a880907b33d79406b71005b07b7c2addc81ccb179e697fa",
       "always_loaded": false
     },
     {
@@ -5808,7 +5808,7 @@
       "anchor": "applied-learning-format-only-scoped-paths-in-an-inherited-or-dirty-worktree",
       "source_date": "2026-07-20",
       "source_incident": "found 2026-07-20 during steering-delivery implementation).",
-      "content_sha256": "4354199c57a4310561b86abe1495366b81c4b5d0a91f36a6a3c5281a22c2e833",
+      "content_sha256": "235a93192f1ab7d27f22de4496428a492e2e5bc59dd96d03edff5cfb98492412",
       "always_loaded": false
     },
     {
@@ -5821,7 +5821,7 @@
       "anchor": "applied-learning-fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 while validating discard-journal persistence failure).",
-      "content_sha256": "aa6ae4696a9e7055458c05258fb91e214a29eddfb2194ac5ac4840288f68632d",
+      "content_sha256": "ae1ec3a7843f7ce9175588f7cc637623b84a2e3c856a741ac7fe20c7055315d0",
       "always_loaded": false
     },
     {
@@ -6341,7 +6341,7 @@
       "anchor": "applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle",
       "source_date": "2026-07-24",
       "source_incident": "found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).",
-      "content_sha256": "d112118013d481fb505ff2c98c4f33a5ec284d89f42bcd2f166b7751fd80443f",
+      "content_sha256": "18299a5c4c48d5a21d3a684cb2484d3c067e034a7b6f7df6fd2f7e3309d85675",
       "always_loaded": false
     },
     {
@@ -6354,7 +6354,7 @@
       "anchor": "applied-learning-independently-rerun-delegated-verification-against-the-committed-revision",
       "source_date": "2026-07-25",
       "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
-      "content_sha256": "28b14f222d4f043262fbb48a31ae53612797b007393304e554978e274621e581",
+      "content_sha256": "59106324ac93eaa8662bafc60ac2af6a5171594951aaee36e658d1bd0a973368",
       "always_loaded": false
     },
     {
@@ -6549,7 +6549,7 @@
       "anchor": "applied-learning-a-green-exunit-exit-must-include-a-nonzero-intended-test-count",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 during the Phase C delegated-work canary).",
-      "content_sha256": "a3e4de6438ff6f15ff4c88c61518f3953f366b263772f322e7acf12ff5e56cb3",
+      "content_sha256": "b08bb2860e20b3a8193e76d2fdd9347bced15745e9541c841de679a84266c6b0",
       "always_loaded": false
     },
     {
@@ -6809,7 +6809,7 @@
       "anchor": "applied-learning-source-owner-cleanup-success-does-not-imply-convergence",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).",
-      "content_sha256": "93642dd17dc0d2efa32309192566c764857df6855701c8dbd2fe35395eb679c4",
+      "content_sha256": "b0393a2dd665247620a08eb95c684b250594d7da64c642b114fcc4b944907d06",
       "always_loaded": false
     },
     {
@@ -6848,7 +6848,7 @@
       "anchor": "applied-learning-detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while finalizing the managed ACP settlement candidate).",
-      "content_sha256": "69812b15b91af17c54d62d6f98c214bb560680408a924f01f6c3e19a34b0c3b6",
+      "content_sha256": "409ea1ea242de0ebec31bfe6c1d31a8e956786b15a61e1dca763a85b552a5b75",
       "always_loaded": false
     },
     {
@@ -6939,7 +6939,7 @@
       "anchor": "applied-learning-conditional-readiness-fixtures-must-assert-their-precondition",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while reviewing pending-approval settlement tests). Clarified 2026-09-24 during agent-stack acceptance.",
-      "content_sha256": "ea07ceda56a8f4f1dc83874cd68d10169d4bc7d48c8a84d8560bbe791a22afd6",
+      "content_sha256": "1b141b38a2017411ac8fe55d7f500219722c216e30e4ea6cb1e1fa021ff5ca0b",
       "always_loaded": false
     },
     {
@@ -7498,7 +7498,7 @@
       "anchor": "applied-learning-deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local",
       "source_date": "2026-08-02",
       "source_incident": "found 2026-08-02 while reworking VOICE transport deadlines).",
-      "content_sha256": "cea6862981e825c1b91bebbf81c5ca7fb9f74d325cf84716e8a32cf97e0df0ef",
+      "content_sha256": "d7624f32e8dc8ba0f96285e704724e5aa6a9f454567738f0237f040f7668c1a9",
       "always_loaded": false
     },
     {
@@ -7628,7 +7628,7 @@
       "anchor": "applied-learning-callback-validation-must-not-depend-on-incidental-module-preload",
       "source_date": "2026-08-03",
       "source_incident": "found 2026-08-03 while isolating VP-04D2B Session startup).",
-      "content_sha256": "80a3dc6bea02eba0cad265c9f5f6df1c88d1d63689ad8f767db2fbb39ee578e0",
+      "content_sha256": "c084c1f0e26f510fbc911f376f2b28049ea7f1f0e26e9dcd6a553f22546be30b",
       "always_loaded": false
     },
     {
@@ -7797,7 +7797,7 @@
       "anchor": "applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it",
       "source_date": "2026-08-04",
       "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance: serialize only known tagged snapshot structs and preserve raw policy identity before acceptance effects. Clarified 2026-09-24: fingerprint normalized model-visible schemas rather than callback identity; align Repo configuration with its serving owner, distinguish PostgreSQL address representation, and verify the Stop node ACK separately from PID absence.",
-      "content_sha256": "cfc8cd0ef6168c619ff0a8d49139e8ca64011afb65345d46d6592c0f6f8ad93f",
+      "content_sha256": "c485a65e39ea7f464e15bb425db605fcd9cd1cf5b85e87ad131289a59f7bcc09",
       "always_loaded": false
     },
     {
@@ -8123,7 +8123,7 @@
       "source_date": "2026-08-21",
       "source_incident": "found 2026-08-21 when concurrent retained-worktree inspection tripped the post-commit Git-storage TOCTOU guard",
       "always_loaded": false,
-      "content_sha256": "7100b5f8916d7149ac3f210e73bfd4ae4812a9c91df5a7d735ccd0b705ae91f9"
+      "content_sha256": "ba35727bbeef7977be1ebcedf8f424a4d9ce44b3ae682a56a207e1d89b94d3f0"
     },
     {
       "source_ordinal": 661,
@@ -8435,7 +8435,7 @@
       "source_date": "2026-08-25",
       "source_incident": "found 2026-08-25 moving recall to the user turn",
       "always_loaded": false,
-      "content_sha256": "08a1ea30190a45069be9ab75fb44b02d1298b1f6ccc52bed38aca972648756c2"
+      "content_sha256": "a91ce0f0acc1a46daba40c4c619ddf8214089e0789d6a4b5aff640f403a464f7"
     },
     {
       "source_ordinal": 685,
@@ -8487,7 +8487,7 @@
       "source_date": "2026-08-26",
       "source_incident": "found 2026-08-26 during P1E-1 acceptance",
       "always_loaded": false,
-      "content_sha256": "a8bc4c387ab08d8e9264f33a079c4a786d6b55ca43e93196870fe6c124488ae6"
+      "content_sha256": "d3fd1785ad449d010e552c8a8daaa4646efbac7150723d6f3b7f159d318b38d2"
     },
     {
       "source_ordinal": 689,
@@ -8513,7 +8513,7 @@
       "source_date": "2026-08-26",
       "source_incident": "found 2026-08-26 while isolating the 10,001-record Security hydration regression",
       "always_loaded": false,
-      "content_sha256": "f3209ecfe076f5af5e17d6477db57d6227e23257191597143c79057e0e2e7024"
+      "content_sha256": "533d7b431ee2ba13480e92f0924da75c6fd4e3216699d1bf5c8ca3438ec38f91"
     },
     {
       "source_ordinal": 691,
@@ -8578,7 +8578,7 @@
       "source_date": "2026-08-27",
       "source_incident": "found 2026-08-26 in P1B-2A CrossApp batch 17 and verified 2026-08-27",
       "always_loaded": false,
-      "content_sha256": "b24604e917fbc6746678f679aa2d9b802fd7639c0157b5fb812ae0e982b09c8f"
+      "content_sha256": "8e5b1c27d90ef337b73f2249c7fee2404f57771a5ba2ffbc88323e6769da1119"
     },
     {
       "source_ordinal": 696,
@@ -8604,7 +8604,7 @@
       "source_date": "2026-08-26",
       "source_incident": "found 2026-08-26, V7-17 / run 11o; supersedes V7-15",
       "always_loaded": false,
-      "content_sha256": "c9c2b5927b09cc97d53373e57610f11e695465e0a8c5c03d9920ee3d793fd385"
+      "content_sha256": "5110acbfbf806c05ea387607bd0de9173d443c34b6d384fd65a676ba97187801"
     },
     {
       "source_ordinal": 698,
@@ -8656,7 +8656,7 @@
       "source_date": "2026-08-28",
       "source_incident": "found 2026-08-28 when Apple control-plane status was pinned while CrossApp workload image policy was unavailable",
       "always_loaded": false,
-      "content_sha256": "0699e293cbd1cb8da901120b07aef55498c1704eb610d645da62b0ba795a3fcf"
+      "content_sha256": "48b647426043da4284e3b06a435a6fecf8e86ea47ff2ceffb0986a8dc3122314"
     },
     {
       "source_ordinal": 702,
@@ -8786,7 +8786,7 @@
       "source_date": "2026-09-01",
       "source_incident": "found 2026-09-01 during G5B1 exact-two-revision verification",
       "always_loaded": false,
-      "content_sha256": "3d7d3b562be9fe9ddd2ec24abd4c0be410877001de495d9a7f1e675fb567b04a"
+      "content_sha256": "20bfa4be65d92efa6b12353bf5d1f803734c723b25e175689d3eb2d73fda1086"
     },
     {
       "source_ordinal": 712,
@@ -8916,7 +8916,7 @@
       "source_date": "2026-09-07",
       "source_incident": "learned 2026-09-07 while separating personal-agent delivery from G5E and shared-authority qualification",
       "always_loaded": false,
-      "content_sha256": "66bdddc148758ccb1252a344cf2e4dbb561341defd7e691c5e805a674f2f42bc"
+      "content_sha256": "e378ae34407cf7cfb8c34c05b0747e01de42dae380260a52ac6250531137673e"
     },
     {
       "source_ordinal": 722,
@@ -9033,7 +9033,7 @@
       "source_date": "2026-09-08",
       "source_incident": "found 2026-09-08 while independently falsifying J0 recall observation claims",
       "always_loaded": false,
-      "content_sha256": "184f9e3625b5228fa6bf6fa3b5903479058a779475538678fe2e818b93338149"
+      "content_sha256": "d5fa6617c78fbdb45d594f83f028546a0d459da4717435b380d7430d1f4dd0fb"
     },
     {
       "source_ordinal": 731,
@@ -9047,6 +9047,32 @@
       "source_incident": "found 2026-09-08 in isolated J0 surrounding Commands qualification",
       "always_loaded": false,
       "content_sha256": "123c2bcf28fe8a1a5d4800ad835bc024361236b59bf8894839fa60d7e05350b7"
+    },
+    {
+      "source_ordinal": 732,
+      "source_kind": "post-migration",
+      "slug": "verify-producer-payloads-against-current-consumer-contracts",
+      "title": "Verify producer payloads against current consumer contracts.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-verify-producer-payloads-against-current-consumer-contracts",
+      "source_date": "2026-09-09",
+      "source_incident": "found 2026-09-09 while tracing AgentSeed DateTime metadata rejection through the strict memory Index input contract",
+      "always_loaded": false,
+      "content_sha256": "564c933f40501a84fc03062e6b5bebedb3563e1247c33ff8df512f1b3284e409"
+    },
+    {
+      "source_ordinal": 735,
+      "source_kind": "post-migration",
+      "slug": "preserve-the-formatter-api-s-newline-contract",
+      "title": "Preserve the formatter API's newline contract.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-preserve-the-formatter-api-s-newline-contract",
+      "source_date": "2026-09-09",
+      "source_incident": "found 2026-09-09 during private-turn memory containment source and test review",
+      "always_loaded": false,
+      "content_sha256": "6b148f77b7394036db812d2479ddb40d17bb76ee553fe33ed9be48a1a991cc65"
     },
     {
       "source_ordinal": 739,
@@ -9085,7 +9111,7 @@
       "source_date": "2026-09-27",
       "source_incident": "found 2026-09-27 during the Arbor adapter renderer qualification",
       "always_loaded": false,
-      "content_sha256": "ab6820b6aa527a8d24c5f8b3f4cdbc4cd5208738b7f202d4cf9cfa8aa6917b6c"
+      "content_sha256": "6b2eab1cc645e9510951219f871e79ac6136024719488b6f7e9070801038730b"
     },
     {
       "source_ordinal": 742,
@@ -9098,7 +9124,7 @@
       "source_date": "2026-09-27",
       "source_incident": "found 2026-09-27 while qualifying ConversationKit against a real Arbor Session",
       "always_loaded": false,
-      "content_sha256": "bbc2340f94704e1705b3dfcf1e2d7590395c8b40d4f8a74618528dfb9ae9752c"
+      "content_sha256": "ef52277b8386d8131652268927dd14671285c8eae427585fcfcd66f801724619"
     },
     {
       "source_ordinal": 743,
@@ -9137,7 +9163,7 @@
       "source_date": "2026-09-27",
       "source_incident": "found 2026-09-27 in alias, rate-limit and blocked-turn convergence regressions",
       "always_loaded": false,
-      "content_sha256": "d2c772e42a45f17a8fecb58e567f1c7d6b396a18469ab9eb344436d5f57ce262"
+      "content_sha256": "915eee46a855552af06cb9dfbf2f629426cea67813a8508ad43812b9af7e0d8d"
     },
     {
       "source_ordinal": 746,
@@ -9189,7 +9215,7 @@
       "source_date": "2026-09-27",
       "source_incident": "found 2026-09-27 reviewing VP-07A1",
       "always_loaded": false,
-      "content_sha256": "67e677fe0db434066acae2ab37002da69f1fd6edbd642f09d333e9c7e0995e02"
+      "content_sha256": "7a89fee0578310bcb7c8e6221e91543a3651e6a5f0cdb00bc0a30ccc5d3a2a71"
     },
     {
       "source_ordinal": 750,
@@ -9219,5 +9245,5 @@
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 283
+  "post_migration_entry_count": 285
 }

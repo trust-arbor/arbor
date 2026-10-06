@@ -14,6 +14,12 @@ then retire the Session after its sole completed or cancelled operation. Regress
 both the rejected prior operation and the subsequent valid audio turn; do not
 claim reusable-session safety from a close-after-audio test alone (found
 2026-09-27 reviewing VP-07A1).
+Scope cancellation claims to the received lifecycle phase. Capture Cancel
+discards held audio, while presentation Cancel retains text already committed;
+a turn cancellation can race one valid durable pair. On 2026-10-04 the physical
+voice review found generic recording-discard copy for all phases. Test positive
+local closure and no late replay separately from remote provider cancellation;
+closing a TLS transport does not prove remote computation or billing stopped.
 
 <!-- applied-learning: a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart -->
 <a id="applied-learning-a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart"></a>
@@ -53,6 +59,11 @@ and cancellation derive the same task/worktree/artifact identities without creat
 cancel request or adapter-task exit is not proof that a delegated worker stopped; retain the exact
 artifact lease until worker termination and cleanup are positively confirmed, or a late worker can
 mutate a path already reassigned to an identical rerun.
+Keep delivery uncertainty separate from execution liveness when discovering
+active commands. An immutable uncertain delivery may still own a live Engine;
+retain it until separate confirmed termination evidence arrives. An admitted
+command with confirmed never-dispatched cancellation is inactive
+(2026-10-03 durable conversation command index).
 
 <!-- applied-learning: a-private-ets-table-is-not-an-access-control-boundary-if-a-genserver-relays-its-rows -->
 <a id="applied-learning-a-private-ets-table-is-not-an-access-control-boundary-if-a-genserver-relays-its-rows"></a>
@@ -97,10 +108,22 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: derived-summaries-cannot-replace-independently-recorded-cleanup-evidence -->
 <a id="applied-learning-derived-summaries-cannot-replace-independently-recorded-cleanup-evidence"></a>
 **Derived summaries cannot replace independently recorded cleanup evidence.** If run-root cleanup is observed only while building a summary, later acceptance recomputation may incorrectly infer it from pair cleanup and let a coordinated summary rewrite forge success. Retain each security-relevant lifecycle observation outside caller-editable aggregates, require it in the closed report schema, and derive the summary from that evidence (found 2026-07-11 reviewing coding benchmark acceptance integrity).
+An observer can exit nonzero after its `finally` completes resource closure.
+Preserve that failed operation receipt. A separate reconciliation must bind the
+actual browser/host/terminal owners and fresh absence, endpoint and closure facts
+before removing disposable credentials or admitting a successor fixture
+(2026-10-05 v9 browser-observer retirement).
 
 <!-- applied-learning: trace-the-actual-external-process-owner-on-every-execution-branch-before-claiming-tree-cleanup -->
 <a id="applied-learning-trace-the-actual-external-process-owner-on-every-execution-branch-before-claiming-tree-cleanup"></a>
 **Trace the actual external-process owner on every execution branch before claiming tree cleanup.** In the pinned Bash/ExCmd path, the Session owns ordinary foreground `ExCmd.Process` instances, while background jobs introduce a `JobProcess` and a separate worker that creates ExCmd; killing the Session is therefore not one uniform cleanup proof. Timeout/cancellation tests must exercise foreground, pipeline, background, and coprocess branches or reject unsupported branches before launch (found 2026-07-11 reviewing CapShell timeout ownership).
+
+For terminal teardown, bind the surviving PID to the actual adapter owner and
+its exact reader before classifying it as shared infrastructure. A linked
+child ignores normal owner exit; a reader blocked in IO.getn cannot service
+a stop call. Explicitly settle that owned reader and observe DOWN, while
+preserving borrowed adapters and the shared I/O device. A forced fixture
+cleanup is not a passing normal-exit witness (2026-10-03 native Breeze exit).
 
 <!-- applied-learning: a-genserver-from-tuple-is-protocol-data-not-authenticated-process-identity -->
 <a id="applied-learning-a-genserver-from-tuple-is-protocol-data-not-authenticated-process-identity"></a>
@@ -113,6 +136,12 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: cleanup-absence-checks-must-distinguish-absent-from-unqueryable -->
 <a id="applied-learning-cleanup-absence-checks-must-distinguish-absent-from-unqueryable"></a>
 **Cleanup absence checks must distinguish absent from unqueryable.** A boolean helper that maps every failing `git show-ref` or worktree query to `false` can issue a verified receipt while the repository is unavailable. Use tri-state queries, accept only the command's exact not-found outcome as absence, and fail closed on every transport, permission, timeout, or parse error (found 2026-07-11 reviewing workspace cleanup receipts).
+Record OS PID/group signal-zero outcomes separately: `PermissionError` / `EPERM`
+means the sandbox probe is unavailable, while `ESRCH` means absence. On
+2026-10-06 UTC, usable user-terminal fixtures were unqueryable from Codex.
+The first readiness script aborted before writing success metadata; its corrected
+proof recorded `permission_denied` without an independent presence or absence
+claim.
 
 <!-- applied-learning: verified-preservation-is-not-verified-cleanup -->
 <a id="applied-learning-verified-preservation-is-not-verified-cleanup"></a>
@@ -146,6 +175,15 @@ qualification).
 <!-- applied-learning: format-status-2-does-not-make-secret-bearing-genserver-state-private -->
 <a id="applied-learning-format-status-2-does-not-make-secret-bearing-genserver-state-private"></a>
 **`format_status/2` does not make secret-bearing GenServer state private.** It can redact crash/status formatting, but local code can still call `:sys.get_state/1` and receive the raw state. Do not retain bearer tokens or private authority in long-lived GenServer state at all; keep them in a private owner/ETS boundary or consume them entirely inside the exact request process (found 2026-07-11 probing the MCP verified-request handler).
+
+Private custody must also stay private during handoff. Enable sensitivity before
+the first acquisition or claim RPC, since its reply can queue while the caller
+is descheduled. Before sending a secret bootstrap to a newly created worker,
+wait for that exact worker's fresh sensitive-ready acknowledgment; setting the
+flag after receipt leaves an ordinary `Process.info(pid, :messages)` window.
+Regress held startup and queued replies, not only an already-claimed worker.
+This protects ordinary inspection, not hostile code execution in the same BEAM
+(2026-10-03 native notice handoff review).
 
 <!-- applied-learning: private-ets-does-not-protect-authority-from-its-owning-genserver-s-sys-callbacks -->
 <a id="applied-learning-private-ets-does-not-protect-authority-from-its-owning-genserver-s-sys-callbacks"></a>
@@ -259,6 +297,13 @@ joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
 <!-- applied-learning: a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority -->
 <a id="applied-learning-a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority"></a>
 **A restartable registry must not be the sole owner of child cleanup authority.** Process-local maps disappear on registry restart, and process-bound opaque leases cannot be transferred to the replacement process. Put each multi-part validation resource under a separately supervised owner that monitors the registry, acquires/releases the opaque Shell lease itself, retains every filesystem/Git identity, and cleans on registry death; the registry keeps only an authorized handle and public projection (found 2026-07-16 reviewing validation-resource restart cleanup).
+For asynchronous credential acquisition, the worker retains cleanup custody until
+an acknowledgement after the receiver commits its adopted state. A queued result
+is not adoption. Normal owner teardown must not kill that sole cleanup worker
+before it discards an unadopted login or session; committed credentials need an
+external owner monitor because `terminate/2` does not run after `:kill`. Regress
+normal close and untrappable death on both sides of the handoff (2026-10-03
+terminal target-switch review).
 
 <!-- applied-learning: filesystem-fixture-names-must-outlive-neither-vm-local-uniqueness-nor-cleanup-ownership -->
 <a id="applied-learning-filesystem-fixture-names-must-outlive-neither-vm-local-uniqueness-nor-cleanup-ownership"></a>
@@ -350,6 +395,14 @@ settles; preserve an exact per-operation join for source custody, authenticated
 backend retirement plus worker DOWN, and stable lease drain. Publish that
 receipt before successful cleanup acknowledgements, and never reconstruct it
 from empty supervisors or a missing Session (2026-09-29 Voice Desk).
+
+Operation expiration must deny late payloads and effects without discarding
+authenticated terminal resource-retirement evidence. Keep the logical operation
+deadline separate from one absolute physical callback-plus-retirement ceiling;
+leave that watchdog armed through close. Admit a late close acknowledgement only
+for disposal after exact worker/token authentication, then require its worker
+DOWN and independent lease settlement. Unknown or killed workers still prove no
+closure (2026-10-05 Voice configuration timeout regressions).
 
 <!-- applied-learning: out-of-band-owner-updates-must-survive-stale-process-local-publication -->
 <a id="applied-learning-out-of-band-owner-updates-must-survive-stale-process-local-publication"></a>

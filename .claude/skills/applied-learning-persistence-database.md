@@ -73,6 +73,13 @@ post-write uncertainty handling, and never suppress genuine database failures
 (source-backed lesson from recurring warnings during completed cross-surface
 turns, 2026-09-29).
 
+Keep read-only observation out of SQLite writer transactions. Use one bounded
+SELECT when it can return the rows and source head together, or an explicit
+DEFERRED snapshot for a multi-query read. Verify the read on an independent WAL
+connection while another connection holds the writer lock. An implicit
+`BEGIN IMMEDIATE` for activity discovery needlessly blocks both reads and writes
+(found 2026-10-03 while qualifying command discovery during real turn execution).
+
 <!-- applied-learning: phoenix-tracker-is-a-distributed-projection-not-a-first-writer-cas -->
 <a id="applied-learning-phoenix-tracker-is-a-distributed-projection-not-a-first-writer-cas"></a>
 **Phoenix.Tracker is a distributed projection, not a first-writer CAS.** Concurrent node owners can publish conflicting metadata, tracking failure may be ignored, and lookup order is not a conflict-resolution protocol. Security-relevant answer/idempotence state needs an atomic shared durable backend; use Tracker/PubSub only after the source-of-truth commit and fail closed when that backend is unavailable (found 2026-07-11 reviewing cluster approval answers).
@@ -133,6 +140,16 @@ turns, 2026-09-29).
 <a id="applied-learning-boot-lifecycle-normalization-must-publish-durable-authority-before-hot-state"></a>
 **Boot lifecycle normalization must publish durable authority before hot state.** Rehydrating a local `:running` row as hot-only `:interrupted` looks correct until runtime refresh imports the still-durable `:running` row and makes public resume fail with `{:invalid_status, :running}`. Persist the correction first, use structured CAS when available, leave remote ownership untouched, and publish to hot state only after durable success (found 2026-07-15 strengthening the real application-restart proof).
 
+For same-node authority, serialize acknowledged writes and authoritative reads
+through the same fixed owner. Retiring a lower broker generation does not fence
+a caller continuation: after broker restart, a new reader can pin old SQL facts
+before the held caller resumes its write. Execute closed mutations in the owner,
+then queue authority acquisition behind them. Legacy migration must insert only
+if the authoritative slot is absent, using backend CAS; a cache absence check
+followed by unconditional put can overwrite a newer revocation. Regress the held
+writer/restarted reader and lazy/bulk migration races against real storage
+(2026-10-03 Profile notice authority review).
+
 <!-- applied-learning: disable-production-durable-stores-before-the-test-application-starts-do-not-tear-them-down-in-test-helper-exs -->
 <a id="applied-learning-disable-production-durable-stores-before-the-test-application-starts-do-not-tear-them-down-in-test-helper-exs"></a>
 **Disable production durable stores before the test application starts; do not tear them down in `test_helper.exs`.** A test-helper teardown runs only after the application-owned child may already have opened and hydrated real operator state, and deleting the child can make an incorrect test configuration appear isolated. Set the test-environment child config to disabled, inject temporary roots into focused tests, and assert the production child was never started (found 2026-07-16 reviewing retained-workspace restart persistence).
@@ -166,6 +183,15 @@ and remove both key forms on update/delete. Test a real cold-store reload:
 the live cache can hide unreadable reverse indexes and duplicate JSON keys
 (found 2026-09-28 when identity resolution survived restart but alias listing
 reported no linked identities).
+
+Normalize producer-owned closed enum values before a strict durable JSON
+boundary; key normalization alone does not convert atom values. Preserve the
+codec's rejection of arbitrary non-JSON values. On 2026-10-04, real protected
+conversation denial reached its public answer path but failed before commit:
+the producer emitted `decision: :deny`, and the durable codec correctly rejected
+that atom. Cover deny and rework independently, including recovered human,
+resource and decision evidence; an approved positive uses different metadata
+and cannot prove rejection persistence.
 
 <!-- applied-learning: a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome -->
 <a id="applied-learning-a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome"></a>

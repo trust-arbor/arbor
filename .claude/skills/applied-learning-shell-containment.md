@@ -361,6 +361,18 @@ raced status must fail closed rather than letting expensive work discover the
 problem later (found 2026-08-28 when Apple control-plane status was pinned while
 CrossApp workload image policy was unavailable).
 When promoting a new image, compare its complete reviewed environment and labels with the candidate policy; inheriting the predecessor policy can retain an obsolete PATH or omit admitted Mix/cache variables even when all image digests are correct (reinforced 2026-09-27 during native-audio baseline admission).
+Preflight added containment with a no-effect child before mutating artifacts.
+On 2026-10-05, nested `sandbox-exec` around `/usr/bin/true` failed with
+`sandbox_apply` EPERM under Codex's existing sandbox, before any VM started.
+Preserve that refusal. A reviewed no-start compiler already covered by the
+required outer workspace/network restrictions can omit the unsupported nested
+wrapper while retaining its executor-context and source/operation gates; this
+does not authorize permission or outbound allowance changes.
+Scope evidence to the actual probe. On 2026-10-06 the isolated Home regression
+verified inherited TCP-listen denial before running, without starting Arbor or
+calling providers or the live database. That denied listen is not proof that
+every outbound network operation is blocked; retain the nested initialization
+refusal separately from the passing test result.
 
 <!-- applied-learning: image-policy-stores-provisioning-references-not-derived-execution-aliases -->
 <a id="applied-learning-image-policy-stores-provisioning-references-not-derived-execution-aliases"></a>

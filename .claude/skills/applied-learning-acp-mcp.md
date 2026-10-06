@@ -465,6 +465,12 @@ source-coupling baseline).
 <a id="applied-learning-map-decoding-can-erase-duplicate-json-members-before-closed-schema-validation"></a>
 **Map decoding can erase duplicate JSON members before closed-schema validation.** Jason's normal map mode keeps only one value for repeated keys, so a durable record with two `active` or `token` members may look valid after decode while evidence was discarded. Decode security-critical durable JSON as ordered objects, reject duplicate members recursively under a depth/size bound, then convert to maps for the ordinary closed core (found 2026-07-14 reviewing the Apple unit-intent journal).
 
+Use the same rule for signed request objects and authenticated response
+envelopes. A client-side correlation check cannot detect conflicting
+`agent_id` members once map decoding has discarded one. Test both key orders
+through a supported public operation and retain a successful predecessor
+happy path (2026-10-03 conversation SDK and remote adapter regressions).
+
 <!-- applied-learning: owner-death-must-preserve-coding-workspaces-even-when-currently-pristine -->
 <a id="applied-learning-owner-death-must-preserve-coding-workspaces-even-when-currently-pristine"></a>
 **Owner death must preserve coding workspaces, even when currently pristine.** TaskStore hard cancellation kills the coding owner, but an external ACP worker can outlive it and write after any inspect-then-remove check. `WorkspaceLeaseRegistry` therefore never treats unexpected owner death as immediate deletion authority: reused paths survive, and every owned path converts to the existing identity-pinned, bounded-TTL retained lease for exact task+principal reactivation. Identity uncertainty is a non-destructive authorized quarantine with retry, not deletion authority. Explicit release and verified TTL expiry remain the deletion paths (fixed 2026-07-15 after cancellation destroyed an uncommitted coding patch).

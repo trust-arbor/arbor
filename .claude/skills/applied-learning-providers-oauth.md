@@ -47,6 +47,12 @@ Arbor-owned credential. Prefer an independently acquired Arbor OAuth
 session/token family; do not consume or overwrite a CLI-owned rotating
 credential as a retry workaround (found 2026-07-18 during council smoke).
 
+When reusing an owned store in place, bind its credential-origin directory and
+the most recently retired runtime separately. A successor may keep the original
+store while the last runtime uses a newer private root; verify positive retirement
+of that last owner without substituting its root for the store origin (2026-10-05
+private realtime controls).
+
 <!-- applied-learning: rotating-oauth-refresh-is-a-provider-keyed-single-flight-publication -->
 <a id="applied-learning-rotating-oauth-refresh-is-a-provider-keyed-single-flight-publication"></a>
 **Rotating OAuth refresh is a provider-keyed single-flight publication.** Concurrent
@@ -100,6 +106,19 @@ fields indistinguishable from unrecognized runtime values behind the same
 before any backend consultation is not evidence of previous-turn cleanup or
 tool overlap. Preserve this uncertainty until the actual rejecting phase is
 observed; do not guess a wire-order change from a generic error.
+
+Compare an early-finished recording with a recording that reaches its configured
+limit before attributing a provider failure to a new device control. Separately
+check the typed backend: successful subscription text inference does not prove
+realtime speech inference. An acknowledgement-order candidate remains an
+experiment until an actual provider comparison supports it (2026-10-05).
+
+Keep provider work and cleanup budgets separate. The receive reservation on
+2026-10-05 retained the voice-turn deadline, but handoff silently clamped the
+acknowledgement wait to cleanup's five seconds and killed its worker. Bound each
+receive handoff by the existing worker operation ceiling within the original
+turn deadline; keep cleanup independently bounded. Test long valid reservations
+against that ceiling rather than passing an unsupported full deadline through.
 
 Distinguish empty, malformed, oversized and conflicting completed speech text
 at the existing reducer rejection boundary. A successful retry does not prove
@@ -375,6 +394,7 @@ fragment (found 2026-08-25 keyless streaming).
 <!-- applied-learning: prove-responses-store-false-by-retrieve-and-resume-failure-not-the-outbound-flag -->
 <a id="applied-learning-prove-responses-store-false-by-retrieve-and-resume-failure-not-the-outbound-flag"></a>
 **Prove Responses `store: false` by retrieve and resume failure, not the outbound flag.** A captured body with `"store": false` is necessary but not the honor check. After a successful ChatGPT Codex `POST /backend-api/codex/responses`, take the `resp_*` id from `response.completed` and assert `GET .../responses/{id}` is 404 and a follow-up `POST` with `previous_response_id` is 400. The completed object echoing `store: false` is corroboration only. Phase 3 websocket/Lite must copy outbound `store: false` and omit `previous_response_id` on create; connection-scoped WS resume is a different mechanism (found 2026-08-25 verifying the Codex-native harness).
+
 <!-- applied-learning: provider-startup-defaults-are-not-acknowledged-operation-formats -->
 <a id="applied-learning-provider-startup-defaults-are-not-acknowledged-operation-formats"></a>
 **Provider startup defaults are not acknowledged operation formats.** When a transport negotiates media, keep requested settings, initial defaults and confirmed formats distinct. Admit bytes only after the provider acknowledges the exact format and transport within the original operation deadline; replay the documented startup order in a positive fixture alongside malformed-format negatives. On 2026-09-27, xAI's initial `session.created` correctly reported 24 kHz input/output before Arbor requested 16 kHz/24 kHz. Treating that initial event as an acknowledged mismatch rejected normal startup, while hardcoded metadata falsely claimed the requested input rate. Configuration now owns acknowledgement before publishing usable PCM metadata.
