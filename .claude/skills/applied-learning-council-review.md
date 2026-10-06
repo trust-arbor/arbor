@@ -105,6 +105,8 @@ State which guarantees remain, which change, and the evidence required; never
 silently relabel a rejected factory outcome as acceptance. SU-3A (2026-09-08)
 otherwise alternated a two-observer cleanup promise with a single-guard request.
 
+Archive only fully completed scope under `5-completed/`. Before closing a roadmap item, give every deferred or nonblocking follow-up its own active item, with an owner, acceptance criteria and a backlink; the archive may link to those items but must not remain their execution backlog. The owner explicitly treats anything in `5-completed/` as complete (clarified 2026-10-06 after voice, library-release and legacy-UI follow-ups were left in a completed adoption item).
+
 <!-- applied-learning: containment-tests-that-discover-the-reviewed-mix-wrapper-need-a-worktree-local-build-path -->
 <a id="applied-learning-containment-tests-that-discover-the-reviewed-mix-wrapper-need-a-worktree-local-build-path"></a>
 **Containment tests that discover the reviewed Mix wrapper need a worktree-local build path.** Sharing `MIX_DEPS_PATH` into an isolated worktree is safe, but pointing `MIX_BUILD_PATH` outside the repo makes the loaded `arbor_actions` BEAM path lead to that external build root, so `Arbor.Actions.Mix.resolve_mix_wrapper/0` correctly cannot prove the repo-owned `bin/mix` identity and fails closed with `:mix_wrapper_unavailable`. For this suite, leave `_build` inside the isolated worktree and share only dependencies; an external build path is still appropriate for tests that do not intentionally derive a source/runtime root from loaded code (found 2026-07-13 while independently validating Spawn Containment Slice 1 R11).

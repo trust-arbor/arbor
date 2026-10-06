@@ -2859,7 +2859,7 @@
       "anchor": "applied-learning-make-multi-agent-rework-monotonic-with-a-frozen-finding-ledger",
       "source_date": "2026-07-12",
       "source_incident": "adopted 2026-07-12 after Phase 6 review rounds showed high rejection counts despite substantial accepted progress; ACP continuity corrected 2026-07-12; design constraint retention reinforced 2026-08-02 during VP-04).",
-      "content_sha256": "cf1619b7a2f770b232bca9d31eef7711223c1819fe987fea6cd16ea348fe3e1e",
+      "content_sha256": "2544d4e14297cd3fea1d8265ac5346a95aaea2b07e08ef95ceddc8b1b44f7c62",
       "always_loaded": false
     },
     {
