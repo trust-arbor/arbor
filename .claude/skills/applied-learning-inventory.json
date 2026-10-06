@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 748,
+  "entry_count": 749,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -9268,8 +9268,21 @@
       "source_incident": "isolated Main extraction backport review and behavioral predecessor qualification, 2026-10-06",
       "always_loaded": false,
       "content_sha256": "20ac494e977964a1795430e679e3c48e555cf19f0c36e74d6da2fe416e41a44c"
+    },
+    {
+      "source_ordinal": 754,
+      "source_kind": "post-migration",
+      "slug": "bind-cold-storage-proofs-to-the-declared-backend",
+      "title": "Bind cold storage proofs to the declared backend.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-bind-cold-storage-proofs-to-the-declared-backend",
+      "source_date": "2026-10-06",
+      "source_incident": "standalone Workflow configured SQL checkpoint cold-consumer qualification,2026-10-06",
+      "always_loaded": false,
+      "content_sha256": "908c56d9b4ae83b9939e8eb7e9a4fac1e20e9e3a27b692dcde1b3b74f5ec6e11"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 287
+  "post_migration_entry_count": 288
 }

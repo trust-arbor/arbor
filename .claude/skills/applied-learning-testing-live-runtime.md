@@ -2178,3 +2178,14 @@ Keep incompatible runtime fixtures in separate normal test processes: a
 database helper that starts the default Repo conflicts with an actual Session
 journey that deliberately requires it absent. Bind every phase to the same
 frozen source and retain the failed combined attempt (2026-10-03 host controls).
+
+<!-- applied-learning: bind-cold-storage-proofs-to-the-declared-backend -->
+<a id="applied-learning-bind-cold-storage-proofs-to-the-declared-backend"></a>
+**Bind cold storage proofs to the declared backend.** A direct checkpoint or
+store API can select a different default from the configured Engine, even when
+the runtime owner reports healthy durable storage. Pass the captured store, name
+and options explicitly, then load by its actual run identity to prove the same
+SQL roundtrip. Diagnose the value-producing failure before attributing it to a
+nearby database warning; retain the initial failure and fix the owning consumer
+recipe without substituting a volatile store or relaxing durability (found
+2026-10-06 while qualifying the standalone Workflow release consumer).
