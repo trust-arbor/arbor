@@ -51,6 +51,11 @@ attests the backend contract; only the read checks that the running database is
 available. Neither check records audio, contacts a speech provider, or reserves
 allowance. Loopback alone does not test this prerequisite.
 
+Conversation Home also requires the [conversation interface schema](CONVERSATION_HOST_BOUNDARY.md#conversation-interface-schema)
+in the active Repo. Verify its two selected migration versions and five tables
+before testing the joined web/terminal/voice path; voice-budget readiness and
+public HTTP health do not check those objects.
+
 Each Desk turn reserves at most its remaining configured Desk permit and the
 configured session/daily ceilings. Cleanup releases unused allowance so another short turn
 can begin; the daily consumed total remains durable.

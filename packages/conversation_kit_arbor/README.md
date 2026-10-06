@@ -13,6 +13,13 @@ provisional. Host integrations use:
 {:conversation_kit_arbor, path: "../../packages/conversation_kit_arbor"}
 ```
 
+An Arbor host also needs its conversation SQL schema deployed to the active
+Persistence Repo. Conversation Home and native controls require migrations
+`20261003000001` and `20261003000002`; building the adapter or starting the host
+does not apply them. See the [host schema prerequisites](../../docs/arbor/CONVERSATION_HOST_BOUNDARY.md#conversation-interface-schema)
+before an existing-host upgrade. The independent core and adapter tests do not
+establish that a running Arbor database has this schema.
+
 ## Native interface connection
 
 `ConversationKit.Arbor.Connection` privately owns credentials, scope fences,

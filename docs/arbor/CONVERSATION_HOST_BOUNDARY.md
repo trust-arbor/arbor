@@ -140,6 +140,24 @@ reconstruct a missing journal outcome after a crash.
 
 ## Storage and integration scope
 
+### Conversation interface schema
+
+The Arbor host must apply the conversation migrations to its configured
+Persistence Repo before using Conversation Home and native conversation controls:
+
+| Migration version | New tables |
+| --- | --- |
+| `20261003000001` | `conversation_command_checkpoints`, `conversation_commands`, `conversation_command_pages` |
+| `20261003000002` | `conversation_notice_heads`, `conversation_notices` |
+
+These migrations extend the existing engagement/session schema. Use the host's
+normal schema-deployment procedure and verify both migration-ledger entries and
+all five tables in the active Repo afterward. For an existing database, inspect
+its applied versions before selecting upgrade migrations. Application startup,
+Gateway health and sign-in redirects do not establish schema readiness. Home's
+directory read requires `conversation_notice_heads` even when the result page
+would be empty; a missing table returns the unavailable-directory message.
+
 Comms owns command reduction and delegates durable append to the public
 Persistence facade. The default journal backend is explicitly
 `Arbor.Persistence.EventLog.Ecto`, with the configured Persistence Repo and its

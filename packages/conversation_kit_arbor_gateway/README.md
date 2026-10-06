@@ -100,8 +100,9 @@ The credential appears only in the SDK's upgrade header. The host validates
 fresh authority for every operation and publication. Rendered snapshots contain
 no credential. Signed-key mode remains available unchanged.
 
-The maintained opt-in `clients/arbor_breeze` launcher accepts `--url URL --agent
-ID` for human device sign-in, or `--key FILE` for explicit signed-key mode.
+The maintained [Breeze `arbor-tui` launcher](../../clients/arbor_breeze/README.md)
+accepts `--url URL --agent ID` for human device sign-in, or `--key FILE` for
+explicit signed-key mode.
 It prints only public verification instructions, polls within flow expiry,
 cancels failed flows, and closes its connection before attempting logout on
 ordinary exit. It never writes provider tokens or credentials. The archived
