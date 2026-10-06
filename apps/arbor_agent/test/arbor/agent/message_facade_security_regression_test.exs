@@ -733,6 +733,36 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
   @tag :conversation_ingress
   @tag :isolated_repo
+  test "security regression: public submission rejects a stopped target before durable admission",
+       %{target: target} do
+    start_conversation_repo!()
+    caller = register_active_human!()
+    capability = track_grant!(caller, "arbor://chat/agent/" <> target)
+    assert {:ok, token} = SessionToken.generate(caller)
+    command = %{id: "stopped-target-new-command", text: "must not become uncertain"}
+    refute Arbor.Agent.running?(target)
+
+    assert {:error, :agent_not_running} =
+             Arbor.Agent.submit_conversation_command(caller, target, command,
+               session_token: token
+             )
+
+    assert {:error, :not_found} =
+             Arbor.Agent.conversation_command(caller, target, command.id, session_token: token)
+
+    assert {:ok, %{events: [], head: 0}} =
+             Arbor.Agent.conversation_events(caller, target, 0, session_token: token)
+
+    assert :ok = Security.revoke(capability.id)
+
+    assert {:error, :unauthorized} =
+             Arbor.Agent.submit_conversation_command(caller, target, command,
+               session_token: token
+             )
+  end
+
+  @tag :conversation_ingress
+  @tag :isolated_repo
   test "security regression: public conversation replay preserves private ownership over real SQLite",
        %{target: target} do
     start_conversation_repo!()

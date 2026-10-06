@@ -220,6 +220,32 @@ defmodule ConversationKit.Arbor.Gateway.WireTest do
              )
   end
 
+  test "stopped-agent rejection is a closed error correlated to the submitted ID" do
+    rejection = encoded("conversation_rejected", %{id: "id1", reason: "agent_not_running"})
+
+    assert {:error, :agent_not_running} =
+             Wire.decode(rejection, context(:submit, %{id: "id1", text: "hello"}))
+
+    assert {:error, :agent_not_running} =
+             Wire.decode(
+               Jason.encode!(%{type: "error", reason: "agent_not_running"}),
+               context(:submit, %{id: "id1", text: "hello"})
+             )
+
+    assert {:error, :invalid_transport_response} =
+             Wire.decode(rejection, context(:command, "id1"))
+
+    assert {:error, :invalid_transport_response} =
+             Wire.decode(
+               encoded("conversation_rejected", %{
+                 id: "id1",
+                 reason: "agent_not_running",
+                 detail: "unqualified host detail"
+               }),
+               context(:submit, %{id: "id1", text: "hello"})
+             )
+  end
+
   test "wire rejects oversized payload and malformed nested arrays before Kit" do
     assert {:error, :invalid_transport_response} =
              Wire.decode(String.duplicate("x", 8_388_609), context(:history))

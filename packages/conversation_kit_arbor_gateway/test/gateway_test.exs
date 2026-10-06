@@ -122,6 +122,50 @@ defmodule ConversationKit.Arbor.GatewayTest do
     assert :ok = Gateway.close(remote)
   end
 
+  test "a stopped-agent submit rejection reaches the public adapter without replay", c do
+    {remote, client, _opts} = start(c)
+    {attached, channel, _, _} = attach(client)
+    task = Task.async(fn -> Arbor.submit(attached, "stopped_remote", "Keep this draft") end)
+    assert_receive {:frame, ^channel, request}, 2_000
+    assert_signed(request, c.pub)
+
+    assert ["arbor.conversation.v2", "submit", "human_test", "agent_test", input, _, @engagement] =
+             Jason.decode!(request["payload"])
+
+    assert input == ["stopped_remote", "Keep this draft"]
+
+    send(channel, {
+      :reply,
+      %{type: "conversation_rejected", data: %{id: "stopped_remote", reason: "agent_not_running"}}
+    })
+
+    assert {:error, :agent_not_running} = Task.await(task)
+    assert Arbor.position(attached) == %{history: 0, commands: 0}
+    assert Arbor.projection(attached)["messages"] == []
+    assert Arbor.projection(attached)["deliveries"] == []
+    refute_receive {:frame, _, _}
+    refute_receive {:channel_closed, ^channel}
+    assert :ok = Gateway.close(remote)
+  end
+
+  test "security regression: stopped-agent rejection with a different ID retires the channel",
+       c do
+    {remote, client, _opts} = start(c)
+    {attached, channel, _, _} = attach(client)
+    task = Task.async(fn -> Arbor.submit(attached, "expected_id", "Keep this draft") end)
+    assert_receive {:frame, ^channel, _request}, 2_000
+
+    send(channel, {
+      :reply,
+      %{type: "conversation_rejected", data: %{id: "another_id", reason: "agent_not_running"}}
+    })
+
+    assert {:error, :invalid_transport_response} = Task.await(task)
+    assert_receive {:channel_closed, ^channel}, 2_000
+    refute_receive {:frame, _, _}
+    assert :ok = Gateway.close(remote)
+  end
+
   test "bounded window startup attaches the signed socket without replaying transcript or journal",
        c do
     {remote, client, opts} = start(c)

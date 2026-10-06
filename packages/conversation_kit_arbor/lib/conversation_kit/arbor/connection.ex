@@ -494,6 +494,15 @@ defmodule ConversationKit.Arbor.Connection do
            error: "The request was rejected. Edit the message before sending again."
        }
 
+  defp apply_result(%{pending: %{attempts: 1}} = state, :submit, {:error, :agent_not_running}),
+    do: %{
+      state
+      | pending: nil,
+        receipt: nil,
+        ack: nil,
+        error: "This agent is not running. Resume it in Console, then send again."
+    }
+
   defp apply_result(state, _kind, {:error, reason}), do: failed(state, reason)
   defp apply_result(state, _, _), do: failed(state, :invalid_transport_response)
 
@@ -524,6 +533,13 @@ defmodule ConversationKit.Arbor.Connection do
 
   defp failed(state, reason) when reason in [:invalid_command, :command_conflict],
     do: %{state | error: "This attempt was refused. Earlier delivery remains unconfirmed."}
+
+  defp failed(state, :agent_not_running),
+    do: %{
+      state
+      | error:
+          "This agent is not running. Earlier delivery remains unconfirmed. Resume it in Console, then check the saved request ID."
+    }
 
   defp failed(state, :not_found),
     do: %{

@@ -285,6 +285,45 @@ defmodule Arbor.Gateway.Chat.TerminalSessionSocketTest do
     assert_receive {:terminal_dispatch, :submit, _, _, _, _}
   end
 
+  test "security regression: stopped-target rejection keeps server proof private and rechecks authority",
+       %{state: state} do
+    state = attach(state)
+    command = %{id: "stopped_command", text: "keep this draft"}
+    Process.put(:host_result, {:error, :agent_not_running})
+    {event, attached} = drive(frame(:submit, command), state)
+
+    assert event == %{
+             "type" => "conversation_rejected",
+             "data" => %{"id" => "stopped_command", "reason" => "agent_not_running"}
+           }
+
+    assert attached == state
+    assert_receive {:terminal_dispatch, :submit, "human_owner", "agent_a", ^command, opts}
+    assert opts[:session_token] == @proof
+    assert opts[:expected_engagement_id] == @engagement
+    refute Keyword.has_key?(opts, :signed_request)
+    refute inspect(event) =~ @proof
+    refute inspect(event) =~ @credential
+
+    Process.put(:lose_after_call, :revoked)
+    {event, retired} = drive(frame(:submit, command), attached)
+    assert event == %{"type" => "error", "reason" => "unauthorized"}
+    assert retired.invalidated?
+    assert retired.agent_id == nil and retired.engagement_id == nil
+    assert :ets.info(attached.credential_table) == :undefined
+    assert_receive {:terminal_dispatch, :submit, "human_owner", "agent_a", ^command, _}
+  end
+
+  test "an unknown submit result remains an uncorrelated error", %{state: state} do
+    state = attach(state)
+    Process.put(:host_result, {:error, :conversation_unavailable})
+    {event, attached} = drive(frame(:submit, %{id: "unknown_command", text: "hello"}), state)
+    assert event == %{"type" => "error", "reason" => "conversation_unavailable"}
+    assert attached == state
+    assert_receive {:terminal_dispatch, :submit, _, _, _, _}
+    Socket.terminate(:normal, attached)
+  end
+
   test "initial window attaches a human session without replaying transcript history", %{
     state: state
   } do

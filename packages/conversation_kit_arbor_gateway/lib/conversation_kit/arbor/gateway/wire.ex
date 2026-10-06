@@ -8,7 +8,7 @@ defmodule ConversationKit.Arbor.Gateway.Wire do
   @entry_keys ~w(id role content timestamp entry_ordinal)a
   @assistant_statuses ~w(complete interrupted cancelled failed streaming)
   @event_keys ~w(id cursor kind command)a
-  @errors ~w(unauthorized conversation_scope_changed unsupported_conversation_capability not_found command_conflict conversation_unavailable page_too_large invalid_opts invalid_cursor invalid_command invalid_caller_id invalid_agent_id invalid_content invalid_message invalid_sender invalid_engagement_id approval_answer_required invalid_control_request invalid_interaction_answer interaction_not_pending interaction_unavailable notice_subject_required invalid_notice_request notice_unavailable)a
+  @errors ~w(unauthorized conversation_scope_changed unsupported_conversation_capability not_found command_conflict conversation_unavailable page_too_large invalid_opts invalid_cursor invalid_command agent_not_running invalid_caller_id invalid_agent_id invalid_content invalid_message invalid_sender invalid_engagement_id approval_answer_required invalid_control_request invalid_interaction_answer interaction_not_pending interaction_unavailable notice_subject_required invalid_notice_request notice_unavailable)a
 
   def payload(context),
     do:
@@ -126,7 +126,12 @@ defmodule ConversationKit.Arbor.Gateway.Wire do
     with %{"id" => ^id, "reason" => reason} when map_size(data) == 2 <- data,
          atom when not is_nil(atom) <-
            Enum.find(
-             [:invalid_command, :command_conflict, :unsupported_conversation_capability],
+             [
+               :invalid_command,
+               :command_conflict,
+               :agent_not_running,
+               :unsupported_conversation_capability
+             ],
              &(Atom.to_string(&1) == reason)
            ) do
       {:ok, {:error, atom}}

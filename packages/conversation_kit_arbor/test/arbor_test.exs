@@ -414,6 +414,21 @@ defmodule ConversationKit.ArborTest do
     assert {:error, :conflicting_response} = Arbor.submit(attached_client(), "cmd_1", "Hello")
   end
 
+  test "a stopped-agent submit rejection propagates through the local public facade adapter" do
+    Process.put(:host, fn :submit, "human_private", "agent_private", input, opts ->
+      assert input == %{id: "stopped_local", text: "Hello"}
+      assert opts[:expected_engagement_id] == @engagement
+      assert Keyword.has_key?(opts, :session_token)
+      {:error, :agent_not_running}
+    end)
+
+    attached = attached_client()
+    assert {:error, :agent_not_running} = Arbor.submit(attached, "stopped_local", "Hello")
+    assert Arbor.position(attached) == %{history: 0, commands: 0}
+    assert Arbor.projection(attached)["messages"] == []
+    assert Arbor.projection(attached)["deliveries"] == []
+  end
+
   test "input and history use the actual independent host limits without truncation" do
     input = String.duplicate("x", 32_768)
     transcript = String.duplicate("y", 262_144)

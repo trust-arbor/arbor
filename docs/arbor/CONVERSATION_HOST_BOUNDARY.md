@@ -85,6 +85,16 @@ retries. IDs are unique per canonical owner across destinations. Reusing an ID w
 different text or a different destination conflicts. Equal retries return saved
 state after fresh authentication. They do not allocate a second delivery attempt.
 
+After authentication, ownership and the engagement fence, the host checks
+`Arbor.Agent.running?/1` before admitting a new command. A stopped target returns
+`:agent_not_running` without admission, a worker or a dispatch claim. Saved
+commands remain readable and an exact submit retry returns their saved state,
+including `:admitted`, without starting delivery while the target is stopped.
+Changed text still returns `:command_conflict`. The host rechecks current access
+before releasing these results and never starts or resumes the agent itself.
+Liveness is a preflight observation: a stop after admission still follows the
+existing claimed-command uncertainty rules.
+
 The returned command has `id`, `name`, `text`, `principal_id`, `agent_id`,
 `engagement_id`, `status`, `outcome`, `admitted_cursor` and `updated_cursor`.
 

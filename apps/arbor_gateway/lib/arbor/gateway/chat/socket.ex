@@ -162,7 +162,12 @@ defmodule Arbor.Gateway.Chat.Socket do
 
     case result do
       {:error, reason}
-      when reason in [:unsupported_conversation_capability, :invalid_command, :command_conflict] ->
+      when reason in [
+             :unsupported_conversation_capability,
+             :invalid_command,
+             :command_conflict,
+             :agent_not_running
+           ] ->
         push({:conversation_rejected, %{id: req.input.id, reason: reason}}, state)
 
       _ ->

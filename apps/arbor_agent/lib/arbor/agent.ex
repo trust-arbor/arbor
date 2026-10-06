@@ -337,8 +337,13 @@ defmodule Arbor.Agent do
   `:expected_engagement_id` continuity fence: it is compared against the owner's
   resolved engagement before any read or admission, never used as a route.
   A mismatch returns `:conversation_scope_changed` and requires clearing cached
-  private data and pending commands before reconnecting. A claimed command is never redispatched, even
-  after restart. `:dispatch_started` means its outcome is unknown; `:uncertain`
+  private data and pending commands before reconnecting. After authentication,
+  ownership and that fence, a stopped target rejects a new command with
+  `:agent_not_running` before admission or dispatch. Saved commands still replay
+  their existing state without dispatch; changed text still conflicts. This
+  check does not reserve a running Session: a stop after admission retains the
+  existing uncertain-delivery semantics. A claimed command is never redispatched,
+  even after restart. `:dispatch_started` means its outcome is unknown; `:uncertain`
   is an immutable terminal delivery uncertainty, not permission to retry.
 
   Session owns execution/transcript commits. Its existing steering semantics

@@ -206,6 +206,157 @@ defmodule Arbor.Agent.ConversationFacadeSecurityRegressionTest do
     %{state: state, collaborators: collaborators, parent: parent}
   end
 
+  test "stopped target rejects a new command before admission or dispatch", c do
+    parent = self()
+
+    collaborators =
+      c.collaborators
+      |> Map.put(:running?, fn target ->
+        send(parent, {:readiness_checked, target})
+        false
+      end)
+      |> Map.put(:admit, fn _, _ -> flunk("stopped target must not admit") end)
+      |> Map.put(:start_worker, fn _ -> flunk("stopped target must not start a worker") end)
+      |> Map.put(:claim, fn _, _ -> flunk("stopped target must not claim") end)
+
+    assert {:error, :agent_not_running} =
+             request(%{c | collaborators: collaborators}, :submit, @command)
+
+    assert_received {:readiness_checked, @target}
+    assert Agent.get(c.state, & &1.commands) == %{}
+    assert Agent.get(c.state, & &1.claims) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+    assert length(Agent.get(c.state, & &1.discarded)) == 1
+  end
+
+  test "security regression: proof ownership and engagement fence precede target liveness", c do
+    collaborators =
+      Map.put(c.collaborators, :running?, fn _ ->
+        flunk("unauthorized or changed scope must not reveal target liveness")
+      end)
+
+    guarded = %{c | collaborators: collaborators}
+    Agent.update(c.state, &%{&1 | authorized: false})
+    assert {:error, :unauthorized} = request(guarded, :submit, @command)
+
+    Agent.update(c.state, &%{&1 | authorized: true, canonical_owner: nil})
+    assert {:error, :unauthorized} = request(guarded, :submit, @command)
+
+    Agent.update(c.state, &%{&1 | canonical_owner: @caller})
+
+    assert {:error, :conversation_scope_changed} =
+             request(guarded, :submit, @command,
+               session_token: "test-proof",
+               expected_engagement_id: "eng_00000000000000000000000000000002"
+             )
+
+    assert Agent.get(c.state, & &1.commands) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+  end
+
+  test "security regression: stopped-target release conceals liveness after revocation", c do
+    for field <- [:authorized, :active] do
+      Agent.update(c.state, &Map.put(&1, field, true))
+
+      collaborators =
+        Map.put(c.collaborators, :running?, fn _ ->
+          Agent.update(c.state, &Map.put(&1, field, false))
+          false
+        end)
+
+      assert {:error, :unauthorized} =
+               request(%{c | collaborators: collaborators}, :submit, @command)
+
+      Agent.update(c.state, &Map.put(&1, field, true))
+    end
+
+    assert Agent.get(c.state, & &1.commands) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+  end
+
+  test "running target keeps admission and supervised delivery unchanged", c do
+    collaborators = Map.put(c.collaborators, :running?, fn target -> target == @target end)
+    running = %{c | collaborators: collaborators}
+
+    assert {:ok, %{status: :admitted}} = request(running, :submit, @command)
+    assert_receive {:settled, "command-1", %{status: :completed, text: "Reply 東京"}}
+    assert {:ok, %{status: :completed}} = request(running, :submit, @command)
+    assert Agent.get(c.state, & &1.dispatched) == 1
+  end
+
+  test "stopped target replays saved commands and conflicts without admission or dispatch", c do
+    scope = %{
+      principal_id: @caller,
+      agent_id: @target,
+      engagement_id: "eng_00000000000000000000000000000001"
+    }
+
+    collaborators =
+      c.collaborators
+      |> Map.put(:running?, fn _ -> false end)
+      |> Map.put(:admit, fn _, _ -> flunk("saved stopped-target command must not admit") end)
+      |> Map.put(:start_worker, fn _ ->
+        flunk("saved stopped-target command must not dispatch")
+      end)
+      |> Map.put(:claim, fn _, _ -> flunk("saved stopped-target command must not claim") end)
+
+    stopped = %{c | collaborators: collaborators}
+
+    for {status, outcome} <- [
+          admitted: nil,
+          dispatch_started: nil,
+          completed: %{status: :completed, text: "saved reply"},
+          uncertain: %{status: :uncertain, reason: :delivery_unknown}
+        ] do
+      saved = Map.merge(scope, Map.merge(@command, %{status: status, outcome: outcome}))
+      Agent.update(c.state, &%{&1 | commands: %{{scope, @command.id} => saved}})
+
+      assert {:ok, ^saved} = request(stopped, :submit, @command)
+
+      assert {:error, :command_conflict} =
+               request(stopped, :submit, %{@command | text: "changed"})
+
+      assert Agent.get(c.state, & &1.commands) == %{{scope, @command.id} => saved}
+    end
+
+    assert Agent.get(c.state, & &1.claims) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+  end
+
+  test "stopped-target lookup failures stay unavailable rather than becoming a new rejection",
+       c do
+    for reply <- [{:error, {:database_error, "private DSN"}}, {:ok, %{}}, :oops] do
+      collaborators =
+        c.collaborators
+        |> Map.put(:running?, fn _ -> false end)
+        |> Map.put(:get, fn _, _ -> reply end)
+        |> Map.put(:admit, fn _, _ -> flunk("failed stopped-target lookup must not admit") end)
+
+      assert {:error, :conversation_unavailable} =
+               request(%{c | collaborators: collaborators}, :submit, @command)
+    end
+
+    assert Agent.get(c.state, & &1.commands) == %{}
+    assert Agent.get(c.state, & &1.dispatched) == 0
+  end
+
+  test "a target stopping after readiness keeps claimed delivery uncertainty", c do
+    Agent.update(c.state, fn current ->
+      %{current | delivery: fn -> {:error, :agent_not_found} end}
+    end)
+
+    collaborators = Map.put(c.collaborators, :running?, fn _ -> true end)
+
+    assert {:ok, %{status: :admitted}} =
+             request(%{c | collaborators: collaborators}, :submit, @command)
+
+    assert_receive {:settled, "command-1", %{status: :uncertain, reason: :delivery_unknown}}
+
+    stopped = %{c | collaborators: Map.put(collaborators, :running?, fn _ -> false end)}
+    assert {:ok, %{status: :uncertain}} = request(stopped, :submit, @command)
+    assert Agent.get(c.state, & &1.dispatched) == 1
+  end
+
   test "security regression: exact retries reuse one scrubbed result without redispatch", c do
     assert {:ok, %{status: :admitted}} = request(c, :submit, @command)
     assert_receive {:settled, "command-1", %{status: :completed, text: "Reply 東京"}}

@@ -1,6 +1,7 @@
 defmodule ConversationKit.Arbor.ConnectionTest do
   use ExUnit.Case, async: true
   alias ConversationKit.Arbor.Connection
+  alias ConversationKit.Composer
   @moduletag :fast
   @engagement "eng_0123456789abcdef0123456789abcdef"
 
@@ -269,6 +270,117 @@ defmodule ConversationKit.Arbor.ConnectionTest do
 
     assert_receive {:lookup, "stable_retry"}
     assert_receive {:submitted, %{id: "stable_retry", text: "Hello"}}
+    refute_receive {:submitted, _}
+  end
+
+  test "a first stopped-agent rejection releases admission without acknowledging or erasing the draft" do
+    pid =
+      start(
+        fn context, observer ->
+          case context.operation do
+            :window ->
+              {:ok, window()}
+
+            :submit ->
+              send(observer, {:submitted, context.input})
+              {:error, :agent_not_running}
+
+            _ ->
+              {:error, :unsupported_conversation_capability}
+          end
+        end,
+        poll_interval_ms: 60_000
+      )
+
+    snapshot = attached(pid)
+    draft = Composer.new() |> Composer.draft("Keep this draft 日本語")
+    {:send, request, submitted} = Composer.submit(draft, snapshot.send_allowed, "stopped_first")
+    Connection.act(pid, :send, request)
+
+    rejected =
+      await(
+        pid,
+        &(&1.error == "This agent is not running. Resume it in Console, then send again." and
+            not &1.busy)
+      )
+
+    assert_receive {:submitted, ^request}
+    assert rejected.connected
+    assert rejected.send_allowed
+    refute rejected.retry_allowed
+    refute rejected.private_cleared
+    assert rejected.pending_id == nil
+    assert rejected.receipt == nil
+    assert rejected.ack == nil
+    assert rejected.projection["messages"] == []
+    assert Composer.acknowledge(submitted, rejected.ack) == submitted
+
+    assert %{draft: "Keep this draft 日本語", submitted: nil} =
+             Composer.reject(submitted, request.id)
+
+    refute_receive {:submitted, _}
+  end
+
+  test "a stopped-agent retry retains earlier uncertainty and reconciles only the saved ID" do
+    attempts = start_supervised!({Agent, fn -> 0 end})
+
+    pid =
+      start(
+        fn context, observer ->
+          case context.operation do
+            :window ->
+              {:ok, window()}
+
+            :command ->
+              send(observer, {:lookup, context.input})
+              {:error, :not_found}
+
+            :submit ->
+              send(observer, {:submitted, context.input})
+
+              case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+                0 -> {:error, :transport_timeout}
+                1 -> {:error, :agent_not_running}
+                _ -> {:ok, receipt(context.input.id, context.input.text)}
+              end
+
+            _ ->
+              {:error, :unsupported_conversation_capability}
+          end
+        end,
+        poll_interval_ms: 60_000
+      )
+
+    attached(pid)
+    request = %{id: "stopped_retry", text: "Keep the saved text"}
+    Connection.act(pid, :send, request)
+    await(pid, &(&1.pending_id == request.id and not &1.busy))
+    assert_receive {:submitted, ^request}
+    Connection.act(pid, :retry)
+
+    uncertain =
+      await(
+        pid,
+        &(&1.pending_id == request.id and not &1.busy and is_binary(&1.error) and
+            String.contains?(
+              &1.error,
+              "This agent is not running. Earlier delivery remains unconfirmed."
+            ))
+      )
+
+    assert uncertain.connected
+    assert uncertain.retry_allowed
+    refute uncertain.send_allowed
+    assert uncertain.ack == nil
+    assert_receive {:lookup, "stopped_retry"}
+    assert_receive {:submitted, ^request}
+    refute_receive {:submitted, _}
+    assert Agent.get(attempts, & &1) == 2
+
+    Connection.act(pid, :retry)
+    assert %{pending_id: nil, ack: ^request} = await(pid, &(not is_nil(&1.ack)))
+    assert_receive {:lookup, "stopped_retry"}
+    assert_receive {:submitted, ^request}
     refute_receive {:submitted, _}
   end
 

@@ -38,10 +38,14 @@ defmodule Arbor.Gateway.Chat.SocketTest.Host do
     with :ok <- authenticate(:submit, caller, target, command, opts) do
       case Process.get({:command, command.id}) do
         nil ->
-          send(self(), {:dispatch, command.id})
-          saved = Map.put(command, :status, :dispatch_started)
-          Process.put({:command, command.id}, saved)
-          {:ok, saved}
+          if Process.get(:agent_stopped, false) do
+            {:error, :agent_not_running}
+          else
+            send(self(), {:dispatch, command.id})
+            saved = Map.put(command, :status, :dispatch_started)
+            Process.put({:command, command.id}, saved)
+            {:ok, saved}
+          end
 
         %{text: text} = saved when text == command.text ->
           {:ok, saved}
@@ -308,6 +312,56 @@ defmodule Arbor.Gateway.Chat.SocketTest do
 
     assert {%{"type" => "conversation_rejected", "data" => %{"reason" => "command_conflict"}}, _} =
              drive(frame(:submit, %{command | text: "changed"}, key), state)
+  end
+
+  test "stopped target rejects the exact command and retry still requires a fresh proof", %{
+    state: state,
+    key: key
+  } do
+    {_, attached} = drive(frame(:history, nil, key), state)
+    Process.put(:agent_stopped, true)
+    command = %{id: "stopped_command", text: "keep this draft"}
+    wire = frame(:submit, command, key)
+
+    assert {%{
+              "type" => "conversation_rejected",
+              "data" => %{"id" => "stopped_command", "reason" => "agent_not_running"}
+            }, ^attached} = drive(wire, attached)
+
+    assert Process.get({:command, command.id}) == nil
+    refute_receive {:dispatch, _}
+
+    assert {%{"type" => "error", "reason" => "unauthorized"}, ^attached} =
+             drive(wire, attached)
+
+    Process.put(:agent_stopped, false)
+
+    assert {%{
+              "type" => "conversation_command",
+              "data" => %{"id" => "stopped_command", "status" => "dispatch_started"}
+            }, ^attached} = drive(frame(:submit, command, key), attached)
+
+    assert_receive {:dispatch, "stopped_command"}
+    refute_receive {:dispatch, _}
+  end
+
+  test "a saved uncertain receipt stays a command response when the target is stopped", %{
+    state: state,
+    key: key
+  } do
+    {_, attached} = drive(frame(:history, nil, key), state)
+    command = %{id: "uncertain_command", text: "already admitted"}
+    saved = Map.put(command, :status, :uncertain)
+    Process.put({:command, command.id}, saved)
+    Process.put(:agent_stopped, true)
+
+    assert {%{
+              "type" => "conversation_command",
+              "data" => %{"id" => "uncertain_command", "status" => "uncertain"}
+            }, ^attached} = drive(frame(:submit, command, key), attached)
+
+    assert Process.get({:command, command.id}) == saved
+    refute_receive {:dispatch, _}
   end
 
   test "security regression: no agent-wide signals disclose messages or approvals", %{

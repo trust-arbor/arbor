@@ -32,6 +32,7 @@ defmodule ConversationKit.Arbor do
     :invalid_opts,
     :invalid_cursor,
     :invalid_command,
+    :agent_not_running,
     :invalid_caller_id,
     :invalid_agent_id,
     :invalid_content,

@@ -30,6 +30,7 @@ defmodule Arbor.Agent.ConversationFacade do
     :unsupported_conversation_capability,
     :not_found,
     :command_conflict,
+    :agent_not_running,
     :conversation_unavailable,
     :conversation_scope_changed,
     :page_too_large
@@ -210,6 +211,7 @@ defmodule Arbor.Agent.ConversationFacade do
       authenticate_operation: &MessageFacade.with_authenticated_operation_receipt/5,
       resolve: &Arbor.Comms.resolve_user_engagement/2,
       recheck: &Arbor.Security.recheck_conversation_owner/3,
+      running?: &Arbor.Agent.running?/1,
       admit: &Arbor.Comms.admit_conversation_command/2,
       get: &Arbor.Comms.get_conversation_command/2,
       claim: &Arbor.Comms.claim_conversation_command/2,
@@ -227,26 +229,17 @@ defmodule Arbor.Agent.ConversationFacade do
   end
 
   defp dispatch(:submit, scope, command, _page, ownership, collaborators) do
-    case collaborators.admit.(scope, command) do
-      {:ok, admitted} ->
-        if admitted.status == :admitted and
-             Map.get(admitted, :cancellation, %{status: :none}).status == :none do
-          work = fn -> execute(scope, command.id, ownership, collaborators) end
+    case target_readiness(scope.agent_id, collaborators) do
+      :ok ->
+        admit_and_dispatch(scope, command, ownership, collaborators)
 
-          case collaborators.start_worker.(work) do
-            {:ok, _pid} ->
-              # Receipt lifetime now belongs to the worker, even if publication
-              # is denied after a concurrent revocation or the caller disappears.
-              {:handoff, release({:ok, admitted}, scope, ownership, collaborators)}
-
-            _ ->
-              # No claim or dispatch has occurred. A later authenticated retry
-              # may safely start the still-admitted command.
-              {:error, :conversation_unavailable}
-          end
-        else
-          release({:ok, admitted}, scope, ownership, collaborators)
-        end
+      {:error, :agent_not_running} ->
+        release(
+          stopped_target_replay(scope, command, collaborators),
+          scope,
+          ownership,
+          collaborators
+        )
 
       error ->
         release(error, scope, ownership, collaborators)
@@ -350,6 +343,76 @@ defmodule Arbor.Agent.ConversationFacade do
       end
 
     release(result, scope, ownership, collaborators)
+  end
+
+  defp target_readiness(target, collaborators) do
+    case Map.fetch(collaborators, :running?) do
+      {:ok, running?} when is_function(running?, 1) ->
+        case running?.(target) do
+          true -> :ok
+          false -> {:error, :agent_not_running}
+          _ -> {:error, :conversation_unavailable}
+        end
+
+      :error ->
+        # Existing isolated fixtures do not model runtime liveness. The fixed
+        # production map always checks the public Agent facade before admission.
+        :ok
+
+      _ ->
+        {:error, :conversation_unavailable}
+    end
+  rescue
+    _ -> {:error, :conversation_unavailable}
+  catch
+    _, _ -> {:error, :conversation_unavailable}
+  end
+
+  defp stopped_target_replay(scope, command, collaborators) do
+    case collaborators.get.(scope, command.id) do
+      {:ok, %{id: id, text: text} = saved} when id == command.id and text == command.text ->
+        {:ok, saved}
+
+      {:ok, %{id: id, text: text}} when id == command.id and is_binary(text) ->
+        {:error, :command_conflict}
+
+      {:error, :not_found} ->
+        {:error, :agent_not_running}
+
+      _ ->
+        {:error, :conversation_unavailable}
+    end
+  rescue
+    _ -> {:error, :conversation_unavailable}
+  catch
+    _, _ -> {:error, :conversation_unavailable}
+  end
+
+  defp admit_and_dispatch(scope, command, ownership, collaborators) do
+    case collaborators.admit.(scope, command) do
+      {:ok, admitted} ->
+        if admitted.status == :admitted and
+             Map.get(admitted, :cancellation, %{status: :none}).status == :none do
+          work = fn -> execute(scope, command.id, ownership, collaborators) end
+
+          case collaborators.start_worker.(work) do
+            {:ok, _pid} ->
+              # Receipt lifetime now belongs to the worker, even if publication
+              # is denied after a concurrent revocation or the caller disappears.
+              {:handoff, release({:ok, admitted}, scope, ownership, collaborators)}
+
+            _ ->
+              # No claim or dispatch has occurred. A later authenticated retry
+              # may safely start the still-admitted command.
+              {:error, :conversation_unavailable}
+          end
+        else
+          release({:ok, admitted}, scope, ownership, collaborators)
+        end
+
+      error ->
+        release(error, scope, ownership, collaborators)
+    end
   end
 
   defp bounded_activity(result) do
