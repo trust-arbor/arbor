@@ -752,6 +752,8 @@ and migration ledger before handing off an authenticated interface. Scope a
 repair to the reviewed missing versions and retain any partial migration result;
 an unrelated all-pending migration run is not the same operation.
 
+Check recipient readiness separately from a connected transport. After authentication and current authorization, reject new commands for a stopped agent before durable admission, while preserving exact saved-command replay and later uncertainty. On 2026-10-06 Breeze remained Connected while its selected target was stopped; admitting first produced an unhelpful Delivery uncertain result.
+
 <!-- applied-learning: authenticate-the-control-plane-service-not-only-its-cli -->
 <a id="applied-learning-authenticate-the-control-plane-service-not-only-its-cli"></a>
 **Authenticate the control-plane service, not only its CLI.** Apple Container's signed CLI writes a user-owned LaunchAgent for `container-apiserver`, while user configuration can select the VM kernel and vminit image. A containment backend must bind launchd's running program/argv to a separately pinned signed API-server binary and explicitly select root/operator-owned kernel, immutable init image, platform, and runtime values; self-reported health JSON is corroboration, not authority (found 2026-07-14 auditing Apple Container 1.1.0 before the imperative prober).
