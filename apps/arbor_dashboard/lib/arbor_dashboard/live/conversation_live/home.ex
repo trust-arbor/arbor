@@ -380,7 +380,8 @@ defmodule Arbor.Dashboard.Live.ConversationLive.Home do
       bounded?(agent, 256) and Regex.match?(~r/\Aagent_[A-Za-z0-9_-]+\z/, agent) and
       bounded?(name, 640) and String.length(name) <= 160 and
       status in ["active", "parked", "archived"] and timestamp?(updated) and
-      (is_nil(preview) or (bounded?(preview, 2_560) and String.length(preview) <= 160)) and
+      (is_nil(preview) or preview == "" or
+         (bounded?(preview, 2_560) and String.length(preview) <= 160)) and
       (is_nil(last) or timestamp?(last))
   end
 
