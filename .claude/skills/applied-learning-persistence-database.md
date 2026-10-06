@@ -288,3 +288,15 @@ seconds and terminalized P1B-2A).
 <!-- applied-learning: bound-active-audit-work-separately-from-durable-history -->
 <a id="applied-learning-bound-active-audit-work-separately-from-durable-history"></a>
 **Bound active audit work separately from durable history.** A finite outbox or recovery working-set budget must not become a lifetime event quota when completed-operation fingerprints accumulate. Keep durable history and duplicate/conflict evidence in scalable storage, reclaim hot admission capacity only after verified durable transfer, and qualify sustained operation beyond the hot bound as well as outage/restart behavior. An empty pending queue does not prove sustainable admission. Do not declare rollout ready while terminal retirement remains deferred (user challenge and live security-journal exhaustion, 2026-09-27).
+
+<!-- applied-learning: treat-default-struct-fields-as-receipt-schema-changes -->
+<a id="applied-learning-treat-default-struct-fields-as-receipt-schema-changes"></a>
+**Treat default struct fields as receipt schema changes.** When receipts hash
+a struct using deterministic Erlang external term format, adding an empty
+default field changes the digest even if its JSON representation is additive.
+Preserve each owner's accepted digest schema; normalize only the exact legacy
+default where compatibility requires it, while hashing every nonempty or
+malformed value. Prove recovery with independently retained signed checkpoints
+and actual predecessor receipts, plus changed-evidence rejection. Do not copy
+one owner's normalization into another whose current schema already includes
+the field (found 2026-10-06 while backporting Workflow input taint into Main).

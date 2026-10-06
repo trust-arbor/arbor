@@ -400,3 +400,14 @@ cleanup optional by omitting their nodes. Pin transitive content and active-run
 versions; keep effect gates and emergency recovery host-owned. Checkpoints do not
 provide universal transactions, and packaging behavior does not itself shrink the
 TCB (learned 2026-09-07 while refining the plugin plan around existing DOT programs).
+
+<!-- applied-learning: use-strict-value-equality-when-carrying-provenance-evidence -->
+<a id="applied-learning-use-strict-value-equality-when-carrying-provenance-evidence"></a>
+**Use strict value equality when carrying provenance evidence.** Bind inherited
+sanitization and confidence to matching producer values using `===`, not `==`.
+Numeric coercion can lend evidence from `1` to `1.0`, including inside lists
+and maps. Retain worst risk across all declared inputs, but derive evidence
+only from strictly matching inputs; an unlabeled match contributes empty,
+unverified evidence. Regress through a public graph with mixed inputs and
+numeric type changes, retaining exact-copy positive controls (found
+2026-10-06 during the Main taint backport review).

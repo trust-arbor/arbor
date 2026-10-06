@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 746,
+  "entry_count": 748,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -9242,8 +9242,34 @@
       "source_incident": "user challenge and live security-journal exhaustion, 2026-09-27",
       "always_loaded": false,
       "content_sha256": "ee55b0ec715a64e13f6acb495bf6aa164c98a08143cf72952944b8f2454123ba"
+    },
+    {
+      "source_ordinal": 752,
+      "source_kind": "post-migration",
+      "slug": "treat-default-struct-fields-as-receipt-schema-changes",
+      "title": "Treat default struct fields as receipt schema changes.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-treat-default-struct-fields-as-receipt-schema-changes",
+      "source_date": "2026-10-06",
+      "source_incident": "isolated Main extraction backport review and behavioral predecessor qualification, 2026-10-06",
+      "always_loaded": false,
+      "content_sha256": "47eeaa7dc2b98fbc7bcdf841f981013df22453167bc4c8e250130af2b1859e19"
+    },
+    {
+      "source_ordinal": 753,
+      "source_kind": "post-migration",
+      "slug": "use-strict-value-equality-when-carrying-provenance-evidence",
+      "title": "Use strict value equality when carrying provenance evidence.",
+      "topic": "dot-pipelines",
+      "destination": ".claude/skills/dot-pipeline-authoring.md",
+      "anchor": "applied-learning-use-strict-value-equality-when-carrying-provenance-evidence",
+      "source_date": "2026-10-06",
+      "source_incident": "isolated Main extraction backport review and behavioral predecessor qualification, 2026-10-06",
+      "always_loaded": false,
+      "content_sha256": "20ac494e977964a1795430e679e3c48e555cf19f0c36e74d6da2fe416e41a44c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 285
+  "post_migration_entry_count": 287
 }
