@@ -6354,7 +6354,7 @@
       "anchor": "applied-learning-independently-rerun-delegated-verification-against-the-committed-revision",
       "source_date": "2026-07-25",
       "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
-      "content_sha256": "59106324ac93eaa8662bafc60ac2af6a5171594951aaee36e658d1bd0a973368",
+      "content_sha256": "3c0878a74bd204a4e9a9b2abb79bd59529b285ef7a4900d0595fd8916fc172b9",
       "always_loaded": false
     },
     {

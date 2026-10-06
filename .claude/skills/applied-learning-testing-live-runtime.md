@@ -427,6 +427,13 @@ producer through the public projection. An implementation module and a public
 backend label are different values; on 2026-10-05 a realtime control fixture
 rejected a valid session by comparing `:xai_realtime` with its module name.
 
+For library refreshes, compare each consumer's actual pinned archive runtime
+members with the intended accepted source. Clean sibling checkouts and exact
+archive hashes prove reproducibility, not freshness. Factory's 2026-10-06 cold
+consumer passed with an older ActionRuntime adapter lacking current owner-context
+checks; advance the compatible pin and prove the public behavior through the
+consumer before declaring the sync complete.
+
 <!-- applied-learning: fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety -->
 <a id="applied-learning-fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety"></a>
 **Fault tests must prove the required recovery contract, not only fail-closed
