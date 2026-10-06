@@ -22,6 +22,10 @@ defmodule Arbor.Agent.RuntimeAdmission.GuardedRestore do
   alias Arbor.Agent.TemplateAuthorityReconciliationStore
 
   @default_store TaskStore
+
+  # Build identity is fixed in the BEAM; releases do not contain Mix.
+  # Runtime environment/options cannot enable test collaborators or bypasses.
+  @test_build Mix.env() == :test
   @default_deadline_ms 120_000
   @max_deadline_ms 180_000
   @ready_poll_ms 50
@@ -106,7 +110,7 @@ defmodule Arbor.Agent.RuntimeAdmission.GuardedRestore do
   defp validate_public_opts(opts) when is_list(opts) do
     if Keyword.keyword?(opts) do
       keys = opts |> Keyword.keys() |> MapSet.new()
-      allowed = if Mix.env() == :test, do: @test_opt_keys, else: @production_opt_keys
+      allowed = if @test_build, do: @test_opt_keys, else: @production_opt_keys
 
       cond do
         MapSet.member?(keys, :name) ->
@@ -123,7 +127,7 @@ defmodule Arbor.Agent.RuntimeAdmission.GuardedRestore do
     end
   end
 
-  if Mix.env() == :test do
+  if @test_build do
     defp resolve_store_ref(opts) do
       case Keyword.fetch(opts, :task_store) do
         :error ->

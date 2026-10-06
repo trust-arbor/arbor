@@ -74,6 +74,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   @max_encoded_id_budget String.duplicate(<<0>>, @max_id_bytes)
 
   @verify_hook_key {__MODULE__, :post_delete_remaining_override}
+  @test_build Mix.env() == :test
 
   @type relationship_error ::
           :invalid_request
@@ -174,7 +175,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   end
 
   # Test-only process-local seam for delete-all verify failure.
-  if Mix.env() == :test do
+  if @test_build do
     @doc false
     def __set_post_delete_remaining_override__(n) when is_integer(n) and n >= 0 do
       Process.put(@verify_hook_key, n)
@@ -397,7 +398,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   end
 
   defp post_delete_remaining(agent_id) do
-    if Mix.env() == :test do
+    if @test_build do
       case Process.get(@verify_hook_key) do
         n when is_integer(n) and n >= 0 -> n
         _ -> real_count(agent_id)

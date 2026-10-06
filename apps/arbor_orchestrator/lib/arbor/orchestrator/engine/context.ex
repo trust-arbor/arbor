@@ -216,7 +216,7 @@ defmodule Arbor.Orchestrator.Engine.Context do
   @spec set(t(), String.t(), term()) :: t()
   def set(%__MODULE__{values: values} = ctx, key, value) do
     check_value_budget(key, value, "anonymous")
-    %{ctx | values: Map.put(values, key, value)}
+    %{ctx | values: Map.put(values, key, value), taint: invalidate_evidence(ctx.taint, [key])}
   end
 
   @doc """
@@ -250,8 +250,31 @@ defmodule Arbor.Orchestrator.Engine.Context do
     check_value_budget(key, value, node_id)
     check_size_budgets(new_values, node_id)
 
-    %{ctx | values: new_values, lineage: Map.put(lineage, key, entry)}
+    %{
+      ctx
+      | values: new_values,
+        lineage: Map.put(lineage, key, entry),
+        taint: invalidate_evidence(ctx.taint, [key])
+    }
   end
+
+  # A write changes the producer/value binding even if it happens to repeat
+  # bytes. Only the Engine's explicit output-provenance step can attach evidence
+  # to the replacement; stale classification severity is retained conservatively.
+  defp invalidate_evidence(taint, keys) do
+    Enum.reduce(keys, taint, fn key, acc ->
+      case Map.get(acc, key) do
+        %TaintStruct{} = label ->
+          Map.put(acc, key, %{label | sanitizations: 0, confidence: :unverified})
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  @doc "Remove a replaced output's stale label when its new producer supplied no provenance."
+  def clear_output_taint(%__MODULE__{} = ctx, keys), do: %{ctx | taint: Map.drop(ctx.taint, keys)}
 
   @doc "Merge updates into context without tracking lineage."
   @spec apply_updates(t(), map()) :: t()
@@ -259,7 +282,7 @@ defmodule Arbor.Orchestrator.Engine.Context do
     new_values = Map.merge(ctx.values, updates)
     check_updates_value_budgets(updates, "anonymous")
     check_size_budgets(new_values, "anonymous")
-    %{ctx | values: new_values}
+    %{ctx | values: new_values, taint: invalidate_evidence(ctx.taint, Map.keys(updates))}
   end
 
   @doc """
@@ -299,7 +322,12 @@ defmodule Arbor.Orchestrator.Engine.Context do
     check_updates_value_budgets(updates, node_id)
     check_size_budgets(new_values, node_id)
 
-    %{ctx | values: new_values, lineage: new_lineage}
+    %{
+      ctx
+      | values: new_values,
+        lineage: new_lineage,
+        taint: invalidate_evidence(ctx.taint, Map.keys(updates))
+    }
   end
 
   @doc """

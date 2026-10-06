@@ -7,6 +7,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Orchestrator.LlmRouting.ProviderFallbackCore
+  alias Arbor.Orchestrator.LlmRouting.Sensitivity
   alias Arbor.Signals.Taint, as: SignalTaint
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
@@ -284,7 +285,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
               true ->
                 # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
-                # decision). Keep its historical behavior unchanged when router mode is absent.
+                # decision). Missing or failed policy must stop this dispatch too.
                 case egress_halt_outcome(context, base_updates) do
                   %Outcome{} = halt ->
                     halt
@@ -807,9 +808,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # ── Egress gate (2026-06-14) — compute-node LLM path ──────────────────────
   #
   # Returns a halt %Outcome{} when egress is blocked/requires-approval, else nil
-  # (proceed). arbor_security/arbor_trust/arbor_ai are hard deps so the calls are direct;
-  # a crash still fails open (the egress gate's documented default-allow posture
-  # — the taint conjunct, not this gate, is the fail-closed protection).
+  # (proceed). Classification and authorization are required decisions. Failure
+  # of either is a refusal, never permission to continue to the model client.
 
   @taint_severity %{trusted: 0, derived: 1, untrusted: 2, hostile: 3}
 
@@ -823,20 +823,40 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     # scope LLM egress by).
     opts = [egress_taint: taint, egress_destination: provider && to_string(provider)]
 
-    case Arbor.Trust.authorize_egress(agent_id, tier, opts) do
-      :allow ->
-        nil
+    if tier in Arbor.Contracts.Security.Classification.egress_tiers() do
+      case Arbor.Trust.authorize_egress(agent_id, tier, opts) do
+        :allow ->
+          nil
 
-      {:requires_approval, _} ->
-        egress_refusal(base_updates, agent_id, tier, taint, :requires_approval, context)
+        {:requires_approval, _} ->
+          egress_refusal(base_updates, agent_id, tier, taint, :requires_approval, context)
 
-      {:error, {:egress_blocked, t, reason}} ->
-        egress_refusal(base_updates, agent_id, t, taint, {:blocked, reason}, context)
+        {:error, {:egress_blocked, t, reason}} ->
+          egress_refusal(base_updates, agent_id, t, taint, {:blocked, reason}, context)
+
+        _ ->
+          egress_unavailable(context, base_updates)
+      end
+    else
+      egress_unavailable(context, base_updates)
     end
   rescue
-    e ->
-      Logger.warning("[LlmHandler] egress gate error (failing open): #{Exception.message(e)}")
-      nil
+    _ -> egress_unavailable(context, base_updates)
+  catch
+    _, _ -> egress_unavailable(context, base_updates)
+  end
+
+  defp egress_unavailable(context, base_updates) do
+    Logger.warning("[LlmHandler] egress policy unavailable; refusing model dispatch")
+
+    egress_refusal(
+      base_updates,
+      Context.get(context, "session.agent_id", "system"),
+      :unknown,
+      :untrusted,
+      :policy_unavailable,
+      context
+    )
   end
 
   # Surface a halted egress as a clear, honest refusal the user/heartbeat sees,
@@ -865,6 +885,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     "⛔ Egress blocked: this would send data to an external model (#{tier}) and " <>
       "this agent lacks egress standing — it requires approval. Grant egress " <>
       "standing (trust profile egress_modes) or route to a local model."
+  end
+
+  defp egress_refusal_message(_tier, :policy_unavailable) do
+    "⛔ Egress blocked: required classification or authorization is unavailable. " <>
+      "No model request was sent."
   end
 
   defp egress_refusal_message(tier, {:blocked, :policy}) do
@@ -922,6 +947,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
     case build_llm_request(node, context, system_content, user_content) do
       {:ok, request} ->
+        {client, opts} = Sensitivity.wrap_client(client, context, opts)
         call_opts = build_call_opts(node, opts)
         on_stream = Keyword.get(opts, :on_stream)
 
@@ -1497,6 +1523,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> maybe_put_provider_usage_context(opts)
             |> maybe_add_stream_callback(on_stream)
             |> maybe_put_llm_call_authorizer(opts)
+            |> Keyword.merge(Sensitivity.private_opts(opts))
             |> strip_turn_private_opts()
             |> Keyword.put(:tool_taint, tool_taint)
 
@@ -1853,21 +1880,24 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp maybe_put_route_authorizer(dispatch_opts, context, engine_opts) do
-    cond do
-      session_turn_egress_seam?(engine_opts) ->
-        Keyword.put(
-          dispatch_opts,
-          :route_authorizer,
-          wrap_dispatch_route_authorizer(Keyword.fetch!(engine_opts, :turn_egress_authorizer))
-        )
+    dispatch_opts =
+      cond do
+        session_turn_egress_seam?(engine_opts) ->
+          Keyword.put(
+            dispatch_opts,
+            :route_authorizer,
+            wrap_dispatch_route_authorizer(Keyword.fetch!(engine_opts, :turn_egress_authorizer))
+          )
 
-      Keyword.has_key?(dispatch_opts, :provider_route_input) ->
-        authorizer = route_authorizer(Context.get(context, "session.agent_id"), context)
-        Keyword.put(dispatch_opts, :route_authorizer, authorizer)
+        Keyword.has_key?(dispatch_opts, :provider_route_input) ->
+          authorizer = route_authorizer(Context.get(context, "session.agent_id"), context)
+          Keyword.put(dispatch_opts, :route_authorizer, authorizer)
 
-      true ->
-        dispatch_opts
-    end
+        true ->
+          dispatch_opts
+      end
+
+    Sensitivity.put_route_authorizer(dispatch_opts, engine_opts)
   end
 
   # Native tool runtimes and the legacy ACP provider adapter do not carry the
@@ -1969,12 +1999,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       fn
         %{provider: %{id: provider_id}}
         when is_atom(provider_id) and provider_id not in [nil, true, false] ->
-          tier = resolve_egress_tier(provider_id)
-
-          Arbor.Trust.authorize_egress(agent_id, tier,
-            egress_taint: taint,
-            egress_destination: Atom.to_string(provider_id)
-          )
+          authorize_exact_route_egress(agent_id, provider_id, taint)
 
         _malformed_route ->
           {:error, {:egress_blocked, :external_provider, :invalid_route}}
@@ -1985,6 +2010,31 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp route_authorizer(_agent_id, _context), do: denying_route_authorizer()
+
+  defp authorize_exact_route_egress(agent_id, provider_id, taint) do
+    tier = resolve_egress_tier(provider_id)
+
+    if tier in Arbor.Contracts.Security.Classification.egress_tiers() do
+      case Arbor.Trust.authorize_egress(agent_id, tier,
+             egress_taint: taint,
+             egress_destination: Atom.to_string(provider_id)
+           ) do
+        :allow -> :allow
+        {:requires_approval, _} = approval -> approval
+        {:error, {:egress_blocked, _, _}} = refusal -> refusal
+        _ -> unavailable_route_egress()
+      end
+    else
+      unavailable_route_egress()
+    end
+  rescue
+    _ -> unavailable_route_egress()
+  catch
+    _, _ -> unavailable_route_egress()
+  end
+
+  defp unavailable_route_egress,
+    do: {:error, {:egress_blocked, :external_provider, :policy_unavailable}}
 
   defp denying_route_authorizer do
     fn _route -> {:error, {:egress_blocked, :external_provider, :invalid_principal}} end
@@ -2164,8 +2214,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  # Consult the sensitivity router if data sensitivity is known.
-  # arbor_ai is a hard dep — Arbor.AI.SensitivityRouter is called directly.
+  # Known non-public data requires an explicit sensitivity decision. A missing
+  # provider or failed decision cannot authorize the original destination.
   defp maybe_route_by_sensitivity(provider, model, context) do
     sensitivity = Context.get(context, "__data_sensitivity__")
 
@@ -2173,7 +2223,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       agent_id = Context.get(context, "session.agent_id")
 
       decision =
-        Arbor.AI.SensitivityRouter.decide(
+        Arbor.Orchestrator.Config.sensitivity_routing_module().sensitivity_routing_decision(
           safe_to_atom(provider),
           model || "",
           sensitivity,
@@ -2204,14 +2254,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         %{action: :blocked, reason: reason} ->
           maybe_record_routing_telemetry(agent_id, :blocked)
           {:error, {:sensitivity_blocked, reason}}
+
+        _ ->
+          {:error, {:sensitivity_blocked, :policy_unavailable}}
       end
     else
       {provider, model}
     end
   rescue
-    _ -> {provider, model}
+    _ -> {:error, {:sensitivity_blocked, :policy_unavailable}}
   catch
-    :exit, _ -> {provider, model}
+    _, _ -> {:error, {:sensitivity_blocked, :policy_unavailable}}
   end
 
   defp safe_to_atom(value) when is_atom(value), do: value

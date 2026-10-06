@@ -38,6 +38,11 @@ defmodule Arbor.Agent.Config do
   """
 
   @app :arbor_agent
+
+  @doc "Trusted public executor facade for SimpleAgent tools; absence never permits direct action execution."
+  def simple_agent_executor,
+    do: Application.get_env(@app, :simple_agent_executor, Module.concat([Arbor, Orchestrator]))
+
   @default_legacy_agents_dir ".arbor/agents"
   @default_task_executor Arbor.Agent.Orchestration.TaskRunner
   # Best-effort bound for optional task_status/2 and cancel_task/2 callbacks.

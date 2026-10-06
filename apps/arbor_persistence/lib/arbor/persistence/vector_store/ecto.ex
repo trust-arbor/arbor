@@ -39,6 +39,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   @operation_transaction_event [:arbor, :persistence, :vector_store, :operation_transaction]
   @fence_claim_event [:arbor, :persistence, :vector_store, :fence_claim]
   @verify_hook_key :arbor_vector_destroy_residual_override
+  @test_build Mix.env() == :test
 
   @impl true
   def execute(%VectorOperation{} = operation, []) do
@@ -229,7 +230,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   def destroy(_agent_id, _opts), do: {:error, :backend_failure}
 
   # Test-only residual override for destroy verification failure.
-  if Mix.env() == :test do
+  if @test_build do
     @doc false
     def __set_post_destroy_residual_override__(true) do
       Process.put(@verify_hook_key, true)
@@ -860,7 +861,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   end
 
   defp residual_override? do
-    Mix.env() == :test and Process.get(@verify_hook_key) == true
+    @test_build and Process.get(@verify_hook_key) == true
   end
 
   defp mark_closed(repo, agent_id) do

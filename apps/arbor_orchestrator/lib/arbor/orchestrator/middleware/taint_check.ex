@@ -353,15 +353,38 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
         value = Context.get(token.context, key)
 
         if is_binary(value) do
-          label = classify_value(value, token.node)
+          scanned = classify_value(value, token.node)
+          label = join_recorded_taint(Context.taint_label(token.context, key), scanned)
           Map.put(acc, key, label)
         else
           acc
         end
       end)
 
-    Token.assign(token, :taint_labels, new_labels)
+    # Make discovered risk visible to the actual handler. The Outcome bridge
+    # carries this same pre-effect annotation into durable Engine provenance.
+    context =
+      Enum.reduce(new_labels, token.context, fn {key, label}, ctx ->
+        Context.record_output_taint(ctx, [key], label)
+      end)
+
+    token
+    |> Map.put(:context, context)
+    |> Token.assign(:taint_labels, new_labels)
   end
+
+  # Content scanning can discover additional risk, never erase producer-owned
+  # provenance. It is not a sanitizer or confidence attestation. Context/Engine
+  # invalidate those evidence fields whenever the bound value is replaced.
+  defp join_recorded_taint(
+         %Arbor.Contracts.Security.Taint{} = recorded,
+         %Arbor.Contracts.Security.Taint{} = scanned
+       ) do
+    joined = Arbor.Signals.Taint.propagate_taint([recorded, scanned])
+    %{joined | sanitizations: recorded.sanitizations, confidence: recorded.confidence}
+  end
+
+  defp join_recorded_taint(_recorded, scanned), do: scanned
 
   defp propagate_taint(token) do
     if token.outcome && token.outcome.context_updates do

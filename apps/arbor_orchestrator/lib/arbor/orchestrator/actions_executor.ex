@@ -162,14 +162,22 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   @doc false
   @spec output_taint_bound(map(), map()) :: atom() | nil
-  def output_taint_bound(binding, params) when is_map(params) do
-    case verify_execution_binding(Map.get(binding, :action_name), binding) do
-      {:ok, action_module} -> ActionTaint.output_taint_for(action_module, params)
-      _other -> nil
+  def output_taint_bound(binding, params) when is_map(binding) and is_map(params) do
+    with {:ok, action_module} <-
+           verify_execution_binding(Map.get(binding, :action_name), binding),
+         level when level in [nil, :trusted, :derived, :untrusted, :hostile] <-
+           ActionTaint.output_taint_for(action_module, params) do
+      level
+    else
+      _ -> :hostile
     end
+  rescue
+    _ -> :hostile
+  catch
+    _, _ -> :hostile
   end
 
-  def output_taint_bound(_binding, _params), do: nil
+  def output_taint_bound(_binding, _params), do: :hostile
 
   defp execute_with_result_mode(name, args, workdir, opts, result_mode)
        when result_mode in [:formatted, :structured] do

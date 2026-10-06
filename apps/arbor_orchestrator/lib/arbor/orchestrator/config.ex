@@ -42,6 +42,10 @@ defmodule Arbor.Orchestrator.Config do
 
   @app :arbor_orchestrator
 
+  @doc "Host-owned sensitivity policy facade; a missing or failed provider refuses sensitive model calls."
+  def sensitivity_routing_module,
+    do: Application.get_env(@app, :sensitivity_routing_module, Arbor.AI)
+
   @doc "Host-owned qualification requirement by agent and turn/heartbeat source. Unconfigured agents are exploratory and unqualified."
   def security_qualification(agent_id, source) do
     case Application.get_env(@app, :security_qualification_profiles, %{}) do

@@ -79,6 +79,18 @@ defmodule Arbor.Orchestrator do
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
 
   @doc """
+  Execute an action through the orchestrator's existing authorized executor.
+
+  Retains name/schema normalization, signing, capability, taint and approval
+  checks. This facade does not grant authority or provide a direct-action fallback.
+  """
+  @spec execute_action(String.t(), map(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  defdelegate execute_action(name, arguments, workdir, opts \\ []),
+    to: Arbor.Orchestrator.ActionsExecutor,
+    as: :execute
+
+  @doc """
   Classify an Engine result envelope for callers that require complete success.
 
   An `{:ok, envelope}` transport result does not establish pipeline success.

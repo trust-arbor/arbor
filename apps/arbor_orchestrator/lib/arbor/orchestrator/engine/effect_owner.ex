@@ -114,11 +114,22 @@ defmodule Arbor.Orchestrator.Engine.EffectOwner do
 
   Uses Erlang external term format with `[:deterministic]` so equal maps with
   different insertion order hash equally, while type-distinct values differ.
-  Only the digest is persisted in the effect envelope.
+  The default empty input classification is omitted to preserve receipt digests
+  created before that additive field existed. Nonempty or malformed evidence is
+  always included. Only the digest is persisted in the effect envelope.
   """
   @spec outcome_result_digest(Outcome.t()) :: String.t()
   def outcome_result_digest(%Outcome{} = outcome) do
-    payload = :erlang.term_to_binary(outcome, [:deterministic])
+    compatible =
+      case Map.fetch(outcome, :input_taint) do
+        {:ok, labels} when is_map(labels) and map_size(labels) == 0 ->
+          Map.delete(outcome, :input_taint)
+
+        _ ->
+          outcome
+      end
+
+    payload = :erlang.term_to_binary(compatible, [:deterministic])
     :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
   end
 

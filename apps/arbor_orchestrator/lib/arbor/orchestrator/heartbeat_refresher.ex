@@ -14,9 +14,9 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
   periodically calls `PipelineStatus.touch_heartbeat/1` so the pipeline
   stays visibly alive. The ticker:
 
-    - Runs in a separate, unlinked process so a failure in the
-      blocking call can't take the ticker down (and vice versa)
-    - Self-terminates when the caller's `after` clause kills it
+    - Runs in a separate, unlinked process so ticker failure can't
+      take the caller down
+    - Terminates when the caller finishes or its monitored owner dies
     - Is a no-op when `run_id` is `nil` (out-of-engine call sites)
     - Catches and swallows journal errors — refreshing is
       best-effort, never the failure axis
@@ -35,7 +35,8 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
   Run `fun` while periodically refreshing the heartbeat for `run_id`.
 
   Returns whatever `fun` returns. Exceptions from `fun` propagate
-  normally; the ticker is always cleaned up via the `after` clause.
+  normally; the `after` clause stops the ticker when `fun` exits, and
+  owner death also terminates it.
 
   When `run_id` is `nil`, `fun` is invoked directly with no ticker
   overhead — useful for call sites that don't have an engine run
@@ -71,9 +72,10 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
   # ----------------------------------------------------------------
 
   # Spawned unlinked so a crash here can't bring down the caller.
-  # The caller's `after` clause is the only thing that stops it.
+  # Monitor the caller as well: an untrappable owner exit skips its `after` clause.
   defp start_ticker(run_id, interval_ms) do
-    spawn(fn -> tick_loop(run_id, interval_ms) end)
+    owner = self()
+    spawn(fn -> tick_loop(run_id, interval_ms, Process.monitor(owner)) end)
   end
 
   defp stop_ticker(pid) when is_pid(pid) do
@@ -84,17 +86,21 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
     :ok
   end
 
-  defp tick_loop(run_id, interval_ms) do
-    Process.sleep(interval_ms)
+  defp tick_loop(run_id, interval_ms, owner_ref) do
+    receive do
+      {:DOWN, ^owner_ref, :process, _owner, _reason} ->
+        :ok
+    after
+      interval_ms ->
+        try do
+          PipelineStatus.touch_heartbeat(run_id)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
 
-    try do
-      PipelineStatus.touch_heartbeat(run_id)
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
+        tick_loop(run_id, interval_ms, owner_ref)
     end
-
-    tick_loop(run_id, interval_ms)
   end
 end

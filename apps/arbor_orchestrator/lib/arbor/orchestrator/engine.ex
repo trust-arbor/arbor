@@ -902,10 +902,12 @@ defmodule Arbor.Orchestrator.Engine do
     completed = [node.id | state.completed]
 
     # Skipping the work must still reproduce its context effects.
+    input_context = record_scanned_inputs(context, outcome)
+
     context =
-      context
+      input_context
       |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-      |> record_node_taint(node, outcome)
+      |> record_node_taint(node, outcome, input_context)
       |> apply_taint_reductions(node, outcome)
       |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
       |> Context.set("__completed_nodes__", completed, node.id, step_now)
@@ -1478,10 +1480,12 @@ defmodule Arbor.Orchestrator.Engine do
       |> put_in([:node_durations, node.id], stage_duration)
       |> put_in([:content_hashes, node.id], computed_hash)
 
+    input_context = record_scanned_inputs(context, outcome)
+
     context =
-      context
+      input_context
       |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-      |> record_node_taint(node, outcome)
+      |> record_node_taint(node, outcome, input_context)
       |> apply_taint_reductions(node, outcome)
       |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
       |> Context.set("__completed_nodes__", completed, node.id, step_now)
@@ -1937,15 +1941,55 @@ defmodule Arbor.Orchestrator.Engine do
   #   DECLARED edges (not the ambient "worst of the whole context"), so a node
   #   that didn't read a tainted key doesn't inherit its taint.
   #
-  # Taint is read from `context` BEFORE this node's own outputs are recorded, so
-  # input lookups see upstream provenance, not this node's writes.
-  defp record_node_taint(context, node, %Outcome{} = outcome) do
-    Context.propagate_output_taint(
-      context,
-      Map.keys(outcome.context_updates || %{}),
-      outcome.output_taint,
-      node_input_keys(node)
-    )
+  # Input provenance is read from the pre-update context. Exact copies preserve
+  # evidence; transformed bytes retain risk but lose sanitization/confidence.
+  defp record_scanned_inputs(context, %Outcome{input_taint: labels}) do
+    Enum.reduce(labels, context, fn {key, label}, ctx ->
+      Context.record_output_taint(ctx, [key], label)
+    end)
+  end
+
+  defp record_node_taint(context, node, %Outcome{} = outcome, input_context) do
+    keys = Map.keys(outcome.context_updates || %{})
+    inputs = node_input_keys(node)
+    inherited = Context.worst_taint(input_context, inputs)
+
+    Enum.reduce(keys, context, fn key, ctx ->
+      cond do
+        not is_nil(outcome.output_taint) ->
+          # A bound producer (for example SanitizeHandler) explicitly attests
+          # its exact output. This is the only source of newly earned bits.
+          Context.record_output_taint(ctx, [key], outcome.output_taint)
+
+        is_nil(inherited) ->
+          Context.clear_output_taint(ctx, [key])
+
+        true ->
+          # Worst risk comes from all declared inputs. Evidence can only come
+          # from inputs whose actual bytes match this particular output.
+          label = copied_output_evidence(inherited, input_context, inputs, Context.get(ctx, key))
+          Context.record_output_taint(ctx, [key], label)
+      end
+    end)
+  end
+
+  defp copied_output_evidence(inherited, input_context, inputs, value) do
+    matching = Enum.filter(inputs, &(Context.get(input_context, &1) === value))
+
+    case matching do
+      [] ->
+        %{inherited | sanitizations: 0, confidence: :unverified}
+
+      keys ->
+        evidence =
+          keys
+          |> Enum.map(fn key ->
+            Context.taint_label(input_context, key) || %Arbor.Contracts.Security.Taint{}
+          end)
+          |> Arbor.Signals.Taint.propagate_taint()
+
+        %{inherited | sanitizations: evidence.sanitizations, confidence: evidence.confidence}
+    end
   end
 
   # Apply taint reductions a node requested on EXISTING context keys (e.g. a

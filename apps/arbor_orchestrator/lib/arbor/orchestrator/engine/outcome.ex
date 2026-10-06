@@ -13,6 +13,8 @@ defmodule Arbor.Orchestrator.Engine.Outcome do
           # A bare level atom (ingress actions declare a level) or a full
           # %Arbor.Contracts.Security.Taint{} (reductions); the engine normalizes.
           output_taint: atom() | Arbor.Contracts.Security.Taint.t() | nil,
+          # Middleware-owned input classification; not context update data.
+          input_taint: %{String.t() => Arbor.Contracts.Security.Taint.t()},
           # Reductions to apply to EXISTING context keys (not this node's outputs),
           # e.g. a human-approved gate reducing reviewed data via :human_review.
           # List of {context_key, target_level, reason}; the engine applies each
@@ -30,5 +32,6 @@ defmodule Arbor.Orchestrator.Engine.Outcome do
             # Phase 1). Set by ingress handlers (web -> :untrusted, LLM ->
             # :derived); the engine records it on the output context keys.
             output_taint: nil,
+            input_taint: %{},
             taint_reductions: []
 end

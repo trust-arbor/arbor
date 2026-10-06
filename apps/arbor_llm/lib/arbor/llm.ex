@@ -214,6 +214,15 @@ defmodule Arbor.LLM do
   def oauth_health(provider), do: Arbor.LLM.OAuth.health(provider)
 
   @doc """
+  All known provider names, without credential or availability filtering.
+
+  This catalog performs no network calls and does not authorize model access.
+  It includes the implicit catalog routes supported by Client adapter lookup.
+  """
+  @spec known_providers() :: [String.t()]
+  def known_providers, do: ProviderRegistry.list()
+
+  @doc """
   Whether a provider route can be called from this host right now.
 
   Two kinds of route exist: catalog providers (`"openai"`, `"xai"`, `"ollama"`,

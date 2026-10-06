@@ -92,6 +92,17 @@ defmodule Arbor.Common.Config do
   @spec trust_zones() :: term()
   def trust_zones, do: get(:trust_zones, :disabled)
 
+  @doc """
+  Trusted remote registry policy (default `Arbor.Common.NodeRegistry`).
+
+  The provider exposes `local_zone/0`, `trust_zone/1`, and `can_resolve?/2`.
+  Remote lookup requires valid zones and an explicit `true` decision; a missing
+  or unavailable provider denies remote lookup. Local lookup is unaffected.
+  """
+  @spec registry_distribution_policy() :: module() | nil
+  def registry_distribution_policy,
+    do: get(:registry_distribution_policy, Arbor.Common.NodeRegistry)
+
   @doc "OAuth HTTP adapter module (default `Arbor.Common.OAuth.HttpClient.Req`)."
   @spec oauth_http_client() :: term()
   def oauth_http_client, do: get(:oauth_http_client, Arbor.Common.OAuth.HttpClient.Req)

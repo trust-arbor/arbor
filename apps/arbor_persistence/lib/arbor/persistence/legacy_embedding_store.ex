@@ -12,6 +12,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
 
   @legacy_id_constraints ["memory_embeddings_pkey", "memory_embeddings_id_index"]
   @verify_hook_key {__MODULE__, :post_delete_remaining_override}
+  @test_build Mix.env() == :test
 
   @type legacy_cleanup_error ::
           :invalid_request | :invalid_options | :backend_failure | :indeterminate
@@ -294,7 +295,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
   end
 
   # Test-only process-local seam for post-delete confirming-count failure.
-  if Mix.env() == :test do
+  if @test_build do
     @doc false
     def __set_post_delete_remaining_override__(n) when is_integer(n) and n >= 0 do
       Process.put(@verify_hook_key, n)
@@ -347,7 +348,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
   end
 
   defp post_delete_remaining(repo, agent_id) do
-    if Mix.env() == :test do
+    if @test_build do
       case Process.get(@verify_hook_key) do
         n when is_integer(n) and n >= 0 -> n
         _ -> authoritative_legacy_count(repo, agent_id)

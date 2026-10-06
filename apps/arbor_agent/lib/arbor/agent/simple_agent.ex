@@ -331,65 +331,26 @@ defmodule Arbor.Agent.SimpleAgent do
   end
 
   defp execute_tool(name, args, state) do
-    # Check if security stack (CapabilityStore) is running — if not, skip
-    # authorize_and_execute entirely and call action modules directly.
-    security_available? =
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
+    # A tool definition never grants authority. Only the trusted public
+    # executor owns authorization; absence/failure cannot permit run/2.
+    executor = Arbor.Agent.Config.simple_agent_executor()
 
-    if security_available? do
-      executor_mod = Module.concat([:Arbor, :Orchestrator, :ActionsExecutor])
-
-      try do
-        if Code.ensure_loaded?(executor_mod) do
-          apply(executor_mod, :execute, [
-            name,
-            args,
-            state.working_dir,
-            [agent_id: state.agent_id]
-          ])
-        else
-          direct_execute(name, args, state)
-        end
-      catch
-        :exit, {:noproc, _} ->
-          direct_execute(name, args, state)
-      end
+    if is_atom(executor) and executor not in [nil, true, false] and
+         Code.ensure_loaded?(executor) and function_exported?(executor, :execute_action, 4) do
+      apply(executor, :execute_action, [
+        name,
+        args,
+        state.working_dir,
+        [agent_id: state.agent_id]
+      ])
     else
-      direct_execute(name, args, state)
+      {:error, :action_executor_unavailable}
     end
+  rescue
+    _ -> {:error, :action_executor_unavailable}
+  catch
+    _, _ -> {:error, :action_executor_unavailable}
   end
-
-  # Direct action execution — bypasses authorization (for tests or when security stack unavailable)
-  defp direct_execute(name, args, state) do
-    case Arbor.Actions.name_to_module(name) do
-      {:ok, module} ->
-        safe_args =
-          args
-          |> atomize_known_keys(module)
-          |> maybe_inject_workdir(state.working_dir)
-
-        case module.run(safe_args, %{}) do
-          {:ok, result} -> {:ok, format_action_result(result)}
-          {:error, reason} -> {:error, "Action #{name} failed: #{inspect(reason)}"}
-        end
-
-      {:error, _} ->
-        {:error, "Unknown tool: #{name}"}
-    end
-  end
-
-  defp maybe_inject_workdir(args, _working_dir), do: args
-
-  defp format_action_result(result) when is_binary(result), do: result
-
-  defp format_action_result(result) when is_map(result) do
-    case Jason.encode(result) do
-      {:ok, json} -> json
-      _ -> inspect(result)
-    end
-  end
-
-  defp format_action_result(result), do: inspect(result)
 
   # ── Response Classification ──────────────────────────────────────
 
@@ -508,23 +469,6 @@ defmodule Arbor.Agent.SimpleAgent do
 
   defp truncate(str, max) do
     String.slice(str, 0, max) <> "\n... (truncated)"
-  end
-
-  defp atomize_known_keys(args, _action_module) do
-    # LLM sends string keys. Action schemas use atom keys.
-    # Use to_existing_atom for safety — all Jido action schema keys
-    # are defined at compile time as atoms.
-    Map.new(args, fn {k, v} ->
-      if is_binary(k) do
-        try do
-          {String.to_existing_atom(k), v}
-        rescue
-          ArgumentError -> {k, v}
-        end
-      else
-        {k, v}
-      end
-    end)
   end
 
   defp maybe_record_compaction_telemetry(agent_id, utilization) do

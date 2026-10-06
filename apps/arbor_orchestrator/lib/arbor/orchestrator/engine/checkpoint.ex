@@ -678,6 +678,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
             # Persist output_taint in its established closed form so digest-bearing
             # Outcomes round-trip exactly. C6C changes context provenance only.
             |> Map.update(:output_taint, nil, &serialize_output_taint/1)
+            |> Map.update(:input_taint, %{}, fn labels ->
+              Map.new(labels, fn {key, label} -> {key, serialize_output_taint(label)} end)
+            end)
 
           {node_id, sanitized}
         end)
@@ -1334,6 +1337,10 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
              # Digest-bearing field: must round-trip exactly for effect recovery.
              # Transient reductions stay empty (engine applied them live).
              output_taint: parse_output_taint(Map.get(outcome_map, "output_taint")),
+             input_taint:
+               Map.new(Map.get(outcome_map, "input_taint", %{}), fn {key, label} ->
+                 {key, parse_output_taint(label)}
+               end),
              taint_reductions: []
            }}
         end)

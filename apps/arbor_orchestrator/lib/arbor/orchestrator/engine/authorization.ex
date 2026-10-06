@@ -235,19 +235,20 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     # Run before_node middleware
     token = Chain.run_before(chain, token)
 
-    if token.halted do
-      # Middleware halted — return the outcome (Chain.run_before ensures one exists)
-      token.outcome || %Outcome{status: :fail, failure_reason: token.halt_reason}
-    else
-      # Execute the actual handler
-      outcome = do_call_handler(handler, node, context, graph, opts)
+    # Capture only before-node classification: after-node labels may contain
+    # output attestations, which must never be applied to unchanged input bytes.
+    input_taint = Map.get(token.assigns, :taint_labels, %{})
 
-      # Run after_node middleware with the outcome
-      token = %{token | outcome: outcome}
-      token = Chain.run_after(chain, token)
+    outcome =
+      if token.halted do
+        token.outcome || %Outcome{status: :fail, failure_reason: token.halt_reason}
+      else
+        outcome = do_call_handler(handler, node, token.context, graph, opts)
+        token = Chain.run_after(chain, %{token | outcome: outcome})
+        token.outcome || outcome
+      end
 
-      token.outcome || outcome
-    end
+    %{outcome | input_taint: input_taint}
   end
 
   defp do_call_handler(handler, node, context, graph, opts) when is_function(handler, 4) do

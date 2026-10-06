@@ -58,7 +58,7 @@ defmodule Arbor.Orchestrator.HeartbeatRefresherTest do
 
             info ->
               info[:current_function] ==
-                {Arbor.Orchestrator.HeartbeatRefresher, :tick_loop, 2}
+                {Arbor.Orchestrator.HeartbeatRefresher, :tick_loop, 3}
           end
         end)
 

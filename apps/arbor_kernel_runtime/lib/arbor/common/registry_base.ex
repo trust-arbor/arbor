@@ -739,8 +739,18 @@ defmodule Arbor.Common.RegistryBase do
       defp resolve_remote_any(name) do
         # Check remote cache first
         case remote_cache_lookup(name) do
-          {:ok, _module, _node} = cached -> {:ok, elem(cached, 1)}
-          :miss -> do_resolve_remote_any(name)
+          {:ok, module, remote_node} ->
+            local_zone = safe_local_zone()
+            remote_zone = safe_trust_zone(remote_node)
+
+            if safe_can_resolve?(local_zone, remote_zone) do
+              {:ok, module}
+            else
+              {:error, {:zone_violation, local_zone, remote_zone}}
+            end
+
+          :miss ->
+            do_resolve_remote_any(name)
         end
       end
 
@@ -859,45 +869,45 @@ defmodule Arbor.Common.RegistryBase do
 
       # --- Trust Zone Bridges (safe, fail-closed) ---
 
-      defp safe_local_zone do
-        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
-             function_exported?(Arbor.Common.NodeRegistry, :local_zone, 0) do
-          Arbor.Common.NodeRegistry.local_zone()
+      defp safe_local_zone, do: safe_zone(:local_zone, [])
+
+      defp safe_trust_zone(node_name), do: safe_zone(:trust_zone, [node_name])
+
+      defp safe_zone(callback, args) do
+        policy = Arbor.Common.Config.registry_distribution_policy()
+
+        if is_atom(policy) and not is_nil(policy) and Code.ensure_loaded?(policy) and
+             function_exported?(policy, callback, length(args)) do
+          case apply(policy, callback, args) do
+            zone when zone in 0..2 -> zone
+            _ -> :unavailable
+          end
         else
-          2
+          :unavailable
         end
       rescue
-        _ -> 2
+        _ -> :unavailable
       catch
-        :exit, _ -> 2
+        _, _ -> :unavailable
       end
 
-      defp safe_trust_zone(node_name) do
-        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
-             function_exported?(Arbor.Common.NodeRegistry, :trust_zone, 1) do
-          Arbor.Common.NodeRegistry.trust_zone(node_name)
+      defp safe_can_resolve?(from_zone, entry_zone)
+           when from_zone in 0..2 and entry_zone in 0..2 do
+        policy = Arbor.Common.Config.registry_distribution_policy()
+
+        if is_atom(policy) and not is_nil(policy) and Code.ensure_loaded?(policy) and
+             function_exported?(policy, :can_resolve?, 2) do
+          policy.can_resolve?(from_zone, entry_zone) == true
         else
-          0
+          false
         end
       rescue
-        _ -> 0
+        _ -> false
       catch
-        :exit, _ -> 0
+        _, _ -> false
       end
 
-      defp safe_can_resolve?(from_zone, entry_zone) do
-        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
-             function_exported?(Arbor.Common.NodeRegistry, :can_resolve?, 2) do
-          Arbor.Common.NodeRegistry.can_resolve?(from_zone, entry_zone)
-        else
-          # Fail open when NodeRegistry unavailable (single-node dev)
-          true
-        end
-      rescue
-        _ -> true
-      catch
-        :exit, _ -> true
-      end
+      defp safe_can_resolve?(_from_zone, _entry_zone), do: false
 
       defp safe_pg_members do
         :pg.get_members(@pg_scope, @pg_group)

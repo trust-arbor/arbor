@@ -65,6 +65,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   require Logger
 
+  # Build identity is fixed in the BEAM; releases do not contain Mix.
+  # Runtime environment/options cannot enable test collaborators or bypasses.
+  @test_build Mix.env() == :test
+
   @default_name __MODULE__
   @default_task_supervisor Arbor.Agent.Orchestration.TaskSupervisor
   @default_runner Arbor.Agent.Orchestration.TaskRunner
@@ -868,7 +872,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       opts
       |> Keyword.get(
         :task_control_recovery_facade,
-        if(Mix.env() == :test,
+        if(@test_build,
           do: Arbor.Agent.Orchestration.TaskControlRecoveryMemory,
           else: Arbor.Agent.Orchestration.TaskControlRecoveryPersistence
         )
@@ -903,10 +907,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     force_ready? =
       case Keyword.fetch(opts, :recovery_force_ready) do
         {:ok, value} -> value == true
-        :error -> Mix.env() == :test
+        :error -> @test_build
       end
 
-    if Mix.env() == :test and
+    if @test_build and
          recovery_facade == Arbor.Agent.Orchestration.TaskControlRecoveryMemory do
       _ = Arbor.Agent.Orchestration.TaskControlRecoveryMemory.ensure!()
     end
@@ -4085,7 +4089,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     do: true
 
   defp recovery_facade_durable?(facade) when is_atom(facade) and not is_nil(facade) do
-    Mix.env() == :test and Code.ensure_loaded?(facade) and
+    @test_build and Code.ensure_loaded?(facade) and
       function_exported?(facade, :buffered_store_acknowledged_put, 3)
   end
 
@@ -5335,19 +5339,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # Phase 4C C2A: operation-owned per-target dispatch fence + supervised seed
   # ---------------------------------------------------------------------------
 
-  defp validate_fence_facade!(facade, opts) when is_atom(facade) and not is_nil(facade) do
-    # Production collaborator is fixed at init. An alternate facade may be
-    # injected solely at store start under MIX_ENV=test; per-dispatch options
-    # remain data-only and can never select it.
-    if Mix.env() != :test and
-         Keyword.has_key?(opts, :template_authority_fence_facade) and
-         facade != @default_fence_seed_facade do
-      raise ArgumentError,
-            "template_authority_fence_facade is fixed at store initialization " <>
-              "and cannot be overridden outside MIX_ENV=test"
-    end
+  # Production collaborator is fixed at init. Test-only substitution is
+  # selected while compiling, never from release/runtime configuration.
+  if @test_build do
+    defp validate_fence_facade!(facade, _opts) when is_atom(facade) and not is_nil(facade),
+      do: facade
+  else
+    defp validate_fence_facade!(facade, opts) when is_atom(facade) and not is_nil(facade) do
+      if Keyword.has_key?(opts, :template_authority_fence_facade) and
+           facade != @default_fence_seed_facade do
+        raise ArgumentError,
+              "template_authority_fence_facade is fixed at store initialization " <>
+                "and cannot be overridden outside MIX_ENV=test"
+      end
 
-    facade
+      facade
+    end
   end
 
   defp validate_fence_facade!(invalid, _opts) do
@@ -5356,7 +5363,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp fence_force_ready?(opts) do
-    if Mix.env() == :test do
+    if @test_build do
       case Keyword.fetch(opts, :fence_force_ready) do
         {:ok, value} -> value == true
         :error -> true
@@ -5367,7 +5374,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp runtime_admission_force_ready?(opts) do
-    if Mix.env() == :test do
+    if @test_build do
       case Keyword.fetch(opts, :runtime_admission_force_ready) do
         {:ok, value} -> value == true
         :error -> true
@@ -5568,7 +5575,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  if Mix.env() == :test do
+  if @test_build do
     defp normalize_max_runtime_admission_waiters(opts) when is_list(opts) do
       WaiterCore.normalize_max(
         Keyword.get(opts, :max_runtime_admission_waiters, @default_max_runtime_admission_waiters)
@@ -7635,18 +7642,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :ok
   end
 
-  defp maybe_runtime_admission_observe_test_hang(request) do
-    case Application.get_env(:arbor_agent, :runtime_admission_observe_test_hang) do
-      %{timeout_ms: ms, target: target}
-      when is_integer(ms) and ms > 0 and is_binary(target) ->
-        if Map.get(request, :target) == target, do: Process.sleep(ms)
+  if @test_build do
+    defp maybe_runtime_admission_observe_test_hang(request) do
+      case Application.get_env(:arbor_agent, :runtime_admission_observe_test_hang) do
+        %{timeout_ms: ms, target: target}
+        when is_integer(ms) and ms > 0 and is_binary(target) ->
+          if Map.get(request, :target) == target, do: Process.sleep(ms)
 
-      %{timeout_ms: ms} when is_integer(ms) and ms > 0 ->
-        Process.sleep(ms)
+        %{timeout_ms: ms} when is_integer(ms) and ms > 0 ->
+          Process.sleep(ms)
 
-      _ ->
-        :ok
+        _ ->
+          :ok
+      end
     end
+  else
+    defp maybe_runtime_admission_observe_test_hang(_request), do: :ok
   end
 
   # Fixed observer only — never called from GenServer callbacks.
@@ -8284,7 +8295,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp maybe_runtime_admission_durable_mark_test_hang(target) when is_binary(target) do
-    if Mix.env() == :test do
+    if @test_build do
       case Application.get_env(:arbor_agent, :runtime_admission_test_durable_mark_hang) do
         %{timeout_ms: ms, target: ^target} when is_integer(ms) and ms > 0 ->
           Process.sleep(ms)
@@ -8303,7 +8314,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp durable_mark_outcome_unknown_with_retry(target, token, attempt)
        when is_integer(attempt) and attempt < 4 do
     # MIX_ENV=test seam: force terminal shell failure (not launch failure).
-    if Mix.env() == :test and
+    if @test_build and
          Application.get_env(:arbor_agent, :runtime_admission_test_durable_mark_force_error) ==
            true do
       {:error, :mark_forced_failure}
@@ -9725,7 +9736,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp ensure_claim_join_operation_id(request), do: request
 
   defp maybe_runtime_admission_claim_join_test_hang(request) when is_map(request) do
-    if Mix.env() == :test do
+    if @test_build do
       case Application.get_env(:arbor_agent, :runtime_admission_test_claim_join_hang) do
         %{timeout_ms: ms, target: target}
         when is_integer(ms) and ms > 0 and is_binary(target) ->
@@ -9746,7 +9757,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  if Mix.env() == :test do
+  if @test_build do
     defp hang_claim_join_until_released do
       if Application.get_env(:arbor_agent, :runtime_admission_test_claim_join_hang) == true do
         Process.sleep(50)
@@ -10347,14 +10358,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     hang_runtime_admission_claim_inventory_if_requested()
 
     # MIX_ENV=test force-error seam (absent from production call shape defaults).
-    if Mix.env() == :test and
+    if @test_build and
          Application.get_env(:arbor_agent, :runtime_admission_test_claim_inventory_force_error) ==
            true do
       {:error, :restore_claim_inventory_unavailable}
     else
       case Arbor.Agent.TemplateAuthorityReconciliationStore.list_outstanding_runtime_restore_claims() do
         {:ok, claims} when is_list(claims) ->
-          if Mix.env() == :test and
+          if @test_build and
                Application.get_env(
                  :arbor_agent,
                  :runtime_admission_test_claim_inventory_malformed
@@ -10378,7 +10389,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     :exit, _ -> {:error, :restore_claim_inventory_unavailable}
   end
 
-  if Mix.env() == :test do
+  if @test_build do
     # Hold claim inventory so security regressions can inject stale/hot-upgrade
     # reconcile results against a live running attempt. Absent from prod BEAMs
     # as a no-op clause below.
