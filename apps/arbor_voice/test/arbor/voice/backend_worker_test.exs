@@ -1,5 +1,5 @@
 defmodule Arbor.Voice.BackendWorkerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   import ExUnit.CaptureLog
 
   alias Arbor.Voice.BackendWorker
@@ -72,6 +72,15 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
         :partial_configure ->
           {:error, {:distinctive_partial_configure, session.secret}, bump(session)}
+
+        :late_configuration_hanging_close ->
+          {:ok, deadline} = Arbor.Voice.BackendWorker.operation_deadline()
+          delay = max(deadline - System.monotonic_time(:millisecond), 0) + 1_000
+          Process.send_after(self(), :finish_late_configuration, delay)
+
+          receive do
+            :finish_late_configuration -> {:error, :timeout, bump(session)}
+          end
 
         :invalid_configure ->
           {:ok, session, :wrong_shape}
@@ -153,7 +162,18 @@ defmodule Arbor.Voice.BackendWorkerTest do
         {:backend_called, :close, self(), session.version, session.secret}
       )
 
-      if session.mode == :configure_close_failed, do: {:error, :close_failed}, else: :ok
+      case session.mode do
+        :configure_close_failed ->
+          {:error, :close_failed}
+
+        :late_configuration_hanging_close ->
+          receive do
+            :never_finish_close -> :ok
+          end
+
+        _ ->
+          :ok
+      end
     end
 
     defp session(parent, mode, secret, authorizer, route) do
@@ -181,7 +201,8 @@ defmodule Arbor.Voice.BackendWorkerTest do
     %{supervisor: supervisor}
   end
 
-  test "hanging open dies at its exact deadline and leaves no supervised orphan", ctx do
+  test "hanging open dies at its bounded physical deadline and leaves no supervised orphan",
+       ctx do
     {worker, credential} =
       start_worker(ctx.supervisor, [parent: self(), mode: :hang_open], :none)
 
@@ -202,6 +223,32 @@ defmodule Arbor.Voice.BackendWorkerTest do
     assert_receive down = {:DOWN, ^monitor, :process, ^worker, :killed}, 1_000
     refute inspect(down) =~ "ordinary-session"
     refute_receive {:voice_backend_operation_result, %Result{worker: ^worker}}, 50
+    assert_eventually_no_children(ctx.supervisor)
+  end
+
+  @tag :security_regression
+  test "late callback and hanging retirement share one absolute physical deadline", ctx do
+    {worker, credential} =
+      start_worker(
+        ctx.supervisor,
+        [parent: self(), mode: :late_configuration_hanging_close],
+        :none,
+        retire_timeout_ms: 2_000
+      )
+
+    opened = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, opened)
+    monitor = Process.monitor(worker)
+    token = BackendWorker.new_operation_token()
+    deadline = now_ms() + 400
+    assert :ok = BackendWorker.submit(worker, credential, token, deadline, :configure, [%{}])
+    assert_receive {:backend_called, :configure, ^worker, 0}, 500
+    # The callback recovers at D + 1,000, leaving 1,000 ms of the original
+    # D + 2,000 ceiling. The 1,500 ms DOWN bound permits scheduler delay while
+    # remaining shorter than an incorrectly renewed 2,000 ms retirement.
+    assert_receive {:backend_called, :close, ^worker, 1, "ordinary-session"}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :killed}, 1_500
+    refute_receive {:voice_backend_operation_result, %Result{worker: ^worker}}, 25
     assert_eventually_no_children(ctx.supervisor)
   end
 

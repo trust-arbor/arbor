@@ -660,7 +660,9 @@ defmodule Arbor.Voice.BackendWorker do
 
   @impl true
   def handle_continue(:execute_operation, state) do
-    case arm_kill_timer(state.deadline_ms) do
+    # The logical deadline still fences every effect and result. Keep one
+    # absolute physical ceiling for callback recovery plus resource retirement.
+    case arm_kill_timer(state.deadline_ms + state.retire_timeout_ms) do
       {:ok, deadline_timer} ->
         execute_with_watchdog(state, deadline_timer)
 
@@ -719,7 +721,6 @@ defmodule Arbor.Voice.BackendWorker do
     completed_at = now_ms()
 
     Process.delete(operation_context_key())
-    cancel_kill_timer(deadline_timer)
 
     execution =
       if completed_at > state.deadline_ms do
@@ -743,6 +744,10 @@ defmodule Arbor.Voice.BackendWorker do
       else
         {execution.session, :open, false}
       end
+
+    # Do not give a late callback a fresh full retirement interval: the outer
+    # watchdog remains armed through close, alongside its existing close timer.
+    cancel_kill_timer(deadline_timer)
 
     completion_value = make_ref()
     completion = %CompletionCredential{value: Redacted.new(completion_value)}

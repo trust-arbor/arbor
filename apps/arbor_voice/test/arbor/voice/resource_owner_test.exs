@@ -48,6 +48,38 @@ defmodule Arbor.Voice.ResourceOwnerTest do
       do: %{backend: :configure_latest, mode: :local, input_format: nil, output_format: nil}
   end
 
+  defmodule LateConfigureBackend do
+    @behaviour Arbor.Voice.RealtimeBackend
+
+    def egress_route, do: :none
+    def open(opts), do: {:ok, %{parent: opts[:parent], outcome: opts[:outcome], generation: 0}}
+
+    def configure(session, _config) do
+      {:ok, deadline} = Arbor.Voice.BackendWorker.operation_deadline()
+      delay = max(deadline - System.monotonic_time(:millisecond), 0) + 25
+      Process.send_after(self(), :finish_late_configuration, delay)
+
+      receive do
+        :finish_late_configuration ->
+          latest = %{session | generation: 1}
+          if session.outcome == :ok, do: {:ok, latest}, else: {:error, :timeout, latest}
+      end
+    end
+
+    def send_text(session, _text), do: {:ok, session}
+    def send_audio(session, _chunk), do: {:ok, session}
+    def send_tool_result(session, _call_id, _output), do: {:ok, session}
+    def recv(_session, _timeout), do: {:error, :timeout}
+
+    def close(session) do
+      send(session.parent, {:late_configuration_closed, session.generation, self()})
+      :ok
+    end
+
+    def meta(_session),
+      do: %{backend: :late_configuration, mode: :local, input_format: nil, output_format: nil}
+  end
+
   defmodule BadMetaBackend do
     @behaviour Arbor.Voice.RealtimeBackend
 
@@ -301,6 +333,29 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert %{worker: nil, poisoned: true, phase: :terminal} = :sys.get_state(owner)
     assert {:error, :owner_poisoned} = ResourceOwner.meta(owner)
     assert :ok = ResourceOwner.close(owner)
+  end
+
+  @tag :security_regression
+  test "late authenticated configuration retirement closes resources without publishing success" do
+    for outcome <- [:error, :ok] do
+      opts = Keyword.put(@default_opts, :close_timeout_ms, 200)
+
+      assert {:ok, owner} =
+               ResourceOwner.start(
+                 self(),
+                 LateConfigureBackend,
+                 [parent: self(), outcome: outcome],
+                 opts
+               )
+
+      assert {:error, :owner_timeout} = ResourceOwner.configure(owner, %{})
+      assert_receive {:late_configuration_closed, 1, worker}, 500
+      refute Process.alive?(worker)
+      refute_receive {:late_configuration_closed, 0, _}, 25
+      assert {:error, :owner_poisoned} = ResourceOwner.meta(owner)
+      assert :ok = ResourceOwner.close(owner)
+      refute Process.alive?(owner)
+    end
   end
 
   @tag :security_regression

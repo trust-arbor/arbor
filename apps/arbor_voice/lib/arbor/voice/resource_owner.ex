@@ -1126,9 +1126,7 @@ defmodule Arbor.Voice.ResourceOwner do
     with {:ok, verified} <- BackendWorker.verify_result(result, credential),
          true <- verified.worker == state.worker,
          true <- verified.operation_token === current.token,
-         true <- verified.operation === current.operation,
-         true <- verified.completed_at <= current.deadline_ms,
-         true <- received_at <= current.deadline_ms do
+         true <- verified.operation === current.operation do
       cancel_timer(current.timer_ref)
       reply = current.reply || public_outcome(verified.outcome, current.operation)
 
@@ -1138,6 +1136,18 @@ defmodule Arbor.Voice.ResourceOwner do
       effects_complete? = current.expected_effects == []
 
       cond do
+        verified.completed_at > current.deadline_ms or received_at > current.deadline_ms ->
+          # Expiration still denies the operation. An exact authenticated close
+          # may be acknowledged solely for disposal, never for its payload.
+          reject_result_preserving_retirement(
+            state,
+            current,
+            result,
+            verified,
+            credential,
+            current.reply || {:error, :owner_timeout}
+          )
+
         EgressAuthority.authorize_operation(authority_cell(state), current.operation) != :ok ->
           reject_result_preserving_retirement(state, current, result, verified, credential)
 
@@ -1186,9 +1196,16 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp handle_worker_result(_result, state), do: {:noreply, state}
 
-  defp reject_result_preserving_retirement(state, current, result, verified, credential) do
-    # Lost publication authority never authorizes the payload. It also must not
-    # erase a producing worker's authenticated, already-completed resource close.
+  defp reject_result_preserving_retirement(
+         state,
+         current,
+         result,
+         verified,
+         credential,
+         reply \\ {:error, :backend_effect_denied}
+       ) do
+    # Lost publication authority or expiration never authorizes the payload.
+    # Neither erases an authenticated, already-completed resource close.
     state =
       if verified.retirement == :closed and
            terminal_outcome?(verified.outcome, current.operation) and
@@ -1200,7 +1217,7 @@ defmodule Arbor.Voice.ResourceOwner do
       current
       | timer_ref: nil,
         status: :awaiting_down,
-        reply: {:error, :backend_effect_denied}
+        reply: reply
     }
 
     {:noreply, %{poison_state(state) | current: current}}

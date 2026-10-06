@@ -148,6 +148,14 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   defp content_item(%{kind: :text, text: t}) when is_binary(t),
     do: %{"type" => "input_text", "text" => t}
 
+  # Canonical persisted transcript parts are JSON maps, not native ContentParts.
+  # Admit only their explicit text shape; never normalize nontext or local media.
+  defp content_item(%{"type" => "text", "text" => text} = part)
+       when is_binary(text) and not is_map_key(part, "kind") and not is_map_key(part, :kind) and
+              not is_map_key(part, :type) and
+              not is_map_key(part, :text),
+       do: %{"type" => "input_text", "text" => text}
+
   defp content_item(t) when is_binary(t), do: %{"type" => "input_text", "text" => t}
 
   defp content_item(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
@@ -234,8 +242,20 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
   defp assistant_text(parts) when is_list(parts) do
     parts
-    |> Enum.filter(&(is_map(&1) and Map.get(&1, :kind) == :text))
-    |> Enum.map_join(" ", & &1.text)
+    |> Enum.flat_map(fn
+      %{kind: :text} = part ->
+        [part.text]
+
+      %{"type" => "text", "text" => text} = part
+      when is_binary(text) and not is_map_key(part, "kind") and not is_map_key(part, :kind) and
+             not is_map_key(part, :type) and
+             not is_map_key(part, :text) ->
+        [text]
+
+      _ ->
+        []
+    end)
+    |> Enum.join(" ")
   end
 
   defp assistant_text(_), do: ""

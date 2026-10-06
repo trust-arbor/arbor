@@ -48,6 +48,19 @@ defmodule Arbor.Voice.DeskLateCleanupTest do
     def egress_route, do: :none
     def open(opts), do: {:ok, Map.new(opts) |> Map.put(:events, [])}
     def configure(%{mode: :startup_failure}, _), do: {:error, :refused}
+
+    def configure(%{mode: :startup_timeout} = state, _) do
+      {:ok, deadline} = Arbor.Voice.BackendWorker.operation_deadline()
+      send(state.parent, {:startup_timeout_configuring, self()})
+      delay = max(deadline - System.monotonic_time(:millisecond), 0) + 25
+      Process.send_after(self(), :finish_startup_configuration, delay)
+
+      receive do
+        :finish_startup_configuration ->
+          {:error, :timeout, Map.put(state, :generation, 1)}
+      end
+    end
+
     def configure(state, _), do: {:ok, state}
     def send_text(state, _), do: {:ok, state}
     def send_tool_result(state, _, _), do: {:ok, state}
@@ -71,6 +84,10 @@ defmodule Arbor.Voice.DeskLateCleanupTest do
 
     def close(state) do
       send(state.parent, {:backend_close, state.mode})
+
+      if state.mode == :startup_timeout,
+        do: send(state.parent, {:startup_timeout_closed, state.generation, self()})
+
       if state.mode == :unknown_close, do: {:error, :unknown}, else: :ok
     end
 
@@ -213,6 +230,31 @@ defmodule Arbor.Voice.DeskLateCleanupTest do
     assert %{terminal: true} = await(id, & &1.terminal)
     assert {:ok, next} = record(user)
     assert %{terminal: true} = await(next, & &1.terminal)
+  end
+
+  test "security regression: timed-out startup closes exact backend before late lease settlement",
+       %{ledger: ledger, user: user} do
+    mode(:startup_timeout)
+    FakeLedger.set_release_mode(ledger, :error)
+    assert {:ok, id} = record(user)
+    assert_receive {:startup_timeout_configuring, worker}, 1_000
+    worker_ref = Process.monitor(worker)
+    assert_receive {:startup_timeout_closed, 1, ^worker}, 1_000
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}, 1_000
+    refute_receive :audio_received, 25
+
+    assert %{terminal: false, state: :cleanup_pending} =
+             await(id, &(&1.state == :cleanup_pending))
+
+    assert {:error, :device_busy} = record(user)
+    assert Enum.any?(FakeLedger.calls(ledger), &match?({:release, _, _}, &1))
+
+    FakeLedger.set_release_mode(ledger, :ok)
+    assert %{terminal: true, state: :cancelled} = await(id, & &1.terminal)
+    assert {:error, :not_found} = Voice.session_status({user, "fixture-agent"})
+    mode(:success)
+    assert {:ok, next} = record(user)
+    assert %{terminal: true, state: :complete} = await(next, & &1.terminal)
   end
 
   test "security regression: unknown backend close remains blocked after successful settlement",

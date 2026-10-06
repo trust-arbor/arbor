@@ -560,6 +560,178 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     end)
   end
 
+  test "regression: OAuth wire retains both canonical voice pairs before a fresh typed turn", %{
+    store_dir: store_dir
+  } do
+    canonical_pairs = [
+      {:user, "Remember the first test phrase: Cedar Lantern."},
+      {:assistant, "I will remember Cedar Lantern."},
+      {:user, "Remember the second test phrase: Pine River."},
+      {:assistant, "I will remember Pine River."}
+    ]
+
+    current = "What are both test phrases from this conversation? Quote them exactly."
+
+    for {route, backend, model} <- [
+          {"xai_oauth", :xai, "grok-4.6"},
+          {"openai_oauth", :openai, "gpt-5.6-sol"}
+        ] do
+      write_store_json(
+        store_dir,
+        "#{backend}.json",
+        oauth_store(to_string(backend), "synthetic-history-token")
+      )
+
+      {url, server} = start_request_capture_server()
+      configure_responses_endpoint!(%{backend => url})
+
+      # Comms canonical publication and Session restoration preserve this JSON
+      # text-part shape. A request capture before the adapter misses this bug.
+      history =
+        Enum.map(canonical_pairs, fn {role, text} ->
+          Message.new(role, [%{"type" => "text", "text" => text}])
+        end)
+
+      request = %Request{
+        provider: route,
+        model: model,
+        messages: history ++ [Message.new(:user, current)]
+      }
+
+      client =
+        Arbor.LLM.Client.new(
+          default_provider: route,
+          adapters: %{route => Arbor.LLM.Adapter.OAuthResponses}
+        )
+
+      assert {:ok, %Response{text: "ok"}} =
+               Arbor.LLM.Client.complete(client, request, receive_timeout: 1_000)
+
+      assert %{body: body} = Task.await(server, 2_000)
+      decoded = Jason.decode!(body)
+
+      expected =
+        Enum.map(canonical_pairs ++ [{:user, current}], fn {role, text} ->
+          part_type = if role == :assistant, do: "output_text", else: "input_text"
+          %{"role" => to_string(role), "content" => [%{"type" => part_type, "text" => text}]}
+        end)
+
+      assert decoded["input"] == expected
+      assert decoded["model"] == model
+      assert_unstored_responses_body!(body)
+    end
+  end
+
+  test "security regression: canonical OAuth text support preserves native protocol and excludes nontext parts",
+       %{
+         store_dir: store_dir
+       } do
+    alias Arbor.LLM.ContentPart
+
+    nontext_parts = [
+      ContentPart.thinking("hidden-thinking-sentinel"),
+      ContentPart.audio_url("https://synthetic.invalid/audio.wav"),
+      %{"type" => "thinking", "text" => "string-thinking-sentinel"},
+      %{"type" => "text", "kind" => "thinking", "text" => "mixed-string-thinking-sentinel"},
+      %{"type" => "image", "path" => "/synthetic-not-readable.png", "text" => "image-sentinel"},
+      %{"type" => "unknown", "text" => "unknown-sentinel"},
+      %{"text" => "untyped-sentinel"},
+      %{"kind" => "text", "text" => "noncanonical-kind-sentinel"},
+      %{"type" => "text", "text" => 42},
+      %{"type" => "text", "text" => nil},
+      %{:kind => :thinking, "type" => "text", "text" => "mixed-thinking-sentinel"},
+      %{:type => :thinking, "type" => "text", "text" => "mixed-type-sentinel"},
+      %{:text => "ambiguous-text-sentinel", "type" => "text", "text" => "mixed-text-sentinel"}
+    ]
+
+    for {route, backend, model} <- [
+          {"xai_oauth", :xai, "grok-4.6"},
+          {"openai_oauth", :openai, "gpt-5.6-sol"}
+        ] do
+      write_store_json(
+        store_dir,
+        "#{backend}.json",
+        oauth_store(to_string(backend), "synthetic-protocol-token")
+      )
+
+      {url, server} = start_request_capture_server()
+      configure_responses_endpoint!(%{backend => url})
+
+      request = %Request{
+        provider: route,
+        model: model,
+        messages: [
+          Message.new(:system, [ContentPart.text("native instructions")]),
+          Message.new(
+            :user,
+            [
+              ContentPart.text("native user"),
+              ContentPart.image_url("https://synthetic.invalid/image.png"),
+              ContentPart.image_base64("c3ludGhldGlj", "image/png")
+            ] ++ nontext_parts
+          ),
+          Message.new(
+            :assistant,
+            [
+              ContentPart.tool_call("synthetic-call", "noop", %{"q" => "synthetic"}),
+              ContentPart.text("native assistant")
+            ] ++ nontext_parts
+          ),
+          Message.new(:tool, "synthetic tool result", %{"tool_call_id" => "synthetic-call"}),
+          Message.new(:user, "fresh user")
+        ]
+      }
+
+      client =
+        Arbor.LLM.Client.new(
+          default_provider: route,
+          adapters: %{route => Arbor.LLM.Adapter.OAuthResponses}
+        )
+
+      assert {:ok, %Response{text: "ok"}} =
+               Arbor.LLM.Client.complete(client, request, receive_timeout: 1_000)
+
+      assert %{body: body} = Task.await(server, 2_000)
+      decoded = Jason.decode!(body)
+      assert decoded["instructions"] == "native instructions"
+
+      assert decoded["input"] == [
+               %{
+                 "role" => "user",
+                 "content" => [
+                   %{"type" => "input_text", "text" => "native user"},
+                   %{
+                     "type" => "input_image",
+                     "image_url" => "https://synthetic.invalid/image.png"
+                   },
+                   %{"type" => "input_image", "image_url" => "data:image/png;base64,c3ludGhldGlj"}
+                 ]
+               },
+               %{
+                 "type" => "function_call",
+                 "call_id" => "synthetic-call",
+                 "name" => "noop",
+                 "arguments" => Jason.encode!(%{"q" => "synthetic"})
+               },
+               %{
+                 "role" => "assistant",
+                 "content" => [%{"type" => "output_text", "text" => "native assistant"}]
+               },
+               %{
+                 "type" => "function_call_output",
+                 "call_id" => "synthetic-call",
+                 "output" => "synthetic tool result"
+               },
+               %{
+                 "role" => "user",
+                 "content" => [%{"type" => "input_text", "text" => "fresh user"}]
+               }
+             ]
+
+      assert_unstored_responses_body!(body)
+    end
+  end
+
   test "security regression: OAuth adapter stamps backend from route, not provider payload", %{
     store_dir: store_dir
   } do
