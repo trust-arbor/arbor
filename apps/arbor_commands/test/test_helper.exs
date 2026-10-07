@@ -12,4 +12,6 @@ for child <- [
   end
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+# :benchmark — measurement harnesses (e.g. the mind/body phase-gate chat
+# overhead baseline); run explicitly with --include benchmark.
+ExUnit.start(exclude: [:llm, :llm_local, :benchmark])

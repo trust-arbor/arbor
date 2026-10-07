@@ -562,6 +562,10 @@ defmodule Arbor.Memory.Signals do
   defdelegate emit_goal_achieved(agent_id, goal_id), to: __MODULE__.Lifecycle
   defdelegate emit_goal_abandoned(agent_id, goal_id, reason), to: __MODULE__.Lifecycle
   defdelegate emit_intent_formed(agent_id, intent), to: __MODULE__.Lifecycle
+
+  defdelegate emit_intent_evicted(agent_id, intent, status, cause),
+    to: __MODULE__.Lifecycle
+
   defdelegate emit_percept_received(agent_id, percept), to: __MODULE__.Lifecycle
   defdelegate emit_thinking_recorded(agent_id, text), to: __MODULE__.Lifecycle
   defdelegate emit_knowledge_archived(agent_id, node_data, reason), to: __MODULE__.Lifecycle

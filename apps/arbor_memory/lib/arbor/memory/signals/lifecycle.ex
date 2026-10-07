@@ -99,6 +99,27 @@ defmodule Arbor.Memory.Signals.Lifecycle do
   end
 
   @doc """
+  Emit a signal when IntentStore evicts an intent that was not completed.
+
+  Eviction of live work (pending, locked, or blocked) is data loss, so it is
+  never silent. `cause` names the bound that forced it (`:buffer_size` or
+  `:aggregate_limit`).
+  """
+  @spec emit_intent_evicted(String.t(), struct(), atom(), atom()) :: :ok
+  def emit_intent_evicted(agent_id, intent, status, cause) do
+    # Uses :agent category (not :memory), matching emit_intent_formed/2
+    Arbor.Signals.emit(:agent, :intent_evicted, %{
+      agent_id: agent_id,
+      intent_id: intent.id,
+      intent_type: intent.type,
+      goal_id: intent.goal_id,
+      status: status,
+      cause: cause,
+      evicted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
   Emit a signal when a percept is received.
   """
   @spec emit_percept_received(String.t(), struct()) :: :ok

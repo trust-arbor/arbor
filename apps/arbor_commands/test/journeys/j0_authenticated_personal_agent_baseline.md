@@ -36,6 +36,40 @@ engagement's first `{:ok, reply}` via `assert_committed_pair_now!/4` in
 `j0_authenticated_baseline.ex` (no poll, no sleep). The sqlite poll test remains
 extra inventory, not an async success loophole.
 
+## Update 2026-10-07: harness drift repaired, recall contract retargeted
+
+J0 builds part of the production supervision tree by hand. That copy fell
+behind production twice, and J0 was red from about 2026-09-27:
+
+- **`Arbor.Agent.ProfileAuthorityOwner` was not started.** Since 2026-10-05
+  (`3614f4cfe`), `ProfileStore.store_profile/1` routes through it. The missing
+  owner's `:noproc` exit is reported as `:outcome_unknown`, so `Lifecycle.create/2`
+  returned `{:persist_failed, :outcome_unknown}`.
+- **The `:arbor_user_config` BufferedStore (identity alias records) was not
+  started.** Since 2026-09-27 (`11d209431`),
+  `Security.resolve_conversation_owner/1` resolves aliases strictly. Every
+  authenticated delivery therefore failed closed as `:unauthorized`
+  (`:alias_store_unavailable`).
+
+Both are now started in `start_agent_children!/0`, in production order.
+
+The product also changed under the dispatched-recall test. Since 2026-09-09
+(`6f619c769`, `c8c977589`), authenticated private turns never dispatch generic
+`Arbor.Memory.recall`. Continuity runs through opt-in private conversation
+memory (`recall_private_conversations/3` in the Session preflight), which is off
+by default and in J0. The test now asserts three things:
+1. the default configuration holds (private memory off);
+2. no generic recall is dispatched on the authenticated follow-up;
+3. a coverage canary: a real `Memory.recall/2` under the same traced
+   `Session.TaskSupervisor` IS observed. So the empty drain is evidence of
+   absence, not a missed observation.
+
+Exercising the opt-in path needs a hermetic embedding route:
+`.arbor/roadmap/0-inbox/j0-hermetic-private-memory-route.md`.
+
+The section below is the original 2026-09-07 record. Gaps 1–2 describe the
+pre-2026-09-09 product.
+
 ## Production-path gaps recorded (not repaired)
 
 These are executable observations, not suppressed failures.

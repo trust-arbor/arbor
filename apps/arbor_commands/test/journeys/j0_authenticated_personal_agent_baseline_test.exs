@@ -21,6 +21,7 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
   alias Arbor.Commands.J0AuthenticatedBaseline
   alias Arbor.Commands.J0AuthenticatedBaseline.{SqliteEvidence, TraceHub}
   alias Arbor.LLM.Request
+  alias Arbor.Orchestrator.Config, as: OrchestratorConfig
 
   @moduletag :integration
   @moduletag :database
@@ -198,10 +199,11 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
 
       _ = J0AuthenticatedBaseline.await_provider_request!()
 
-      # Measurement, not a product success claim. Authenticated Session turns
-      # run production turn.dot; session_memory.update reads session.turn_data
-      # which no node produces, and AgentSeed.finalize_query is not on this
-      # path. Do not seed. If this starts seeing the marker, indexing was wired.
+      # Measurement, not a product success claim. Since 2026-09-09 authenticated
+      # turns index only through opt-in private conversation memory (Session
+      # owner, after the acknowledged turn), which is off by default and in this
+      # topology; turn.dot itself does not index. Do not seed. If this starts
+      # seeing the marker, an indexing path was wired for the default config.
       index =
         J0AuthenticatedBaseline.inspect_index(
           conversationalist_id,
@@ -229,11 +231,27 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
       J0AuthenticatedBaseline.assert_no_escapes!(ctx.hub)
     end
 
-    test "follow-up dispatched recall is observed independently and does not contain the preference",
+    # Contract since 2026-09-09 (6f619c769, c8c977589): authenticated private
+    # turns run with memory_write_policy :deny, so turn.dot's
+    # session_memory.recall node never dispatches generic Arbor.Memory.recall.
+    # Continuity runs through opt-in private conversation memory instead: the
+    # Session preflight calls Memory.recall_private_conversations/3, and only
+    # when :private_conversation_memory has an embedding route. That path is
+    # off by default and in this topology; exercising it needs a hermetic
+    # embedding route (.arbor/roadmap/0-inbox/j0-hermetic-private-memory-route.md).
+    test "authenticated follow-up dispatches no generic Memory.recall (private memory off by default)",
          ctx do
       conversationalist_id = ctx.conversationalist.agent_id
       conversant_id = ctx.conversant.id
       follow_up = J0AuthenticatedBaseline.follow_up()
+
+      assert OrchestratorConfig.private_conversation_memory() in [false, nil],
+             """
+             J0 now runs with private conversation memory enabled, so this test's
+             premise (no recall on the authenticated path) no longer holds. Retarget it
+             to observe Memory.recall_private_conversations/3 in the Session preflight
+             (see .arbor/roadmap/0-inbox/j0-hermetic-private-memory-route.md).
+             """
 
       _ = TraceHub.assert_supervised_turn_owner_traced!(ctx.hub)
 
@@ -265,39 +283,40 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
 
       dispatched =
         Enum.filter(events, fn
-          {:j0_dispatched_recall, ^conversationalist_id, query, _result} ->
-            query == follow_up
-
-          _ ->
-            false
+          {:j0_dispatched_recall, ^conversationalist_id, _query, _result} -> true
+          _ -> false
         end)
 
-      assert dispatched != [],
+      assert dispatched == [],
              """
-             Empty trace drain after a follow-up turn whose owner was
-             Session.TaskSupervisor #{inspect(ctx.hub.task_supervisor)}
-             (do_send_message_async/5 start_child), already in traced_pids
-             #{inspect(ctx.hub.traced_pids)} before send_authenticated.
-             That is a missing observation of session_memory.recall /
-             SessionMemory.bridge(Arbor.Memory, :recall, ...), not evidence
-             that recall was absent from the product path.
-             Events: #{inspect(events)}
+             The authenticated follow-up dispatched generic Arbor.Memory.recall. Since
+             2026-09-09 authenticated private turns must not reach it (the recall node
+             only passes through Session-precomputed private recall).
+             Dispatched: #{inspect(dispatched)}
              """
 
-      Enum.each(dispatched, fn {:j0_dispatched_recall, _agent_id, query, result} ->
-        assert query == follow_up
+      # Coverage canary: the same traced Session.TaskSupervisor must observe a real
+      # facade call, so the empty drain above is evidence of absence, not a missed
+      # observation.
+      canary_query = "j0 trace coverage canary"
 
-        assert match?({:ok, results} when is_list(results), result) or
-                 result == {:error, :index_not_initialized},
-               "unexpected dispatched recall result: #{inspect(result)}"
-
-        refute inspect(result) =~ J0AuthenticatedBaseline.preference_marker(),
-               """
-               Dispatched recall contained the preference. This baseline expected the
-               Session indexing gap (unproduced session.turn_data / finalize_query not
-               on the authenticated path). Result: #{inspect(result)}
-               """
+      ctx.hub.task_supervisor
+      |> Task.Supervisor.async_nolink(fn ->
+        Arbor.Memory.recall(conversationalist_id, canary_query)
       end)
+      |> Task.await(5_000)
+
+      canary_events = TraceHub.drain(ctx.hub)
+
+      assert Enum.any?(canary_events, fn
+               {:j0_dispatched_recall, ^conversationalist_id, ^canary_query, _result} -> true
+               _ -> false
+             end),
+             """
+             TraceHub did not observe a canary Arbor.Memory.recall/2 under
+             Session.TaskSupervisor #{inspect(ctx.hub.task_supervisor)}; the empty
+             follow-up drain proves nothing. Events: #{inspect(canary_events)}
+             """
 
       J0AuthenticatedBaseline.assert_no_escapes!(ctx.hub)
     end

@@ -561,24 +561,10 @@ defmodule Arbor.Agent.SessionManager do
 
   # ── Companion server lifecycle (Phase 3) ─────────────────────────
 
+  # ActionCycleServer is retired and is no longer started here
+  # (.arbor/decisions/2026-10-07-mind-body-sensorium.md, M0); its code is
+  # deleted in M3. stop_companion_servers/1 still stops one if present.
   defp start_companion_servers(agent_id, opts) do
-    # Action Cycle Server
-    if Code.ensure_loaded?(Arbor.Agent.ActionCycleSupervisor) do
-      try do
-        apply(Arbor.Agent.ActionCycleSupervisor, :start_server, [agent_id, opts])
-      rescue
-        e ->
-          Logger.warning(
-            "[SessionManager] Failed to start ActionCycleServer for #{agent_id}: #{Exception.message(e)}"
-          )
-      catch
-        :exit, reason ->
-          Logger.warning(
-            "[SessionManager] ActionCycleServer start exited for #{agent_id}: #{inspect(reason)}"
-          )
-      end
-    end
-
     # Maintenance Server
     if Code.ensure_loaded?(Arbor.Agent.MaintenanceSupervisor) do
       try do

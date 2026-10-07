@@ -138,6 +138,7 @@ defmodule Arbor.Agent.Executor do
         intents_executed: 0,
         intents_blocked: 0,
         intents_parked: 0,
+        intents_dropped: 0,
         total_duration_ms: 0,
         started_at: DateTime.utc_now()
       }
@@ -215,7 +216,7 @@ defmodule Arbor.Agent.Executor do
       :ok ->
         case state.status do
           :running ->
-            {:noreply, process_intent(intent, state, sender_verdict)}
+            {:noreply, deliver_intent(intent, state)}
 
           :paused ->
             pending = :queue.in(intent, state.pending_intents)
@@ -281,6 +282,52 @@ defmodule Arbor.Agent.Executor do
       Map.get(metadata, "source_agent")
   end
 
+  # Delivery is at-least-once: ExecutorIntegration.route_pending_intentions
+  # re-routes any IntentStore lock older than its stale timeout, and that
+  # includes intents parked here for approval and acts still running. The
+  # Executor is the effect boundary, so it admits a store-managed intent only
+  # while the store still says it is :locked (routed and unfinished), and never
+  # re-admits an intent it has parked. A duplicate is dropped, not failed: the
+  # original attempt still owns the outcome (M0, D4).
+  defp deliver_intent(%Intent{} = intent, state) do
+    case admit_delivery(intent, state) do
+      :deliver ->
+        process_intent(intent, state)
+
+      {:drop, reason} ->
+        Logger.debug("[Executor] dropped duplicate delivery of #{intent.id}: #{inspect(reason)}")
+
+        safe_emit(:agent, :intent_delivery_dropped, %{
+          agent_id: state.agent_id,
+          intent_id: intent.id,
+          reason: inspect(reason)
+        })
+
+        update_in(state, [:stats, :intents_dropped], &((&1 || 0) + 1))
+    end
+  end
+
+  defp admit_delivery(%Intent{id: intent_id}, state) do
+    if Map.has_key?(awaiting_approval(state), intent_id) do
+      {:drop, :awaiting_approval}
+    else
+      store_delivery_verdict(state.agent_id, intent_id)
+    end
+  end
+
+  defp store_delivery_verdict(agent_id, intent_id) do
+    case safe_call(fn -> Arbor.Memory.get_intent(agent_id, intent_id) end) do
+      {:ok, _stored, %{status: :locked}} -> :deliver
+      {:ok, _stored, %{status: status}} -> {:drop, {:stale_delivery, status}}
+      # Direct submissions (tests) never enter the store.
+      {:error, :not_found} -> :deliver
+      # Unverifiable. Every production delivery is store-managed and stays
+      # :locked durably, so the stale-lock sweep re-routes it once the store is
+      # readable again; executing blind could repeat a side effect.
+      _unavailable -> {:drop, :intent_status_unavailable}
+    end
+  end
+
   defp process_intent(%Intent{} = intent, state, sender_verdict \\ :ok) do
     start_time = System.monotonic_time(:millisecond)
     state = %{state | current_intent: intent}
@@ -291,7 +338,14 @@ defmodule Arbor.Agent.Executor do
         _ -> :ok
       end
 
-    {canonical_uri, auth_verdict} = gather_auth(intent, state)
+    # A rejected sender never reaches the authorizer: Trust.authorize can open a
+    # human approval request, and a forged intent must not be able to prompt
+    # one on this agent's behalf. DecideCore rejects the sender first anyway.
+    {canonical_uri, auth_verdict} =
+      case sender_verdict do
+        {:error, _reason} -> {nil, nil}
+        _ok -> gather_auth(intent, state)
+      end
 
     snapshot = %{
       agent_id: state.agent_id,
@@ -407,11 +461,7 @@ defmodule Arbor.Agent.Executor do
 
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
-
-    # Mark intent failed in IntentStore so it isn't re-routed
-    safe_call(fn ->
-      Arbor.Memory.fail_intent(state.agent_id, intent.id, "blocked: #{inspect(reason)}")
-    end)
+    block_stored_intent(state.agent_id, intent, reason)
 
     # Forward blocked percept to ActionCycleServer for Mind awareness
     forward_percept_to_action_cycle(state.agent_id, percept)
@@ -425,6 +475,33 @@ defmodule Arbor.Agent.Executor do
     state
     |> update_in([:stats, :intents_blocked], &(&1 + 1))
     |> Map.put(:current_intent, nil)
+  end
+
+  # A refused intent is blocked, not failed: retrying the same act cannot
+  # succeed, so it must not return to :pending for automatic re-routing (M0,
+  # D5); what happens next is the mind's decision. A sender rejection leaves the
+  # store alone — that intent came from an unauthorized principal, so it must
+  # not be able to block (or otherwise mutate) a stored intent by reusing its id.
+  defp block_stored_intent(_agent_id, _intent, {:sender_unauthorized, _reason}), do: :ok
+
+  defp block_stored_intent(agent_id, %Intent{id: intent_id}, reason) do
+    safe_call(fn ->
+      Arbor.Memory.block_intent(agent_id, intent_id, store_reason("blocked: " <> inspect(reason)))
+    end)
+  end
+
+  # IntentStore rejects failure reasons over 4 KiB as invalid requests; an
+  # oversized inspect/1 must not silently leave the intent locked.
+  @max_store_reason_bytes 4_000
+
+  defp store_reason(reason) when byte_size(reason) <= @max_store_reason_bytes, do: reason
+
+  defp store_reason(reason) do
+    reason
+    |> binary_part(0, @max_store_reason_bytes)
+    |> String.chunk(:valid)
+    |> Enum.filter(&String.valid?/1)
+    |> Enum.join()
   end
 
   defp handle_ask(%Intent{} = intent, resource, meta, state, start_time) do
@@ -668,7 +745,7 @@ defmodule Arbor.Agent.Executor do
 
       {{:value, intent}, rest} ->
         state = %{state | pending_intents: rest}
-        state = process_intent(intent, state)
+        state = deliver_intent(intent, state)
         drain_pending(state)
     end
   end
@@ -721,8 +798,9 @@ defmodule Arbor.Agent.Executor do
       nil
   end
 
-  # Forward execution results to ActionCycleServer so the Mind can process them.
-  # Converts Percept struct to a plain map (ActionCycleServer expects maps).
+  # Execution failures still return the intent to :pending for automatic retry
+  # (IntentStore blocks it once retries are exhausted). Replacing automatic
+  # retry with a mind decision is M1's Intention/Act split.
   defp complete_or_fail_intent(agent_id, %Intent{id: intent_id}, :success) do
     safe_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
   end
@@ -731,6 +809,9 @@ defmodule Arbor.Agent.Executor do
     safe_call(fn -> Arbor.Memory.fail_intent(agent_id, intent_id, "execution failed") end)
   end
 
+  # Forward execution results to ActionCycleServer so the Mind can process them.
+  # Converts Percept struct to a plain map (ActionCycleServer expects maps).
+  # No-op since ActionCycleServer stopped being started (M0); deleted in M3.
   defp forward_percept_to_action_cycle(agent_id, %Percept{} = percept) do
     action_cycle = Arbor.Agent.ActionCycleSupervisor
 

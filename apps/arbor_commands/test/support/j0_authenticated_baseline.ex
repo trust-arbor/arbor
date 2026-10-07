@@ -727,11 +727,26 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
         id: :arbor_agent_profiles
       )
 
+    # Mirrors Arbor.Agent.Application. Identity alias records live in this
+    # store; since 2026-09-27 (11d209431) Security.resolve_conversation_owner/1
+    # resolves aliases strictly, so without it every authenticated delivery
+    # fails closed as {:error, :unauthorized} (:alias_store_unavailable).
+    user_config =
+      Supervisor.child_spec(
+        {BufferedStore, name: :arbor_user_config, backend: nil, write_mode: :sync},
+        id: :arbor_user_config
+      )
+
     Enum.map(
       [
         {Elixir.Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
         {Elixir.Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
         profiles,
+        # Mirrors Arbor.Agent.Application: since 2026-10-05 (3614f4cfe)
+        # ProfileStore.store_profile/1 routes through this owner, and a missing
+        # owner surfaces from Lifecycle.create/2 as {:persist_failed, :outcome_unknown}.
+        Arbor.Agent.ProfileAuthorityOwner,
+        user_config,
         AgentRegistry,
         Arbor.Agent.SessionManager,
         Arbor.Agent.Supervisor

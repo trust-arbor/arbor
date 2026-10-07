@@ -366,6 +366,7 @@ defmodule Arbor.Memory do
   defdelegate lock_intent(agent_id, intent_id), to: GoalIntentOps
   defdelegate complete_intent(agent_id, intent_id), to: GoalIntentOps
   defdelegate fail_intent(agent_id, intent_id, reason \\ "unknown"), to: GoalIntentOps
+  defdelegate block_intent(agent_id, intent_id, reason), to: GoalIntentOps
   defdelegate unlock_stale_intents(agent_id, timeout_ms \\ 60_000), to: GoalIntentOps
   defdelegate export_pending_intents(agent_id), to: GoalIntentOps
   defdelegate import_intents(agent_id, intent_maps), to: GoalIntentOps

@@ -50,7 +50,16 @@ defmodule Arbor.Memory.IntentStore do
   @intent_types [:think, :act, :wait, :reflect, :internal]
   @percept_types [:action_result, :environment, :interrupt, :error, :timeout]
   @percept_outcomes [:success, :failure, :partial, :blocked, :interrupted]
-  @intent_statuses [:pending, :locked, :completed]
+  # `:blocked` is terminal for routing (never locked or re-routed) but is not
+  # `:completed`: it holds an intent that needs a decision from the mind
+  # (authorization/approval denied, or automatic retries exhausted). See
+  # .arbor/decisions/2026-10-07-mind-body-sensorium.md (M0, D5).
+  @intent_statuses [:pending, :locked, :completed, :blocked]
+  @routing_terminal_statuses [:completed, :blocked]
+  # A failure that would push retry_count to this value blocks the intent
+  # instead of returning it to :pending, so exhausted intents cannot linger as
+  # hidden :pending zombies. Matches the pending_intentions/2 read default.
+  @max_auto_retries 5
   @aggregate_fields ~w(version intents percepts statuses)
   @item_fields ~w(payload provenance)
   @intent_payload_fields ~w(
@@ -256,9 +265,13 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
+  # Terminal for goal-decomposition purposes: completed, blocked, or a legacy
+  # :pending row whose retries were exhausted before blocking existed.
   defp intent_terminal?(intent_id, statuses) do
     status_info = Map.get(statuses, intent_id, %{})
-    Map.get(status_info, :status, :pending) == :completed
+
+    Map.get(status_info, :status, :pending) in @routing_terminal_statuses or
+      Map.get(status_info, :retry_count, 0) >= @max_auto_retries
   end
 
   # ============================================================================
@@ -360,6 +373,36 @@ defmodule Arbor.Memory.IntentStore do
 
   def fail_intent_tainted(_agent_id, _intent_id, _reason, _taint),
     do: {:error, :invalid_request}
+
+  @doc """
+  Mark an intent as blocked: it will not be locked or re-routed again.
+
+  Used when the body refuses an intent (authorization denied, reflex block,
+  approval denied). Retrying the same act cannot succeed; what happens next is
+  the mind's decision. Unlike `fail_intent/3`, this never returns the intent to
+  `:pending`. Completed intents are not reopened (`{:error, :intent_terminal}`).
+  """
+  @spec block_intent(String.t(), String.t(), String.t()) ::
+          :ok
+          | {:error,
+             :invalid_request
+             | :not_found
+             | :intent_terminal
+             | :store_unavailable
+             | :commit_outcome_unknown}
+  def block_intent(agent_id, intent_id, reason)
+      when is_binary(reason) and byte_size(reason) <= @max_failure_reason_bytes do
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_identifier(intent_id),
+         true <- String.valid?(reason) do
+      taint = TaintEnvelope.missing_fallback()
+      safe_server_call({:block_intent, agent_id, intent_id, reason, taint}, :mutation)
+    else
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  def block_intent(_agent_id, _intent_id, _reason), do: {:error, :invalid_request}
 
   @doc """
   Unlock intents that have been locked longer than `timeout_ms`.
@@ -714,6 +757,20 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @impl true
+  def handle_call({:block_intent, agent_id, intent_id, reason, reason_taint}, _from, state) do
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      operation = fn baseline ->
+        block_intent_mutation(baseline, intent_id, reason, reason_taint)
+      end
+
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, :blocked, disposition} -> {:ok, state, disposition}
+        {:error, error, disposition} -> {error, state, disposition}
+      end
+    end)
+  end
+
+  @impl true
   def handle_call({:import_intents, agent_id, prepared_items}, _from, initial_state) do
     buffer_size = initial_state.buffer_size
 
@@ -838,10 +895,18 @@ defmodule Arbor.Memory.IntentStore do
 
       {surviving_intents, pruned_ids} =
         Enum.reduce(data.intents, {[], []}, fn intent, {keep, pruned} ->
-          age_ms = DateTime.diff(now, intent.created_at, :millisecond)
-          status = Map.get(Map.get(statuses, intent.id, %{}), :status, :pending)
+          status_info = Map.get(statuses, intent.id, %{})
+          status = Map.get(status_info, :status, :pending)
+          # Blocked intents age from the block, so the mind sees a recent block
+          # for a full window before it is pruned.
+          aged_from =
+            if status == :blocked,
+              do: Map.get(status_info, :failed_at) || intent.created_at,
+              else: intent.created_at
 
-          if status == :pending and age_ms > max_age_ms do
+          age_ms = DateTime.diff(now, aged_from, :millisecond)
+
+          if status in [:pending, :blocked] and age_ms > max_age_ms do
             {keep, [intent.id | pruned]}
           else
             {[intent | keep], pruned}
@@ -1131,7 +1196,7 @@ defmodule Arbor.Memory.IntentStore do
       {:ok, value, _projection, :noop} ->
         {:ok, value, :ack}
 
-      {:error, reason} when reason in [:not_found, :not_lockable] ->
+      {:error, reason} when reason in [:not_found, :not_lockable, :intent_terminal] ->
         {:error, {:error, reason}, :ack}
 
       {:error, reason} ->
@@ -1188,29 +1253,80 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
+  # A failure never reopens a terminal intent (a late failure report must not
+  # resurrect a completed or blocked intent), and exhausting automatic retries
+  # blocks the intent instead of leaving a hidden :pending zombie.
   defp fail_intent_mutation(baseline, intent_id, reason, reason_taint) do
     data = baseline.data
     statuses = Map.get(data, :statuses, %{})
+    current = Map.get(statuses, intent_id, %{})
 
-    if Enum.any?(data.intents, &(&1.id == intent_id)) do
-      current = Map.get(statuses, intent_id, %{})
-      retry_count = Map.get(current, :retry_count, 0) + 1
+    cond do
+      not Enum.any?(data.intents, &(&1.id == intent_id)) ->
+        {:error, :not_found}
 
-      status_info = %{
-        status: :pending,
-        failed_at: DateTime.utc_now(),
-        last_failure_reason: reason,
-        retry_count: retry_count
-      }
+      Map.get(current, :status, :pending) in @routing_terminal_statuses ->
+        {:error, :intent_terminal}
 
-      updated_statuses = Map.put(statuses, intent_id, status_info)
-      updated = Map.put(data, :statuses, updated_statuses)
+      true ->
+        retry_count = Map.get(current, :retry_count, 0) + 1
 
-      {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
-       fn _encoded -> {:failed, retry_count} end}
-    else
-      {:error, :not_found}
+        {status, recorded_reason} =
+          if retry_count >= @max_auto_retries,
+            do: {:blocked, bounded_reason("retries_exhausted: " <> reason)},
+            else: {:pending, reason}
+
+        status_info = %{
+          status: status,
+          failed_at: DateTime.utc_now(),
+          last_failure_reason: recorded_reason,
+          retry_count: retry_count
+        }
+
+        updated_statuses = Map.put(statuses, intent_id, status_info)
+        updated = Map.put(data, :statuses, updated_statuses)
+
+        {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
+         fn _encoded -> {:failed, retry_count} end}
     end
+  end
+
+  defp block_intent_mutation(baseline, intent_id, reason, reason_taint) do
+    data = baseline.data
+    statuses = Map.get(data, :statuses, %{})
+    current = Map.get(statuses, intent_id, %{})
+
+    cond do
+      not Enum.any?(data.intents, &(&1.id == intent_id)) ->
+        {:error, :not_found}
+
+      Map.get(current, :status, :pending) == :completed ->
+        {:error, :intent_terminal}
+
+      true ->
+        status_info = %{
+          status: :blocked,
+          failed_at: DateTime.utc_now(),
+          last_failure_reason: reason,
+          retry_count: Map.get(current, :retry_count, 0)
+        }
+
+        updated_statuses = Map.put(statuses, intent_id, status_info)
+        updated = Map.put(data, :statuses, updated_statuses)
+
+        {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
+         fn _encoded -> :blocked end}
+    end
+  end
+
+  defp bounded_reason(reason) when byte_size(reason) <= @max_failure_reason_bytes, do: reason
+
+  defp bounded_reason(reason) do
+    reason
+    |> binary_part(0, @max_failure_reason_bytes)
+    |> String.chunk(:valid)
+    |> Enum.filter(&String.valid?/1)
+    |> Enum.join()
   end
 
   defp commit_disposition(:projected), do: :settle
@@ -1222,7 +1338,9 @@ defmodule Arbor.Memory.IntentStore do
 
   defp do_record_prepared(state, domain, agent_id, prepared, deadline) do
     operation = fn baseline ->
-      candidate = put_prepared_item(baseline.data, domain, prepared.value, state.buffer_size)
+      candidate =
+        put_prepared_item(agent_id, baseline.data, domain, prepared.value, state.buffer_size)
+
       overrides = %{{domain, prepared.id} => prepared.taint}
 
       result = fn encoded ->
@@ -1902,14 +2020,15 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
-  defp put_prepared_item(data, :intent, %Intent{} = intent, buffer_size) do
-    intents = [intent | Enum.reject(data.intents, &(&1.id == intent.id))]
-    intents = Enum.take(intents, buffer_size)
+  defp put_prepared_item(agent_id, data, :intent, %Intent{} = intent, buffer_size) do
+    all_intents = [intent | Enum.reject(data.intents, &(&1.id == intent.id))]
+    {intents, evicted} = Enum.split(all_intents, buffer_size)
+    warn_evicted_live_intents(agent_id, data.statuses, evicted, :buffer_size)
 
     retain_intent_state(%{data | intents: intents}, intents)
   end
 
-  defp put_prepared_item(data, :percept, %Percept{} = percept, buffer_size) do
+  defp put_prepared_item(_agent_id, data, :percept, %Percept{} = percept, buffer_size) do
     percepts = [percept | Enum.reject(data.percepts, &(&1.id == percept.id))]
     %{data | percepts: Enum.take(percepts, buffer_size)}
   end
@@ -2124,7 +2243,7 @@ defmodule Arbor.Memory.IntentStore do
         {:error, :provenance_unavailable}
 
       {:error, _reason} ->
-        case drop_oldest_unprotected(data, protected_keys) do
+        case drop_oldest_unprotected(agent_id, data, protected_keys) do
           {:ok, smaller} ->
             encode_bounded_aggregate(agent_id, baseline, smaller, overrides, protected_keys)
 
@@ -2134,14 +2253,15 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
-  defp drop_oldest_unprotected(data, protected_keys) do
+  defp drop_oldest_unprotected(agent_id, data, protected_keys) do
     candidates =
       []
       |> maybe_add_oldest_candidate(:intent, data.intents, protected_keys)
       |> maybe_add_oldest_candidate(:percept, data.percepts, protected_keys)
 
     case Enum.min_by(candidates, &candidate_time/1, fn -> nil end) do
-      %{domain: :intent} ->
+      %{domain: :intent, item: evicted} ->
+        warn_evicted_live_intents(agent_id, data.statuses, [evicted], :aggregate_limit)
         intents = Enum.drop(data.intents, -1)
         {:ok, retain_intent_state(%{data | intents: intents}, intents)}
 
@@ -2256,6 +2376,36 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp emit_record_signals(_signal), do: :ok
+
+  # Evicting completed intents is routine buffer hygiene. Evicting anything
+  # else drops live work (pending/locked) or an undecided block, so it is
+  # logged at warning level and signalled — never silent (M0, D8).
+  defp warn_evicted_live_intents(agent_id, statuses, evicted, cause) do
+    for %Intent{} = intent <- evicted,
+        status = statuses |> Map.get(intent.id, %{}) |> Map.get(:status, :pending),
+        status != :completed do
+      Logger.warning(
+        "IntentStore evicted non-completed intent #{intent.id} " <>
+          "(status=#{status}, cause=#{cause}) for agent #{agent_id}"
+      )
+
+      emit_intent_evicted(agent_id, intent, status, cause)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_intent_evicted(agent_id, intent, status, cause) do
+    Signals.emit_intent_evicted(agent_id, intent, status, cause)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
 
   defp ensure_ets_table do
     if :ets.whereis(@ets_table) == :undefined do

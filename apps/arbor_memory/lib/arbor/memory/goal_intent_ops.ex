@@ -204,11 +204,20 @@ defmodule Arbor.Memory.GoalIntentOps do
   defdelegate complete_intent(agent_id, intent_id), to: IntentStore
 
   @doc """
-  Mark an intent as failed. Increments retry_count, returns to pending.
+  Mark an intent as failed. Increments retry_count and returns it to pending,
+  or blocks it once automatic retries are exhausted. Never reopens a completed
+  or blocked intent (`{:error, :intent_terminal}`).
   """
   @spec fail_intent(String.t(), String.t(), String.t()) ::
-          {:ok, non_neg_integer()} | {:error, :not_found}
+          {:ok, non_neg_integer()} | {:error, term()}
   defdelegate fail_intent(agent_id, intent_id, reason \\ "unknown"), to: IntentStore
+
+  @doc """
+  Mark an intent as blocked: never locked or re-routed again; the mind decides
+  what happens next. Does not reopen a completed intent.
+  """
+  @spec block_intent(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  defdelegate block_intent(agent_id, intent_id, reason), to: IntentStore
 
   @doc """
   Unlock intents locked longer than timeout_ms (stale lock recovery).
