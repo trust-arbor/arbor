@@ -183,8 +183,8 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
   test "security regression: broker and lane restart cannot pin a pre-revocation profile" do
     for ordering <- [:broker_only, :lane_then_broker, :broker_then_lane] do
       {:ok, identity} = Identity.generate(name: "profile-notice-restart")
-      :ok = Security.register_identity(Identity.public_only(identity))
-      :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+      :ok = Security.register_identity_fixture(Identity.public_only(identity))
+      :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
       profile = profile(identity.agent_id)
       assert :ok = ProfileStore.store_profile(profile)
       assert {:ok, old_source} = open_source(identity)
@@ -222,8 +222,8 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
         assert Backend.raw(identity.agent_id).data["notice_mailboxes"] == []
       after
         send(backend_owner, {:release_backend, latch})
-        Security.delete_signing_key(identity.agent_id)
-        Security.deregister_identity(identity.agent_id)
+        Security.delete_signing_key_fixture(identity.agent_id)
+        Security.deregister_identity_fixture(identity.agent_id)
       end
     end
   end
@@ -263,8 +263,8 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
 
   test "security regression: acknowledged CAS retires the old source before backend IO" do
     {:ok, identity} = Identity.generate(name: "profile-notice-cas")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
     profile = profile(identity.agent_id)
     assert :ok = ProfileStore.store_profile(profile)
     assert {:ok, old_source} = open_source(identity)
@@ -317,8 +317,8 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
     after
       send(backend_owner, {:release_backend, latch})
       send(worker, :stop)
-      Security.delete_signing_key(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      Security.delete_signing_key_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end
   end
 

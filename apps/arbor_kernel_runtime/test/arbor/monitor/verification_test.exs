@@ -10,10 +10,13 @@ defmodule Arbor.Monitor.VerificationTest do
   ]
 
   setup do
-    start_supervised!({Verification, @test_opts})
+    start_supervised!({Verification, test_opts()})
     Verification.clear_all()
     :ok
   end
+
+  defp test_opts(opts \\ @test_opts),
+    do: Keyword.put(opts, :trusted_mutation_producer, self())
 
   defp make_fingerprint(skill \\ :memory, metric \\ :total_bytes) do
     Fingerprint.new(skill, metric, :above)
@@ -226,10 +229,10 @@ defmodule Arbor.Monitor.VerificationTest do
 
       start_supervised!(
         {Verification,
-         [
+         test_opts(
            soak_cycles: 2,
            signal_callback: callback
-         ]}
+         )}
       )
 
       fp = make_fingerprint()
@@ -256,10 +259,10 @@ defmodule Arbor.Monitor.VerificationTest do
 
       start_supervised!(
         {Verification,
-         [
+         test_opts(
            soak_cycles: 3,
            signal_callback: callback
-         ]}
+         )}
       )
 
       fp = make_fingerprint(:memory, :total_bytes)

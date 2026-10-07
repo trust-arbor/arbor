@@ -46,7 +46,13 @@ defmodule Arbor.Agent.Eval.TaskLoaderTest do
   end
 
   test "an unknown capability is rejected (never String.to_atom on file content)" do
-    m = %{"id" => "t", "prompt" => "p", "category" => "credential_safety", "capabilities" => ["rm_rf"]}
+    m = %{
+      "id" => "t",
+      "prompt" => "p",
+      "category" => "credential_safety",
+      "capabilities" => ["rm_rf"]
+    }
+
     assert_raise ArgumentError, ~r/unknown capability/, fn -> TaskLoader.from_map(m) end
   end
 

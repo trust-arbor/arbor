@@ -77,8 +77,8 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
     )
 
     {:ok, target} = Security.generate_identity()
-    assert :ok = Security.register_identity(target)
-    on_exit(fn -> Security.deregister_identity(target.agent_id) end)
+    assert :ok = Security.register_identity_fixture(target)
+    on_exit(fn -> Security.deregister_identity_fixture(target.agent_id) end)
     cap = Humans.grant!(c.human_id, "arbor://chat/agent/" <> target.agent_id)
     {:ok, %{operation_id: audit_id}} = Security.capability_mutation_audit_status()
     {:ok, engagement} = Arbor.Comms.resolve_user_engagement(target.agent_id, c.human_id)
@@ -230,7 +230,7 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
     end
 
     refute inspect(controls) =~ "private terminal"
-    assert :ok = Security.revoke(c.cap.id)
+    assert :ok = Security.revoke_fixture(c.cap.id)
     assert {:error, :unauthorized} = Adapter.activity(c.client)
   end
 

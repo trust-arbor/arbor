@@ -36,6 +36,7 @@ defmodule Arbor.Security.SubagentIsolation do
   require Logger
 
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security
   alias Arbor.Security.CapabilityStore
 
   @type isolation :: %{
@@ -68,50 +69,63 @@ defmodule Arbor.Security.SubagentIsolation do
   """
   @spec create_isolation(keyword()) :: {:ok, isolation()} | {:error, term()}
   def create_isolation(opts) do
-    parent_id = Keyword.fetch!(opts, :parent_id)
-    worker_id = Keyword.fetch!(opts, :worker_id)
-    resource_uris = Keyword.fetch!(opts, :resource_uris)
-    task_id = Keyword.get(opts, :task_id, generate_task_id())
-    session_id = opts[:session_id]
-    max_uses = Keyword.get(opts, :max_uses, 1)
-    expires_in = opts[:expires_in]
-    constraints = Keyword.get(opts, :constraints, %{})
+    with true <- Keyword.keyword?(opts),
+         actor_authority when not is_nil(actor_authority) <-
+           Keyword.get(opts, :actor_authority) do
+      parent_id = Keyword.fetch!(opts, :parent_id)
+      worker_id = Keyword.fetch!(opts, :worker_id)
+      resource_uris = Keyword.fetch!(opts, :resource_uris)
+      task_id = Keyword.get(opts, :task_id, generate_task_id())
+      session_id = opts[:session_id]
+      max_uses = Keyword.get(opts, :max_uses, 1)
+      expires_in = opts[:expires_in]
+      constraints = Keyword.get(opts, :constraints, %{})
 
-    expires_at =
-      if expires_in,
-        do: DateTime.utc_now() |> DateTime.add(expires_in, :second),
-        else: nil
+      expires_at =
+        if expires_in,
+          do: DateTime.utc_now() |> DateTime.add(expires_in, :second),
+          else: nil
 
-    delegated =
-      Enum.reduce(resource_uris, [], fn uri, acc ->
-        case delegate_for_task(
-               parent_id, worker_id, uri, task_id,
-               session_id, max_uses, expires_at, constraints
-             ) do
-          {:ok, cap} ->
-            [cap | acc]
+      delegated =
+        Enum.reduce(resource_uris, [], fn uri, acc ->
+          case delegate_for_task(
+                 parent_id,
+                 worker_id,
+                 uri,
+                 task_id,
+                 session_id,
+                 max_uses,
+                 expires_at,
+                 constraints,
+                 actor_authority
+               ) do
+            {:ok, cap} ->
+              [cap | acc]
 
-          {:error, reason} ->
-            Logger.warning(
-              "[SubagentIsolation] Could not delegate #{uri} from #{parent_id}: #{inspect(reason)}"
-            )
+            {:error, reason} ->
+              Logger.warning(
+                "[SubagentIsolation] Could not delegate #{uri} from #{parent_id}: #{inspect(reason)}"
+              )
 
-            acc
-        end
-      end)
+              acc
+          end
+        end)
 
-    if delegated == [] do
-      {:error, :no_capabilities_delegated}
+      if delegated == [] do
+        {:error, :no_capabilities_delegated}
+      else
+        isolation = %{
+          task_id: task_id,
+          parent_id: parent_id,
+          worker_id: worker_id,
+          capabilities: Enum.reverse(delegated),
+          created_at: DateTime.utc_now()
+        }
+
+        {:ok, isolation}
+      end
     else
-      isolation = %{
-        task_id: task_id,
-        parent_id: parent_id,
-        worker_id: worker_id,
-        capabilities: Enum.reverse(delegated),
-        created_at: DateTime.utc_now()
-      }
-
-      {:ok, isolation}
+      _ -> {:error, :capability_mutation_unauthorized}
     end
   end
 
@@ -121,33 +135,41 @@ defmodule Arbor.Security.SubagentIsolation do
   Call this when the worker task completes (success or failure).
   Revokes all capabilities with the given task_id.
   """
-  @spec cleanup(String.t()) :: {:ok, non_neg_integer()}
-  def cleanup(task_id) do
-    CapabilityStore.revoke_by_task(task_id)
+  @spec cleanup(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def cleanup(task_id, opts \\ []) do
+    with true <- Keyword.keyword?(opts),
+         actor_authority when not is_nil(actor_authority) <-
+           Keyword.get(opts, :actor_authority) do
+      Security.revoke_by_task(task_id, actor_authority: actor_authority)
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
   end
 
   # Private
 
-  defp delegate_for_task(parent_id, worker_id, resource_uri, task_id, session_id, max_uses, expires_at, constraints) do
+  defp delegate_for_task(
+         parent_id,
+         worker_id,
+         resource_uri,
+         task_id,
+         session_id,
+         max_uses,
+         expires_at,
+         constraints,
+         actor_authority
+       ) do
     case CapabilityStore.find_authorizing(parent_id, resource_uri) do
       {:ok, parent_cap} ->
-        case Capability.delegate(parent_cap, worker_id,
-               task_id: task_id,
-               session_id: session_id,
-               max_uses: max_uses,
-               delegation_depth: 0,
-               expires_at: expires_at,
-               constraints: constraints
-             ) do
-          {:ok, delegated_cap} ->
-            case CapabilityStore.put(delegated_cap) do
-              {:ok, :stored} -> {:ok, delegated_cap}
-              {:error, _} = error -> error
-            end
-
-          {:error, _} = error ->
-            error
-        end
+        Security.delegate(parent_cap.id, worker_id,
+          actor_authority: actor_authority,
+          task_id: task_id,
+          session_id: session_id,
+          max_uses: max_uses,
+          delegation_depth: 0,
+          expires_at: expires_at,
+          constraints: constraints
+        )
 
       {:error, :not_found} ->
         {:error, {:parent_lacks_capability, resource_uri}}

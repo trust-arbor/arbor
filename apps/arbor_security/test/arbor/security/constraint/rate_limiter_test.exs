@@ -50,17 +50,32 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
     end
   end
 
-  describe "reset/2" do
+  describe "reset_fixture/2" do
     test "restores full tokens on next consume", %{principal: p, resource: r} do
       max = 2
       :ok = RateLimiter.consume(p, r, max)
       :ok = RateLimiter.consume(p, r, max)
       assert {:error, :rate_limited} = RateLimiter.consume(p, r, max)
 
-      :ok = RateLimiter.reset(p, r)
+      :ok = RateLimiter.reset_fixture(p, r)
 
       # After reset, bucket is removed — next consume creates fresh bucket
       assert :ok = RateLimiter.consume(p, r, max)
+    end
+
+    test "security regression: raw reset messages cannot refill a bucket", %{
+      principal: p,
+      resource: r
+    } do
+      assert :ok = RateLimiter.consume(p, r, 1)
+      assert {:error, :rate_limited} = RateLimiter.consume(p, r, 1)
+
+      assert {:error, :rate_limit_reset_unauthorized} =
+               GenServer.call(RateLimiter, {:reset, {p, r}})
+
+      assert {:error, :rate_limited} = RateLimiter.consume(p, r, 1)
+      assert :ok = RateLimiter.reset_fixture(p, r)
+      assert :ok = RateLimiter.consume(p, r, 1)
     end
   end
 
@@ -85,7 +100,8 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
 
       on_exit(fn ->
         if prev_refill,
-          do: Application.put_env(:arbor_security, :rate_limit_refill_period_seconds, prev_refill),
+          do:
+            Application.put_env(:arbor_security, :rate_limit_refill_period_seconds, prev_refill),
           else: Application.delete_env(:arbor_security, :rate_limit_refill_period_seconds)
       end)
 

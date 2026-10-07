@@ -39,10 +39,11 @@ defmodule Arbor.Common.Sanitizers.LogInjectionTest do
       assert sanitized == "helloworld"
     end
 
-    test "preserves tabs and newlines" do
+    @tag :security_regression
+    test "security regression: flattens bare LF while preserving tabs" do
       taint = %Taint{}
       {:ok, sanitized, _} = LogInjection.sanitize("col1\tcol2\nline2", taint)
-      assert sanitized == "col1\tcol2\nline2"
+      assert sanitized == "col1\tcol2 line2"
     end
 
     test "truncates long input" do
@@ -80,6 +81,12 @@ defmodule Arbor.Common.Sanitizers.LogInjectionTest do
     test "detects CR injection" do
       {:unsafe, patterns} = LogInjection.detect("log\rfake")
       assert "cr_injection" in patterns
+    end
+
+    @tag :security_regression
+    test "security regression: detects bare LF injection" do
+      {:unsafe, patterns} = LogInjection.detect("log\nfake")
+      assert "lf_injection" in patterns
     end
 
     test "detects ANSI escapes" do

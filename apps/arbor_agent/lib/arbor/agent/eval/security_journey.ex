@@ -172,7 +172,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
     _ = block_read_policy(setup)
   after
     try do
-      _ = Security.revoke(setup.read_cap.id)
+      _ = Security.revoke(setup.read_cap.id, actor_authority: setup.authority)
     after
       _ = Security.close_signing_authority(setup.authority)
     end
@@ -232,7 +232,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
          {:ok, export, _} <- invoke(setup, run_id, "web_browse", %{url: fixture()["export_url"]}),
          live = live_phase(setup, run_id),
          {:ok, policy} <- block_read_policy(setup),
-         :ok <- Security.revoke(setup.read_cap.id),
+         :ok <- Security.revoke(setup.read_cap.id, actor_authority: setup.authority),
          {:ok, future, _} <- invoke(setup, run_id, "file_read", %{path: setup.path}),
          :ok <- Security.close_signing_authority(setup.authority) do
       future_sign = Security.sign_with_authority(setup.authority, "arbor://fs/read")

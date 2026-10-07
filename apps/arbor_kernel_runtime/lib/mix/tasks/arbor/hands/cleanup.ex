@@ -38,20 +38,47 @@ defmodule Mix.Tasks.Arbor.Hands.Cleanup do
         exit({:shutdown, 1})
       end
 
+      validate_name(name)
       cleanup_hand(name, opts)
     end
   end
 
   defp cleanup_hand(name, opts) do
+    hand_dir = resolve_hand_dir(name)
     ensure_hand_stopped(name)
-    ensure_hand_dir_exists(name)
     maybe_remove_worktree(name, opts)
     maybe_delete_branch(name, opts)
 
     # Remove hand directory
-    File.rm_rf!(Hands.hand_dir(name))
+    File.rm_rf!(hand_dir)
     Mix.shell().info("Removed .arbor/hands/#{name}/")
     Mix.shell().info("Cleanup complete for '#{name}'.")
+  end
+
+  defp validate_name(name) do
+    case Hands.validate_name(name) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_hand_name} ->
+        Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp resolve_hand_dir(name) do
+    case Hands.resolve_existing_hand_dir(name) do
+      {:ok, path} ->
+        path
+
+      {:error, :not_found} ->
+        Mix.shell().error("No hand directory found for '#{name}'")
+        exit({:shutdown, 1})
+
+      {:error, reason} ->
+        Mix.shell().error("Unsafe hand directory for '#{name}': #{inspect(reason)}")
+        exit({:shutdown, 1})
+    end
   end
 
   defp ensure_hand_stopped(name) do
@@ -68,23 +95,18 @@ defmodule Mix.Tasks.Arbor.Hands.Cleanup do
     end
   end
 
-  defp ensure_hand_dir_exists(name) do
-    unless File.dir?(Hands.hand_dir(name)) do
-      Mix.shell().error("No hand directory found for '#{name}'")
-      exit({:shutdown, 1})
-    end
-  end
-
   defp maybe_remove_worktree(name, opts) do
-    unless Hands.has_worktree?(name), do: :ok
+    if Hands.has_worktree?(name) do
+      case Hands.remove_worktree(name) do
+        :ok ->
+          Mix.shell().info("Removed worktree for '#{name}'")
 
-    case Hands.remove_worktree(name) do
-      :ok ->
-        Mix.shell().info("Removed worktree for '#{name}'")
-
-      {:error, reason} ->
-        Mix.shell().error(reason)
-        handle_worktree_error(opts)
+        {:error, reason} ->
+          Mix.shell().error(reason)
+          handle_worktree_error(opts)
+      end
+    else
+      :ok
     end
   end
 
@@ -134,21 +156,21 @@ defmodule Mix.Tasks.Arbor.Hands.Cleanup do
   defp cleanup_all(opts) do
     hands_dir = Hands.hands_dir()
 
-    unless File.dir?(hands_dir) do
+    if File.dir?(hands_dir) do
+      candidates = find_cleanup_candidates(hands_dir)
+      run_cleanup_candidates(candidates, opts)
+    else
       Mix.shell().info("No hands directory found.")
-      return_early()
     end
-
-    candidates = find_cleanup_candidates(hands_dir)
-    run_cleanup_candidates(candidates, opts)
   end
 
   defp find_cleanup_candidates(hands_dir) do
     hands_dir
     |> File.ls!()
     |> Enum.filter(fn name ->
-      dir = Path.join(hands_dir, name)
-      File.dir?(dir) && Hands.summary_exists?(name) && Hands.find_hand(name) == :not_found
+      Hands.validate_name(name) == :ok and
+        match?({:ok, _}, Hands.resolve_existing_hand_dir(name)) and
+        Hands.summary_exists?(name) and Hands.find_hand(name) == :not_found
     end)
   end
 
@@ -165,6 +187,4 @@ defmodule Mix.Tasks.Arbor.Hands.Cleanup do
       cleanup_hand(name, opts)
     end)
   end
-
-  defp return_early, do: :ok
 end

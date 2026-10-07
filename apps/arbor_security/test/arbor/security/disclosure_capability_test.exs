@@ -20,19 +20,59 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     SystemAuthority
   }
 
+  alias Arbor.Security
+
+  @authority_key {__MODULE__, :actor_authority}
+  @principal_key {__MODULE__, :target_principal}
+
+  setup do
+    {:ok, actor} = Identity.generate(name: "disclosure-capability-actor")
+    :ok = Registry.register_fixture(actor)
+    target_principal = Arbor.Identifiers.generate_agent_id()
+
+    {:ok, mutation_cap} =
+      Security.grant_fixture(
+        principal: actor.agent_id,
+        resource: "arbor://security/grant/#{target_principal}"
+      )
+
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        actor.agent_id,
+        actor.private_key,
+        purpose: :disclosure_capability_test
+      )
+
+    {:ok, actor_authority} =
+      Security.open_ephemeral_signing_authority(proof, actor.private_key)
+
+    Process.put(@authority_key, actor_authority)
+    Process.put(@principal_key, target_principal)
+
+    on_exit(fn ->
+      Security.close_signing_authority(actor_authority)
+      _ = CapabilityStore.revoke_all_fixture(target_principal)
+      Security.revoke_fixture(mutation_cap.id)
+      Security.deregister_identity_fixture(actor.agent_id)
+    end)
+
+    :ok
+  end
+
   defp unique, do: :erlang.unique_integer([:positive])
 
   defp valid_issue_opts(overrides \\ []) do
     n = unique()
 
     [
-      principal_id: Arbor.Identifiers.generate_agent_id(),
+      principal_id: Process.get(@principal_key),
       session_id: "session_#{n}",
       task_id: "task_#{n}",
       principal_scope: "human_#{n}",
       destination: "api.anthropic.com",
       provider: "anthropic",
-      runtime: "arbor"
+      runtime: "arbor",
+      actor_authority: Process.get(@authority_key)
     ]
     |> Keyword.merge(overrides)
   end
@@ -157,15 +197,26 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
 
     @tag spec: "VP-05D2A0"
     test "accepts a positive ttl_seconds" do
+      before_issue = DateTime.utc_now()
       assert {:ok, cap} = DisclosureCapability.issue(valid_issue_opts(ttl_seconds: 60))
-      assert DateTime.diff(cap.expires_at, cap.granted_at) == 60
+      after_issue = DateTime.utc_now()
+
+      assert DateTime.compare(cap.expires_at, DateTime.add(before_issue, 60, :second)) in [
+               :eq,
+               :gt
+             ]
+
+      assert DateTime.compare(cap.expires_at, DateTime.add(after_issue, 60, :second)) in [
+               :eq,
+               :lt
+             ]
     end
   end
 
   describe "fetch_and_validate/2" do
     setup do
       {:ok, cap} = DisclosureCapability.issue(valid_issue_opts())
-      on_exit(fn -> _ = CapabilityStore.revoke(cap.id) end)
+      on_exit(fn -> _ = CapabilityStore.revoke_fixture(cap.id) end)
       %{cap: cap}
     end
 
@@ -183,7 +234,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
 
     @tag spec: "VP-05D2A0"
     test "revoked id fails closed", %{cap: cap} do
-      :ok = CapabilityStore.revoke(cap.id)
+      :ok = CapabilityStore.revoke_fixture(cap.id)
 
       assert {:error, :not_found} =
                DisclosureCapability.fetch_and_validate(cap.id, fetch_opts(cap))
@@ -248,7 +299,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "forged signature fails closed", %{cap: cap} do
       forged = %{cap | issuer_signature: :crypto.strong_rand_bytes(64)}
-      {:ok, :stored} = CapabilityStore.put(forged)
+      {:ok, :stored} = CapabilityStore.put_fixture(forged)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(forged.id, fetch_opts(cap))
@@ -261,7 +312,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
       on_exit(fn -> restore_config(:capability_signing_required, original) end)
 
       unsigned = %{cap | issuer_signature: nil, issuer_id: nil}
-      {:ok, :stored} = CapabilityStore.put(unsigned)
+      {:ok, :stored} = CapabilityStore.put_fixture(unsigned)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(unsigned.id, fetch_opts(cap))
@@ -270,8 +321,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "expired capability fails closed", %{cap: cap} do
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -10, :second)}
-      {:ok, resigned} = SystemAuthority.sign_capability(expired)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -281,8 +332,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "security regression: a future-dated grant fails closed", %{cap: cap} do
       granted_at = DateTime.add(DateTime.utc_now(), 3600, :second)
       future = %{cap | granted_at: granted_at, expires_at: DateTime.add(granted_at, 300, :second)}
-      {:ok, resigned} = SystemAuthority.sign_capability(future)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(future)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -292,8 +343,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "security regression: a non-positive validity window fails closed", %{cap: cap} do
       expires_at = DateTime.add(DateTime.utc_now(), 300, :second)
       invalid = %{cap | granted_at: DateTime.add(expires_at, 1, :second), expires_at: expires_at}
-      {:ok, resigned} = SystemAuthority.sign_capability(invalid)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(invalid)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -310,8 +361,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
           expires_at: DateTime.add(granted_at, max_ttl + 1, :second)
       }
 
-      {:ok, resigned} = SystemAuthority.sign_capability(overlong)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(overlong)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -320,14 +371,14 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "security regression: only the current SystemAuthority issuer is accepted", %{cap: cap} do
       {:ok, other_identity} = Identity.generate()
-      :ok = Registry.register(Identity.public_only(other_identity))
+      :ok = Registry.register_fixture(Identity.public_only(other_identity))
 
       signed =
         cap
         |> Map.put(:issuer_id, other_identity.agent_id)
         |> Signer.sign(other_identity.private_key)
 
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(signed.id, fetch_opts(cap))
@@ -341,8 +392,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
 
       for uri <- [cap.resource_uri <> "/extra", prefix <> String.upcase(token)] do
         malformed = %{cap | resource_uri: uri}
-        {:ok, resigned} = SystemAuthority.sign_capability(malformed)
-        {:ok, :stored} = CapabilityStore.put(resigned)
+        {:ok, resigned} = SystemAuthority.sign_capability_for_test(malformed)
+        {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
         assert {:error, :disclosure_capability_uri_malformed} =
                  DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -352,8 +403,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "delegated (parent_capability_id set) fails closed", %{cap: cap} do
       delegated = %{cap | parent_capability_id: "cap_some_parent_#{unique()}"}
-      {:ok, resigned} = SystemAuthority.sign_capability(delegated)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(delegated)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_delegated} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -380,8 +431,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
       }
 
       delegated = %{cap | delegation_chain: [chain_record]}
-      {:ok, resigned} = SystemAuthority.sign_capability(delegated)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(delegated)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_delegated} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -390,8 +441,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "nonzero delegation_depth fails closed", %{cap: cap} do
       deep = %{cap | delegation_depth: 1}
-      {:ok, resigned} = SystemAuthority.sign_capability(deep)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(deep)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_nonzero_depth} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -401,8 +452,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "any max_uses (including 1) fails closed", %{cap: cap} do
       for max_uses <- [1, 50] do
         capped = %{cap | max_uses: max_uses}
-        {:ok, resigned} = SystemAuthority.sign_capability(capped)
-        {:ok, :stored} = CapabilityStore.put(resigned)
+        {:ok, resigned} = SystemAuthority.sign_capability_for_test(capped)
+        {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
         assert {:error, :disclosure_capability_max_uses_forbidden} =
                  DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -416,8 +467,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
         | constraints: Map.put(cap.constraints, :egress, %{max_tier: :external_provider})
       }
 
-      {:ok, resigned} = SystemAuthority.sign_capability(dual)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(dual)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_dual_purpose} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -427,8 +478,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "unknown/duplicate-spelled nested field fails closed", %{cap: cap} do
       bad_disclosure = Map.put(cap.constraints.disclosure, :extra, "smuggled")
       bad = %{cap | constraints: %{disclosure: bad_disclosure}}
-      {:ok, resigned} = SystemAuthority.sign_capability(bad)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(bad)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_unknown_field} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -438,8 +489,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "missing route field fails closed", %{cap: cap} do
       bad_disclosure = Map.delete(cap.constraints.disclosure, :destination)
       bad = %{cap | constraints: %{disclosure: bad_disclosure}}
-      {:ok, resigned} = SystemAuthority.sign_capability(bad)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(bad)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_missing_route_field} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -449,8 +500,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "wrong kind fails closed", %{cap: cap} do
       bad_disclosure = Map.put(cap.constraints.disclosure, :kind, :something_else)
       bad = %{cap | constraints: %{disclosure: bad_disclosure}}
-      {:ok, resigned} = SystemAuthority.sign_capability(bad)
-      {:ok, :stored} = CapabilityStore.put(resigned)
+      {:ok, resigned} = SystemAuthority.sign_capability_for_test(bad)
+      {:ok, :stored} = CapabilityStore.put_fixture(resigned)
 
       assert {:error, :disclosure_capability_wrong_kind} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
@@ -460,7 +511,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
   describe "Arbor.Security.validate_disclosure_capability/3" do
     setup do
       {:ok, cap} = Arbor.Security.issue_disclosure_capability(valid_issue_opts())
-      on_exit(fn -> _ = CapabilityStore.revoke(cap.id) end)
+      on_exit(fn -> _ = CapabilityStore.revoke_fixture(cap.id) end)
       %{cap: cap}
     end
 
@@ -484,7 +535,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
       Application.put_env(:arbor_security, :egress_gate_enforcing, false)
       on_exit(fn -> restore_config(:egress_gate_enforcing, original) end)
 
-      :ok = CapabilityStore.revoke(cap.id)
+      :ok = CapabilityStore.revoke_fixture(cap.id)
       opts = Keyword.delete(fetch_opts(cap), :principal_id)
 
       assert {:error, _reason} =

@@ -60,6 +60,8 @@ defmodule Arbor.Security.AuditJournalCore do
   @terminals ["effect_rejected", "delivered"]
   @pending_statuses ["prepared", "effect_applied"]
   @max_pending_age_seconds 31_536_000
+  @small_principal_increase_cap 8
+  @operational_principal_increase_cap 128
 
   @type state :: %{
           required(String.t()) => term()
@@ -568,6 +570,49 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   def increase_headroom?(_state, _opts), do: false
+
+  @doc false
+  @spec principal_increase_admission(term(), term()) ::
+          :ok | {:error, :principal_capacity_exhausted | :malformed}
+  def principal_increase_admission(
+        %{"operations" => operations} = state,
+        %{
+          "effect_class" => "authority_increase",
+          "audit" => %{"data" => %{"principal_id" => principal_id}}
+        }
+      )
+      when is_map(operations) and is_binary(principal_id) do
+    cap =
+      if profile(state) == :operational,
+        do: @operational_principal_increase_cap,
+        else: @small_principal_increase_cap
+
+    active =
+      Enum.count(operations, fn
+        {_operation_id,
+         %{
+           "status" => status,
+           "effect_class" => "authority_increase",
+           "intent" => %{"audit" => %{"data" => %{"principal_id" => ^principal_id}}}
+         }} ->
+          status != "delivered"
+
+        _other ->
+          false
+      end)
+
+    if active < cap, do: :ok, else: {:error, :principal_capacity_exhausted}
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  def principal_increase_admission(%{"operations" => operations}, %{"effect_class" => class})
+      when is_map(operations) and class != "authority_increase",
+      do: :ok
+
+  def principal_increase_admission(_state, _intent), do: {:error, :malformed}
 
   defp capacity_reservation(%{"operations" => operations} = state) when is_map(operations) do
     reservation(state)

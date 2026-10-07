@@ -10,10 +10,18 @@ defmodule Mix.Tasks.Arbor.Rpc do
 
   The expression is evaluated in the context of the remote server node.
   The result is inspected and printed to stdout.
+
+  This is intentionally a root administration command. Erlang distribution
+  cookie possession is the only authority boundary; the expression is not
+  sandboxed or separately authorized.
   """
   use Mix.Task
 
   alias Mix.Tasks.Arbor.Helpers, as: Config
+
+  @doc "Authority granted to a connected Erlang-distribution peer."
+  @spec remote_authority() :: :root
+  def remote_authority, do: :root
 
   @impl Mix.Task
   def run([]) do

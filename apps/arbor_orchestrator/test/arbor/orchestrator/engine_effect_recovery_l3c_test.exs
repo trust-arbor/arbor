@@ -160,11 +160,11 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    :ok = Registry.register("l3c_side", SideEffectProbe)
-    :ok = Registry.register("l3c_ckpt", CheckpointBreakProbe)
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    :ok = Registry.register_fixture("l3c_side", SideEffectProbe)
+    :ok = Registry.register_fixture("l3c_ckpt", CheckpointBreakProbe)
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 

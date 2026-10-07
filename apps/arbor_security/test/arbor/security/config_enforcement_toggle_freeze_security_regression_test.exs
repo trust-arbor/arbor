@@ -7,6 +7,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Security.Config
+  alias Arbor.Signals
 
   @moduletag :fast
   @moduletag security: :regression
@@ -26,10 +27,12 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
 
   setup do
     originals = env_snapshot()
+    :ok = Signals.restore_runtime_fixture()
 
     on_exit(fn ->
       Config.restore_enforcement_toggles()
       restore_env(originals)
+      :ok = Signals.restore_runtime_fixture()
     end)
 
     :ok
@@ -290,28 +293,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
   end
 
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
-
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} ->
-          :ok
-
-        {:error, {:already_started, _pid}} ->
-          :ok
-
-        {:error, :already_present} ->
-          {module, _opts} = child
-          :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-          {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-      end
-    end
+    Signals.restore_runtime_fixture()
   end
 
   defp claim_table, do: Module.concat(Config, EnforcementToggleClaim)
@@ -372,14 +354,13 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
       :ets.delete(table)
     end
 
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
-
     # Restarting :arbor_security brings Identity.Registry back, and with
     # distributed signals enabled it subscribes to Arbor.Signals.Bus during
     # init. The two tests that fully stop the app leave the Bus down, so
     # without this the restore crashes with :noproc and the test reports a
     # teardown failure rather than its actual result.
     ensure_signals_children()
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
 
     _ = Arbor.Security.TestBootstrap.start!()
     restore_extra_security_test_children()

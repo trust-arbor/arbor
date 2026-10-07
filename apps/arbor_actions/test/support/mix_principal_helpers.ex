@@ -51,14 +51,15 @@ defmodule Arbor.Actions.MixPrincipalHelpers do
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
 
     Enum.each(@mix_resources, fn resource ->
-      {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      {:ok, _capability} =
+        Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     end)
 
     Process.put(@agent_key, agent_id)
 
     ExUnit.Callbacks.on_exit(fn ->
-      if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      if Arbor.Security.capability_authorization_available?() do
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do

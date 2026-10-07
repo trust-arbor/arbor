@@ -100,6 +100,8 @@ defmodule Arbor.Security.Identity.ReplayPeers do
 
   require Logger
 
+  alias Arbor.Security.SupervisedOwner
+
   @table :arbor_security_replay_peers
 
   # The row where the client-side await cap is published, so callers outside
@@ -192,7 +194,7 @@ defmodule Arbor.Security.Identity.ReplayPeers do
         # unwedged VM) is downgraded to :foreign within one TTL instead of
         # staying pinned until its dist connection drops. Not awaited — the
         # conservative answer is already in hand.
-        GenServer.cast(__MODULE__, {:revalidate, node})
+        owner_cast({:revalidate, node})
         :replay_peer
 
       :unknown ->
@@ -201,7 +203,13 @@ defmodule Arbor.Security.Identity.ReplayPeers do
   end
 
   defp await_classification(node) do
-    GenServer.call(__MODULE__, {:await_classification, node}, await_timeout_ms())
+    case owner_pid() do
+      pid when is_pid(pid) ->
+        GenServer.call(pid, {:await_classification, node}, await_timeout_ms())
+
+      nil ->
+        :replay_peer
+    end
   catch
     # Tracker down, or the probe outran the await budget. Fail closed.
     :exit, _ -> :replay_peer
@@ -212,7 +220,7 @@ defmodule Arbor.Security.Identity.ReplayPeers do
   # can read it without a GenServer round-trip; when the table is missing the
   # fallback only pads the timeout of a call that is about to fail closed.
   defp await_timeout_ms do
-    case :ets.lookup(@table, @config_key) do
+    case owned_table_lookup(@config_key) do
       [{@config_key, await_timeout}] when is_integer(await_timeout) -> await_timeout
       _other -> @default_await_timeout_ms
     end
@@ -236,7 +244,7 @@ defmodule Arbor.Security.Identity.ReplayPeers do
       other when other in [:unknown, {:stale, :replay_peer}] ->
         # This API remains non-blocking. Ask the tracker to refresh an expired
         # verdict, but expose the conservative answer while it is uncertain.
-        GenServer.cast(__MODULE__, {:revalidate, node})
+        owner_cast({:revalidate, node})
         :replay_peer
     end
   end
@@ -276,7 +284,10 @@ defmodule Arbor.Security.Identity.ReplayPeers do
     """
     @spec forget(node()) :: :ok
     def forget(node) when is_atom(node) do
-      GenServer.call(__MODULE__, {:forget, node})
+      case owner_pid() do
+        pid when is_pid(pid) -> GenServer.call(pid, {:forget, node})
+        nil -> :ok
+      end
     end
   end
 
@@ -542,7 +553,7 @@ defmodule Arbor.Security.Identity.ReplayPeers do
   end
 
   defp cached_classification(node) do
-    case :ets.lookup(@table, node) do
+    case owned_table_lookup(node) do
       [{^node, :foreign, connection_id, expires_at}] when is_integer(expires_at) ->
         with true <- monotonic_ms() < expires_at,
              {:ok, ^connection_id} <- current_connection_id(node) do
@@ -571,6 +582,31 @@ defmodule Arbor.Security.Identity.ReplayPeers do
     end
   rescue
     ArgumentError -> :unknown
+  end
+
+  defp owned_table_lookup(key) do
+    case owner_pid() do
+      pid when is_pid(pid) ->
+        if :ets.info(@table, :owner) == pid, do: :ets.lookup(@table, key), else: []
+
+      nil ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp owner_cast(message) do
+    case owner_pid() do
+      pid when is_pid(pid) -> GenServer.cast(pid, message)
+      nil -> :ok
+    end
+  end
+
+  defp owner_pid do
+    SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__])
   end
 
   defp cache_classification(node, connection_id, :foreign, state) do

@@ -9,6 +9,7 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   @roots [:joken, :joken_jwks, :req]
+  @restart_timeout 3_000
 
   setup do
     start_children = Application.fetch_env(:arbor_security, :start_children)
@@ -64,6 +65,66 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
     assert Enum.all?(@roots, &(&1 in started))
   end
 
+  test "security regression: full static startup returns only after deferred Registry hydration and authority readiness" do
+    :ok = Application.stop(:arbor_security)
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    assert is_pid(Process.whereis(Arbor.Security.TerminalLogin))
+
+    agent_id = Arbor.Security.SystemAuthority.agent_id()
+    public_key = Arbor.Security.SystemAuthority.public_key()
+
+    assert {:ok, ^public_key} = Arbor.Security.Identity.Registry.lookup(agent_id)
+  end
+
+  test "security regression: SystemAuthority crash restores authority before public use and restarts downstream in order" do
+    authority = Process.whereis(Arbor.Security.SystemAuthority)
+    downstream = Process.whereis(Arbor.Security.DeliveryReceiptBroker)
+    expected_ids = supervisor_child_ids()
+
+    assert is_pid(authority)
+    assert is_pid(downstream)
+    Process.exit(authority, :kill)
+
+    assert eventually(fn ->
+             replacement = Process.whereis(Arbor.Security.SystemAuthority)
+             replacement_downstream = Process.whereis(Arbor.Security.DeliveryReceiptBroker)
+
+             is_pid(replacement) and replacement != authority and is_pid(replacement_downstream) and
+               replacement_downstream != downstream and system_authority_ready?()
+           end)
+
+    assert supervisor_child_ids() == expected_ids
+
+    agent_id = Arbor.Security.SystemAuthority.agent_id()
+    public_key = Arbor.Security.SystemAuthority.public_key()
+    assert {:ok, ^public_key} = Arbor.Security.Identity.Registry.lookup(agent_id)
+  end
+
+  test "security regression: conflicting authority role proof stops and removes the partial root" do
+    roles = Application.fetch_env!(:arbor_security, :signing_key_owner_roles)
+    bad_roles = put_in(roles, [:system_authority, :path], [Arbor.Security.Identity.Registry])
+
+    :ok = Application.stop(:arbor_security)
+    Application.put_env(:arbor_security, :signing_key_owner_roles, bad_roles)
+
+    try do
+      assert {:error,
+              {:arbor_security,
+               {{:security_readiness_failed,
+                 {:authority_registration_failed, :registration_conflict}},
+                {Arbor.Security.Application, :start, _}}}} =
+               Application.ensure_all_started(:arbor_security)
+
+      refute Process.whereis(Arbor.Security.Supervisor)
+      refute Process.whereis(Arbor.Security.SigningAuthorityBroker)
+      refute Process.whereis(Arbor.Security.DeliveryReceiptBroker)
+    after
+      Application.put_env(:arbor_security, :signing_key_owner_roles, roles)
+      assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    end
+  end
+
   test "actual gate-name collision keeps the typed error and starts no later child" do
     :ok = Application.stop(:arbor_security)
     {:ok, rogue} = Agent.start_link(fn -> :ok end, name: Arbor.Security.ProviderGate)
@@ -98,6 +159,41 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
     after
       Agent.stop(squat)
       assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    end
+  end
+
+  defp supervisor_child_ids do
+    Arbor.Security.Supervisor
+    |> Supervisor.which_children()
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  defp system_authority_ready? do
+    is_binary(Arbor.Security.SystemAuthority.agent_id()) and
+      is_binary(Arbor.Security.SystemAuthority.public_key())
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp eventually(fun, timeout \\ @restart_timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    eventually_until(fun, deadline)
+  end
+
+  defp eventually_until(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        receive do
+        after
+          10 -> eventually_until(fun, deadline)
+        end
+      end
     end
   end
 

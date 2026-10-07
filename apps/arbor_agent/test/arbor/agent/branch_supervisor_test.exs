@@ -68,14 +68,14 @@ defmodule Arbor.Agent.BranchSupervisorTest do
   test "security regression: cleanup supervisor shutdown permanently closes its bootstrap" do
     ensure_signing_authority_stack!()
     {:ok, identity} = Identity.generate(name: "branch-bootstrap-cleanup")
-    :ok = Arbor.Security.register_identity(Identity.public_only(identity))
+    :ok = Arbor.Security.register_identity_fixture(Identity.public_only(identity))
 
     on_exit(fn ->
-      _ = Arbor.Security.delete_signing_key(identity.agent_id)
-      _ = Arbor.Security.deregister_identity(identity.agent_id)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
     end)
 
-    :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     {:ok, proof} =
       Arbor.Security.build_signing_authority_acquisition_proof(

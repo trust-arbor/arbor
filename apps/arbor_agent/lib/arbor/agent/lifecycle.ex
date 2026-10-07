@@ -34,6 +34,7 @@ defmodule Arbor.Agent.Lifecycle do
     ExactTemplatePolicy,
     Executor,
     Profile,
+    ProfileAuthorityOwner,
     ProfileStore,
     SessionConfig,
     SessionManager,
@@ -74,6 +75,9 @@ defmodule Arbor.Agent.Lifecycle do
 
   ## Options of note
 
+  - `:actor_authority` — caller-owned authority for an already registered
+    principal that is authorized to enroll the identity and grant every
+    requested capability. Creation fails closed when it is absent.
   - `:return_identity` — when `true`, returns `{:ok, profile, identity}` with
     the in-memory `Identity` struct **including the freshly-generated private
     key**. Required for external-agent registration flows where the caller
@@ -97,7 +101,7 @@ defmodule Arbor.Agent.Lifecycle do
           success
 
         {:error, _reason} = error ->
-          rollback_failed_creation(identity.agent_id)
+          rollback_failed_creation(identity.agent_id, opts)
           error
       end
     end
@@ -113,34 +117,35 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp do_create(display_name, character, identity, opts) do
-    with :ok <- register_identity(identity),
-         {:ok, endorsement} <- endorse_identity(identity),
-         keychain <- create_keychain(identity),
+    with {:ok, actor_authority} <- mutation_authority(opts),
+         :ok <- register_identity(identity, actor_authority),
+         {:ok, endorsement} <- endorse_identity(identity, actor_authority),
          agent_id = identity.agent_id,
-         :ok <- persist_signing_key(agent_id, identity),
-         :ok <- grant_initial_capabilities(agent_id, opts),
-         :ok <- grant_workspace_capabilities(agent_id, opts),
-         :ok <- maybe_delegate_from_parent(agent_id, opts),
+         :ok <- persist_signing_key(agent_id, identity, actor_authority),
+         :ok <- grant_initial_capabilities(agent_id, opts, actor_authority),
+         :ok <- grant_workspace_capabilities(agent_id, opts, actor_authority),
+         :ok <- maybe_delegate_from_parent(agent_id, opts, actor_authority),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
          :ok <- seed_template_identity(agent_id, character, opts) do
       profile =
-        build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts)
+        build_profile(agent_id, display_name, identity, endorsement, agent_id, character, opts)
 
       case ensure_trust_profile(agent_id, opts) do
         :ok ->
           # Trust profile setup can asynchronously synchronize capabilities.
           # Reconcile after it so exact authority is the final creation state.
           persistence_result =
-            with :ok <- reconcile_exact_authority_after_trust(agent_id, opts) do
+            with :ok <-
+                   reconcile_exact_authority_after_trust(agent_id, opts, actor_authority) do
               persist_profile(profile)
             end
 
           case persistence_result do
             :ok ->
               unless Keyword.has_key?(opts, :exact_template_policy) do
-                grant_owner_chat_capability(agent_id, opts)
-                grant_self_memory_capabilities(agent_id)
+                grant_owner_chat_capability(agent_id, opts, actor_authority)
+                grant_self_memory_capabilities(agent_id, actor_authority)
               end
 
               emit_created_signal(profile)
@@ -171,16 +176,16 @@ defmodule Arbor.Agent.Lifecycle do
 
   Returns `{:ok, agent_id}` or `{:error, reason}`.
   """
-  @spec ensure_identity(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def ensure_identity(agent_id) do
+  @spec ensure_identity(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def ensure_identity(agent_id, opts \\ []) do
     case restore(agent_id) do
       {:ok, profile} ->
-        case prepare_and_activate_authority(profile) do
+        case prepare_and_activate_authority(profile, opts) do
           {:ok, _prepared_profile, _policy_mode} ->
             {:ok, agent_id}
 
           {:error, _} = error ->
-            handle_authority_failure(profile, error)
+            handle_authority_failure(profile, error, opts)
         end
 
       {:error, _} = error ->
@@ -202,35 +207,34 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec build_signer(String.t()) ::
           {:ok, (binary() -> {:ok, term()} | {:error, term()})} | {:error, term()}
-  def build_signer(agent_id) do
-    case Arbor.Security.load_signing_key(agent_id) do
-      {:ok, private_key} ->
-        {:ok, Arbor.Security.make_signer(agent_id, private_key)}
-
-      {:error, _} = error ->
-        error
-    end
-  end
+  def build_signer(_agent_id), do: {:error, :raw_signing_key_access_retired}
 
   @doc "Issue a restartable bootstrap for a non-branch agent consumer."
   @spec issue_signing_authority_bootstrap(String.t(), atom()) ::
           {:ok, Arbor.Contracts.Security.SigningAuthorityBootstrap.t()} | {:error, term()}
   def issue_signing_authority_bootstrap(agent_id, purpose)
       when is_binary(agent_id) and is_atom(purpose) do
-    with {:ok, private_key} <- Arbor.Security.load_signing_key(agent_id),
-         {:ok, proof} <-
-           Arbor.Security.build_signing_authority_acquisition_proof(
-             agent_id,
-             private_key,
-             purpose: purpose,
-             owner: self()
-           ) do
-      Arbor.Security.issue_signing_authority_bootstrap(proof)
-    end
+    Arbor.Agent.ProfileAuthorityOwner.issue_signing_authority_bootstrap(agent_id, purpose)
   end
 
   def issue_signing_authority_bootstrap(_agent_id, _purpose),
     do: {:error, :invalid_signing_authority_bootstrap_args}
+
+  @doc false
+  @spec transfer_signing_authority_handoff(String.t(), atom(), pid(), map()) ::
+          :ok | {:error, term()}
+  def transfer_signing_authority_handoff(agent_id, purpose, claimant, context)
+      when is_binary(agent_id) and is_atom(purpose) and is_pid(claimant) and is_map(context) do
+    Arbor.Agent.ProfileAuthorityOwner.transfer_signing_authority_handoff(
+      agent_id,
+      purpose,
+      claimant,
+      context
+    )
+  end
+
+  def transfer_signing_authority_handoff(_agent_id, _purpose, _claimant, _context),
+    do: {:error, :invalid_signing_authority_handoff}
 
   @doc """
   Restore an agent from a persisted profile.
@@ -470,20 +474,20 @@ defmodule Arbor.Agent.Lifecycle do
   defp do_ordinary_start_effects(agent_id, opts, branch_witness) do
     case restore(agent_id) do
       {:ok, profile} ->
-        case prepare_and_activate_authority(profile) do
+        case prepare_and_activate_authority(profile, opts) do
           {:ok, prepared_profile, policy_mode} ->
             result = start_activated_profile(prepared_profile, opts, branch_witness)
 
             case {result, policy_mode} do
               {{:error, _} = error, {:exact, _envelope}} ->
-                handle_authority_failure(prepared_profile, error)
+                handle_authority_failure(prepared_profile, error, opts)
 
               _ ->
                 result
             end
 
           {:error, _} = error ->
-            handle_authority_failure(profile, error)
+            handle_authority_failure(profile, error, opts)
         end
 
       {:error, _} = error ->
@@ -626,12 +630,10 @@ defmodule Arbor.Agent.Lifecycle do
   defp issue_branch_authority_bootstraps(_agent_id, false, false), do: {:ok, %{}}
 
   defp issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled) do
-    with {:ok, private_key} <- Arbor.Security.load_signing_key(agent_id),
-         {:ok, session} <-
-           issue_optional_authority_bootstrap(agent_id, private_key, :session, session_enabled) do
+    with {:ok, session} <-
+           issue_optional_authority_bootstrap(agent_id, :session, session_enabled) do
       case issue_optional_authority_bootstrap(
              agent_id,
-             private_key,
              :heartbeat,
              heartbeat_enabled
            ) do
@@ -645,11 +647,11 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp issue_optional_authority_bootstrap(_agent_id, _private_key, _purpose, false),
+  defp issue_optional_authority_bootstrap(_agent_id, _purpose, false),
     do: {:ok, nil}
 
-  defp issue_optional_authority_bootstrap(agent_id, private_key, purpose, true),
-    do: issue_authority_bootstrap(agent_id, private_key, purpose)
+  defp issue_optional_authority_bootstrap(agent_id, purpose, true),
+    do: issue_authority_bootstrap(agent_id, purpose)
 
   defp compact_bootstraps(bootstraps),
     do: Enum.reject(bootstraps, fn {_purpose, bootstrap} -> is_nil(bootstrap) end) |> Map.new()
@@ -664,17 +666,12 @@ defmodule Arbor.Agent.Lifecycle do
       Map.get(extract_heartbeat_config(profile, opts), :enabled, true)
   end
 
-  defp issue_authority_bootstrap(agent_id, private_key, purpose) do
-    with {:ok, proof} <-
-           Arbor.Security.build_signing_authority_acquisition_proof(
-             agent_id,
-             private_key,
-             purpose: purpose,
-             owner: self()
-           ) do
-      Arbor.Security.issue_signing_authority_bootstrap(proof)
-    end
-  end
+  defp issue_authority_bootstrap(agent_id, purpose),
+    do:
+      Arbor.Agent.ProfileAuthorityOwner.issue_runtime_admission_signing_authority_bootstrap(
+        agent_id,
+        purpose
+      )
 
   defp close_branch_authority_bootstraps(bootstraps) do
     Enum.each(bootstraps, fn {_purpose, bootstrap} ->
@@ -1160,8 +1157,17 @@ defmodule Arbor.Agent.Lifecycle do
   @doc """
   Delete an agent and all its data.
   """
-  @spec destroy(String.t()) :: :ok | {:error, term()}
-  def destroy(agent_id) do
+  @spec destroy(String.t()) :: {:error, :capability_mutation_unauthorized}
+  def destroy(_agent_id), do: {:error, :capability_mutation_unauthorized}
+
+  @spec destroy(String.t(), keyword()) :: :ok | {:error, term()}
+  def destroy(agent_id, opts) when is_list(opts) do
+    with {:ok, _actor_authority} <- mutation_authority(opts) do
+      do_destroy(agent_id, opts)
+    end
+  end
+
+  defp do_destroy(agent_id, opts) do
     # Terminate the whole supervision tree FIRST. stop/1 shuts down the BranchSupervisor and ALL its
     # children — host, executor, session, AND HeartbeatService. Previously destroy only stopped the
     # Executor and left the BranchSupervisor running, so the HeartbeatService kept beating on the
@@ -1171,10 +1177,12 @@ defmodule Arbor.Agent.Lifecycle do
     stop(agent_id)
 
     cleanup_results = [
-      cleanup_agent_authority(agent_id),
+      cleanup_agent_authority(agent_id, opts),
       safe_cleanup(fn -> Arbor.Memory.cleanup_for_agent(agent_id) end),
-      safe_cleanup(fn -> Arbor.Security.delete_signing_key(agent_id) end),
-      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id) end),
+      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id, opts) end),
+      safe_cleanup(fn ->
+        ProfileAuthorityOwner.delete_signing_key(agent_id, Keyword.get(opts, :actor_authority))
+      end),
       safe_cleanup(fn -> ProfileStore.delete_profile(agent_id) end)
     ]
 
@@ -1511,39 +1519,35 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Security.generate_identity(name: display_name)
   end
 
-  defp register_identity(identity) do
-    Arbor.Security.register_identity(identity)
+  defp register_identity(identity, actor_authority) do
+    Arbor.Security.register_identity(identity, actor_authority)
   end
 
-  defp endorse_identity(identity) do
-    Arbor.Security.endorse_agent(identity)
+  defp endorse_identity(identity, actor_authority) do
+    Arbor.Security.endorse_agent(identity, actor_authority)
   end
 
-  defp create_keychain(identity) do
-    Arbor.Security.new_keychain(identity.agent_id)
-  end
-
-  # Persist the signing private key for later use in signing ceremonies.
-  # Gracefully degrades if the signing key store is not available.
-  defp persist_signing_key(agent_id, identity) do
-    case identity.private_key do
-      nil ->
-        Logger.warning("No private key to persist for agent #{agent_id}")
-        :ok
-
-      private_key ->
-        case Arbor.Security.store_signing_key(agent_id, private_key) do
+  # Persist the identity's signing and X25519 private keys atomically through
+  # the fixed profile authority owner. Channel crypto must never regenerate a
+  # disconnected keychain after Lifecycle drops its local Identity struct.
+  defp persist_signing_key(agent_id, identity, actor_authority) do
+    case {identity.private_key, identity.encryption_private_key} do
+      {signing, encryption} when is_binary(signing) and is_binary(encryption) ->
+        case ProfileAuthorityOwner.store_signing_identity(identity, actor_authority) do
           :ok ->
             :ok
 
           {:error, reason} ->
-            Logger.warning("Failed to persist signing key: #{inspect(reason)}",
+            Logger.warning("Failed to persist identity keypair: #{inspect(reason)}",
               agent_id: agent_id
             )
 
-            # Don't fail agent creation over signing key persistence
-            :ok
+            {:error, {:signing_key_persistence_failed, reason}}
         end
+
+      _ ->
+        Logger.warning("Identity keypair is incomplete for agent #{agent_id}")
+        {:error, :signing_key_missing}
     end
   end
 
@@ -1552,10 +1556,14 @@ defmodule Arbor.Agent.Lifecycle do
   # cap is scoped to THIS agent, so it's multi-user-safe (you chat with your own
   # agents, not everyone's). Best-effort — never fails agent creation; an
   # auto/system-spawned agent with no creator principal gets no chat grant.
-  defp grant_owner_chat_capability(agent_id, opts) do
+  defp grant_owner_chat_capability(agent_id, opts, actor_authority) do
     case extract_principal_id(opts) do
       creator when is_binary(creator) ->
-        case Arbor.Security.grant(principal: creator, resource: "arbor://chat/agent/#{agent_id}") do
+        case Arbor.Security.grant(
+               principal: creator,
+               resource: "arbor://chat/agent/#{agent_id}",
+               actor_authority: actor_authority
+             ) do
           {:ok, _} ->
             :ok
 
@@ -1594,11 +1602,15 @@ defmodule Arbor.Agent.Lifecycle do
   # whole contract.
   @self_memory_operations ~w[read write search]
 
-  defp grant_self_memory_capabilities(agent_id) do
+  defp grant_self_memory_capabilities(agent_id, actor_authority) do
     Enum.each(@self_memory_operations, fn operation ->
       resource = "arbor://memory/#{operation}/#{agent_id}"
 
-      case Arbor.Security.grant(principal: agent_id, resource: resource) do
+      case Arbor.Security.grant(
+             principal: agent_id,
+             resource: resource,
+             actor_authority: actor_authority
+           ) do
         {:ok, _} ->
           :ok
 
@@ -1618,30 +1630,31 @@ defmodule Arbor.Agent.Lifecycle do
     :exit, _ -> :ok
   end
 
-  defp grant_initial_capabilities(agent_id, opts) do
+  defp grant_initial_capabilities(agent_id, opts, actor_authority) do
     case Keyword.get(opts, :exact_template_policy) do
       %{} = envelope ->
-        reconcile_exact_capabilities(agent_id, envelope)
+        reconcile_exact_capabilities(agent_id, envelope, actor_authority)
 
       _other ->
         grant_capabilities(
           agent_id,
           opts[:capabilities] || [],
-          template_metadata_from_opts(opts)
+          template_metadata_from_opts(opts),
+          actor_authority
         )
     end
   end
 
-  defp reconcile_exact_authority_after_trust(agent_id, opts) do
+  defp reconcile_exact_authority_after_trust(agent_id, opts, actor_authority) do
     case Keyword.get(opts, :exact_template_policy) do
-      %{} = envelope -> reconcile_exact_capabilities(agent_id, envelope)
+      %{} = envelope -> reconcile_exact_capabilities(agent_id, envelope, actor_authority)
       _ -> :ok
     end
   end
 
-  defp grant_capabilities(_agent_id, [], _template_metadata), do: :ok
+  defp grant_capabilities(_agent_id, [], _template_metadata, _actor_authority), do: :ok
 
-  defp grant_capabilities(agent_id, capabilities, template_metadata) do
+  defp grant_capabilities(agent_id, capabilities, template_metadata, actor_authority) do
     # Check which capabilities the agent already has to avoid duplicates
     existing_uris =
       case Arbor.Security.list_capabilities(agent_id) do
@@ -1674,7 +1687,8 @@ defmodule Arbor.Agent.Lifecycle do
               case Arbor.Security.grant(
                      principal: agent_id,
                      resource: resource,
-                     constraints: constraints
+                     constraints: constraints,
+                     actor_authority: actor_authority
                    ) do
                 {:ok, _cap} ->
                   {[:ok | results], MapSet.put(existing_uris, resource)}
@@ -1702,15 +1716,27 @@ defmodule Arbor.Agent.Lifecycle do
     :ok
   end
 
-  defp reconcile_exact_capabilities(agent_id, envelope) do
+  defp reconcile_exact_capabilities(agent_id, envelope, actor_authority) do
     snapshot = ExactTemplatePolicy.snapshot(envelope)
     digest = ExactTemplatePolicy.digest(envelope)
 
     with {:ok, desired_specs} <- exact_capability_specs(agent_id, snapshot),
          {:ok, current_caps} <- Arbor.Security.list_capabilities(agent_id),
          {:ok, retained_keys} <-
-           revoke_stale_exact_capabilities(current_caps, desired_specs, digest),
-         :ok <- grant_missing_exact_capabilities(agent_id, desired_specs, retained_keys, digest),
+           revoke_stale_exact_capabilities(
+             current_caps,
+             desired_specs,
+             digest,
+             actor_authority
+           ),
+         :ok <-
+           grant_missing_exact_capabilities(
+             agent_id,
+             desired_specs,
+             retained_keys,
+             digest,
+             actor_authority
+           ),
          :ok <- verify_exact_capabilities(agent_id, desired_specs, digest) do
       :ok
     else
@@ -1738,7 +1764,12 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp revoke_stale_exact_capabilities(current_caps, desired_specs, digest) do
+  defp revoke_stale_exact_capabilities(
+         current_caps,
+         desired_specs,
+         digest,
+         actor_authority
+       ) do
     desired_by_key = Map.new(desired_specs, &{exact_capability_key(&1), &1})
 
     {retained, stale} =
@@ -1754,13 +1785,19 @@ defmodule Arbor.Agent.Lifecycle do
         end
       end)
 
-    case revoke_capabilities(stale) do
+    case revoke_capabilities(stale, actor_authority) do
       :ok -> {:ok, retained}
       {:error, _} = error -> error
     end
   end
 
-  defp grant_missing_exact_capabilities(agent_id, desired_specs, retained_keys, digest) do
+  defp grant_missing_exact_capabilities(
+         agent_id,
+         desired_specs,
+         retained_keys,
+         digest,
+         actor_authority
+       ) do
     desired_specs
     |> Enum.reject(&MapSet.member?(retained_keys, exact_capability_key(&1)))
     |> Enum.reduce_while(:ok, fn spec, :ok ->
@@ -1771,7 +1808,8 @@ defmodule Arbor.Agent.Lifecycle do
              metadata: %{
                source: :exact_template_policy,
                template_digest: digest
-             }
+             },
+             actor_authority: actor_authority
            ) do
         {:ok, _capability} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:grant_failed, spec.resource, reason}}}
@@ -1824,9 +1862,9 @@ defmodule Arbor.Agent.Lifecycle do
   defp exact_capability_key(%{resource_uri: resource, constraints: constraints}),
     do: {resource, constraints}
 
-  defp revoke_capabilities(capabilities) do
+  defp revoke_capabilities(capabilities, actor_authority) do
     Enum.reduce_while(capabilities, :ok, fn cap, :ok ->
-      case Arbor.Security.revoke(cap.id) do
+      case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
         :ok -> {:cont, :ok}
         {:error, :not_found} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:revoke_failed, cap.id, reason}}}
@@ -1948,15 +1986,15 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Grant workspace-scoped fs capabilities when tenant_context provides a workspace root.
   # This ensures agents can access their user's workspace directory.
-  defp grant_workspace_capabilities(agent_id, opts) do
+  defp grant_workspace_capabilities(agent_id, opts, actor_authority) do
     if exact_template_policy?(template_metadata_from_opts(opts), :capability_policy) do
       :ok
     else
-      do_grant_workspace_capabilities(agent_id, opts)
+      do_grant_workspace_capabilities(agent_id, opts, actor_authority)
     end
   end
 
-  defp do_grant_workspace_capabilities(agent_id, opts) do
+  defp do_grant_workspace_capabilities(agent_id, opts, actor_authority) do
     tenant_context = Keyword.get(opts, :tenant_context)
 
     workspace_root =
@@ -1977,7 +2015,8 @@ defmodule Arbor.Agent.Lifecycle do
         case Arbor.Security.grant(
                principal: agent_id,
                resource: resource,
-               principal_scope: principal_id
+               principal_scope: principal_id,
+               actor_authority: actor_authority
              ) do
           {:ok, _cap} ->
             :ok
@@ -2023,37 +2062,50 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Delegate capabilities from a parent (human or agent) to the newly created agent.
   # Non-fatal: logs warnings on failure, always returns :ok for backwards compat.
-  defp maybe_delegate_from_parent(agent_id, opts) do
+  defp maybe_delegate_from_parent(agent_id, opts, actor_authority) do
     if Keyword.has_key?(opts, :exact_template_policy) do
       :ok
     else
-      do_maybe_delegate_from_parent(agent_id, opts)
+      do_maybe_delegate_from_parent(agent_id, opts, actor_authority)
     end
   end
 
-  defp do_maybe_delegate_from_parent(agent_id, opts) do
+  defp do_maybe_delegate_from_parent(agent_id, opts, actor_authority) do
     delegator_id = Keyword.get(opts, :delegator_id)
-    delegator_key = Keyword.get(opts, :delegator_private_key)
 
-    if delegator_id && delegator_key do
+    if delegator_id do
       resources =
         (opts[:capabilities] || [])
         |> Enum.map(fn cap -> cap[:resource] || cap["resource"] end)
         |> Enum.reject(&is_nil/1)
 
-      {:ok, caps} =
-        Arbor.Security.delegate_to_agent(delegator_id, agent_id,
-          delegator_private_key: delegator_key,
-          resources: resources
-        )
+      case Arbor.Security.delegate_to_agent(delegator_id, agent_id,
+             actor_authority: actor_authority,
+             resources: resources
+           ) do
+        {:ok, caps} ->
+          Logger.info(
+            "[Lifecycle] Delegated #{length(caps)} capabilities from #{delegator_id} to #{agent_id}"
+          )
 
-      Logger.info(
-        "[Lifecycle] Delegated #{length(caps)} capabilities from #{delegator_id} to #{agent_id}"
-      )
+          :ok
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      :ok
     end
-
-    :ok
   end
+
+  defp mutation_authority(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :actor_authority) do
+      {:ok, authority} when not is_nil(authority) -> {:ok, authority}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp mutation_authority(_opts), do: {:error, :capability_mutation_unauthorized}
 
   defp init_memory(agent_id, opts) do
     if Process.whereis(Arbor.Memory.Registry) do
@@ -2223,7 +2275,15 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts) do
+  defp build_profile(
+         agent_id,
+         display_name,
+         identity,
+         endorsement,
+         keychain_ref,
+         character,
+         opts
+       ) do
     # Store template as string name (not module atom)
     template =
       case Keyword.get(opts, :template) do
@@ -2243,9 +2303,10 @@ defmodule Arbor.Agent.Lifecycle do
       identity: %{
         agent_id: identity.agent_id,
         public_key: Base.encode16(identity.public_key, case: :lower),
+        encryption_public_key: Base.encode16(identity.encryption_public_key, case: :lower),
         endorsement: endorsement
       },
-      keychain_ref: keychain.agent_id,
+      keychain_ref: keychain_ref,
       metadata: build_profile_metadata(opts),
       created_at: DateTime.utc_now(),
       version: 1
@@ -2296,20 +2357,31 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp maybe_put_exact_template_policy(metadata, _envelope), do: metadata
 
-  defp prepare_and_activate_authority(%Profile{} = profile) do
+  defp prepare_and_activate_authority(%Profile{} = profile, opts) do
+    with {:ok, actor_authority} <- mutation_authority(opts) do
+      do_prepare_and_activate_authority(profile, actor_authority)
+    end
+  end
+
+  defp do_prepare_and_activate_authority(%Profile{} = profile, actor_authority) do
     case resolve_exact_profile_policy(profile) do
       {:ok, prepared_profile, envelope} ->
         snapshot = ExactTemplatePolicy.snapshot(envelope)
 
-        with :ok <- register_profile_identity(prepared_profile, :strict),
+        with :ok <- register_profile_identity(prepared_profile, :strict, actor_authority),
              :ok <- ensure_exact_trust_profile(prepared_profile.agent_id, snapshot),
-             :ok <- reconcile_exact_capabilities(prepared_profile.agent_id, envelope),
-             :ok <- ensure_exact_identity_active(prepared_profile.agent_id) do
+             :ok <-
+               reconcile_exact_capabilities(
+                 prepared_profile.agent_id,
+                 envelope,
+                 actor_authority
+               ),
+             :ok <- ensure_exact_identity_active(prepared_profile.agent_id, actor_authority) do
           {:ok, prepared_profile, {:exact, envelope}}
         end
 
       :not_exact ->
-        with :ok <- ensure_identity_and_capabilities(profile) do
+        with :ok <- ensure_identity_and_capabilities(profile, actor_authority) do
           {:ok, profile, :legacy}
         end
 
@@ -2434,10 +2506,10 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Re-register identity and capabilities on resume.
   # ETS-based stores lose state on restart, so we re-grant from the profile.
-  defp ensure_identity_and_capabilities(%Profile{} = profile) do
+  defp ensure_identity_and_capabilities(%Profile{} = profile, actor_authority) do
     agent_id = profile.agent_id
 
-    _result = register_profile_identity(profile, :best_effort)
+    _result = register_profile_identity(profile, :best_effort, actor_authority)
 
     # Re-grant capabilities from template or stored list
     # Filter out retired plural action grants; action execution now authorizes
@@ -2449,40 +2521,60 @@ defmodule Arbor.Agent.Lifecycle do
         String.starts_with?(resource, "arbor://actions/execute/")
       end)
 
-    grant_capabilities(agent_id, capabilities, extract_template_metadata(profile))
+    grant_capabilities(
+      agent_id,
+      capabilities,
+      extract_template_metadata(profile),
+      actor_authority
+    )
   end
 
-  defp register_profile_identity(%Profile{} = profile, mode) do
+  defp register_profile_identity(%Profile{} = profile, mode, actor_authority) do
     agent_id = profile.agent_id
 
     # Re-register identity from stored public key
     case profile.identity do
-      %{public_key: pub_hex} when is_binary(pub_hex) ->
-        case Base.decode16(pub_hex, case: :mixed) do
-          {:ok, pub_key} ->
-            identity = %Arbor.Contracts.Security.Identity{
-              agent_id: agent_id,
-              public_key: pub_key,
-              name: profile.display_name,
-              status: :active,
-              created_at: profile.created_at || DateTime.utc_now()
-            }
+      %{public_key: pub_hex} = stored_identity when is_binary(pub_hex) ->
+        with {:ok, pub_key} <- Base.decode16(pub_hex, case: :mixed),
+             {:ok, encryption_public_key} <-
+               decode_profile_encryption_public_key(stored_identity) do
+          identity = %Arbor.Contracts.Security.Identity{
+            agent_id: agent_id,
+            public_key: pub_key,
+            encryption_public_key: encryption_public_key,
+            name: profile.display_name,
+            status: :active,
+            created_at: profile.created_at || DateTime.utc_now()
+          }
 
-            case Arbor.Security.register_identity(identity) do
-              :ok ->
-                :ok
-
-              {:error, :already_registered} ->
-                :ok
-
-              {:error, {:already_registered, _agent_id}} ->
-                :ok
-
-              {:error, reason} ->
-                identity_registration_failure(mode, agent_id, reason)
+          registration_result =
+            with {:ok, possession_proof} <-
+                   ProfileAuthorityOwner.build_stored_identity_registration_proof(
+                     identity,
+                     actor_authority
+                   ) do
+              Arbor.Security.register_stored_identity(
+                identity,
+                actor_authority,
+                possession_proof
+              )
             end
 
-          :error ->
+          case registration_result do
+            :ok ->
+              :ok
+
+            {:error, :already_registered} ->
+              :ok
+
+            {:error, {:already_registered, _agent_id}} ->
+              :ok
+
+            {:error, reason} ->
+              identity_registration_failure(mode, agent_id, reason)
+          end
+        else
+          _ ->
             identity_registration_failure(mode, agent_id, :invalid_public_key)
         end
 
@@ -2499,13 +2591,30 @@ defmodule Arbor.Agent.Lifecycle do
     :ok
   end
 
-  defp ensure_exact_identity_active(agent_id) do
+  defp decode_profile_encryption_public_key(identity) when is_map(identity) do
+    case Map.get(identity, :encryption_public_key) || Map.get(identity, "encryption_public_key") do
+      value when is_binary(value) -> Base.decode16(value, case: :mixed)
+      nil -> {:ok, nil}
+      _ -> :error
+    end
+  end
+
+  defp ensure_exact_identity_active(agent_id, actor_authority) do
     case Arbor.Security.identity_status(agent_id) do
-      {:ok, :active} -> :ok
-      {:ok, :suspended} -> Arbor.Security.resume_identity(agent_id)
-      {:ok, status} -> {:error, {:identity_not_activatable, status}}
-      {:error, reason} -> {:error, {:identity_status_failed, reason}}
-      other -> {:error, {:unexpected_identity_status, other}}
+      {:ok, :active} ->
+        :ok
+
+      {:ok, :suspended} ->
+        Arbor.Security.resume_identity(agent_id, actor_authority: actor_authority)
+
+      {:ok, status} ->
+        {:error, {:identity_not_activatable, status}}
+
+      {:error, reason} ->
+        {:error, {:identity_status_failed, reason}}
+
+      other ->
+        {:error, {:unexpected_identity_status, other}}
     end
   end
 
@@ -2535,13 +2644,13 @@ defmodule Arbor.Agent.Lifecycle do
     ProfileStore.store_profile(profile)
   end
 
-  defp handle_authority_failure(%Profile{} = profile, {:error, reason} = error) do
+  defp handle_authority_failure(%Profile{} = profile, {:error, reason} = error, opts) do
     if ExactTemplatePolicy.managed_profile?(profile) do
       _ = stop(profile.agent_id)
 
       results = [
-        suspend_exact_identity(profile.agent_id),
-        cleanup_agent_authority(profile.agent_id)
+        suspend_exact_identity(profile.agent_id, opts),
+        cleanup_agent_authority(profile.agent_id, opts)
       ]
 
       case Enum.reject(results, &(&1 == :ok)) do
@@ -2556,11 +2665,14 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp suspend_exact_identity(agent_id) do
+  defp suspend_exact_identity(agent_id, opts) do
     case Arbor.Security.identity_status(agent_id) do
       {:ok, :active} ->
         safe_cleanup(fn ->
-          Arbor.Security.suspend_identity(agent_id, reason: :exact_policy_activation_failed)
+          Arbor.Security.suspend_identity(agent_id,
+            reason: :exact_policy_activation_failed,
+            actor_authority: Keyword.get(opts, :actor_authority)
+          )
         end)
 
       {:ok, :suspended} ->
@@ -2585,11 +2697,11 @@ defmodule Arbor.Agent.Lifecycle do
     kind, reason -> {:error, {:identity_suspension_failure, kind, reason}}
   end
 
-  defp rollback_failed_creation(agent_id) do
+  defp rollback_failed_creation(agent_id, opts) do
     cleanup_results = [
-      cleanup_agent_authority(agent_id),
-      safe_cleanup(fn -> Arbor.Security.delete_signing_key(agent_id) end),
-      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id) end),
+      cleanup_agent_authority(agent_id, opts),
+      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id, opts) end),
+      maybe_delete_signing_key(agent_id, opts),
       safe_cleanup(fn -> ProfileStore.delete_profile(agent_id) end),
       safe_cleanup(fn -> Arbor.Memory.cleanup_for_agent(agent_id) end)
     ]
@@ -2606,9 +2718,21 @@ defmodule Arbor.Agent.Lifecycle do
     :ok
   end
 
-  defp cleanup_agent_authority(agent_id) do
+  defp maybe_delete_signing_key(agent_id, opts) do
+    case Keyword.get(opts, :actor_authority) do
+      nil ->
+        :ok
+
+      actor_authority ->
+        safe_cleanup(fn ->
+          ProfileAuthorityOwner.delete_signing_key(agent_id, actor_authority)
+        end)
+    end
+  end
+
+  defp cleanup_agent_authority(agent_id, opts) do
     results = [
-      revoke_all_agent_capabilities(agent_id),
+      revoke_all_agent_capabilities(agent_id, opts),
       safe_cleanup(fn -> Arbor.Trust.delete_trust_profile(agent_id) end)
     ]
 
@@ -2618,11 +2742,14 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp revoke_all_agent_capabilities(agent_id) do
-    case Arbor.Security.list_capabilities(agent_id) do
-      {:ok, capabilities} -> revoke_capabilities(capabilities)
-      {:error, reason} -> {:error, {:capability_list_failed, reason}}
-      other -> {:error, {:unexpected_capability_list_result, other}}
+  defp revoke_all_agent_capabilities(agent_id, opts) do
+    with {:ok, actor_authority} <- mutation_authority(opts) do
+      case Arbor.Security.revoke_all(agent_id, actor_authority: actor_authority) do
+        {:ok, _count} -> :ok
+        {:error, :not_found} -> :ok
+        {:error, reason} -> {:error, {:capability_revoke_failed, reason}}
+        other -> {:error, {:unexpected_capability_revoke_result, other}}
+      end
     end
   rescue
     error -> {:error, {:capability_cleanup_exception, Exception.message(error)}}

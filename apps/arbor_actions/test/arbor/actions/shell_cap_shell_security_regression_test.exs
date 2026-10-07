@@ -81,7 +81,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end)
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "actions-capshell-test")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
     agent_id = identity.agent_id
 
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
@@ -98,17 +98,18 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
             |> Map.put("arbor://shell/exec/**", :auto)
       })
 
-    {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+    {:ok, _cap} =
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec/**")
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
 
       if Process.whereis(Arbor.Security.Identity.Registry) do
-        Arbor.Security.deregister_identity(agent_id)
+        Arbor.Security.deregister_identity_fixture(agent_id)
       end
     end)
 
@@ -361,7 +362,9 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     :ok = File.mkdir(root)
     {:ok, cwd} = SafePath.resolve_real(root)
     on_exit(fn -> File.rm_rf!(cwd) end)
-    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
+    {:ok, _} =
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
 
     if Process.whereis(Arbor.Trust.Manager) == nil do
       start_supervised!(

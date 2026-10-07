@@ -18,6 +18,8 @@ defmodule Arbor.Security.StrictIdentityModeTest do
   @moduletag :fast
 
   alias Arbor.Security
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security.Identity.Registry
 
   setup do
     ensure_security_started()
@@ -50,7 +52,7 @@ defmodule Arbor.Security.StrictIdentityModeTest do
     principal = "agent_" <> hex
     uri = "arbor://historian/query"
 
-    {:ok, _cap} = Security.grant(principal: principal, resource: uri)
+    {:ok, _cap} = Security.grant_fixture(principal: principal, resource: uri)
 
     {:ok, principal: principal, uri: uri}
   end
@@ -77,6 +79,29 @@ defmodule Arbor.Security.StrictIdentityModeTest do
              match?({:ok, :pending_approval, _}, result),
            "expected the unregistered principal to pass the identity gate when " <>
              "strict mode is off; got #{inspect(result)}"
+  end
+
+  test "security regression: preverified identity still checks current standing" do
+    {:ok, identity} = Identity.generate(name: "preverified-standing")
+    :ok = Registry.register_fixture(identity)
+
+    uri = "arbor://historian/query/#{System.unique_integer([:positive])}"
+    {:ok, _cap} = Security.grant_fixture(principal: identity.agent_id, resource: uri)
+    :ok = Security.suspend_identity_fixture(identity.agent_id, reason: "security regression")
+
+    assert {:error, {:unauthorized, :identity_suspended}} =
+             Security.authorize(identity.agent_id, uri, :query,
+               identity_verified: true,
+               verify_identity: true
+             )
+  end
+
+  test "security regression: development config does not allow arbitrary OIDC subjects" do
+    dev_config =
+      Path.expand("../../../../../config/dev.exs", __DIR__)
+      |> File.read!()
+
+    refute dev_config =~ "oidc_registration_mode: :allow"
   end
 
   defp ensure_security_started do

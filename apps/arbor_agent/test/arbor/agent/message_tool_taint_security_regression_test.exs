@@ -203,7 +203,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
       grant!(human_b, chat_resource(agent_id)) | grants
     ]
 
-    on_exit(fn -> Enum.each(grants, &Security.revoke(&1.id)) end)
+    on_exit(fn -> Enum.each(grants, &Security.revoke_fixture(&1.id)) end)
 
     assert {:ok, session_pid} =
              SessionManager.ensure_session(agent_id,
@@ -368,9 +368,9 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
   defp register_agent_identity! do
     assert {:ok, identity} = Identity.generate(name: "Message tool taint agent")
-    assert :ok = Security.register_identity(Identity.public_only(identity))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
 
-    on_exit(fn -> _ = Security.deregister_identity(identity.agent_id) end)
+    on_exit(fn -> _ = Security.deregister_identity_fixture(identity.agent_id) end)
 
     %{
       agent_id: identity.agent_id,
@@ -404,17 +404,9 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
     }
 
     assert {:ok, id_token} = Joken.Signer.sign(claims, signer)
-    jwks_table = :arbor_oidc_jwks_cache
+    provider = %{issuer: issuer, client_id: client_id}
 
-    if :ets.whereis(jwks_table) == :undefined do
-      :ets.new(jwks_table, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    true =
-      :ets.insert(
-        jwks_table,
-        {issuer, %{"keys" => [public_map]}, System.monotonic_time(:millisecond) + 60_000}
-      )
+    :ok = Security.put_oidc_jwks_fixture(provider, %{"keys" => [public_map]})
 
     assert {:ok, identity} = Identity.generate(name: claims["name"])
 
@@ -436,15 +428,11 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
         }
     }
 
-    assert :ok =
-             Security.register_oidc_identity(human_identity, id_token, %{
-               issuer: issuer,
-               client_id: client_id
-             })
+    assert :ok = Security.register_oidc_identity(human_identity, id_token, provider)
 
     on_exit(fn ->
-      if :ets.whereis(jwks_table) != :undefined, do: :ets.delete(jwks_table, issuer)
-      _ = Security.deregister_identity(human_id)
+      :ok = Security.delete_oidc_jwks_fixture(provider)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     human_id
@@ -452,7 +440,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
   defp grant!(principal, resource) do
     assert {:ok, capability} =
-             Security.grant(principal: principal, resource: resource, constraints: %{})
+             Security.grant_fixture(principal: principal, resource: resource, constraints: %{})
 
     capability
   end

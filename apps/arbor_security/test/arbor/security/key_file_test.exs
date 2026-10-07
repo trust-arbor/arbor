@@ -11,7 +11,8 @@ defmodule Arbor.Security.KeyFileTest do
 
   import Bitwise
 
-  alias Arbor.Security.KeyFile
+  alias Arbor.Security
+  alias Arbor.Security.{Crypto, KeyFile}
 
   setup do
     tmp = System.tmp_dir!() |> Path.join("key_file_test_#{System.unique_integer([:positive])}")
@@ -62,6 +63,48 @@ defmodule Arbor.Security.KeyFileTest do
       """
 
       assert {:error, {:invalid_agent_id, "human_"}} = KeyFile.parse(contents)
+    end
+
+    test "security regression: the public operator parser rejects oversized contents" do
+      assert {:error, :invalid_key_file_size} =
+               Security.parse_operator_key_file_contents(:binary.copy(<<"x">>, 4_097))
+    end
+  end
+
+  describe "sign_scheduler_caps_payload/2" do
+    test "security regression: signs only the exact canonical scheduler domain", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "scheduler.arbor.key")
+      {public_key, private_key} = Crypto.generate_keypair()
+      principal_id = "agent_" <> String.duplicate("a", 64)
+
+      write_private!(path, """
+      agent_id=#{principal_id}
+      private_key_b64=#{Base.encode64(private_key)}
+      """)
+
+      domain = "arbor.scheduler.caps.v2"
+      payload = <<byte_size(domain)::32-big, domain::binary, "canonical-caps-body">>
+      wrong_domain = "arbor.scheduler.caps.v1"
+      wrong_payload = <<byte_size(wrong_domain)::32-big, wrong_domain::binary, "body">>
+
+      {:ok, io_device} = :file.open(String.to_charlist(path), [:read, :raw, :binary])
+
+      try do
+        assert {:error, :invalid_scheduler_caps_payload} =
+                 Security.sign_scheduler_caps_payload(io_device, wrong_payload)
+
+        assert {:ok, ^principal_id, signature} =
+                 Security.sign_scheduler_caps_payload(io_device, payload)
+
+        assert :ok = Security.verify_detached(payload, signature, public_key)
+
+        assert {:error, :invalid_signature} =
+                 Security.verify_detached(payload <> "tampered", signature, public_key)
+      after
+        :file.close(io_device)
+      end
     end
   end
 

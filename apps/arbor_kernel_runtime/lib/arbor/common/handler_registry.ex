@@ -23,4 +23,27 @@ defmodule Arbor.Common.HandlerRegistry do
     table_name: :handler_registry,
     require_behaviour: nil,
     allow_overwrite: false
+
+  def validate_entry(_name, module, _metadata) do
+    behaviours =
+      module.module_info(:attributes)
+      |> Keyword.get_values(:behaviour)
+      |> List.flatten()
+
+    declared_handler_behaviour? =
+      Enum.any?(behaviours, fn behaviour ->
+        Code.ensure_loaded?(behaviour) and function_exported?(behaviour, :behaviour_info, 1) and
+          {:execute, 4} in behaviour.behaviour_info(:callbacks)
+      end)
+
+    if declared_handler_behaviour? and function_exported?(module, :execute, 4) do
+      :ok
+    else
+      {:error, {:missing_handler_behaviour, {:execute, 4}}}
+    end
+  rescue
+    _ -> {:error, {:missing_handler_behaviour, {:execute, 4}}}
+  catch
+    _, _ -> {:error, {:missing_handler_behaviour, {:execute, 4}}}
+  end
 end

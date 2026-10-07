@@ -3,7 +3,11 @@ defmodule Arbor.Security.SigningAuthorityBroker.KeyHolder do
 
   use GenServer
 
+  alias Arbor.Security.PrivateState
+
   @take_timeout_ms 1_000
+  @private_state_anchor {__MODULE__, :private_state}
+  @private_state_schema :signing_key_holder_v1
 
   @spec start(binary(), pid(), pid(), pos_integer()) ::
           {:ok, pid(), reference()} | {:error, :key_handoff_unavailable}
@@ -23,7 +27,7 @@ defmodule Arbor.Security.SigningAuthorityBroker.KeyHolder do
   @spec take(pid(), reference()) :: {:ok, binary()} | {:error, atom()}
   def take(holder_pid, transfer_ref) when is_pid(holder_pid) and is_reference(transfer_ref) do
     try do
-      GenServer.call(holder_pid, {:take, transfer_ref}, @take_timeout_ms)
+      Arbor.Common.authenticated_call(holder_pid, {:take, transfer_ref}, @take_timeout_ms)
     catch
       :exit, {:timeout, _details} -> {:error, :key_handoff_expired}
       :exit, _reason -> {:error, :key_handoff_unavailable}
@@ -34,31 +38,43 @@ defmodule Arbor.Security.SigningAuthorityBroker.KeyHolder do
 
   @spec cancel(pid(), reference()) :: :ok
   def cancel(holder_pid, transfer_ref) when is_pid(holder_pid) and is_reference(transfer_ref) do
-    GenServer.cast(holder_pid, {:cancel, transfer_ref})
+    try do
+      _ = Arbor.Common.authenticated_call(holder_pid, {:cancel, transfer_ref}, @take_timeout_ms)
+    catch
+      :exit, _reason -> :ok
+    end
+
+    :ok
   end
 
   def cancel(_, _), do: :ok
 
   @impl true
   def init({private_key, owner_pid, broker_pid, transfer_ref, ttl_ms}) do
+    Process.flag(:sensitive, true)
     owner_monitor = Process.monitor(owner_pid)
     broker_monitor = Process.monitor(broker_pid)
     expiry_timer = Process.send_after(self(), :expire, ttl_ms)
 
-    {:ok,
-     %{
-       private_key: private_key,
-       owner_pid: owner_pid,
-       broker_pid: broker_pid,
-       transfer_ref: transfer_ref,
-       owner_monitor: owner_monitor,
-       broker_monitor: broker_monitor,
-       expiry_timer: expiry_timer
-     }}
+    state = %{
+      private_key: private_key,
+      owner_pid: owner_pid,
+      broker_pid: broker_pid,
+      transfer_ref: transfer_ref,
+      owner_monitor: owner_monitor,
+      broker_monitor: broker_monitor,
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      expiry_timer: expiry_timer
+    }
+
+    {:ok, PrivateState.new(@private_state_anchor, @private_state_schema, state)}
   end
 
   @impl true
-  def handle_call({:take, transfer_ref}, {requester_pid, _tag}, state) do
+  def handle_call(_request, _from, private_state),
+    do: {:reply, {:error, :key_handoff_unavailable}, private_state}
+
+  defp handle_authenticated_call({:take, transfer_ref}, requester_pid, state) do
     cond do
       transfer_ref != state.transfer_ref ->
         {:reply, {:error, :key_handoff_unavailable}, state}
@@ -72,22 +88,63 @@ defmodule Arbor.Security.SigningAuthorityBroker.KeyHolder do
     end
   end
 
-  @impl true
-  def handle_cast({:cancel, transfer_ref}, %{transfer_ref: transfer_ref} = state) do
+  defp handle_authenticated_call(
+         {:cancel, transfer_ref},
+         owner_pid,
+         %{transfer_ref: transfer_ref, owner_pid: owner_pid} = state
+       ) do
+    {:stop, :normal, :ok, state}
+  end
+
+  defp handle_authenticated_call(_request, _caller, state),
+    do: {:reply, {:error, :key_handoff_unavailable}, state}
+
+  defp handle_private_info(:expire, state), do: {:stop, :normal, state}
+
+  defp handle_private_info({:DOWN, ref, :process, _pid, _reason}, state)
+       when ref == state.owner_monitor or ref == state.broker_monitor do
     {:stop, :normal, state}
   end
 
-  def handle_cast(_message, state), do: {:noreply, state}
+  defp handle_private_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        case handle_authenticated_call(request, caller, state) do
+          {:reply, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:noreply, next_state}
 
-  @impl true
-  def handle_info(:expire, state), do: {:stop, :normal, state}
+          {:stop, reason, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:stop, reason, next_state}
+        end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state)
-      when ref == state.owner_monitor or ref == state.broker_monitor do
-    {:stop, :normal, state}
+      result when result in [:pending, :expired, :rejected] ->
+        {:noreply, state}
+
+      :unrecognized ->
+        {:noreply, state}
+    end
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  @impl true
+  def handle_info(message, private_state) do
+    with {:ok, state} <- private_state(private_state) do
+      case handle_private_info(message, state) do
+        {:noreply, next_state} ->
+          case put_private_state(private_state, next_state) do
+            :ok -> {:noreply, private_state}
+            {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+          end
+
+        {:stop, reason, next_state} ->
+          _ = put_private_state(private_state, next_state)
+          {:stop, reason, private_state}
+      end
+    else
+      {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+    end
+  end
 
   @impl true
   def format_status(status) when is_map(status) do
@@ -101,12 +158,59 @@ defmodule Arbor.Security.SigningAuthorityBroker.KeyHolder do
   end
 
   @impl true
-  def terminate(_reason, state) do
-    Process.demonitor(state.owner_monitor, [:flush])
-    Process.demonitor(state.broker_monitor, [:flush])
-    Process.cancel_timer(state.expiry_timer, async: false, info: false)
+  def terminate(_reason, private_state) do
+    case private_state(private_state) do
+      {:ok, state} ->
+        Process.demonitor(state.owner_monitor, [:flush])
+        Process.demonitor(state.broker_monitor, [:flush])
+        Process.cancel_timer(state.expiry_timer, async: false, info: false)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    PrivateState.delete(private_state, @private_state_anchor)
     :ok
   end
+
+  defp private_state(state) do
+    PrivateState.fetch(
+      state,
+      @private_state_anchor,
+      @private_state_schema,
+      &valid_private_state?/1
+    )
+  end
+
+  defp put_private_state(handle, state) do
+    PrivateState.replace(
+      handle,
+      @private_state_anchor,
+      @private_state_schema,
+      state,
+      &valid_private_state?/1
+    )
+  end
+
+  defp valid_private_state?(state) when is_map(state) do
+    Map.keys(state) |> Enum.sort() ==
+      [
+        :authenticated_calls,
+        :broker_monitor,
+        :broker_pid,
+        :expiry_timer,
+        :owner_monitor,
+        :owner_pid,
+        :private_key,
+        :transfer_ref
+      ] and
+      (is_binary(state.private_key) or is_nil(state.private_key)) and is_pid(state.owner_pid) and
+      is_pid(state.broker_pid) and is_reference(state.transfer_ref) and
+      is_reference(state.owner_monitor) and is_reference(state.broker_monitor) and
+      is_reference(state.authenticated_calls) and is_reference(state.expiry_timer)
+  end
+
+  defp valid_private_state?(_state), do: false
 
   defp maybe_redact_status_field(status, key) do
     if Map.has_key?(status, key), do: Map.put(status, key, :redacted), else: status
@@ -158,20 +262,32 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.SigningAuthority.Validator
   alias Arbor.Contracts.Security.SigningAuthorityBootstrap
+  alias Arbor.Contracts.Extension.Envelope
   alias Arbor.Security.Config
   alias Arbor.Security.Crypto
+  alias Arbor.Security.Capability.Signer
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.SessionToken
+  alias Arbor.Security.PrivateState
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SigningAuthorityBroker.KeyHolder
   alias Arbor.Security.SigningAuthorityStateOwner
+  alias Arbor.Security.SupervisedOwner
 
   @token_bytes 32
   @wrapping_key_bytes 32
+  @private_state_anchor {__MODULE__, :private_state}
+  @private_state_schema :signing_authority_broker_v1
   @signed_request_nonce_bytes 16
   @derive_domain_prefix "arbor.signing_authority.v1/"
+  @identity_endorsement_domain "arbor.identity.endorsement.v1"
+  @identity_endorsement_purposes [:session, :heartbeat, :action_cycle]
+  @max_identity_id_bytes 256
+  @owner_table :arbor_security_signing_authority_broker_directory
   @acquisition_v1 "arbor.signing_authority.acquire.v1"
   @ephemeral_aad_v1 "arbor.signing_authority.ephemeral.v1"
   @ephemeral_key_check_v1 "arbor.signing_authority.ephemeral.key_check.v1"
@@ -181,6 +297,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   @ephemeral_finalize_timeout_ms 100
   @persistent_request_ttl_margin_ms 1_000
   @persistent_finalize_timeout_ms 100
+  @platform_activation_ttl_seconds 60
+  @max_activation_nonces 4_096
 
   @type open_purpose :: atom() | String.t()
   @type derive_purpose :: atom() | String.t()
@@ -239,6 +357,36 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   @doc false
+  @spec complete_startup(pid(), reference()) :: :ok | {:error, term()}
+  def complete_startup(supervisor, state_owner_token) do
+    with {:ok, timeout} <- Arbor.Security.Config.startup_timeout_ms() do
+      complete_startup(supervisor, state_owner_token, timeout)
+    end
+  end
+
+  @spec complete_startup(pid(), reference(), timeout()) :: :ok | {:error, term()}
+
+  def complete_startup(supervisor, state_owner_token, timeout)
+      when is_pid(supervisor) and is_reference(state_owner_token) and is_integer(timeout) and
+             timeout > 0 do
+    case SupervisedOwner.child_pid(supervisor, __MODULE__) do
+      broker when is_pid(broker) ->
+        GenServer.call(broker, {:complete_startup, supervisor, state_owner_token}, timeout)
+
+      nil ->
+        {:error, :broker_unavailable}
+    end
+  rescue
+    _ -> {:error, :broker_unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :broker_startup_timeout}
+    :exit, _ -> {:error, :broker_unavailable}
+  end
+
+  def complete_startup(_supervisor, _state_owner_token, _timeout),
+    do: {:error, :invalid_broker_startup}
+
+  @doc false
   def owned_identity(authority) do
     with {:ok, canonical} <- SigningAuthority.canonicalize(authority) do
       call({:owned_identity, canonical, self()})
@@ -252,12 +400,24 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  @doc false
+  @spec channel_identity(SigningAuthority.t()) ::
+          {:ok, %{principal_id: String.t(), purpose: term(), owner_pid: pid()}}
+          | {:error, :channel_authority_unauthorized}
+  def channel_identity(authority) do
+    with {:ok, canonical} <- SigningAuthority.canonicalize(authority) do
+      call({:channel_identity, canonical})
+    else
+      _ -> {:error, :channel_authority_unauthorized}
+    end
+  end
+
   @doc """
   Open a persistent signing authority directly from a possession proof.
   """
   @spec open(SignedRequest.t()) :: {:ok, SigningAuthority.t()} | {:error, term()}
   def open(%SignedRequest{} = proof) do
-    case Process.whereis(__MODULE__) do
+    case broker_pid() do
       broker_pid when is_pid(broker_pid) ->
         timeout_ms = Config.signing_authority_broker_call_timeout_ms()
         request_id = make_ref()
@@ -270,6 +430,15 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   def open(_), do: {:error, :invalid_acquisition_proof}
+
+  @doc false
+  @spec open_agent_lifecycle_session(binary()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_agent_lifecycle_session(session_token) when is_binary(session_token) do
+    call({:open_agent_lifecycle_session, session_token})
+  end
+
+  def open_agent_lifecycle_session(_session_token), do: {:error, :invalid_session_token}
 
   @doc """
   Issue an expiring persistent-backed restart slot from a possession proof.
@@ -293,7 +462,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   def claim_bootstrap(bootstrap) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
       {:ok, canonical} ->
-        case Process.whereis(__MODULE__) do
+        case broker_pid() do
           broker_pid when is_pid(broker_pid) ->
             timeout_ms = Config.signing_authority_broker_call_timeout_ms()
             request_id = make_ref()
@@ -330,7 +499,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
           {:ok, SigningAuthority.t()} | {:error, term()}
   def open_ephemeral(%SignedRequest{} = proof, private_key) do
     with :ok <- validate_private_key(private_key) do
-      case Process.whereis(__MODULE__) do
+      case broker_pid() do
         broker_pid when is_pid(broker_pid) ->
           timeout_ms = Config.signing_authority_broker_call_timeout_ms()
           holder_ttl_ms = timeout_ms + @key_holder_ttl_margin_ms
@@ -383,15 +552,132 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   @doc false
-  @spec sign_detached(SigningAuthority.t(), binary()) :: {:ok, binary()} | {:error, term()}
-  def sign_detached(authority, message) when is_binary(message) and byte_size(message) > 0 do
+  @spec sign_native_notice_source(SigningAuthority.t(), binary()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def sign_native_notice_source(authority, payload) when is_binary(payload) do
     case SigningAuthority.canonicalize(authority) do
-      {:ok, canonical} -> call({:sign_detached, canonical, message})
+      {:ok, canonical} -> call({:sign_native_notice_source, canonical, payload})
       {:error, reason} -> {:error, reason}
     end
   end
 
-  def sign_detached(authority, _message) do
+  def sign_native_notice_source(authority, _payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :native_notice_source_required}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec sign_native_notice_publication(SigningAuthority.t(), binary()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def sign_native_notice_publication(authority, payload) when is_binary(payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:sign_native_notice_publication, canonical, payload})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def sign_native_notice_publication(authority, _payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :native_notice_source_required}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec sign_delegation(SigningAuthority.t(), Capability.t(), Capability.t()) ::
+          {:ok, map()} | {:error, term()}
+  def sign_delegation(authority, %Capability{} = parent, %Capability{} = child) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:sign_delegation, canonical, parent, child})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def sign_delegation(_authority, _parent, _child),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @doc false
+  @spec sign_identity_endorsement(SigningAuthority.t(), String.t(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_identity_endorsement(authority, signer_id, target_id, target_public_key)
+      when is_binary(signer_id) and is_binary(target_id) and is_binary(target_public_key) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        call({:sign_identity_endorsement, canonical, signer_id, target_id, target_public_key})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def sign_identity_endorsement(_authority, _signer_id, _target_id, _target_public_key),
+    do: {:error, :identity_endorsement_unauthorized}
+
+  @doc false
+  @spec identity_endorsement_payload(String.t(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, :invalid_identity_endorsement}
+  def identity_endorsement_payload(signer_id, target_id, target_public_key)
+      when is_binary(signer_id) and is_binary(target_id) and is_binary(target_public_key) do
+    with :ok <- validate_identity_id(signer_id),
+         :ok <- validate_identity_id(target_id),
+         true <- signer_id != target_id,
+         true <- byte_size(target_public_key) == 32 do
+      {:ok,
+       identity_endorsement_field(@identity_endorsement_domain) <>
+         identity_endorsement_field(signer_id) <>
+         identity_endorsement_field(target_id) <>
+         identity_endorsement_field(target_public_key)}
+    else
+      _ -> {:error, :invalid_identity_endorsement}
+    end
+  end
+
+  def identity_endorsement_payload(_signer_id, _target_id, _target_public_key),
+    do: {:error, :invalid_identity_endorsement}
+
+  @doc false
+  @spec reserve_platform_activation_window(
+          SigningAuthority.t(),
+          String.t(),
+          String.t(),
+          String.t()
+        ) ::
+          {:ok, %{issued_at: String.t(), expires_at: String.t()}} | {:error, term()}
+  def reserve_platform_activation_window(authority, nonce, valid_from, valid_until)
+      when is_binary(nonce) and is_binary(valid_from) and is_binary(valid_until) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        call({:reserve_platform_activation_window, canonical, nonce, valid_from, valid_until})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def reserve_platform_activation_window(authority, _nonce, _valid_from, _valid_until) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :invalid_activation_window}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec sign_platform_activation(SigningAuthority.t(), map(), String.t()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_platform_activation(authority, unsigned_envelope, nonce)
+      when is_map(unsigned_envelope) and is_binary(nonce) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        call({:sign_platform_activation, canonical, unsigned_envelope, nonce})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def sign_platform_activation(authority, _unsigned_envelope, _nonce) do
     case SigningAuthority.canonicalize(authority) do
       {:ok, _canonical} -> {:error, :invalid_payload}
       {:error, reason} -> {:error, reason}
@@ -403,8 +689,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   The authority's purpose must be allowed to sign `domain_tag`
   (`:coding_task_executor` may sign only `arbor-forge-projection-v1`), and the
-  message must begin with the 32-bit length-prefixed tag. The existing
-  `sign_detached/2` (`:platform_activation` only) is unchanged.
+  message must begin with the 32-bit length-prefixed tag.
   """
   @spec sign_detached_with_domain(SigningAuthority.t(), String.t(), binary()) ::
           {:ok, binary()} | {:error, term()}
@@ -472,12 +757,18 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   def validate_issue_options(_), do: {:error, :invalid_options}
 
   defp call(message) do
-    call(__MODULE__, message, Config.signing_authority_broker_call_timeout_ms())
+    case broker_pid() do
+      pid when is_pid(pid) ->
+        call(pid, message, Config.signing_authority_broker_call_timeout_ms())
+
+      _ ->
+        {:error, :broker_unavailable}
+    end
   end
 
   defp call(server, message, timeout_ms) do
     try do
-      GenServer.call(server, message, timeout_ms)
+      Arbor.Common.authenticated_call(server, message, timeout_ms)
     rescue
       _ -> {:error, :broker_unavailable}
     catch
@@ -498,8 +789,15 @@ defmodule Arbor.Security.SigningAuthorityBroker do
            min(timeout_ms, @persistent_finalize_timeout_ms)
          ) do
       :ok ->
-        GenServer.cast(broker_pid, {:ack_persistent_open, request_id, self()})
-        {:ok, authority}
+        case call(
+               broker_pid,
+               {:ack_persistent_open, request_id},
+               min(timeout_ms, @persistent_finalize_timeout_ms)
+             ) do
+          :ok -> {:ok, authority}
+          {:error, _reason} = error -> error
+          _unexpected -> {:error, :broker_unavailable}
+        end
 
       {:error, _reason} = error ->
         request_persistent_open_cancel(broker_pid, request_id)
@@ -522,7 +820,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp request_persistent_open_cancel(broker_pid, request_id) do
-    GenServer.cast(broker_pid, {:cancel_persistent_open, request_id, self()})
+    _ =
+      call(
+        broker_pid,
+        {:cancel_persistent_open, request_id},
+        @persistent_finalize_timeout_ms
+      )
+
     :ok
   end
 
@@ -580,31 +884,161 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   @impl true
   def init(opts) do
+    Process.flag(:sensitive, true)
+
     with {:ok, state_owner_token} <- Keyword.fetch(opts, :state_owner_token),
          true <- is_reference(state_owner_token),
-         state_owner_pid when is_pid(state_owner_pid) <-
-           Process.whereis(SigningAuthorityStateOwner),
-         {:ok, snapshot} <- SigningAuthorityStateOwner.load(state_owner_token),
-         {:ok, recovered_state} <- recover_persistent_state(snapshot) do
-      state =
-        Map.merge(recovered_state, %{
-          ephemeral_open_requests: %{},
-          wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes),
-          state_owner_token: state_owner_token,
-          state_owner_monitor: Process.monitor(state_owner_pid)
-        })
+         {:ok, supervisor_pid} <- startup_supervisor_pid(),
+         {:ok, defer_initialization?} <- defer_initialization(opts),
+         :ok <- claim_owner_directory() do
+      # StateOwner authenticates this broker against Security.Supervisor.
+      # Defer that call until init/1 has acknowledged startup so a dynamic
+      # Supervisor.start_child/2 does not make the parent wait on a child that
+      # is synchronously asking the same parent for its child inventory.
+      private_state =
+        PrivateState.new(
+          @private_state_anchor,
+          @private_state_schema,
+          pending_state(state_owner_token, supervisor_pid)
+        )
 
-      case persist_state(state) do
-        :ok -> {:ok, state}
-        {:error, reason} -> {:stop, reason}
-      end
+      if defer_initialization? and not SupervisedOwner.application_started?(:arbor_security),
+        do: {:ok, private_state},
+        else: {:ok, private_state, {:continue, :initialize}}
     else
       _ -> {:stop, :state_owner_unavailable}
     end
   end
 
   @impl true
-  def handle_call({:open, request_id, proof}, {caller_pid, _tag}, state) do
+  def handle_continue(:initialize, private_state) do
+    with {:ok, pending_state} <- private_state(private_state) do
+      case initialize_private_state(pending_state) do
+        {:noreply, state} ->
+          case put_private_state(private_state, state) do
+            :ok -> {:noreply, private_state}
+            {:error, _reason} -> {:stop, :state_owner_unavailable, private_state}
+          end
+
+        {:stop, reason, state} ->
+          _ = put_private_state(private_state, state)
+          {:stop, reason, private_state}
+      end
+    else
+      {:error, _reason} -> {:stop, :state_owner_unavailable, private_state}
+    end
+  end
+
+  defp initialize_private_state(pending_state) do
+    state_owner_token = pending_state.state_owner_token
+    supervisor_pid = pending_state.security_supervisor_pid
+
+    with state_owner_pid when is_pid(state_owner_pid) <-
+           SigningAuthorityStateOwner.pid_from_supervisor(supervisor_pid),
+         {:ok, snapshot} <-
+           SigningAuthorityStateOwner.load_from_supervisor(supervisor_pid, state_owner_token),
+         {:ok, recovered_state} <- recover_persistent_state(snapshot) do
+      state =
+        Map.merge(recovered_state, %{
+          authenticated_calls: pending_state.authenticated_calls,
+          ephemeral_open_requests: %{},
+          wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes),
+          state_owner_token: state_owner_token,
+          state_owner_monitor: Process.monitor(state_owner_pid),
+          security_supervisor_pid: supervisor_pid
+        })
+
+      case persist_state(state) do
+        :ok -> {:noreply, state}
+        {:error, reason} -> {:stop, reason, state}
+      end
+    else
+      _ -> {:stop, :state_owner_unavailable, pending_state}
+    end
+  end
+
+  defp pending_state(state_owner_token, supervisor_pid) do
+    %{
+      authorities: %{},
+      bootstraps: %{},
+      persistent_open_requests: %{},
+      ephemeral_open_requests: %{},
+      monitors: %{},
+      activation_nonces: %{},
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      wrapping_key: nil,
+      state_owner_token: state_owner_token,
+      state_owner_monitor: nil,
+      security_supervisor_pid: supervisor_pid
+    }
+  end
+
+  defp defer_initialization(opts) when is_list(opts) do
+    case Keyword.get(opts, :defer_initialization, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:error, :invalid_broker_startup}
+    end
+  rescue
+    _ -> {:error, :invalid_broker_startup}
+  end
+
+  defp defer_initialization(_opts), do: {:error, :invalid_broker_startup}
+
+  defp startup_supervisor_pid do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> linked_supervisor(pid)
+      [name | _] when is_atom(name) -> name |> Process.whereis() |> linked_supervisor()
+      _other -> {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(pid) when is_pid(pid) do
+    case Process.info(self(), :links) do
+      {:links, links} when is_list(links) ->
+        if pid in links,
+          do: {:ok, pid},
+          else: {:error, :security_supervisor_unavailable}
+
+      _other ->
+        {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(_pid), do: {:error, :security_supervisor_unavailable}
+
+  @impl true
+  def handle_call(
+        {:complete_startup, supervisor, state_owner_token},
+        _from,
+        private_state
+      ) do
+    with {:ok, state} <- private_state(private_state),
+         true <- supervisor === state.security_supervisor_pid,
+         true <- state_owner_token === state.state_owner_token do
+      if initialized_state?(state) do
+        {:reply, :ok, private_state}
+      else
+        case initialize_private_state(state) do
+          {:noreply, initialized_state} ->
+            case put_private_state(private_state, initialized_state) do
+              :ok -> {:reply, :ok, private_state}
+              {:error, _reason} -> {:reply, {:error, :invalid_private_state}, private_state}
+            end
+
+          {:stop, reason, _state} ->
+            {:reply, {:error, reason}, private_state}
+        end
+      end
+    else
+      _other -> {:reply, {:error, :signing_authority_unauthorized}, private_state}
+    end
+  end
+
+  @impl true
+  def handle_call(_request, _from, private_state),
+    do: {:reply, {:error, :signing_authority_unauthorized}, private_state}
+
+  defp handle_authenticated_call({:open, request_id, proof}, caller_pid, state) do
     case verify_persistent_acquisition(proof, caller_pid) do
       {:ok, bound} ->
         with :ok <- validate_persistent_request_id(request_id, state) do
@@ -635,7 +1069,37 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:prepare_persistent_open_finalize, request_id}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call(
+         {:open_agent_lifecycle_session, session_token},
+         caller_pid,
+         state
+       ) do
+    with {:ok, principal_id} <-
+           SessionToken.verify_for(
+             session_token,
+             "arbor://agent/lifecycle/create",
+             :create
+           ),
+         true <- String.starts_with?(principal_id, "human_"),
+         :ok <- ensure_owner_alive(caller_pid),
+         :ok <- ensure_identity_active(principal_id),
+         :ok <- ensure_signing_key_present(principal_id) do
+      bound = %{principal_id: principal_id, purpose: :agent_lifecycle, owner_pid: caller_pid}
+
+      state
+      |> create_authority(bound, caller_pid, :persistent, nil)
+      |> commit_persistent_result()
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_session_token}, state}
+    end
+  end
+
+  defp handle_authenticated_call(
+         {:prepare_persistent_open_finalize, request_id},
+         caller_pid,
+         state
+       ) do
     case fetch_persistent_open_request(state, request_id, caller_pid) do
       {:ok, %{status: :committed} = request} ->
         state =
@@ -659,7 +1123,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:issue_bootstrap, proof, grace_ms}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call({:issue_bootstrap, proof, grace_ms}, caller_pid, state) do
     with {:ok, validated_grace_ms} <- validate_grace_ms(grace_ms),
          {:ok, bound} <- verify_persistent_acquisition(proof, caller_pid) do
       state
@@ -670,7 +1134,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:claim_bootstrap, request_id, bootstrap}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call({:claim_bootstrap, request_id, bootstrap}, caller_pid, state) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
       {:ok, bootstrap} ->
         with :ok <- validate_persistent_request_id(request_id, state) do
@@ -701,7 +1165,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:close_bootstrap, bootstrap}, _from, state) do
+  defp handle_authenticated_call({:close_bootstrap, bootstrap}, _caller, state) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
       {:ok, bootstrap} ->
         state
@@ -713,11 +1177,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call(
-        {:open_ephemeral, request_id, proof, holder_pid, transfer_ref},
-        {caller_pid, _tag},
-        state
-      ) do
+  defp handle_authenticated_call(
+         {:open_ephemeral, request_id, proof, holder_pid, transfer_ref},
+         caller_pid,
+         state
+       ) do
     result =
       with :ok <- validate_ephemeral_request_id(request_id, state),
            {:ok, bound} <- verify_acquisition(proof, caller_pid),
@@ -755,7 +1219,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:ack_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call({:ack_ephemeral_open, request_id}, caller_pid, state) do
     case fetch_ephemeral_open_request(state, request_id, caller_pid) do
       {:ok, request} ->
         state =
@@ -774,7 +1238,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:finalize_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call({:finalize_ephemeral_open, request_id}, caller_pid, state) do
     case fetch_ephemeral_open_request(state, request_id, caller_pid) do
       {:ok, %{status: :acknowledged}} ->
         {:reply, :ok, remove_ephemeral_open_request(state, request_id)}
@@ -787,7 +1251,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:cancel_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+  defp handle_authenticated_call({:cancel_ephemeral_open, request_id}, caller_pid, state) do
     case fetch_ephemeral_open_request(state, request_id, caller_pid) do
       {:ok, request} ->
         {:reply, :ok, revoke_ephemeral_open_request(state, request_id, request)}
@@ -800,7 +1264,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:owned_identity, authority, owner}, _from, state) do
+  defp handle_authenticated_call({:owned_identity, authority, owner}, _caller, state) do
     reply =
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
            {:ok, %{owner_pid: ^owner} = entry} <- authorize_authority(authority, state) do
@@ -812,9 +1276,27 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:sign, authority, payload}, _from, state) do
+  defp handle_authenticated_call({:channel_identity, authority}, _caller, state) do
     reply =
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state) do
+        {:ok,
+         %{
+           principal_id: entry.principal_id,
+           purpose: entry.purpose,
+           owner_pid: entry.owner_pid
+         }}
+      else
+        _ -> {:error, :channel_authority_unauthorized}
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp handle_authenticated_call({:sign, authority, payload}, _caller, state) do
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           :ok <- validate_resource_binding(payload),
            {:ok, entry} <- authorize_authority(authority, state),
            {:ok, private_key} <- private_key_for(entry, authority.token, state) do
         safely_sign_request(payload, entry.principal_id, private_key)
@@ -823,19 +1305,156 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:sign_detached, authority, message}, _from, state) do
+  defp handle_authenticated_call(
+         {:sign_native_notice_source, authority, payload},
+         caller,
+         state
+       ) do
     reply =
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
-           {:ok, entry} <- authorize_authority(authority, state),
-           :ok <- require_platform_activation_purpose(entry.purpose),
+           {:ok, %{owner_pid: ^caller} = entry} <- authorize_authority(authority, state),
+           :ok <- validate_native_notice_source_payload(payload, entry, caller),
            {:ok, private_key} <- private_key_for(entry, authority.token, state) do
-        safely_sign_detached(message, private_key)
+        safely_sign_request(payload, entry.principal_id, private_key)
+      else
+        _ -> {:error, :native_notice_source_required}
       end
 
     {:reply, reply, state}
   end
 
-  def handle_call({:sign_detached, authority, domain_tag, message}, _from, state) do
+  defp handle_authenticated_call(
+         {:sign_native_notice_publication, authority, payload},
+         caller,
+         state
+       ) do
+    reply =
+      with true <-
+             SupervisedOwner.authorized?(
+               caller,
+               :arbor_security,
+               [Arbor.Security.NativeNoticeBroker]
+             ),
+           {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- validate_native_notice_publication_payload(payload, entry),
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        safely_sign_request(payload, entry.principal_id, private_key)
+      else
+        _ -> {:error, :native_notice_source_required}
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp handle_authenticated_call(
+         {:sign_delegation, authority, parent, child},
+         caller,
+         state
+       ) do
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, %{owner_pid: ^caller} = entry} <- authorize_authority(authority, state),
+           true <- entry.principal_id == parent.principal_id,
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        {:ok, Signer.sign_delegation(parent, child, private_key)}
+      else
+        _ -> {:error, :capability_mutation_unauthorized}
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp handle_authenticated_call(
+         {:sign_identity_endorsement, authority, signer_id, target_id, target_public_key},
+         caller,
+         state
+       ) do
+    reply =
+      with {:ok, payload} <-
+             identity_endorsement_payload(signer_id, target_id, target_public_key),
+           {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, %{owner_pid: ^caller, principal_id: ^signer_id} = entry} <-
+             authorize_authority(authority, state),
+           true <- entry.purpose in @identity_endorsement_purposes,
+           {:ok, ^target_public_key} <- Registry.lookup(target_id),
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        safely_sign_detached(payload, private_key)
+      else
+        _ -> {:error, :identity_endorsement_unauthorized}
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp handle_authenticated_call(
+         {:reserve_platform_activation_window, authority, nonce, valid_from, valid_until},
+         _caller,
+         state
+       ) do
+    state = prune_activation_nonces(state)
+
+    result =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- require_platform_activation_purpose(entry.purpose),
+           :ok <- validate_activation_nonce(nonce),
+           false <- Map.has_key?(state.activation_nonces, nonce),
+           true <- map_size(state.activation_nonces) < @max_activation_nonces,
+           {:ok, window} <- activation_window(valid_from, valid_until) do
+        reservation = %{
+          authority_token: authority.token,
+          issued_at: window.issued_at,
+          expires_at: window.expires_at,
+          expires_at_unix: window.expires_at_unix,
+          status: :reserved
+        }
+
+        {:ok, Map.drop(window, [:expires_at_unix]),
+         put_in(state, [:activation_nonces, nonce], reservation)}
+      else
+        true -> {:error, :activation_nonce_reused}
+        false -> {:error, :activation_nonce_capacity_exceeded}
+        {:error, reason} -> {:error, reason}
+      end
+
+    case result do
+      {:ok, window, next_state} -> with_persistent_commit({:ok, window}, next_state)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_authenticated_call(
+         {:sign_platform_activation, authority, unsigned_envelope, nonce},
+         _caller,
+         state
+       ) do
+    reservation = Map.get(state.activation_nonces, nonce)
+
+    consumed_state =
+      case reservation do
+        %{status: :reserved} = entry ->
+          put_in(state, [:activation_nonces, nonce], %{entry | status: :consumed})
+
+        _ ->
+          state
+      end
+
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- require_platform_activation_purpose(entry.purpose),
+           :ok <- match_activation_reservation(reservation, authority, unsigned_envelope, nonce),
+           {:ok, message} <- Envelope.signing_message(unsigned_envelope),
+           :ok <- verify_platform_activation_message(message),
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        safely_sign_detached(message, private_key)
+      end
+
+    with_persistent_commit(reply, consumed_state)
+  end
+
+  defp handle_authenticated_call({:sign_detached, authority, domain_tag, message}, _caller, state) do
     reply =
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
            {:ok, entry} <- authorize_authority(authority, state),
@@ -848,7 +1467,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:derive_secret, authority, purpose}, _from, state) do
+  defp handle_authenticated_call({:derive_secret, authority, purpose}, _caller, state) do
     reply =
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
            {:ok, info} <- derive_info(purpose),
@@ -860,7 +1479,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:close, authority}, _from, state) do
+  defp handle_authenticated_call({:close, authority}, _caller, state) do
     case SigningAuthority.canonicalize(authority) do
       {:ok, authority} ->
         state
@@ -872,7 +1491,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call(:debug_state, _from, state) do
+  defp handle_authenticated_call(:debug_state, _caller, state) do
     entries =
       Enum.map(state.authorities, fn {_token, entry} ->
         %{
@@ -907,6 +1526,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     snapshot = %{
       authority_count: map_size(state.authorities),
       bootstrap_count: map_size(state.bootstraps),
+      activation_nonce_count: map_size(state.activation_nonces),
       persistent_open_request_count: map_size(state.persistent_open_requests),
       ephemeral_open_request_count: map_size(state.ephemeral_open_requests),
       wrapping_key_present?: is_binary(state.wrapping_key),
@@ -917,37 +1537,41 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     {:reply, snapshot, state}
   end
 
-  @impl true
-  def handle_cast({:ack_persistent_open, request_id, caller_pid}, state) do
+  defp handle_authenticated_call({:ack_persistent_open, request_id}, caller_pid, state) do
     case fetch_persistent_open_request(state, request_id, caller_pid) do
       {:ok, %{status: :prepared}} ->
         state = remove_persistent_open_request(state, request_id)
-        noreply_with_persistent_commit(state)
+        with_persistent_commit(:ok, state)
 
       {:ok, _request} ->
-        {:noreply, state}
+        {:reply, {:error, :persistent_open_not_prepared}, state}
 
-      {:error, _reason} ->
-        {:noreply, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_cast({:cancel_persistent_open, request_id, caller_pid}, state) do
+  defp handle_authenticated_call({:cancel_persistent_open, request_id}, caller_pid, state) do
     case fetch_persistent_open_request(state, request_id, caller_pid) do
       {:ok, request} ->
         state = revoke_persistent_open_request(state, request_id, request)
-        noreply_with_persistent_commit(state)
+        with_persistent_commit(:ok, state)
 
       {:error, :persistent_open_not_pending} ->
-        {:noreply, state}
+        {:reply, :ok, state}
 
-      {:error, _reason} ->
-        {:noreply, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
+  defp handle_authenticated_call(_request, _caller, state),
+    do: {:reply, {:error, :signing_authority_unauthorized}, state}
+
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  def handle_cast(_request, private_state), do: {:noreply, private_state}
+
+  defp handle_private_info({:DOWN, ref, :process, _pid, _reason}, state) do
     cond do
       ref == state.state_owner_monitor ->
         {:stop, :state_owner_unavailable, state}
@@ -957,7 +1581,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_info({:expire_bootstrap, token, expiry_id}, state) do
+  defp handle_private_info({:expire_bootstrap, token, expiry_id}, state) do
     case Map.get(state.bootstraps, token) do
       %{expiry_id: ^expiry_id, status: status} = slot when status in [:unclaimed, :reclaimable] ->
         state = remove_bootstrap(state, token, slot)
@@ -968,7 +1592,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_info({:expire_persistent_open_request, request_id, expiry_id}, state) do
+  defp handle_private_info({:expire_persistent_open_request, request_id, expiry_id}, state) do
     case Map.get(state.persistent_open_requests, request_id) do
       %{expiry_id: ^expiry_id} = request ->
         state = revoke_persistent_open_request(state, request_id, request)
@@ -979,7 +1603,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_info({:expire_ephemeral_open_request, request_id, expiry_id}, state) do
+  defp handle_private_info({:expire_ephemeral_open_request, request_id, expiry_id}, state) do
     case Map.get(state.ephemeral_open_requests, request_id) do
       %{expiry_id: ^expiry_id, status: :committed} = request ->
         {:noreply, revoke_ephemeral_open_request(state, request_id, request)}
@@ -992,7 +1616,50 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  defp handle_private_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        if initialized_state?(state) do
+          case handle_authenticated_call(request, caller, state) do
+            {:reply, reply, next_state} ->
+              :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+              {:noreply, next_state}
+
+            {:stop, reason, reply, next_state} ->
+              :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+              {:stop, reason, next_state}
+          end
+        else
+          :ok = Arbor.Common.reply_authenticated_call(reply_to, {:error, :broker_unavailable})
+          {:noreply, state}
+        end
+
+      result when result in [:pending, :expired, :rejected] ->
+        {:noreply, state}
+
+      :unrecognized ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info(message, private_state) do
+    with {:ok, state} <- private_state(private_state) do
+      case handle_private_info(message, state) do
+        {:noreply, next_state} ->
+          case put_private_state(private_state, next_state) do
+            :ok -> {:noreply, private_state}
+            {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+          end
+
+        {:stop, reason, next_state} ->
+          _ = put_private_state(private_state, next_state)
+          {:stop, reason, private_state}
+      end
+    else
+      {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+    end
+  end
 
   defp handle_owner_down(ref, state) do
     case Map.pop(state.monitors, ref) do
@@ -1021,7 +1688,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   @impl true
   def format_status(status) when is_map(status) do
-    state = Map.get(status, :state, %{})
+    state =
+      case private_state(Map.get(status, :state, %{})) do
+        {:ok, value} -> value
+        {:error, _reason} -> %{}
+      end
 
     redacted_state = %{
       authority_count: map_count(state, :authorities),
@@ -1039,7 +1710,17 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(_reason, private_state) do
+    case private_state(private_state) do
+      {:ok, state} -> cleanup_private_state(state)
+      {:error, _reason} -> :ok
+    end
+
+    PrivateState.delete(private_state, @private_state_anchor)
+    :ok
+  end
+
+  defp cleanup_private_state(state) do
     Enum.each(state.monitors, fn {ref, _token} -> Process.demonitor(ref, [:flush]) end)
 
     Enum.each(state.bootstraps, fn {_token, slot} ->
@@ -1060,6 +1741,70 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
     :ok
   end
+
+  defp private_state(state) do
+    PrivateState.fetch(
+      state,
+      @private_state_anchor,
+      @private_state_schema,
+      &valid_private_state?/1
+    )
+  end
+
+  defp put_private_state(handle, state) do
+    PrivateState.replace(
+      handle,
+      @private_state_anchor,
+      @private_state_schema,
+      state,
+      &valid_private_state?/1
+    )
+  end
+
+  defp valid_private_state?(state) when is_map(state) do
+    Map.keys(state) |> Enum.sort() ==
+      [
+        :activation_nonces,
+        :authenticated_calls,
+        :authorities,
+        :bootstraps,
+        :ephemeral_open_requests,
+        :monitors,
+        :persistent_open_requests,
+        :security_supervisor_pid,
+        :state_owner_monitor,
+        :state_owner_token,
+        :wrapping_key
+      ] and
+      Enum.all?(
+        [
+          state.activation_nonces,
+          state.authorities,
+          state.bootstraps,
+          state.ephemeral_open_requests,
+          state.monitors,
+          state.persistent_open_requests
+        ],
+        &is_map/1
+      ) and
+      is_reference(state.authenticated_calls) and is_reference(state.state_owner_token) and
+      is_pid(state.security_supervisor_pid) and valid_initialization_state?(state)
+  end
+
+  defp valid_private_state?(_state), do: false
+
+  defp valid_initialization_state?(%{state_owner_monitor: nil, wrapping_key: nil}), do: true
+
+  defp valid_initialization_state?(%{
+         state_owner_monitor: monitor,
+         wrapping_key: wrapping_key
+       }) do
+    is_reference(monitor) and is_binary(wrapping_key) and
+      byte_size(wrapping_key) == @wrapping_key_bytes
+  end
+
+  defp initialized_state?(state),
+    do: valid_initialization_state?(state) and is_binary(state.wrapping_key)
 
   # ---------------------------------------------------------------------------
   # Acquisition and creation
@@ -1606,7 +2351,28 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp persist_state(state) do
-    SigningAuthorityStateOwner.replace(persistent_snapshot(state), state.state_owner_token)
+    SigningAuthorityStateOwner.replace_from_supervisor(
+      state.security_supervisor_pid,
+      persistent_snapshot(state),
+      state.state_owner_token
+    )
+  end
+
+  defp claim_owner_directory do
+    table = :ets.new(@owner_table, [:named_table, :protected, :set, read_concurrency: true])
+    true = :ets.insert(table, {:owner, self()})
+    :ok
+  rescue
+    _ -> {:error, :broker_owner_directory_unavailable}
+  end
+
+  defp broker_pid do
+    SupervisedOwner.protected_directory_owner(
+      @owner_table,
+      :owner,
+      :arbor_security,
+      [__MODULE__]
+    )
   end
 
   defp persistent_snapshot(state) do
@@ -1629,21 +2395,29 @@ defmodule Arbor.Security.SigningAuthorityBroker do
         {request_id, Map.drop(request, [:expiry_id, :expiry_timer])}
       end)
 
-    %{authorities: authorities, bootstraps: bootstraps, open_requests: open_requests}
+    %{
+      authorities: authorities,
+      bootstraps: bootstraps,
+      open_requests: open_requests,
+      activation_nonces: state.activation_nonces
+    }
   end
 
   defp recover_persistent_state(%{
          authorities: authorities,
          bootstraps: bootstraps,
-         open_requests: open_requests
+         open_requests: open_requests,
+         activation_nonces: activation_nonces
        })
-       when is_map(authorities) and is_map(bootstraps) and is_map(open_requests) do
+       when is_map(authorities) and is_map(bootstraps) and is_map(open_requests) and
+              is_map(activation_nonces) do
     state = %{
       authorities: %{},
       bootstraps: %{},
       persistent_open_requests: %{},
       ephemeral_open_requests: %{},
-      monitors: %{}
+      monitors: %{},
+      activation_nonces: admit_activation_nonces(activation_nonces)
     }
 
     with {:ok, state} <- recover_authorities(state, authorities),
@@ -1994,11 +2768,205 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   defp require_platform_activation_purpose(_purpose), do: {:error, :purpose_mismatch}
 
+  defp validate_resource_binding(payload) when is_binary(payload) do
+    if byte_size(payload) <= 2_048 and Arbor.Contracts.Security.CapabilityUri.valid?(payload),
+      do: :ok,
+      else: {:error, :invalid_resource_binding}
+  end
+
+  defp validate_resource_binding(_payload), do: {:error, :invalid_resource_binding}
+
+  defp validate_native_notice_source_payload(payload, entry, caller)
+       when is_binary(payload) and byte_size(payload) <= 16_384 and is_pid(caller) do
+    with ["arbor.native.notice.source.v1", source] <-
+           :erlang.binary_to_term(payload, [:safe]),
+         true <- is_map(source) and not is_struct(source),
+         [:branch_pid, :mailboxes, :owner_pid, :principal_id, :role] <-
+           Map.keys(source) |> Enum.sort(),
+         ^caller <- source.owner_pid,
+         true <- source.principal_id == entry.principal_id,
+         true <- Process.alive?(source.branch_pid),
+         true <- native_notice_purpose_matches?(entry.purpose, source.role),
+         true <- is_list(source.mailboxes) and length(source.mailboxes) in 1..16,
+         true <-
+           Enum.all?(
+             source.mailboxes,
+             &match?(
+               {:ok, _},
+               Arbor.Security.validate_native_notice_mailbox(source.principal_id, &1)
+             )
+           ) do
+      :ok
+    else
+      _ -> {:error, :native_notice_source_required}
+    end
+  rescue
+    _ -> {:error, :native_notice_source_required}
+  catch
+    _, _ -> {:error, :native_notice_source_required}
+  end
+
+  defp validate_native_notice_source_payload(_payload, _entry, _caller),
+    do: {:error, :native_notice_source_required}
+
+  defp native_notice_purpose_matches?(:session, :session), do: true
+  defp native_notice_purpose_matches?(:heartbeat, :heartbeat_service), do: true
+  defp native_notice_purpose_matches?(_purpose, _role), do: false
+
+  defp validate_native_notice_publication_payload(payload, entry)
+       when is_binary(payload) and byte_size(payload) <= 130_000 do
+    with {:ok,
+          [
+            "arbor.conversation.notice.publication.v1",
+            owner_id,
+            target_agent_id,
+            engagement_id,
+            recipient_subject_id,
+            notice_id,
+            kind,
+            text,
+            provenance
+          ]} <- Jason.decode(payload),
+         true <- target_agent_id == entry.principal_id,
+         true <- entry.purpose in [:session, :heartbeat],
+         scope = %{
+           owner_id: owner_id,
+           target_agent_id: target_agent_id,
+           engagement_id: engagement_id
+         },
+         value = %{
+           recipient_subject_id: recipient_subject_id,
+           notice_id: notice_id,
+           kind: kind,
+           text: text,
+           provenance: provenance
+         },
+         {:ok, ^payload} <- Arbor.Security.ConversationNoticeCore.payload(scope, value) do
+      :ok
+    else
+      _ -> {:error, :native_notice_source_required}
+    end
+  rescue
+    _ -> {:error, :native_notice_source_required}
+  catch
+    _, _ -> {:error, :native_notice_source_required}
+  end
+
+  defp validate_native_notice_publication_payload(_payload, _entry),
+    do: {:error, :native_notice_source_required}
+
+  defp validate_identity_id(value) when is_binary(value) do
+    if byte_size(value) in 1..@max_identity_id_bytes//1 and String.valid?(value) and
+         not String.contains?(value, <<0>>),
+       do: :ok,
+       else: {:error, :invalid_identity_endorsement}
+  end
+
+  defp identity_endorsement_field(value),
+    do: <<byte_size(value)::32-big-unsigned-integer, value::binary>>
+
+  defp validate_activation_nonce(nonce) when is_binary(nonce) do
+    if byte_size(nonce) == 32 and Regex.match?(~r/\A[0-9a-f]{32}\z/, nonce),
+      do: :ok,
+      else: {:error, :invalid_nonce}
+  end
+
+  defp validate_activation_nonce(_nonce), do: {:error, :invalid_nonce}
+
+  defp activation_window(valid_from, valid_until) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    with {:ok, starts, 0} <- DateTime.from_iso8601(valid_from),
+         {:ok, ends, 0} <- DateTime.from_iso8601(valid_until),
+         start_order when start_order in [:lt, :eq] <- DateTime.compare(starts, now),
+         ordering when ordering in [:gt, :eq] <- DateTime.compare(ends, now) do
+      requested_end = DateTime.add(now, @platform_activation_ttl_seconds, :second)
+      expires = if DateTime.compare(requested_end, ends) == :gt, do: ends, else: requested_end
+
+      if DateTime.compare(expires, now) == :gt do
+        {:ok,
+         %{
+           issued_at: DateTime.to_iso8601(now),
+           expires_at: DateTime.to_iso8601(expires),
+           expires_at_unix: DateTime.to_unix(expires)
+         }}
+      else
+        {:error, :invalid_validity_window}
+      end
+    else
+      _ -> {:error, :invalid_validity_window}
+    end
+  end
+
+  defp match_activation_reservation(
+         %{
+           authority_token: token,
+           issued_at: issued_at,
+           expires_at: expires_at,
+           status: :reserved
+         },
+         %{token: token},
+         %{"payload" => payload},
+         nonce
+       )
+       when is_map(payload) do
+    if payload["nonce"] == nonce and payload["issued_at"] == issued_at and
+         payload["expires_at"] == expires_at,
+       do: :ok,
+       else: {:error, :activation_reservation_mismatch}
+  end
+
+  defp match_activation_reservation(_, _, _, _),
+    do: {:error, :activation_reservation_missing}
+
+  defp prune_activation_nonces(state) do
+    now = System.system_time(:second)
+
+    nonces =
+      Map.reject(state.activation_nonces, fn {_nonce, reservation} ->
+        not is_map(reservation) or Map.get(reservation, :expires_at_unix, 0) <= now
+      end)
+
+    %{state | activation_nonces: nonces}
+  end
+
+  defp admit_activation_nonces(nonces) do
+    now = System.system_time(:second)
+
+    nonces
+    |> Enum.filter(fn
+      {nonce,
+       %{
+         authority_token: token,
+         issued_at: issued,
+         expires_at: expires,
+         expires_at_unix: expiry,
+         status: status
+       }} ->
+        is_binary(nonce) and is_binary(token) and is_binary(issued) and is_binary(expires) and
+          is_integer(expiry) and expiry > now and status in [:reserved, :consumed]
+
+      _ ->
+        false
+    end)
+    |> Enum.take(@max_activation_nonces)
+    |> Map.new()
+  end
+
   @forge_projection_domain "arbor-forge-projection-v1"
+  @platform_activation_domain "arbor.extension.activation_authorization.v1"
 
   defp require_detached_domain_purpose(:coding_task_executor, @forge_projection_domain), do: :ok
 
   defp require_detached_domain_purpose(_purpose, _domain_tag), do: {:error, :purpose_mismatch}
+
+  defp verify_platform_activation_message(message) when is_binary(message) do
+    if String.starts_with?(message, @platform_activation_domain <> <<0>>),
+      do: :ok,
+      else: {:error, :domain_tag_mismatch}
+  end
+
+  defp verify_platform_activation_message(_message), do: {:error, :domain_tag_mismatch}
 
   defp verify_domain_tag_prefix(message, domain_tag)
        when is_binary(message) and is_binary(domain_tag) do

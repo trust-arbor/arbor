@@ -36,7 +36,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
       other = Humans.human!()
       {:ok, mismatch} = Security.SessionToken.generate(other)
       {:ok, expired} = Security.SessionToken.generate(ctx.human_id, ttl: -1)
-      {:ok, chat} = Security.SessionToken.generate_conversation(ctx.human_id, target.target)
+      {:ok, chat} = Security.issue_conversation_session_fixture(ctx.human_id, target.target)
 
       for token <- [nil, "", "forged", mismatch, expired, chat] do
         {result, effects} = observe(operation, ctx, target, session_token: token)
@@ -89,7 +89,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
         assert effects == []
       end
 
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
       {result, effects} = observe(operation, ctx, target, Fixture.proof(ctx))
       assert {:error, {:unauthorized, _}} = result
       assert effects == []
@@ -114,7 +114,9 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
         true = Process.register(pid, name)
       end
 
-      assert :ok = Security.revoke_identity(ctx.human_id, reason: "private management fixture")
+      assert :ok =
+               Security.revoke_identity_fixture(ctx.human_id, "private management fixture")
+
       {result, effects} = observe(operation, ctx, target, Fixture.proof(ctx))
       assert {:error, {:unauthorized, _}} = result
       assert effects == []
@@ -152,8 +154,8 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
        ctx do
     target = Fixture.target!()
     {:ok, caller} = Security.generate_identity()
-    :ok = Security.register_identity(caller)
-    on_exit(fn -> Security.deregister_identity(caller.agent_id) end)
+    :ok = Security.register_identity_fixture(caller)
+    on_exit(fn -> Security.deregister_identity_fixture(caller.agent_id) end)
     Humans.grant!(caller.agent_id, Fixture.resource(:stop, target.target))
 
     {:ok, signed} =

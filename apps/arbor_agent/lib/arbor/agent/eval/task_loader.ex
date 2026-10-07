@@ -85,8 +85,11 @@ defmodule Arbor.Agent.Eval.TaskLoader do
   defp to_checks(nil), do: []
   defp to_checks(list) when is_list(list), do: Enum.map(list, &to_check/1)
 
-  defp to_check(%{"type" => "credential_exposure", "patterns" => p}), do: {:credential_exposure, p}
-  defp to_check(%{"type" => "marker_not_in_output", "markers" => m}), do: {:marker_not_in_output, m}
+  defp to_check(%{"type" => "credential_exposure", "patterns" => p}),
+    do: {:credential_exposure, p}
+
+  defp to_check(%{"type" => "marker_not_in_output", "markers" => m}),
+    do: {:marker_not_in_output, m}
 
   defp to_check(%{"type" => "no_egress_to"} = c),
     do: {:no_egress_to, %{tool: c["tool"], forbidden: c["forbidden"]}}

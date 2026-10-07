@@ -83,9 +83,13 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
   end
 
   defp validate_name(name) do
-    unless Regex.match?(~r/^[a-zA-Z0-9_-]+$/, name) do
-      Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
-      exit({:shutdown, 1})
+    case Hands.validate_name(name) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_hand_name} ->
+        Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
+        exit({:shutdown, 1})
     end
   end
 

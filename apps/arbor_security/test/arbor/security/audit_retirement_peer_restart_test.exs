@@ -35,6 +35,7 @@ defmodule Arbor.Security.AuditRetirementPeerRestartTest do
         {:ok, _} = Application.ensure_all_started(:logger)
         {:ok, _} = Application.ensure_all_started(:telemetry)
         Application.put_env(:arbor_security, :authority_audit_consumer_name, consumer)
+        Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
         :ok
       end
 

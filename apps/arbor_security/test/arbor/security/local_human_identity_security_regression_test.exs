@@ -5,6 +5,7 @@ defmodule Arbor.Security.LocalHumanIdentitySecurityRegressionTest do
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.OIDC.IdentityStore
 
   setup do
     previous = Application.get_env(:arbor_security, :allow_local_human_identity)
@@ -39,6 +40,12 @@ defmodule Arbor.Security.LocalHumanIdentitySecurityRegressionTest do
 
     assert {:error, :local_human_identity_disabled} =
              Registry.register_local_human(local_identity())
+
+    assert {:error, :local_human_identity_disabled} =
+             IdentityStore.load_or_create_local(%{
+               "iss" => "arbor://local",
+               "sub" => "arbitrary-process@host"
+             })
   end
 
   test "security regression: a non-local issuer cannot use the local path" do

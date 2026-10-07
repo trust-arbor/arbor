@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Security.{Identity, SigningAuthority, SigningAuthorityBootstrap}
   alias Arbor.Orchestrator.HeartbeatService
   alias Arbor.Orchestrator.PipelineStatus
 
@@ -41,6 +42,22 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
                  signing_authority_bootstrap: %{},
                  heartbeat_config: %{enabled: true}
                )
+    end
+
+    test "security regression: init failure retires the claimed signing authority" do
+      {identity, bootstrap} = signing_bootstrap!(:heartbeat)
+      Process.flag(:trap_exit, true)
+      on_exit(fn -> Process.flag(:trap_exit, false) end)
+
+      assert {:error, {:heartbeat_init_failed, :invalid_heartbeat_graph}} =
+               start_test_service(
+                 agent_id: identity.agent_id,
+                 signing_authority_bootstrap: bootstrap,
+                 heartbeat_graph: :not_a_compiled_graph
+               )
+
+      assert {:error, :bootstrap_not_found} =
+               Arbor.Security.claim_signing_authority(bootstrap)
     end
 
     test "starts with correct default config" do
@@ -94,6 +111,106 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
       GenServer.stop(pid)
     end
+  end
+
+  test "security regression: heartbeat uses sealed authority after hostile table substitution" do
+    {identity, bootstrap} = signing_bootstrap!(:heartbeat)
+    test_pid = self()
+    observed = :atomics.new(1, signed: false)
+    engine_runs = :atomics.new(1, signed: false)
+
+    {:ok, heartbeat_graph} =
+      Arbor.Orchestrator.compile(
+        "digraph Heartbeat { start [shape=Mdiamond] done [shape=Msquare] start -> done }"
+      )
+
+    authorizer = fn agent_id, credential ->
+      result = Arbor.Security.signing_authority_principal(credential)
+      :atomics.put(observed, 1, if(result == {:ok, agent_id}, do: 1, else: 2))
+      send(test_pid, {:heartbeat_authority_principal, result})
+      send(test_pid, {:heartbeat_authority, credential})
+      if result == {:ok, agent_id}, do: :ok, else: {:error, :wrong_authority}
+    end
+
+    {:ok, pid} =
+      start_test_service(
+        agent_id: identity.agent_id,
+        signing_authority_bootstrap: bootstrap,
+        heartbeat_graph: heartbeat_graph,
+        identity_checker: fn _ -> true end,
+        orchestrator_authorizer: authorizer,
+        engine_runner: fn _graph, _opts ->
+          :atomics.add(engine_runs, 1, 1)
+
+          {:ok,
+           %{
+             final_outcome: %{status: :success},
+             context: %{"__completed_nodes__" => []}
+           }}
+        end,
+        heartbeat_config: %{enabled: true, interval: 60_000}
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+    end)
+
+    state = :sys.get_state(pid)
+    Process.cancel_timer(state.heartbeat_ref)
+    assert state.signing_authority == nil
+    assert state.signer == nil
+
+    {:ok, forged_authority} =
+      SigningAuthority.new(
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: "agent_forged_heartbeat",
+        purpose: :heartbeat
+      )
+
+    {:ok, forged_bootstrap} =
+      SigningAuthorityBootstrap.new(
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: "agent_forged_heartbeat",
+        purpose: :heartbeat
+      )
+
+    forged = :ets.new(:forged_heartbeat_credentials, [:set, :private])
+
+    true =
+      :ets.insert(
+        forged,
+        {:heartbeat_credentials_v1,
+         %{signing_authority: forged_authority, signer: nil, bootstrap: forged_bootstrap}}
+      )
+
+    true = :ets.give_away(forged, pid, :forged_heartbeat_credentials)
+    assert eventually(fn -> :ets.info(forged, :owner) == pid end)
+
+    :sys.replace_state(pid, fn current ->
+      current
+      |> Map.put(:credential_custody, forged)
+      |> Map.put(:signing_authority, forged_authority)
+      |> Map.put(:heartbeat_ref, nil)
+    end)
+
+    :atomics.put(observed, 1, 0)
+    send(pid, :heartbeat)
+
+    assert eventually(fn -> :atomics.get(observed, 1) != 0 end)
+    assert :atomics.get(observed, 1) == 1
+    assert_receive {:heartbeat_authority_principal, {:ok, principal}}, 1_000
+    assert_receive {:heartbeat_authority, authority}, 1_000
+    assert principal == identity.agent_id
+    assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_in_flight == false end)
+    assert :atomics.get(engine_runs, 1) == 1
+    assert HeartbeatService.get_state(pid).heartbeat_last_result.final_outcome.status == :success
+
+    GenServer.stop(pid)
+
+    assert {:error, :authority_not_found} =
+             Arbor.Security.sign_with_authority(authority, "arbor://orchestrator/execute")
+
+    assert {:error, :bootstrap_not_found} = Arbor.Security.claim_signing_authority(bootstrap)
   end
 
   test "security regression: a required qualification refuses before the heartbeat engine starts" do
@@ -530,6 +647,32 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   # ===========================================================================
   # Test helpers
   # ===========================================================================
+
+  defp signing_bootstrap!(purpose) do
+    {:ok, identity} =
+      Identity.generate(name: "heartbeat-private-custody-#{System.unique_integer([:positive])}")
+
+    :ok = Arbor.Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: purpose,
+        owner: self()
+      )
+
+    {:ok, bootstrap} = Arbor.Security.issue_signing_authority_bootstrap(proof)
+
+    on_exit(fn ->
+      _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    {identity, bootstrap}
+  end
 
   defp start_test_service(extra_opts \\ []) do
     opts =

@@ -37,16 +37,26 @@ defmodule Arbor.Security.UriRegistry do
 
   ## Runtime Registration
 
-  New facades can register URIs at startup:
+  Trusted facades can register their fixed URI projection at startup:
 
-      UriRegistry.register("arbor://my_facade/operation")
+      UriRegistry.register_provider(Arbor.Actions)
+
+  Provider modules must be explicitly configured in
+  `:uri_registration_providers` and export `capability_uri_prefixes/0`.
+  Callers never supply prefixes to the registry.
   """
 
   use GenServer
 
   alias Arbor.Contracts.Security.CapabilityUri
+  alias Arbor.Security.SupervisedOwner
 
   require Logger
+
+  @max_provider_prefixes 4_096
+  if Mix.env() == :test do
+    @test_fixture_anchor {__MODULE__, :test_isolated_fixture}
+  end
 
   # Canonical URI prefixes — the authoritative set of valid capability URIs.
   # Each entry is a prefix: "arbor://shell/exec" matches "arbor://shell/exec/git".
@@ -133,6 +143,8 @@ defmodule Arbor.Security.UriRegistry do
     # "arbor://signals/subscribe/<topic>") but was previously absent from the
     # canonical registry (Security Sentinel finding, 2026-06-09).
     "arbor://signals/subscribe",
+    # Principal-authenticated channel administration and message transport.
+    "arbor://signals/channel",
 
     # Gateway MCP bridge
     "arbor://mcp/",
@@ -246,6 +258,18 @@ defmodule Arbor.Security.UriRegistry do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  def child_spec(opts) do
+    opts = test_fixture_child_opts(opts)
+
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5_000
+    }
+  end
+
   @doc """
   Check if a URI matches a registered prefix.
 
@@ -280,40 +304,28 @@ defmodule Arbor.Security.UriRegistry do
     end
   end
 
+  @doc "Refuse the retired caller-chosen runtime-prefix mutation API."
+  @spec register(term()) :: {:error, :uri_mutation_unauthorized}
+  def register(_prefix), do: {:error, :uri_mutation_unauthorized}
+
   @doc """
-  Register a new URI prefix at runtime.
+  Register the fixed capability URI projection of a configured provider.
 
-  Used by facades that register their URIs at startup.
+  The owner process invokes the allowlisted module's
+  `capability_uri_prefixes/0`; caller-controlled prefix bytes never cross the
+  GenServer boundary.
   """
-  @spec register(String.t()) :: :ok | {:error, {:invalid_uri, term()}}
-  def register(prefix) when is_binary(prefix) do
-    case CapabilityUri.parse(prefix) do
-      {:ok, _parsed} ->
-        if Process.whereis(__MODULE__) do
-          GenServer.call(__MODULE__, {:register, prefix})
-        else
-          Logger.debug("[UriRegistry] Not running, skipping registration of #{prefix}")
-          :ok
-        end
-
-      {:error, reason} ->
-        Logger.warning(
-          "[UriRegistry] Refusing to register invalid URI prefix #{inspect(prefix)}: #{inspect(reason)}"
-        )
-
-        {:error, {:invalid_uri, reason}}
-    end
+  @spec register_provider(module()) :: :ok | {:error, atom() | tuple()}
+  def register_provider(provider) when is_atom(provider) and not is_nil(provider) do
+    owner_call({:register_provider, provider}, {:error, :uri_registry_unavailable})
   end
+
+  def register_provider(_provider), do: {:error, :uri_mutation_unauthorized}
 
   @doc "Return all registered prefixes (canonical + runtime)."
   @spec all_prefixes() :: [String.t()]
   def all_prefixes do
-    runtime =
-      if Process.whereis(__MODULE__) do
-        GenServer.call(__MODULE__, :list_runtime)
-      else
-        []
-      end
+    runtime = owner_call(:list_runtime, [])
 
     @canonical_prefixes ++ runtime
   end
@@ -333,18 +345,36 @@ defmodule Arbor.Security.UriRegistry do
   # =========================================================================
 
   @impl true
-  def init(_opts) do
-    {:ok, %{runtime_prefixes: MapSet.new()}}
+  def init(opts) do
+    :ok = maybe_register_test_fixture(opts)
+    {:ok, %{provider_prefixes: %{}}}
   end
 
   @impl true
-  def handle_call({:register, prefix}, _from, state) do
-    new_state = %{state | runtime_prefixes: MapSet.put(state.runtime_prefixes, prefix)}
-    {:reply, :ok, new_state}
+  def handle_call({:register_provider, provider}, _from, state) do
+    case load_provider_prefixes(provider) do
+      {:ok, prefixes} ->
+        new_state = put_in(state, [:provider_prefixes, provider], MapSet.new(prefixes))
+        {:reply, :ok, new_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:list_runtime, _from, state) do
-    {:reply, MapSet.to_list(state.runtime_prefixes), state}
+    prefixes =
+      state.provider_prefixes
+      |> Map.values()
+      |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+      |> MapSet.to_list()
+
+    {:reply, prefixes, state}
+  end
+
+  @impl true
+  def handle_call(_request, _from, state) do
+    {:reply, {:error, :unsupported_request}, state}
   end
 
   # =========================================================================
@@ -369,14 +399,95 @@ defmodule Arbor.Security.UriRegistry do
     Enum.any?(@canonical_prefixes, &CapabilityUri.prefix_match?(&1, uri))
   end
 
-  defp runtime_match?(uri) do
-    if Process.whereis(__MODULE__) do
-      case GenServer.call(__MODULE__, :list_runtime) do
-        [] -> false
-        prefixes -> Enum.any?(prefixes, &CapabilityUri.prefix_match?(&1, uri))
-      end
+  defp load_provider_prefixes(provider) do
+    with true <- provider in configured_providers(),
+         true <- Code.ensure_loaded?(provider),
+         true <- function_exported?(provider, :capability_uri_prefixes, 0),
+         prefixes <- apply(provider, :capability_uri_prefixes, []),
+         :ok <- validate_provider_prefixes(prefixes) do
+      {:ok, Enum.uniq(prefixes)}
     else
-      false
+      _ -> {:error, :uri_mutation_unauthorized}
     end
+  rescue
+    _ -> {:error, :uri_mutation_unauthorized}
+  catch
+    _, _ -> {:error, :uri_mutation_unauthorized}
+  end
+
+  defp configured_providers do
+    case Application.get_env(:arbor_security, :uri_registration_providers, []) do
+      providers when is_list(providers) ->
+        providers
+        |> Enum.filter(&(is_atom(&1) and not is_nil(&1)))
+        |> Enum.take(32)
+
+      _ ->
+        []
+    end
+  end
+
+  defp validate_provider_prefixes(prefixes)
+       when is_list(prefixes) and length(prefixes) <= @max_provider_prefixes do
+    if Enum.all?(prefixes, &valid_provider_prefix?/1),
+      do: :ok,
+      else: {:error, :invalid_provider_prefixes}
+  end
+
+  defp validate_provider_prefixes(_prefixes), do: {:error, :invalid_provider_prefixes}
+
+  defp valid_provider_prefix?(prefix) when is_binary(prefix) do
+    byte_size(prefix) <= 1_024 and match?({:ok, _parsed}, CapabilityUri.parse(prefix))
+  end
+
+  defp valid_provider_prefix?(_prefix), do: false
+
+  defp runtime_match?(uri) do
+    case owner_call(:list_runtime, []) do
+      [] -> false
+      prefixes -> Enum.any?(prefixes, &CapabilityUri.prefix_match?(&1, uri))
+    end
+  end
+
+  defp owner_call(request, unavailable) do
+    case owner_pid() do
+      pid when is_pid(pid) -> GenServer.call(pid, request)
+      nil -> unavailable
+    end
+  rescue
+    _ -> unavailable
+  catch
+    :exit, _ -> unavailable
+  end
+
+  defp owner_pid do
+    SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) ||
+      test_isolated_owner_pid()
+  end
+
+  if Mix.env() == :test do
+    defp test_fixture_child_opts(opts), do: Keyword.put(opts, :test_isolated_owner, true)
+
+    defp maybe_register_test_fixture(opts) do
+      if Keyword.get(opts, :test_isolated_owner, false) == true do
+        :persistent_term.put(@test_fixture_anchor, self())
+      end
+
+      :ok
+    end
+
+    defp test_isolated_owner_pid do
+      case :persistent_term.get(@test_fixture_anchor, nil) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid) and Process.whereis(__MODULE__) == pid, do: pid, else: nil
+
+        _ ->
+          nil
+      end
+    end
+  else
+    defp test_fixture_child_opts(opts), do: opts
+    defp maybe_register_test_fixture(_opts), do: :ok
+    defp test_isolated_owner_pid, do: nil
   end
 end

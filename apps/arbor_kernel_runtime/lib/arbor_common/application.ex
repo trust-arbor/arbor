@@ -47,12 +47,14 @@ defmodule Arbor.Common.Application do
   # M7: Install API key/token redaction filter on the default Logger handler.
   # Must be done at runtime since config.exs can't hold function references.
   defp install_log_redaction_filter do
-    :logger.add_handler_filter(
-      :default,
-      :api_key_redaction,
-      {&Arbor.Common.LogRedactor.filter/2, :log}
-    )
-  rescue
-    _ -> :ok
+    case :logger.add_handler_filter(
+           :default,
+           :api_key_redaction,
+           {&Arbor.Common.LogRedactor.filter/2, :log}
+         ) do
+      :ok -> :ok
+      {:error, {:already_exist, :api_key_redaction}} -> :ok
+      {:error, reason} -> raise "failed to install log redaction filter: #{inspect(reason)}"
+    end
   end
 end

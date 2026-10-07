@@ -35,6 +35,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
   """
 
   alias Arbor.Contracts.Skill
+  alias Arbor.Common.SkillLibrary.ScanGuard
 
   @pattern_filename "system.md"
 
@@ -62,7 +63,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
   """
   @spec parse(String.t()) :: {:ok, parsed_skill()} | {:error, term()}
   def parse(path) when is_binary(path) do
-    with {:ok, content} <- File.read(path) do
+    with {:ok, content} <- ScanGuard.read_regular(path) do
       attrs = %{
         name: name_from_path(path),
         description: extract_description(content),
@@ -97,10 +98,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
   """
   @spec list(String.t()) :: [String.t()]
   def list(dir) when is_binary(dir) do
-    dir
-    |> Path.join("**/" <> @pattern_filename)
-    |> Path.wildcard()
-    |> Enum.sort()
+    dir |> ScanGuard.recursive_named_files(@pattern_filename) |> Enum.sort()
   end
 
   # --- Private Helpers ---

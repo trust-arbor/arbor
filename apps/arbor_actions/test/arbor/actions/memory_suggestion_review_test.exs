@@ -13,8 +13,10 @@ defmodule Arbor.Actions.MemorySuggestionReviewTest do
     foreign_agent_id = init_agent("foreign")
 
     for resource <- ["arbor://memory/read", "arbor://memory/write"] do
-      assert {:ok, capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
-      on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+      assert {:ok, capability} =
+               Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
+
+      on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
     end
 
     %{agent_id: agent_id, foreign_agent_id: foreign_agent_id, context: %{agent_id: agent_id}}
@@ -166,8 +168,11 @@ defmodule Arbor.Actions.MemorySuggestionReviewTest do
 
   test "security regression: read-only authority cannot approve a queued suggestion" do
     agent_id = init_agent("reader")
-    assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://memory/read")
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+
+    assert {:ok, cap} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://memory/read")
+
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     context = %{agent_id: agent_id}
     proposal = propose(agent_id, :insight, "read-only proposal fixture")
     before = snapshot(agent_id)

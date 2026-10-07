@@ -100,6 +100,9 @@ defmodule Arbor.Security.Constraint do
         remaining = RateLimiter.remaining(principal_id, resource_uri, max_tokens)
 
         {:error, {:constraint_violated, :rate_limit, %{limit: max_tokens, remaining: remaining}}}
+
+      {:error, :rate_limiter_unavailable} ->
+        {:error, {:constraint_violated, :rate_limit, %{limit: max_tokens, remaining: 0}}}
     end
   end
 

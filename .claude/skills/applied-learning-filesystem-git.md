@@ -4,6 +4,14 @@ Read this when handling paths, files, symlinks, worktrees, Git provenance, index
 
 ## Retained Applied Learning
 
+<!-- applied-learning: put-ripgrep-filters-before-the-option-terminator -->
+<a id="applied-learning-put-ripgrep-filters-before-the-option-terminator"></a>
+**Put ripgrep filters before the option terminator.** When a search pattern
+begins with `-`, write options first and then `--`, for example
+`rg -g '*.ex' -- '--cookie|--name' paths`. Putting `-g` after `--` makes it a
+path, while omitting `--` makes the pattern an option (found 2026-10-06 while
+tracing distribution-cookie exposure).
+
 <!-- applied-learning: do-not-use-path-as-a-zsh-loop-variable -->
 <a id="applied-learning-do-not-use-path-as-a-zsh-loop-variable"></a>
 **Do not use `path` as a zsh loop variable.** In zsh, lowercase `path` is a
@@ -166,7 +174,7 @@ preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname -->
 <a id="applied-learning-path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname"></a>
-**Path confinement checks must bind to the opened file, not only the pathname.** `lstat`/`realpath` followed by `File.read` is still check-then-use: a leaf or ancestor can be swapped to a symlink/FIFO between calls. Open once without accepting symlink indirection, inspect the handle's type/device/inode, compare it to the confined path and stable ancestors, read bounded bytes from that same handle, and recheck stability; otherwise fail closed (found 2026-07-11 reviewing benchmark artifact IO).
+**Path confinement checks must bind to the opened file, not only the pathname.** `lstat`/`realpath` followed by `File.read` is still check-then-use: a leaf or ancestor can be swapped to a symlink/FIFO between calls. Finite pathname rechecks do not make the ancestor chain stable because a coordinated swap can restore each expected identity before every check. Pin the authorized root directory once, verify its identity, traverse descendants with descriptor-relative `openat` plus `O_NOFOLLOW`, and read only the resulting regular-file descriptor. The native helper that performs this privileged open must itself be bound into trusted runtime code rather than executed from an agent-writable source or build path (found 2026-07-11 reviewing benchmark artifact IO; reinforced 2026-10-07 while closing the Security FileGuard read race).
 
 <!-- applied-learning: plain-detached-git-worktrees-do-not-inherit-ignored-dependency-directories -->
 <a id="applied-learning-plain-detached-git-worktrees-do-not-inherit-ignored-dependency-directories"></a>
@@ -174,7 +182,7 @@ preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm -->
 <a id="applied-learning-temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm"></a>
-**Temporary test roots must be collision-safe across BEAM invocations, not only within one VM.** `System.unique_integer/1` restarts with a new VM, so a predictable global `/tmp` path can collide with residue from an interrupted prior run. Allocate an exclusive random/OS-owned directory, register cleanup ownership before partial fixture construction, and regress stale-root behavior deterministically (found 2026-07-11 rerunning coding benchmark tests in an isolated worktree). Separate checkouts alone do not isolate `System.tmp_dir!/0`: simultaneous candidate/predecessor Voice journeys reused a migrated SQLite database until their fixture roots included OS process identity and an exclusively created random suffix (2026-09-27).
+**Temporary test roots must be collision-safe across BEAM invocations, not only within one VM.** `System.unique_integer/1` restarts with a new VM, so a predictable global `/tmp` path can collide with residue from an interrupted prior run. Allocate an exclusive random/OS-owned directory, register cleanup ownership before partial fixture construction, and regress stale-root behavior deterministically (found 2026-07-11 rerunning coding benchmark tests in an isolated worktree). Separate checkouts alone do not isolate `System.tmp_dir!/0`: simultaneous candidate/predecessor Voice journeys reused a migrated SQLite database until their fixture roots included OS process identity and an exclusively created random suffix (2026-09-27). This recurred on 2026-10-07 when a fresh Security suite reopened an earlier malformed authority inventory because its global temp leaf used `System.unique_integer/1` plus `mkdir_p`.
 
 <!-- applied-learning: pinned-otp-file-timestamps-may-be-too-coarse-to-prove-same-read-stability -->
 <a id="applied-learning-pinned-otp-file-timestamps-may-be-too-coarse-to-prove-same-read-stability"></a>
@@ -363,7 +371,11 @@ rewriting a test, causing Git to classify the whole file as binary and hiding th
 ordinary line diff. When an edited source file unexpectedly becomes binary, inspect
 its NUL count and force the intended language escape to remain textual; review the
 result with `git diff --text` before accepting it (found 2026-07-28 when a Claude ACP
-edit converted an Elixir invalid-input fixture into a literal NUL).
+edit converted an Elixir invalid-input fixture into a literal NUL). When writing
+sentinel bytes through nested JavaScript, shell, or Python escaping, prefer numeric
+bytes (for example, `bytes([10])`) and inspect the final bytes; an overescaped
+newline can append the two literal characters instead of a line feed (found
+2026-10-07 while restoring EOF newlines after a security review).
 
 <!-- applied-learning: verify-requested-deletions-are-git-deletions-not-empty-tracked-files -->
 <a id="applied-learning-verify-requested-deletions-are-git-deletions-not-empty-tracked-files"></a>

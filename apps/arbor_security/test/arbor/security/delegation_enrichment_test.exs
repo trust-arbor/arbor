@@ -22,13 +22,13 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
     {:ok, recipient} = Identity.generate(name: "recipient")
     {:ok, second_recipient} = Identity.generate(name: "second-recipient")
 
-    :ok = Registry.register(delegator)
-    :ok = Registry.register(recipient)
-    :ok = Registry.register(second_recipient)
+    :ok = Registry.register_fixture(delegator)
+    :ok = Registry.register_fixture(recipient)
+    :ok = Registry.register_fixture(second_recipient)
 
     # Grant a capability to the delegator
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: delegator.agent_id,
         resource: "arbor://test/delegate/resource",
         delegation_depth: 3
@@ -49,9 +49,7 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
     test "includes delegated_at timestamp", %{parent_cap: parent_cap, delegator: delegator} do
       # Create a new capability for the delegation record
       {:ok, new_cap} =
-        Capability.delegate(parent_cap, "agent_new_recipient",
-          constraints: %{}
-        )
+        Capability.delegate(parent_cap, "agent_new_recipient", constraints: %{})
 
       before_time = DateTime.utc_now()
 
@@ -71,9 +69,7 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
       delegator: delegator
     } do
       {:ok, new_cap} =
-        Capability.delegate(parent_cap, "agent_recipient",
-          constraints: %{custom: "value"}
-        )
+        Capability.delegate(parent_cap, "agent_recipient", constraints: %{custom: "value"})
 
       delegation_record =
         Signer.sign_delegation(parent_cap, new_cap, delegator.private_key)
@@ -100,7 +96,7 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
       recipient: recipient
     } do
       {:ok, child_cap} =
-        Security.delegate(parent_cap.id, recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
@@ -109,7 +105,7 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
 
       # Verify via cascade_revoke that the relationship is tracked
       # (if we revoke parent, child should be revoked too)
-      {:ok, count} = CapabilityStore.cascade_revoke(parent_cap.id)
+      {:ok, count} = CapabilityStore.cascade_revoke_fixture(parent_cap.id)
 
       # Should have revoked both parent and child
       assert count == 2
@@ -126,17 +122,17 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
       second_recipient: second_recipient
     } do
       {:ok, child1} =
-        Security.delegate(parent_cap.id, recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
       {:ok, child2} =
-        Security.delegate(parent_cap.id, second_recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, second_recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
       # Cascade revoke should get all three
-      {:ok, count} = CapabilityStore.cascade_revoke(parent_cap.id)
+      {:ok, count} = CapabilityStore.cascade_revoke_fixture(parent_cap.id)
 
       assert count == 3
       assert {:error, :not_found} = CapabilityStore.get(parent_cap.id)
@@ -151,14 +147,14 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
 
   describe "CapabilityStore.cascade_revoke/1" do
     test "revokes leaf capability (no children)", %{parent_cap: parent_cap} do
-      {:ok, count} = CapabilityStore.cascade_revoke(parent_cap.id)
+      {:ok, count} = CapabilityStore.cascade_revoke_fixture(parent_cap.id)
 
       assert count == 1
       assert {:error, :not_found} = CapabilityStore.get(parent_cap.id)
     end
 
     test "returns error for unknown capability" do
-      assert {:error, :not_found} = CapabilityStore.cascade_revoke("cap_unknown")
+      assert {:error, :not_found} = CapabilityStore.cascade_revoke_fixture("cap_unknown")
     end
 
     test "handles multi-level delegation tree", %{
@@ -168,22 +164,22 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
     } do
       # Level 1: delegator -> recipient
       {:ok, level1_cap} =
-        Security.delegate(parent_cap.id, recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
       # Generate another recipient for level 2
       {:ok, level2_recipient} = Identity.generate(name: "level2-recipient")
-      :ok = Registry.register(level2_recipient)
+      :ok = Registry.register_fixture(level2_recipient)
 
       # Level 2: recipient -> level2_recipient
       {:ok, level2_cap} =
-        Security.delegate(level1_cap.id, level2_recipient.agent_id,
+        Security.delegate_fixture(level1_cap.id, level2_recipient.agent_id,
           delegator_private_key: recipient.private_key
         )
 
       # Cascade revoke from root should get all three
-      {:ok, count} = CapabilityStore.cascade_revoke(parent_cap.id)
+      {:ok, count} = CapabilityStore.cascade_revoke_fixture(parent_cap.id)
 
       assert count == 3
       assert {:error, :not_found} = CapabilityStore.get(parent_cap.id)
@@ -198,21 +194,21 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
     } do
       # Create child
       {:ok, child_cap} =
-        Security.delegate(parent_cap.id, recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
       # Generate grandchild recipient
       {:ok, grandchild_recipient} = Identity.generate(name: "grandchild")
-      :ok = Registry.register(grandchild_recipient)
+      :ok = Registry.register_fixture(grandchild_recipient)
 
       {:ok, grandchild_cap} =
-        Security.delegate(child_cap.id, grandchild_recipient.agent_id,
+        Security.delegate_fixture(child_cap.id, grandchild_recipient.agent_id,
           delegator_private_key: recipient.private_key
         )
 
       # Cascade from child should revoke child and grandchild, but NOT parent
-      {:ok, count} = CapabilityStore.cascade_revoke(child_cap.id)
+      {:ok, count} = CapabilityStore.cascade_revoke_fixture(child_cap.id)
 
       assert count == 2
 
@@ -236,13 +232,13 @@ defmodule Arbor.Security.DelegationEnrichmentTest do
       recipient: recipient
     } do
       {:ok, _child} =
-        Security.delegate(parent_cap.id, recipient.agent_id,
+        Security.delegate_fixture(parent_cap.id, recipient.agent_id,
           delegator_private_key: delegator.private_key
         )
 
       stats_before = CapabilityStore.stats()
 
-      {:ok, 2} = CapabilityStore.cascade_revoke(parent_cap.id)
+      {:ok, 2} = CapabilityStore.cascade_revoke_fixture(parent_cap.id)
 
       stats_after = CapabilityStore.stats()
 

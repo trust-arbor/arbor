@@ -19,7 +19,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
   setup do
     # Clean up after test
     on_exit(fn ->
-      SigningKeyStore.delete(@test_agent_id)
+      SigningKeyStore.delete_fixture(@test_agent_id)
     end)
 
     :ok
@@ -30,23 +30,51 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       # Generate a fresh Ed25519 keypair
       {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert :ok = SigningKeyStore.put(@test_agent_id, priv)
-      assert {:ok, retrieved} = SigningKeyStore.get(@test_agent_id)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, priv)
+      assert {:ok, retrieved} = SigningKeyStore.get_for_test(@test_agent_id)
       assert retrieved == priv
     end
 
     test "returns error for non-existent key" do
-      assert {:error, :no_signing_key} = SigningKeyStore.get("agent_nonexistent_key_test")
+      assert {:error, :no_signing_key} =
+               SigningKeyStore.get_for_test("agent_nonexistent_key_test")
     end
 
     test "overwrites existing key" do
       {_pub1, priv1} = :crypto.generate_key(:eddsa, :ed25519)
       {_pub2, priv2} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert :ok = SigningKeyStore.put(@test_agent_id, priv1)
-      assert :ok = SigningKeyStore.put(@test_agent_id, priv2)
-      assert {:ok, retrieved} = SigningKeyStore.get(@test_agent_id)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, priv1)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, priv2)
+      assert {:ok, retrieved} = SigningKeyStore.get_for_test(@test_agent_id)
       assert retrieved == priv2
+    end
+
+    test "security regression: reading with a missing master key never creates a replacement" do
+      base = scratch_dir!("arbor-signing-read")
+
+      existing_keypath = Path.join([base, "existing", "master.key"])
+      missing_keypath = Path.join([base, "missing", "master.key"])
+      previous = Application.get_env(:arbor_security, :master_key_path)
+      Application.put_env(:arbor_security, :master_key_path, existing_keypath)
+
+      on_exit(fn ->
+        File.rm_rf(base)
+
+        case previous do
+          nil -> Application.delete_env(:arbor_security, :master_key_path)
+          value -> Application.put_env(:arbor_security, :master_key_path, value)
+        end
+      end)
+
+      {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, private_key)
+      assert File.exists?(existing_keypath)
+
+      Application.put_env(:arbor_security, :master_key_path, missing_keypath)
+
+      assert {:error, :master_key_missing} = SigningKeyStore.get_for_test(@test_agent_id)
+      refute File.exists?(missing_keypath)
     end
   end
 
@@ -54,7 +82,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     test "reports available without returning key material" do
       {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, private_key)
       assert {:ok, :available} = Security.signing_key_status(@test_agent_id)
     end
 
@@ -75,7 +103,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
 
     test "reports malformed encrypted material without exposing storage errors" do
       {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, private_key)
 
       malformed = %Record{
         id: @test_agent_id,
@@ -93,8 +121,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     end
 
     test "does not create a missing master key while checking an encrypted signing record" do
-      base =
-        Path.join(System.tmp_dir!(), "arbor_signing_status_#{System.unique_integer([:positive])}")
+      base = scratch_dir!("arbor-signing-status")
 
       existing_keypath = Path.join([base, "existing", "master.key"])
       missing_keypath = Path.join([base, "missing", "master.key"])
@@ -111,7 +138,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       end)
 
       {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, private_key)
       assert File.exists?(existing_keypath)
 
       Application.put_env(:arbor_security, :master_key_path, missing_keypath)
@@ -125,15 +152,15 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     test "deletes a stored key" do
       {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert :ok = SigningKeyStore.put(@test_agent_id, priv)
-      assert {:ok, _} = SigningKeyStore.get(@test_agent_id)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, priv)
+      assert {:ok, _} = SigningKeyStore.get_for_test(@test_agent_id)
 
-      assert :ok = SigningKeyStore.delete(@test_agent_id)
-      assert {:error, :no_signing_key} = SigningKeyStore.get(@test_agent_id)
+      assert :ok = SigningKeyStore.delete_fixture(@test_agent_id)
+      assert {:error, :no_signing_key} = SigningKeyStore.get_for_test(@test_agent_id)
     end
 
     test "succeeds even if key doesn't exist" do
-      assert :ok = SigningKeyStore.delete("agent_nonexistent_delete_test")
+      assert :ok = SigningKeyStore.delete_fixture("agent_nonexistent_delete_test")
     end
   end
 
@@ -141,7 +168,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     test "stored data is encrypted (not raw private key)" do
       {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert :ok = SigningKeyStore.put(@test_agent_id, priv)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, priv)
 
       # Read the authoritative raw record — it must not contain the private key.
       case AuthorityStore.authoritative_get(@test_agent_id,
@@ -179,7 +206,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       # the containing directory to 0700 (and writes the file via an atomic
       # 0600 temp-rename). The directory mode is the persistent, testable
       # discriminator — pre-fix the dir was the umask default (commonly 0755).
-      base = Path.join(System.tmp_dir!(), "arbor_c6_#{:erlang.unique_integer([:positive])}")
+      base = scratch_dir!("arbor-c6")
       keypath = Path.join([base, "security", "master.key"])
       prev = Application.get_env(:arbor_security, :master_key_path)
       Application.put_env(:arbor_security, :master_key_path, keypath)
@@ -193,9 +220,10 @@ defmodule Arbor.Security.SigningKeyStoreTest do
         end
       end)
 
-      # Path doesn't exist yet → triggers generation.
-      assert {:ok, key} = SigningKeyStore.ensure_master_key_for_oidc()
-      assert byte_size(key) == 32
+      # The fixture mutation exercises the real encrypted-write path, which
+      # creates the process master key without exposing it to the caller.
+      {_public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      assert :ok = SigningKeyStore.put_fixture(@test_agent_id, private_key)
 
       dir = Path.dirname(keypath)
       {:ok, dir_stat} = File.stat(dir)
@@ -231,7 +259,7 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       nil -> :ok
     end
 
-    case AuthorityStore.start_link(
+    case AuthorityStore.start_test_fixture(
            name: child_id,
            backend: nil,
            namespace: "signing_keys",
@@ -247,5 +275,15 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       {:error, reason} ->
         raise "failed to start signing-key AuthorityStore: #{inspect(reason)}"
     end
+  end
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 end

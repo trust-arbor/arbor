@@ -141,16 +141,16 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
 
     on_exit(fn -> Arbor.LLM.Client.set_default_client(old_client) end)
     {:ok, agent} = Identity.generate()
-    :ok = Security.register_identity(Identity.public_only(agent))
-    on_exit(fn -> Security.deregister_identity(agent.agent_id) end)
+    :ok = Security.register_identity_fixture(Identity.public_only(agent))
+    on_exit(fn -> Security.deregister_identity_fixture(agent.agent_id) end)
 
     for resource <- [
           "arbor://orchestrator/execute",
           "arbor://orchestrator/execute/llm_query",
           "arbor://orchestrator/execute/transform"
         ] do
-      {:ok, cap} = Security.grant(principal: agent.agent_id, resource: resource)
-      on_exit(fn -> Security.revoke(cap.id) end)
+      {:ok, cap} = Security.grant_fixture(principal: agent.agent_id, resource: resource)
+      on_exit(fn -> Security.revoke_fixture(cap.id) end)
     end
 
     owner = owner!(agent)
@@ -363,7 +363,7 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
 
       case @denial do
         :revocation ->
-          assert :ok = Security.revoke(ctx.owner.cap.id)
+          assert :ok = Security.revoke_fixture(ctx.owner.cap.id)
 
         :owner_change ->
           other = owner!(ctx.agent)
@@ -459,14 +459,17 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
     human = fixture.identity
 
     {:ok, cap} =
-      Security.grant(principal: human.agent_id, resource: "arbor://chat/agent/" <> agent.agent_id)
+      Security.grant_fixture(
+        principal: human.agent_id,
+        resource: "arbor://chat/agent/" <> agent.agent_id
+      )
 
     {:ok, engagement} = Arbor.Comms.resolve_user_engagement(agent.agent_id, human.agent_id)
 
     on_exit(fn ->
-      Security.revoke(cap.id)
+      Security.revoke_fixture(cap.id)
       fixture.cleanup.()
-      Security.deregister_identity(human.agent_id)
+      Security.deregister_identity_fixture(human.agent_id)
     end)
 
     %{human: human, agent: agent, cap: cap, engagement: engagement}

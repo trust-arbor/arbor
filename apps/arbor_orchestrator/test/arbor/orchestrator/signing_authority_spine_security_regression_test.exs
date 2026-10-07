@@ -33,8 +33,8 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
 
     {:ok, identity} = Identity.generate(name: "orch-authority-spine")
     public_identity = Identity.public_only(identity)
-    :ok = Security.register_identity(public_identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(public_identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
     :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
 
     # Restore pre-existing env exactly — never unconditionally delete.
@@ -46,8 +46,8 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
 
     on_exit(fn ->
       _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
       restore_env(:security_available_override, prev_override)
       restore_env(:security_required, prev_required)
       restore_env(:security_module, prev_module)
@@ -843,7 +843,7 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
   # outside the orchestrator/execute/** grant used by the suite setup.
   defp grant_pipeline_run!(agent_id) do
     {:ok, cap} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: agent_id,
         resource: "arbor://action/pipeline/run",
         delegation_depth: 0,
@@ -851,7 +851,7 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
         metadata: %{test: true}
       )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     :ok
   end
 

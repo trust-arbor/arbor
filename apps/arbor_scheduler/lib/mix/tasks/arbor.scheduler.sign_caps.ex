@@ -36,8 +36,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
   use Mix.Task
 
   alias Arbor.Scheduler.{CapsFile, PipelinePaths}
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.KeyFile
+  alias Arbor.Security
 
   @impl true
   def run(args) do
@@ -58,10 +57,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
          :ok <- PipelinePaths.verify_caps_target(caps_path, paths),
          {:ok, workdir} <- PipelinePaths.resolve_workdir(workdir_input),
          {:ok, initial_args} <- parse_initial_args(args_json),
-         {:ok, key_material} <- KeyFile.read(key_path),
          {:ok, raw} <- read_json(caps_path),
          {:ok, declaration} <- normalize_declaration(raw),
-         :ok <- check_issuer_matches(declaration.issuer_id, key_material.agent_id),
          {:ok, graph_hash} <- PipelinePaths.hash_file(paths.path),
          {:ok, payload} <-
            CapsFile.build(declaration.issuer_id, declaration.capabilities,
@@ -71,7 +68,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
              workdir: workdir,
              initial_args: initial_args
            ),
-         {:ok, signed_json} <- sign_and_serialize(payload, key_material.private_key),
+         {:ok, signature} <- sign_with_key_file(key_path, payload, declaration.issuer_id),
+         {:ok, signed_json} <- serialize_signed_payload(payload, signature),
          :ok <- atomic_write(caps_path, signed_json) do
       Mix.shell().info("Signed #{caps_path}")
       Mix.shell().info("  version:  2")
@@ -173,15 +171,34 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
     {:error, {:issuer_mismatch, %{caps_file: file_issuer, key_file: key_issuer}}}
   end
 
-  defp sign_and_serialize(payload, private_key) do
-    signature = payload |> CapsFile.signing_payload() |> Crypto.sign(private_key)
-
+  defp serialize_signed_payload(payload, signature) do
     json =
       payload
       |> CapsFile.manifest_map(signature)
       |> Jason.encode!(pretty: true)
 
     {:ok, json <> "\n"}
+  end
+
+  defp sign_with_key_file(path, payload, expected_issuer) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          with {:ok, key_issuer, signature} <-
+                 Security.sign_scheduler_caps_payload(
+                   io_device,
+                   CapsFile.signing_payload(payload)
+                 ),
+               :ok <- check_issuer_matches(expected_issuer, key_issuer) do
+            {:ok, signature}
+          end
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:key_file_open_failed, reason}}
+    end
   end
 
   defp atomic_write(path, content) do

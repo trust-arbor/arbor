@@ -133,7 +133,10 @@ defmodule Arbor.Agent.Manager do
         ])
 
     with {:ok, spec} <- Arbor.Agent.Spec.new(spec_opts),
-         lifecycle_opts = Arbor.Agent.Spec.to_lifecycle_opts(spec),
+         lifecycle_opts =
+           spec
+           |> Arbor.Agent.Spec.to_lifecycle_opts()
+           |> Keyword.put(:actor_authority, Keyword.get(opts, :actor_authority)),
          {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume
       updated_profile = put_in(profile.metadata[:last_model_config], model_config)
@@ -365,18 +368,33 @@ defmodule Arbor.Agent.Manager do
 
   ## Example
 
-      Manager.set_mcp_config(agent_id, [
-        %{name: "github", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-github"]},
-        %{name: "filesystem", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]}
-      ])
+      Manager.set_mcp_config(
+        agent_id,
+        [
+          %{name: "github", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-github"]},
+          %{name: "filesystem", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]}
+        ],
+        actor_authority: operator_authority
+      )
   """
-  @spec set_mcp_config(String.t(), [map()]) :: :ok | {:error, term()}
-  def set_mcp_config(agent_id, servers) when is_binary(agent_id) and is_list(servers) do
+  @spec set_mcp_config(String.t(), [map()]) ::
+          {:error, :capability_mutation_unauthorized}
+  def set_mcp_config(_agent_id, _servers), do: {:error, :capability_mutation_unauthorized}
+
+  @spec set_mcp_config(String.t(), [map()], keyword()) :: :ok | {:error, term()}
+  def set_mcp_config(agent_id, servers, opts)
+      when is_binary(agent_id) and is_list(servers) and is_list(opts) do
+    actor_authority = Keyword.get(opts, :actor_authority)
+
     with {:ok, profile} <- ProfileStore.load_profile(agent_id),
+         false <- is_nil(actor_authority),
          {:ok, approval_uris} <- mcp_server_approval_uris(servers),
-         :ok <- reconcile_mcp_server_approvals(agent_id, approval_uris) do
+         :ok <- reconcile_mcp_server_approvals(agent_id, approval_uris, actor_authority) do
       metadata = Map.put(profile.metadata || %{}, :mcp_servers, servers)
       ProfileStore.store_profile(%{profile | metadata: metadata})
+    else
+      true -> {:error, :capability_mutation_unauthorized}
+      {:error, _} = error -> error
     end
   end
 
@@ -393,7 +411,7 @@ defmodule Arbor.Agent.Manager do
 
   # Grant each wanted approval the agent lacks and revoke held approvals that
   # are no longer wanted, so the capability set mirrors the configured list.
-  defp reconcile_mcp_server_approvals(agent_id, wanted) do
+  defp reconcile_mcp_server_approvals(agent_id, wanted, actor_authority) do
     prefix = Arbor.Security.mcp_server_approval_prefix()
 
     with {:ok, caps} <- Arbor.Security.list_capabilities(agent_id) do
@@ -403,26 +421,31 @@ defmodule Arbor.Agent.Manager do
       held_uris = MapSet.new(held, & &1.resource_uri)
       wanted = MapSet.new(wanted)
 
-      with :ok <- grant_missing(agent_id, MapSet.difference(wanted, held_uris)) do
+      with :ok <-
+             grant_missing(agent_id, MapSet.difference(wanted, held_uris), actor_authority) do
         held
         |> Enum.reject(&MapSet.member?(wanted, &1.resource_uri))
-        |> revoke_all()
+        |> revoke_all(actor_authority)
       end
     end
   end
 
-  defp grant_missing(agent_id, uris) do
+  defp grant_missing(agent_id, uris, actor_authority) do
     Enum.reduce_while(uris, :ok, fn uri, :ok ->
-      case Arbor.Security.grant(principal: agent_id, resource: uri) do
+      case Arbor.Security.grant(
+             principal: agent_id,
+             resource: uri,
+             actor_authority: actor_authority
+           ) do
         {:ok, _cap} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:mcp_server_approval_failed, reason}}}
       end
     end)
   end
 
-  defp revoke_all(caps) do
+  defp revoke_all(caps, actor_authority) do
     Enum.reduce_while(caps, :ok, fn cap, :ok ->
-      case Arbor.Security.revoke(cap.id) do
+      case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
         :ok -> {:cont, :ok}
         {:error, :not_found} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:mcp_server_approval_revoke_failed, reason}}}

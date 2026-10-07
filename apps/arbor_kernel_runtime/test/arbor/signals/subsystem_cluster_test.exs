@@ -326,21 +326,135 @@ defmodule Arbor.Signals.SubsystemClusterTest do
     end
   end
 
+  # ── Security Distributed Sync ──────────────────────────────────────
+
+  describe "Security restricted signals across nodes" do
+    test "security regression: identity suspension emitted on A changes public status on B" do
+      {:ok, cluster} = start_cluster(2, "security_sync", [:arbor_security])
+      on_exit(fn -> stop_cluster_if_alive(cluster) end)
+
+      {:ok, [node_a, node_b]} = LocalCluster.nodes(cluster)
+
+      for node <- [node_a, node_b] do
+        assert :ok = :erpc.call(node, H, :configure_identity_security_sync, [])
+      end
+
+      setup_nodes([node_a, node_b])
+
+      for node <- [node_a, node_b] do
+        assert :ok = :erpc.call(node, H, :start_security_sync, [])
+      end
+
+      assert eventually(fn ->
+               Enum.all?([node_a, node_b], fn node ->
+                 case :erpc.call(node, H, :relay_stats, []) do
+                   %{peers_connected: count} when count >= 1 -> true
+                   _other -> false
+                 end
+               end)
+             end)
+
+      assert {:ok, public_identity} =
+               :erpc.call(node_a, H, :create_security_identity, [
+                 "distributed-security-sync-#{random_token()}"
+               ])
+
+      agent_id = Map.fetch!(public_identity, :agent_id)
+
+      assert :ok =
+               :erpc.call(node_b, H, :register_security_identity, [public_identity])
+
+      assert {:ok, :active} =
+               :erpc.call(node_b, H, :security_identity_status, [agent_id])
+
+      # The supervised Registry is the pinned restricted-topic publisher and
+      # emits this mutation through the public Arbor.Signals.emit/4 boundary.
+      assert :ok = :erpc.call(node_a, H, :suspend_security_identity, [agent_id])
+
+      assert eventually(fn ->
+               :erpc.call(node_b, H, :security_identity_status, [agent_id]) ==
+                 {:ok, :suspended}
+             end)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %Arbor.Signals.Signal{}},
+                 identity_suspension_signal(node_b, agent_id)
+               )
+             end)
+
+      assert {:ok, source_signal} = identity_suspension_signal(node_a, agent_id)
+      assert {:ok, remote_signal} = identity_suspension_signal(node_b, agent_id)
+
+      # The public emitter and real Relay transport must preserve the
+      # authority-reducing payload across nodes even though TopicKeys are
+      # intentionally node-local. Remote ingress also owns event identity and
+      # attribution: it replaces the source event id/timestamp/emitter and
+      # derives the origin from the credential-bound peer pid.
+      refute remote_signal.data[:__encrypted__]
+      refute remote_signal.data[:__decryption_failed__]
+      assert remote_signal.data.agent_id == agent_id
+      assert remote_signal.origin_node == node_a
+      assert remote_signal.data.origin_node == node_a
+      assert node(remote_signal.emitter_pid) == node_b
+      refute remote_signal.id == source_signal.id
+      assert remote_signal.metadata["remote"]["id"] =~ source_signal.id
+      assert remote_signal.metadata["remote"]["origin_node"] =~ Atom.to_string(node_a)
+
+      provenance_marker = random_token()
+
+      assert {:ok, _subscription_handle} =
+               :erpc.call(node_b, H, :subscribe_and_forward, [
+                 "activity.remote_provenance_probe",
+                 self(),
+                 {:remote_provenance, provenance_marker}
+               ])
+
+      assert :ok =
+               :erpc.call(node_a, H, :emit_cluster_signal, [
+                 :activity,
+                 :remote_provenance_probe,
+                 %{marker: provenance_marker, origin_node: :forged_origin@attacker}
+               ])
+
+      assert_receive {{:remote_provenance, ^provenance_marker}, provenance_signal}, 5_000
+      assert provenance_signal.data.marker == provenance_marker
+      assert provenance_signal.origin_node == node_a
+      assert provenance_signal.data.origin_node == node_a
+      assert node(provenance_signal.emitter_pid) == node_b
+      refute provenance_signal.origin_node == :forged_origin@attacker
+      refute provenance_signal.data.origin_node == :forged_origin@attacker
+
+      assert %{relayed_out: sent} = :erpc.call(node_a, H, :relay_stats, [])
+      assert %{relayed_in: received} = :erpc.call(node_b, H, :relay_stats, [])
+      assert sent >= 1
+      assert received >= 1
+    end
+  end
+
   # ── Helpers ────────────────────────────────────────────────────────
 
-  defp start_cluster(count, prefix) do
+  defp start_cluster(count, prefix, extra_applications \\ []) do
+    # LocalCluster turns the prefix into long-lived node atoms in this BEAM.
+    # A cryptorandom suffix prevents concurrent test VMs from sharing names
+    # while keeping the atom count bounded by this finite distributed suite.
+    prefix = "#{prefix}_#{random_token()}_"
+
     # Note: :arbor_gateway is excluded from auto-start because its Application
     # starts EndpointRegistry before signal infrastructure is ready. Instead,
     # we start EndpointRegistry manually after signals via setup_endpoint_registries.
     LocalCluster.start_link(count,
       prefix: prefix,
-      applications: [
-        :arbor_kernel,
-        :arbor_kernel_runtime,
-        :arbor_persistence,
-        :arbor_memory,
-        :arbor_trust
-      ],
+      applications:
+        Enum.uniq(
+          [
+            :arbor_kernel,
+            :arbor_kernel_runtime,
+            :arbor_persistence,
+            :arbor_memory,
+            :arbor_trust
+          ] ++ extra_applications
+        ),
       files: [@helper_file]
     )
   end
@@ -364,5 +478,48 @@ defmodule Arbor.Signals.SubsystemClusterTest do
     # Needs to be generous — after previous cluster shutdown, :pg
     # needs to fully clean up before new members are visible.
     Process.sleep(500)
+  end
+
+  defp eventually(fun, attempts \\ 200)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(25)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp identity_suspension_signal(node, agent_id) do
+    case :erpc.call(node, Arbor.Signals, :recent, [
+           [category: :security, type: :identity_suspended, limit: 20]
+         ]) do
+      {:ok, signals} ->
+        case Enum.find(signals, fn signal ->
+               signal.data[:agent_id] == agent_id or signal.data["agent_id"] == agent_id
+             end) do
+          nil -> :not_found
+          signal -> {:ok, signal}
+        end
+
+      _error ->
+        :not_found
+    end
+  end
+
+  defp random_token do
+    Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  defp stop_cluster_if_alive(cluster) do
+    if is_pid(cluster) and Process.alive?(cluster) do
+      LocalCluster.stop(cluster)
+    else
+      :ok
+    end
+  catch
+    :exit, _reason -> :ok
   end
 end

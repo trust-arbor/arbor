@@ -13,6 +13,8 @@ defmodule Arbor.Signals.Application do
           {Arbor.Signals.Store, []},
           {Arbor.Signals.TopicKeys, []},
           {Arbor.Signals.Channels, []},
+          {Arbor.Signals.SubscriptionRegistry, []},
+          {Arbor.Signals.TelemetryBridge, []},
           {Arbor.Signals.Bus, []},
           {Arbor.Signals.Relay, []}
         ]

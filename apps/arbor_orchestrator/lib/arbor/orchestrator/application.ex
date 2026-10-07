@@ -54,7 +54,11 @@ defmodule Arbor.Orchestrator.Application do
       maybe_run_journal_store_child(journal_opts) ++
         checkpoint_children ++
         [
-          Arbor.Common.HandlerRegistry,
+          Arbor.Common.handler_registry_child_spec(
+            core_registration_authority:
+              Arbor.Orchestrator.Handlers.RegistryAuthority.authority_config()
+          ),
+          Arbor.Orchestrator.Handlers.RegistryAuthority,
           {event_log_backend, name: event_log_name},
           {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
           Arbor.Orchestrator.SignalsBridge,

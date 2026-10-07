@@ -3,6 +3,7 @@ defmodule Arbor.Security.Reflex.BuiltinTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.Reflex
+  alias Arbor.Security.Reflex, as: ReflexEvaluator
   alias Arbor.Security.Reflex.Builtin
 
   describe "all/0" do
@@ -36,9 +37,9 @@ defmodule Arbor.Security.Reflex.BuiltinTest do
       rm_rf = Enum.find(reflexes, &(&1.id == "rm_rf_root"))
 
       assert rm_rf != nil
-      assert rm_rf.type == :pattern
       assert rm_rf.response == :block
       assert rm_rf.priority == 100
+      assert ReflexEvaluator.matches?(rm_rf, %{command: "rm -rf /"})
     end
 
     test "includes sudo/su protection" do
@@ -206,39 +207,39 @@ defmodule Arbor.Security.Reflex.BuiltinTest do
 
     test "rm_rf_root matches dangerous patterns" do
       [rm_rf] = Enum.filter(Builtin.shell_reflexes(), &(&1.id == "rm_rf_root"))
-      {:pattern, regex} = rm_rf.trigger
 
       # Should match
-      assert Regex.match?(regex, "rm -rf /")
-      assert Regex.match?(regex, "rm -rf ~")
-      assert Regex.match?(regex, "rm -r /var")
-      assert Regex.match?(regex, "rm -f /etc")
+      assert ReflexEvaluator.matches?(rm_rf, %{command: "rm -rf /"})
+      assert ReflexEvaluator.matches?(rm_rf, %{command: "rm -rf ~"})
+      assert ReflexEvaluator.matches?(rm_rf, %{command: "rm -r /var"})
 
       # Should NOT match (safe commands)
-      refute Regex.match?(regex, "rm file.txt")
-      refute Regex.match?(regex, "rm -f file.txt")
+      refute ReflexEvaluator.matches?(rm_rf, %{command: "rm file.txt"})
+      refute ReflexEvaluator.matches?(rm_rf, %{command: "rm -f file.txt"})
+      refute ReflexEvaluator.matches?(rm_rf, %{command: "rm -f /etc"})
     end
 
     test "sudo_su matches privilege escalation" do
       [sudo] = Enum.filter(Builtin.shell_reflexes(), &(&1.id == "sudo_su"))
-      {:pattern, regex} = sudo.trigger
 
-      assert Regex.match?(regex, "sudo apt install")
-      assert Regex.match?(regex, "su - root")
-      assert Regex.match?(regex, "sudo -i")
+      assert ReflexEvaluator.matches?(sudo, %{command: "sudo apt install"})
+      assert ReflexEvaluator.matches?(sudo, %{command: "su - root"})
+      assert ReflexEvaluator.matches?(sudo, %{command: "sudo -i"})
 
-      refute Regex.match?(regex, "sudoku")  # Not sudo
-      refute Regex.match?(regex, "resume")  # Contains 'su' but not the command
+      refute ReflexEvaluator.matches?(sudo, %{command: "sudoku"})
+      refute ReflexEvaluator.matches?(sudo, %{command: "resume"})
     end
 
     test "ssrf_metadata matches cloud metadata" do
       [meta] = Enum.filter(Builtin.network_reflexes(), &(&1.id == "ssrf_metadata"))
-      {:pattern, regex} = meta.trigger
 
-      assert Regex.match?(regex, "http://169.254.169.254/latest/meta-data/")
-      assert Regex.match?(regex, "https://169.254.1.1/")
+      assert ReflexEvaluator.matches?(meta, %{
+               url: "http://169.254.169.254/latest/meta-data/"
+             })
 
-      refute Regex.match?(regex, "http://169.253.169.254/")  # Wrong IP range
+      assert ReflexEvaluator.matches?(meta, %{url: "https://169.254.1.1/"})
+
+      refute ReflexEvaluator.matches?(meta, %{url: "http://169.253.169.254/"})
     end
   end
 end

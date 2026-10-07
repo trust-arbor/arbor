@@ -43,6 +43,55 @@ defmodule Arbor.Common.LogRedactorTest do
       assert String.contains?(report.detail, "[REDACTED]")
     end
 
+    @tag :security_regression
+    test "security regression: redacts secrets in chardata messages" do
+      secret = "xai-" <> String.duplicate("a", 24)
+      event = %{level: :info, meta: %{}, msg: {:string, ["token=", secret]}}
+
+      assert %{msg: {:string, redacted}} = LogRedactor.filter(event, [])
+      refute redacted =~ secret
+      assert redacted =~ "[REDACTED]"
+    end
+
+    @tag :security_regression
+    test "security regression: redacts Erlang format arguments" do
+      secret = "hf_" <> String.duplicate("b", 24)
+      event = %{level: :info, meta: %{}, msg: {~c"token=~ts", [secret]}}
+
+      assert %{msg: {:string, redacted}} = LogRedactor.filter(event, [])
+      refute redacted =~ secret
+      assert redacted =~ "token="
+      assert redacted =~ "[REDACTED]"
+      refute redacted =~ "FORMAT"
+    end
+
+    @tag :security_regression
+    test "security regression: redacts nested logger metadata" do
+      secret = "gsk_" <> String.duplicate("c", 24)
+      event = %{level: :info, meta: %{request: %{credential: secret}}, msg: {:string, "safe"}}
+
+      assert %{meta: %{request: %{credential: redacted}}} = LogRedactor.filter(event, [])
+      refute redacted =~ secret
+      assert redacted =~ "[REDACTED]"
+    end
+
+    @tag :security_regression
+    test "security regression: sensitive field names redact unpatterned values" do
+      secret = "plain-random-session-material"
+
+      event = %{
+        level: :info,
+        meta: %{},
+        msg: {:report, %{session_token_secret: secret}}
+      }
+
+      assert %{msg: {:report, %{session_token_secret: redacted}}} =
+               LogRedactor.filter(event, [])
+
+      refute redacted =~ secret
+      assert redacted == "[REDACTED]"
+    end
+
     test "redacts secrets nested inside a {:report, map} message" do
       secret = "AKIA" <> "IOSFODNN7EXAMPLE"
       event = %{level: :info, meta: %{}, msg: {:report, %{outer: %{inner: "key #{secret} end"}}}}
@@ -101,7 +150,7 @@ defmodule Arbor.Common.LogRedactorTest do
       refute rendered =~ "SECRETSECRET"
     end
 
-    test "an OTP crash report within budget is kept as a report for the translator" do
+    test "an OTP crash report within budget is rendered without translator metadata" do
       report = %{
         label: {:gen_server, :terminate},
         name: SomeServer,
@@ -110,10 +159,10 @@ defmodule Arbor.Common.LogRedactorTest do
 
       event = %{level: :error, msg: {:report, report}, meta: %{}}
 
-      assert %{msg: {:report, %{label: {:gen_server, :terminate}, report: kw}}} =
-               LogRedactor.filter(event, :log)
-
-      assert Keyword.keys(kw) == [:name, :last_message, :state, :reason]
+      assert %{msg: {:string, rendered}} = LogRedactor.filter(event, :log)
+      assert rendered =~ "gen_server"
+      assert rendered =~ "reason: :normal"
+      refute rendered == "nil"
     end
 
     test "walks keyword-list reports without raising" do

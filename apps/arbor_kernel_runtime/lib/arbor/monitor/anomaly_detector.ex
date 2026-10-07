@@ -11,18 +11,15 @@ defmodule Arbor.Monitor.AnomalyDetector do
 
   alias Arbor.Monitor.Config
 
-  @stats_table :arbor_monitor_stats
   @min_observations 10
 
   @doc """
   Initialize the stats ETS table. Called by MetricsStore or Application.
   """
   def init do
-    if :ets.whereis(@stats_table) == :undefined do
-      :ets.new(@stats_table, [:named_table, :set, :public, read_concurrency: true])
-    end
-
-    :ok
+    if :ets.whereis(stats_table()) == :undefined,
+      do: {:error, :metrics_store_not_started},
+      else: :ok
   end
 
   @doc """
@@ -32,6 +29,13 @@ defmodule Arbor.Monitor.AnomalyDetector do
   """
   @spec update(atom(), atom(), number()) :: Arbor.Monitor.Skill.anomaly_result()
   def update(skill, metric_key, value) when is_number(value) do
+    GenServer.call(Arbor.Monitor.MetricsStore, {:update_anomaly_stats, skill, metric_key, value})
+  end
+
+  def update(_skill, _metric_key, _value), do: :normal
+
+  @doc false
+  def update_owned(skill, metric_key, value) when is_number(value) do
     key = {skill, metric_key}
     config = Config.anomaly_config()
     alpha = Map.get(config, :ewma_alpha, 0.3)
@@ -48,15 +52,12 @@ defmodule Arbor.Monitor.AnomalyDetector do
     end
   end
 
-  def update(_skill, _metric_key, _value), do: :normal
-
   @doc """
   Reset statistics for a specific skill/metric pair.
   """
   @spec reset(atom(), atom()) :: :ok
   def reset(skill, metric_key) do
-    :ets.delete(stats_table(), {skill, metric_key})
-    :ok
+    GenServer.call(Arbor.Monitor.MetricsStore, {:reset_anomaly_stats, skill, metric_key})
   end
 
   @doc """
@@ -64,15 +65,11 @@ defmodule Arbor.Monitor.AnomalyDetector do
   """
   @spec reset_all() :: :ok
   def reset_all do
-    if :ets.whereis(@stats_table) != :undefined do
-      :ets.delete_all_objects(stats_table())
-    end
-
-    :ok
+    GenServer.call(Arbor.Monitor.MetricsStore, :reset_all_anomaly_stats)
   end
 
   @doc false
-  def stats_table, do: @stats_table
+  def stats_table, do: Arbor.Monitor.MetricsStore.stats_table()
 
   # Private
 

@@ -8,8 +8,7 @@ defmodule Arbor.Security.Kernel do
   """
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
-  alias Arbor.Security.SystemAuthority
+  alias Arbor.Security
 
   @doc """
   Grant a capability using keyword options.
@@ -30,23 +29,20 @@ defmodule Arbor.Security.Kernel do
   """
   @spec grant_capability(keyword()) :: {:ok, Capability.t()} | {:error, term()}
   def grant_capability(opts) do
-    principal_id = Keyword.fetch!(opts, :principal_id)
-    resource_uri = Keyword.fetch!(opts, :resource_uri)
-    constraints = Keyword.get(opts, :constraints, %{})
-    metadata = Keyword.get(opts, :metadata, %{})
-    expires_at = Keyword.get(opts, :expires_at)
-
-    with {:ok, cap} <-
-           Capability.new(
-             resource_uri: resource_uri,
-             principal_id: principal_id,
-             constraints: constraints,
-             expires_at: expires_at,
-             metadata: metadata
-           ),
-         {:ok, signed_cap} <- SystemAuthority.sign_capability(cap),
-         {:ok, :stored} <- CapabilityStore.put(signed_cap) do
-      {:ok, signed_cap}
+    with true <- Keyword.keyword?(opts),
+         principal_id when is_binary(principal_id) <- Keyword.get(opts, :principal_id),
+         resource_uri when is_binary(resource_uri) <- Keyword.get(opts, :resource_uri),
+         actor_authority when not is_nil(actor_authority) <- Keyword.get(opts, :actor_authority) do
+      Security.grant(
+        principal: principal_id,
+        resource: resource_uri,
+        actor_authority: actor_authority,
+        constraints: Keyword.get(opts, :constraints, %{}),
+        metadata: Keyword.get(opts, :metadata, %{}),
+        expires_at: Keyword.get(opts, :expires_at)
+      )
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
     end
   end
 
@@ -67,7 +63,12 @@ defmodule Arbor.Security.Kernel do
   """
   @spec revoke_capability(keyword()) :: :ok | {:error, term()}
   def revoke_capability(opts) do
-    capability_id = Keyword.fetch!(opts, :capability_id)
-    CapabilityStore.revoke(capability_id)
+    with true <- Keyword.keyword?(opts),
+         capability_id when is_binary(capability_id) <- Keyword.get(opts, :capability_id),
+         actor_authority when not is_nil(actor_authority) <- Keyword.get(opts, :actor_authority) do
+      Security.revoke(capability_id, actor_authority: actor_authority)
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
   end
 end

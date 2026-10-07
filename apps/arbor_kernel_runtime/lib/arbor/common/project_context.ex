@@ -15,6 +15,13 @@ defmodule Arbor.Common.ProjectContext do
 
   Only reads files; returns the assembled string, or `""` when nothing is found. Meant to be
   prepended to the agent's stable/cacheable system prompt.
+
+  ## Trust boundary
+
+  Repository context files are untrusted instructions supplied by the checked-out project.
+  Enabling this feature deliberately grants those files prompt influence; it does not make
+  their contents system policy or authorization. Callers must keep capability, trust, and
+  approval enforcement outside the prompt and must not treat this text as proof of authority.
   """
 
   require Logger

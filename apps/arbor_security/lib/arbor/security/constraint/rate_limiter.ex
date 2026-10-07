@@ -13,6 +13,7 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   use GenServer
 
   alias Arbor.Security.Config
+  alias Arbor.Security.SupervisedOwner
 
   @type bucket_key :: {String.t(), String.t()}
   @type bucket :: %{
@@ -40,9 +41,13 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   If the bucket doesn't exist, it is lazily created with `max_tokens` capacity.
   Returns `:ok` if a token was available, `{:error, :rate_limited}` otherwise.
   """
-  @spec consume(String.t(), String.t(), pos_integer()) :: :ok | {:error, :rate_limited}
+  @spec consume(String.t(), String.t(), pos_integer()) ::
+          :ok | {:error, :rate_limited | :rate_limiter_unavailable}
   def consume(principal_id, resource_uri, max_tokens) do
-    GenServer.call(__MODULE__, {:consume, {principal_id, resource_uri}, max_tokens})
+    owner_call(
+      {:consume, {principal_id, resource_uri}, max_tokens},
+      {:error, :rate_limiter_unavailable}
+    )
   end
 
   @doc """
@@ -50,15 +55,18 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   """
   @spec remaining(String.t(), String.t(), pos_integer()) :: non_neg_integer()
   def remaining(principal_id, resource_uri, max_tokens) do
-    GenServer.call(__MODULE__, {:remaining, {principal_id, resource_uri}, max_tokens})
+    owner_call({:remaining, {principal_id, resource_uri}, max_tokens}, 0)
   end
 
-  @doc """
-  Reset a specific bucket (for testing/admin).
-  """
-  @spec reset(String.t(), String.t()) :: :ok
-  def reset(principal_id, resource_uri) do
-    GenServer.call(__MODULE__, {:reset, {principal_id, resource_uri}})
+  if Mix.env() == :test do
+    @doc false
+    @spec reset_fixture(String.t(), String.t()) :: :ok
+    def reset_fixture(principal_id, resource_uri) do
+      owner_call(
+        {:test_reset_fixture, {principal_id, resource_uri}},
+        {:error, :rate_limiter_unavailable}
+      )
+    end
   end
 
   @doc """
@@ -66,7 +74,7 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   """
   @spec stats() :: map()
   def stats do
-    GenServer.call(__MODULE__, :stats)
+    owner_call(:stats, %{bucket_count: 0, buckets: %{}})
   end
 
   # ===========================================================================
@@ -103,8 +111,15 @@ defmodule Arbor.Security.Constraint.RateLimiter do
     {:reply, trunc(bucket.tokens), state}
   end
 
-  def handle_call({:reset, key}, _from, state) do
-    {:reply, :ok, %{state | buckets: Map.delete(state.buckets, key)}}
+  if Mix.env() == :test do
+    def handle_call({:test_reset_fixture, key}, _from, state) do
+      {:reply, :ok, %{state | buckets: Map.delete(state.buckets, key)}}
+    end
+  end
+
+  def handle_call({operation, _key}, _from, state)
+      when operation in [:reset, :test_reset_fixture] do
+    {:reply, {:error, :rate_limit_reset_unauthorized}, state}
   end
 
   def handle_call(:stats, _from, state) do
@@ -174,5 +189,16 @@ defmodule Arbor.Security.Constraint.RateLimiter do
 
   defp schedule_cleanup do
     Process.send_after(self(), :cleanup, Config.rate_limit_cleanup_interval_ms())
+  end
+
+  defp owner_call(request, unavailable) do
+    case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+      pid when is_pid(pid) -> GenServer.call(pid, request)
+      nil -> unavailable
+    end
+  rescue
+    _ -> unavailable
+  catch
+    :exit, _ -> unavailable
   end
 end

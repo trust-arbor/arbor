@@ -5,6 +5,8 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.{OIDCTestHelper, TerminalLogin}
 
+  @admission_source String.duplicate("s", 43)
+
   defmodule Aliases do
     def resolve(principal) do
       case Application.get_env(:arbor_security, :terminal_alias_block) do
@@ -88,8 +90,9 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
       reflex_checking_enabled: false,
       uri_registry_enforcement: false,
       constraint_enforcement_enabled: true,
-      session_token_secret: "terminal-login-#{System.unique_integer([:positive])}",
-      terminal_login: [device_flow_module: DeviceFlow],
+      session_token_secret:
+        "terminal-login-security-regression-secret-#{System.unique_integer([:positive])}",
+      terminal_login: [device_flow_module: DeviceFlow, max_starts_per_source: 32],
       oidc: []
     ]
 
@@ -115,6 +118,95 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     %{oidc: oidc, caller: oidc.identity.agent_id, target: target, provider: provider}
   end
 
+  test "security regression: bare login admission cannot start anonymous IdP work", c do
+    assert {:error, :terminal_login_source_required} = Security.begin_terminal_login(c.target)
+    refute_receive {:device_start, _}
+  end
+
+  test "security regression: a stolen flow handle cannot poll or cancel another source", c do
+    source_a = @admission_source
+    source_b = String.duplicate("b", 43)
+
+    Application.put_env(:arbor_security, :oidc,
+      device_flow: Map.put(c.provider, :block_start, true)
+    )
+
+    restart_broker()
+    grant!(c.caller, c.target)
+
+    start = Task.async(fn -> Security.begin_terminal_login(c.target, source_a) end)
+    assert_receive {:device_start, worker}
+
+    [{_key, starting_flow}] = :sys.get_state(TerminalLogin).flows |> Map.to_list()
+    refute Map.has_key?(starting_flow, :handle)
+
+    send(worker, :continue)
+    assert {:ok, pending} = Task.await(start)
+    assert_receive {:device_poll, ^worker}
+
+    refute inspect(:sys.get_state(TerminalLogin)) =~ pending.handle
+    refute inspect(:sys.get_status(TerminalLogin)) =~ pending.handle
+
+    assert {:error, :unauthorized} = Security.terminal_login_status(pending.handle)
+    assert {:error, :unauthorized} = Security.cancel_terminal_login(pending.handle)
+
+    assert {:error, :unauthorized} =
+             Task.async(fn -> Security.terminal_login_status(pending.handle, source_b) end)
+             |> Task.await()
+
+    assert {:error, :unauthorized} =
+             Task.async(fn -> Security.cancel_terminal_login(pending.handle, source_b) end)
+             |> Task.await()
+
+    assert {:ok, :pending} =
+             Task.async(fn -> Security.terminal_login_status(pending.handle, source_a) end)
+             |> Task.await()
+
+    send(worker, {:token, c.oidc.id_token})
+
+    assert {:ok, %{credential: credential}} =
+             await_status(pending.handle, source_a)
+
+    assert is_binary(credential)
+  end
+
+  test "security regression: source and global admission budgets bound IdP fanout", c do
+    Application.put_env(:arbor_security, :terminal_login,
+      device_flow_module: DeviceFlow,
+      max_pending: 8,
+      max_pending_per_source: 1,
+      max_starts_per_source: 2,
+      max_starts_per_window: 3,
+      start_window_seconds: 60
+    )
+
+    restart_broker()
+    source_a = @admission_source
+    source_b = String.duplicate("b", 43)
+    source_c = String.duplicate("c", 43)
+
+    assert {:ok, first} = begin_login(c.target, source_a)
+    assert_receive {:device_start, _first_worker}
+    assert_receive {:device_poll, _first_worker}
+    assert {:error, :login_unavailable} = begin_login(c.target, source_a)
+    refute_receive {:device_start, _}
+
+    assert {:ok, second} = begin_login(c.target, source_b)
+    assert_receive {:device_start, _second_worker}
+    assert_receive {:device_poll, _second_worker}
+    assert :ok = Security.cancel_terminal_login(first.handle, source_a)
+    assert :ok = Security.cancel_terminal_login(second.handle, source_b)
+
+    assert {:ok, third} = begin_login(c.target, source_a)
+    assert_receive {:device_start, _third_worker}
+    assert_receive {:device_poll, _third_worker}
+    assert :ok = Security.cancel_terminal_login(third.handle, source_a)
+
+    assert {:error, :login_unavailable} = begin_login(c.target, source_a)
+    assert {:error, :login_unavailable} = begin_login(c.target, source_c)
+    refute_receive {:device_start, _}
+  end
+
   test "security regression: existing linked human uses own grant and one-shot opaque credential",
        c do
     owner = identity!()
@@ -132,7 +224,10 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     assert byte_size(session.credential) == 43
     assert session.lifetime == :connection
     claim!(session)
-    assert {:error, :unauthorized} = Security.terminal_login_status(handle)
+
+    assert {:error, :unauthorized} =
+             Security.terminal_login_status(handle, @admission_source)
+
     assert {:ok, binding} = Security.verify_terminal_session(session.credential)
     assert binding.owner == owner.identity.agent_id
     assert binding.target == c.target
@@ -154,7 +249,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     assert :ok = Security.revoke_terminal_session(session.credential)
     assert {:error, :unauthorized} = Security.verify_terminal_session(session.credential)
     assert :ok = Security.revoke_terminal_session(session.credential)
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
   end
 
   test "security regression: login cannot provision unknown humans or inherit owner grants", c do
@@ -164,7 +259,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
       device_flow: Map.put(unknown.provider, :observer, self())
     )
 
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     send(worker, {:token, unknown.id_token})
     assert {:error, :unauthorized} = await_status(pending.handle)
@@ -179,7 +274,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
       c.caller => owner.identity.agent_id
     })
 
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     send(worker, {:token, c.oidc.id_token})
     assert {:error, :unauthorized} = await_status(pending.handle)
@@ -191,7 +286,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     cap = grant!(c.caller, c.target)
     {_handle, session} = login!(c)
     claim!(session)
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:error, :unauthorized} = preflight(session.credential)
     assert {:error, :unauthorized} = Security.verify_terminal_session(session.credential)
 
@@ -208,7 +303,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     Application.put_env(:arbor_security, :terminal_test_aliases, %{})
     {_handle, session} = login!(c)
     claim!(session)
-    assert :ok = Security.suspend_identity(c.caller)
+    assert :ok = Security.suspend_identity_fixture(c.caller, "security regression fixture")
     assert {:error, :unauthorized} = Security.verify_terminal_session(session.credential)
   end
 
@@ -239,7 +334,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
 
     for mutation <- invalid do
       {:ok, token} = Joken.Signer.sign(Map.merge(c.oidc.claims, mutation), signer)
-      assert {:ok, pending} = Security.begin_terminal_login(c.target)
+      assert {:ok, pending} = begin_login(c.target)
       assert_receive {:device_poll, worker}
       send(worker, {:token, token})
       assert {:error, :unauthorized} = await_status(pending.handle)
@@ -258,15 +353,21 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
   end
 
   test "security regression: cancellation retires the exact worker before acknowledging", c do
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     monitor = Process.monitor(worker)
-    assert {:ok, :pending} = Security.terminal_login_status(pending.handle)
-    assert :ok = Security.cancel_terminal_login(pending.handle)
+
+    assert {:ok, :pending} =
+             Security.terminal_login_status(pending.handle, @admission_source)
+
+    assert :ok = Security.cancel_terminal_login(pending.handle, @admission_source)
     refute Process.alive?(worker)
     assert_receive {:DOWN, ^monitor, :process, ^worker, _}
-    assert {:error, :unauthorized} = Security.terminal_login_status(pending.handle)
-    assert :ok = Security.cancel_terminal_login(pending.handle)
+
+    assert {:error, :unauthorized} =
+             Security.terminal_login_status(pending.handle, @admission_source)
+
+    assert :ok = Security.cancel_terminal_login(pending.handle, @admission_source)
     assert Process.alive?(Process.whereis(TerminalLogin))
   end
 
@@ -276,14 +377,14 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
       device_flow: Map.put(c.provider, :block_start, true)
     )
 
-    caller = spawn(fn -> Security.begin_terminal_login(c.target) end)
+    caller = spawn(fn -> begin_login(c.target) end)
     assert_receive {:device_start, worker}
     monitor = Process.monitor(worker)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 1_000
 
     Application.put_env(:arbor_security, :oidc, device_flow: c.provider)
-    assert {:ok, _pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, _pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     monitor = Process.monitor(worker)
     assert :ok = Supervisor.terminate_child(Security.Supervisor, TerminalLogin)
@@ -303,19 +404,22 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     )
 
     restart_broker()
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     monitor = Process.monitor(worker)
-    assert {:error, :login_unavailable} = Security.begin_terminal_login(c.target)
+    assert {:error, :login_unavailable} = begin_login(c.target)
     assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 2_000
-    assert {:error, :unauthorized} = Security.terminal_login_status(pending.handle)
+
+    assert {:error, :unauthorized} =
+             Security.terminal_login_status(pending.handle, @admission_source)
+
     grant!(c.caller, c.target)
     {_handle, session} = login!(c)
-    assert {:error, :login_unavailable} = Security.begin_terminal_login(c.target)
+    assert {:error, :login_unavailable} = begin_login(c.target)
     Process.sleep(1_100)
     assert {:error, :unauthorized} = preflight(session.credential)
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
-    assert :ok = Security.cancel_terminal_login(pending.handle)
+    assert {:ok, pending} = begin_login(c.target)
+    assert :ok = Security.cancel_terminal_login(pending.handle, @admission_source)
   end
 
   @tag :slow
@@ -328,12 +432,16 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
 
     restart_broker()
     grant!(c.caller, c.target)
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     send(worker, {:token, c.oidc.id_token})
     await_ready(pending.handle)
     :ok = :sys.suspend(TerminalLogin)
-    task = Task.async(fn -> Security.terminal_login_status(pending.handle) end)
+
+    task =
+      Task.async(fn ->
+        Security.terminal_login_status(pending.handle, @admission_source)
+      end)
 
     try do
       await_call_wait(task.pid)
@@ -343,7 +451,9 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     end
 
     assert {:error, :unauthorized} = Task.await(task)
-    assert {:error, :unauthorized} = Security.terminal_login_status(pending.handle)
+
+    assert {:error, :unauthorized} =
+             Security.terminal_login_status(pending.handle, @admission_source)
   end
 
   @tag :slow
@@ -392,7 +502,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
 
     assert {:ok, next} = Security.verify_terminal_session(session.credential)
     refute next.session_token == binding.session_token
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
 
     assert Enum.sort(Map.keys(pending)) == [
              :expires_in,
@@ -412,7 +522,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
   test "security regression: invalid target, handles, URI and caller-selected options fail closed",
        c do
     for target <- [nil, %{}, "", "agent_bad/path", String.duplicate("a", 257)] do
-      assert {:error, :unauthorized} = Security.begin_terminal_login(target)
+      assert {:error, :unauthorized} = begin_login(target)
     end
 
     refute_receive {:device_start, _}
@@ -426,9 +536,11 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     assert Process.alive?(Process.whereis(TerminalLogin))
 
     for opaque <- [nil, "", String.duplicate("x", 44), %{target: c.target}] do
-      assert {:error, :unauthorized} = Security.terminal_login_status(opaque)
+      assert {:error, :unauthorized} =
+               Security.terminal_login_status(opaque, @admission_source)
+
       assert {:error, :unauthorized} = Security.verify_terminal_session(opaque)
-      assert :ok = Security.cancel_terminal_login(opaque)
+      assert :ok = Security.cancel_terminal_login(opaque, @admission_source)
       assert :ok = Security.revoke_terminal_session(opaque)
     end
 
@@ -441,7 +553,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
         device_flow: Map.put(c.provider, :verification_uri, uri)
       )
 
-      assert {:error, :unauthorized} = Security.begin_terminal_login(c.target)
+      assert {:error, :unauthorized} = begin_login(c.target)
     end
   end
 
@@ -453,17 +565,19 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
       device_flow: Map.merge(c.provider, %{allow_http: true, verification_uri: uri})
     )
 
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
-    on_exit(fn -> Security.cancel_terminal_login(pending.handle) end)
+    assert {:ok, pending} = begin_login(c.target)
+    on_exit(fn -> Security.cancel_terminal_login(pending.handle, @admission_source) end)
     assert pending.verification_uri == uri
     refute Map.has_key?(pending, :device_code)
     refute Map.has_key?(pending, :verification_uri_complete)
     assert_receive {:device_poll, worker}
     monitor = Process.monitor(worker)
-    assert :ok = Security.cancel_terminal_login(pending.handle)
+    assert :ok = Security.cancel_terminal_login(pending.handle, @admission_source)
     assert_receive {:DOWN, ^monitor, :process, ^worker, _}
     refute Process.alive?(worker)
-    assert {:error, :unauthorized} = Security.terminal_login_status(pending.handle)
+
+    assert {:error, :unauthorized} =
+             Security.terminal_login_status(pending.handle, @admission_source)
   end
 
   test "security regression: local verification instructions retain HTTP and URI safety gates",
@@ -484,7 +598,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
         device_flow: Map.merge(c.provider, %{allow_http: allow_http, verification_uri: uri})
       )
 
-      assert {:error, :unauthorized} = Security.begin_terminal_login(c.target)
+      assert {:error, :unauthorized} = begin_login(c.target)
       assert_receive {:device_start, _}
       refute_receive {:device_poll, _}
     end
@@ -504,6 +618,10 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
              reconnect_seconds: 120,
              pending_seconds: 300,
              max_pending: 32,
+             max_pending_per_source: 2,
+             max_starts_per_source: 4,
+             max_starts_per_window: 64,
+             start_window_seconds: 60,
              max_active: 128
            } =
              Security.Config.terminal_login_options()
@@ -689,7 +807,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     assert_receive {:alias_blocked, broker}
 
     try do
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
     after
       send(broker, :release_alias)
     end
@@ -759,7 +877,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
                  fixture.provider
                )
 
-      on_exit(fn -> Security.deregister_identity(fixture.identity.agent_id) end)
+      on_exit(fn -> Security.deregister_identity_fixture(fixture.identity.agent_id) end)
     end
 
     on_exit(fixture.cleanup)
@@ -768,28 +886,36 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
 
   defp grant!(principal, target) do
     assert {:ok, cap} =
-             Security.grant(principal: principal, resource: "arbor://chat/agent/" <> target)
+             Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://chat/agent/" <> target
+             )
 
-    on_exit(fn -> Security.revoke(cap.id) end)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 
   defp login!(c, token \\ nil) do
-    assert {:ok, pending} = Security.begin_terminal_login(c.target)
+    assert {:ok, pending} = begin_login(c.target)
     assert_receive {:device_poll, worker}
     send(worker, {:token, token || c.oidc.id_token})
     assert {:ok, session} = await_status(pending.handle)
     {pending.handle, session}
   end
 
-  defp await_status(handle, attempts \\ 200)
-  defp await_status(_handle, 0), do: flunk("terminal login did not settle")
+  defp begin_login(target, source \\ @admission_source) do
+    Security.begin_terminal_login(target, source)
+  end
 
-  defp await_status(handle, attempts) do
-    case Security.terminal_login_status(handle) do
+  defp await_status(handle), do: await_status(handle, @admission_source, 200)
+  defp await_status(handle, source), do: await_status(handle, source, 200)
+  defp await_status(_handle, _source, 0), do: flunk("terminal login did not settle")
+
+  defp await_status(handle, source, attempts) do
+    case Security.terminal_login_status(handle, source) do
       {:ok, :pending} ->
         Process.sleep(5)
-        await_status(handle, attempts - 1)
+        await_status(handle, source, attempts - 1)
 
       result ->
         result
@@ -818,19 +944,15 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
   defp await_call_wait(_pid, 0), do: flunk("status caller did not block on broker")
 
   defp await_call_wait(pid, attempts) do
-    case Process.info(pid, :current_stacktrace) do
-      {:current_stacktrace, stack} ->
-        if Enum.any?(stack, fn {module, function, _, _} ->
-             module == :gen and function == :do_call
-           end),
-           do: :ok,
-           else:
-             (
-               Process.sleep(2)
-               await_call_wait(pid, attempts - 1)
-             )
+    case Process.info(pid, :status) do
+      {:status, :waiting} ->
+        :ok
 
-      _ ->
+      {:status, _running_or_runnable} ->
+        Process.sleep(2)
+        await_call_wait(pid, attempts - 1)
+
+      nil ->
         flunk("status caller exited before broker resumed")
     end
   end
@@ -848,10 +970,7 @@ defmodule Arbor.Security.TerminalLoginSecurityRegressionTest do
     kid = "terminal-claims"
     jwks = %{"keys" => [Map.merge(public_map, %{"kid" => kid, "alg" => "ES256"})]}
 
-    :ets.insert(
-      :arbor_oidc_jwks_cache,
-      {fixture.provider.issuer, jwks, System.monotonic_time(:millisecond) + 60_000}
-    )
+    :ok = Arbor.Security.OIDC.JwksCache.put_fixture(fixture.provider, jwks)
 
     Joken.Signer.create("ES256", private_map, %{"kid" => kid})
   end

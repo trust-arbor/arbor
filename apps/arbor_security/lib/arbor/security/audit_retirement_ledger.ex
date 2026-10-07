@@ -50,7 +50,6 @@ defmodule Arbor.Security.AuditRetirementLedger do
 
   import Arbor.Security.AuditJournalFileProofs
 
-  alias Arbor.Common.SafePath
   alias Arbor.Security.AuditJournalFileCore
   alias Arbor.Security.AuditRetirementLedgerCore, as: LedgerCore
 
@@ -330,8 +329,11 @@ defmodule Arbor.Security.AuditRetirementLedger do
     parent = Path.dirname(journal_path)
 
     with {:ok, name} <- ledger_name(journal_path),
-         {:ok, joined} <- safe_join(parent, name) do
-      contained_in_root(joined, root)
+         {:ok, joined} <- safe_join(parent, name),
+         {:ok, _contained} <- contained_in_root(joined, root) do
+      # Preserve the lexical path so the subsequent lstat can distinguish a
+      # ledger symlink from its regular-file target.
+      {:ok, joined}
     end
   end
 
@@ -345,9 +347,10 @@ defmodule Arbor.Security.AuditRetirementLedger do
   end
 
   defp safe_join(parent, name) do
-    case SafePath.safe_join(parent, name) do
-      {:ok, path} -> {:ok, path}
-      {:error, _reason} -> {:error, :path_escape}
+    if Path.basename(name) == name do
+      {:ok, Path.join(parent, name)}
+    else
+      {:error, :path_escape}
     end
   end
 

@@ -3,6 +3,10 @@ defmodule Arbor.Security.UriRegistryTest do
 
   alias Arbor.Security.UriRegistry
 
+  defmodule ForgedProvider do
+    def capability_uri_prefixes, do: ["arbor://forged/provider"]
+  end
+
   setup do
     unless Process.whereis(UriRegistry) do
       start_supervised!({UriRegistry, []})
@@ -102,13 +106,12 @@ defmodule Arbor.Security.UriRegistryTest do
   end
 
   describe "Arbor.Security.uri_registered?/1" do
-    test "exposes canonical and runtime URI membership through the facade" do
+    test "security regression: caller-chosen runtime prefixes fail closed through the facade" do
       prefix = "arbor://facade_runtime_#{System.unique_integer([:positive])}/op"
 
-      assert :ok = Arbor.Security.register_uri_prefix(prefix)
+      assert {:error, :uri_mutation_unauthorized} = Arbor.Security.register_uri_prefix(prefix)
       assert Arbor.Security.uri_registered?("arbor://fs/read/project/src")
-      assert Arbor.Security.uri_registered?(prefix <> "/child")
-      refute Arbor.Security.uri_registered?(prefix <> "posite/child")
+      refute Arbor.Security.uri_registered?(prefix <> "/child")
     end
   end
 
@@ -133,17 +136,18 @@ defmodule Arbor.Security.UriRegistryTest do
   end
 
   describe "register/1" do
-    test "runtime prefixes use segment-aware matching" do
+    test "security regression: direct caller-chosen runtime prefixes cannot mutate the registry" do
       prefix = "arbor://custom_runtime_#{System.unique_integer([:positive])}/op"
 
-      assert :ok = UriRegistry.register(prefix)
-      assert UriRegistry.registered?(prefix <> "/child")
-      refute UriRegistry.registered?(prefix <> "posite/child")
+      assert {:error, :uri_mutation_unauthorized} = UriRegistry.register(prefix)
+      refute UriRegistry.registered?(prefix <> "/child")
     end
 
-    test "rejects invalid runtime prefixes" do
-      assert {:error, {:invalid_uri, :invalid_scheme}} =
-               UriRegistry.register("not-a-uri")
+    test "security regression: an unconfigured provider cannot inject a fixed-looking prefix" do
+      assert {:error, :uri_mutation_unauthorized} =
+               UriRegistry.register_provider(ForgedProvider)
+
+      refute UriRegistry.registered?("arbor://forged/provider/child")
     end
   end
 

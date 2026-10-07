@@ -556,13 +556,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     grant_reviewed_validation!(agent_id)
 
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/coding/security_regression/validate",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
 
     nested_attempts = :counters.new(1, [])
     {:ok, seen} = Agent.start_link(fn -> nil end)
@@ -639,13 +639,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     grant_reviewed_validation!(agent_id)
 
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/coding/contract_change/validate",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
 
     changed_files =
       Enum.map(1..70, fn i ->
@@ -800,13 +800,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              over_files_reason =~ "too_many_paths"
 
     assert {:ok, mix_cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/mix/compile",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(mix_cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(mix_cap.id) end)
 
     Application.put_env(
       :arbor_actions,
@@ -892,25 +892,25 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     grant_reviewed_validation!(agent_id)
 
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/mix/compile",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     cap
   end
 
   defp grant_reviewed_validation!(agent_id) do
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/coding/reviewed_validation",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     cap
   end
 

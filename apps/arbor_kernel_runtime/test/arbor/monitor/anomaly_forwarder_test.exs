@@ -10,12 +10,20 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
     Testing.delete(:channel_bridge_module)
     Testing.delete(:agent_directory_module)
 
-    {:ok, pid} = start_supervised(AnomalyForwarder)
-    %{forwarder: pid}
+    owner_secret = :crypto.strong_rand_bytes(32)
+    owner_proof = :crypto.hash(:sha256, owner_secret)
+
+    {:ok, pid} =
+      start_supervised(
+        {AnomalyForwarder, trusted_producers: trusted_self(), channel_owner_proof: owner_proof}
+      )
+
+    %{forwarder: pid, owner_secret: owner_secret}
   end
 
   defp sync_forwarder do
-    assert :ok = AnomalyForwarder.set_channel("ops-room")
+    _state = :sys.get_state(AnomalyForwarder)
+    :ok
   end
 
   describe "start_link/1" do
@@ -27,8 +35,15 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
 
   describe "set_channel/1" do
     @tag :fast
-    test "accepts a channel id", %{forwarder: _forwarder} do
-      assert :ok = AnomalyForwarder.set_channel("ops-room")
+    test "accepts a channel id only from its owner", %{
+      forwarder: _forwarder,
+      owner_secret: owner_secret
+    } do
+      assert {:error, :unauthorized} = AnomalyForwarder.set_channel("attacker-room")
+      assert :ok = AnomalyForwarder.set_channel("ops-room", owner_secret)
+
+      assert {:error, :channel_already_bound} =
+               AnomalyForwarder.set_channel("redirected-room", owner_secret)
     end
   end
 
@@ -40,7 +55,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
         data: %{skill: :beam, severity: :warning, details: %{metric: :reductions}}
       }
 
-      send(Process.whereis(AnomalyForwarder), {:signal, signal})
+      assert :ok = AnomalyForwarder.forward(signal)
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
@@ -52,7 +67,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
         data: %{anomaly_count: 10}
       }
 
-      send(Process.whereis(AnomalyForwarder), {:signal, signal})
+      assert :ok = AnomalyForwarder.forward(signal)
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
@@ -64,7 +79,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
         data: %{fingerprint: "beam:reductions"}
       }
 
-      send(Process.whereis(AnomalyForwarder), {:signal, signal})
+      assert :ok = AnomalyForwarder.forward(signal)
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
@@ -76,7 +91,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
         data: %{fingerprint: "beam:reductions"}
       }
 
-      send(Process.whereis(AnomalyForwarder), {:signal, signal})
+      assert :ok = AnomalyForwarder.forward(signal)
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
@@ -84,7 +99,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
     @tag :fast
     test "handles unknown signal types gracefully" do
       signal = %{type: :unknown_signal, data: %{}}
-      send(Process.whereis(AnomalyForwarder), {:signal, signal})
+      assert {:error, :unauthorized_producer} = AnomalyForwarder.forward(signal)
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
@@ -104,5 +119,18 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
       sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
+  end
+
+  defp trusted_self do
+    Map.new(
+      [
+        :anomaly_detected,
+        :cascade_detected,
+        :cascade_resolved,
+        :healing_verified,
+        :healing_ineffective
+      ],
+      &{&1, self()}
+    )
   end
 end

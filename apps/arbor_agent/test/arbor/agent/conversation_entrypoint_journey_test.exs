@@ -179,8 +179,8 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     primary = human!()
     secondary = human!()
     {:ok, agent} = Identity.generate(name: "Real entrypoint convergence journey")
-    :ok = Security.register_identity(Identity.public_only(agent))
-    on_exit(fn -> Security.deregister_identity(agent.agent_id) end)
+    :ok = Security.register_identity_fixture(Identity.public_only(agent))
+    on_exit(fn -> Security.deregister_identity_fixture(agent.agent_id) end)
     resource = "arbor://chat/agent/" <> agent.agent_id
     primary_cap = grant!(primary.agent_id, resource)
     {:ok, %{operation_id: primary_audit_id}} = Security.capability_mutation_audit_status()
@@ -674,7 +674,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
                expected_engagement_id: "eng_" <> String.duplicate("f", 32)
              )
 
-    assert :ok = Security.revoke(c.primary_cap.id)
+    assert :ok = Security.revoke_fixture(c.primary_cap.id)
 
     assert {:error, :unauthorized} =
              Arbor.Agent.conversation_activity(c.primary.agent_id, c.target,
@@ -1000,7 +1000,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     assert_receive {:actual_model_request, new_prompt, _}, 5_000
     assert inspect(new_prompt) =~ "fresh secondary context"
     refute inspect(new_prompt) =~ "private prior owner"
-    assert :ok = Security.revoke(c.secondary_cap.id)
+    assert :ok = Security.revoke_fixture(c.secondary_cap.id)
 
     for {operation, input} <- [
           history: nil,
@@ -1014,7 +1014,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     end
 
     refute_receive {:actual_model_request, _, _}, 100
-    assert :ok = Security.revoke(c.primary_cap.id)
+    assert :ok = Security.revoke_fixture(c.primary_cap.id)
     cleared = Conversation.refresh(web)
     refute cleared.assigns.conversation_authorized
     assert cleared.assigns.streams.messages.inserts == []
@@ -1193,7 +1193,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     :ok = Security.register_oidc_identity(fixture.identity, fixture.id_token, fixture.provider)
 
     on_exit(fn ->
-      Security.deregister_identity(fixture.identity.agent_id)
+      Security.deregister_identity_fixture(fixture.identity.agent_id)
       fixture.cleanup.()
     end)
 
@@ -1201,8 +1201,8 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
   end
 
   defp grant!(principal, resource) do
-    {:ok, cap} = Security.grant(principal: principal, resource: resource)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

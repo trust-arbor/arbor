@@ -92,7 +92,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
     {:ok, identity} = Identity.generate()
 
     :ok =
-      Arbor.Security.register_identity(Identity.public_only(identity))
+      Arbor.Security.register_identity_fixture(Identity.public_only(identity))
 
     agent_id = identity.agent_id
     previous = Application.fetch_env(:arbor_kernel, :common)
@@ -108,10 +108,10 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
     )
 
     {:ok, version} = SkillLibrary.prepare_approval(@test_skill_name)
-    {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: version.resource_uri)
+    {:ok, cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: version.resource_uri)
 
     on_exit(fn ->
-      Arbor.Security.revoke(cap.id)
+      Arbor.Security.revoke_fixture(cap.id)
 
       case previous do
         {:ok, config} -> Application.put_env(:arbor_kernel, :common, config)

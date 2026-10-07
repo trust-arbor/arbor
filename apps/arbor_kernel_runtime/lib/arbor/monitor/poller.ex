@@ -28,6 +28,7 @@ defmodule Arbor.Monitor.Poller do
 
   @impl true
   def init(opts) do
+    Process.flag(:sensitive, true)
     AnomalyDetector.init()
 
     interval = Keyword.get(opts, :interval, Config.polling_interval())
@@ -146,6 +147,7 @@ defmodule Arbor.Monitor.Poller do
 
     # Forward to healing queue if running
     forward_to_healing_queue(anomaly)
+    forward_to_ops_room(:anomaly_detected, anomaly)
 
     # Emit external signal if configured
     if Config.signal_emission_enabled?() do
@@ -208,6 +210,15 @@ defmodule Arbor.Monitor.Poller do
   rescue
     error ->
       Logger.debug("[Arbor.Monitor] Signal emission failed: #{Exception.message(error)}")
+  end
+
+  defp forward_to_ops_room(type, data) do
+    Arbor.Monitor.AnomalyForwarder.forward(%{type: type, data: data})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp schedule_poll(interval) do

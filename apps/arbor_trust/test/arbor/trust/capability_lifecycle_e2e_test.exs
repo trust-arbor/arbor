@@ -14,6 +14,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   setup do
     ensure_security_started()
@@ -34,7 +35,8 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
     Application.put_env(:arbor_security, :delegation_chain_verification_enabled, false)
 
-    agent_id = "agent_cap_lifecycle_#{:erlang.unique_integer([:positive])}"
+    {actor_identity, actor_authority} = actor_authority!()
+    agent_id = actor_identity.agent_id
 
     on_exit(fn ->
       restore_config(:reflex_checking_enabled, prev_reflex)
@@ -45,7 +47,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       restore_config(:delegation_chain_verification_enabled, prev_delegation)
     end)
 
-    {:ok, agent_id: agent_id}
+    {:ok, agent_id: agent_id, actor_identity: actor_identity, actor_authority: actor_authority}
   end
 
   # ===========================================================================
@@ -82,7 +84,10 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   # ===========================================================================
 
   describe "revoke" do
-    test "revoking a capability blocks subsequent authorization", %{agent_id: agent_id} do
+    test "revoking a capability blocks subsequent authorization", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       cap = grant_capability(agent_id, "arbor://shell/exec/echo")
 
       # Should work before revocation
@@ -90,15 +95,18 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
                Security.authorize(agent_id, "arbor://shell/exec/echo", :execute)
 
       # Revoke
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke(cap.id, actor_authority: actor_authority)
 
       # Should fail after revocation
       assert {:error, :unauthorized} =
                Security.authorize(agent_id, "arbor://shell/exec/echo", :execute)
     end
 
-    test "revoking a non-existent capability returns error" do
-      assert {:error, :not_found} = Security.revoke("cap_nonexistent_id")
+    test "revoking a non-existent capability returns error", %{
+      actor_authority: actor_authority
+    } do
+      assert {:error, :not_found} =
+               Security.revoke("cap_nonexistent_id", actor_authority: actor_authority)
     end
   end
 
@@ -125,7 +133,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # Should fail because capability has expired
       assert {:error, :unauthorized} =
@@ -147,7 +155,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://test/future", :execute)
@@ -173,7 +181,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # First use — should succeed
       assert {:ok, :authorized} =
@@ -224,7 +232,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # Should fail because not_before is in the future
       # Capability.valid?/1 checks not_before_passed?, which causes
@@ -249,7 +257,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://test/past_start", :execute)
@@ -329,7 +337,11 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   # ===========================================================================
 
   describe "delegation" do
-    test "delegated capability authorizes the delegatee", %{agent_id: agent_id} do
+    test "delegated capability authorizes the delegatee", %{
+      agent_id: agent_id,
+      actor_identity: actor_identity,
+      actor_authority: actor_authority
+    } do
       delegatee_id = "agent_delegatee_#{:erlang.unique_integer([:positive])}"
 
       # Grant parent capability with delegation_depth: 1
@@ -337,15 +349,16 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         Security.grant(
           principal: agent_id,
           resource: "arbor://test/delegated",
-          delegation_depth: 1
+          delegation_depth: 1,
+          actor_authority: actor_authority
         )
-
-      # Generate keypair for the delegator to sign the delegation
-      {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
       # Delegate to another agent
       {:ok, delegated_cap} =
-        Security.delegate(parent_cap.id, delegatee_id, delegator_private_key: priv)
+        Security.delegate(parent_cap.id, delegatee_id,
+          actor_authority: actor_authority,
+          delegator_private_key: actor_identity.private_key
+        )
 
       # Delegatee should be authorized
       assert {:ok, :authorized} =
@@ -360,7 +373,11 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert delegated_cap.parent_capability_id == parent_cap.id
     end
 
-    test "delegation_depth: 0 prevents further delegation", %{agent_id: agent_id} do
+    test "delegation_depth: 0 prevents further delegation", %{
+      agent_id: agent_id,
+      actor_identity: actor_identity,
+      actor_authority: actor_authority
+    } do
       delegatee_id = "agent_delegatee_#{:erlang.unique_integer([:positive])}"
 
       # Grant non-delegatable capability (depth: 0)
@@ -368,34 +385,42 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         Security.grant(
           principal: agent_id,
           resource: "arbor://test/nondelegatable",
-          delegation_depth: 0
+          delegation_depth: 0,
+          actor_authority: actor_authority
         )
-
-      {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
       # Should fail to delegate
       assert {:error, :delegation_depth_exhausted} =
-               Security.delegate(parent_cap.id, delegatee_id, delegator_private_key: priv)
+               Security.delegate(parent_cap.id, delegatee_id,
+                 actor_authority: actor_authority,
+                 delegator_private_key: actor_identity.private_key
+               )
     end
 
     test "revoking parent does not automatically revoke delegated cap (use cascade_revoke for that)",
-         %{agent_id: agent_id} do
+         %{
+           agent_id: agent_id,
+           actor_identity: actor_identity,
+           actor_authority: actor_authority
+         } do
       delegatee_id = "agent_delegatee_#{:erlang.unique_integer([:positive])}"
 
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
           resource: "arbor://test/cascade",
-          delegation_depth: 2
+          delegation_depth: 2,
+          actor_authority: actor_authority
         )
 
-      {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
-
       {:ok, _delegated_cap} =
-        Security.delegate(parent_cap.id, delegatee_id, delegator_private_key: priv)
+        Security.delegate(parent_cap.id, delegatee_id,
+          actor_authority: actor_authority,
+          delegator_private_key: actor_identity.private_key
+        )
 
       # Revoke parent with simple revoke (not cascade)
-      :ok = Security.revoke(parent_cap.id)
+      :ok = Security.revoke(parent_cap.id, actor_authority: actor_authority)
 
       # Delegatee should still be authorized (simple revoke doesn't cascade)
       assert {:ok, :authorized} =
@@ -406,23 +431,29 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
                )
     end
 
-    test "cascade_revoke removes parent and delegated capabilities", %{agent_id: agent_id} do
+    test "cascade_revoke removes parent and delegated capabilities", %{
+      agent_id: agent_id,
+      actor_identity: actor_identity,
+      actor_authority: actor_authority
+    } do
       delegatee_id = "agent_delegatee_#{:erlang.unique_integer([:positive])}"
 
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
           resource: "arbor://test/cascade_full",
-          delegation_depth: 2
+          delegation_depth: 2,
+          actor_authority: actor_authority
         )
 
-      {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
-
       {:ok, _delegated_cap} =
-        Security.delegate(parent_cap.id, delegatee_id, delegator_private_key: priv)
+        Security.delegate(parent_cap.id, delegatee_id,
+          actor_authority: actor_authority,
+          delegator_private_key: actor_identity.private_key
+        )
 
       # Cascade revoke the parent
-      assert {:ok, count} = CapabilityStore.cascade_revoke(parent_cap.id)
+      assert {:ok, count} = Arbor.Security.cascade_revoke_fixture(parent_cap.id)
       assert count >= 2
 
       # Both parent and delegatee should be unauthorized
@@ -463,7 +494,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # Authorized with matching session_id
       assert {:ok, :authorized} =
@@ -492,7 +523,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # Should fail with wrong session
       assert {:error, :scope_mismatch} =
@@ -520,7 +551,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
         metadata: %{test: true}
       }
 
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       # No session_id in opts — should fail scope check
       assert {:error, :scope_mismatch} =
@@ -558,12 +589,16 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   # ===========================================================================
 
   describe "full lifecycle" do
-    test "grant -> authorize -> revoke -> verify revoked", %{agent_id: agent_id} do
+    test "grant -> authorize -> revoke -> verify revoked", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       # Step 1: Grant
       {:ok, cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://test/lifecycle"
+          resource: "arbor://test/lifecycle",
+          actor_authority: actor_authority
         )
 
       assert cap.principal_id == agent_id
@@ -582,7 +617,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert Enum.any?(caps, &(&1.id == cap.id))
 
       # Step 4: Revoke
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke(cap.id, actor_authority: actor_authority)
 
       # Step 5: Verify revoked
       assert {:error, :unauthorized} =
@@ -619,7 +654,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       metadata: %{test: true}
     }
 
-    {:ok, :stored} = CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     cap
   end
 

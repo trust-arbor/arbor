@@ -13,6 +13,8 @@ defmodule Arbor.Security.OIDC.Config do
             client_id: "...",
             client_secret: "...",
             scopes: ["openid", "email", "profile"],
+            allowed_subjects: ["provider-subject-id"],
+            allowed_email_domains: ["example.com"],
             allow_http: false
           }
         ],

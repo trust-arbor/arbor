@@ -41,7 +41,7 @@ defmodule Arbor.Orchestrator.DeploymentDecisionGateExampleTest do
         metadata: %{test: true}
       )
 
-    Arbor.Security.CapabilityStore.put(cap)
+    Arbor.Security.put_capability_fixture(cap)
     :ok
   end
 

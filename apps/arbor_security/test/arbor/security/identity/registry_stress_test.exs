@@ -48,7 +48,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
         # Register all identities concurrently
         tasks =
           Enum.map(identities, fn identity ->
-            Task.async(fn -> Registry.register(identity) end)
+            Task.async(fn -> Registry.register_fixture(identity) end)
           end)
 
         results = Task.await_many(tasks, 5_000)
@@ -65,19 +65,19 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
 
         # Clean up
         Enum.each(identities, fn identity ->
-          Registry.deregister(identity.agent_id)
+          Registry.deregister_fixture(identity.agent_id)
         end)
       end)
     end
 
     test "duplicate registration is reliably rejected under concurrency" do
       identity = generate_identity("dup-test")
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       # Try to register the same identity from many concurrent tasks
       tasks =
         for _ <- 1..@concurrent_agents do
-          Task.async(fn -> Registry.register(identity) end)
+          Task.async(fn -> Registry.register_fixture(identity) end)
         end
 
       results = Task.await_many(tasks, 5_000)
@@ -93,7 +93,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       assert pk == identity.public_key
 
       # Clean up
-      Registry.deregister(identity.agent_id)
+      Registry.deregister_fixture(identity.agent_id)
     end
   end
 
@@ -110,12 +110,12 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
         {to_register, to_lookup_later} = Enum.split(identities, div(@concurrent_agents, 2))
 
         # Register the first half
-        Enum.each(to_register, fn id -> :ok = Registry.register(id) end)
+        Enum.each(to_register, fn id -> :ok = Registry.register_fixture(id) end)
 
         # Concurrently: register second half + lookup first half
         register_tasks =
           Enum.map(to_lookup_later, fn id ->
-            Task.async(fn -> {:register, id.agent_id, Registry.register(id)} end)
+            Task.async(fn -> {:register, id.agent_id, Registry.register_fixture(id)} end)
           end)
 
         lookup_tasks =
@@ -142,7 +142,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
         end)
 
         # Clean up
-        Enum.each(identities, fn id -> Registry.deregister(id.agent_id) end)
+        Enum.each(identities, fn id -> Registry.deregister_fixture(id.agent_id) end)
       end)
     end
   end
@@ -156,14 +156,16 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       Enum.each(1..@stress_iterations, fn _iteration ->
         # Register a batch of identities
         identities = generate_identities(@concurrent_agents, "mut-test")
-        Enum.each(identities, fn id -> :ok = Registry.register(id) end)
+        Enum.each(identities, fn id -> :ok = Registry.register_fixture(id) end)
 
         # Split: deregister half, re-lookup the other half, all concurrently
         {to_deregister, to_keep} = Enum.split(identities, div(@concurrent_agents, 2))
 
         deregister_tasks =
           Enum.map(to_deregister, fn id ->
-            Task.async(fn -> {:deregister, id.agent_id, Registry.deregister(id.agent_id)} end)
+            Task.async(fn ->
+              {:deregister, id.agent_id, Registry.deregister_fixture(id.agent_id)}
+            end)
           end)
 
         lookup_tasks =
@@ -191,7 +193,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
         end)
 
         # Clean up remaining
-        Enum.each(to_keep, fn id -> Registry.deregister(id.agent_id) end)
+        Enum.each(to_keep, fn id -> Registry.deregister_fixture(id.agent_id) end)
       end)
     end
   end
@@ -205,7 +207,9 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       identities = generate_identities(@concurrent_agents, "stats-test")
 
       # Register all
-      tasks = Enum.map(identities, fn id -> Task.async(fn -> Registry.register(id) end) end)
+      tasks =
+        Enum.map(identities, fn id -> Task.async(fn -> Registry.register_fixture(id) end) end)
+
       Task.await_many(tasks, 5_000)
 
       stats = Registry.stats()
@@ -216,7 +220,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
 
       remove_tasks =
         Enum.map(to_remove, fn id ->
-          Task.async(fn -> Registry.deregister(id.agent_id) end)
+          Task.async(fn -> Registry.deregister_fixture(id.agent_id) end)
         end)
 
       Task.await_many(remove_tasks, 5_000)
@@ -234,7 +238,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
 
       # Clean up
       identities
-      |> Enum.each(fn id -> Registry.deregister(id.agent_id) end)
+      |> Enum.each(fn id -> Registry.deregister_fixture(id.agent_id) end)
     end
   end
 
@@ -263,7 +267,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       # Register all concurrently
       tasks =
         Enum.map(identities_with_name, fn id ->
-          Task.async(fn -> Registry.register(id) end)
+          Task.async(fn -> Registry.register_fixture(id) end)
         end)
 
       results = Task.await_many(tasks, 5_000)
@@ -275,7 +279,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       assert length(agent_ids) == @concurrent_agents
 
       # Clean up
-      Enum.each(identities_with_name, fn id -> Registry.deregister(id.agent_id) end)
+      Enum.each(identities_with_name, fn id -> Registry.deregister_fixture(id.agent_id) end)
     end
   end
 
@@ -286,14 +290,14 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
   describe "concurrent lifecycle transitions" do
     test "concurrent suspend/resume on different identities" do
       identities = generate_identities(@concurrent_agents, "lifecycle")
-      Enum.each(identities, fn id -> :ok = Registry.register(id) end)
+      Enum.each(identities, fn id -> :ok = Registry.register_fixture(id) end)
 
       {to_suspend, to_keep_active} = Enum.split(identities, div(@concurrent_agents, 2))
 
       # Suspend half concurrently while looking up the other half
       suspend_tasks =
         Enum.map(to_suspend, fn id ->
-          Task.async(fn -> Registry.suspend(id.agent_id, "stress test") end)
+          Task.async(fn -> Registry.suspend_fixture(id.agent_id, "stress test") end)
         end)
 
       lookup_tasks =
@@ -319,7 +323,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       # Resume all suspended
       resume_tasks =
         Enum.map(to_suspend, fn id ->
-          Task.async(fn -> Registry.resume(id.agent_id) end)
+          Task.async(fn -> Registry.resume_fixture(id.agent_id) end)
         end)
 
       resume_results = Task.await_many(resume_tasks, 5_000)
@@ -331,7 +335,7 @@ defmodule Arbor.Security.Identity.RegistryStressTest do
       end)
 
       # Clean up
-      Enum.each(identities, fn id -> Registry.deregister(id.agent_id) end)
+      Enum.each(identities, fn id -> Registry.deregister_fixture(id.agent_id) end)
     end
   end
 end

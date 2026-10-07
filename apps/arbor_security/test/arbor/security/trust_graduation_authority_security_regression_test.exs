@@ -38,7 +38,7 @@ defmodule Arbor.Security.TrustGraduationAuthoritySecurityRegressionTest do
                )
     end
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert {:error, :graduation_authority_required} =
              Security.authorize_trust_graduation(ctx.human_id, ctx.agent_id, ctx.token, :accept)

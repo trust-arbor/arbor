@@ -9,6 +9,8 @@ defmodule Arbor.Monitor.Config do
 
   @default_interval_ms 5_000
 
+  @default_healing_worker_modules []
+
   @default_skills [
     Arbor.Monitor.Skills.Beam,
     Arbor.Monitor.Skills.Memory,
@@ -68,6 +70,10 @@ defmodule Arbor.Monitor.Config do
   @doc "Healing child keyword options (default `[]`)."
   @spec healing() :: keyword()
   def healing, do: get(:healing, [])
+
+  @doc "Modules admitted under the healing DynamicSupervisor. Defaults closed outside tests."
+  @spec healing_worker_modules() :: [module()]
+  def healing_worker_modules, do: get(:healing_worker_modules, @default_healing_worker_modules)
 
   @doc "Whether HealingSupervisor schedules ops-room setup (default true)."
   @spec start_ops_room?() :: boolean() | nil

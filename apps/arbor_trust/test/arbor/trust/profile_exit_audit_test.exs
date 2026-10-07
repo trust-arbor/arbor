@@ -7,6 +7,7 @@ defmodule Arbor.Trust.ProfileExitAuditTest do
   alias Arbor.Contracts.Trust.Profile
   alias Arbor.Trust.Store
   alias Arbor.Trust.ProfileExitAudit
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   setup do
     previous = Application.get_env(:arbor_security, :capability_signing_required)
@@ -86,6 +87,7 @@ defmodule Arbor.Trust.ProfileExitAuditTest do
     ensure_started(Arbor.Security.Identity.Registry)
     ensure_started(Arbor.Security.SystemAuthority)
     ensure_started(Arbor.Security.CapabilityStore)
+    {_identity, actor_authority} = actor_authority!()
 
     profile =
       "audit_fresh_invalid"
@@ -97,7 +99,12 @@ defmodule Arbor.Trust.ProfileExitAuditTest do
 
     :ok = Store.store_profile(profile)
 
-    assert {:ok, result} = ProfileExitAudit.migrate(grant_missing: true)
+    assert {:ok, result} =
+             ProfileExitAudit.migrate(
+               grant_missing: true,
+               actor_authority: actor_authority
+             )
+
     assert result.after.clean
 
     assert [

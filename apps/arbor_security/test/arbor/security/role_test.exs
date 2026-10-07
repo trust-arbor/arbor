@@ -13,8 +13,18 @@ defmodule Arbor.Security.RoleTest do
 
   setup do
     {:ok, identity} = Identity.generate(name: "role-test-human")
-    :ok = Registry.register(identity)
-    {:ok, identity: identity, agent_id: identity.agent_id}
+    :ok = Registry.register_fixture(identity)
+
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: :role_test
+      )
+
+    {:ok, authority} = Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    {:ok, identity: identity, authority: authority, agent_id: identity.agent_id}
   end
 
   describe "Role.get/1" do
@@ -60,7 +70,7 @@ defmodule Arbor.Security.RoleTest do
 
   describe "Security.assign_role/3" do
     test "grants admin capabilities", %{agent_id: agent_id} do
-      {:ok, caps} = Security.assign_role(agent_id, :admin)
+      {:ok, caps} = Security.assign_role_fixture(agent_id, :admin)
       assert length(caps) >= 1
 
       admin_cap = Enum.find(caps, &(&1.resource_uri == "arbor://**"))
@@ -69,7 +79,7 @@ defmodule Arbor.Security.RoleTest do
     end
 
     test "admin role authorizes any resource", %{agent_id: agent_id} do
-      {:ok, _caps} = Security.assign_role(agent_id, :admin)
+      {:ok, _caps} = Security.assign_role_fixture(agent_id, :admin)
 
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://fs/read/**", nil, verify_identity: false)
@@ -86,27 +96,27 @@ defmodule Arbor.Security.RoleTest do
     end
 
     test "returns error for unknown role", %{agent_id: agent_id} do
-      assert {:error, :unknown_role} = Security.assign_role(agent_id, :nonexistent)
+      assert {:error, :unknown_role} = Security.assign_role_fixture(agent_id, :nonexistent)
     end
 
     test "idempotent — second assign doesn't fail", %{agent_id: agent_id} do
-      {:ok, caps1} = Security.assign_role(agent_id, :admin)
-      {:ok, _caps2} = Security.assign_role(agent_id, :admin)
+      {:ok, caps1} = Security.assign_role_fixture(agent_id, :admin)
+      {:ok, _caps2} = Security.assign_role_fixture(agent_id, :admin)
 
       # Should still have the capabilities
       {:ok, all_caps} = Security.list_capabilities(agent_id)
       assert length(all_caps) >= length(caps1)
     end
 
-    test "admin can delegate to agents", %{identity: identity} do
-      {:ok, _caps} = Security.assign_role(identity.agent_id, :admin)
+    test "admin can delegate to agents", %{identity: identity, authority: authority} do
+      {:ok, _caps} = Security.assign_role_fixture(identity.agent_id, :admin)
 
       {:ok, agent} = Identity.generate(name: "child-agent")
-      :ok = Registry.register(agent)
+      :ok = Registry.register_fixture(agent)
 
       {:ok, delegated} =
         Security.delegate_to_agent(identity.agent_id, agent.agent_id,
-          delegator_private_key: identity.private_key,
+          actor_authority: authority,
           resources: ["arbor://fs/read/**"]
         )
 
@@ -117,7 +127,7 @@ defmodule Arbor.Security.RoleTest do
     test "external registrar authorizes a fixed profile but not generic creation", %{
       agent_id: agent_id
     } do
-      {:ok, _caps} = Security.assign_role(agent_id, :external_agent_registrar)
+      {:ok, _caps} = Security.assign_role_fixture(agent_id, :external_agent_registrar)
 
       assert {:ok, :authorized} =
                Security.authorize(
@@ -166,7 +176,7 @@ defmodule Arbor.Security.RoleTest do
     end
 
     test "custom role grants specific capabilities", %{agent_id: agent_id} do
-      {:ok, caps} = Security.assign_role(agent_id, :viewer)
+      {:ok, caps} = Security.assign_role_fixture(agent_id, :viewer)
       assert length(caps) == 2
     end
   end

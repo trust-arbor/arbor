@@ -28,7 +28,7 @@ defmodule Arbor.Monitor do
 
   use Boundary,
     top_level?: true,
-    deps: [Arbor.Contracts, Arbor.Signals, Logger],
+    deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Logger],
     exports: :all
 
   alias Arbor.Monitor.{Config, MetricsStore}

@@ -3,7 +3,9 @@ defmodule Arbor.Security.ReflexTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.Reflex, as: ReflexContract
+  alias Arbor.Security
   alias Arbor.Security.Reflex
+  alias Arbor.Security.Reflex.Registry
 
   describe "check/1" do
     test "returns :ok when no reflexes match" do
@@ -20,6 +22,25 @@ defmodule Arbor.Security.ReflexTest do
       assert {:blocked, _, _} = Reflex.check(%{command: "rm -rf ~"})
     end
 
+    test "security regression: blocks common recursive-delete option variants" do
+      for command <- [
+            "rm -rfv /",
+            "rm -rf -- /",
+            "rm --recursive --force /",
+            "rm -rf --no-preserve-root /",
+            "rm --preserve-root=no -rf /",
+            ~s(rm -rf "/"),
+            "rm -rf $HOME",
+            ~s(rm -rf "$HOME"),
+            ~s(rm -rf "${HOME}"),
+            "rm --force --recursive ~/work",
+            "/bin/rm -R -f /"
+          ] do
+        assert {:blocked, reflex, _} = Reflex.check(%{command: command})
+        assert reflex.id == "rm_rf_root"
+      end
+    end
+
     test "blocks sudo commands" do
       assert {:blocked, reflex, _} = Reflex.check(%{command: "sudo apt install foo"})
       assert reflex.id == "sudo_su"
@@ -28,6 +49,13 @@ defmodule Arbor.Security.ReflexTest do
     test "blocks su commands" do
       assert {:blocked, reflex, _} = Reflex.check(%{command: "su - root"})
       assert reflex.id == "sudo_su"
+    end
+
+    test "security regression: blocks doas and pkexec privilege escalation" do
+      for command <- ["doas sh", "pkexec /bin/sh"] do
+        assert {:blocked, reflex, _} = Reflex.check(%{command: command})
+        assert reflex.id == "sudo_su"
+      end
     end
 
     test "blocks chmod 777" do
@@ -80,6 +108,49 @@ defmodule Arbor.Security.ReflexTest do
                Reflex.check(%{command: "curl http://169.254.169.254/latest/meta-data/"})
 
       assert reflex.id == "ssrf_metadata"
+    end
+
+    test "security regression: blocks alternate cloud metadata address forms" do
+      for url <- [
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://2852039166/latest/meta-data/",
+            "http://[fe80::a9fe:a9fe]/latest/meta-data/",
+            "http://[fd00:ec2::254]/latest/meta-data/"
+          ] do
+        assert {:blocked, reflex, _} = Reflex.check(%{url: url})
+        assert reflex.id == "ssrf_metadata"
+      end
+    end
+
+    test "security regression: sensitive paths are normalized before matching" do
+      assert {:blocked, passwd_reflex, _} = Reflex.check(%{path: "/etc//passwd"})
+      assert passwd_reflex.id == "etc_passwd"
+
+      private_passwd =
+        case Arbor.Common.SafePath.resolve_real("/etc/passwd") do
+          {:ok, real} -> real
+          _ -> "/etc/passwd"
+        end
+
+      assert {:blocked, canonical_reflex, _} = Reflex.check(%{path: private_passwd})
+      assert canonical_reflex.id == "etc_passwd"
+
+      assert {:blocked, ssh_reflex, _} = Reflex.check(%{path: "$HOME/.ssh/id_rsa"})
+      assert ssh_reflex.id == "ssh_private_keys"
+    end
+
+    test "security regression: public authorization extracts the fs path without the operation" do
+      previous = Application.get_env(:arbor_security, :reflex_checking_enabled)
+      Application.put_env(:arbor_security, :reflex_checking_enabled, true)
+      on_exit(fn -> restore_env(:reflex_checking_enabled, previous) end)
+
+      assert {:error, {:reflex_blocked, "etc_passwd", _message}} =
+               Security.authorize(
+                 "agent_reflex_path_regression",
+                 "arbor://fs/read/etc/passwd",
+                 :read,
+                 verify_identity: false
+               )
     end
 
     test "warns on localhost requests" do
@@ -152,17 +223,25 @@ defmodule Arbor.Security.ReflexTest do
   end
 
   describe "register/3 and unregister/1" do
-    test "registers and unregisters custom reflexes" do
+    test "security regression: public callers cannot mutate the reflex registry" do
       reflex = ReflexContract.pattern("custom_test", ~r/custom/, id: "custom_test_reg")
+      before = Reflex.list()
 
-      assert :ok = Reflex.register(:custom_test_reg, reflex)
-      assert {:ok, ^reflex} = Reflex.get(:custom_test_reg)
+      assert {:error, :reflex_mutation_unauthorized} =
+               Reflex.register(:custom_test_reg, reflex)
 
-      assert :ok = Reflex.unregister(:custom_test_reg)
+      assert {:error, :reflex_mutation_unauthorized} = Reflex.unregister(:rm_rf_root)
       assert {:error, :not_found} = Reflex.get(:custom_test_reg)
+      assert Reflex.list() == before
+
+      assert :ets.info(:arbor_reflex_registry, :protection) == :protected
+
+      assert_raise ArgumentError, fn ->
+        :ets.insert(:arbor_reflex_registry, {:custom_test_reg, reflex})
+      end
     end
 
-    test "registered reflex is used in checks" do
+    test "owner-installed fixture reflex is used in checks" do
       reflex =
         ReflexContract.pattern(
           "block_foobar",
@@ -172,37 +251,24 @@ defmodule Arbor.Security.ReflexTest do
           message: "Blocked foobar"
         )
 
-      Reflex.register(:foobar_blocker, reflex)
+      :ok = Registry.register_fixture(:foobar_blocker, reflex)
+      on_exit(fn -> Registry.unregister_fixture(:foobar_blocker) end)
 
       assert {:blocked, _, "Blocked foobar"} = Reflex.check(%{command: "echo foobar"})
-
-      # Cleanup
-      Reflex.unregister(:foobar_blocker)
     end
   end
 
   describe "set_enabled/2" do
-    test "enables and disables reflexes" do
-      # First register a test reflex
+    test "security regression: public callers cannot disable an installed reflex" do
       reflex = ReflexContract.pattern("toggle_test", ~r/toggle/, id: "toggle_test")
-      Reflex.register(:toggle_test, reflex)
+      :ok = Registry.register_fixture(:toggle_test, reflex)
+      on_exit(fn -> Registry.unregister_fixture(:toggle_test) end)
 
-      # Disable it
-      assert :ok = Reflex.set_enabled(:toggle_test, false)
-      {:ok, disabled} = Reflex.get(:toggle_test)
-      refute disabled.enabled
+      assert {:error, :reflex_mutation_unauthorized} =
+               Reflex.set_enabled(:toggle_test, false)
 
-      # Enable it
-      assert :ok = Reflex.set_enabled(:toggle_test, true)
-      {:ok, enabled} = Reflex.get(:toggle_test)
-      assert enabled.enabled
-
-      # Cleanup
-      Reflex.unregister(:toggle_test)
-    end
-
-    test "returns error for non-existent reflex" do
-      assert {:error, :not_found} = Reflex.set_enabled(:nonexistent_reflex, false)
+      assert {:ok, still_enabled} = Reflex.get(:toggle_test)
+      assert still_enabled.enabled
     end
   end
 
@@ -269,4 +335,7 @@ defmodule Arbor.Security.ReflexTest do
       assert Reflex.check(context) == :ok
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
 end

@@ -645,7 +645,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       ExMCP.Client.stop(client)
       Arbor.Gateway.stop_agent_endpoint(agent_id)
-      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
       Arbor.Trust.Store.delete_profile(agent_id)
     end
 
@@ -753,7 +753,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       Arbor.Gateway.stop_agent_endpoint(agent_id)
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
     end
 
@@ -781,7 +781,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       ExMCP.Client.stop(client)
       Arbor.Gateway.stop_agent_endpoint(agent_id)
-      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
     end
 
     test "registered endpoint keeps principal scope through nested coding validation" do
@@ -813,7 +813,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       ExMCP.Client.stop(client)
       Arbor.Gateway.stop_agent_endpoint(agent_id)
-      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
     end
   end
 
@@ -847,20 +847,20 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
   defp authenticated_identity(tag) do
     {:ok, identity} = Arbor.Security.generate_identity(name: "gateway-endpoint-#{tag}")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
     payload = Arbor.Gateway.agent_endpoint_authentication_payload(identity.agent_id)
     {:ok, signed_request} = SignedRequest.sign(payload, identity.agent_id, identity.private_key)
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(identity.agent_id)
+        Arbor.Security.revoke_all_fixture(identity.agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
         Arbor.Trust.Store.delete_profile(identity.agent_id)
       end
 
-      Arbor.Security.deregister_identity(identity.agent_id)
+      Arbor.Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     {identity.agent_id, signed_request}
@@ -926,7 +926,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     Enum.each(resources, fn resource ->
       assert {:ok, _capability} =
-               Arbor.Security.grant(principal: agent_id, resource: resource)
+               Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     end)
   end
 

@@ -19,10 +19,8 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
   alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
 
   setup do
-    ensure_security_started()
     ensure_shell_started()
 
     prev = %{
@@ -147,7 +145,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
 
   defp grant_shell_capability(agent_id, resource_uri) do
     cap = %Capability{
-      id: "cap_env_sec_#{:erlang.unique_integer([:positive])}",
+      id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
       resource_uri: resource_uri,
       principal_id: agent_id,
       granted_at: DateTime.utc_now(),
@@ -158,7 +156,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
       metadata: %{test: true}
     }
 
-    {:ok, :stored} = CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     cap
   end
 
@@ -169,31 +167,6 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
 
       _pid ->
         :ok
-    end
-  end
-
-  defp ensure_security_started do
-    security_children = [
-      {Arbor.Security.Identity.Registry, []},
-      {Arbor.Security.Identity.NonceCache, []},
-      {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.Reflex.Registry, []}
-    ]
-
-    if Process.whereis(Arbor.Security.Supervisor) do
-      for child <- security_children do
-        try do
-          case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-            {:ok, _pid} -> :ok
-            {:error, {:already_started, _pid}} -> :ok
-            {:error, :already_present} -> :ok
-            _other -> :ok
-          end
-        catch
-          :exit, _ -> :ok
-        end
-      end
     end
   end
 

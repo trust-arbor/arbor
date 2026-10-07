@@ -15,7 +15,8 @@ defmodule Arbor.Signals.Channels do
   1. Look up invitee's encryption public key from the identity-key provider
   2. Seal the channel key using ECDH + AES-GCM (`seal/3`)
   3. Emit an invitation signal with the sealed key
-  4. Invitee accepts by unsealing the key and storing in their keychain
+  4. Invitee accepts; the manager unseals and verifies the key without
+     exporting it
 
   ## Key Rotation
 
@@ -39,6 +40,7 @@ defmodule Arbor.Signals.Channels do
         signals: [
           crypto_module: nil,
           identity_registry_module: nil,
+          channel_principal_authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
           channel_auto_rotate_interval_ms: 86_400_000,
           channel_rotate_on_leave: true
         ]
@@ -47,6 +49,7 @@ defmodule Arbor.Signals.Channels do
   use GenServer
   require Logger
 
+  alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Identifiers
   alias Arbor.Signals.Bus
   alias Arbor.Signals.Channel
@@ -56,6 +59,7 @@ defmodule Arbor.Signals.Channels do
 
   @type channel_id :: String.t()
   @type agent_id :: String.t()
+  @type key_reference :: :server_managed
 
   @type rotation_reason :: :member_left | :member_revoked | :scheduled | :manual
 
@@ -83,14 +87,20 @@ defmodule Arbor.Signals.Channels do
   Generates an AES-256-GCM key and creates the channel with the creator
   as the first member.
 
-  Returns `{:ok, channel, key}` where `key` is the symmetric channel key
-  that the creator should store in their keychain.
+  The caller supplies an executor-issued authorization context. The creator
+  identity is derived from that context and the symmetric key remains inside
+  this process.
   """
-  @spec create(String.t(), String.t(), keyword()) ::
-          {:ok, Channel.t(), binary()} | {:error, term()}
-  def create(name, creator_id, opts \\ []) when is_binary(name) and is_binary(creator_id) do
-    GenServer.call(__MODULE__, {:create, name, creator_id, opts})
+  @spec create(String.t(), AuthContext.t(), keyword()) ::
+          {:ok, Channel.t(), key_reference()} | {:error, term()}
+  def create(name, auth_context, opts \\ [])
+
+  def create(name, %AuthContext{} = auth_context, opts) when is_binary(name) do
+    GenServer.call(__MODULE__, {:authorized_create, name, auth_context, opts})
   end
+
+  def create(name, _asserted_identity, _opts) when is_binary(name),
+    do: {:error, :authenticated_principal_required}
 
   @doc """
   Invite an agent to a channel.
@@ -99,16 +109,25 @@ defmodule Arbor.Signals.Channels do
   and seals the channel key for them. The sealed key is included in an
   invitation signal.
 
-  Requires `sender_keychain` to contain the sender's encryption private key.
+  Requires `sender_keychain` to contain the sender's signing private key and
+  `auth_context` to bind that keychain to an authorized principal.
 
   Returns `{:ok, invitation}` with the sealed key, or an error.
   """
-  @spec invite(channel_id(), agent_id(), map()) ::
+  @spec invite(channel_id(), agent_id(), map(), AuthContext.t()) ::
           {:ok, map()} | {:error, term()}
-  def invite(channel_id, invitee_id, sender_keychain)
+  def invite(channel_id, invitee_id, sender_keychain, %AuthContext{} = auth_context)
       when is_binary(channel_id) and is_binary(invitee_id) and is_map(sender_keychain) do
-    GenServer.call(__MODULE__, {:invite, channel_id, invitee_id, sender_keychain})
+    GenServer.call(
+      __MODULE__,
+      {:authorized_invite, channel_id, invitee_id, sender_keychain, auth_context}
+    )
   end
+
+  @doc deprecated: "Pass an executor-issued AuthContext as the fourth argument."
+  def invite(channel_id, invitee_id, sender_keychain)
+      when is_binary(channel_id) and is_binary(invitee_id) and is_map(sender_keychain),
+      do: {:error, :authenticated_principal_required}
 
   @doc """
   Accept a channel invitation.
@@ -116,18 +135,31 @@ defmodule Arbor.Signals.Channels do
   Unseals the channel key using the recipient's encryption private key
   and adds the agent as a member.
 
-  Returns `{:ok, channel, key}` where `key` is the decrypted channel key.
+  The invitee identity is derived from `auth_context`. The channel key is
+  unsealed and checked inside this process but is never returned.
   """
-  @spec accept_invitation(channel_id(), agent_id(), agent_id(), map(), map()) ::
-          {:ok, Channel.t(), binary()} | {:error, term()}
-  def accept_invitation(channel_id, agent_id, inviter_id, sealed_key, recipient_keychain)
-      when is_binary(channel_id) and is_binary(agent_id) and is_binary(inviter_id) and
-             is_map(sealed_key) and is_map(recipient_keychain) do
+  @spec accept_invitation(channel_id(), agent_id(), map(), map(), AuthContext.t()) ::
+          {:ok, Channel.t(), key_reference()} | {:error, term()}
+  def accept_invitation(
+        channel_id,
+        inviter_id,
+        sealed_key,
+        recipient_keychain,
+        %AuthContext{} = auth_context
+      )
+      when is_binary(channel_id) and is_binary(inviter_id) and is_map(sealed_key) and
+             is_map(recipient_keychain) do
     GenServer.call(
       __MODULE__,
-      {:accept_invitation, channel_id, agent_id, inviter_id, sealed_key, recipient_keychain}
+      {:authorized_accept_invitation, channel_id, inviter_id, sealed_key, recipient_keychain,
+       auth_context}
     )
   end
+
+  def accept_invitation(channel_id, _agent_id, inviter_id, sealed_key, recipient_keychain)
+      when is_binary(channel_id) and is_binary(inviter_id) and is_map(sealed_key) and
+             is_map(recipient_keychain),
+      do: {:error, :authenticated_principal_required}
 
   @doc """
   Send a message on a channel.
@@ -137,43 +169,60 @@ defmodule Arbor.Signals.Channels do
 
   Returns `:ok` on success.
   """
-  @spec send(channel_id(), agent_id(), atom(), map()) :: :ok | {:error, term()}
-  def send(channel_id, sender_id, message_type, data)
-      when is_binary(channel_id) and is_binary(sender_id) and is_atom(message_type) and
+  @spec send(channel_id(), AuthContext.t(), atom(), map()) :: :ok | {:error, term()}
+  def send(channel_id, %AuthContext{} = auth_context, message_type, data)
+      when is_binary(channel_id) and is_atom(message_type) and
              is_map(data) do
-    GenServer.call(__MODULE__, {:send, channel_id, sender_id, message_type, data})
+    with {:ok, %Signal{} = signal} <-
+           GenServer.call(
+             __MODULE__,
+             {:authorized_send, channel_id, message_type, data, auth_context}
+           ) do
+      Bus.publish(signal)
+    end
   end
+
+  def send(channel_id, _asserted_identity, message_type, data)
+      when is_binary(channel_id) and is_atom(message_type) and is_map(data),
+      do: {:error, :authenticated_principal_required}
 
   @doc """
   Leave a channel.
 
   Removes the agent from the channel. Automatically rotates the channel key
-  and redistributes to remaining members (unless disabled via config).
+  and requires the remaining members to be re-invited (unless disabled via config).
 
   If the leaving agent is the creator and other members remain, a new creator
   is assigned.
 
   Returns `:ok` on success.
   """
-  @spec leave(channel_id(), agent_id()) :: :ok | {:error, term()}
-  def leave(channel_id, agent_id) when is_binary(channel_id) and is_binary(agent_id) do
-    GenServer.call(__MODULE__, {:leave, channel_id, agent_id})
+  @spec leave(channel_id(), AuthContext.t()) :: :ok | {:error, term()}
+  def leave(channel_id, %AuthContext{} = auth_context) when is_binary(channel_id) do
+    GenServer.call(__MODULE__, {:authorized_leave, channel_id, auth_context})
   end
+
+  def leave(channel_id, _asserted_identity) when is_binary(channel_id),
+    do: {:error, :authenticated_principal_required}
 
   @doc """
   Revoke a member's access to a channel.
 
   Creator-initiated removal of a member. Automatically rotates the channel key
-  and redistributes to remaining members.
+  and requires the remaining members to be re-invited.
 
   Returns `:ok` on success, or `{:error, reason}` if the requester is not
   the creator or the target is not a member.
   """
-  @spec revoke(channel_id(), agent_id(), agent_id()) :: :ok | {:error, term()}
-  def revoke(channel_id, target_agent_id, requester_id)
-      when is_binary(channel_id) and is_binary(target_agent_id) and is_binary(requester_id) do
-    GenServer.call(__MODULE__, {:revoke, channel_id, target_agent_id, requester_id})
+  @spec revoke(channel_id(), agent_id(), AuthContext.t()) :: :ok | {:error, term()}
+  def revoke(channel_id, target_agent_id, %AuthContext{} = auth_context)
+      when is_binary(channel_id) and is_binary(target_agent_id) do
+    GenServer.call(__MODULE__, {:authorized_revoke, channel_id, target_agent_id, auth_context})
   end
+
+  def revoke(channel_id, target_agent_id, _asserted_identity)
+      when is_binary(channel_id) and is_binary(target_agent_id),
+      do: {:error, :authenticated_principal_required}
 
   @doc """
   Rotate the channel key.
@@ -181,13 +230,17 @@ defmodule Arbor.Signals.Channels do
   Generates a new key and increments the version. Callers must re-distribute
   the new key to members via sealed invitations.
 
-  Returns `{:ok, new_key, members_to_reinvite}`.
+  Returns `{:ok, :server_managed, members_to_reinvite}`. The key reference is
+  deliberately opaque; the new key remains server-side.
   """
-  @spec rotate_key(channel_id(), agent_id()) :: {:ok, binary(), [agent_id()]} | {:error, term()}
-  def rotate_key(channel_id, requester_id)
-      when is_binary(channel_id) and is_binary(requester_id) do
-    GenServer.call(__MODULE__, {:rotate_key, channel_id, requester_id})
+  @spec rotate_key(channel_id(), AuthContext.t()) ::
+          {:ok, key_reference(), [agent_id()]} | {:error, term()}
+  def rotate_key(channel_id, %AuthContext{} = auth_context) when is_binary(channel_id) do
+    GenServer.call(__MODULE__, {:authorized_rotate_key, channel_id, auth_context})
   end
+
+  def rotate_key(channel_id, _asserted_identity) when is_binary(channel_id),
+    do: {:error, :authenticated_principal_required}
 
   @doc """
   Schedule automatic key rotation for a channel.
@@ -197,22 +250,27 @@ defmodule Arbor.Signals.Channels do
 
   Returns `:ok` on success.
   """
-  @spec schedule_rotation(channel_id(), agent_id()) :: :ok | {:error, term()}
-  def schedule_rotation(channel_id, requester_id)
-      when is_binary(channel_id) and is_binary(requester_id) do
-    GenServer.call(__MODULE__, {:schedule_rotation, channel_id, requester_id})
+  @spec schedule_rotation(channel_id(), AuthContext.t()) :: :ok | {:error, term()}
+  def schedule_rotation(channel_id, %AuthContext{} = auth_context) when is_binary(channel_id) do
+    GenServer.call(__MODULE__, {:authorized_schedule_rotation, channel_id, auth_context})
   end
+
+  def schedule_rotation(channel_id, _asserted_identity) when is_binary(channel_id),
+    do: {:error, :authenticated_principal_required}
 
   @doc """
   Cancel automatic key rotation for a channel.
 
   Returns `:ok` on success.
   """
-  @spec cancel_scheduled_rotation(channel_id(), agent_id()) :: :ok | {:error, term()}
-  def cancel_scheduled_rotation(channel_id, requester_id)
-      when is_binary(channel_id) and is_binary(requester_id) do
-    GenServer.call(__MODULE__, {:cancel_scheduled_rotation, channel_id, requester_id})
+  @spec cancel_scheduled_rotation(channel_id(), AuthContext.t()) :: :ok | {:error, term()}
+  def cancel_scheduled_rotation(channel_id, %AuthContext{} = auth_context)
+      when is_binary(channel_id) do
+    GenServer.call(__MODULE__, {:authorized_cancel_scheduled_rotation, channel_id, auth_context})
   end
+
+  def cancel_scheduled_rotation(channel_id, _asserted_identity) when is_binary(channel_id),
+    do: {:error, :authenticated_principal_required}
 
   @doc """
   Get a channel by ID.
@@ -225,49 +283,50 @@ defmodule Arbor.Signals.Channels do
   end
 
   @doc """
-  Get the channel key for a member.
+  Raw channel-key export is disabled.
 
-  H4: this API trusts the caller's asserted `agent_id`. Anyone who can call
-  `Channels` can request a key by asserting any member id, so the symmetric
-  channel key leaks to any code path that holds a reference to this module.
-  New code should use `decrypt_for_member/3` (server-side decrypt — the key
-  never leaves the GenServer process). `get_key/2` is kept for the existing
-  `Arbor.Signals.Bus` decryption path; that path is itself flagged for
-  follow-up in OQ-7 because it keys decryption on the sender's id rather
-  than the subscriber's. Removing this function entirely is staged behind
-  the bus rework.
+  This compatibility function always fails closed. Use
+  `decrypt_for_member/3` with an executor-issued authorization context.
   """
-  @doc deprecated: "Use decrypt_for_member/3 — H4 makes raw key retrieval system-internal."
+  @doc deprecated: "Raw channel-key export is disabled; use decrypt_for_member/3."
   @spec get_key(channel_id(), agent_id()) :: {:ok, binary()} | {:error, term()}
-  def get_key(channel_id, agent_id) when is_binary(channel_id) and is_binary(agent_id) do
-    GenServer.call(__MODULE__, {:get_key, channel_id, agent_id})
+  def get_key(_channel_id, _agent_id) do
+    {:error, :raw_key_export_disabled}
   end
 
   @doc """
-  Decrypt a channel payload for a specific member.
+  Decrypt a channel payload for the authenticated principal.
 
   H4: server-side decryption. The symmetric channel key never leaves the
   Channels GenServer process; callers receive only the plaintext (or an
-  error). Membership is still asserted by the caller — true authentication
-  of the requesting principal is a layer above this module (the caller's
-  AuthContext must demonstrate they ARE the named member).
+  error). The member identity is derived from an authorization context checked
+  by the configured channel principal authorizer.
 
   Returns `{:ok, plaintext}` or `{:error, reason}`.
   """
-  @spec decrypt_for_member(channel_id(), agent_id(), map()) ::
+  @spec decrypt_for_member(channel_id(), AuthContext.t(), map()) ::
           {:ok, binary()} | {:error, term()}
-  def decrypt_for_member(channel_id, member_id, encrypted_payload)
-      when is_binary(channel_id) and is_binary(member_id) and is_map(encrypted_payload) do
-    GenServer.call(__MODULE__, {:decrypt_for_member, channel_id, member_id, encrypted_payload})
+  def decrypt_for_member(channel_id, %AuthContext{} = auth_context, encrypted_payload)
+      when is_binary(channel_id) and is_map(encrypted_payload) do
+    GenServer.call(
+      __MODULE__,
+      {:authorized_decrypt_for_member, channel_id, encrypted_payload, auth_context}
+    )
   end
+
+  def decrypt_for_member(channel_id, _asserted_identity, encrypted_payload)
+      when is_binary(channel_id) and is_map(encrypted_payload),
+      do: {:error, :authenticated_principal_required}
 
   @doc """
   List all channels an agent is a member of.
   """
-  @spec list_channels(agent_id()) :: [Channel.t()]
-  def list_channels(agent_id) when is_binary(agent_id) do
-    GenServer.call(__MODULE__, {:list_channels, agent_id})
+  @spec list_channels(AuthContext.t()) :: [Channel.t()] | {:error, term()}
+  def list_channels(%AuthContext{} = auth_context) do
+    GenServer.call(__MODULE__, {:authorized_list_channels, auth_context})
   end
+
+  def list_channels(_asserted_identity), do: {:error, :authenticated_principal_required}
 
   @doc """
   Get statistics about managed channels.
@@ -296,11 +355,10 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:create, name, creator_id, opts}, _from, state) do
-    with {:ok, {authority_public, authority_private}} <- generate_authority_keypair(),
-         {:ok, encrypted_private} <- encrypt_state_key(authority_private) do
+  def handle_call({:authorized_create, name, auth_context, opts}, _from, state) do
+    with {:ok, creator_id} <- authorize_principal(auth_context, :create, nil),
+         {:ok, key} <- generate_channel_key() do
       channel_id = generate_channel_id()
-      key = :crypto.strong_rand_bytes(32)
       channel = Channel.new(channel_id, name, creator_id, opts)
 
       entry = %{
@@ -308,11 +366,7 @@ defmodule Arbor.Signals.Channels do
         key: key,
         key_history: [],
         pending_invitations: %{},
-        rotation_timer: nil,
-        authority_keypair: %{
-          public: authority_public,
-          private: encrypted_private
-        }
+        rotation_timer: nil
       }
 
       state = put_in(state, [:channels, channel_id], entry)
@@ -320,16 +374,22 @@ defmodule Arbor.Signals.Channels do
 
       emit_membership_event(:channel_created, channel_id, creator_id, %{channel_name: name})
 
-      {:reply, {:ok, channel, key}, state}
+      {:reply, {:ok, channel, :server_managed}, state}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   @impl true
-  def handle_call({:invite, channel_id, invitee_id, sender_keychain}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
-         :ok <- verify_member(entry.channel, sender_keychain.agent_id),
+  def handle_call(
+        {:authorized_invite, channel_id, invitee_id, sender_keychain, auth_context},
+        _from,
+        state
+      ) do
+    with {:ok, sender_id} <- authorize_principal(auth_context, :invite, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
+         :ok <- verify_sender_keychain(sender_id, sender_keychain),
+         :ok <- verify_member(entry.channel, sender_id),
          {:ok, invitee_enc_pub} <- lookup_encryption_key(invitee_id),
          {:ok, sealed_key} <-
            seal_key(entry.key, invitee_enc_pub, sender_keychain.signing_keypair.private) do
@@ -340,7 +400,7 @@ defmodule Arbor.Signals.Channels do
       invitation = %{
         channel_id: channel_id,
         channel_name: entry.channel.name,
-        inviter_id: sender_keychain.agent_id,
+        inviter_id: sender_id,
         sealed_key: sealed_key,
         invited_at: DateTime.utc_now()
       }
@@ -359,7 +419,7 @@ defmodule Arbor.Signals.Channels do
 
       # Emit security audit signal
       emit_membership_event(:channel_member_invited, channel_id, invitee_id, %{
-        inviter_id: sender_keychain.agent_id
+        inviter_id: sender_id
       })
 
       {:reply, {:ok, invitation}, state}
@@ -370,14 +430,19 @@ defmodule Arbor.Signals.Channels do
 
   @impl true
   def handle_call(
-        {:accept_invitation, channel_id, agent_id, inviter_id, sealed_key, recipient_keychain},
+        {:authorized_accept_invitation, channel_id, inviter_id, sealed_key, recipient_keychain,
+         auth_context},
         _from,
         state
       ) do
     # Look up the inviter's signing public key from the registry and verify
     # the sealed key's signature against it (C2): the unsealed channel key is
     # only trusted if it was sealed by the claimed inviter.
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+    with {:ok, agent_id} <-
+           authorize_principal(auth_context, :accept_invitation, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
+         :ok <- verify_recipient_keychain(agent_id, recipient_keychain),
+         :ok <- verify_pending_invitation(entry, agent_id, inviter_id, sealed_key),
          {:ok, inviter_sign_pub} <- lookup_signing_key(inviter_id),
          {:ok, key} <-
            unseal_key(
@@ -410,7 +475,7 @@ defmodule Arbor.Signals.Channels do
         # Emit security audit signal
         emit_membership_event(:channel_member_joined, channel_id, agent_id, %{})
 
-        {:reply, {:ok, updated_channel, key}, state}
+        {:reply, {:ok, updated_channel, :server_managed}, state}
       end
     else
       {:error, _reason} = error -> {:reply, error, state}
@@ -418,8 +483,13 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:send, channel_id, sender_id, message_type, data}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call(
+        {:authorized_send, channel_id, message_type, data, auth_context},
+        _from,
+        state
+      ) do
+    with {:ok, sender_id} <- authorize_principal(auth_context, :send, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_member(entry.channel, sender_id) do
       # Encrypt data with channel key
       case encrypt_message(data, entry.key, entry.channel.key_version) do
@@ -437,9 +507,13 @@ defmodule Arbor.Signals.Channels do
               source: sender_id
             )
 
-          Bus.publish(signal)
           state = update_in(state, [:stats, :messages_sent], &(&1 + 1))
-          {:reply, :ok, state}
+
+          # Publish from the public client boundary after this call returns.
+          # Publishing here creates a synchronous cycle when Bus prepares a
+          # channel-encrypted delivery by calling back into Channels to prove
+          # the subscriber's membership and decrypt the payload.
+          {:reply, {:ok, signal}, state}
 
         {:error, _reason} = error ->
           {:reply, error, state}
@@ -450,8 +524,9 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:leave, channel_id, agent_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call({:authorized_leave, channel_id, auth_context}, _from, state) do
+    with {:ok, agent_id} <- authorize_principal(auth_context, :leave, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_member(entry.channel, agent_id) do
       updated_channel = Channel.remove_member(entry.channel, agent_id)
 
@@ -496,7 +571,7 @@ defmodule Arbor.Signals.Channels do
         state =
           if Config.channel_rotate_on_leave?() do
             {new_state, _new_key} =
-              do_rotate_and_redistribute(state, channel_id, updated_channel, :member_left)
+              do_rotate_key(state, channel_id, updated_channel, :member_left)
 
             new_state
           else
@@ -511,8 +586,13 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:revoke, channel_id, target_agent_id, requester_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call(
+        {:authorized_revoke, channel_id, target_agent_id, auth_context},
+        _from,
+        state
+      ) do
+    with {:ok, requester_id} <- authorize_principal(auth_context, :revoke, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_creator(entry.channel, requester_id),
          :ok <- verify_member(entry.channel, target_agent_id),
          :ok <- verify_not_self(target_agent_id, requester_id) do
@@ -540,7 +620,7 @@ defmodule Arbor.Signals.Channels do
 
       # Always rotate key on revoke (security requirement)
       {state, _new_key} =
-        do_rotate_and_redistribute(state, channel_id, updated_channel, :member_revoked)
+        do_rotate_key(state, channel_id, updated_channel, :member_revoked)
 
       {:reply, :ok, state}
     else
@@ -549,11 +629,12 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:rotate_key, channel_id, requester_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call({:authorized_rotate_key, channel_id, auth_context}, _from, state) do
+    with {:ok, requester_id} <- authorize_principal(auth_context, :rotate_key, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_creator(entry.channel, requester_id) do
-      {state, new_key} =
-        do_rotate_and_redistribute(state, channel_id, entry.channel, :manual)
+      {state, _new_key} =
+        do_rotate_key(state, channel_id, entry.channel, :manual)
 
       # Members who need to update their keychain (except requester)
       members_to_reinvite =
@@ -561,15 +642,17 @@ defmodule Arbor.Signals.Channels do
         |> MapSet.delete(requester_id)
         |> MapSet.to_list()
 
-      {:reply, {:ok, new_key, members_to_reinvite}, state}
+      {:reply, {:ok, :server_managed, members_to_reinvite}, state}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   @impl true
-  def handle_call({:schedule_rotation, channel_id, requester_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call({:authorized_schedule_rotation, channel_id, auth_context}, _from, state) do
+    with {:ok, requester_id} <-
+           authorize_principal(auth_context, :schedule_rotation, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_creator(entry.channel, requester_id) do
       # Cancel existing timer if any
       cancel_rotation_timer(entry.rotation_timer)
@@ -587,8 +670,14 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:cancel_scheduled_rotation, channel_id, requester_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+  def handle_call(
+        {:authorized_cancel_scheduled_rotation, channel_id, auth_context},
+        _from,
+        state
+      ) do
+    with {:ok, requester_id} <-
+           authorize_principal(auth_context, :cancel_scheduled_rotation, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_creator(entry.channel, requester_id) do
       cancel_rotation_timer(entry.rotation_timer)
       state = put_in(state, [:channels, channel_id, :rotation_timer], nil)
@@ -608,22 +697,16 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:get_key, channel_id, agent_id}, _from, state) do
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
-         :ok <- verify_member(entry.channel, agent_id) do
-      {:reply, {:ok, entry.key}, state}
-    else
-      {:error, _reason} = error -> {:reply, error, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:decrypt_for_member, channel_id, member_id, payload}, _from, state) do
+  def handle_call(
+        {:authorized_decrypt_for_member, channel_id, payload, auth_context},
+        _from,
+        state
+      ) do
     # H4: do the decrypt inside the GenServer so the symmetric channel key
-    # never escapes this process. The caller asserts membership (the
-    # authentication of the principal is layered above), and we verify the
-    # asserted member is actually on the channel before doing the decrypt.
-    with {:ok, entry} <- get_channel_entry(state, channel_id),
+    # never escapes this process. Principal authorization is performed inside
+    # the state owner so a caller cannot bypass it with a raw GenServer message.
+    with {:ok, member_id} <- authorize_principal(auth_context, :decrypt, channel_id),
+         {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_member(entry.channel, member_id),
          {:ok, plaintext} <- decrypt_with_key(payload, entry.key) do
       {:reply, {:ok, plaintext}, state}
@@ -633,14 +716,20 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:list_channels, agent_id}, _from, state) do
-    channels =
-      state.channels
-      |> Map.values()
-      |> Enum.filter(fn entry -> Channel.member?(entry.channel, agent_id) end)
-      |> Enum.map(fn entry -> entry.channel end)
+  def handle_call({:authorized_list_channels, auth_context}, _from, state) do
+    case authorize_principal(auth_context, :list, nil) do
+      {:ok, agent_id} ->
+        channels =
+          state.channels
+          |> Map.values()
+          |> Enum.filter(fn entry -> Channel.member?(entry.channel, agent_id) end)
+          |> Enum.map(fn entry -> entry.channel end)
 
-    {:reply, channels, state}
+        {:reply, channels, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -658,6 +747,11 @@ defmodule Arbor.Signals.Channels do
     {:reply, stats, state}
   end
 
+  # Reject legacy/raw mutation tuples without crashing the security owner. All
+  # identity-sensitive calls must carry an authorization envelope consumed by
+  # one of the explicit clauses above.
+  def handle_call(_message, _from, state), do: {:reply, {:error, :unauthorized}, state}
+
   @impl true
   def handle_info({:auto_rotate, channel_id}, state) do
     case Map.get(state.channels, channel_id) do
@@ -667,7 +761,7 @@ defmodule Arbor.Signals.Channels do
 
       entry ->
         {state, _new_key} =
-          do_rotate_and_redistribute(state, channel_id, entry.channel, :scheduled)
+          do_rotate_key(state, channel_id, entry.channel, :scheduled)
 
         # Reschedule next rotation
         interval = Config.channel_auto_rotate_interval_ms()
@@ -679,6 +773,30 @@ defmodule Arbor.Signals.Channels do
   end
 
   # Private helpers
+
+  defp authorize_principal(%AuthContext{} = auth_context, operation, channel_id) do
+    case Provider.resolve(
+           Config.channel_principal_authorizer(),
+           :authorize_channel_principal,
+           3
+         ) do
+      {:ok, provider} ->
+        case Provider.invoke(provider, :authorize_channel_principal, [
+               auth_context,
+               operation,
+               channel_id
+             ]) do
+          {:ok, {:ok, principal_id}} when is_binary(principal_id) and principal_id != "" ->
+            {:ok, principal_id}
+
+          _ ->
+            {:error, :unauthorized}
+        end
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
 
   defp get_channel_entry(state, channel_id) do
     case Map.get(state.channels, channel_id) do
@@ -692,6 +810,20 @@ defmodule Arbor.Signals.Channels do
       :ok
     else
       {:error, :not_a_member}
+    end
+  end
+
+  defp verify_recipient_keychain(agent_id, %{agent_id: agent_id}), do: :ok
+  defp verify_recipient_keychain(_agent_id, _keychain), do: {:error, :recipient_identity_mismatch}
+
+  defp verify_sender_keychain(agent_id, %{agent_id: agent_id}), do: :ok
+  defp verify_sender_keychain(_agent_id, _keychain), do: {:error, :sender_identity_mismatch}
+
+  defp verify_pending_invitation(entry, agent_id, inviter_id, sealed_key) do
+    case Map.get(entry.pending_invitations, agent_id) do
+      %{inviter_id: ^inviter_id, sealed_key: ^sealed_key} -> :ok
+      nil -> {:error, :invitation_not_pending}
+      _ -> {:error, :invitation_mismatch}
     end
   end
 
@@ -782,14 +914,32 @@ defmodule Arbor.Signals.Channels do
     Identifiers.generate_id("chan_")
   end
 
+  # Keep channel creation fail-closed when the configured crypto provider is
+  # unavailable. The provider's key-generation operation is used as a bounded
+  # health/capability check; the channel's symmetric key is generated locally
+  # and never leaves this process.
+  defp generate_channel_key do
+    case call_crypto(:generate_encryption_keypair, []) do
+      {:ok, {public_key, private_key}}
+      when is_binary(public_key) and is_binary(private_key) ->
+        {:ok, :crypto.strong_rand_bytes(32)}
+
+      {:ok, _malformed} ->
+        {:error, :crypto_failed}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   defp cancel_rotation_timer(nil), do: :ok
   defp cancel_rotation_timer(ref) when is_reference(ref), do: Process.cancel_timer(ref)
 
-  # Rotate key and redistribute to all remaining members
-  @spec do_rotate_and_redistribute(map(), channel_id(), Channel.t(), rotation_reason()) ::
+  # Rotate locally. Distribution uses fresh, recipient-pinned invitations;
+  # there is no trust-on-first-use channel authority key.
+  @spec do_rotate_key(map(), channel_id(), Channel.t(), rotation_reason()) ::
           {map(), binary()}
-  defp do_rotate_and_redistribute(state, channel_id, channel, reason) do
-    entry = state.channels[channel_id]
+  defp do_rotate_key(state, channel_id, channel, reason) do
     old_key_version = channel.key_version
     new_key = :crypto.strong_rand_bytes(32)
     updated_channel = Channel.increment_key_version(channel)
@@ -803,9 +953,6 @@ defmodule Arbor.Signals.Channels do
       |> put_in([:channels, channel_id, :channel], updated_channel)
       |> update_in([:channels, channel_id, :key_history], &[key_history_entry | &1])
       |> update_in([:stats, :key_rotations], &(&1 + 1))
-
-    # Redistribute key to all members
-    redistribute_key(channel_id, new_key, updated_channel.members, entry)
 
     # Emit key rotation signal
     signal =
@@ -827,111 +974,11 @@ defmodule Arbor.Signals.Channels do
     {state, new_key}
   end
 
-  # Seal and distribute new key to all members
-  defp redistribute_key(channel_id, new_key, members, entry) do
-    new_version = entry.channel.key_version + 1
-    authority_keypair = entry.authority_keypair
-
-    case decrypt_state_key(authority_keypair.private) do
-      {:ok, authority_private} ->
-        Enum.each(members, fn member_id ->
-          case lookup_encryption_key(member_id) do
-            {:ok, member_enc_pub} ->
-              case seal_key(new_key, member_enc_pub, authority_private) do
-                {:ok, sealed_key} ->
-                  signal =
-                    Signal.new(:channel, :key_redistributed, %{
-                      channel_id: channel_id,
-                      recipient_id: member_id,
-                      key_version: new_version,
-                      sealed_key: sealed_key,
-                      authority_public_key: authority_keypair.public
-                    })
-
-                  Bus.publish(signal)
-
-                {:error, _reason} ->
-                  :ok
-              end
-
-            {:error, _reason} ->
-              # Member's encryption key not found, skip
-              :ok
-          end
-        end)
-
-      {:error, reason} ->
-        Logger.warning(
-          "Failed to decrypt authority keypair for channel #{channel_id}: #{inspect(reason)}"
-        )
-
-        :ok
-    end
-  end
-
-  # Encrypt private key material in GenServer state to reduce exposure window.
-  # Uses a per-process ephemeral key derived from the process's own identity.
-  defp encrypt_state_key(private_key) when is_binary(private_key) do
-    encrypt_bytes(private_key, state_encryption_key())
-  end
-
-  defp decrypt_state_key({ciphertext, iv, tag}) do
-    decrypt_bytes(ciphertext, state_encryption_key(), iv, tag)
-  end
-
-  defp decrypt_state_key(private_key) when is_binary(private_key) do
-    # Backward compatibility: unencrypted key
-    {:ok, private_key}
-  end
-
-  defp state_encryption_key do
-    # Derive a stable per-process key from the process dictionary
-    case Process.get(:__channels_state_key__) do
-      nil ->
-        key = :crypto.strong_rand_bytes(32)
-        Process.put(:__channels_state_key__, key)
-        key
-
-      key ->
-        key
-    end
-  end
-
-  defp generate_authority_keypair do
-    case call_crypto(:generate_encryption_keypair, []) do
-      {:ok, {public_key, private_key}}
-      when is_binary(public_key) and is_binary(private_key) ->
-        {:ok, {public_key, private_key}}
-
-      {:ok, _} ->
-        {:error, :crypto_failed}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
   defp encrypt_bytes(plaintext, key) do
     case call_crypto(:encrypt, [plaintext, key]) do
       {:ok, {ciphertext, iv, tag}}
       when is_binary(ciphertext) and is_binary(iv) and is_binary(tag) ->
         {:ok, {ciphertext, iv, tag}}
-
-      {:ok, _} ->
-        {:error, :crypto_failed}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp decrypt_bytes(ciphertext, key, iv, tag) do
-    case call_crypto(:decrypt, [ciphertext, key, iv, tag]) do
-      {:ok, {:ok, plaintext}} when is_binary(plaintext) ->
-        {:ok, plaintext}
-
-      {:ok, {:error, :decryption_failed} = error} ->
-        error
 
       {:ok, _} ->
         {:error, :crypto_failed}

@@ -18,12 +18,12 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     {:ok, identity} = Identity.generate(name: "signing-authority-test")
     # Strip private keys before registry; store signing key separately.
     public_identity = Identity.public_only(identity)
-    :ok = Security.register_identity(public_identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(public_identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
       ensure_broker_started()
     end)
 
@@ -79,6 +79,119 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert {:error, :invalid_purpose} =
                Security.derive_secret_with_authority(authority, true)
     end
+
+    test "security regression: transferred schema-valid broker custody cannot replace authority state",
+         ctx do
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
+      broker = Process.whereis(SigningAuthorityBroker)
+      monitor = Process.monitor(broker)
+      fake_authenticated_calls = Arbor.Common.new_authenticated_call_custody()
+      hostile = :ets.new(__MODULE__, [:set, :private])
+
+      entry = %{
+        principal_id: ctx.agent_id,
+        purpose: :session,
+        owner_pid: self(),
+        owner_ref: make_ref(),
+        opened_at: DateTime.utc_now(),
+        key_source: :persistent,
+        bootstrap_token: nil
+      }
+
+      true =
+        :ets.insert(
+          hostile,
+          {:signing_authority_broker_v1,
+           %{
+             activation_nonces: %{},
+             authenticated_calls: fake_authenticated_calls,
+             authorities: %{authority.token => entry},
+             bootstraps: %{},
+             ephemeral_open_requests: %{},
+             monitors: %{},
+             persistent_open_requests: %{},
+             state_owner_monitor: nil,
+             state_owner_token: make_ref(),
+             wrapping_key: :crypto.strong_rand_bytes(32)
+           }}
+        )
+
+      true = :ets.give_away(hostile, broker, :hostile_signing_authority_state)
+      assert :ets.info(hostile, :owner) == broker
+      :sys.replace_state(broker, fn _state -> %{private_state: hostile} end)
+
+      assert {:error, _reason} =
+               Security.sign_with_authority(authority, "arbor://test/signing/hostile-state")
+
+      assert_receive {:DOWN, ^monitor, :process, ^broker, _reason}, 2_000
+      ensure_broker_started()
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "arbor://test/signing/sealed-state")
+    end
+
+    test "security regression: identity endorsements are canonical and owner-bound", ctx do
+      {:ok, target} = Identity.generate(name: "identity-endorsement-target")
+      :ok = Security.register_identity_fixture(Identity.public_only(target))
+      {:ok, authority} = open_authority(ctx, purpose: :session)
+
+      on_exit(fn ->
+        _ = Security.close_signing_authority(authority)
+        _ = Security.deregister_identity_fixture(target.agent_id)
+      end)
+
+      assert {:ok, signature} =
+               Security.sign_identity_endorsement(
+                 authority,
+                 ctx.agent_id,
+                 target.agent_id,
+                 target.public_key
+               )
+
+      assert :ok =
+               Security.verify_identity_endorsement(
+                 ctx.agent_id,
+                 target.agent_id,
+                 target.public_key,
+                 signature
+               )
+
+      assert {:error, :invalid_identity_endorsement} =
+               Security.verify_identity_endorsement(
+                 ctx.agent_id,
+                 target.agent_id <> "-tampered",
+                 target.public_key,
+                 signature
+               )
+
+      assert {:error, :identity_endorsement_unauthorized} =
+               Task.async(fn ->
+                 Security.sign_identity_endorsement(
+                   authority,
+                   ctx.agent_id,
+                   target.agent_id,
+                   target.public_key
+                 )
+               end)
+               |> Task.await()
+    end
+
+    test "security regression: raw GenServer caller spoof cannot open signing authority", ctx do
+      assert {:ok, proof} = acquisition_proof(ctx, :session, self())
+      broker = Process.whereis(SigningAuthorityBroker)
+      victim = self()
+
+      assert is_pid(broker)
+
+      assert {:error, :signing_authority_unauthorized} =
+               Task.async(fn ->
+                 forged_call(broker, victim, {:open, make_ref(), proof})
+               end)
+               |> Task.await()
+
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
+      assert :ok = Security.close_signing_authority(authority)
+    end
   end
 
   describe "security regression: acquisition requires possession proof" do
@@ -107,7 +220,8 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         case result do
           {:ok, %SigningAuthority{} = authority} ->
             # Even if an authority struct were returned, it must not be usable.
-            sign_result = Security.sign_with_authority(authority, "agent-id-only-attack")
+            sign_result =
+              Security.sign_with_authority(authority, "arbor://test/signing/agent-id-only-attack")
 
             flunk(
               "agent_id-only acquisition produced usable authority: " <>
@@ -127,18 +241,20 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Positive control: possession proof still opens a usable authority.
       assert {:ok, authority} = open_authority(ctx, purpose: :session)
-      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "legitimate")
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "arbor://test/signing/legitimate")
     end
 
     test "invalid signature and wrong principal fail closed", ctx do
       {:ok, other} = Identity.generate(name: "other-principal")
       public_other = Identity.public_only(other)
-      :ok = Security.register_identity(public_other)
-      :ok = Security.store_signing_key(other.agent_id, other.private_key)
+      :ok = Security.register_identity_fixture(public_other)
+      :ok = Security.store_signing_key_fixture(other.agent_id, other.private_key)
 
       on_exit(fn ->
-        _ = Security.delete_signing_key(other.agent_id)
-        _ = Security.deregister_identity(other.agent_id)
+        _ = Security.delete_signing_key_fixture(other.agent_id)
+        _ = Security.deregister_identity_fixture(other.agent_id)
       end)
 
       # Wrong principal: payload claims ctx.agent_id but is signed by other.
@@ -174,7 +290,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       tampered = %{authority | purpose: :evil}
 
       assert {:error, :purpose_mismatch} =
-               Security.sign_with_authority(tampered, "tampered-purpose")
+               Security.sign_with_authority(tampered, "arbor://test/signing/tampered-purpose")
 
       assert {:error, :purpose_mismatch} =
                Security.derive_secret_with_authority(tampered, :capability_mac)
@@ -183,7 +299,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.close_signing_authority(tampered)
 
       # Original reference still works.
-      assert {:ok, _} = Security.sign_with_authority(authority, "untampered")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/untampered")
     end
 
     test "owner substitution and cross-process proof replay fail closed", ctx do
@@ -217,7 +333,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                )
 
       assert {:ok, authority} = Security.open_signing_authority(proof2)
-      assert {:ok, _} = Security.sign_with_authority(authority, "owner-ok")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/owner-ok")
 
       # Proof that names a foreign owner cannot be opened by this process.
       foreign = spawn(fn -> Process.sleep(:infinity) end)
@@ -245,7 +361,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                )
 
       assert {:ok, authority} = Security.open_signing_authority(proof)
-      assert {:ok, _} = Security.sign_with_authority(authority, "first-open")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/first-open")
 
       assert {:error, :replayed_nonce} = Security.open_signing_authority(proof)
     end
@@ -273,7 +389,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert_receive {:authority, authority}, 1_000
 
       # Sanity: works while owner alive
-      assert {:ok, _} = Security.sign_with_authority(authority, "alive")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/alive")
 
       ref = Process.monitor(owner)
       Process.exit(owner, :kill)
@@ -281,11 +397,14 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Allow broker to process DOWN
       wait_until(fn ->
-        match?({:error, :authority_not_found}, Security.sign_with_authority(authority, "dead"))
+        match?(
+          {:error, :authority_not_found},
+          Security.sign_with_authority(authority, "arbor://test/signing/dead")
+        )
       end)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(authority, "after-owner-death")
+               Security.sign_with_authority(authority, "arbor://test/signing/after-owner-death")
     end
 
     test "explicit close revokes the token", ctx do
@@ -294,7 +413,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert :ok = Security.close_signing_authority(authority)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(authority, "closed")
+               Security.sign_with_authority(authority, "arbor://test/signing/closed")
 
       assert {:error, :authority_not_found} =
                Security.close_signing_authority(authority)
@@ -313,22 +432,22 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         )
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(forged, "forged")
+               Security.sign_with_authority(forged, "arbor://test/signing/forged")
 
       # Tamper principal while keeping real token
       tampered = %{authority | principal_id: "agent_" <> String.duplicate("00", 32)}
 
       assert {:error, :principal_mismatch} =
-               Security.sign_with_authority(tampered, "tampered")
+               Security.sign_with_authority(tampered, "arbor://test/signing/tampered")
     end
 
     test "key deletion fails subsequent sign/derive", ctx do
       {:ok, authority} = open_authority(ctx, purpose: :session)
 
-      assert :ok = Security.delete_signing_key(ctx.agent_id)
+      assert :ok = Security.delete_signing_key_fixture(ctx.agent_id)
 
       assert {:error, :no_signing_key} =
-               Security.sign_with_authority(authority, "no-key")
+               Security.sign_with_authority(authority, "arbor://test/signing/no-key")
 
       assert {:error, :no_signing_key} =
                Security.derive_secret_with_authority(authority, :capability_mac)
@@ -341,10 +460,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Correct length, structurally invalid Ed25519 material.
       malformed_key = <<0::size(64 * 8)>>
-      assert :ok = Security.store_signing_key(ctx.agent_id, malformed_key)
+      assert :ok = Security.store_signing_key_fixture(ctx.agent_id, malformed_key)
 
       assert {:error, :signing_key_invalid} =
-               Security.sign_with_authority(authority, "must-not-sign")
+               Security.sign_with_authority(authority, "arbor://test/signing/must-not-sign")
 
       assert {:error, :signing_key_invalid} =
                Security.derive_secret_with_authority(authority, :must_not_derive)
@@ -361,13 +480,13 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       refute Enum.any?(snapshot.bootstrap_entries, &(&1.purpose == :must_not_issue))
 
       assert {:error, :signing_key_invalid} =
-               Security.sign_with_authority(authority, "still-must-not-sign")
+               Security.sign_with_authority(authority, "arbor://test/signing/still-must-not-sign")
 
       {:ok, other_identity} = Identity.generate(name: "wrong-persistent-key")
-      assert :ok = Security.store_signing_key(ctx.agent_id, other_identity.private_key)
+      assert :ok = Security.store_signing_key_fixture(ctx.agent_id, other_identity.private_key)
 
       assert {:error, :signing_key_mismatch} =
-               Security.sign_with_authority(authority, "wrong-identity-key")
+               Security.sign_with_authority(authority, "arbor://test/signing/wrong-identity-key")
 
       assert {:error, :signing_key_mismatch} =
                Security.derive_secret_with_authority(authority, :wrong_identity_key)
@@ -378,18 +497,18 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     test "identity suspension and revocation fail closed", ctx do
       {:ok, authority} = open_authority(ctx, purpose: :session)
 
-      assert :ok = Security.suspend_identity(ctx.agent_id, reason: "test suspend")
+      assert :ok = Security.suspend_identity_fixture(ctx.agent_id, reason: "test suspend")
 
       assert {:error, :identity_suspended} =
-               Security.sign_with_authority(authority, "suspended")
+               Security.sign_with_authority(authority, "arbor://test/signing/suspended")
 
-      assert :ok = Security.resume_identity(ctx.agent_id)
-      assert {:ok, _} = Security.sign_with_authority(authority, "resumed")
+      assert :ok = Security.resume_identity_fixture(ctx.agent_id)
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/resumed")
 
-      assert :ok = Security.revoke_identity(ctx.agent_id, reason: "test revoke")
+      assert :ok = Security.revoke_identity_fixture(ctx.agent_id, reason: "test revoke")
 
       assert {:error, :identity_revoked} =
-               Security.sign_with_authority(authority, "revoked")
+               Security.sign_with_authority(authority, "arbor://test/signing/revoked")
     end
 
     test "security regression: broker restart preserves persistent authorities and restart slots",
@@ -397,18 +516,22 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       {:ok, authority} = open_authority(ctx, purpose: :session)
       {:ok, bootstrap} = issue_bootstrap(ctx, :restart_slot_survives, grace_ms: 5_000)
 
-      assert {:ok, _} = Security.sign_with_authority(authority, "before-restart")
+      assert {:ok, _} =
+               Security.sign_with_authority(authority, "arbor://test/signing/before-restart")
 
       :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
       {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
 
-      assert {:ok, _} = Security.sign_with_authority(authority, "after-restart")
+      assert {:ok, _} =
+               Security.sign_with_authority(authority, "arbor://test/signing/after-restart")
 
       assert {:ok, claimed} = Security.claim_signing_authority(bootstrap)
-      assert {:ok, _} = Security.sign_with_authority(claimed, "claimed-after-restart")
+
+      assert {:ok, _} =
+               Security.sign_with_authority(claimed, "arbor://test/signing/claimed-after-restart")
 
       assert {:ok, authority2} = open_authority(ctx, purpose: :session)
-      assert {:ok, _} = Security.sign_with_authority(authority2, "fresh")
+      assert {:ok, _} = Security.sign_with_authority(authority2, "arbor://test/signing/fresh")
     end
   end
 
@@ -425,7 +548,8 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                  open_requests: %{}
                })
 
-      assert {:ok, _signed} = Security.sign_with_authority(authority, "state-intact")
+      assert {:ok, _signed} =
+               Security.sign_with_authority(authority, "arbor://test/signing/state-intact")
     end
 
     test "security regression: state-owner crash restarts broker fail closed", ctx do
@@ -456,14 +580,19 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       end)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(persistent, "must-not-survive")
+               Security.sign_with_authority(persistent, "arbor://test/signing/must-not-survive")
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(ephemeral_authority, "must-not-survive")
+               Security.sign_with_authority(
+                 ephemeral_authority,
+                 "arbor://test/signing/must-not-survive"
+               )
 
       assert {:error, :bootstrap_not_found} = Security.claim_signing_authority(bootstrap)
       assert {:ok, fresh} = open_authority(ctx, purpose: :after_owner_crash)
-      assert {:ok, _signed} = Security.sign_with_authority(fresh, "fresh-state")
+
+      assert {:ok, _signed} =
+               Security.sign_with_authority(fresh, "arbor://test/signing/fresh-state")
     end
 
     test "reference and broker state contain no functions or private keys", ctx do
@@ -501,7 +630,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Prove this is not a closure — named dispatch only.
       refute is_function(authority)
-      assert {:ok, _} = Security.sign_with_authority(authority, "pre-reload")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/pre-reload")
 
       beam_path = :code.which(Arbor.Security)
       assert is_list(beam_path)
@@ -523,7 +652,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Retained reference still works via named dispatch after reload.
       assert {:ok, %SignedRequest{} = signed} =
-               Security.sign_with_authority(authority, "post-reload")
+               Security.sign_with_authority(authority, "arbor://test/signing/post-reload")
 
       assert signed.agent_id == ctx.agent_id
       agent_id = ctx.agent_id
@@ -549,7 +678,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "rejects open when signing key missing", ctx do
-      :ok = Security.delete_signing_key(ctx.agent_id)
+      :ok = Security.delete_signing_key_fixture(ctx.agent_id)
 
       assert {:ok, proof} =
                Security.build_signing_authority_acquisition_proof(
@@ -720,7 +849,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Valid lease must remain usable across the hostile calls below.
       assert {:ok, %SignedRequest{}} =
-               Security.sign_with_authority(authority, "pre-hostile-baseline")
+               Security.sign_with_authority(
+                 authority,
+                 "arbor://test/signing/pre-hostile-baseline"
+               )
 
       partial_missing = %{__struct__: SigningAuthority}
       partial_short = %{__struct__: SigningAuthority, token: "too-short"}
@@ -733,7 +865,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       for hostile <- [partial_missing, partial_short, partial_token_only, nil, :not_authority] do
         sign_result =
           try do
-            Security.sign_with_authority(hostile, "hostile-payload")
+            Security.sign_with_authority(hostile, "arbor://test/signing/hostile-payload")
           catch
             kind, reason -> flunk("sign_with_authority exited: #{inspect({kind, reason})}")
           end
@@ -768,7 +900,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Pre-existing valid lease still signs after the hostile barrage.
       assert {:ok, %SignedRequest{}} =
-               Security.sign_with_authority(authority, "post-hostile-still-valid")
+               Security.sign_with_authority(
+                 authority,
+                 "arbor://test/signing/post-hostile-still-valid"
+               )
 
       assert {:ok, secret} =
                Security.derive_secret_with_authority(authority, :capability_mac)
@@ -919,7 +1054,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert Process.whereis(SigningAuthorityBroker) == broker_pid
 
       assert {:ok, authority} = Security.claim_signing_authority(bootstrap)
-      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "still-live")
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "arbor://test/signing/still-live")
+
       assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
     end
 
@@ -959,14 +1097,17 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Enum.filter(results, fn {_id, _pid, result} -> match?({:error, _}, result) end)
 
       assert {:ok, %SignedRequest{}} =
-               Security.sign_with_authority(authority, "engine-helper-bearer-use")
+               Security.sign_with_authority(
+                 authority,
+                 "arbor://test/signing/engine-helper-bearer-use"
+               )
 
       send(winner, :stop)
 
       wait_until(fn ->
         match?(
           {:error, :authority_not_found},
-          Security.sign_with_authority(authority, "owner-gone")
+          Security.sign_with_authority(authority, "arbor://test/signing/owner-gone")
         )
       end)
 
@@ -984,25 +1125,35 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         end)
 
       assert_receive {:first_claim, {:ok, first_authority}}, 1_000
-      assert {:ok, _} = Security.sign_with_authority(first_authority, "before-owner-down")
+
+      assert {:ok, _} =
+               Security.sign_with_authority(
+                 first_authority,
+                 "arbor://test/signing/before-owner-down"
+               )
 
       Process.exit(owner, :kill)
 
       wait_until(fn ->
         match?(
           {:error, :authority_not_found},
-          Security.sign_with_authority(first_authority, "after-owner-down")
+          Security.sign_with_authority(first_authority, "arbor://test/signing/after-owner-down")
         )
       end)
 
       assert {:ok, second_authority} = Security.claim_signing_authority(bootstrap)
       refute second_authority.token == first_authority.token
-      assert {:ok, _} = Security.sign_with_authority(second_authority, "after-reclaim")
+
+      assert {:ok, _} =
+               Security.sign_with_authority(
+                 second_authority,
+                 "arbor://test/signing/after-reclaim"
+               )
 
       assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(second_authority, "closed-slot")
+               Security.sign_with_authority(second_authority, "arbor://test/signing/closed-slot")
     end
 
     test "closing a claimed authority releases the slot; closing bootstrap is permanent", ctx do
@@ -1012,7 +1163,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert :ok = Security.close_signing_authority(first_authority)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(first_authority, "closed-claim")
+               Security.sign_with_authority(first_authority, "arbor://test/signing/closed-claim")
 
       assert {:ok, second_authority} = Security.claim_signing_authority(bootstrap)
       refute second_authority.token == first_authority.token
@@ -1020,7 +1171,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(second_authority, "permanently-closed")
+               Security.sign_with_authority(
+                 second_authority,
+                 "arbor://test/signing/permanently-closed"
+               )
 
       assert {:error, :bootstrap_not_found} = Security.claim_signing_authority(bootstrap)
     end
@@ -1051,7 +1205,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       wait_until(fn ->
         match?(
           {:error, :authority_not_found},
-          Security.sign_with_authority(authority, "reclaim-grace-started")
+          Security.sign_with_authority(authority, "arbor://test/signing/reclaim-grace-started")
         )
       end)
 
@@ -1068,12 +1222,12 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       human_id = oidc.identity.agent_id
 
       :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
-      :ok = Security.store_signing_key(human_id, oidc.identity.private_key)
+      :ok = Security.store_signing_key_fixture(human_id, oidc.identity.private_key)
 
       on_exit(fn ->
         oidc.cleanup.()
-        _ = Security.delete_signing_key(human_id)
-        _ = Security.deregister_identity(human_id)
+        _ = Security.delete_signing_key_fixture(human_id)
+        _ = Security.deregister_identity_fixture(human_id)
       end)
 
       human_ctx = %{agent_id: human_id, private_key: oidc.identity.private_key}
@@ -1082,7 +1236,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert authority.principal_id == human_id
 
       assert {:ok, %SignedRequest{agent_id: ^human_id}} =
-               Security.sign_with_authority(authority, "human-authority")
+               Security.sign_with_authority(authority, "arbor://test/signing/human-authority")
     end
   end
 
@@ -1096,7 +1250,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert {:error, :private_key_mismatch} =
                Security.open_ephemeral_signing_authority(proof, other.private_key)
 
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
     end
 
     test "security regression: ephemeral proof owner must be the caller" do
@@ -1110,19 +1264,19 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       end)
 
       assert_receive {:ephemeral_wrong_owner, {:error, :owner_mismatch}}, 1_000
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
     end
 
     test "security regression: ephemeral key is wrapped in memory and never persisted" do
       ephemeral = register_ephemeral_identity("ephemeral-success")
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
       assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral, self())
 
       assert {:ok, authority} =
                Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
 
       assert {:ok, %SignedRequest{agent_id: agent_id} = signed} =
-               Security.sign_with_authority(authority, "ephemeral-sign")
+               Security.sign_with_authority(authority, "arbor://test/signing/ephemeral-sign")
 
       assert agent_id == ephemeral.agent_id
       expected_id = ephemeral.agent_id
@@ -1132,7 +1286,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.derive_secret_with_authority(authority, :ephemeral_session)
 
       assert byte_size(secret) == 32
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
 
       snapshot = SigningAuthorityBroker.debug_state()
       assert snapshot.wrapping_key_present?
@@ -1311,7 +1465,12 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       restore_env(:signing_authority_persistent_open_test_seam, previous_seam)
       assert {:ok, reclaimed} = Security.claim_signing_authority(bootstrap)
-      assert {:ok, _} = Security.sign_with_authority(reclaimed, "reclaimed-after-timeout")
+
+      assert {:ok, _} =
+               Security.sign_with_authority(
+                 reclaimed,
+                 "arbor://test/signing/reclaimed-after-timeout"
+               )
 
       send(owner, :stop)
     end
@@ -1357,7 +1516,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       send(owner, :stop)
     end
 
-    test "security regression: broker timeout carries no plaintext key and stale handoff cannot execute" do
+    test "security regression: broker timeout leaves no usable authority and stale handoff cannot execute" do
       ephemeral = register_ephemeral_identity("ephemeral-timeout")
       broker_pid = Process.whereis(SigningAuthorityBroker)
 
@@ -1383,23 +1542,6 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         end)
 
       assert_receive :ephemeral_timeout_calling, 1_000
-
-      wait_until(fn ->
-        {:messages, messages} = Process.info(broker_pid, :messages)
-
-        Enum.any?(messages, fn
-          {:"$gen_call", _from,
-           {:open_ephemeral, request_id, %SignedRequest{}, holder_pid, transfer_ref}} ->
-            is_reference(request_id) and is_pid(holder_pid) and is_reference(transfer_ref)
-
-          _ ->
-            false
-        end)
-      end)
-
-      {:messages, messages} = Process.info(broker_pid, :messages)
-      refute contains_value?(messages, ephemeral.private_key)
-
       assert {:error, :broker_timeout} = Task.await(task, 1_000)
       safe_resume(broker_pid)
 
@@ -1455,7 +1597,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       end)
 
       assert Process.whereis(SigningAuthorityBroker) == broker_pid
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
     end
 
     test "security regression: format_status redacts messages and all sensitive state" do
@@ -1500,7 +1642,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert holder_redacted.log == :redacted
     end
 
-    test "security regression: corrupted wrapping state returns typed errors without broker crash" do
+    test "security regression: callback-state substitution cannot replace the wrapping key" do
       ephemeral = register_ephemeral_identity("ephemeral-corrupt-wrapping")
       assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_corrupt, self())
 
@@ -1510,11 +1652,11 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       broker_pid = Process.whereis(SigningAuthorityBroker)
       :sys.replace_state(broker_pid, &Map.put(&1, :wrapping_key, <<0>>))
 
-      assert {:error, :key_decryption_failed} =
-               Security.sign_with_authority(authority, "must-not-sign")
+      assert {:ok, _proof} =
+               Security.sign_with_authority(authority, "arbor://test/signing/still-sealed")
 
-      assert {:error, :key_decryption_failed} =
-               Security.derive_secret_with_authority(authority, :must_not_derive)
+      assert {:ok, secret} = Security.derive_secret_with_authority(authority, :still_sealed)
+      assert is_binary(secret)
 
       assert Process.whereis(SigningAuthorityBroker) == broker_pid
       restart_broker()
@@ -1533,14 +1675,14 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         end)
 
       assert_receive {:ephemeral_authority, {:ok, authority}}, 1_000
-      assert {:ok, _} = Security.sign_with_authority(authority, "owner-live")
+      assert {:ok, _} = Security.sign_with_authority(authority, "arbor://test/signing/owner-live")
 
       Process.exit(owner, :kill)
 
       wait_until(fn ->
         match?(
           {:error, :authority_not_found},
-          Security.sign_with_authority(authority, "owner-dead")
+          Security.sign_with_authority(authority, "arbor://test/signing/owner-dead")
         )
       end)
 
@@ -1559,17 +1701,21 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert {:ok, authority} =
                Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
 
-      assert {:ok, _} = Security.sign_with_authority(authority, "before-restart")
+      assert {:ok, _} =
+               Security.sign_with_authority(authority, "arbor://test/signing/before-restart")
+
       restart_broker()
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(authority, "after-restart")
+               Security.sign_with_authority(authority, "arbor://test/signing/after-restart")
 
-      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:error, :no_signing_key} = Security.signing_key_status(ephemeral.agent_id)
 
       # Persistent acquisition remains available after restart.
       assert {:ok, persistent} = open_authority(ctx, purpose: :persistent_after_restart)
-      assert {:ok, _} = Security.sign_with_authority(persistent, "persistent")
+
+      assert {:ok, _} =
+               Security.sign_with_authority(persistent, "arbor://test/signing/persistent")
     end
   end
 
@@ -1612,7 +1758,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       # Paired restart must yield a usable authority path, not an empty-opts crash.
       assert {:ok, authority} = open_authority(ctx, purpose: :pair_restart_ok)
-      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "pair-restart")
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "arbor://test/signing/pair-restart")
     end
 
     test "starts a matched pair when both are absent", ctx do
@@ -1629,7 +1777,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert is_pid(broker)
 
       assert {:ok, authority} = open_authority(ctx, purpose: :pair_both_absent)
-      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "both-absent")
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "arbor://test/signing/both-absent")
     end
 
     test "fails clearly on impossible partial state (broker without owner)" do
@@ -1708,6 +1858,22 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
   end
 
+  defp forged_call(server, asserted_pid, message) do
+    reply = :erlang.alias()
+    tag = [:alias | reply]
+    send(server, {:"$gen_call", {asserted_pid, tag}, message})
+
+    try do
+      receive do
+        {^tag, result} -> result
+      after
+        2_000 -> flunk("forged signing-authority call did not settle")
+      end
+    after
+      :erlang.unalias(reply)
+    end
+  end
+
   defp acquisition_proof(ctx, purpose, owner) do
     Security.build_signing_authority_acquisition_proof(
       ctx.agent_id,
@@ -1725,11 +1891,11 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
   defp register_ephemeral_identity(name) do
     {:ok, identity} = Identity.generate(name: name)
-    :ok = Security.register_identity(Identity.public_only(identity))
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{

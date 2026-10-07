@@ -1,36 +1,23 @@
 defmodule Arbor.Security.SigningKeyStore do
-  @moduledoc """
-  Encrypted storage for agent signing private keys.
-
-  Wraps `Arbor.Security.AuthorityStore` with AES-256-GCM encryption at the
-  application layer.
-  Private keys are encrypted before storage and decrypted on retrieval.
-
-  ## Encryption
-
-  Uses a stable master key stored at `~/.arbor/security/master.key`. The master
-  key is generated on first use and persists across restarts. The signing key
-  encryption key is derived from the master key via HKDF with purpose-specific
-  info string.
-
-  ## Storage
-
-  Backed by the `:arbor_security_signing_keys` AuthorityStore instance.
-  Reads always consult its authoritative backend and mutations use its
-  acknowledged API so callers never confuse an attempted write with a
-  durably acknowledged write.
-  """
-
+  @moduledoc false
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority.Validator, as: SigningAuthorityValidator
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Crypto
+  alias Arbor.Security.SigningKeyStore.Owner
+  alias Arbor.Security.SupervisedOwner
 
   require Logger
 
   @store_name :arbor_security_signing_keys
   @key_derivation_info "arbor-signing-key-encryption-v1"
+  @master_key_purposes %{
+    oidc_token_cache: "arbor-oidc-token-cache-v1",
+    authority_record: "arbor-authority-store-record-authentication-v1",
+    capability_revocation_ledger: "arbor-capability-revocation-ledger-authentication-v1"
+  }
 
   @doc """
   Store an agent's signing private key (encrypted at rest).
@@ -40,6 +27,22 @@ defmodule Arbor.Security.SigningKeyStore do
   @spec put(String.t(), binary()) :: :ok | {:error, term()}
   def put(agent_id, private_key)
       when is_binary(agent_id) and is_binary(private_key) do
+    Owner.put(agent_id, private_key)
+  end
+
+  def put(_agent_id, _private_key), do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  def put_from_owner(agent_id, private_key)
+      when is_binary(agent_id) and is_binary(private_key) do
+    if owner_process?(),
+      do: do_put(agent_id, private_key),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def put_from_owner(_agent_id, _private_key), do: {:error, :key_mutation_unauthorized}
+
+  defp do_put(agent_id, private_key) do
     with {:ok, enc_key} <- get_encryption_key() do
       {ciphertext, iv, tag} = Crypto.encrypt(private_key, enc_key)
 
@@ -66,8 +69,47 @@ defmodule Arbor.Security.SigningKeyStore do
   """
   @spec get(String.t()) :: {:ok, binary()} | {:error, term()}
   def get(agent_id) when is_binary(agent_id) do
-    with {:ok, enc_key} <- get_encryption_key(),
-         {:ok, raw} <- get_record(agent_id) do
+    Owner.get(agent_id)
+  end
+
+  def get(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  def get_from_owner(agent_id) when is_binary(agent_id) do
+    if owner_process?(), do: do_get(agent_id), else: {:error, :unauthorized}
+  end
+
+  def get_from_owner(_agent_id), do: {:error, :unauthorized}
+
+  if Mix.env() == :test do
+    @doc false
+    def put_fixture(agent_id, private_key), do: Owner.put_fixture(agent_id, private_key)
+
+    @doc false
+    def put_keypair_fixture(agent_id, signing_key, encryption_key \\ nil),
+      do: Owner.put_keypair_fixture(agent_id, signing_key, encryption_key)
+
+    @doc false
+    def delete_fixture(agent_id), do: Owner.delete_fixture(agent_id)
+
+    @doc false
+    def get_for_test(agent_id) when is_binary(agent_id), do: do_get(agent_id)
+
+    @doc false
+    def get_keypair_for_test(agent_id) when is_binary(agent_id), do: do_get_keypair(agent_id)
+
+    @doc false
+    def get_authority_bundle_for_test(agent_id) when is_binary(agent_id),
+      do: do_get_authority_bundle(agent_id, :application)
+
+    @doc false
+    def load_public_identity_fixture(agent_id, opts \\ []),
+      do: Owner.load_public_identity_fixture(agent_id, opts)
+  end
+
+  defp do_get(agent_id) do
+    with {:ok, raw} <- get_record(agent_id),
+         {:ok, enc_key} <- get_read_only_encryption_key() do
       data = unwrap_record(raw)
 
       case data do
@@ -111,6 +153,259 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
+  @doc false
+  @spec load_public_identity(String.t(), keyword()) :: {:ok, Identity.t()} | {:error, term()}
+  def load_public_identity(agent_id, opts \\ [])
+
+  def load_public_identity(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    Owner.load_public_identity(agent_id, opts)
+  end
+
+  def load_public_identity(_, _), do: {:error, :invalid_principal}
+
+  @doc false
+  def load_public_identity_from_owner(agent_id, opts)
+      when is_binary(agent_id) and is_list(opts) do
+    if owner_process?(),
+      do: do_load_public_identity(agent_id, opts),
+      else: {:error, :unauthorized_key_owner}
+  end
+
+  def load_public_identity_from_owner(_, _), do: {:error, :invalid_principal}
+
+  defp do_load_public_identity(agent_id, opts) do
+    with {:ok, keypair} <- do_get_keypair(agent_id),
+         {public_key, _private_key} <-
+           :crypto.generate_key(:eddsa, :ed25519, keypair.signing),
+         {:ok, identity} <-
+           Identity.new(
+             public_key: public_key,
+             encryption_public_key: encryption_public_key(keypair),
+             name: Keyword.get(opts, :name),
+             metadata: Keyword.get(opts, :metadata, %{})
+           ) do
+      {:ok, %{identity | agent_id: agent_id}}
+    end
+  rescue
+    _ -> {:error, :invalid_key_material}
+  catch
+    _, _ -> {:error, :invalid_key_material}
+  end
+
+  @doc false
+  @spec build_registration_proof(Identity.t()) :: {:ok, binary()} | {:error, term()}
+  def build_registration_proof(%Identity{} = public_identity) do
+    Owner.build_registration_proof(public_identity)
+  end
+
+  def build_registration_proof(_identity), do: {:error, :invalid_identity}
+
+  @doc false
+  def build_registration_proof_from_owner(%Identity{} = public_identity) do
+    if owner_process?(),
+      do: do_build_registration_proof(public_identity),
+      else: {:error, :unauthorized_key_owner}
+  end
+
+  def build_registration_proof_from_owner(_identity), do: {:error, :invalid_identity}
+
+  defp do_build_registration_proof(public_identity) do
+    with {:ok, keypair} <- do_get_keypair(public_identity.agent_id),
+         {stored_public_key, _private_key} <-
+           :crypto.generate_key(:eddsa, :ed25519, keypair.signing),
+         true <- stored_public_key == public_identity.public_key,
+         true <- Crypto.derive_agent_id(stored_public_key) == public_identity.agent_id,
+         identity = %{public_identity | private_key: keypair.signing},
+         {:ok, proof} <- Arbor.Security.Identity.Registry.registration_proof(identity) do
+      {:ok, proof}
+    else
+      false -> {:error, :stored_identity_mismatch}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :identity_proof_unavailable}
+    end
+  rescue
+    _ -> {:error, :identity_proof_unavailable}
+  catch
+    _, _ -> {:error, :identity_proof_unavailable}
+  end
+
+  @doc false
+  @spec migrate_legacy_locator(String.t(), keyword()) ::
+          {:ok, Identity.t(), :created | :existing} | {:error, term()}
+  def migrate_legacy_locator(locator, opts \\ [])
+
+  def migrate_legacy_locator(locator, opts) when is_binary(locator) and is_list(opts) do
+    Owner.migrate_legacy_locator(locator, opts)
+  end
+
+  def migrate_legacy_locator(_, _), do: {:error, :invalid_legacy_locator}
+
+  @doc false
+  def migrate_legacy_locator_from_owner(locator, opts)
+      when is_binary(locator) and is_list(opts) do
+    if owner_process?(),
+      do: do_migrate_legacy_locator(locator, opts),
+      else: {:error, :unauthorized_key_owner}
+  end
+
+  def migrate_legacy_locator_from_owner(_, _), do: {:error, :invalid_legacy_locator}
+
+  defp do_migrate_legacy_locator(locator, opts) do
+    with {:ok, private_key} <- do_get(locator),
+         {public_key, _private_key} <- :crypto.generate_key(:eddsa, :ed25519, private_key),
+         {:ok, identity} <-
+           Identity.new(
+             public_key: public_key,
+             name: Keyword.get(opts, :name),
+             metadata: Keyword.get(opts, :metadata, %{})
+           ) do
+      case status(identity.agent_id) do
+        {:error, :no_signing_key} ->
+          with :ok <- do_put(identity.agent_id, private_key) do
+            {:ok, Identity.public_only(identity), :created}
+          end
+
+        {:ok, :available} ->
+          with {:ok, existing} <- do_load_public_identity(identity.agent_id, []),
+               true <- existing.public_key == public_key do
+            {:ok, Identity.public_only(identity), :existing}
+          else
+            _ -> {:error, :principal_signing_key_mismatch}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  rescue
+    _ -> {:error, :legacy_key_migration_failed}
+  catch
+    _, _ -> {:error, :legacy_key_migration_failed}
+  end
+
+  @doc false
+  @spec build_oidc_acquisition_proof(String.t(), map(), atom(), pid()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def build_oidc_acquisition_proof(id_token, provider_config, :oidc_operator, owner)
+      when is_binary(id_token) and is_map(provider_config) and is_pid(owner) and owner == self() do
+    Owner.build_oidc_acquisition_proof(id_token, provider_config, :oidc_operator, owner)
+  end
+
+  def build_oidc_acquisition_proof(_, _, _, _),
+    do: {:error, :invalid_oidc_authority_request}
+
+  @doc false
+  def build_oidc_acquisition_proof_from_owner(
+        id_token,
+        provider_config,
+        :oidc_operator,
+        owner
+      )
+      when is_binary(id_token) and is_map(provider_config) and is_pid(owner) do
+    if owner_process?() do
+      do_build_oidc_acquisition_proof(id_token, provider_config, owner)
+    else
+      {:error, :unauthorized_key_owner}
+    end
+  end
+
+  def build_oidc_acquisition_proof_from_owner(_, _, _, _),
+    do: {:error, :invalid_oidc_authority_request}
+
+  defp do_build_oidc_acquisition_proof(id_token, provider_config, owner) do
+    with {:ok, claims} <- Arbor.Security.OIDC.TokenVerifier.verify(id_token, provider_config),
+         principal_id <- Arbor.Security.OIDC.IdentityStore.derive_agent_id(claims),
+         {:ok, keypair} <- do_get_keypair(principal_id),
+         payload <-
+           Arbor.Security.SigningAuthorityBroker.acquisition_payload(
+             principal_id,
+             :oidc_operator,
+             owner
+           ) do
+      SignedRequest.sign(payload, principal_id, keypair.signing)
+    end
+  end
+
+  @doc false
+  def build_oidc_registration_proof(%Identity{} = identity, id_token, provider_config)
+      when is_binary(id_token) and is_map(provider_config) do
+    Owner.build_oidc_registration_proof(identity, id_token, provider_config)
+  end
+
+  def build_oidc_registration_proof(_identity, _id_token, _provider_config),
+    do: {:error, :invalid_oidc_registration}
+
+  @doc false
+  def build_oidc_registration_proof_from_owner(
+        %Identity{} = identity,
+        id_token,
+        provider_config
+      )
+      when is_binary(id_token) and is_map(provider_config) do
+    if owner_process?() do
+      with {:ok, claims} <- Arbor.Security.OIDC.TokenVerifier.verify(id_token, provider_config),
+           expected_id <- Arbor.Security.OIDC.IdentityStore.derive_agent_id(claims),
+           true <- identity.agent_id == expected_id,
+           {:ok, keypair} <- do_get_keypair(expected_id),
+           {stored_public_key, _private_key} <-
+             :crypto.generate_key(:eddsa, :ed25519, keypair.signing),
+           true <- stored_public_key == identity.public_key do
+        payload = Arbor.Security.Identity.Registry.oidc_key_possession_payload(identity, id_token)
+        {:ok, Crypto.sign(payload, keypair.signing)}
+      else
+        false -> {:error, :stored_identity_mismatch}
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :invalid_oidc_registration}
+      end
+    else
+      {:error, :unauthorized_key_owner}
+    end
+  rescue
+    _ -> {:error, :invalid_oidc_registration}
+  catch
+    _, _ -> {:error, :invalid_oidc_registration}
+  end
+
+  def build_oidc_registration_proof_from_owner(_identity, _id_token, _provider_config),
+    do: {:error, :invalid_oidc_registration}
+
+  @doc false
+  @spec build_named_acquisition_proof(String.t(), atom(), pid(), atom()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def build_named_acquisition_proof(principal_id, purpose, owner, registered_owner)
+      when is_binary(principal_id) and is_atom(purpose) and is_pid(owner) and
+             is_atom(registered_owner) and owner == self() do
+    Owner.build_named_acquisition_proof(principal_id, purpose, owner, registered_owner)
+  end
+
+  def build_named_acquisition_proof(_, _, _, _),
+    do: {:error, :unauthorized_key_owner}
+
+  @doc false
+  def build_named_acquisition_proof_from_owner(
+        principal_id,
+        purpose,
+        owner
+      )
+      when is_binary(principal_id) and is_atom(purpose) and is_pid(owner) do
+    if owner_process?() do
+      with {:ok, private_key} <- do_get(principal_id),
+           payload <-
+             Arbor.Security.SigningAuthorityBroker.acquisition_payload(
+               principal_id,
+               purpose,
+               owner
+             ) do
+        SignedRequest.sign(payload, principal_id, private_key)
+      end
+    else
+      {:error, :unauthorized_key_owner}
+    end
+  end
+
+  def build_named_acquisition_proof_from_owner(_, _, _),
+    do: {:error, :unauthorized_key_owner}
+
   @doc """
   Store a keypair (signing + optional encryption) for an agent, encrypted at rest.
 
@@ -119,7 +414,27 @@ defmodule Arbor.Security.SigningKeyStore do
   """
   @spec put_keypair(String.t(), binary(), binary() | nil) :: :ok | {:error, term()}
   def put_keypair(agent_id, signing_key, encryption_key \\ nil)
+
+  def put_keypair(agent_id, signing_key, encryption_key)
       when is_binary(agent_id) and is_binary(signing_key) do
+    Owner.put_keypair(agent_id, signing_key, encryption_key)
+  end
+
+  def put_keypair(_agent_id, _signing_key, _encryption_key),
+    do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  def put_keypair_from_owner(agent_id, signing_key, encryption_key)
+      when is_binary(agent_id) and is_binary(signing_key) do
+    if owner_process?(),
+      do: do_put_keypair(agent_id, signing_key, encryption_key),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def put_keypair_from_owner(_agent_id, _signing_key, _encryption_key),
+    do: {:error, :key_mutation_unauthorized}
+
+  defp do_put_keypair(agent_id, signing_key, encryption_key) do
     keypair_data = %{"signing" => signing_key}
 
     keypair_data =
@@ -160,6 +475,59 @@ defmodule Arbor.Security.SigningKeyStore do
   """
   @spec put_authority_bundle(String.t(), Identity.t()) :: :ok | {:error, atom()}
   def put_authority_bundle(agent_id, %Identity{} = identity) when is_binary(agent_id) do
+    Owner.put_authority_bundle(agent_id, identity)
+  end
+
+  def put_authority_bundle(_agent_id, _identity), do: {:error, :invalid_authority_identity}
+
+  @doc false
+  def put_authority_bundle_from_owner(agent_id, %Identity{} = identity)
+      when is_binary(agent_id) do
+    if owner_process?(),
+      do: do_put_authority_bundle(agent_id, identity, :application),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def put_authority_bundle_from_owner(_agent_id, _identity),
+    do: {:error, :invalid_authority_identity}
+
+  @doc false
+  def put_authority_bundle_from_owner(agent_id, %Identity{} = identity, supervisor)
+      when is_binary(agent_id) and is_pid(supervisor) do
+    if Owner.owner_process_from_supervisor?(supervisor),
+      do: do_put_authority_bundle(agent_id, identity, {:supervisor, supervisor}),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def put_authority_bundle_from_owner(_agent_id, _identity, _supervisor),
+    do: {:error, :invalid_authority_identity}
+
+  @doc false
+  def delete_authority_record(key) when is_binary(key), do: Owner.delete_authority_record(key)
+  def delete_authority_record(_key), do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  def delete_authority_record_from_owner(key) when is_binary(key) do
+    if owner_process?(),
+      do: acknowledged_delete(key, :application),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def delete_authority_record_from_owner(_key),
+    do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  def delete_authority_record_from_owner(key, supervisor)
+      when is_binary(key) and is_pid(supervisor) do
+    if Owner.owner_process_from_supervisor?(supervisor),
+      do: acknowledged_delete(key, {:supervisor, supervisor}),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def delete_authority_record_from_owner(_key, _supervisor),
+    do: {:error, :key_mutation_unauthorized}
+
+  defp do_put_authority_bundle(agent_id, identity, store_context) do
     with :ok <- validate_identity_keypairs(identity),
          {:ok, enc_key} <- get_encryption_key(),
          {:ok, encrypted} <-
@@ -180,7 +548,7 @@ defmodule Arbor.Security.SigningKeyStore do
       }
 
       record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
-      acknowledged_put(agent_id, record)
+      acknowledged_put(agent_id, record, store_context)
     else
       {:error, reason} when reason in [:invalid_key_material, :invalid_authority_identity] ->
         {:error, reason}
@@ -189,8 +557,6 @@ defmodule Arbor.Security.SigningKeyStore do
         {:error, :key_encryption_unavailable}
     end
   end
-
-  def put_authority_bundle(_agent_id, _identity), do: {:error, :invalid_authority_identity}
 
   @doc """
   Load and validate a v3 atomic system-authority bundle.
@@ -208,8 +574,33 @@ defmodule Arbor.Security.SigningKeyStore do
              | :store_unavailable
              | :key_encryption_unavailable}
   def get_authority_bundle(agent_id) when is_binary(agent_id) do
-    with {:ok, enc_key} <- get_encryption_key(),
-         {:ok, raw} <- get_record(agent_id) do
+    Owner.get_authority_bundle(agent_id)
+  end
+
+  def get_authority_bundle(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  def get_authority_bundle_from_owner(agent_id) when is_binary(agent_id) do
+    if owner_process?(),
+      do: do_get_authority_bundle(agent_id, :application),
+      else: {:error, :unauthorized}
+  end
+
+  def get_authority_bundle_from_owner(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  def get_authority_bundle_from_owner(agent_id, supervisor)
+      when is_binary(agent_id) and is_pid(supervisor) do
+    if Owner.owner_process_from_supervisor?(supervisor),
+      do: do_get_authority_bundle(agent_id, {:supervisor, supervisor}),
+      else: {:error, :unauthorized}
+  end
+
+  def get_authority_bundle_from_owner(_agent_id, _supervisor), do: {:error, :unauthorized}
+
+  defp do_get_authority_bundle(agent_id, store_context) do
+    with {:ok, raw} <- get_record(agent_id, store_context),
+         {:ok, enc_key} <- get_read_only_encryption_key() do
       case unwrap_record(raw) do
         %{"format" => "authority_bundle", "v" => 3} = data ->
           decrypt_authority_bundle(data, enc_key)
@@ -235,8 +626,31 @@ defmodule Arbor.Security.SigningKeyStore do
   """
   @spec get_keypair(String.t()) :: {:ok, map()} | {:error, term()}
   def get_keypair(agent_id) when is_binary(agent_id) do
-    with {:ok, enc_key} <- get_encryption_key(),
-         {:ok, raw} <- get_record(agent_id) do
+    Owner.get_keypair(agent_id)
+  end
+
+  def get_keypair(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  def get_keypair_from_owner(agent_id) when is_binary(agent_id) do
+    if owner_process?(), do: do_get_keypair(agent_id), else: {:error, :unauthorized}
+  end
+
+  def get_keypair_from_owner(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  def get_keypair_from_owner(agent_id, supervisor)
+      when is_binary(agent_id) and is_pid(supervisor) do
+    if Owner.owner_process_from_supervisor?(supervisor),
+      do: do_get_keypair(agent_id, {:supervisor, supervisor}),
+      else: {:error, :unauthorized}
+  end
+
+  def get_keypair_from_owner(_agent_id, _supervisor), do: {:error, :unauthorized}
+
+  defp do_get_keypair(agent_id, store_context \\ :application) do
+    with {:ok, raw} <- get_record(agent_id, store_context),
+         {:ok, enc_key} <- get_read_only_encryption_key() do
       data = unwrap_record(raw)
 
       case data do
@@ -277,8 +691,19 @@ defmodule Arbor.Security.SigningKeyStore do
              | :invalid_store_record
              | :store_capacity_exceeded}
   def delete(agent_id) when is_binary(agent_id) do
-    acknowledged_delete(agent_id)
+    Owner.delete(agent_id)
   end
+
+  def delete(_agent_id), do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  def delete_from_owner(agent_id) when is_binary(agent_id) do
+    if owner_process?(),
+      do: acknowledged_delete(agent_id),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def delete_from_owner(_agent_id), do: {:error, :key_mutation_unauthorized}
 
   @doc """
   Check if the signing key store is available.
@@ -288,23 +713,161 @@ defmodule Arbor.Security.SigningKeyStore do
     Process.whereis(@store_name) != nil
   end
 
-  @doc """
-  Returns the master key for OIDC token cache encryption.
+  @doc false
+  @spec encrypt_with_master(atom(), binary()) ::
+          {:ok, %{ciphertext: binary(), iv: binary(), tag: binary()}} | {:error, term()}
+  def encrypt_with_master(purpose, plaintext) when is_binary(plaintext) do
+    if token_cache_owner_process?() and purpose == :oidc_token_cache do
+      with {:ok, key} <- purpose_key(purpose, :write) do
+        {ciphertext, iv, tag} = Crypto.encrypt(plaintext, key)
+        {:ok, %{ciphertext: ciphertext, iv: iv, tag: tag}}
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  rescue
+    _ -> {:error, :key_encryption_unavailable}
+  catch
+    _, _ -> {:error, :key_encryption_unavailable}
+  end
 
-  This is a public wrapper around the internal master key management
-  for use by the OIDC subsystem only.
-  """
-  @spec ensure_master_key_for_oidc() :: {:ok, binary()} | {:error, term()}
-  def ensure_master_key_for_oidc, do: ensure_master_key()
+  def encrypt_with_master(_, _), do: {:error, :invalid_master_key_operation}
+
+  @doc false
+  @spec decrypt_with_master(atom(), binary(), binary(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def decrypt_with_master(purpose, ciphertext, iv, tag)
+      when is_binary(ciphertext) and is_binary(iv) and is_binary(tag) do
+    if token_cache_owner_process?() and purpose == :oidc_token_cache do
+      with {:ok, key} <- purpose_key(purpose, :read) do
+        Crypto.decrypt(ciphertext, key, iv, tag)
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  rescue
+    _ -> {:error, :key_encryption_unavailable}
+  catch
+    _, _ -> {:error, :key_encryption_unavailable}
+  end
+
+  def decrypt_with_master(_, _, _, _), do: {:error, :invalid_master_key_operation}
+
+  @doc false
+  @spec authenticate_with_master(atom(), binary()) :: {:ok, binary()} | {:error, term()}
+  def authenticate_with_master(purpose, bytes) when is_binary(bytes) do
+    if master_key_owner_process?() do
+      with {:ok, key} <- purpose_key(purpose, :write) do
+        {:ok, :crypto.mac(:hmac, :sha256, key, bytes)}
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  end
+
+  def authenticate_with_master(_, _), do: {:error, :invalid_master_key_operation}
+
+  @doc false
+  @spec authenticate_with_master_from_supervisor(pid(), atom(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def authenticate_with_master_from_supervisor(supervisor, purpose, bytes)
+      when is_pid(supervisor) and is_binary(bytes) do
+    if Arbor.Security.MasterKeyAccessOwner.owner_process_from_supervisor?(supervisor) do
+      with {:ok, key} <- purpose_key(purpose, :write) do
+        {:ok, :crypto.mac(:hmac, :sha256, key, bytes)}
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  end
+
+  def authenticate_with_master_from_supervisor(_, _, _),
+    do: {:error, :invalid_master_key_operation}
+
+  @doc false
+  @spec verify_with_master(atom(), binary(), binary()) :: :ok | {:error, term()}
+  def verify_with_master(purpose, bytes, expected)
+      when is_binary(bytes) and is_binary(expected) do
+    if master_key_owner_process?() do
+      with {:ok, key} <- purpose_key(purpose, :read) do
+        actual = :crypto.mac(:hmac, :sha256, key, bytes)
+
+        if byte_size(actual) == byte_size(expected) and :crypto.hash_equals(actual, expected),
+          do: :ok,
+          else: {:error, :record_authentication_failed}
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  end
+
+  def verify_with_master(_, _, _), do: {:error, :invalid_master_key_operation}
+
+  @doc false
+  @spec verify_with_master_from_supervisor(pid(), atom(), binary(), binary()) ::
+          :ok | {:error, term()}
+  def verify_with_master_from_supervisor(supervisor, purpose, bytes, expected)
+      when is_pid(supervisor) and is_binary(bytes) and is_binary(expected) do
+    if Arbor.Security.MasterKeyAccessOwner.owner_process_from_supervisor?(supervisor) do
+      with {:ok, key} <- purpose_key(purpose, :read) do
+        actual = :crypto.mac(:hmac, :sha256, key, bytes)
+
+        if byte_size(actual) == byte_size(expected) and :crypto.hash_equals(actual, expected),
+          do: :ok,
+          else: {:error, :record_authentication_failed}
+      end
+    else
+      {:error, :master_key_access_unauthorized}
+    end
+  end
+
+  def verify_with_master_from_supervisor(_, _, _, _),
+    do: {:error, :invalid_master_key_operation}
 
   # -- Private --
 
+  defp owner_process?, do: Owner.owner_process?()
+  defp master_key_owner_process?, do: Arbor.Security.MasterKeyAccessOwner.owner_process?()
+  defp token_cache_owner_process?, do: Arbor.Security.OIDC.TokenCacheOwner.owner_process?()
+
+  defp purpose_key(purpose, mode) when mode in [:read, :write] do
+    with {:ok, info} <- Map.fetch(@master_key_purposes, purpose),
+         {:ok, master_key} <- master_key_for_mode(mode) do
+      {:ok, Crypto.derive_key(master_key, info, 32)}
+    else
+      :error -> {:error, :unsupported_master_key_purpose}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp purpose_key(_, _), do: {:error, :invalid_master_key_operation}
+
+  defp master_key_for_mode(:write), do: ensure_master_key()
+  defp master_key_for_mode(:read), do: read_master_key(master_key_path())
+
+  defp encryption_public_key(%{encryption: private_key}) when is_binary(private_key) do
+    {public_key, _private_key} = :crypto.generate_key(:ecdh, :x25519, private_key)
+    public_key
+  end
+
+  defp encryption_public_key(_), do: nil
+
   defp unwrap_record(%Record{data: data}), do: data
 
-  defp get_record(agent_id) do
-    if available?() do
+  defp get_record(agent_id, store_context \\ :application) do
+    if available?(store_context) do
       try do
-        AuthorityStore.authoritative_get(agent_id, name: @store_name)
+        case store_context do
+          :application ->
+            AuthorityStore.authoritative_get(agent_id, name: @store_name)
+
+          {:supervisor, supervisor} ->
+            AuthorityStore.authoritative_get_from_supervisor(
+              supervisor,
+              agent_id,
+              name: @store_name
+            )
+        end
       rescue
         _ -> {:error, :store_unavailable}
       catch
@@ -316,10 +879,24 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
-  defp acknowledged_put(key, %Record{} = record) do
-    if available?() do
+  defp acknowledged_put(key, %Record{} = record, store_context \\ :application) do
+    if available?(store_context) do
       try do
-        case AuthorityStore.acknowledged_put(key, record, name: @store_name) do
+        result =
+          case store_context do
+            :application ->
+              AuthorityStore.acknowledged_put(key, record, name: @store_name)
+
+            {:supervisor, supervisor} ->
+              AuthorityStore.acknowledged_put_from_supervisor(
+                supervisor,
+                key,
+                record,
+                name: @store_name
+              )
+          end
+
+        case result do
           {:ok, %Record{}} -> :ok
           {:error, :outcome_unknown} -> {:error, :outcome_unknown}
           {:error, reason} -> normalize_known_mutation_error(reason)
@@ -335,10 +912,23 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
-  defp acknowledged_delete(key) do
-    if available?() do
+  defp acknowledged_delete(key, store_context \\ :application) do
+    if available?(store_context) do
       try do
-        case AuthorityStore.acknowledged_delete(key, name: @store_name) do
+        result =
+          case store_context do
+            :application ->
+              AuthorityStore.acknowledged_delete(key, name: @store_name)
+
+            {:supervisor, supervisor} ->
+              AuthorityStore.acknowledged_delete_from_supervisor(
+                supervisor,
+                key,
+                name: @store_name
+              )
+          end
+
+        case result do
           :ok -> :ok
           {:error, :outcome_unknown} -> {:error, :outcome_unknown}
           {:error, reason} -> normalize_known_mutation_error(reason)
@@ -367,6 +957,11 @@ defmodule Arbor.Security.SigningKeyStore do
 
   defp normalize_known_mutation_error(_reason), do: {:error, :store_unavailable}
 
+  defp available?(:application), do: available?()
+
+  defp available?({:supervisor, supervisor}) when is_pid(supervisor),
+    do: is_pid(SupervisedOwner.child_pid(supervisor, @store_name))
+
   defp get_encryption_key do
     with {:ok, master_key} <- ensure_master_key() do
       {:ok, Crypto.derive_key(master_key, @key_derivation_info, 32)}
@@ -374,8 +969,15 @@ defmodule Arbor.Security.SigningKeyStore do
   end
 
   defp get_read_only_encryption_key do
-    with {:ok, master_key} <- read_master_key(master_key_path()) do
-      {:ok, Crypto.derive_key(master_key, @key_derivation_info, 32)}
+    case read_master_key(master_key_path()) do
+      {:ok, master_key} ->
+        {:ok, Crypto.derive_key(master_key, @key_derivation_info, 32)}
+
+      {:error, {:master_key_read_failed, :enoent}} ->
+        {:error, :master_key_missing}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

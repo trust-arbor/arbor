@@ -16,7 +16,7 @@ defmodule Arbor.Memory.HybridSearchTest do
   setup do
     DurableGraphAuthority.start!()
     agent = "agent_hybrid_#{System.unique_integer([:positive])}"
-    {:ok, cap} = Arbor.Security.grant(principal: agent, resource: "arbor://memory/search")
+    {:ok, cap} = Arbor.Security.grant_fixture(principal: agent, resource: "arbor://memory/search")
     assert {:ok, nil} = Memory.init_for_agent(agent, index_enabled: false, auto_embed: false)
 
     settings = [
@@ -103,7 +103,7 @@ defmodule Arbor.Memory.HybridSearchTest do
         {app, key, :error} -> Application.delete_env(app, key)
       end)
 
-      Arbor.Security.revoke(cap.id)
+      Arbor.Security.revoke_fixture(cap.id)
       :ets.delete(:arbor_memory_graphs, agent)
     end)
 
@@ -187,12 +187,12 @@ defmodule Arbor.Memory.HybridSearchTest do
     caller = "agent_hybrid_delegate_#{System.unique_integer([:positive])}"
 
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: caller,
                resource: "arbor://memory/search/#{ctx.agent}"
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
 
     assert {:ok, %{results: [result]}} =
              Memory.authorize_hybrid_search(caller, ctx.agent, "restart only crashed child")
@@ -424,7 +424,7 @@ defmodule Arbor.Memory.HybridSearchTest do
     Agent.update(ctx.backend, fn _ -> :held end)
     task = Task.async(fn -> search(ctx, "restart only crashed child") end)
     assert_receive {:embedding_http, worker, "POST", _}, 5_000
-    assert :ok = Arbor.Security.revoke(ctx.cap.id)
+    assert :ok = Arbor.Security.revoke_fixture(ctx.cap.id)
     send(worker, :release)
     assert {:error, {:unauthorized, _}} = Task.await(task, 10_000)
     refute_receive {:embedding_http, _, _, _}

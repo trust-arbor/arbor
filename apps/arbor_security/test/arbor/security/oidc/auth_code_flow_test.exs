@@ -50,6 +50,17 @@ defmodule Arbor.Security.OIDC.AuthCodeFlowTest do
     end
   end
 
+  describe "generate_nonce/0" do
+    test "returns unique bounded base64url values" do
+      nonce1 = AuthCodeFlow.generate_nonce()
+      nonce2 = AuthCodeFlow.generate_nonce()
+
+      assert is_binary(nonce1)
+      assert byte_size(nonce1) in 1..1_024
+      refute nonce1 == nonce2
+    end
+  end
+
   # These replace the previous pair of tests that resolved
   # "https://nonexistent.arbor-test-oidc.invalid" — those depended on live DNS.
   # The preserved {:http_request_failed, _} error family is still asserted, now
@@ -145,6 +156,36 @@ defmodule Arbor.Security.OIDC.AuthCodeFlowTest do
       assert query["code_challenge_method"] == "S256"
       # Historical default scopes.
       assert query["scope"] == "openid email profile"
+    end
+
+    test "security regression: binds a caller nonce into the authorization request", %{
+      provider: provider
+    } do
+      nonce = AuthCodeFlow.generate_nonce()
+
+      assert {:ok, url, _verifier} =
+               AuthCodeFlow.build_authorize_url(
+                 provider,
+                 "http://127.0.0.1:1/cb",
+                 "state123",
+                 nonce: nonce
+               )
+
+      query = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert query["nonce"] == nonce
+    end
+
+    test "security regression: nonce cannot be supplied through two option paths", %{
+      provider: provider
+    } do
+      assert {:error, {:invalid_extra_query, {:reserved_key, "nonce"}}} =
+               AuthCodeFlow.build_authorize_url(
+                 provider,
+                 "http://127.0.0.1:1/cb",
+                 "state123",
+                 nonce: "bound-nonce",
+                 extra_query: [{"nonce", "different-nonce"}]
+               )
     end
 
     test "accepts the production provider shape and uses its configured scopes", %{

@@ -4,12 +4,34 @@ defmodule Arbor.Gateway.Bridge.RouterTest do
   import Plug.Conn
 
   alias Arbor.Gateway.Bridge.Router
+  alias Arbor.Gateway.Bridge.ClaudeSession
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security
 
   @moduletag :fast
 
   defmodule UnavailableTrust do
     def get_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
     def create_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+  end
+
+  defmodule RecordingTrust do
+    use Agent
+
+    def start_link(_opts), do: Agent.start_link(fn -> %{} end, name: __MODULE__)
+    def reset, do: Agent.update(__MODULE__, fn _ -> %{} end)
+    def get_trust_profile(id), do: Agent.get(__MODULE__, &Map.fetch(&1, id))
+
+    def create_trust_profile(id) do
+      Agent.get_and_update(__MODULE__, fn profiles ->
+        if Map.has_key?(profiles, id) do
+          {{:error, :already_exists}, profiles}
+        else
+          profile = %{agent_id: id}
+          {{:ok, profile}, Map.put(profiles, id, profile)}
+        end
+      end)
+    end
   end
 
   @opts Router.init([])
@@ -19,6 +41,11 @@ defmodule Arbor.Gateway.Bridge.RouterTest do
   @parsers_opts Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
 
   setup do
+    case start_supervised(RecordingTrust) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> RecordingTrust.reset()
+    end
+
     previous = Application.get_env(:arbor_gateway, :trust_module)
     Application.put_env(:arbor_gateway, :trust_module, UnavailableTrust)
 
@@ -27,6 +54,60 @@ defmodule Arbor.Gateway.Bridge.RouterTest do
         do: Application.put_env(:arbor_gateway, :trust_module, previous),
         else: Application.delete_env(:arbor_gateway, :trust_module)
     end)
+  end
+
+  test "security regression: ambient bridge registration cannot mint a session" do
+    Application.put_env(:arbor_gateway, :trust_module, RecordingTrust)
+    session_id = "ambient-denied-#{System.unique_integer([:positive])}"
+    agent_id = ClaudeSession.to_agent_id(session_id)
+
+    assert {:error, :capability_mutation_unauthorized} =
+             ClaudeSession.ensure_registered(session_id, "/tmp")
+
+    assert {:error, :not_found} = RecordingTrust.get_trust_profile(agent_id)
+    assert {:ok, []} = Security.list_capabilities(agent_id)
+  end
+
+  test "security regression: authenticated first bridge tool call registers and is usable" do
+    Application.put_env(:arbor_gateway, :trust_module, RecordingTrust)
+    {:ok, actor} = Identity.generate(name: "bridge-registration-actor")
+    :ok = Security.register_identity_fixture(actor)
+    :ok = Security.store_signing_key_fixture(actor.agent_id, actor.private_key)
+
+    {:ok, _} =
+      Security.grant_fixture(
+        principal: actor.agent_id,
+        resource: "arbor://security/grant/**"
+      )
+
+    session_id = "authorized-first-#{System.unique_integer([:positive])}"
+    agent_id = ClaudeSession.to_agent_id(session_id)
+
+    on_exit(fn ->
+      Security.revoke_all_fixture(actor.agent_id)
+      Security.revoke_all_fixture(agent_id)
+      Security.delete_signing_key_fixture(actor.agent_id)
+      Security.deregister_identity_fixture(actor.agent_id)
+    end)
+
+    body =
+      Jason.encode!(%{
+        session_id: session_id,
+        tool_name: "Read",
+        tool_input: %{file_path: "/tmp/bridge-first-use"},
+        cwd: "/tmp"
+      })
+
+    conn =
+      parsed_post("/authorize_tool", body)
+      |> assign(:agent_id, actor.agent_id)
+      |> Router.call(@opts)
+
+    assert conn.status == 200
+    assert %{"decision" => "allow"} = Jason.decode!(conn.resp_body)
+    assert {:ok, _profile} = RecordingTrust.get_trust_profile(agent_id)
+    assert {:ok, capabilities} = Security.list_capabilities(agent_id)
+    assert capabilities != []
   end
 
   defp parsed_post(path, body) do

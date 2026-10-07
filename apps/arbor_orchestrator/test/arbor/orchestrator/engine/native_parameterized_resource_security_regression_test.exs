@@ -81,7 +81,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     assert Arbor.Trust.effective_mode(principal, @resource) == :allow
 
     on_exit(fn ->
-      Security.revoke_by_task(task)
+      Security.revoke_by_task_fixture(task)
       Arbor.Trust.delete_trust_profile(principal)
     end)
 
@@ -126,7 +126,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
                session_id: c.session
              )
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
   end
 
   test "security regression: sibling and coarse grants never authorize the resolved resource",
@@ -140,7 +140,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
       assert result.final_outcome.status == :fail
       assert result.final_outcome.failure_reason =~ "native_action_preflight_refused"
       refute_received {:native_resource_probe_ran, _}
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
     end
 
     assert {:ok, no_grant} = Arbor.Orchestrator.run(dot("allowed", "valid"), c.opts)
@@ -210,7 +210,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
       assert {:ok, result} = Arbor.Orchestrator.run(facade_dot(), opts)
       assert result.final_outcome.status == :fail
       refute_received {:native_resource_probe_ran, _}
-      if cap, do: Security.revoke(cap.id)
+      if cap, do: Security.revoke_fixture(cap.id)
     end
 
     grant!(c, @resource)
@@ -275,8 +275,8 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     grant!(c, @resource)
     opts = pinned_facade_opts!(Keyword.delete(c.opts, :conversation_source))
     alias Arbor.Orchestrator.Handlers.Registry
-    handlers = Registry.snapshot_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(handlers) end)
+    handlers = Registry.snapshot_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(handlers) end)
 
     assert {:error, {:unbound_authorized_override, :actions_executor}} =
              Arbor.Orchestrator.run(
@@ -287,16 +287,19 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     refute_received :custom_facade_executor_effect
     refute_received {:native_resource_probe_ran, _}
 
-    :ok = Registry.register("exec", NativeResourceCustomExecHandler)
+    :ok = Registry.register_fixture("exec", NativeResourceCustomExecHandler)
 
     assert {:error, {:unbound_custom_handler, "effect"}} =
              Arbor.Orchestrator.run(facade_dot(), opts)
 
-    :ok = Registry.unregister("exec")
+    :ok = Registry.unregister_fixture("exec")
 
     on_event = fn
-      %{type: :pipeline_started} -> Registry.register("exec", NativeResourceCustomExecHandler)
-      _ -> :ok
+      %{type: :pipeline_started} ->
+        Registry.register_fixture("exec", NativeResourceCustomExecHandler)
+
+      _ ->
+        :ok
     end
 
     assert {:ok, handler_denied} =
@@ -460,7 +463,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
 
   defp grant!(c, resource, options \\ []) do
     assert {:ok, cap} =
-             Security.grant(
+             Security.grant_fixture(
                Keyword.merge(
                  [
                    principal: c.principal,

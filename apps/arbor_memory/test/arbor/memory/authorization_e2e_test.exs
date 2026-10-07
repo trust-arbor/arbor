@@ -84,7 +84,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       {:ok, _} = Arbor.Memory.init_for_agent(agent_id)
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/read/#{agent_id}"
         )
@@ -122,7 +122,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       {:ok, _} = Arbor.Memory.init_for_agent(agent_id)
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/write/#{agent_id}"
         )
@@ -183,7 +183,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       })
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/search/#{agent_id}"
         )
@@ -208,7 +208,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       {:ok, _} = Arbor.Memory.init_for_agent(agent_id)
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/write/#{agent_id}"
         )
@@ -236,7 +236,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       Arbor.Memory.index(agent_id, "important recall fact", %{type: :fact})
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/read/#{agent_id}"
         )
@@ -261,7 +261,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       {:ok, _} = Arbor.Memory.init_for_agent(agent_id, graph_enabled: true)
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/write/#{agent_id}"
         )
@@ -290,7 +290,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       caller = unique_caller()
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/init/#{agent_id}"
         )
@@ -334,7 +334,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       {:ok, _} = Arbor.Memory.init_for_agent(agent_id)
 
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/cleanup/#{agent_id}"
         )
@@ -380,7 +380,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
       # Grant caller read access to agent_a ONLY
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/read/#{agent_a}"
         )
@@ -413,7 +413,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       caller: caller
     } do
       {:ok, _} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/write/#{agent_a}"
         )
@@ -437,7 +437,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       caller: caller
     } do
       {:ok, _} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/search/#{agent_a}"
         )
@@ -465,7 +465,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
       # Grant wildcard read: arbor://memory/read/**
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/read/**"
         )
@@ -512,7 +512,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
       # Grant wildcard write
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://memory/write/**"
         )
@@ -560,7 +560,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
       # arbor://** is the root wildcard — grants access to ALL resources
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: caller,
           resource: "arbor://**"
         )
@@ -658,7 +658,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
       # Grant all necessary capabilities for the lifecycle
       for action <- ["init", "read", "write", "cleanup"] do
         {:ok, _} =
-          Arbor.Security.grant(
+          Arbor.Security.grant_fixture(
             principal: caller,
             resource: "arbor://memory/#{action}/#{agent_id}"
           )

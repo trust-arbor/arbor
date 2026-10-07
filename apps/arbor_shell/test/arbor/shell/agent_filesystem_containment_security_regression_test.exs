@@ -40,14 +40,16 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
     File.write!(Path.join(cwd, "input"), "permitted-data")
     File.write!(Path.join(root, "outside"), "outside-data")
     {:ok, identity} = Security.generate_identity(name: "synthetic-shell-containment")
-    :ok = Security.register_identity(identity)
-    {:ok, _} = Security.grant(principal: identity.agent_id, resource: "arbor://shell/exec/**")
+    :ok = Security.register_identity_fixture(identity)
+
+    {:ok, _} =
+      Security.grant_fixture(principal: identity.agent_id, resource: "arbor://shell/exec/**")
 
     on_exit(fn ->
       Application.put_env(:arbor_shell, :agent_authorizer, old)
       {:ok, caps} = Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(root)
     end)
 
@@ -104,13 +106,13 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
 
   test "security regression: revoked read grant cannot be reused", c do
     cap = grant(c, :read)
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:error, _} = Shell.authorize_and_execute(c.agent, "cat input", cwd: c.cwd)
   end
 
   test "security regression: global grants and caller supplied allow paths do not widen scope",
        c do
-    {:ok, _} = Security.grant(principal: c.agent, resource: "arbor://fs/**")
+    {:ok, _} = Security.grant_fixture(principal: c.agent, resource: "arbor://fs/**")
 
     assert {:error, _} =
              Shell.authorize_and_execute(c.agent, "cat input",
@@ -151,7 +153,7 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
   test "security regression: another directory grant and unsupported wildcard shapes cannot authorize cwd",
        c do
     for uri <- ["arbor://fs/read#{c.root}/outside/**", "arbor://fs/read#{c.cwd}/*"] do
-      {:ok, _} = Security.grant(principal: c.agent, resource: uri)
+      {:ok, _} = Security.grant_fixture(principal: c.agent, resource: uri)
     end
 
     assert {:error, _} = Shell.authorize_and_execute(c.agent, "cat input", cwd: c.cwd)
@@ -221,7 +223,7 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
 
   defp grant(c, operation) do
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: c.agent,
         resource: "arbor://fs/#{operation}#{c.cwd}/**"
       )

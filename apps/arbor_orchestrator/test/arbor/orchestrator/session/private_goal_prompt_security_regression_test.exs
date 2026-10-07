@@ -355,7 +355,7 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
       )
 
     assert matches != []
-    Enum.each(matches, fn cap -> assert :ok = Security.revoke(cap.id) end)
+    Enum.each(matches, fn cap -> assert :ok = Security.revoke_fixture(cap.id) end)
   end
 
   defp grant_execution!(owner) do
@@ -365,8 +365,10 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
           "arbor://orchestrator/execute/unknown",
           "arbor://orchestrator/execute/transform"
         ] do
-      assert {:ok, cap} = Security.grant(principal: owner.agent.agent_id, resource: resource)
-      on_exit(fn -> Security.revoke(cap.id) end)
+      assert {:ok, cap} =
+               Security.grant_fixture(principal: owner.agent.agent_id, resource: resource)
+
+      on_exit(fn -> Security.revoke_fixture(cap.id) end)
     end
   end
 

@@ -2,15 +2,15 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   @moduledoc """
   Integration tests for Trust-Capability synchronization.
 
-  These tests verify that the explicit, lifecycle-driven capability sync
-  (`CapabilitySync.sync_capabilities/1` and freeze handling) grants/revokes
-  signed capabilities through the Security facade.
+  These tests verify that explicit, caller-authorized capability sync
+  (`CapabilitySync.sync_capabilities/2`) grants signed capabilities through
+  the Security facade. Trust events themselves are observability-only.
 
   They also pin the tier-minting kill sweep (P0 gate #1): recording trust
   events through the public Manager API must NOT move tier or mint capabilities
   via a second authority path.
 
-  Uses CapabilitySync.sync_capabilities/1 directly since we don't
+  Uses CapabilitySync.sync_capabilities/2 directly since we don't
   have PubSub set up in tests.
   """
   use ExUnit.Case, async: false
@@ -22,6 +22,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   alias Arbor.Trust.EventStore
   alias Arbor.Trust.Manager
   alias Arbor.Trust.Store
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @moduletag :integration
 
@@ -49,20 +50,24 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
     # Unique agent ID for each test
     agent_id = "agent_sync_test_#{:erlang.unique_integer([:positive])}"
+    {actor_identity, actor_authority} = actor_authority!()
 
-    {:ok, agent_id: agent_id}
+    {:ok, agent_id: agent_id, actor_identity: actor_identity, actor_authority: actor_authority}
   end
 
   describe "tier-minting kill sweep (P0 gate #1) — security regression" do
     test "recording many approvals never mints capabilities", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      actor_authority: actor_authority
     } do
       # Profile starts with the creation baseline.
       {:ok, profile} = Trust.create_trust_profile(agent_id)
       assert profile.baseline == :ask
 
       # Establish a deterministic baseline capability set (the creation grant).
-      {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
+      {:ok, _} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, baseline_caps} = Security.list_capabilities(agent_id)
       baseline_ids = MapSet.new(baseline_caps, & &1.id)
 
@@ -97,13 +102,16 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
   describe "sync_capabilities grants signed capabilities" do
     test "syncing grants baseline capabilities with valid signatures", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      actor_authority: actor_authority
     } do
       {:ok, profile} = Trust.create_trust_profile(agent_id)
       assert profile.baseline == :ask
 
       # Sync capabilities
-      {:ok, result} = CapabilitySync.sync_capabilities(agent_id)
+      {:ok, result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       assert result.granted >= 0 or result.existing >= 0
 
       # Check capabilities were granted
@@ -120,9 +128,16 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       end
     end
 
-    test "synced capabilities have system authority as issuer", %{agent_id: agent_id} do
+    test "synced capabilities record their caller and have system authority as issuer", %{
+      agent_id: agent_id,
+      actor_identity: actor_identity,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       system_authority_id = SystemAuthority.agent_id()
@@ -130,14 +145,22 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       for cap <- caps do
         assert cap.issuer_id == system_authority_id,
                "Capability should be signed by system authority"
+
+        assert cap.metadata["granter_id"] == actor_identity.agent_id
       end
     end
   end
 
   describe "synced capabilities work for authorization" do
-    test "synced capabilities can be used for authorize/4", %{agent_id: agent_id} do
+    test "synced capabilities can be used for authorize/4", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       # At least one capability should authorize successfully
@@ -147,9 +170,15 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       end
     end
 
-    test "synced capabilities work with can?/3", %{agent_id: agent_id} do
+    test "synced capabilities work with can?/3", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       if caps != [] do
@@ -160,9 +189,15 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   end
 
   describe "capability signature verification" do
-    test "synced capability signatures are valid", %{agent_id: agent_id} do
+    test "synced capability signatures are valid", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       for cap <- caps do
@@ -171,9 +206,15 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       end
     end
 
-    test "tampered synced capability fails verification", %{agent_id: agent_id} do
+    test "tampered synced capability fails verification", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _result} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       if caps != [] do
@@ -187,12 +228,21 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   end
 
   describe "freeze/unfreeze flow" do
-    test "frozen agent loses explicit write capability after sync", %{agent_id: agent_id} do
+    test "freeze event does not revoke without an authenticated caller", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, _profile} = Trust.create_trust_profile(agent_id)
 
       # Grant an explicit write capability outside of templates
       resource = "arbor://fs/write/explicit_#{:erlang.unique_integer([:positive])}"
-      {:ok, cap} = Security.grant(principal: agent_id, resource: resource)
+
+      {:ok, cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          actor_authority: actor_authority
+        )
 
       # Verify it works
       assert {:ok, :authorized} = Security.authorize(agent_id, resource)
@@ -200,17 +250,24 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       # Freeze trust
       :ok = Trust.freeze_trust(agent_id, :test_freeze)
 
-      # Revoke the explicit capability (simulating what CapabilitySync.handle_trust_frozen does)
-      # The sync_capabilities call grants template caps, but the freeze handler revokes non-readonly
-      :ok = Security.revoke(cap.id)
+      # The broadcast trust event carries no authenticated mutation authority.
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+
+      :ok = Security.revoke(cap.id, actor_authority: actor_authority)
 
       # Explicit grant should be revoked now
       assert {:error, :unauthorized} = Security.authorize(agent_id, resource)
     end
 
-    test "unfrozen agent regains baseline capabilities", %{agent_id: agent_id} do
+    test "an authenticated caller can resync baseline capabilities after unfreeze", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       {:ok, profile} = Trust.create_trust_profile(agent_id)
-      {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
+
       {:ok, caps_before} = Security.list_capabilities(agent_id)
 
       # Freeze
@@ -218,7 +275,9 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       # Unfreeze
       :ok = Trust.unfreeze_trust(agent_id)
-      {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
+
+      {:ok, _} =
+        CapabilitySync.sync_capabilities(agent_id, actor_authority: actor_authority)
 
       {:ok, caps_after} = Security.list_capabilities(agent_id)
 

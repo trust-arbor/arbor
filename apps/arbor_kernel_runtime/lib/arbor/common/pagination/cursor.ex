@@ -46,7 +46,7 @@ defmodule Arbor.Common.Pagination.Cursor do
   @spec parse(String.t()) :: {:ok, {integer(), String.t()}} | :error
   def parse(cursor) when is_binary(cursor) do
     case String.split(cursor, ":", parts: 2) do
-      [timestamp_str, id] ->
+      [timestamp_str, id] when byte_size(id) > 0 ->
         case Integer.parse(timestamp_str) do
           {timestamp_ms, ""} -> {:ok, {timestamp_ms, id}}
           _ -> :error
@@ -75,7 +75,7 @@ defmodule Arbor.Common.Pagination.Cursor do
     precision = Keyword.get(opts, :precision, :millisecond)
 
     case String.split(cursor, ":", parts: 2) do
-      [timestamp_str, id] ->
+      [timestamp_str, id] when byte_size(id) > 0 ->
         parse_datetime_parts(timestamp_str, id, precision)
 
       _ ->
@@ -183,7 +183,7 @@ defmodule Arbor.Common.Pagination.Cursor do
         end)
 
       :error ->
-        records
+        []
     end
   end
 
@@ -224,7 +224,7 @@ defmodule Arbor.Common.Pagination.Cursor do
         end)
 
       :error ->
-        records
+        []
     end
   end
 

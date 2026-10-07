@@ -8,7 +8,7 @@ defmodule Mix.Tasks.Arbor.Start do
 
   The server runs in the background with:
   - Node name: `arbor_dev@localhost` (or `arbor_dev@<ip>` with ARBOR_NODE_HOST)
-  - Cookie: from ARBOR_COOKIE env var
+  - Cookie: loaded from a private `~/.arbor/distribution/.erlang.cookie`
   - Logs: `~/.arbor/logs/arbor-dev.log`
   - PID file: `~/.arbor/arbor-dev.pid`
   - Metadata: `~/.arbor/arbor-dev.meta.json` (persisted node/host/pid identity)
@@ -240,12 +240,31 @@ defmodule Mix.Tasks.Arbor.Start do
     node = Config.node_atom(node_string)
     cookie_string = Config.cookie() |> Atom.to_string()
 
-    # Inherit the full environment so API keys, PATH, etc. are available.
-    # Only override MIX_ENV explicitly.
-    env =
-      System.get_env()
-      |> Map.put("MIX_ENV", to_string(Mix.env()))
-      |> Enum.to_list()
+    cookie_home =
+      case Config.prepare_distribution_cookie(cookie_string) do
+        {:ok, path} ->
+          path
+
+        {:error, reason} ->
+          Mix.shell().error(
+            "Failed to prepare the private distribution cookie: #{inspect(reason)}"
+          )
+
+          exit({:shutdown, 1})
+      end
+
+    bootstrap_path = Config.runtime_bootstrap_file(project_dir)
+
+    unless File.regular?(bootstrap_path) do
+      Mix.shell().error("Runtime HOME bootstrap is missing at #{bootstrap_path}")
+      exit({:shutdown, 1})
+    end
+
+    # Preserve provider/application settings while removing every Erlang flag
+    # injection channel. Prepend the real Erlang bin because the launcher uses
+    # a private HOME during VM boot and version-manager shims can otherwise
+    # resolve a different toolchain from that temporary HOME.
+    env = daemon_env(System.get_env(), Mix.env(), Config.erlang_bin_dir())
 
     case spawn_daemon_process(%{
            project_dir: project_dir,
@@ -253,7 +272,9 @@ defmodule Mix.Tasks.Arbor.Start do
            mix_path: mix_path,
            name_flag: name_flag,
            node_string: node_string,
-           cookie: cookie_string,
+           cookie_home: cookie_home,
+           bind_mode: Config.distribution_bind_mode(host),
+           bootstrap_path: bootstrap_path,
            log_file: log_file,
            env: env
          }) do
@@ -325,20 +346,59 @@ defmodule Mix.Tasks.Arbor.Start do
         elixir_path: elixir_path,
         name_flag: name_flag,
         node_string: node_string,
-        cookie: cookie,
+        cookie_home: cookie_home,
+        bind_mode: bind_mode,
+        bootstrap_path: bootstrap_path,
         mix_path: mix_path,
         log_file: log_file
       })
       when is_binary(elixir_path) and is_binary(name_flag) and is_binary(node_string) and
-             is_binary(cookie) and is_binary(mix_path) and is_binary(log_file) do
-    if Enum.any?([elixir_path, name_flag, node_string, cookie, mix_path, log_file], &(&1 == "")) do
-      {:error, :empty_launch_argument}
-    else
-      {:ok, [elixir_path, name_flag, node_string, cookie, mix_path, log_file]}
+             is_binary(cookie_home) and is_binary(bind_mode) and is_binary(bootstrap_path) and
+             is_binary(mix_path) and is_binary(log_file) do
+    values = [
+      elixir_path,
+      name_flag,
+      node_string,
+      cookie_home,
+      bind_mode,
+      bootstrap_path,
+      mix_path,
+      log_file
+    ]
+
+    cond do
+      Enum.any?(values, &(&1 == "")) ->
+        {:error, :empty_launch_argument}
+
+      bind_mode not in ["default", "loopback_v4", "loopback_v6"] ->
+        {:error, :invalid_distribution_bind_mode}
+
+      true ->
+        {:ok, values}
     end
   end
 
   def daemon_launch_argv(_), do: {:error, :invalid_launch_spec}
+
+  @doc false
+  @spec daemon_env(map(), atom() | String.t(), String.t()) ::
+          [{String.t(), String.t() | nil}]
+  def daemon_env(environment, mix_env, erlang_bin_dir)
+      when is_map(environment) and is_binary(erlang_bin_dir) do
+    current_path = Map.get(environment, "PATH", "")
+
+    environment =
+      environment
+      |> Map.put("MIX_ENV", to_string(mix_env))
+      |> Map.put("PATH", prepend_path(erlang_bin_dir, current_path))
+
+    Config.blocked_vm_flag_env()
+    |> Enum.reduce(environment, fn key, acc -> Map.put(acc, key, nil) end)
+    |> Enum.to_list()
+  end
+
+  defp prepend_path(dir, ""), do: dir
+  defp prepend_path(dir, path), do: dir <> ":" <> path
 
   @doc false
   @spec resolve_daemon_launcher(String.t()) :: {:ok, String.t()} | {:error, term()}

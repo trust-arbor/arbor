@@ -58,14 +58,14 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     assert :ok = Security.register_oidc_identity(human.identity, human.id_token, human.provider)
 
     assert {:ok, cap} =
-             Security.grant(
+             Security.grant_fixture(
                principal: human.identity.agent_id,
                resource: "arbor://chat/agent/" <> agent_id
              )
 
     on_exit(fn ->
-      Security.revoke(cap.id)
-      Security.deregister_identity(human.identity.agent_id)
+      Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(human.identity.agent_id)
       human.cleanup.()
     end)
 

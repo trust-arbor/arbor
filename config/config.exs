@@ -5,7 +5,60 @@ import Config
 config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin]
 
 # Common configuration for all Arbor apps
-config :arbor_security, :native_notice_source_authorizer, Arbor.Agent.NoticeSourceAuthority
+config :arbor_security,
+  native_notice_source_authorizer: Arbor.Agent.NoticeSourceAuthority,
+  authority_audit_consumer_name: Arbor.Historian.AuthorityAuditPuller,
+  authority_audit_consumer_application: :arbor_historian,
+  approval_receipt_issuer_owner: %{
+    application: :arbor_trust,
+    path: [Arbor.Trust.Supervisor, Arbor.Trust.ConfirmationTracker],
+    registered_name: Arbor.Trust.ConfirmationTracker
+  },
+  uri_registration_providers: [Arbor.Actions],
+  signing_key_owner_roles: %{
+    profile_owner: %{
+      application: :arbor_agent,
+      path: [Arbor.Agent.ProfileAuthorityOwner],
+      registered_name: Arbor.Agent.ProfileAuthorityOwner,
+      purposes: [:session, :heartbeat, :action_cycle]
+    },
+    scheduler_owner: %{
+      application: :arbor_scheduler,
+      path: [Arbor.Scheduler.RuntimeSupervisor, Arbor.Scheduler.Identity],
+      registered_name: Arbor.Scheduler.Identity,
+      purposes: [:scheduler]
+    },
+    trust_grant_owner: %{
+      application: :arbor_trust,
+      path: [Arbor.Trust.Supervisor, Arbor.Trust.CapabilityGrantOwner],
+      registered_name: Arbor.Trust.CapabilityGrantOwner,
+      purposes: [:trust_capability_grant]
+    },
+    gateway_bridge_owner: %{
+      application: :arbor_gateway,
+      path: [Arbor.Gateway.Bridge.RegistrationAuthority],
+      registered_name: Arbor.Gateway.Bridge.RegistrationAuthority,
+      purposes: [:gateway_claude_bridge]
+    },
+    system_authority: %{
+      application: :arbor_security,
+      path: [Arbor.Security.SystemAuthority],
+      registered_name: Arbor.Security.SystemAuthority,
+      purposes: []
+    },
+    signing_broker: %{
+      application: :arbor_security,
+      path: [Arbor.Security.SigningAuthorityBroker],
+      registered_name: Arbor.Security.SigningAuthorityBroker,
+      purposes: []
+    },
+    channel_broker: %{
+      application: :arbor_security,
+      path: [Arbor.Security.ChannelAuthorityBroker],
+      registered_name: Arbor.Security.ChannelAuthorityBroker,
+      purposes: []
+    }
+  }
 
 config :logger,
   level: :info
@@ -176,10 +229,14 @@ config :arbor_kernel,
     security_sync_subscribers: %{
       nonce_cache: %{
         owner: Arbor.Security.Identity.NonceCache,
+        supervisor: {:application, :arbor_security},
+        child_id: Arbor.Security.Identity.NonceCache,
         events: [:nonce_seen]
       },
       capability_store: %{
         owner: Arbor.Security.CapabilityStore,
+        supervisor: {:application, :arbor_security},
+        child_id: Arbor.Security.CapabilityStore,
         events: [
           :capability_granted,
           :capability_revoked,
@@ -190,6 +247,8 @@ config :arbor_kernel,
       },
       identity_registry: %{
         owner: Arbor.Security.Identity.Registry,
+        supervisor: {:application, :arbor_security},
+        child_id: Arbor.Security.Identity.Registry,
         events: [
           :identity_registered,
           :identity_deregistered,

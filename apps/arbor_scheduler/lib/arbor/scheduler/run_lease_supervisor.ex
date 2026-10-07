@@ -10,13 +10,15 @@ defmodule Arbor.Scheduler.RunLeaseSupervisor do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    scheduler_mutation_token = Keyword.fetch!(opts, :scheduler_mutation_token)
+
     children = [
-      RunLease.StateOwner,
+      {RunLease.StateOwner, scheduler_mutation_token: scheduler_mutation_token},
       RunLease.Store,
       {Registry, keys: :unique, name: RunLease.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: RunLease.DynamicSupervisor},
-      RunLease.Reconciler
+      {RunLease.Reconciler, scheduler_mutation_token: scheduler_mutation_token}
     ]
 
     # A StateOwner failure legitimately restarts all five children. OTP counts

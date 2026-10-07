@@ -71,7 +71,7 @@ defmodule Arbor.Shell.OwnedTreeTest do
     File.write!(marker, "keep")
 
     wrong_identity = Map.update!(identity, :minor_device, &(&1 + 1))
-    assert {:error, :cleanup_identity_mismatch} = Shell.remove_owned_tree(wrong_identity)
+    assert {:error, :owned_tree_not_registered} = Shell.remove_owned_tree(wrong_identity)
     assert File.read!(marker) == "keep"
 
     assert :ok = Shell.remove_owned_tree(identity)

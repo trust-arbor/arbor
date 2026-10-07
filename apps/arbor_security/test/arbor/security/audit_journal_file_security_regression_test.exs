@@ -211,7 +211,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     File.ln_s!(outside_real, link)
     path = Path.join(link, "audit_journal.v1.log")
 
-    assert {:error, :symlink_rejected} = AuditJournalFile.open(root: root, path: path)
+    assert {:error, :path_escape} = AuditJournalFile.open(root: root, path: path)
   end
 
   test "security regression: post-sync minor-device mismatch is commit_uncertain", %{

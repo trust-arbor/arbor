@@ -122,9 +122,10 @@ defmodule Arbor.Scheduler.RunIdentity do
          {:ok, lease} <-
            RunLease.start(
              self(),
+             attestation,
              [security_facade: security, trust_facade: trust, ttl_ms: ttl_ms] ++ cleanup_opts
            ) do
-      provision(attestation, lease, security, trust, ttl_ms)
+      provision(attestation, lease, security, trust)
     end
   end
 
@@ -150,9 +151,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   # Internals
   # ===========================================================================
 
-  defp provision(attestation, lease, security, trust, ttl_ms) do
-    expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
-
+  defp provision(attestation, lease, security, trust) do
     result =
       with {:ok, identity} <- security.generate_identity(name: identity_name()),
            :ok <- register_identity(lease, identity, security),
@@ -162,11 +161,10 @@ defmodule Arbor.Scheduler.RunIdentity do
                security,
                identity.agent_id,
                @orchestrator_execute_uri,
-               expires_at,
                []
              ),
            {:ok, run_caps} <-
-             grant_run_caps(lease, security, identity.agent_id, attestation, expires_at),
+             grant_run_caps(lease, security, identity.agent_id, attestation),
            :ok <- set_trust_profile_rules(trust, identity.agent_id, attestation.capabilities),
            {:ok, authority} <- open_authority(lease, identity, security) do
         {:ok,
@@ -197,12 +195,11 @@ defmodule Arbor.Scheduler.RunIdentity do
   end
 
   defp register_identity(lease, identity, security) do
-    public_identity = Arbor.Contracts.Security.Identity.public_only(identity)
-    RunLease.register_identity(lease, public_identity, security)
+    RunLease.register_identity(lease, identity, security)
   end
 
-  defp grant_capability(lease, security, agent_id, resource, expires_at, extra_opts) do
-    opts = [principal: agent_id, resource: resource, expires_at: expires_at] ++ extra_opts
+  defp grant_capability(lease, security, agent_id, resource, extra_opts) do
+    opts = [principal: agent_id, resource: resource] ++ extra_opts
 
     RunLease.grant_capability(lease, opts, security)
   end
@@ -210,34 +207,15 @@ defmodule Arbor.Scheduler.RunIdentity do
   defp open_authority(lease, identity, security),
     do: RunLease.open_authority(lease, identity, security)
 
-  defp grant_run_caps(lease, security, agent_id, attestation, expires_at) do
+  defp grant_run_caps(lease, security, agent_id, attestation) do
     attestation.capabilities
     |> Enum.reduce_while({:ok, []}, fn descriptor, {:ok, acc} ->
-      # Provenance records that this cap was minted from a verified signed
-      # envelope. `AuthDecision.check_approval` consults this metadata to
-      # bypass the security ceiling :ask gate for parameter-bounded caps on
-      # the "askable" URI classes (fs/write, code/write, file.* actions).
-      # Always-locked URIs (shell, governance, code.hot_load) ignore this
-      # marker — pre-approval can't unlock parameter-unbounded blast radius.
-      metadata = %{
-        provenance: %{
-          source: :caps_file,
-          manifest_version: attestation.version,
-          issuer_id: attestation.issuer_id,
-          pipeline_root: attestation.pipeline_root,
-          pipeline_path: attestation.pipeline_path,
-          graph_hash: attestation.graph_hash
-        }
-      }
-
       case grant_capability(
              lease,
              security,
              agent_id,
              descriptor.resource_uri,
-             expires_at,
-             constraints: descriptor.constraints,
-             metadata: metadata
+             constraints: descriptor.constraints
            ) do
         {:ok, cap} ->
           {:cont, {:ok, [cap | acc]}}

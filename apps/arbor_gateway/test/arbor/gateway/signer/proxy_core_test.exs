@@ -92,7 +92,8 @@ defmodule Arbor.Gateway.Signer.ProxyCoreTest do
       private_key_b64=#{Base.encode64(:crypto.strong_rand_bytes(32))}
       """
 
-      assert {:error, {:invalid_agent_id, "system_authority"}} = ProxyCore.parse_key_file(contents)
+      assert {:error, {:invalid_agent_id, "system_authority"}} =
+               ProxyCore.parse_key_file(contents)
     end
   end
 

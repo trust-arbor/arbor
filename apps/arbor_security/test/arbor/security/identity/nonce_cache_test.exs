@@ -42,7 +42,7 @@ defmodule Arbor.Security.Identity.NonceCacheTest do
   end
 
   describe "cluster distribution (C5 review fix)" do
-    test "security regression: remote nonce_seen is recorded so authenticated transport can reuse apply" do
+    test "security regression: legacy unauthenticated nonce_seen mailbox injection is ignored" do
       nonce = :crypto.strong_rand_bytes(16)
 
       signal = %{
@@ -56,10 +56,11 @@ defmodule Arbor.Security.Identity.NonceCacheTest do
       send(Process.whereis(NonceCache), {:signal_received, signal})
       _ = :sys.get_state(NonceCache)
 
+      assert :ok = NonceCache.check_and_record(nonce, 300)
       assert {:error, :replayed_nonce} = NonceCache.check_and_record(nonce, 300)
     end
 
-    test "our own echoed signal is ignored (nonce stays fresh)" do
+    test "our own echoed legacy signal is ignored (nonce stays fresh)" do
       nonce = :crypto.strong_rand_bytes(16)
 
       signal = %{

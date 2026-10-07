@@ -31,6 +31,23 @@ another one. It doubles as user documentation — anyone standing up agents need
   If you *need* the events, authorize the principal for that topic (the signal
   authorizer's policy) — passing the agent id is best-effort and may still be refused.
 
+## 1A. Distributed security-sync mutation publishers are owner-bound
+
+- **What:** `security.nonce_seen` and the authority-reducing capability/identity
+  mutations are live security state, not ordinary observability. The Signals bus
+  accepts a local publication only from the exact supervised owner that established
+  the configured security-sync subscription. Missing, malformed, or ambiguous
+  publisher configuration fails closed for these mutation types. Other security and
+  identity observability events remain publishable when no sync publisher is defined.
+- **Symptom:** `Arbor.Signals.emit/4` returns `{:error, :unauthorized}` and the event
+  is neither delivered locally nor relayed. This commonly means the Security owner
+  has not completed startup or its role/event mapping is invalid or duplicated.
+- **Action:** start the canonical Security supervision tree and keep the
+  `:security_sync_subscribers` map aligned with its exact owner, supervisor path,
+  child ID, and event list. Emit these mutations from `CapabilityStore`,
+  `Identity.Registry`, or `NonceCache` through their normal public Security flows;
+  do not synthesize them from an agent, action, or observability process.
+
 ## 2. `arbor://shell/exec` is structurally `:ask` (always-locked ceiling)
 
 - **What:** shell is deliberately un-autonomous: it has an always-on `:ask` **ceiling**
@@ -926,6 +943,13 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   test that needs a specific decision should inject `:security_module` with an
   `authorize/3` that returns it. Regression:
   `security_unavailable_security_regression_test.exs`.
+- **The same restart invariant applies inside ACP sessions.** A missing
+  `CapabilityStore` must deny an ACP permission request instead of skipping
+  `Security.authorize/4`, and a missing `Trust.Manager` must deny rather than
+  erase the confirmation ceiling. Exercise the public permission path with the
+  registered owner name temporarily absent; raise/exit-only tests do not cover
+  an availability predicate that returns false (found 2026-10-07 while closing
+  the kernel-runtime/security review ripple paths).
 
 ## 32. Agent Shell needs an explicit workdir with a filesystem grant (2026-09-24)
 
@@ -951,6 +975,27 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   directory or a root. Worked examples:
   `shell_filesystem_containment_security_regression_test.exs` (arbor_actions)
   and the Shell cases in `agent_endpoint_test.exs` (arbor_gateway).
+
+## 33. Security-state mutations need caller-owned authority (2026-10-06)
+
+- **What:** capability grant, revoke, delegation and role assignment; identity
+  registration/status changes; and issuer, URI and reflex registry mutations no
+  longer accept an ambient in-VM caller. An in-process caller passes an
+  `actor_authority` owned by that exact PID. A CLI holding a key file constructs
+  an exact signed mutation request locally and submits only the proof; the target
+  process never opens a caller-selected key path. Authorities cannot be handed
+  to a GenServer and consumed there because the broker binds them to the opener
+  PID.
+- **Symptom:** `:capability_mutation_unauthorized`,
+  `:identity_registration_unauthorized`, or `:issuer_mutation_unauthorized`
+  after code calls an old one-argument facade or transfers an authority handle
+  to another process.
+- **Action:** keep the acquire-and-mutate sequence in one caller process, or put
+  a long-lived authority inside the fixed supervised owner that performs the
+  mutation. For key-file CLIs, use the matching `prepare_key_file_*` helper
+  before application startup and submit the exact signed proof after startup.
+  Tests setting up unrelated state use the compile-time `*_fixture` APIs; a
+  production caller must never select them or regain a raw-key path.
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
@@ -1149,3 +1194,67 @@ separately intended autonomous/operator behavior. Verify actual provider chunks
 through public ingress, authorized prefix reads, final SQL and an unprivileged
 signal observer with matched predecessor/candidate sources (source-confirmed
 2026-10-04; qualification remains separate from preparation).
+
+<!-- applied-learning: never-downgrade-protected-content-to-plaintext-when-key-authority-is-unavailable -->
+<a id="applied-learning-never-downgrade-protected-content-to-plaintext-when-key-authority-is-unavailable"></a>
+**Never downgrade protected content to plaintext when key authority is unavailable.**
+Retiring raw-key access, losing a crypto provider, or failing encryption must
+refuse a private send before persistence or delivery. A “graceful fallback” that
+keeps the operation successful silently changes confidentiality semantics. Test
+both the returned denial and that no plaintext message was stored (found
+2026-10-06 while closing the channel raw-private-key deputy).
+
+<!-- applied-learning: treat-genserver-from-as-untrusted-protocol-data -->
+<a id="applied-learning-treat-genserver-from-as-untrusted-protocol-data"></a>
+**Treat GenServer `from` as untrusted protocol data when mutation authority matters.**
+A normal `GenServer.call` exposes the caller PID, but any local process can send a
+raw `:"$gen_call"` with a victim PID and an attacker-owned reply alias. Exact-PID
+checks and mailbox challenge replies alone do not authenticate high-value
+mutations: `Process.info(pid, :messages)` exposes a non-sensitive victim's queued
+challenge, and temporarily setting sensitivity only protects a legitimate call
+while it is active. Use an unpredictable challenge plus a write that only the
+claimed owner can perform, such as a one-shot protected ETS table whose ownership
+is rechecked; mark long-lived privileged principals sensitive from startup as
+defense in depth. Treat reply references as untrusted too: ordinary refs and
+deactivated aliases pass `is_reference/1` but `send/2` can raise, so every reply,
+rejection, and expiry path must drop invalid destinations without crashing and
+must clear pending records and timers. `GenServer.cast` carries no caller identity,
+so it cannot establish provenance and legacy raw mutation casts must be retired.
+Trace every authority-bearing value back to its first ingress: an authenticated
+forwarder still launders attacker content when its trusted producer accepted that
+content through an unauthenticated call or cast. Regress the forged upstream hop
+and the terminal privileged effect together. Test forged raw protocol messages,
+mailbox scraping, transferred custody, and invalid reply aliases (found 2026-10-07
+closing Relay, Bus, AuditJournal, and Monitor deputies).
+
+<!-- applied-learning: retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape -->
+<a id="applied-learning-retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape"></a>
+**Retire positive tests for an unauthenticated mailbox shape when that shape is retired.**
+After a subscriber moves to custody-bearing delivery, an old test that sends the
+legacy tuple directly and expects a mutation is asserting the vulnerability. Turn
+it into a rejection regression and prove legitimate delivery separately through
+the authenticated public transport (found 2026-10-07 while hardening distributed
+nonce propagation).
+
+<!-- applied-learning: verify-named-ets-authority-owners-against-real-supervision -->
+<a id="applied-learning-verify-named-ets-authority-owners-against-real-supervision"></a>
+**Verify named ETS authority owners against the real supervision tree.** A protected
+named table prevents other live processes from writing its owner row, but the table
+disappears when its owner dies. A squatter can then recreate both the table and a
+self-asserted live PID, so row equality plus PID liveness authenticates nothing.
+Before routing an authority-bearing call, verify that the table owner and row PID
+are the exact child at the configured application supervision path, or require an
+opaque custody chain held by a predecessor that survives the restart. Never admit a
+production owner merely because the application is not yet reported as started;
+that creates a pre-start capture window (found 2026-10-07 while testing Security
+owner-directory restart takeover).
+
+<!-- applied-learning: authoritative-signal-mutations-must-deny-ambiguous-publisher-config -->
+<a id="applied-learning-authoritative-signal-mutations-must-deny-ambiguous-publisher-config"></a>
+**Authoritative signal mutations must deny ambiguous publisher configuration.**
+An absent or malformed owner mapping cannot mean “ordinary event” when the event
+changes replay, revocation, or identity state. Classify the mutation type first,
+then require one exact supervised publisher; missing, malformed, duplicate, or
+unsubscribed ownership fails closed before local delivery or relay. Keep this rule
+narrow so unrelated security observability remains available without inventing a
+state owner (found 2026-10-07 while reviewing distributed security-sync admission).

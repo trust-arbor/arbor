@@ -27,8 +27,10 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   alias Arbor.Security.Config
   alias Arbor.Security.SignalSync
+  alias Arbor.Security.SupervisedOwner
 
   @cleanup_interval_ms 60_000
+  @nonce_bytes 16
   @signal_type "nonce_seen"
   @signal_events [:nonce_seen]
 
@@ -47,9 +49,10 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   Returns `:ok` for fresh nonces, `{:error, :replayed_nonce}` for duplicates.
   """
-  @spec check_and_record(binary(), pos_integer()) :: :ok | {:error, :replayed_nonce}
+  @spec check_and_record(binary(), pos_integer()) ::
+          :ok | {:error, :replayed_nonce | :verification_unavailable}
   def check_and_record(nonce, ttl_seconds) when is_binary(nonce) and is_integer(ttl_seconds) do
-    GenServer.call(__MODULE__, {:check_and_record, nonce, ttl_seconds})
+    owner_call({:check_and_record, nonce, ttl_seconds}, {:error, :verification_unavailable})
   end
 
   @doc """
@@ -57,26 +60,32 @@ defmodule Arbor.Security.Identity.NonceCache do
   """
   @spec stats() :: map()
   def stats do
-    GenServer.call(__MODULE__, :stats)
+    owner_call(:stats, %{total_checked: 0, total_rejected: 0, active_nonces: 0})
   end
 
   # Server callbacks
 
   @impl true
   def init(_opts) do
+    Process.flag(:sensitive, true)
+    schedule_cleanup()
+
+    {:ok,
+     %{
+       nonces: %{},
+       signal_sync: nil,
+       stats: %{total_checked: 0, total_rejected: 0}
+     }, {:continue, :establish_signal_sync}}
+  end
+
+  @impl true
+  def handle_continue(:establish_signal_sync, state) do
     case subscribe_to_distributed_signals() do
       {:ok, signal_sync} ->
-        schedule_cleanup()
-
-        {:ok,
-         %{
-           nonces: %{},
-           signal_sync: signal_sync,
-           stats: %{total_checked: 0, total_rejected: 0}
-         }}
+        {:noreply, %{state | signal_sync: signal_sync}}
 
       {:error, reason} ->
-        {:stop, {:security_sync_subscription_failed, reason}}
+        {:stop, {:security_sync_subscription_failed, reason}, state}
     end
   end
 
@@ -108,6 +117,11 @@ defmodule Arbor.Security.Identity.NonceCache do
   end
 
   @impl true
+  def handle_call(_request, _from, state) do
+    {:reply, {:error, :unsupported_request}, state}
+  end
+
+  @impl true
   def handle_info(:cleanup, state) do
     state = cleanup_expired(state)
     schedule_cleanup()
@@ -116,8 +130,12 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   # A peer node recorded a nonce — record it locally so a replay aimed at
   # THIS node is rejected. Never re-emits (no propagation loop).
-  def handle_info({:signal_received, signal}, state) do
-    {:noreply, record_remote_nonce(signal, state)}
+  def handle_info({:signal_received, delivery_ref, signal}, state) do
+    if SignalSync.authenticated_delivery?(state.signal_sync, delivery_ref) do
+      {:noreply, record_remote_nonce(signal, state)}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_info(message, state) do
@@ -175,9 +193,14 @@ defmodule Arbor.Security.Identity.NonceCache do
       nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
 
       case Base.decode16(to_string(nonce_hex), case: :mixed) do
-        {:ok, nonce} when byte_size(nonce) > 0 ->
-          expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
-          put_in(state, [:nonces, nonce], expiry)
+        {:ok, nonce} when byte_size(nonce) == @nonce_bytes ->
+          now = System.system_time(:second)
+          supplied_expiry = data[:expiry] || data["expiry"]
+
+          case bounded_remote_expiry(supplied_expiry, now) do
+            {:ok, expiry} -> put_in(state, [:nonces, nonce], expiry)
+            :discard -> state
+          end
 
         _ ->
           state
@@ -188,6 +211,18 @@ defmodule Arbor.Security.Identity.NonceCache do
       Logger.warning("[NonceCache] failed to record remote nonce: #{inspect(reason)}")
       state
   end
+
+  defp bounded_remote_expiry(expiry, now) when is_integer(expiry) and expiry > now do
+    max_ttl = Config.nonce_ttl_seconds()
+
+    if is_integer(max_ttl) and max_ttl >= 0 do
+      {:ok, min(expiry, now + max_ttl)}
+    else
+      :discard
+    end
+  end
+
+  defp bounded_remote_expiry(_expiry, _now), do: :discard
 
   defp cleanup_expired(state) do
     now = System.system_time(:second)
@@ -208,5 +243,16 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   defp schedule_cleanup do
     Process.send_after(self(), :cleanup, @cleanup_interval_ms)
+  end
+
+  defp owner_call(request, unavailable) do
+    case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+      pid when is_pid(pid) -> GenServer.call(pid, request)
+      nil -> unavailable
+    end
+  rescue
+    _ -> unavailable
+  catch
+    :exit, _ -> unavailable
   end
 end

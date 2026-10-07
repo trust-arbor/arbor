@@ -5,10 +5,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.{CapsFile, RunIdentity, RunIdentityReaper, RunLease}
+  alias Arbor.Scheduler.RunLeaseIdentityFixture
   alias Arbor.Security
-  alias Arbor.Security.CapabilityStore
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Trust
 
@@ -177,6 +175,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   end
 
   setup do
+    :ok = RunLeaseIdentityFixture.ensure_started!()
     Application.put_env(:arbor_scheduler, :run_identity_test_pid, self())
     :ets.new(:run_identity_cleanup_stub, [:named_table, :public, :set])
 
@@ -188,7 +187,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end
 
     {:ok, issuer} = Identity.generate()
-    :ok = Security.register_identity(issuer)
+    :ok = Security.register_identity_fixture(issuer)
 
     envelopes =
       Enum.map(
@@ -201,7 +200,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
         end
       )
 
-    :ok = IssuerRegistry.register(issuer.agent_id, envelopes, reason: "run_identity_test")
+    :ok =
+      Security.register_issuer_fixture(issuer.agent_id, envelopes, reason: "run_identity_test")
 
     tmp_dir =
       System.tmp_dir!() |> Path.join("run_identity_test_#{System.unique_integer([:positive])}")
@@ -214,7 +214,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       Application.delete_env(:arbor_scheduler, :run_identity_reaper_responses)
       Application.delete_env(:arbor_scheduler, :run_identity_runtime_id)
       Application.delete_env(:arbor_scheduler, :run_identity_race_stage)
-      IssuerRegistry.revoke(issuer.agent_id, "test cleanup")
+      Security.revoke_issuer_fixture(issuer.agent_id, "test cleanup")
       File.rm_rf!(tmp_dir)
     end)
 
@@ -235,7 +235,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert Map.keys(handle) |> Enum.sort() == [:agent_id, :cap_ids, :lease, :signing_authority]
     refute Enum.any?(Map.values(handle), &is_function/1)
     refute Map.has_key?(handle, :private_key)
-    assert {:error, :no_signing_key} = SigningKeyStore.get(handle.agent_id)
+    assert {:error, :no_signing_key} = SigningKeyStore.get_for_test(handle.agent_id)
 
     capabilities = Enum.map(handle.cap_ids, &fetch_cap!/1)
 
@@ -321,7 +321,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert :ok = RunIdentity.revoke(handle)
 
     for cap_id <- handle.cap_ids do
-      case CapabilityStore.get(cap_id) do
+      case Security.get_capability_fixture(cap_id) do
         {:error, _reason} -> :ok
         {:ok, capability} -> assert Map.get(capability, :revoked, true)
       end
@@ -333,7 +333,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       assert {:error, :not_found} = Trust.get_trust_profile(handle.agent_id)
     end
 
-    assert {:error, :authority_not_found} = Security.sign_with_authority(authority, "closed")
+    assert {:error, :authority_not_found} =
+             Security.sign_with_authority(authority, "arbor://test/signing/closed")
   end
 
   test "cleanup is nil-safe and idempotent", %{issuer: issuer, tmp_dir: tmp_dir} do
@@ -395,7 +396,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert_eventually(fn -> run_state_removed?(handle) end)
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(handle.signing_authority, "closed")
+             Security.sign_with_authority(handle.signing_authority, "arbor://test/signing/closed")
   end
 
   test "security regression: killing a lease worker preserves live owner authority", %{
@@ -418,7 +419,10 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end)
 
     assert {:ok, _signed_request} =
-             Security.sign_with_authority(handle.signing_authority, "still-live")
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "arbor://test/signing/still-live"
+             )
 
     assert :ok = RunIdentity.revoke(handle)
   end
@@ -477,7 +481,10 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end)
 
     assert {:ok, _signed_request} =
-             Security.sign_with_authority(handle.signing_authority, "survived-store-restart")
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "arbor://test/signing/survived-store-restart"
+             )
 
     assert :ok = RunIdentity.revoke(handle)
     assert_eventually(fn -> run_state_removed?(handle) end)
@@ -508,7 +515,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert {:ok, _signed_request} =
              Security.sign_with_authority(
                handle.signing_authority,
-               "survived-state-owner-restart"
+               "arbor://test/signing/survived-state-owner-restart"
              )
 
     assert :ok = RunIdentity.revoke(handle)
@@ -613,7 +620,10 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     refute MapSet.member?(active_agent_ids, handle.signing_authority.token)
 
     assert {:ok, _signed_request} =
-             Security.sign_with_authority(handle.signing_authority, "journal-still-present")
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "arbor://test/signing/journal-still-present"
+             )
 
     assert :ok = RunIdentity.revoke(handle)
   end
@@ -655,7 +665,9 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       end)
 
       if stage == :grant do
-        assert_eventually(fn -> match?({:error, _reason}, CapabilityStore.get(artifact.id)) end)
+        assert_eventually(fn ->
+          match?({:error, _reason}, Security.get_capability_fixture(artifact.id))
+        end)
       end
 
       refute_receive {:store_death_mint_result, ^stage, {:ok, _handle}}, 100
@@ -688,14 +700,19 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert {:ok, _supervisor} =
              Supervisor.start_child(
                Arbor.Scheduler.Supervisor,
-               Arbor.Scheduler.RunLeaseSupervisor
+               {Arbor.Scheduler.RunLeaseSupervisor,
+                scheduler_mutation_token:
+                  Application.fetch_env!(:arbor_scheduler, :test_scheduler_mutation_token)}
              )
 
     assert_eventually(fn -> run_state_removed?(handle) end)
     assert is_nil(safe_lease_whereis(handle.lease))
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(handle.signing_authority, "stale-journal-handle")
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "arbor://test/signing/stale-journal-handle"
+             )
   end
 
   test "security regression: StateOwner death after identity or grant success reaps orphans", %{
@@ -735,7 +752,9 @@ defmodule Arbor.Scheduler.RunIdentityTest do
           end)
 
         :grant ->
-          assert_eventually(fn -> match?({:error, _reason}, CapabilityStore.get(artifact.id)) end)
+          assert_eventually(fn ->
+            match?({:error, _reason}, Security.get_capability_fixture(artifact.id))
+          end)
       end
 
       refute_receive {:state_owner_death_mint_result, ^stage, {:ok, _handle}}, 100
@@ -799,10 +818,11 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
       case stage do
         :grant ->
-          assert {:error, _reason} = CapabilityStore.get(artifact.id)
+          assert {:error, _reason} = Security.get_capability_fixture(artifact.id)
 
         :authority ->
-          assert {:error, :authority_not_found} = Security.sign_with_authority(artifact, "closed")
+          assert {:error, :authority_not_found} =
+                   Security.sign_with_authority(artifact, "arbor://test/signing/closed")
       end
     end
   end
@@ -870,16 +890,17 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     :ok =
       stale_identity
       |> Identity.public_only()
-      |> Security.register_identity()
+      |> Security.register_identity_fixture()
 
-    assert {:ok, _cap} = Security.grant(principal: stale_identity.agent_id, resource: @lobby_uri)
+    assert {:ok, _cap} =
+             Security.grant_fixture(principal: stale_identity.agent_id, resource: @lobby_uri)
 
     assert {:ok, _profile} =
              Trust.ensure_trust_profile(stale_identity.agent_id, baseline: :ask, rules: %{})
 
     assert {:ok, _public_key} = Security.lookup_public_key(stale_identity.agent_id)
 
-    assert :ok = RunIdentityReaper.reconcile()
+    assert :ok = run_reconciliation()
     assert_eventually(fn -> run_state_removed?(%{agent_id: stale_identity.agent_id}) end)
   end
 
@@ -890,11 +911,14 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     attestation = verified_attestation(issuer, tmp_dir, [])
     assert {:ok, handle} = RunIdentity.mint(attestation)
 
-    assert :ok = RunIdentityReaper.reconcile()
+    assert :ok = run_reconciliation()
     assert {:ok, _public_key} = Security.lookup_public_key(handle.agent_id)
 
     assert {:ok, _signed_request} =
-             Security.sign_with_authority(handle.signing_authority, "still-active")
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "arbor://test/signing/still-active"
+             )
 
     assert :ok = RunIdentity.revoke(handle)
   end
@@ -929,39 +953,41 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     {:ok, first_identity} = Identity.generate(name: first_name)
     {:ok, second_identity} = Identity.generate(name: second_name)
-    :ok = Security.register_identity(Identity.public_only(first_identity))
-    :ok = Security.register_identity(Identity.public_only(second_identity))
+    :ok = Security.register_identity_fixture(Identity.public_only(first_identity))
+    :ok = Security.register_identity_fixture(Identity.public_only(second_identity))
 
     assert :ok =
-             RunIdentityReaper.reconcile(
+             run_reconciliation(
                identity_name: first_name,
                active_agent_ids: MapSet.new()
              )
 
     assert {:error, :not_found} = Security.lookup_public_key(first_identity.agent_id)
     assert {:ok, _public_key} = Security.lookup_public_key(second_identity.agent_id)
-    assert :ok = Security.deregister_identity(second_identity.agent_id)
+    assert :ok = Security.deregister_identity_fixture(second_identity.agent_id)
   end
 
   test "security regression: local reaper scope cannot reap a peer runtime identity" do
     Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "peer-runtime")
     peer_name = RunIdentity.identity_name()
     {:ok, peer_identity} = Identity.generate(name: peer_name)
-    :ok = peer_identity |> Identity.public_only() |> Security.register_identity()
-    assert {:ok, _cap} = Security.grant(principal: peer_identity.agent_id, resource: @lobby_uri)
+    :ok = peer_identity |> Identity.public_only() |> Security.register_identity_fixture()
+
+    assert {:ok, _cap} =
+             Security.grant_fixture(principal: peer_identity.agent_id, resource: @lobby_uri)
 
     assert {:ok, _profile} =
              Trust.ensure_trust_profile(peer_identity.agent_id, baseline: :ask, rules: %{})
 
     Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "local-runtime")
-    assert :ok = RunIdentityReaper.reconcile()
+    assert :ok = run_reconciliation()
 
     assert {:ok, _public_key} = Security.lookup_public_key(peer_identity.agent_id)
     assert {:ok, [_cap]} = Security.list_capabilities(peer_identity.agent_id)
     assert {:ok, _profile} = Trust.get_trust_profile(peer_identity.agent_id)
 
     assert :ok =
-             RunIdentityReaper.reconcile(
+             run_reconciliation(
                identity_name: peer_name,
                active_agent_ids: MapSet.new()
              )
@@ -997,8 +1023,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
         Map.put(base, operation, response)
       )
 
-      assert {:error, ^expected} =
-               RunIdentityReaper.reconcile(
+      assert {:error, {:run_identity_reconciliation_failed, ^expected}} =
+               run_reconciliation(
                  security_facade: ReaperFacadeStub,
                  trust_facade: ReaperFacadeStub,
                  active_agent_ids: MapSet.new(),
@@ -1018,10 +1044,24 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     assert {:error,
             {:run_identity_reconciliation_failed, {:identity_lookup_failed, :registry_down}}} =
-             RunIdentityReaper.start_link(
+             run_reconciliation(
                security_facade: ReaperFacadeStub,
                trust_facade: ReaperFacadeStub
              )
+  end
+
+  test "security regression: raw reaper control messages fail closed without restart" do
+    on_exit(&cleanup_reaper_child/0)
+    assert {:ok, reaper} = start_reaper_child([])
+    assert :ok = RunIdentityReaper.await_ready()
+
+    assert {:error, :run_identity_reaper_unauthorized} = GenServer.call(reaper, :reconcile)
+    GenServer.cast(reaper, :reconcile)
+    send(reaper, :reconcile)
+    assert :ok = RunIdentityReaper.await_ready()
+
+    assert Process.whereis(RunIdentityReaper) == reaper
+    assert Process.alive?(reaper)
   end
 
   test "concurrent mints remain isolated", %{issuer: issuer, tmp_dir: tmp_dir} do
@@ -1040,6 +1080,30 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     RunIdentity.revoke(second)
   end
 
+  defp run_reconciliation(opts \\ []) do
+    cleanup_reaper_child()
+
+    try do
+      assert {:ok, _reaper} = start_reaper_child(opts)
+      RunIdentityReaper.await_ready()
+    after
+      cleanup_reaper_child()
+    end
+  end
+
+  defp start_reaper_child(opts) do
+    token = Application.fetch_env!(:arbor_scheduler, :test_scheduler_mutation_token)
+    opts = Keyword.put_new(opts, :scheduler_mutation_token, token)
+    spec = Supervisor.child_spec({RunIdentityReaper, opts}, restart: :temporary)
+    Supervisor.start_child(Arbor.Scheduler.Supervisor, spec)
+  end
+
+  defp cleanup_reaper_child do
+    _ = Supervisor.terminate_child(Arbor.Scheduler.Supervisor, RunIdentityReaper)
+    _ = Supervisor.delete_child(Arbor.Scheduler.Supervisor, RunIdentityReaper)
+    :ok
+  end
+
   defp verified_attestation(issuer, tmp_dir, capabilities) do
     path = Path.join(tmp_dir, "run.caps.json")
     source = "digraph Run { start [shape=Mdiamond] }"
@@ -1053,7 +1117,9 @@ defmodule Arbor.Scheduler.RunIdentityTest do
         initial_args: %{"mode" => "scheduled"}
       )
 
-    signature = Crypto.sign(CapsFile.signing_payload(payload), issuer.private_key)
+    signature =
+      Security.sign_ed25519_fixture(CapsFile.signing_payload(payload), issuer.private_key)
+
     File.write!(path, payload |> CapsFile.manifest_map(signature) |> Jason.encode!())
 
     assert {:ok, attestation} = CapsFile.load(path)
@@ -1061,7 +1127,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   end
 
   defp fetch_cap!(capability_id) do
-    assert {:ok, capability} = CapabilityStore.get(capability_id)
+    assert {:ok, capability} = Security.get_capability_fixture(capability_id)
     capability
   end
 

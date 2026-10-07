@@ -16,7 +16,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
     on_exit(fn ->
       for id <- [me, other] do
         case Security.list_capabilities(id) do
-          {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+          {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
           _ -> :ok
         end
       end
@@ -26,7 +26,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
   end
 
   test "a parent capability covers the principal's OWN scoped child", %{me: me} do
-    {:ok, _} = Security.grant(principal: me, resource: "arbor://historian/query")
+    {:ok, _} = Security.grant_fixture(principal: me, resource: "arbor://historian/query")
 
     assert {:ok, :authorized} =
              Security.authorize_self_scoped(
@@ -41,7 +41,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
 
   test "security regression: a parent capability does NOT cover another subject's child",
        %{me: me, other: other} do
-    {:ok, _} = Security.grant(principal: me, resource: "arbor://memory/read")
+    {:ok, _} = Security.grant_fixture(principal: me, resource: "arbor://memory/read")
 
     assert {:error, _} =
              Security.authorize_self_scoped(
@@ -60,7 +60,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
   } do
     # The caller claims subject == principal but the scoped resource belongs to
     # someone else: the descendant check is on the URI, so no relaxation.
-    {:ok, _} = Security.grant(principal: me, resource: "arbor://memory/read")
+    {:ok, _} = Security.grant_fixture(principal: me, resource: "arbor://memory/read")
 
     assert {:error, _} =
              Security.authorize_self_scoped(
@@ -74,7 +74,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
   end
 
   test "security regression: only a strict segment-descendant is covered", %{me: me} do
-    {:ok, _} = Security.grant(principal: me, resource: "arbor://memory/read")
+    {:ok, _} = Security.grant_fixture(principal: me, resource: "arbor://memory/read")
 
     # A sibling namespace that merely shares a string prefix.
     assert {:error, _} =
@@ -89,7 +89,7 @@ defmodule Arbor.Security.SelfScopedAuthorizationTest do
   end
 
   test "a scoped grant still works on its own (no parent needed)", %{me: me} do
-    {:ok, _} = Security.grant(principal: me, resource: "arbor://memory/read/#{me}")
+    {:ok, _} = Security.grant_fixture(principal: me, resource: "arbor://memory/read/#{me}")
 
     assert {:ok, :authorized} =
              Security.authorize_self_scoped(

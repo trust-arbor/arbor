@@ -28,6 +28,7 @@ defmodule Arbor.Signals.Store do
 
   @default_max_signals 10_000
   @default_ttl_seconds 3600
+  @default_restricted_topics [:security, :identity]
   @cleanup_interval_ms 60_000
 
   # Client API
@@ -54,7 +55,7 @@ defmodule Arbor.Signals.Store do
   Use this when a caller must query the signal immediately after emission.
   Normal fire-and-forget emission should continue to use `put/1`.
   """
-  @spec put_sync(Signal.t()) :: :ok
+  @spec put_sync(Signal.t()) :: :ok | {:error, :duplicate_id}
   def put_sync(%Signal{} = signal) do
     GenServer.call(__MODULE__, {:put, signal})
   end
@@ -300,7 +301,11 @@ defmodule Arbor.Signals.Store do
 
   @impl true
   def handle_call({:put, signal}, _from, state) do
-    {:reply, :ok, store_signal(state, signal)}
+    if Map.has_key?(state.signals, signal.id) do
+      {:reply, {:error, :duplicate_id}, state}
+    else
+      {:reply, :ok, store_signal(state, signal)}
+    end
   end
 
   @impl true
@@ -366,25 +371,12 @@ defmodule Arbor.Signals.Store do
 
   @impl true
   def handle_call(:snapshot, _from, state) do
-    snapshot_data = %{
-      signals: state.signals,
-      order: :queue.to_list(state.order),
-      stats: state.stats
-    }
-
-    {:reply, {:ok, snapshot_data}, state}
+    {:reply, {:ok, checkpoint_snapshot(state)}, state}
   end
 
   @impl true
   def handle_call({:restore, snapshot_data}, _from, state) do
-    restored = %{
-      state
-      | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
-        order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
-        stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
-    }
-
-    {:reply, :ok, restored}
+    {:reply, :ok, apply_snapshot(state, snapshot_data)}
   end
 
   @impl true
@@ -397,6 +389,11 @@ defmodule Arbor.Signals.Store do
   def handle_call({:memory_agent_content_absent?, agent_id, deadline_mono}, _from, state) do
     reply = do_memory_agent_content_absent(state, agent_id, deadline_mono)
     {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call(_request, _from, state) do
+    {:reply, {:error, :unsupported_request}, state}
   end
 
   @impl true
@@ -477,7 +474,7 @@ defmodule Arbor.Signals.Store do
           end
 
         {:configured, module, store} ->
-          approved = MemoryPrivacyCore.build_snapshot(state2)
+          approved = checkpoint_snapshot(state2)
 
           case run_save_and_load(module, store, approved, deadline_mono) do
             {:ok, loaded} ->
@@ -604,14 +601,22 @@ defmodule Arbor.Signals.Store do
   end
 
   defp add_signal(state, signal) do
-    stats = Map.update!(state.stats, :total_stored, &(&1 + 1))
-
-    %{
+    if Map.has_key?(state.signals, signal.id) do
+      # Signal IDs are immutable event identities. Re-enqueueing a duplicate
+      # makes the order queue cease to be a bijection with the signal map,
+      # which blocks privacy deletion and lets the later writer replace the
+      # original event. Keep the first event and its sole queue position.
       state
-      | signals: Map.put(state.signals, signal.id, signal),
-        order: :queue.in(signal.id, state.order),
-        stats: stats
-    }
+    else
+      stats = Map.update!(state.stats, :total_stored, &(&1 + 1))
+
+      %{
+        state
+        | signals: Map.put(state.signals, signal.id, signal),
+          order: :queue.in(signal.id, state.order),
+          stats: stats
+      }
+    end
   end
 
   defp maybe_evict(state) do
@@ -716,10 +721,14 @@ defmodule Arbor.Signals.Store do
   end
 
   defp apply_snapshot(state, snapshot_data) do
+    signals = snapshot_data[:signals] || snapshot_data["signals"] || %{}
+    order = snapshot_data[:order] || snapshot_data["order"] || []
+    {signals, order} = checkpoint_fields(signals, order)
+
     %{
       state
-      | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
-        order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
+      | signals: signals,
+        order: :queue.from_list(order),
         stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
     }
   end
@@ -733,11 +742,7 @@ defmodule Arbor.Signals.Store do
     checkpoint_store = Config.checkpoint_store()
 
     if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
-      snapshot_data = %{
-        signals: state.signals,
-        order: :queue.to_list(state.order),
-        stats: state.stats
-      }
+      snapshot_data = checkpoint_snapshot(state)
 
       case checkpoint_mod.save("signal_store", snapshot_data, checkpoint_store) do
         :ok ->
@@ -753,5 +758,40 @@ defmodule Arbor.Signals.Store do
 
     :exit, _reason ->
       :ok
+  end
+
+  # TopicKeys are node-local and intentionally ephemeral. Persisting restricted
+  # signals would create ciphertext that no restarted node can decrypt. Keep
+  # those events in the live ring only until a durable key provider exists.
+  defp checkpoint_snapshot(state) do
+    {signals, order} = checkpoint_fields(state.signals, :queue.to_list(state.order))
+    %{signals: signals, order: order, stats: state.stats}
+  end
+
+  defp checkpoint_fields(signals, order) when is_map(signals) and is_list(order) do
+    restricted = restricted_topics()
+
+    signals =
+      Map.filter(signals, fn
+        {id, %Signal{id: signal_id, category: category}} ->
+          id == signal_id and not MapSet.member?(restricted, category)
+
+        _malformed ->
+          false
+      end)
+
+    order = order |> Enum.filter(&Map.has_key?(signals, &1)) |> Enum.uniq()
+    {Map.take(signals, order), order}
+  end
+
+  defp checkpoint_fields(_signals, _order), do: {%{}, []}
+
+  defp restricted_topics do
+    case Config.restricted_topics() do
+      topics when is_list(topics) -> MapSet.new(topics)
+      _malformed -> MapSet.new(@default_restricted_topics)
+    end
+  rescue
+    _ -> MapSet.new(@default_restricted_topics)
   end
 end

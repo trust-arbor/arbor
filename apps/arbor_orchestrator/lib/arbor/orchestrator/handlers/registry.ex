@@ -2,18 +2,18 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   @moduledoc """
   Handler registry mapping node type strings to handler modules.
 
-  Organized into two layers:
-    - **Core handlers** — 15 canonical primitives stored in `HandlerRegistry` (RegistryBase)
-    - **Custom handlers** — runtime-registered overrides in persistent_term
+  Core handlers and admitted plugin handlers are stored in the owner-protected
+  `HandlerRegistry`. Core registration is performed by a supervised custody
+  owner during application boot.
 
   All legacy type names (codergen, tool, memory.recall, etc.) are resolved via
   the alias layer (`Stdlib.Aliases`) which maps them to canonical core types
   with injected attributes.
 
-  Resolution order: custom (persistent_term) > alias-resolved core (HandlerRegistry) > default (LlmHandler).
+  Resolution order: alias-resolved registry entry > direct registry entry >
+  strict unknown-handler policy.
   """
 
-  alias Arbor.Common.HandlerRegistry
   alias Arbor.Orchestrator.Graph.Node
 
   alias Arbor.Orchestrator.Handlers.{
@@ -74,7 +74,15 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "extract" => ExtractHandler
   }
 
-  @custom_handlers_key {__MODULE__, :custom_handlers}
+  @test_fixtures Application.compile_env(
+                   :arbor_kernel_runtime,
+                   :expose_test_fixtures,
+                   false
+                 )
+
+  if @test_fixtures do
+    @test_fixture_key {__MODULE__, :test_handler_fixtures_v1}
+  end
 
   @doc "Returns the canonical core type for any type string."
   @spec canonical_type(String.t()) :: String.t()
@@ -104,23 +112,16 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   preserved (e.g. "consensus.propose" stays as `type` attr) so delegated
   handlers can dispatch on it.
 
-  Resolution order:
-  1. Custom handlers (highest priority, by raw type)
-  2. Alias resolution → core handler lookup (primary path)
-  3. Canonical type mapping (for aliases without attr injection)
-  4. Default to LlmHandler
+  Resolution applies aliases first and then resolves the resulting type through
+  the owner-protected registry.
   """
   @spec resolve_with_attrs(Node.t()) :: {module(), Node.t()}
   def resolve_with_attrs(%Node{} = node) do
     raw_type = node_type(node)
 
-    # Custom handlers always take priority
-    case Map.get(custom_handlers(), raw_type) do
-      nil ->
-        resolve_via_aliases(raw_type, node)
-
-      handler ->
-        {handler, node}
+    case fixture_handler_for(raw_type) do
+      nil -> resolve_via_aliases(raw_type, node)
+      handler -> {handler, node}
     end
   end
 
@@ -150,60 +151,98 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     end
   end
 
-  @spec register(String.t(), module()) :: :ok
-  def register(type, module) when is_binary(type) and is_atom(module) do
-    put_custom_handlers(Map.put(custom_handlers(), type, module))
-  end
+  @spec register(String.t(), module()) :: {:error, :unauthorized}
+  def register(type, module) when is_binary(type) and is_atom(module),
+    do: {:error, :unauthorized}
 
-  @spec unregister(String.t()) :: :ok
-  def unregister(type) when is_binary(type) do
-    put_custom_handlers(Map.delete(custom_handlers(), type))
-  end
+  @spec unregister(String.t()) :: {:error, :unauthorized}
+  def unregister(type) when is_binary(type), do: {:error, :unauthorized}
 
-  @spec reset_custom_handlers() :: :ok
-  def reset_custom_handlers, do: put_custom_handlers(%{})
+  @spec reset_custom_handlers() :: {:error, :unauthorized}
+  def reset_custom_handlers, do: {:error, :unauthorized}
 
-  @doc """
-  Returns the current custom handlers map.
-  Use with `restore_custom_handlers/1` for test save/restore.
-  """
-  @spec snapshot_custom_handlers() :: map()
-  def snapshot_custom_handlers, do: custom_handlers()
+  @spec snapshot_custom_handlers() :: {:error, :unauthorized}
+  def snapshot_custom_handlers, do: {:error, :unauthorized}
 
-  @doc """
-  Restores custom handlers from a previous snapshot.
-  """
-  @spec restore_custom_handlers(map()) :: :ok
-  def restore_custom_handlers(handlers) when is_map(handlers) do
-    put_custom_handlers(handlers)
-  end
+  @spec restore_custom_handlers(map()) :: {:error, :unauthorized}
+  def restore_custom_handlers(handlers) when is_map(handlers), do: {:error, :unauthorized}
 
   @doc "Returns the custom handler for a type, or nil if none registered."
   @spec custom_handler_for(String.t()) :: module() | nil
   def custom_handler_for(type) when is_binary(type) do
-    Map.get(custom_handlers(), type)
+    case fixture_handler_for(type) do
+      nil -> registered_custom_handler_for(type)
+      module -> module
+    end
+  end
+
+  if @test_fixtures do
+    @doc false
+    @spec register_fixture(String.t(), module()) :: :ok | {:error, term()}
+    def register_fixture(type, module) when is_binary(type) and is_atom(module) do
+      if valid_handler_module?(module) do
+        :persistent_term.put(@test_fixture_key, Map.put(test_fixtures(), type, module))
+        :ok
+      else
+        {:error, {:missing_handler_behaviour, {:execute, 4}}}
+      end
+    end
+
+    @doc false
+    @spec unregister_fixture(String.t()) :: :ok | {:error, term()}
+    def unregister_fixture(type) when is_binary(type) do
+      :persistent_term.put(@test_fixture_key, Map.delete(test_fixtures(), type))
+      :ok
+    end
+
+    @doc false
+    @spec snapshot_fixtures() :: %{optional(String.t()) => module()}
+    def snapshot_fixtures, do: test_fixtures()
+
+    @doc false
+    @spec reset_fixtures() :: :ok
+    def reset_fixtures do
+      :persistent_term.put(@test_fixture_key, %{})
+      :ok
+    end
+
+    @doc false
+    @spec restore_fixtures(map()) :: :ok | {:error, :invalid_fixture_snapshot}
+    def restore_fixtures(fixtures) when is_map(fixtures) do
+      if Enum.all?(fixtures, fn {type, module} ->
+           is_binary(type) and is_atom(module) and valid_handler_module?(module)
+         end) do
+        :persistent_term.put(@test_fixture_key, fixtures)
+        :ok
+      else
+        {:error, :invalid_fixture_snapshot}
+      end
+    end
   end
 
   @doc """
   Register the 15 core handlers into the HandlerRegistry.
   Called by the Registrar during application boot.
   """
-  @spec register_core_handlers() :: :ok
+  @spec register_core_handlers() :: :ok | {:error, term()}
   def register_core_handlers do
-    if Process.whereis(HandlerRegistry) do
-      for {type, module} <- @core_handlers do
-        case HandlerRegistry.register(type, module) do
-          :ok -> :ok
-          {:error, :already_registered} -> :ok
-          {:error, :core_locked} -> :ok
-          _ -> :ok
-        end
-      end
-
-      HandlerRegistry.lock_core()
+    case Process.whereis(Arbor.Orchestrator.Handlers.RegistryAuthority) do
+      pid when is_pid(pid) -> Arbor.Orchestrator.Handlers.RegistryAuthority.ensure_registered()
+      _other -> {:error, :handler_registry_authority_unavailable}
     end
+  end
 
-    :ok
+  @doc false
+  @spec register_core_handlers_with_custody(binary()) :: :ok | {:error, term()}
+  def register_core_handlers_with_custody(custody) when is_binary(custody) do
+    if Arbor.Common.core_handlers_locked?() do
+      verify_core_handlers()
+    else
+      with :ok <- register_each_core_handler(custody),
+           :ok <- Arbor.Common.lock_core_handlers(custody, 60_000) do
+        :ok
+      end
+    end
   end
 
   # --- Private ---
@@ -215,11 +254,11 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   # node type, every typo in a custom handler name, and every malicious
   # unrecognized type into an LLM call with whatever context the graph
   # happened to be carrying. Custom handlers must register via
-  # HandlerRegistry or as a custom handler; that path is unchanged.
+  # HandlerRegistry through the authenticated plugin-admission path.
   defp lookup_core_handler(type) do
     resolved =
-      if Process.whereis(HandlerRegistry) do
-        case HandlerRegistry.resolve(type) do
+      if Arbor.Common.handler_registry_pid() do
+        case Arbor.Common.resolve_handler(type) do
           {:ok, module} -> module
           _ -> Map.get(@core_handlers, type)
         end
@@ -233,7 +272,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
           raise ArgumentError,
                 "Unknown handler type #{inspect(type)} — refusing to fall back to " <>
                   "LlmHandler in strict mode (M3). Register the handler via " <>
-                  "Arbor.Common.HandlerRegistry or as a custom handler."
+                  "the Arbor.Common facade or as a custom handler."
         else
           LlmHandler
         end
@@ -248,12 +287,65 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     Application.get_env(:arbor_orchestrator, :strict_unknown_handlers, Mix.env() == :prod)
   end
 
-  defp custom_handlers do
-    :persistent_term.get(@custom_handlers_key, %{})
+  if @test_fixtures do
+    defp fixture_handler_for(type), do: Map.get(test_fixtures(), type)
+    defp test_fixtures, do: :persistent_term.get(@test_fixture_key, %{})
+
+    defp valid_handler_module?(module) do
+      Code.ensure_loaded?(module) and function_exported?(module, :execute, 4)
+    rescue
+      _exception -> false
+    catch
+      _kind, _reason -> false
+    end
+  else
+    defp fixture_handler_for(_type), do: nil
   end
 
-  defp put_custom_handlers(handlers) do
-    :persistent_term.put(@custom_handlers_key, handlers)
-    :ok
+  defp registered_custom_handler_for(type) do
+    if Map.has_key?(@core_handlers, type) do
+      nil
+    else
+      case Arbor.Common.resolve_handler(type) do
+        {:ok, module} -> module
+        _other -> nil
+      end
+    end
+  end
+
+  defp verify_core_handlers do
+    Enum.reduce_while(@core_handlers, :ok, fn {type, expected_module}, :ok ->
+      case Arbor.Common.resolve_handler(type) do
+        {:ok, ^expected_module} ->
+          {:cont, :ok}
+
+        {:ok, actual_module} ->
+          {:halt, {:error, {:core_handler_mismatch, type, expected_module, actual_module}}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:core_handler_unavailable, type, reason}}}
+      end
+    end)
+  end
+
+  defp register_each_core_handler(custody) do
+    Enum.reduce_while(@core_handlers, :ok, fn {type, module}, :ok ->
+      result = Arbor.Common.register_core_handler(type, module, %{}, custody)
+
+      case result do
+        :ok ->
+          {:cont, :ok}
+
+        {:error, reason} when reason in [:already_registered, :core_locked] ->
+          case Arbor.Common.resolve_handler(type) do
+            {:ok, ^module} -> {:cont, :ok}
+            {:ok, other} -> {:halt, {:error, {:core_handler_mismatch, type, module, other}}}
+            {:error, resolve_reason} -> {:halt, {:error, {type, resolve_reason}}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, {type, reason}}}
+      end
+    end)
   end
 end

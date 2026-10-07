@@ -677,24 +677,9 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   # site is a stable anchor for future legitimate mount-time grants, and so
   # the regression test can pin its grant-list policy.
   defp ensure_dashboard_approver_capability(socket) do
-    actor_id = approval_actor_id(socket)
-
-    if actor_id != "system" do
-      for resource <- mount_grant_resources() do
-        Arbor.Security.grant(
-          principal: actor_id,
-          resource: resource,
-          constraints: %{},
-          metadata: %{source: :dashboard}
-        )
-      end
-    end
-
+    _actor_id = approval_actor_id(socket)
+    [] = mount_grant_resources()
     :ok
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   @doc """

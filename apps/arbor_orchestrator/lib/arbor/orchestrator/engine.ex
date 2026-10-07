@@ -10,6 +10,8 @@ defmodule Arbor.Orchestrator.Engine do
   - content-hash based skip logic
   """
 
+  require Logger
+
   alias Arbor.Contracts.Security.SigningAuthority
 
   alias Arbor.Orchestrator.Engine.{
@@ -968,7 +970,18 @@ defmodule Arbor.Orchestrator.Engine do
          step_now,
          %State{} = state
        ) do
-    emit(state.opts, Event.stage_started(node.id))
+    handler_evidence = handler_dispatch_evidence(handler)
+    log_handler_dispatch(node.id, handler_evidence)
+
+    emit(
+      state.opts,
+      Event.stage_started(node.id,
+        handler_module: handler_evidence.handler_module,
+        handler_sha256: Map.get(handler_evidence, :handler_sha256),
+        handler_identity_error: Map.get(handler_evidence, :handler_identity_error)
+      )
+    )
+
     emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
     journaled? = EffectOwner.journaled?(idempotency)
@@ -1063,6 +1076,37 @@ defmodule Arbor.Orchestrator.Engine do
             )
         end
     end
+  end
+
+  defp handler_dispatch_evidence(handler) when is_atom(handler) do
+    evidence = %{handler_module: inspect(handler)}
+
+    case Arbor.Common.loaded_module_sha256(handler) do
+      {:ok, sha256} -> Map.put(evidence, :handler_sha256, sha256)
+      {:error, reason} -> Map.put(evidence, :handler_identity_error, Atom.to_string(reason))
+    end
+  end
+
+  defp handler_dispatch_evidence(handler) when is_function(handler) do
+    %{handler_module: inspect(handler), handler_identity_error: "function_handler"}
+  end
+
+  defp log_handler_dispatch(node_id, %{handler_sha256: sha256} = evidence) do
+    Logger.info(
+      "orchestrator handler dispatch " <>
+        "node_id=#{inspect(node_id)} " <>
+        "handler_module=#{evidence.handler_module} " <>
+        "handler_sha256=#{sha256}"
+    )
+  end
+
+  defp log_handler_dispatch(node_id, evidence) do
+    Logger.warning(
+      "orchestrator handler dispatch identity unavailable " <>
+        "node_id=#{inspect(node_id)} " <>
+        "handler_module=#{evidence.handler_module} " <>
+        "reason=#{Map.get(evidence, :handler_identity_error, "unknown")}"
+    )
   end
 
   defp sync_node_started(nil, _node_id, _run_id, _meta, _journal_opts, true) do

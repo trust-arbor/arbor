@@ -5,6 +5,7 @@ defmodule Arbor.Security.TerminalLogin do
   alias Arbor.Security
   alias Arbor.Security.OIDC.{Config, IdentityStore, TokenVerifier}
   alias Arbor.Security.SessionToken
+  alias Arbor.Security.SupervisedOwner
 
   @denied {:error, :unauthorized}
   @unavailable {:error, :login_unavailable}
@@ -13,18 +14,32 @@ defmodule Arbor.Security.TerminalLogin do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  def begin(target),
-    do: call({:begin, target, now_ms() + @start_timeout_ms}, @start_timeout_ms + 5_000)
+  # Anonymous admission must arrive through a boundary that derives a stable
+  # source identifier from trusted transport metadata. A target alone lets one
+  # caller fan out device-flow work across the shared pending pool.
+  def begin(_target), do: {:error, :terminal_login_source_required}
 
-  def status(handle), do: call({:status, handle})
-  def cancel(handle), do: call({:cancel, handle})
+  def begin(target, source) do
+    call(
+      {:begin, target, source, now_ms() + @start_timeout_ms},
+      @start_timeout_ms + 5_000
+    )
+  end
+
+  def status(_handle), do: @denied
+  def status(handle, source), do: call({:status, handle, source})
+  def cancel(_handle), do: @denied
+  def cancel(handle, source), do: call({:cancel, handle, source})
   def preflight(credential), do: call({:preflight, credential})
   def claim(credential), do: call({:claim, credential, now_ms() + @call_timeout_ms})
   def verify(credential), do: call({:verify, credential})
   def revoke(credential), do: call({:revoke, credential})
 
   defp call(message, timeout \\ @call_timeout_ms) do
-    GenServer.call(__MODULE__, message, timeout)
+    case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+      pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, message, timeout)
+      _ -> @denied
+    end
   catch
     :exit, _ -> @denied
   end
@@ -33,7 +48,20 @@ defmodule Arbor.Security.TerminalLogin do
   def init(_opts) do
     Process.flag(:trap_exit, true)
     Process.flag(:sensitive, true)
-    {:ok, %{flows: %{}, sessions: %{}, options: Security.Config.terminal_login_options()}}
+
+    with {:ok, supervisor_pid} <- startup_supervisor_pid() do
+      {:ok,
+       %{
+         flows: %{},
+         sessions: %{},
+         admissions: [],
+         authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+         options: Security.Config.terminal_login_options(),
+         security_supervisor_pid: supervisor_pid
+       }}
+    else
+      {:error, reason} -> {:stop, reason}
+    end
   end
 
   @impl true
@@ -51,21 +79,33 @@ defmodule Arbor.Security.TerminalLogin do
   end
 
   @impl true
-  def handle_call({:begin, target, start_deadline}, from, state) do
+  def handle_call(_request, _from, state), do: {:reply, @denied, state}
+
+  defp handle_authenticated_request({:begin, target, source, start_deadline}, from, state) do
     provider = Config.device_flow()
+    now = now_ms()
+    state = prune_admissions(state, now)
 
     cond do
-      not target?(target) ->
+      not target?(target) or not source?(source) ->
         {:reply, @denied, state}
 
-      start_deadline <= now_ms() or not Process.alive?(elem(from, 0)) ->
+      start_deadline <= now or not Process.alive?(elem(from, 0)) ->
         {:reply, @unavailable, state}
 
       not provider?(provider) or map_size(state.flows) >= state.options.max_pending or
           map_size(state.sessions) >= state.options.max_active ->
         {:reply, @unavailable, state}
 
+      source_pending_count(state.flows, source) >= state.options.max_pending_per_source ->
+        {:reply, @unavailable, state}
+
+      length(state.admissions) >= state.options.max_starts_per_window or
+          source_start_count(state.admissions, source) >= state.options.max_starts_per_source ->
+        {:reply, @unavailable, state}
+
       true ->
+        state = %{state | admissions: [{source, now} | state.admissions]}
         handle = random_token()
         key = digest(handle)
         owner = self()
@@ -74,7 +114,7 @@ defmodule Arbor.Security.TerminalLogin do
 
         {pid, monitor} =
           :erlang.spawn_opt(
-            fn -> run_flow(owner, key, target, provider, options) end,
+            fn -> run_flow(owner, key, handle, target, provider, options) end,
             [:link, :monitor]
           )
 
@@ -93,8 +133,8 @@ defmodule Arbor.Security.TerminalLogin do
           monitor: monitor,
           caller_monitor: caller_monitor,
           from: from,
-          handle: handle,
           target: target,
+          source: source,
           deadline: deadline,
           start_deadline: start_deadline,
           timer: timer,
@@ -108,9 +148,10 @@ defmodule Arbor.Security.TerminalLogin do
     end
   end
 
-  def handle_call({:status, handle}, _from, state) do
+  defp handle_authenticated_request({:status, handle, source}, _from, state) do
     case fetch_flow(state, handle) do
-      {key, %{stage: :ready, outcome: {:ok, binding}} = flow} ->
+      {key, %{source: ^source, stage: :ready, outcome: {:ok, binding}} = flow}
+      when is_binary(source) ->
         state = drop_flow(state, key, flow)
 
         if map_size(state.sessions) < state.options.max_active and binding_valid?(binding) and
@@ -134,33 +175,39 @@ defmodule Arbor.Security.TerminalLogin do
           {:reply, @denied, state}
         end
 
-      {key, flow} ->
+      {key, %{source: ^source} = flow} when is_binary(source) ->
         if flow.deadline > now_ms() and flow.stage in [:starting, :polling, :settling] do
           {:reply, {:ok, :pending}, state}
         else
           {:reply, @denied, retire_flow(state, key, flow)}
         end
 
+      {_key, _flow} ->
+        {:reply, @denied, state}
+
       nil ->
         {:reply, @denied, state}
     end
   end
 
-  def handle_call({:cancel, handle}, from, state) do
+  defp handle_authenticated_request({:cancel, handle, source}, from, state) do
     case fetch_flow(state, handle) do
-      {key, %{pid: pid} = flow} when is_pid(pid) ->
+      {key, %{source: ^source, pid: pid} = flow} when is_binary(source) and is_pid(pid) ->
         flow = %{flow | waiters: [from | flow.waiters]}
         {:noreply, retire_flow(state, key, flow)}
 
-      {key, flow} ->
+      {key, %{source: ^source} = flow} when is_binary(source) ->
         {:reply, :ok, drop_flow(state, key, flow)}
+
+      {_key, _flow} ->
+        {:reply, @denied, state}
 
       nil ->
         {:reply, :ok, state}
     end
   end
 
-  def handle_call({:preflight, credential}, _from, state) do
+  defp handle_authenticated_request({:preflight, credential}, _from, state) do
     state = detach_dead_owner(state, credential)
 
     case fetch_session(state, credential) do
@@ -188,7 +235,7 @@ defmodule Arbor.Security.TerminalLogin do
     end
   end
 
-  def handle_call({:claim, credential, deadline}, {caller, _}, state) do
+  defp handle_authenticated_request({:claim, credential, deadline}, {caller, _}, state) do
     state = detach_dead_owner(state, credential)
 
     case fetch_session(state, credential) do
@@ -241,13 +288,14 @@ defmodule Arbor.Security.TerminalLogin do
     end
   end
 
-  def handle_call({:verify, credential}, {caller, _}, state) do
+  defp handle_authenticated_request({:verify, credential}, {caller, _}, state) do
     state = detach_dead_owner(state, credential)
 
     case fetch_session(state, credential) do
       {key, %{phase: :attached, owner_pid: ^caller} = binding} ->
         with true <- Process.alive?(caller) and binding_valid?(binding),
-             {:ok, proof} <- SessionToken.generate_conversation(binding.principal, binding.target),
+             {:ok, proof} <-
+               SessionToken.generate_terminal_conversation(binding.principal, binding.target),
              true <- binding_valid?(binding) and Process.alive?(caller) do
           {:reply, {:ok, Map.put(metadata(binding), :session_token, proof)}, state}
         else
@@ -260,7 +308,7 @@ defmodule Arbor.Security.TerminalLogin do
     end
   end
 
-  def handle_call({:revoke, credential}, _from, state) do
+  defp handle_authenticated_request({:revoke, credential}, _from, state) do
     state =
       if token?(credential) do
         key = digest(credential)
@@ -278,13 +326,14 @@ defmodule Arbor.Security.TerminalLogin do
 
   # A malformed private request must not crash this shared owner and expose
   # credential-bearing arguments through an exception stack trace.
-  def handle_call(_request, _from, state), do: {:reply, @denied, state}
+  defp handle_authenticated_request(_request, _from, state), do: {:reply, @denied, state}
 
   @impl true
-  def handle_info({:flow_started, key, pid, public}, state) do
+  def handle_info({:flow_started, key, pid, handle, public}, state) do
     case state.flows[key] do
       %{pid: ^pid, stage: :starting} = flow ->
-        if flow.deadline > now_ms() and flow.start_deadline > now_ms() and
+        if token?(handle) and digest(handle) == key and flow.deadline > now_ms() and
+             flow.start_deadline > now_ms() and
              Process.alive?(elem(flow.from, 0)) do
           Process.cancel_timer(flow.timer)
           Process.demonitor(flow.caller_monitor, [:flush])
@@ -292,13 +341,12 @@ defmodule Arbor.Security.TerminalLogin do
           timer_tag = make_ref()
           timer = Process.send_after(self(), {:flow_expire, key, timer_tag}, remaining(deadline))
           public = %{public | expires_in: max(div(remaining(deadline), 1_000), 1)}
-          GenServer.reply(flow.from, {:ok, Map.put(public, :handle, flow.handle)})
+          reply_authenticated(flow.from, {:ok, Map.put(public, :handle, handle)})
 
           flow = %{
             flow
             | stage: :polling,
               from: nil,
-              handle: nil,
               caller_monitor: nil,
               deadline: deadline,
               timer: timer,
@@ -328,7 +376,7 @@ defmodule Arbor.Security.TerminalLogin do
   def handle_info({:DOWN, monitor, :process, pid, reason}, state) do
     case Enum.find(state.flows, fn {_key, flow} -> flow.monitor == monitor and flow.pid == pid end) do
       {key, flow} ->
-        Enum.each(flow.waiters, &GenServer.reply(&1, :ok))
+        Enum.each(flow.waiters, &reply_authenticated(&1, :ok))
 
         if reason == :normal and flow.stage == :settling and match?({:ok, _}, flow.outcome) and
              flow.deadline > now_ms() do
@@ -363,7 +411,23 @@ defmodule Arbor.Security.TerminalLogin do
   end
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
-  def handle_info(_, state), do: {:noreply, state}
+
+  def handle_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        case handle_authenticated_request(request, {caller, reply_to}, state) do
+          {:reply, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:noreply, next_state}
+
+          {:noreply, next_state} ->
+            {:noreply, next_state}
+        end
+
+      result when result in [:pending, :expired, :rejected, :unrecognized] ->
+        {:noreply, state}
+    end
+  end
 
   @impl true
   def terminate(_reason, state) do
@@ -382,7 +446,27 @@ defmodule Arbor.Security.TerminalLogin do
     :ok
   end
 
-  defp run_flow(owner, key, target, provider, options) do
+  defp startup_supervisor_pid do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> linked_supervisor(pid)
+      [name | _] when is_atom(name) -> name |> Process.whereis() |> linked_supervisor()
+      _other -> {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(pid) when is_pid(pid) do
+    case Process.info(self(), :links) do
+      {:links, links} when is_list(links) ->
+        if pid in links, do: {:ok, pid}, else: {:error, :security_supervisor_unavailable}
+
+      _other ->
+        {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(_pid), do: {:error, :security_supervisor_unavailable}
+
+  defp run_flow(owner, key, handle, target, provider, options) do
     Process.flag(:sensitive, true)
 
     result =
@@ -391,7 +475,7 @@ defmodule Arbor.Security.TerminalLogin do
 
         with {:ok, response} <- options.device_flow_module.start(provider),
              {:ok, public} <- public_device_response(response, provider) do
-          send(owner, {:flow_started, key, self(), public})
+          send(owner, {:flow_started, key, self(), handle, public})
 
           with {:ok, %{"id_token" => token}} <-
                  options.device_flow_module.poll(provider, response),
@@ -504,7 +588,7 @@ defmodule Arbor.Security.TerminalLogin do
   defp drop_flow(state, key, flow) do
     Process.cancel_timer(flow.timer)
     if flow.caller_monitor, do: Process.demonitor(flow.caller_monitor, [:flush])
-    if flow.from, do: GenServer.reply(flow.from, @denied)
+    if flow.from, do: reply_authenticated(flow.from, @denied)
     %{state | flows: Map.delete(state.flows, key)}
   end
 
@@ -605,16 +689,35 @@ defmodule Arbor.Security.TerminalLogin do
 
   defp bounded_string?(v, max),
     do:
-      is_binary(v) and byte_size(v) in 1..max and String.valid?(v) and
+      is_binary(v) and byte_size(v) in 1..max//1 and String.valid?(v) and
         not String.contains?(v, <<0>>)
 
   defp target?(v),
     do: bounded_string?(v, 256) and Regex.match?(~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/, v)
 
+  defp source?(v), do: token?(v)
+
+  defp source_pending_count(flows, source) do
+    Enum.count(flows, fn {_key, flow} -> flow.source == source end)
+  end
+
+  defp source_start_count(admissions, source) do
+    Enum.count(admissions, fn {admission_source, _at} -> admission_source == source end)
+  end
+
+  defp prune_admissions(state, now) do
+    cutoff = now - state.options.start_window_seconds * 1_000
+    %{state | admissions: Enum.filter(state.admissions, fn {_source, at} -> at > cutoff end)}
+  end
+
   defp token?(v),
     do: is_binary(v) and byte_size(v) == 43 and Regex.match?(~r/\A[A-Za-z0-9_-]{43}\z/, v)
 
   defp random_token, do: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+  defp reply_authenticated({_caller, reply_to}, reply),
+    do: Arbor.Common.reply_authenticated_call(reply_to, reply)
+
   defp digest(value), do: :crypto.hash(:sha256, value)
   defp now_ms, do: System.monotonic_time(:millisecond)
   defp now_seconds, do: System.os_time(:second)

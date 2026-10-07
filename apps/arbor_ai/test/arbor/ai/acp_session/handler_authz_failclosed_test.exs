@@ -95,6 +95,20 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
       assert {:denied, _reason} =
                Handler.check_security_authorize("agent_x", "arbor://shell/exec/rm", :execute, %{})
     end
+
+    test "security regression: denies while the default capability store name is unavailable" do
+      Application.delete_env(:arbor_ai, :security_module)
+
+      Arbor.Security.with_capability_store_unregistered_fixture(fn ->
+        assert {:denied, _reason} =
+                 Handler.check_security_authorize(
+                   "agent_x",
+                   "arbor://shell/exec/rm",
+                   :execute,
+                   %{}
+                 )
+      end)
+    end
   end
 
   describe "ACP tool identity security regression" do
@@ -196,6 +210,30 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
 
     assert reason == "trust policy check failed"
     refute_received {_resource_uri, _action}
+  end
+
+  test "security regression: a Trust.Manager restart cannot erase the confirmation gate" do
+    Application.delete_env(:arbor_ai, :trust_policy_module)
+    Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+    Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+
+    name = Module.concat(["Arbor", "Trust", "Manager"])
+    pid = Process.whereis(name)
+    if is_pid(pid), do: Process.unregister(name)
+
+    try do
+      {:ok, state} = Handler.init(agent_id: "agent_x", permission_timeout_ms: 10)
+
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", %{"kind" => "edit"}, %{}, state)
+
+      assert reason == "trust policy unavailable"
+      refute_received {_resource_uri, _action}
+    after
+      if is_pid(pid) and Process.alive?(pid) and Process.whereis(name) == nil do
+        Process.register(pid, name)
+      end
+    end
   end
 
   # SECURITY REGRESSION (codex authz.acp-session-anonymous-file-access, HIGH):

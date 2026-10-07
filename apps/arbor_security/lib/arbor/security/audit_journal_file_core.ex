@@ -244,7 +244,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
   def encode_compacted(snapshot, pending) when is_list(pending) do
     with {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)),
          {:ok, frame, digest} <- encode_frame(snap_bytes, @genesis_digest),
-         {:ok, bytes, _digest} <- encode_pending_frames(pending, digest, frame),
+         {:ok, bytes, _digest} <- encode_pending_frames(pending, digest, [frame]),
          {:ok, empty} <- new(),
          {:ok, replay} <- consume(empty, bytes) do
       {:ok, bytes, replay}
@@ -275,6 +275,40 @@ defmodule Arbor.Security.AuditJournalFileCore do
   end
 
   def source_tip_match?(_replay, _source), do: false
+
+  @doc """
+  Proves that complete framed bytes still match an admitted source binding.
+
+  This verifies every predecessor and frame digest, then compares the final
+  frame count, byte offset, and digest with the binding. It deliberately does
+  not decode or fold payload JSON: the handle core was admitted when the file
+  was opened and the chained digest binds these exact bytes to that core.
+  """
+  @spec verify_source_binding(term(), term()) :: :ok | {:error, atom()}
+  def verify_source_binding(
+        bytes,
+        %{
+          "committed_digest" => expected_hex,
+          "committed_frames" => expected_frames,
+          "committed_offset" => expected_offset
+        }
+      )
+      when is_binary(bytes) and is_binary(expected_hex) and is_integer(expected_frames) and
+             expected_frames >= 0 and is_integer(expected_offset) and expected_offset >= 0 do
+    with true <- byte_size(bytes) == expected_offset || {:error, :size_mismatch},
+         {:ok, expected_digest} <- decode_source_digest(expected_hex),
+         {:ok, evidence} <- verify_source_frames(bytes, 0, @genesis_digest, 0),
+         true <- evidence.frames == expected_frames || {:error, :source_tip_mismatch},
+         true <- evidence.offset == expected_offset || {:error, :size_mismatch},
+         true <- evidence.digest == expected_digest || {:error, :digest_mismatch} do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :source_tip_mismatch}
+    end
+  end
+
+  def verify_source_binding(_bytes, _source), do: {:error, :source_tip_mismatch}
 
   @spec candidate_basename(term()) :: {:ok, String.t()} | {:error, :malformed}
   def candidate_basename(name) when is_binary(name) do
@@ -556,13 +590,15 @@ defmodule Arbor.Security.AuditJournalFileCore do
          {:ok, bytes} <- map_bytes(AuditJournal.canonical_record_bytes(record)),
          {:ok, fingerprint} <- map_fingerprint(AuditJournal.record_fingerprint(bytes)),
          :ok <- match_pending_head(state.pending_needed, record, fingerprint) do
-      have = state.pending_have ++ [record]
+      have = [record | state.pending_have]
       needed = tl(state.pending_needed)
       finish_pending_prefix(state, have, needed)
     end
   end
 
-  defp finish_pending_prefix(state, have, []) do
+  defp finish_pending_prefix(state, reversed, []) do
+    have = Enum.reverse(reversed)
+
     case AuditJournalCore.restore(state.snapshot, have) do
       {:ok, core} ->
         {:ok, %{state | core: core, pending_needed: [], pending_have: have}}
@@ -572,8 +608,9 @@ defmodule Arbor.Security.AuditJournalFileCore do
     end
   end
 
-  defp finish_pending_prefix(state, have, needed) do
-    {:ok, %{state | pending_have: have, pending_needed: needed}}
+  # Keep the incomplete prefix reversed so every admitted frame is O(1).
+  defp finish_pending_prefix(state, reversed, needed) do
+    {:ok, %{state | pending_have: reversed, pending_needed: needed}}
   end
 
   defp match_pending_head([{oid, type, sha} | _rest], record, fingerprint) do
@@ -598,16 +635,18 @@ defmodule Arbor.Security.AuditJournalFileCore do
     end
   end
 
-  defp encode_pending_frames([], digest, acc), do: {:ok, acc, digest}
+  defp encode_pending_frames([], digest, reversed) do
+    {:ok, reversed |> Enum.reverse() |> IO.iodata_to_binary(), digest}
+  end
 
-  defp encode_pending_frames([record | rest], pred, acc) do
+  defp encode_pending_frames([record | rest], pred, reversed) do
     with {:ok, rec_bytes} <- map_bytes(AuditJournal.canonical_record_bytes(record)),
          {:ok, frame, digest} <- encode_frame(rec_bytes, pred) do
-      encode_pending_frames(rest, digest, acc <> frame)
+      encode_pending_frames(rest, digest, [frame | reversed])
     end
   end
 
-  defp encode_pending_frames(_records, _pred, _acc), do: {:error, :malformed}
+  defp encode_pending_frames(_records, _pred, _reversed), do: {:error, :malformed}
 
   defp fold_record(core, record) do
     case AuditJournalCore.append(core, record) do
@@ -685,6 +724,33 @@ defmodule Arbor.Security.AuditJournalFileCore do
           {:ok, _digest} -> {:frame, header, payload}
           {:error, reason} -> {:error, reason}
         end
+    end
+  end
+
+  defp verify_source_frames(bytes, offset, digest, frames) do
+    if offset == byte_size(bytes) do
+      {:ok, %{digest: digest, frames: frames, offset: offset}}
+    else
+      suffix = binary_part(bytes, offset, byte_size(bytes) - offset)
+
+      case classify_suffix(suffix, digest) do
+        {:frame, header, _payload} ->
+          next_offset = offset + @header_size + header.payload_len
+          verify_source_frames(bytes, next_offset, header.frame_digest, frames + 1)
+
+        :torn_tail ->
+          {:error, :source_tip_mismatch}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp decode_source_digest(hex) do
+    case Base.decode16(hex, case: :lower) do
+      {:ok, digest} when byte_size(digest) == @digest_size -> {:ok, digest}
+      _other -> {:error, :source_tip_mismatch}
     end
   end
 

@@ -27,6 +27,13 @@ defmodule Arbor.Comms.Channels.SignalTest do
     def available?, do: false
   end
 
+  defmodule CaptureRunner do
+    def execute(command, _opts) do
+      send(self(), {:signal_command, command})
+      {:ok, %{exit_code: 0, stdout: ""}}
+    end
+  end
+
   describe "channel_info/0" do
     test "returns signal channel metadata" do
       info = Signal.channel_info()
@@ -175,13 +182,6 @@ defmodule Arbor.Comms.Channels.SignalTest do
 
       on_exit(fn -> Application.put_env(:arbor_comms, :signal, original) end)
 
-      defmodule CaptureRunner do
-        def execute(command, _opts) do
-          send(self(), {:signal_command, command})
-          {:ok, %{exit_code: 0, stdout: ""}}
-        end
-      end
-
       Application.put_env(
         :arbor_comms,
         :signal,
@@ -196,7 +196,7 @@ defmodule Arbor.Comms.Channels.SignalTest do
       assert :ok = Arbor.Comms.Channels.Signal.send_message(nil, "hello", [])
       assert_received {:signal_command, command}
       assert command =~ "+15550001111 send"
-      assert String.ends_with?(command, "+15550001111")
+      assert String.ends_with?(command, "-- +15550001111")
 
       Application.put_env(
         :arbor_comms,
@@ -211,7 +211,57 @@ defmodule Arbor.Comms.Channels.SignalTest do
 
       assert :ok = Arbor.Comms.Channels.Signal.send_message("", "hello", [])
       assert_received {:signal_command, command2}
-      assert String.ends_with?(command2, "+15559998888")
+      assert String.ends_with?(command2, "-- +15559998888")
+    end
+
+    @tag :security_regression
+    test "security regression: terminates option parsing before a recipient" do
+      original = Application.get_env(:arbor_comms, :signal, [])
+      on_exit(fn -> Application.put_env(:arbor_comms, :signal, original) end)
+
+      Application.put_env(
+        :arbor_comms,
+        :signal,
+        Keyword.merge(original,
+          account: "+15550001111",
+          command_runner: CaptureRunner,
+          signal_cli_path: "/bin/echo"
+        )
+      )
+
+      assert :ok = Signal.send_message("--config=/tmp/attacker", "hello", [])
+      assert_received {:signal_command, command}
+      assert String.ends_with?(command, "-- --config=/tmp/attacker")
+    end
+
+    @tag :security_regression
+    test "security regression: message and attachment option values cannot become options" do
+      original = Application.get_env(:arbor_comms, :signal, [])
+      on_exit(fn -> Application.put_env(:arbor_comms, :signal, original) end)
+
+      Application.put_env(
+        :arbor_comms,
+        :signal,
+        Keyword.merge(original,
+          account: "+15550001111",
+          command_runner: CaptureRunner,
+          signal_cli_path: "/bin/echo"
+        )
+      )
+
+      assert :ok =
+               Signal.send_message("+15559998888", "--config=/tmp/message",
+                 attachments: [
+                   "--config=/tmp/attachment"
+                 ]
+               )
+
+      assert_received {:signal_command, command}
+      assert command =~ "--message=--config=/tmp/message"
+      assert command =~ "--attachment=--config=/tmp/attachment"
+      refute command =~ "--message --config="
+      refute command =~ "--attachment --config="
+      assert String.ends_with?(command, "-- +15559998888")
     end
   end
 end

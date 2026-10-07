@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
 
       mix arbor.scheduler.update_issuer_envelopes \\
         --issuer-id agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e \\
+        --key-file ~/.arbor/operator.key \\
         --envelope-uri "arbor://fs/read/Users/azmaveth/.arbor/reports/**" \\
         --envelope-uri "arbor://fs/write/Users/azmaveth/.arbor/reports/**" \\
         --envelope-uri "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/**" \\
@@ -32,6 +33,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
   ## Options
 
     * `--issuer-id <id>` (required) — agent_id of the enrolled issuer
+    * `--key-file <path>` — private operator key used to authenticate the
+      registry mutation (default `~/.arbor/operator.key`)
     * `--envelope-uri <uri>` (required, repeatable) — the FULL new
       envelope set. This REPLACES the issuer's existing envelopes; what
       isn't in this list is removed. Pass every URI you want the issuer
@@ -68,22 +71,41 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
   use Mix.Task
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.IssuerRegistry
+
+  @default_key_path "~/.arbor/operator.key"
 
   @impl true
   def run(args) do
-    Mix.Task.run("app.start")
-
     {opts, _positional, _} =
       OptionParser.parse(args,
-        strict: [issuer_id: :string, envelope_uri: :keep, reason: :string],
-        aliases: [i: :issuer_id, e: :envelope_uri, r: :reason]
+        strict: [issuer_id: :string, envelope_uri: :keep, reason: :string, key_file: :string],
+        aliases: [i: :issuer_id, e: :envelope_uri, r: :reason, k: :key_file]
       )
 
     with {:ok, issuer_id} <- fetch_required(opts, :issuer_id),
          {:ok, envelope_uris} <- fetch_envelope_uris(opts),
          {:ok, envelopes} <- build_envelopes(issuer_id, envelope_uris),
-         :ok <- update(issuer_id, envelopes, opts[:reason]) do
+         registry_opts <- registry_opts(opts[:reason]),
+         {:ok, payload_digest} <-
+           Arbor.Security.issuer_mutation_payload_digest(
+             :update,
+             issuer_id,
+             envelopes,
+             registry_opts
+           ),
+         {:ok, _actor_id, actor_proof} <-
+           prepare_key_file_issuer_mutation(
+             Path.expand(opts[:key_file] || @default_key_path),
+             :update,
+             payload_digest
+           ),
+         :ok <- start_application(),
+         :ok <-
+           Arbor.Security.update_issuer_envelopes(
+             issuer_id,
+             envelopes,
+             Keyword.put(registry_opts, :actor_proof, actor_proof)
+           ) do
       Mix.shell().info("Updated issuer envelopes:")
       Mix.shell().info("  issuer_id:     #{issuer_id}")
       Mix.shell().info("  new envelopes:")
@@ -91,6 +113,20 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
       Mix.shell().info("  reason:        #{opts[:reason] || "(none)"}")
     else
       {:error, reason} -> abort(reason)
+    end
+  end
+
+  defp prepare_key_file_issuer_mutation(path, operation, payload_digest) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          Arbor.Security.prepare_key_file_issuer_mutation(io_device, operation, payload_digest)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
     end
   end
 
@@ -122,9 +158,18 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
     end
   end
 
-  defp update(issuer_id, envelopes, reason) do
-    opts = if reason, do: [reason: reason], else: []
-    IssuerRegistry.update_envelopes(issuer_id, envelopes, opts)
+  defp registry_opts(nil), do: []
+  defp registry_opts(reason), do: [reason: reason]
+
+  # See the enroll task: private-key proof construction is available only
+  # before the supervised security boundary starts in production.
+  defp start_application do
+    Mix.Task.run("app.start")
+    :ok
+  rescue
+    exception -> {:error, {:application_start_failed, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:application_start_failed, reason}}
   end
 
   defp abort(reason) do

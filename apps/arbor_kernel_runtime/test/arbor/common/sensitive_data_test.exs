@@ -71,6 +71,38 @@ defmodule Arbor.Common.SensitiveDataTest do
       assert Enum.any?(findings, fn {label, _} -> label == "Anthropic API Key" end)
     end
 
+    @tag :security_regression
+    test "security regression: detects current provider token formats and distribution cookies" do
+      tokens = [
+        {"sk-proj-" <> String.duplicate("a", 24), "OpenAI API Key"},
+        {"sk-svcacct-" <> String.duplicate("b", 24), "OpenAI API Key"},
+        {"xai-" <> String.duplicate("c", 24), "xAI API Key"},
+        {"ya29." <> String.duplicate("d", 24), "Google OAuth Token"},
+        {"hf_" <> String.duplicate("e", 24), "Hugging Face Token"},
+        {"gsk_" <> String.duplicate("f", 24), "Groq API Key"},
+        {"--cookie " <> String.duplicate("cookie", 5), "Erlang Distribution Cookie"}
+      ]
+
+      for {token, label} <- tokens do
+        findings = SensitiveData.scan_secrets("command #{token}")
+        assert Enum.any?(findings, fn {found_label, _match} -> found_label == label end)
+      end
+    end
+
+    @tag :security_regression
+    test "security regression: detects complete encrypted and PGP private-key blocks" do
+      encrypted =
+        "-----BEGIN " <>
+          "ENCRYPTED PRIVATE KEY-----\nprivate-body\n-----END ENCRYPTED PRIVATE KEY-----"
+
+      pgp =
+        "-----BEGIN " <>
+          "PGP PRIVATE KEY BLOCK-----\nprivate-body\n-----END PGP PRIVATE KEY BLOCK-----"
+
+      assert [{"Private Key", ^encrypted}] = SensitiveData.scan_secrets(encrypted)
+      assert [{"PGP Private Key", ^pgp}] = SensitiveData.scan_secrets(pgp)
+    end
+
     test "detects GitHub token" do
       # Concat to avoid committing a scanner-triggering secret literal
       gh_token = "ghp_" <> "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
@@ -210,6 +242,19 @@ defmodule Arbor.Common.SensitiveDataTest do
 
       refute String.contains?(redacted, blob)
       assert String.contains?(redacted, "[REDACTED]")
+    end
+
+    @tag :security_regression
+    test "security regression: removes complete private-key blocks" do
+      key_block =
+        "-----BEGIN " <>
+          "ENCRYPTED PRIVATE KEY-----\nprivate-body\n-----END ENCRYPTED PRIVATE KEY-----"
+
+      redacted = SensitiveData.redact_secrets("before\n#{key_block}\nafter")
+
+      refute redacted =~ "private-body"
+      refute redacted =~ "BEGIN ENCRYPTED PRIVATE KEY"
+      assert redacted == "before\n[REDACTED]\nafter"
     end
   end
 

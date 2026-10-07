@@ -59,9 +59,12 @@ defmodule Arbor.Monitor.AnomalyQueue do
   """
   @spec enqueue(map()) :: {:ok, :enqueued | :deduplicated} | {:error, term()}
   def enqueue(anomaly) do
-    # Notify cascade detector if running
-    notify_cascade_detector(anomaly)
-    GenServer.call(__MODULE__, {:enqueue, anomaly})
+    case trusted_queue_pid() do
+      pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, {:enqueue, anomaly})
+      _other -> {:error, :not_running}
+    end
+  catch
+    :exit, _reason -> {:error, :not_running}
   end
 
   @doc """
@@ -186,6 +189,8 @@ defmodule Arbor.Monitor.AnomalyQueue do
 
   @impl GenServer
   def init(opts) do
+    Process.flag(:sensitive, true)
+
     # Create ETS tables (or recover if they exist)
     create_or_recover_tables()
 
@@ -195,7 +200,9 @@ defmodule Arbor.Monitor.AnomalyQueue do
       check_interval_ms: get_config(opts, :check_interval_ms, @default_check_interval_ms),
       max_attempts: get_config(opts, :max_attempts, @default_max_attempts),
       suppression_window_ms:
-        get_config(opts, :suppression_window_ms, @default_suppression_window_ms)
+        get_config(opts, :suppression_window_ms, @default_suppression_window_ms),
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      trusted_enqueue_producer: configured_trusted_enqueue_producer(opts)
     }
 
     # Schedule periodic lease checking
@@ -205,10 +212,8 @@ defmodule Arbor.Monitor.AnomalyQueue do
   end
 
   @impl GenServer
-  def handle_call({:enqueue, anomaly}, _from, config) do
-    result = do_enqueue(anomaly, config)
-    {:reply, result, config}
-  end
+  def handle_call({:enqueue, _anomaly}, _from, config),
+    do: {:reply, {:error, :unauthorized}, config}
 
   def handle_call({:claim_next, agent_id}, _from, config) do
     result = do_claim_next(agent_id, config)
@@ -250,24 +255,53 @@ defmodule Arbor.Monitor.AnomalyQueue do
     {:noreply, config}
   end
 
+  def handle_info(message, config) do
+    case Arbor.Common.handle_authenticated_call(message, config.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        {reply, config} = dispatch_authenticated(request, caller, config)
+        :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+        {:noreply, config}
+
+      result when result in [:pending, :expired, :rejected, :unrecognized] ->
+        {:noreply, config}
+    end
+  end
+
   # ============================================================================
   # Internal Functions
   # ============================================================================
 
+  defp dispatch_authenticated({:enqueue, anomaly}, caller, config) do
+    if authorized_enqueue_producer?(caller, config) do
+      result = do_enqueue(anomaly, config)
+
+      if match?({:ok, _status}, result) do
+        notify_cascade_detector(anomaly)
+      end
+
+      {result, config}
+    else
+      {{:error, :unauthorized}, config}
+    end
+  end
+
+  defp dispatch_authenticated(_request, _caller, config),
+    do: {{:error, :unauthorized}, config}
+
   defp create_or_recover_tables do
     # Queue table - keyed by anomaly_id
     if :ets.whereis(@queue_table) == :undefined do
-      :ets.new(@queue_table, [:named_table, :set, :public, read_concurrency: true])
+      :ets.new(@queue_table, [:named_table, :set, :protected, read_concurrency: true])
     end
 
     # Fingerprint dedup table - keyed by fingerprint hash
     if :ets.whereis(@fingerprint_table) == :undefined do
-      :ets.new(@fingerprint_table, [:named_table, :set, :public, read_concurrency: true])
+      :ets.new(@fingerprint_table, [:named_table, :set, :protected, read_concurrency: true])
     end
 
     # Suppression table - keyed by family hash
     if :ets.whereis(@suppressed_table) == :undefined do
-      :ets.new(@suppressed_table, [:named_table, :set, :public, read_concurrency: true])
+      :ets.new(@suppressed_table, [:named_table, :set, :protected, read_concurrency: true])
     end
   end
 
@@ -539,6 +573,48 @@ defmodule Arbor.Monitor.AnomalyQueue do
   # ============================================================================
   # Configuration Helpers
   # ============================================================================
+
+  if Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false) do
+    defp trusted_queue_pid, do: Process.whereis(__MODULE__)
+
+    defp configured_trusted_enqueue_producer(opts),
+      do: Keyword.get(opts, :trusted_enqueue_producer)
+
+    defp authorized_enqueue_producer?(caller, config) do
+      caller == config.trusted_enqueue_producer or caller == Process.whereis(Arbor.Monitor.Poller)
+    end
+  else
+    @queue_path [
+      Arbor.Monitor.Application,
+      Arbor.Monitor.HealingSupervisor,
+      __MODULE__
+    ]
+    @poller_path [Arbor.Monitor.Application, Arbor.Monitor.Poller]
+
+    defp trusted_queue_pid do
+      case Arbor.Common.supervised_registered_child_pid(
+             :arbor_kernel_runtime,
+             @queue_path,
+             __MODULE__
+           ) do
+        {:ok, pid} -> pid
+        {:error, :not_supervised_owner} -> nil
+      end
+    end
+
+    defp configured_trusted_enqueue_producer(_opts), do: nil
+
+    defp authorized_enqueue_producer?(caller, _config) do
+      case Arbor.Common.supervised_registered_child_pid(
+             :arbor_kernel_runtime,
+             @poller_path,
+             Arbor.Monitor.Poller
+           ) do
+        {:ok, ^caller} -> true
+        _other -> false
+      end
+    end
+  end
 
   # Get config value: opts > Application env > default
   defp get_config(opts, key, default) do

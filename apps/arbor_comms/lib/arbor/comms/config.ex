@@ -127,6 +127,18 @@ defmodule Arbor.Comms.Config do
         Arbor.Persistence
       )
 
+  @doc false
+  @spec channel_security_module() :: {:ok, module()} | {:error, :invalid_config}
+  def channel_security_module do
+    configured_module(:channel_security_module, Arbor.Security)
+  end
+
+  @doc false
+  @spec channel_store_module() :: {:ok, module()} | {:error, :invalid_config}
+  def channel_store_module do
+    configured_module(:channel_store_module, Arbor.Persistence)
+  end
+
   def conversation_journal do
     config = Application.get_env(:arbor_comms, :conversation_journal, [])
 
@@ -151,6 +163,13 @@ defmodule Arbor.Comms.Config do
     end
   rescue
     _ -> {:error, :invalid_journal_config}
+  end
+
+  defp configured_module(key, default) do
+    case Application.get_env(:arbor_comms, key, default) do
+      module when is_atom(module) and module not in [nil, true, false] -> {:ok, module}
+      _other -> {:error, :invalid_config}
+    end
   end
 
   @doc "Returns the configured durable interaction persistence backend, or nil when disabled."

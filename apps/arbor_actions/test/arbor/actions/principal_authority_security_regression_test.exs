@@ -80,7 +80,7 @@ defmodule Arbor.Actions.PrincipalAuthoritySecurityRegressionTest do
     assert {:error, :authenticated_principal_required} = result
     refute_receive {:principal_sensitive_executed, ^agent_id}
 
-    Arbor.Security.CapabilityStore.revoke_all(agent_id)
+    Arbor.Security.revoke_all_fixture(agent_id)
     Arbor.Trust.Store.delete_profile(agent_id)
   end
 
@@ -117,7 +117,9 @@ defmodule Arbor.Actions.PrincipalAuthoritySecurityRegressionTest do
   defp authorize_agent(agent_id) do
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: %{@resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: @resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: @resource)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

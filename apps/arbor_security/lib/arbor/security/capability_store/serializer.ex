@@ -51,32 +51,59 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
   """
   @spec deserialize(map()) :: {:ok, Capability.t()} | {:error, term()}
   def deserialize(data) when is_map(data) do
-    cap = %Capability{
-      id: data["id"],
-      resource_uri: data["resource_uri"],
-      principal_id: data["principal_id"],
-      granted_at: parse_datetime(data["granted_at"]),
-      expires_at: parse_optional_datetime(data["expires_at"]),
-      not_before: parse_optional_datetime(data["not_before"]),
-      parent_capability_id: data["parent_capability_id"],
-      delegation_depth: data["delegation_depth"] || 3,
-      max_uses: data["max_uses"],
-      allowed_delegatees: data["allowed_delegatees"],
-      session_id: data["session_id"],
-      task_id: data["task_id"],
-      principal_scope: data["principal_scope"],
-      signed_at: parse_optional_datetime(data["signed_at"]),
-      constraints: deserialize_constraints(data["constraints"] || %{}),
-      issuer_id: data["issuer_id"],
-      issuer_signature: decode_optional_binary(data["issuer_signature"]),
-      delegation_chain: deserialize_delegation_chain(data["delegation_chain"] || []),
-      metadata: data["metadata"] || %{}
-    }
-
-    {:ok, cap}
+    with :ok <- require_identity_fields(data),
+         {:ok, granted_at} <- parse_datetime(data["granted_at"]),
+         {:ok, expires_at} <- parse_optional_datetime(data["expires_at"]),
+         {:ok, not_before} <- parse_optional_datetime(data["not_before"]),
+         {:ok, signed_at} <- parse_optional_datetime(data["signed_at"]),
+         {:ok, delegation_depth} <- delegation_depth(data["delegation_depth"]),
+         {:ok, issuer_signature} <- decode_optional_binary(data["issuer_signature"]),
+         {:ok, delegation_chain} <-
+           deserialize_delegation_chain(data["delegation_chain"] || []) do
+      {:ok,
+       %Capability{
+         id: data["id"],
+         resource_uri: data["resource_uri"],
+         principal_id: data["principal_id"],
+         granted_at: granted_at,
+         expires_at: expires_at,
+         not_before: not_before,
+         parent_capability_id: data["parent_capability_id"],
+         delegation_depth: delegation_depth,
+         max_uses: data["max_uses"],
+         allowed_delegatees: data["allowed_delegatees"],
+         session_id: data["session_id"],
+         task_id: data["task_id"],
+         principal_scope: data["principal_scope"],
+         signed_at: signed_at,
+         constraints: deserialize_constraints(data["constraints"] || %{}),
+         issuer_id: data["issuer_id"],
+         issuer_signature: issuer_signature,
+         delegation_chain: delegation_chain,
+         metadata: data["metadata"] || %{}
+       }}
+    end
   rescue
-    e -> {:error, e}
+    _ -> {:error, :invalid_capability_record}
+  catch
+    _, _ -> {:error, :invalid_capability_record}
   end
+
+  def deserialize(_data), do: {:error, :invalid_capability_record}
+
+  defp require_identity_fields(data) do
+    if Enum.all?(["id", "resource_uri", "principal_id"], fn key ->
+         value = data[key]
+         is_binary(value) and value != "" and String.valid?(value)
+       end) do
+      :ok
+    else
+      {:error, :invalid_capability_record}
+    end
+  end
+
+  defp delegation_depth(depth) when is_integer(depth) and depth in 0..10, do: {:ok, depth}
+  defp delegation_depth(_depth), do: {:error, :invalid_capability_record}
 
   # ── Constraints ──
 
@@ -129,58 +156,76 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
   defp serialize_chain_value(v), do: v
 
   defp deserialize_delegation_chain(chain) when is_list(chain) do
-    Enum.map(chain, &deserialize_delegation_record/1)
+    Enum.reduce_while(chain, {:ok, []}, fn record, {:ok, acc} ->
+      case deserialize_delegation_record(record) do
+        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, records} -> {:ok, Enum.reverse(records)}
+      error -> error
+    end
   end
 
-  defp deserialize_delegation_chain(_), do: []
+  defp deserialize_delegation_chain(_), do: {:error, :invalid_capability_record}
 
   defp deserialize_delegation_record(record) when is_map(record) do
-    Map.new(record, fn
-      {"delegator_id", value} -> {:delegator_id, value}
-      {"delegator_signature", value} -> {:delegator_signature, decode_optional_binary(value)}
-      {"constraints", value} -> {:constraints, deserialize_constraints(value)}
-      {"delegated_at", value} -> {:delegated_at, parse_optional_datetime(value)}
-      entry -> entry
-    end)
+    with {:ok, signature} <- decode_optional_binary(record["delegator_signature"]),
+         {:ok, delegated_at} <- parse_optional_datetime(record["delegated_at"]) do
+      decoded =
+        Map.new(record, fn
+          {"delegator_id", value} -> {:delegator_id, value}
+          {"delegator_signature", _value} -> {:delegator_signature, signature}
+          {"constraints", value} -> {:constraints, deserialize_constraints(value)}
+          {"delegated_at", _value} -> {:delegated_at, delegated_at}
+          entry -> entry
+        end)
+
+      {:ok, decoded}
+    end
   end
 
-  defp deserialize_delegation_record(other), do: other
+  defp deserialize_delegation_record(_other), do: {:error, :invalid_capability_record}
 
   # ── Binary encoding ──
 
   defp encode_optional_binary(nil), do: nil
   defp encode_optional_binary(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)
 
-  defp decode_optional_binary(nil), do: nil
-  defp decode_optional_binary(""), do: nil
+  defp decode_optional_binary(nil), do: {:ok, nil}
 
   defp decode_optional_binary(hex) when is_binary(hex) do
     case Base.decode16(hex, case: :mixed) do
-      {:ok, bin} -> bin
-      :error -> nil
+      {:ok, bin} when byte_size(bin) > 0 -> {:ok, bin}
+      _ -> {:error, :invalid_capability_record}
     end
   end
+
+  defp decode_optional_binary(_value), do: {:error, :invalid_capability_record}
 
   # ── DateTime encoding ──
 
   defp encode_optional_datetime(nil), do: nil
   defp encode_optional_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
-  defp parse_datetime(nil), do: DateTime.utc_now()
-
   defp parse_datetime(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
-      {:ok, dt, _offset} -> dt
-      _ -> DateTime.utc_now()
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> {:error, :invalid_capability_record}
     end
   end
 
-  defp parse_optional_datetime(nil), do: nil
+  defp parse_datetime(_value), do: {:error, :invalid_capability_record}
+
+  defp parse_optional_datetime(nil), do: {:ok, nil}
 
   defp parse_optional_datetime(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
-      {:ok, dt, _offset} -> dt
-      _ -> nil
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> {:error, :invalid_capability_record}
     end
   end
+
+  defp parse_optional_datetime(_value), do: {:error, :invalid_capability_record}
 end

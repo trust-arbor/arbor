@@ -14,9 +14,16 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
   ]
 
   setup do
-    start_supervised!({CascadeDetector, @test_opts})
+    start_supervised!({CascadeDetector, test_opts()})
     CascadeDetector.reset()
     :ok
+  end
+
+  defp test_opts(opts \\ @test_opts) do
+    Keyword.merge(opts,
+      trusted_anomaly_producer: self(),
+      trusted_polling_producer: self()
+    )
   end
 
   defp make_anomaly(skill \\ :memory) do
@@ -112,28 +119,25 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       # Sustain a high rate for longer than the exit threshold (50ms) AND the
       # window (100ms) by feeding fresh anomalies in tight rounds. We must NOT
-      # rely on wall-clock sleeps lining up with the exit timer: record_anomaly
-      # is an async cast, and the periodic :cleanup_window handler races the
-      # cast to evaluate the exit condition. Instead, after each round we feed a
-      # fresh anomaly and immediately assert via in_cascade?/0 (a synchronous
-      # call, ordered FIFO after the casts on the same process). Because the
-      # anomaly that bumps last_above_threshold_at was just processed, no
-      # cleanup pass can have measured >= exit_threshold_ms of low rate.
+      # rely on a sleep after the final anomaly: a loaded scheduler can oversleep
+      # past the exit threshold. Sleep first, then feed a fresh synchronous round
+      # and assert immediately. The final assertion therefore always follows a
+      # round that refreshed last_above_threshold_at.
       #
       # 15 rounds * ~10ms covers ~150ms of sustained pressure, exceeding both
       # the 50ms exit threshold and the 100ms window, so this genuinely
       # verifies "sustained high rate keeps it in cascade" without timing flake.
       for _ <- 1..15 do
+        Process.sleep(10)
+
         CascadeDetector.record_anomaly(make_anomaly())
         CascadeDetector.record_anomaly(make_anomaly())
         CascadeDetector.record_anomaly(make_anomaly())
 
-        # Synchronous barrier: drains the casts above before we read state, and
-        # asserts the rate is still above threshold so the exit timer can't fire.
+        # Authenticated calls above are synchronous. Confirm the current window
+        # is above threshold and the cascade remains active after the fresh data.
         assert CascadeDetector.current_rate() >= 3
         assert CascadeDetector.in_cascade?()
-
-        Process.sleep(10)
       end
 
       assert CascadeDetector.in_cascade?()
@@ -478,14 +482,14 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 100,
            cascade_threshold: 3,
            settling_cycles: 2,
            exit_threshold_ms: 50,
            check_interval_ms: 25,
            signal_callback: callback
-         ]}
+         )}
       )
 
       for _ <- 1..3 do
@@ -509,14 +513,14 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 50,
            cascade_threshold: 3,
            settling_cycles: 1,
            exit_threshold_ms: 30,
            check_interval_ms: 10,
            signal_callback: callback
-         ]}
+         )}
       )
 
       for _ <- 1..3 do
@@ -553,14 +557,14 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 100,
            cascade_threshold: 3,
            settling_cycles: 2,
            exit_threshold_ms: 50,
            check_interval_ms: 25,
            signal_callback: bad_callback
-         ]}
+         )}
       )
 
       for _ <- 1..3 do
@@ -579,13 +583,13 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 200,
            cascade_threshold: 5,
            settling_cycles: 1,
            exit_threshold_ms: 50,
            check_interval_ms: 25
-         ]}
+         )}
       )
 
       # 3 anomalies should NOT trigger cascade with threshold=5
@@ -609,13 +613,13 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 200,
            cascade_threshold: 3,
            settling_cycles: 4,
            exit_threshold_ms: 50,
            check_interval_ms: 25
-         ]}
+         )}
       )
 
       for _ <- 1..3 do
@@ -642,14 +646,14 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       start_supervised!(
         {CascadeDetector,
-         [
+         test_opts(
            window_ms: 200,
            cascade_threshold: 3,
            settling_cycles: 1,
            max_concurrent_proposals: 5,
            exit_threshold_ms: 50,
            check_interval_ms: 25
-         ]}
+         )}
       )
 
       for _ <- 1..3 do

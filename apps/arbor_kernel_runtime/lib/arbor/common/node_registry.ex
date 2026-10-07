@@ -1,6 +1,11 @@
 defmodule Arbor.Common.NodeRegistry do
   @moduledoc """
-  Maps BEAM nodes to trust zones for distributed Arbor deployments.
+  Maps BEAM nodes to operational routing zones for distributed Arbor deployments.
+
+  These zones do not provide an authorization boundary. Any node holding the
+  Erlang distribution cookie has cluster-root authority and can bypass this
+  registry. Zone checks are useful for placement and conservative resolution
+  policy only.
 
   Trust zones define isolation boundaries for cross-node communication:
 
@@ -42,6 +47,15 @@ defmodule Arbor.Common.NodeRegistry do
 
   @type zone :: 0 | 1 | 2
   @type zone_info :: %{zone: zone(), apps: [atom()]}
+
+  @doc """
+  Whether node zones are a security boundary.
+
+  Always false: Erlang distribution authenticates a shared cookie and grants
+  connected peers cluster-root authority.
+  """
+  @spec security_boundary?() :: false
+  def security_boundary?, do: false
 
   # =========================================================================
   # Public API
@@ -151,7 +165,7 @@ defmodule Arbor.Common.NodeRegistry do
 
   @impl true
   def init(_opts) do
-    table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    table = :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
 
     # Load zone configuration
     load_config()

@@ -83,12 +83,19 @@ defmodule Arbor.Comms.Channels.Signal do
         formatted = do_format(message)
         attachments = Keyword.get(opts, :attachments, [])
 
-        args = ["-u", account, "send", "-m", formatted, recipient]
+        # Bind untrusted option values into their option token. Quoting alone
+        # does not stop a leading dash from being parsed as another signal-cli
+        # option, and an empty message must remain a real argv value.
+        args = ["-u", account, "send", "--message=#{formatted}"]
 
         args =
           Enum.reduce(attachments, args, fn path, acc ->
-            acc ++ ["--attachment", path]
+            acc ++ ["--attachment=#{path}"]
           end)
+
+        # The recipient is a positional value. Terminate option parsing so a
+        # caller-controlled leading dash cannot become a signal-cli option.
+        args = args ++ ["--", recipient]
 
         case run_signal_cli(args) do
           {:ok, _} -> :ok

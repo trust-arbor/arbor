@@ -2,9 +2,8 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   @moduledoc """
   ETS-backed store for agent telemetry metrics.
 
-  The GenServer's only responsibility is to own the ETS table and manage its
-  lifecycle. All reads and writes go directly through ETS (which is
-  concurrent-safe for single-key operations), avoiding GenServer bottlenecks.
+  The GenServer owns the ETS table and serializes mutations. Reads use the
+  protected table directly; callers cannot forge or erase telemetry rows.
 
   In-memory updates always succeed. Durable writes go through the configured
   `Arbor.Common.AgentTelemetry.Persistence` provider asynchronously and cannot
@@ -39,7 +38,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   @table :arbor_agent_telemetry
 
   # ===========================================================================
-  # Public API (direct ETS access — no GenServer calls)
+  # Public API
   # ===========================================================================
 
   @doc """
@@ -60,8 +59,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec put(String.t(), Telemetry.t()) :: :ok
   def put(agent_id, %Telemetry{} = telemetry) when is_binary(agent_id) do
-    :ets.insert(@table, {agent_id, telemetry})
-    :ok
+    GenServer.call(__MODULE__, {:put, agent_id, telemetry})
   end
 
   @doc """
@@ -70,8 +68,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec record_turn(String.t(), map()) :: :ok
   def record_turn(agent_id, usage) when is_binary(agent_id) and is_map(usage) do
-    telemetry = get_or_create(agent_id)
-    put(agent_id, AgentTelemetry.record_turn(telemetry, usage))
+    :ok = GenServer.call(__MODULE__, {:record_turn, agent_id, usage})
     persist_event(agent_id, :turn_completed, usage)
     :ok
   end
@@ -83,8 +80,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   @spec record_tool(String.t(), String.t(), :ok | :error | :gated, non_neg_integer()) :: :ok
   def record_tool(agent_id, tool_name, result, duration_ms)
       when is_binary(agent_id) and is_binary(tool_name) do
-    telemetry = get_or_create(agent_id)
-    put(agent_id, AgentTelemetry.record_tool(telemetry, tool_name, result, duration_ms))
+    :ok = GenServer.call(__MODULE__, {:record_tool, agent_id, tool_name, result, duration_ms})
 
     persist_event(agent_id, :tool_call, %{
       tool_name: tool_name,
@@ -101,8 +97,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec record_routing(String.t(), :classified | :rerouted | :tokenized | :blocked) :: :ok
   def record_routing(agent_id, decision) when is_binary(agent_id) do
-    telemetry = get_or_create(agent_id)
-    put(agent_id, AgentTelemetry.record_routing(telemetry, decision))
+    :ok = GenServer.call(__MODULE__, {:record_routing, agent_id, decision})
     persist_event(agent_id, :routing_decision, %{decision: decision})
     :ok
   end
@@ -113,8 +108,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec record_compaction(String.t(), float()) :: :ok
   def record_compaction(agent_id, utilization_pct) when is_binary(agent_id) do
-    telemetry = get_or_create(agent_id)
-    put(agent_id, AgentTelemetry.record_compaction(telemetry, utilization_pct))
+    :ok = GenServer.call(__MODULE__, {:record_compaction, agent_id, utilization_pct})
     persist_event(agent_id, :compaction, %{utilization: utilization_pct})
     :ok
   end
@@ -135,10 +129,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec delete(String.t()) :: :ok
   def delete(agent_id) when is_binary(agent_id) do
-    :ets.delete(@table, agent_id)
-    :ok
-  rescue
-    ArgumentError -> :ok
+    GenServer.call(__MODULE__, {:delete, agent_id})
   end
 
   @doc """
@@ -146,10 +137,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec reset_session(String.t()) :: :ok
   def reset_session(agent_id) when is_binary(agent_id) do
-    case get(agent_id) do
-      nil -> :ok
-      telemetry -> put(agent_id, AgentTelemetry.reset_session(telemetry))
-    end
+    GenServer.call(__MODULE__, {:reset_session, agent_id})
   end
 
   # ===========================================================================
@@ -241,7 +229,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   end
 
   # ===========================================================================
-  # GenServer (table ownership only)
+  # GenServer
   # ===========================================================================
 
   def start_link(opts \\ []) do
@@ -254,11 +242,55 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       :ets.new(@table, [
         :named_table,
         :set,
-        :public,
+        :protected,
         read_concurrency: true
       ])
 
     {:ok, %{table: table}}
+  end
+
+  @impl true
+  def handle_call({:put, agent_id, telemetry}, _from, state) do
+    put_owned(agent_id, telemetry)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:record_turn, agent_id, usage}, _from, state) do
+    telemetry = get_or_create(agent_id)
+    put_owned(agent_id, AgentTelemetry.record_turn(telemetry, usage))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:record_tool, agent_id, tool_name, result, duration_ms}, _from, state) do
+    telemetry = get_or_create(agent_id)
+    put_owned(agent_id, AgentTelemetry.record_tool(telemetry, tool_name, result, duration_ms))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:record_routing, agent_id, decision}, _from, state) do
+    telemetry = get_or_create(agent_id)
+    put_owned(agent_id, AgentTelemetry.record_routing(telemetry, decision))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:record_compaction, agent_id, utilization_pct}, _from, state) do
+    telemetry = get_or_create(agent_id)
+    put_owned(agent_id, AgentTelemetry.record_compaction(telemetry, utilization_pct))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:delete, agent_id}, _from, state) do
+    :ets.delete(@table, agent_id)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:reset_session, agent_id}, _from, state) do
+    case get(agent_id) do
+      nil -> :ok
+      telemetry -> put_owned(agent_id, AgentTelemetry.reset_session(telemetry))
+    end
+
+    {:reply, :ok, state}
   end
 
   # ===========================================================================
@@ -290,6 +322,11 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       telemetry ->
         telemetry
     end
+  end
+
+  defp put_owned(agent_id, telemetry) do
+    true = :ets.insert(@table, {agent_id, telemetry})
+    :ok
   end
 
   # Persist a telemetry event asynchronously through the configured provider.

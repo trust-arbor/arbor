@@ -181,11 +181,13 @@ defmodule Arbor.Comms.Channel do
         _from,
         state
       ) do
-    with :ok <- check_membership(sender_id, state),
-         :ok <- check_rate_limit(sender_id, state) do
-      # Extract signature from metadata (placed there by Channel.Send action)
-      {signature, clean_metadata} = Map.pop(metadata, :signature)
+    # Extract signature from metadata (placed there by Channel.Send action).
+    {signature, clean_metadata} = Map.pop(metadata, :signature)
 
+    with :ok <- check_membership(sender_id, state),
+         :ok <- check_rate_limit(sender_id, state),
+         {:ok, persisted} <-
+           prepare_persisted_message(content, clean_metadata, state.encryption_key) do
       message = %{
         id: generate_message_id(),
         channel_id: state.channel_id,
@@ -208,7 +210,7 @@ defmodule Arbor.Comms.Channel do
       new_state = %{state | messages: messages, rate_limits: rate_limits}
 
       # Persist async — encrypt content for private channels
-      persist_message(state.channel_id, message, state.encryption_key)
+      persist_message(state.channel_id, message, persisted)
 
       # Broadcast to PubSub subscribers (plaintext — within process trust boundary)
       broadcast(state, {:channel_message, message})
@@ -339,13 +341,30 @@ defmodule Arbor.Comms.Channel do
   @spec verify_message_signature(message()) :: boolean() | nil
   def verify_message_signature(%{signature: nil}), do: nil
 
-  def verify_message_signature(%{signature: signature, sender_id: sender_id, content: content})
+  def verify_message_signature(%{
+        signature: signature,
+        sender_id: sender_id,
+        channel_id: channel_id,
+        content: content
+      })
       when is_binary(signature) do
-    with {:ok, public_key} <- lookup_identity_public_key(sender_id) do
-      crypto_verify(content, signature, public_key)
+    security = Module.concat(["Arbor", "Security"])
+
+    if Code.ensure_loaded?(security) and
+         function_exported?(security, :verify_channel_message_signature, 4) do
+      apply(security, :verify_channel_message_signature, [
+        sender_id,
+        channel_id,
+        content,
+        signature
+      ])
     else
-      _ -> nil
+      nil
     end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   def verify_message_signature(_), do: nil
@@ -384,7 +403,9 @@ defmodule Arbor.Comms.Channel do
         apply(Phoenix.PubSub, :broadcast, [pubsub, state.pubsub_topic, message])
       rescue
         e ->
-          Logger.debug("[Channel] broadcast failed for #{state.channel_id}: #{Exception.message(e)}")
+          Logger.debug(
+            "[Channel] broadcast failed for #{state.channel_id}: #{Exception.message(e)}"
+          )
       catch
         :exit, reason ->
           Logger.debug("[Channel] broadcast exited for #{state.channel_id}: #{inspect(reason)}")
@@ -416,8 +437,8 @@ defmodule Arbor.Comms.Channel do
   end
 
   defp ensure_persisted(state) do
-    Task.start(fn ->
-      if channel_store_available?() do
+    with {:ok, channel_store} <- available_channel_store() do
+      Task.start(fn ->
         type_str = Atom.to_string(state.type)
 
         members_list =
@@ -431,7 +452,7 @@ defmodule Arbor.Comms.Channel do
             }
           end)
 
-        apply(Arbor.Persistence.ChannelStore, :ensure_channel, [
+        apply(channel_store, :ensure_channel, [
           state.channel_id,
           [
             type: type_str,
@@ -440,47 +461,32 @@ defmodule Arbor.Comms.Channel do
             members: members_list
           ]
         ])
-      end
-    end)
+      end)
+    end
   end
 
-  defp persist_message(channel_id, message, encryption_key) do
-    # Encrypt content for private channels before persistence
-    # JSON-encode encrypted maps so they fit the text column in Postgres
-    persisted_content =
-      case encrypt_content(message.content, encryption_key) do
-        %{} = map -> Jason.encode!(map)
-        plain -> plain
-      end
-
-    persisted_metadata =
-      if encryption_key do
-        Map.put(message.metadata, :encrypted, true)
-      else
-        message.metadata
-      end
-
-    Task.start(fn ->
-      if channel_store_available?() do
-        apply(Arbor.Persistence.ChannelStore, :append_message, [
+  defp persist_message(channel_id, message, persisted) do
+    with {:ok, channel_store} <- available_channel_store() do
+      Task.start(fn ->
+        apply(channel_store, :append_message, [
           channel_id,
           %{
             sender_id: message.sender_id,
             sender_name: message.sender_name,
             sender_type: Atom.to_string(message.sender_type),
-            content: persisted_content,
+            content: persisted.content,
             timestamp: message.timestamp,
-            metadata: persisted_metadata
+            metadata: persisted.metadata
           }
         ])
-      end
-    end)
+      end)
+    end
   end
 
   defp persist_member_add(channel_id, member) do
-    Task.start(fn ->
-      if channel_store_available?() do
-        apply(Arbor.Persistence.ChannelStore, :add_member, [
+    with {:ok, channel_store} <- available_channel_store() do
+      Task.start(fn ->
+        apply(channel_store, :add_member, [
           channel_id,
           %{
             "id" => member.id,
@@ -488,21 +494,31 @@ defmodule Arbor.Comms.Channel do
             "type" => Atom.to_string(member.type)
           }
         ])
-      end
-    end)
+      end)
+    end
   end
 
   defp persist_member_remove(channel_id, member_id) do
-    Task.start(fn ->
-      if channel_store_available?() do
-        apply(Arbor.Persistence.ChannelStore, :remove_member, [channel_id, member_id])
-      end
-    end)
+    with {:ok, channel_store} <- available_channel_store() do
+      Task.start(fn ->
+        apply(channel_store, :remove_member, [channel_id, member_id])
+      end)
+    end
   end
 
-  defp channel_store_available? do
-    Code.ensure_loaded?(Arbor.Persistence.ChannelStore) and
-      apply(Arbor.Persistence.ChannelStore, :available?, [])
+  defp available_channel_store do
+    with {:ok, channel_store} <- Arbor.Comms.Config.channel_store_module(),
+         true <- Code.ensure_loaded?(channel_store),
+         true <- function_exported?(channel_store, :available?, 0),
+         true <- apply(channel_store, :available?, []) do
+      {:ok, channel_store}
+    else
+      _ -> {:error, :channel_store_unavailable}
+    end
+  rescue
+    _ -> {:error, :channel_store_unavailable}
+  catch
+    :exit, _ -> {:error, :channel_store_unavailable}
   end
 
   defp normalize_type(type) when is_atom(type), do: type
@@ -524,16 +540,14 @@ defmodule Arbor.Comms.Channel do
          member_id
        ) do
     # Seal the symmetric key for the new member via ECDH
-    registry = Arbor.Security.Identity.Registry
-    crypto = Arbor.Security.Crypto
+    security = Arbor.Security
 
-    with true <- Code.ensure_loaded?(registry) and Process.whereis(registry) != nil,
-         true <- Code.ensure_loaded?(crypto),
-         {:ok, member_enc_pub} <- apply(registry, :lookup_encryption_key, [member_id]) do
+    with true <- Code.ensure_loaded?(security),
+         {:ok, member_enc_pub} <- security.lookup_encryption_key(member_id) do
       # We need the channel owner's encryption private key for ECDH seal.
       # Use a channel-specific ephemeral keypair derived from the encryption key instead.
-      {ephemeral_pub, ephemeral_priv} = apply(crypto, :generate_encryption_keypair, [])
-      sealed = apply(crypto, :seal, [key, member_enc_pub, ephemeral_priv])
+      {ephemeral_pub, ephemeral_priv} = security.generate_encryption_keypair()
+      sealed = security.seal(key, member_enc_pub, ephemeral_priv)
       sealed = Map.put(sealed, :ephemeral_public, ephemeral_pub)
 
       # Store sealed key for channel restore
@@ -553,7 +567,10 @@ defmodule Arbor.Comms.Channel do
     :ok
   rescue
     e ->
-      Logger.warning("[Channel] key distribution failed for #{channel_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Channel] key distribution failed for #{channel_id}: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, reason ->
@@ -585,31 +602,33 @@ defmodule Arbor.Comms.Channel do
     new_state
   end
 
-  defp encrypt_content(content, nil), do: content
+  defp prepare_persisted_message(content, metadata, nil),
+    do: {:ok, %{content: content, metadata: metadata}}
 
-  defp encrypt_content(content, encryption_key) do
-    crypto = Arbor.Security.Crypto
-
-    if Code.ensure_loaded?(crypto) do
-      {ciphertext, iv, tag} = apply(crypto, :encrypt, [content, encryption_key])
-
-      %{
-        "__encrypted__" => true,
-        "ciphertext" => Base.encode64(ciphertext),
-        "iv" => Base.encode64(iv),
-        "tag" => Base.encode64(tag)
-      }
+  defp prepare_persisted_message(content, metadata, encryption_key) do
+    with {:ok, security} <- Arbor.Comms.Config.channel_security_module(),
+         true <- Code.ensure_loaded?(security),
+         true <- function_exported?(security, :encrypt, 2),
+         {ciphertext, iv, tag} <- apply(security, :encrypt, [content, encryption_key]),
+         {:ok, encoded} <-
+           Jason.encode(%{
+             "__encrypted__" => true,
+             "ciphertext" => Base.encode64(ciphertext),
+             "iv" => Base.encode64(iv),
+             "tag" => Base.encode64(tag)
+           }) do
+      {:ok, %{content: encoded, metadata: Map.put(metadata, :encrypted, true)}}
     else
-      content
+      _ -> {:error, :private_channel_encryption_unavailable}
     end
   rescue
     e ->
       Logger.warning("[Channel] encryption failed: #{Exception.message(e)}")
-      content
+      {:error, :private_channel_encryption_unavailable}
   catch
     :exit, reason ->
       Logger.warning("[Channel] encryption exited: #{inspect(reason)}")
-      content
+      {:error, :private_channel_encryption_unavailable}
   end
 
   @doc false
@@ -626,13 +645,13 @@ defmodule Arbor.Comms.Channel do
   end
 
   def decrypt_content(%{"__encrypted__" => true} = encrypted, encryption_key) do
-    crypto = Arbor.Security.Crypto
-
-    with true <- Code.ensure_loaded?(crypto),
+    with {:ok, security} <- Arbor.Comms.Config.channel_security_module(),
+         true <- Code.ensure_loaded?(security),
+         true <- function_exported?(security, :decrypt, 4),
          {:ok, ciphertext} <- Base.decode64(encrypted["ciphertext"]),
          {:ok, iv} <- Base.decode64(encrypted["iv"]),
          {:ok, tag} <- Base.decode64(encrypted["tag"]),
-         {:ok, plaintext} <- apply(crypto, :decrypt, [ciphertext, encryption_key, iv, tag]) do
+         {:ok, plaintext} <- apply(security, :decrypt, [ciphertext, encryption_key, iv, tag]) do
       plaintext
     else
       _ ->
@@ -667,46 +686,6 @@ defmodule Arbor.Comms.Channel do
 
       _ ->
         message
-    end
-  end
-
-  defp lookup_identity_public_key(agent_id) do
-    registry = Arbor.Security.Identity.Registry
-
-    if Code.ensure_loaded?(registry) and Process.whereis(registry) do
-      try do
-        apply(registry, :lookup, [agent_id])
-      rescue
-        e ->
-          Logger.debug("[Channel] identity lookup failed for #{agent_id}: #{Exception.message(e)}")
-          {:error, :registry_unavailable}
-      catch
-        :exit, reason ->
-          Logger.debug("[Channel] identity lookup exited for #{agent_id}: #{inspect(reason)}")
-          {:error, :registry_unavailable}
-      end
-    else
-      {:error, :registry_unavailable}
-    end
-  end
-
-  defp crypto_verify(message, signature, public_key) do
-    crypto = Arbor.Security.Crypto
-
-    if Code.ensure_loaded?(crypto) do
-      try do
-        apply(crypto, :verify, [message, signature, public_key])
-      rescue
-        e ->
-          Logger.debug("[Channel] crypto verify failed: #{Exception.message(e)}")
-          nil
-      catch
-        :exit, reason ->
-          Logger.debug("[Channel] crypto verify exited: #{inspect(reason)}")
-          nil
-      end
-    else
-      nil
     end
   end
 

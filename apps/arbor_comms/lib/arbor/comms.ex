@@ -555,7 +555,7 @@ defmodule Arbor.Comms do
   @doc """
   Search channels with composable filters.
 
-  When persistence is available, delegates to ChannelStore.search_channels/1.
+  When persistence is available, delegates to the configured persistence facade.
   Falls back to in-memory Registry scan with client-side filtering.
 
   ## Options
@@ -568,25 +568,28 @@ defmodule Arbor.Comms do
   """
   @spec search_channels(keyword()) :: [map()]
   def search_channels(opts \\ []) do
-    if channel_store_available?() do
-      apply(Arbor.Persistence.ChannelStore, :search_channels, [opts])
-      |> Enum.map(&channel_schema_to_info/1)
-    else
-      # Fallback: in-memory scan
-      limit = Keyword.get(opts, :limit, 50)
+    case available_channel_store() do
+      {:ok, channel_store} ->
+        channel_store
+        |> apply(:search_channels, [opts])
+        |> Enum.map(&channel_schema_to_info/1)
 
-      list_channels()
-      |> Enum.map(fn {channel_id, _pid} ->
-        case get_channel_info(channel_id) do
-          {:ok, info} -> info
-          _ -> nil
-        end
-      end)
-      |> Enum.reject(&is_nil/1)
-      |> maybe_filter(:name, Keyword.get(opts, :name))
-      |> maybe_filter(:type, Keyword.get(opts, :type))
-      |> maybe_filter(:owner_id, Keyword.get(opts, :owner_id))
-      |> Enum.take(limit)
+      {:error, :channel_store_unavailable} ->
+        # Fallback: in-memory scan
+        limit = Keyword.get(opts, :limit, 50)
+
+        list_channels()
+        |> Enum.map(fn {channel_id, _pid} ->
+          case get_channel_info(channel_id) do
+            {:ok, info} -> info
+            _ -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> maybe_filter(:name, Keyword.get(opts, :name))
+        |> maybe_filter(:type, Keyword.get(opts, :type))
+        |> maybe_filter(:owner_id, Keyword.get(opts, :owner_id))
+        |> Enum.take(limit)
     end
   rescue
     e ->
@@ -610,7 +613,7 @@ defmodule Arbor.Comms do
       Channel.update_info(pid, opts)
 
       # Persist changes async
-      if channel_store_available?() do
+      with {:ok, channel_store} <- available_channel_store() do
         attrs = %{}
         attrs = if opts[:name], do: Map.put(attrs, :name, opts[:name]), else: attrs
 
@@ -621,7 +624,7 @@ defmodule Arbor.Comms do
 
         if map_size(attrs) > 0 do
           Task.start(fn ->
-            apply(Arbor.Persistence.ChannelStore, :update_channel, [channel_id, attrs])
+            apply(channel_store, :update_channel, [channel_id, attrs])
           end)
         end
       end
@@ -645,8 +648,8 @@ defmodule Arbor.Comms do
     end
 
     # Delete from persistence
-    if channel_store_available?() do
-      apply(Arbor.Persistence.ChannelStore, :delete_channel, [channel_id])
+    with {:ok, channel_store} <- available_channel_store() do
+      apply(channel_store, :delete_channel, [channel_id])
     end
 
     :ok
@@ -660,9 +663,19 @@ defmodule Arbor.Comms do
       :ok
   end
 
-  defp channel_store_available? do
-    Code.ensure_loaded?(Arbor.Persistence.ChannelStore) and
-      apply(Arbor.Persistence.ChannelStore, :available?, [])
+  defp available_channel_store do
+    with {:ok, channel_store} <- Config.channel_store_module(),
+         true <- Code.ensure_loaded?(channel_store),
+         true <- function_exported?(channel_store, :available?, 0),
+         true <- apply(channel_store, :available?, []) do
+      {:ok, channel_store}
+    else
+      _ -> {:error, :channel_store_unavailable}
+    end
+  rescue
+    _ -> {:error, :channel_store_unavailable}
+  catch
+    :exit, _ -> {:error, :channel_store_unavailable}
   end
 
   defp channel_schema_to_info(schema) do

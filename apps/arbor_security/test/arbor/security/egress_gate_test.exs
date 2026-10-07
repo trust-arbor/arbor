@@ -14,7 +14,8 @@ defmodule Arbor.Security.EgressGateTest do
   - **Enforcing**: external-provider egress escalates to `:requires_approval`;
     untrusted/hostile data flowing OUT to an external destination is hard-blocked;
     on-host (local LLM) egress is never gated; on-premises is gated only under
-    the operator opt-in flag; external-peer is advisory-only (ACP deferral).
+    the operator opt-in flag; external-peer follows policy standing; malformed
+    tiers fail closed.
 
   These fail on a build without the egress gate (external egress would authorize
   unconditionally) and pass with it.
@@ -54,7 +55,7 @@ defmodule Arbor.Security.EgressGateTest do
         metadata: %{test: true}
       )
 
-    CapabilityStore.put(cap)
+    CapabilityStore.put_fixture(cap)
 
     %{agent_id: agent_id, cap: cap}
   end
@@ -160,15 +161,45 @@ defmodule Arbor.Security.EgressGateTest do
     end
   end
 
-  describe "enforcing: external_peer is advisory-only in 1.0 (ACP deferral)" do
-    test "external_peer egress is NOT escalated to approval", %{agent_id: agent} do
+  describe "enforcing: external_peer follows policy standing" do
+    @tag spec: "SSEC-012"
+    test "security regression: external_peer without standing escalates to approval",
+         %{agent_id: agent} do
       enforce!()
 
-      assert AuthDecision.check(agent, @resource, :execute,
-               egress_tier: :external_peer,
-               egress_taint: :trusted
-             ) ==
-               :authorized
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_peer,
+                 egress_taint: :trusted
+               )
+    end
+
+    test "security regression: unknown or malformed tiers fail closed" do
+      enforce!()
+
+      for tier <- [nil, :external_providre, "external_provider"] do
+        assert {:block, :policy} =
+                 EgressGate.decide(
+                   "agent_egress_invalid_tier",
+                   tier,
+                   [egress_mode: :allow, egress_taint: :trusted],
+                   []
+                 )
+      end
+    end
+
+    test "security regression: malformed tiers fail closed while the general gate is dark" do
+      Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+
+      for tier <- [nil, :external_providre, "external_provider"] do
+        assert {:block, :policy} =
+                 EgressGate.decide(
+                   "agent_egress_invalid_dark_tier",
+                   tier,
+                   [egress_mode: :allow, egress_taint: :trusted],
+                   []
+                 )
+      end
     end
   end
 
@@ -255,6 +286,20 @@ defmodule Arbor.Security.EgressGateTest do
                {:requires_approval, :egress}
     end
 
+    test "security regression: trusted external_peer fails closed for unusable standing",
+         %{agent_id: agent} do
+      enforce!()
+
+      for opts <- [
+            [egress_taint: :trusted],
+            [egress_taint: :trusted, egress_mode: %{"mode" => "allow"}],
+            [egress_taint: :trusted, egress_mode: :unknown]
+          ] do
+        assert Arbor.Security.authorize_egress(agent, :external_peer, opts) ==
+                 {:requires_approval, :egress}
+      end
+    end
+
     test "enforcing + caller supplies standing → :allow", %{agent_id: agent} do
       enforce!()
 
@@ -291,7 +336,7 @@ defmodule Arbor.Security.EgressGateTest do
           metadata: %{test: true}
         )
 
-      CapabilityStore.put(cap)
+      CapabilityStore.put_fixture(cap)
 
       assert Arbor.Security.authorize_egress(agent, :external_provider, egress_taint: :trusted) ==
                :allow
@@ -316,7 +361,7 @@ defmodule Arbor.Security.EgressGateTest do
           metadata: %{test: true}
         )
 
-      CapabilityStore.put(cap)
+      CapabilityStore.put_fixture(cap)
     end
 
     test "a cap with max_tier covering the request bypasses :ask", %{agent_id: agent} do
@@ -400,10 +445,18 @@ defmodule Arbor.Security.EgressGateTest do
                  egress_destination: "opencode_zen"
                )
 
-      assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
-               Arbor.Security.authorize_egress("agent_1", :external_provider,
-                 egress_destination: "opencode.ai"
-               )
+      for destination <- [
+            "opencode.ai",
+            "OpenCode.ai",
+            "OPENCODE.AI.",
+            "https://OpenCode.ai/v1/chat/completions",
+            "OpenCode.ai:443"
+          ] do
+        assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
+                 Arbor.Security.authorize_egress("agent_1", :external_provider,
+                   egress_destination: destination
+                 )
+      end
     end
 
     test "security regression: dark-launch still allows an existing destination when the gate is dark" do

@@ -83,14 +83,16 @@ defmodule Arbor.Common.CapabilityProviders.SkillProviderTest do
       assert email.kind == :skill
     end
 
-    test "taint maps to trust_required" do
+    test "runtime-registered skill taint maps to trust_required" do
       capabilities = SkillProvider.list_capabilities()
 
+      # SkillLibrary.register/1 is an unprivileged ingestion boundary, so it
+      # replaces caller-asserted taint with :untrusted for both fixtures.
       email = Enum.find(capabilities, &(&1.id == "skill:test-email-triage"))
-      assert email.trust_required == :new
+      assert email.trust_required == :established
 
       code = Enum.find(capabilities, &(&1.id == "skill:test-code-review"))
-      assert code.trust_required == :provisional
+      assert code.trust_required == :established
     end
   end
 

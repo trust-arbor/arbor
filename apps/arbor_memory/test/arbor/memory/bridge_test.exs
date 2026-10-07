@@ -73,7 +73,12 @@ defmodule Arbor.Memory.BridgeTest do
 
     test "accepts correlation_id and cause_id options", %{agent_id: agent_id} do
       percept = Percept.success("int_abc", %{exit_code: 0})
-      assert :ok = Bridge.emit_percept(agent_id, percept, correlation_id: "corr_123", cause_id: "sig_456")
+
+      assert :ok =
+               Bridge.emit_percept(agent_id, percept,
+                 correlation_id: "corr_123",
+                 cause_id: "sig_456"
+               )
     end
   end
 
@@ -224,18 +229,17 @@ defmodule Arbor.Memory.BridgeTest do
     end
 
     test "accepts replacement_intent_id option", %{agent_id: agent_id, target_id: target_id} do
-      :ok = Bridge.interrupt(agent_id, target_id, :higher_priority,
-        replacement_intent_id: "new_intent_123"
-      )
+      :ok =
+        Bridge.interrupt(agent_id, target_id, :higher_priority,
+          replacement_intent_id: "new_intent_123"
+        )
 
       data = Bridge.interrupted?(target_id)
       assert data.replacement_intent_id == "new_intent_123"
     end
 
     test "accepts allow_resume option", %{agent_id: agent_id, target_id: target_id} do
-      :ok = Bridge.interrupt(agent_id, target_id, :higher_priority,
-        allow_resume: true
-      )
+      :ok = Bridge.interrupt(agent_id, target_id, :higher_priority, allow_resume: true)
 
       data = Bridge.interrupted?(target_id)
       assert data.allow_resume == true
@@ -482,15 +486,6 @@ defmodule Arbor.Memory.BridgeTest do
   # Start the Signals infrastructure if not already running.
   # In test mode, start_children: false may leave the bus stopped.
   defp ensure_signals_bus_started do
-    unless Process.whereis(Arbor.Signals.Bus) do
-      for child <- [
-            {Arbor.Signals.Store, []},
-            {Arbor.Signals.TopicKeys, []},
-            {Arbor.Signals.Channels, []},
-            {Arbor.Signals.Bus, []}
-          ] do
-        Supervisor.start_child(Arbor.Signals.Supervisor, child)
-      end
-    end
+    :ok = Arbor.Signals.restore_runtime_fixture()
   end
 end

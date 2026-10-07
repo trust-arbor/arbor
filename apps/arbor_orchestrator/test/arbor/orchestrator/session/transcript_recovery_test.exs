@@ -105,12 +105,12 @@ defmodule Arbor.Orchestrator.Session.TranscriptRecoveryTest do
     agent_id = "agent_recovery_#{System.unique_integer([:positive])}"
 
     assert {:ok, capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://orchestrator/execute/**"
              )
 
-    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
 
     %{
       agent_id: agent_id,

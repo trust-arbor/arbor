@@ -53,11 +53,11 @@ defmodule Arbor.Security do
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.Identity
-  alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Contracts.Security.SigningAuthority.Validator, as: SigningAuthorityValidator
   alias Arbor.Contracts.Security.SigningAuthorityBootstrap
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Common.SafePath
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
@@ -67,6 +67,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Constraint.RateLimiter
   alias Arbor.Security.AuditJournalOwner
   alias Arbor.Security.AuthDecision
+  alias Arbor.Security.ApprovalReceiptBroker
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.DisclosureCapability
   alias Arbor.Security.EgressGate
@@ -76,6 +77,8 @@ defmodule Arbor.Security do
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.InvocationAudit
+  alias Arbor.Security.InvocationReceiptBroker
+  alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Keychain
   alias Arbor.Security.KeyFile
   alias Arbor.Security.Reflex
@@ -87,6 +90,9 @@ defmodule Arbor.Security do
   alias Arbor.Security.UriRegistry
 
   require Logger
+
+  @scheduler_caps_signing_domain "arbor.scheduler.caps.v2"
+  @max_scheduler_caps_payload_bytes 1_048_576
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -121,15 +127,83 @@ defmodule Arbor.Security do
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
   def authorize(principal_id, resource_uri, action \\ nil, opts \\ []) do
+    authorize_with_effect(principal_id, resource_uri, action, opts, :none)
+  end
+
+  defp authorize_with_effect(principal_id, resource_uri, action, opts, effect) do
     result =
       check_if_principal_has_capability_for_resource_action(
         principal_id,
         resource_uri,
         action,
-        opts
+        opts,
+        effect
       )
 
     Arbor.Security.InvocationAudit.observe_authorization(result, principal_id, resource_uri)
+  end
+
+  @doc """
+  Authorize and read a regular file through a descriptor bound to the selected
+  filesystem capability's root.
+
+  This is the file-read facade for agent-controlled paths. It keeps the live
+  session/task scope on both the authorization decision and the descriptor
+  open, preventing a symlink swap between an authorization check and a later
+  File.read/1 call. `path` must be absolute; an owning workspace boundary must
+  resolve relative input before calling this facade.
+  """
+  @spec read_authorized_file(String.t(), String.t(), keyword()) ::
+          {:ok, binary(), String.t()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, term()}
+  def read_authorized_file(principal_id, path, opts \\ [])
+
+  def read_authorized_file(principal_id, path, opts)
+      when is_binary(principal_id) and is_binary(path) and is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         {:ok, execution_path} <- normalize_authorized_file_read_path(path, opts) do
+      auth_opts =
+        opts
+        |> Keyword.delete(:workspace)
+        |> Keyword.put(:file_path, execution_path)
+
+      case authorize_with_effect(
+             principal_id,
+             "arbor://fs/read",
+             :execute,
+             auth_opts,
+             {:read_file, execution_path}
+           ) do
+        {:ok, :authorized, {:ok, content, opened_path}}
+        when is_binary(content) and is_binary(opened_path) ->
+          {:ok, content, opened_path}
+
+        {:ok, :pending_approval, _proposal_id} = pending ->
+          pending
+
+        {:error, _reason} = error ->
+          error
+
+        _unexpected ->
+          {:error, :invalid_file_read_result}
+      end
+    else
+      false -> {:error, :invalid_file_read}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def read_authorized_file(_principal_id, _path, _opts), do: {:error, :invalid_file_read}
+
+  defp normalize_authorized_file_read_path(path, _opts) do
+    with true <- SafePath.absolute?(path),
+         :ok <- SafePath.validate(path) do
+      {:ok, SafePath.normalize(path)}
+    else
+      false -> {:error, :absolute_file_path_required}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc "Validate closed notice facts and conservative payload-bound provenance; grants no authority."
@@ -882,6 +956,13 @@ defmodule Arbor.Security do
     to: Arbor.Security.ConversationSession,
     as: :issue
 
+  if Mix.env() == :test do
+    @doc false
+    def issue_conversation_session_fixture(principal, target) do
+      Arbor.Security.SessionToken.generate_conversation_fixture(principal, target)
+    end
+  end
+
   @doc "Exchange an exact authenticated chat receipt for a pending, caller-owned memory admission."
   defdelegate exchange_private_memory_receipt(receipt, agent_id, sender_id, context),
     to: Arbor.Security.PrivateMemory,
@@ -1031,7 +1112,14 @@ defmodule Arbor.Security do
   defp issue_ordinary_receipt(principal_id, resource_uri, action, safe_opts) do
     case authorize(principal_id, resource_uri, action, safe_opts) do
       {:ok, :authorized} ->
-        case DeliveryReceiptBroker.issue(principal_id, resource_uri, action) do
+        proof =
+          receipt_issuance_proof(:delivery, %{
+            principal_id: principal_id,
+            resource_uri: resource_uri,
+            action: action
+          })
+
+        case DeliveryReceiptBroker.issue_authorized(proof) do
           {:ok, %DeliveryReceipt{} = receipt} ->
             {:ok, receipt}
 
@@ -1184,20 +1272,22 @@ defmodule Arbor.Security do
       case InvocationAudit.observe_authorization(authorization, principal, resource) do
         {:ok, :authorized} ->
           if is_nil(operation_payload) do
-            DeliveryReceiptBroker.issue_conversation(
-              principal,
-              resource,
-              canonical_owner,
-              expected_engagement_id
-            )
+            receipt_issuance_proof(:conversation_delivery, %{
+              principal_id: principal,
+              resource_uri: resource,
+              canonical_owner_id: canonical_owner,
+              expected_engagement_id: expected_engagement_id
+            })
+            |> DeliveryReceiptBroker.issue_conversation_authorized()
           else
-            DeliveryReceiptBroker.issue_conversation_operation(
-              principal,
-              resource,
-              canonical_owner,
-              expected_engagement_id,
-              :crypto.hash(:sha256, operation_payload)
-            )
+            receipt_issuance_proof(:conversation_operation_delivery, %{
+              principal_id: principal,
+              resource_uri: resource,
+              canonical_owner_id: canonical_owner,
+              expected_engagement_id: expected_engagement_id,
+              operation_digest: :crypto.hash(:sha256, operation_payload)
+            })
+            |> DeliveryReceiptBroker.issue_conversation_operation_authorized()
           end
 
         {:ok, :pending_approval, _} ->
@@ -1971,6 +2061,13 @@ defmodule Arbor.Security do
   @spec issue_disclosure_capability(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
   def issue_disclosure_capability(opts), do: DisclosureCapability.issue(opts)
 
+  if Mix.env() == :test do
+    @doc false
+    @spec issue_disclosure_capability_fixture(keyword()) ::
+            {:ok, Capability.t()} | {:error, atom()}
+    def issue_disclosure_capability_fixture(opts), do: DisclosureCapability.issue_fixture(opts)
+  end
+
   @doc """
   Mint an interactive disclosure capability and return only its opaque id.
 
@@ -2105,7 +2202,9 @@ defmodule Arbor.Security do
   - `:delegation_depth` - How many times this can be delegated (default: 3)
   """
   @spec grant(keyword()) :: {:ok, Capability.t()} | {:error, term()}
-  def grant(opts), do: grant_capability_to_principal_for_resource(opts)
+  def grant(opts) when is_list(opts), do: grant_capability_to_principal_for_resource(opts)
+
+  def grant(_opts), do: {:error, :invalid_request}
 
   @doc """
   Grant an ordinary capability and return only its opaque id.
@@ -2122,7 +2221,13 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc "Revoke a capability."
+  @doc """
+  Revoke a capability using a live caller-owned authority.
+
+  The actor must hold `arbor://security/revoke/<principal_id>`. The authority
+  is checked again by `SystemAuthority`, and the resulting one-use receipt is
+  bound to the exact current capability payload before the store deletes it.
+  """
   @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
   def revoke(capability_id, opts \\ []), do: revoke_capability_by_id(capability_id, opts)
 
@@ -2133,8 +2238,20 @@ defmodule Arbor.Security do
   trust-profile change or session termination). Capabilities not bound to the
   given `session_id` are left untouched.
   """
-  @spec revoke_by_session(String.t()) :: {:ok, non_neg_integer()}
-  def revoke_by_session(session_id), do: CapabilityStore.revoke_by_session(session_id)
+  @spec revoke_by_session(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def revoke_by_session(session_id, opts \\ []) do
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         target = {:session_id, session_id},
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke_by_scope,
+             target
+           ) do
+      CapabilityStore.revoke_by_session_authorized(session_id, receipt)
+    end
+  end
 
   @doc """
   Revoke all task-scoped capabilities for a task.
@@ -2142,8 +2259,50 @@ defmodule Arbor.Security do
   VP-05D2A0 exposes both task and session revocation at the security facade.
   Agent/Voice terminal lifecycle call sites are wired by VP-05D2A1/A2.
   """
-  @spec revoke_by_task(String.t()) :: {:ok, non_neg_integer()}
-  def revoke_by_task(task_id), do: CapabilityStore.revoke_by_task(task_id)
+  @spec revoke_by_task(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def revoke_by_task(task_id, opts \\ []) do
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         target = {:task_id, task_id},
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke_by_scope,
+             target
+           ) do
+      CapabilityStore.revoke_by_task_authorized(task_id, receipt)
+    end
+  end
+
+  @doc "Revoke all capabilities held by a principal using an authenticated actor authority."
+  @spec revoke_all(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def revoke_all(principal_id, opts \\ []) do
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke_all,
+             principal_id
+           ) do
+      CapabilityStore.revoke_all_authorized(principal_id, receipt)
+    end
+  end
+
+  @doc "Cascade-revoke a capability and its descendants using an authenticated actor authority."
+  @spec cascade_revoke(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def cascade_revoke(capability_id, opts \\ []) do
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         {:ok, fence} <- current_capability_revocation_fence(capability_id),
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :cascade_revoke,
+             fence
+           ) do
+      CapabilityStore.cascade_revoke_authorized(fence, receipt)
+    end
+  end
 
   # ===========================================================================
   # Acknowledged, crash-journal-safe capability mutation (Phase 4C C3A).
@@ -2204,10 +2363,30 @@ defmodule Arbor.Security do
              | :capability_store_unavailable
              | :outcome_unknown}
   def acknowledged_grant(opts) do
-    with {:ok, safe_opts} <- validate_acknowledged_grant_opts(opts),
-         {:ok, signed_cap} <- build_and_sign_acknowledged_grant(safe_opts) do
-      result = CapabilityStore.acknowledged_put(signed_cap)
-      emit_acknowledged_grant_audit(result, signed_cap)
+    with {:ok, actor_authority, actor_id} <- mutation_actor(opts),
+         grant_opts <-
+           opts
+           |> Keyword.delete(:actor_authority)
+           |> Keyword.put(
+             :metadata,
+             metadata_with_granter(Keyword.get(opts, :metadata, %{}), actor_id)
+           ),
+         {:ok, safe_opts} <- validate_acknowledged_grant_opts(grant_opts),
+         {:ok, cap} <- build_acknowledged_grant(safe_opts),
+         {:ok, authorized_cap, receipt} <-
+           SystemAuthority.authorize_capability_mutation(
+             actor_authority,
+             :acknowledged_grant,
+             cap
+           ) do
+      result =
+        CapabilityStore.acknowledged_put_authorized(
+          authorized_cap,
+          :acknowledged_grant,
+          receipt
+        )
+
+      emit_acknowledged_grant_audit(result, authorized_cap)
       result
     end
   rescue
@@ -2250,15 +2429,41 @@ defmodule Arbor.Security do
   `acknowledged_revoke/2` so a same-id re-grant is not deleted by a stale call.
   """
   @spec acknowledged_revoke(String.t()) ::
-          {:ok, :applied | :idempotent, String.t()}
-          | {:error, :invalid_request | :capability_store_unavailable | :outcome_unknown}
-  def acknowledged_revoke(capability_id) do
-    if canonical_exact_capability_id?(capability_id) do
-      result = CapabilityStore.acknowledged_revoke(capability_id)
+          {:error, :capability_mutation_unauthorized}
+  def acknowledged_revoke(_capability_id),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @doc """
+  Revoke the exact current capability through the acknowledged durable path.
+
+  `:actor_authority` is required. The security authority signs a one-use
+  receipt bound to the capability id, principal, and current signing-payload
+  digest; the store re-reads the authoritative record before its CAS delete.
+  """
+  @spec acknowledged_revoke(String.t(), keyword()) ::
+          {:ok, :applied, String.t()}
+          | {:error,
+             :invalid_request
+             | :not_found
+             | :capability_mutation_unauthorized
+             | :capability_store_unavailable
+             | :outcome_unknown}
+  def acknowledged_revoke(capability_id, opts) when is_list(opts) do
+    with true <- canonical_exact_capability_id?(capability_id),
+         {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         {:ok, fence} <- current_capability_revocation_fence(capability_id),
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke,
+             fence
+           ) do
+      result = CapabilityStore.acknowledged_revoke_authorized(fence, receipt)
       emit_acknowledged_revoke_audit(result)
       result
     else
-      {:error, :invalid_request}
+      false -> {:error, :invalid_request}
+      {:error, _} = error -> error
     end
   rescue
     _ -> {:error, :outcome_unknown}
@@ -2268,6 +2473,9 @@ defmodule Arbor.Security do
     :exit, _ -> {:error, :outcome_unknown}
     :throw, _ -> {:error, :outcome_unknown}
   end
+
+  def acknowledged_revoke(_capability_id, _opts_or_fence),
+    do: {:error, :capability_mutation_unauthorized}
 
   @doc """
   Prepare a closed v1 expected-Record revocation fence for one capability id
@@ -2380,43 +2588,6 @@ defmodule Arbor.Security do
     _, _ -> {:error, :invalid_request}
   end
 
-  @doc """
-  Revoke only if the current verified Record exactly matches the fence from
-  `prepare_acknowledged_revoke/1`.
-
-  Authoritative absence is idempotent. A present replacement is
-  `:identity_conflict` with zero mutation. Does not fall back to occupancy-only
-  `acknowledged_revoke/1`. Audit emission for `:applied` matches `/1`.
-  """
-  @spec acknowledged_revoke(String.t(), map()) ::
-          {:ok, :applied | :idempotent, String.t()}
-          | {:error,
-             :invalid_request
-             | :identity_conflict
-             | :capability_store_unavailable
-             | :outcome_unknown}
-  def acknowledged_revoke(capability_id, fence) do
-    with true <- canonical_exact_capability_id?(capability_id),
-         :ok <- RevocationFence.admit_fence(capability_id, fence) do
-      result = CapabilityStore.acknowledged_revoke(capability_id, fence)
-      emit_acknowledged_revoke_audit(result)
-      result
-    else
-      false ->
-        {:error, :invalid_request}
-
-      {:error, :invalid_request} ->
-        {:error, :invalid_request}
-    end
-  rescue
-    _ -> {:error, :outcome_unknown}
-  catch
-    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
-    :exit, :timeout -> {:error, :outcome_unknown}
-    :exit, _ -> {:error, :outcome_unknown}
-    :throw, _ -> {:error, :outcome_unknown}
-  end
-
   defp emit_acknowledged_revoke_audit({:ok, :applied, capability_id}) do
     Events.record_capability_revoked(capability_id)
     :ok
@@ -2499,7 +2670,7 @@ defmodule Arbor.Security do
     _, _ -> {:error, :invalid_request}
   end
 
-  defp build_and_sign_acknowledged_grant(opts) do
+  defp build_acknowledged_grant(opts) do
     case Capability.new(
            resource_uri: Keyword.fetch!(opts, :resource),
            principal_id: Keyword.fetch!(opts, :principal),
@@ -2521,12 +2692,7 @@ defmodule Arbor.Security do
         # signing. signed_at is part of signing_payload/1, so pinning it to the
         # already-canonical granted_at makes the signing payload byte-identical
         # across delayed journal retries (identity-exact across wall-clock).
-        cap = %{cap | signed_at: cap.granted_at}
-
-        case SystemAuthority.sign_capability(cap) do
-          {:ok, signed_cap} -> {:ok, signed_cap}
-          {:error, _reason} -> {:error, :capability_store_unavailable}
-        end
+        {:ok, %{cap | signed_at: cap.granted_at}}
 
       {:error, _reason} ->
         {:error, :invalid_request}
@@ -2751,7 +2917,7 @@ defmodule Arbor.Security do
 
   - `:constraints` - Additional constraints to apply
   - `:expires_at` - Override expiration (cannot exceed parent)
-  - `:delegator_private_key` - Private key for signing the delegation record
+  - `:actor_authority` - Caller-owned signing authority for the current parent
   """
   @spec delegate(String.t(), String.t(), keyword()) :: {:ok, Capability.t()} | {:error, term()}
   def delegate(capability_id, new_principal_id, opts \\ []),
@@ -2766,48 +2932,52 @@ defmodule Arbor.Security do
 
   ## Options
 
-  - `:delegator_private_key` - Private key for signing delegation records (required)
+  - `:actor_authority` - Caller-owned signing authority for the parent (required)
   - `:resources` - List of resource URIs to delegate (required)
 
   ## Examples
 
       {:ok, caps} = Security.delegate_to_agent(human_id, agent_id,
-        delegator_private_key: key,
+        actor_authority: authority,
         resources: ["arbor://fs/read/**", "arbor://fs/**"]
       )
   """
   @spec delegate_to_agent(String.t(), String.t(), keyword()) ::
           {:ok, [Capability.t()]} | {:error, term()}
   def delegate_to_agent(parent_id, agent_id, opts \\ []) do
-    private_key = Keyword.fetch!(opts, :delegator_private_key)
+    actor_authority = Keyword.get(opts, :actor_authority)
     resources = Keyword.get(opts, :resources, [])
 
-    delegated =
-      Enum.reduce(resources, [], fn resource_uri, acc ->
-        case CapabilityStore.find_authorizing(parent_id, resource_uri) do
-          {:ok, parent_cap} ->
-            case delegate(parent_cap.id, agent_id, delegator_private_key: private_key) do
-              {:ok, delegated_cap} ->
-                [delegated_cap | acc]
+    if is_nil(actor_authority) do
+      {:error, :capability_mutation_unauthorized}
+    else
+      delegated =
+        Enum.reduce(resources, [], fn resource_uri, acc ->
+          case CapabilityStore.find_authorizing(parent_id, resource_uri) do
+            {:ok, parent_cap} ->
+              case delegate(parent_cap.id, agent_id, actor_authority: actor_authority) do
+                {:ok, delegated_cap} ->
+                  [delegated_cap | acc]
 
-              {:error, reason} ->
-                Logger.warning(
-                  "[Security] Failed to delegate #{resource_uri} to #{agent_id}: #{inspect(reason)}"
-                )
+                {:error, reason} ->
+                  Logger.warning(
+                    "[Security] Failed to delegate #{resource_uri} to #{agent_id}: #{inspect(reason)}"
+                  )
 
-                acc
-            end
+                  acc
+              end
 
-          {:error, :not_found} ->
-            Logger.warning(
-              "[Security] Parent #{parent_id} has no capability for #{resource_uri}, skipping delegation"
-            )
+            {:error, :not_found} ->
+              Logger.warning(
+                "[Security] Parent #{parent_id} has no capability for #{resource_uri}, skipping delegation"
+              )
 
-            acc
-        end
-      end)
+              acc
+          end
+        end)
 
-    {:ok, Enum.reverse(delegated)}
+      {:ok, Enum.reverse(delegated)}
+    end
   end
 
   @doc """
@@ -2827,34 +2997,191 @@ defmodule Arbor.Security do
   def assign_role(principal_id, role_name, opts \\ []) do
     alias Arbor.Security.Role
 
-    case Role.get(role_name) do
-      {:ok, resource_uris} ->
-        delegation_depth = Keyword.get(opts, :delegation_depth, 3)
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         {:ok, resource_uris} <- Role.get(role_name) do
+      delegation_depth = Keyword.get(opts, :delegation_depth, 3)
 
-        granted =
-          Enum.reduce(resource_uris, [], fn resource_uri, acc ->
-            case grant(
-                   principal: principal_id,
-                   resource: resource_uri,
-                   delegation_depth: delegation_depth
-                 ) do
-              {:ok, cap} ->
-                [cap | acc]
+      granted =
+        Enum.reduce(resource_uris, [], fn resource_uri, acc ->
+          case grant(
+                 principal: principal_id,
+                 resource: resource_uri,
+                 delegation_depth: delegation_depth,
+                 actor_authority: actor_authority
+               ) do
+            {:ok, cap} ->
+              [cap | acc]
 
-              {:error, _reason} ->
-                # Idempotent — skip if already granted or other non-fatal error
-                acc
-            end
-          end)
+            {:error, _reason} ->
+              # Idempotent — skip if already granted or other non-fatal error
+              acc
+          end
+        end)
 
-        Logger.info(
-          "[Security] Assigned role #{role_name} to #{principal_id} (#{length(granted)} capabilities)"
-        )
+      Logger.info(
+        "[Security] Assigned role #{role_name} to #{principal_id} (#{length(granted)} capabilities)"
+      )
 
-        {:ok, Enum.reverse(granted)}
+      {:ok, Enum.reverse(granted)}
+    else
+      {:error, _} = error -> error
+    end
+  end
 
-      {:error, :unknown_role} = error ->
-        error
+  # Explicit test-fixture mutations keep ordinary test setup concise without
+  # reopening any production deputy. These functions are absent from non-test
+  # builds, and security regression tests exercise the public fail-closed APIs.
+  if Mix.env() == :test do
+    @doc false
+    def grant_fixture(opts) when is_list(opts) do
+      with true <- Keyword.keyword?(opts),
+           {:ok, cap} <-
+             Capability.new(
+               resource_uri: Keyword.fetch!(opts, :resource),
+               principal_id: Keyword.fetch!(opts, :principal),
+               expires_at: Keyword.get(opts, :expires_at),
+               not_before: Keyword.get(opts, :not_before),
+               constraints: Keyword.get(opts, :constraints, %{}),
+               delegation_depth: Keyword.get(opts, :delegation_depth, 3),
+               max_uses: Keyword.get(opts, :max_uses),
+               allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
+               session_id: Keyword.get(opts, :session_id),
+               task_id: Keyword.get(opts, :task_id),
+               principal_scope: Keyword.get(opts, :principal_scope),
+               metadata: Keyword.get(opts, :metadata, %{})
+             ),
+           {:ok, signed_cap} <- SystemAuthority.sign_capability_for_test(cap),
+           {:ok, :stored} <- CapabilityStore.put_fixture(signed_cap) do
+        Events.record_capability_granted(signed_cap)
+        {:ok, signed_cap}
+      else
+        false -> {:error, :invalid_request}
+        {:error, _} = error -> error
+      end
+    rescue
+      _ -> {:error, :invalid_request}
+    end
+
+    def grant_fixture(_opts), do: {:error, :invalid_request}
+
+    @doc false
+    @spec put_capability_fixture(Capability.t()) :: {:ok, :stored} | {:error, term()}
+    def put_capability_fixture(%Capability{} = capability),
+      do: CapabilityStore.put_fixture(capability)
+
+    @doc false
+    @spec get_capability_fixture(String.t()) :: {:ok, Capability.t()} | {:error, term()}
+    def get_capability_fixture(capability_id), do: CapabilityStore.get(capability_id)
+
+    @doc false
+    @spec with_capability_store_unregistered_fixture((-> term())) :: term()
+    def with_capability_store_unregistered_fixture(fun) when is_function(fun, 0) do
+      name = CapabilityStore
+      pid = Process.whereis(name)
+      if is_pid(pid), do: Process.unregister(name)
+
+      try do
+        fun.()
+      after
+        if is_pid(pid) and Process.alive?(pid) and Process.whereis(name) == nil do
+          Process.register(pid, name)
+        end
+      end
+    end
+
+    @doc false
+    def acknowledged_grant_fixture(opts) when is_list(opts) do
+      with {:ok, safe_opts} <- validate_acknowledged_grant_opts(opts),
+           {:ok, cap} <- build_acknowledged_grant(safe_opts),
+           {:ok, signed_cap} <- SystemAuthority.sign_capability_for_test(cap) do
+        result = CapabilityStore.acknowledged_put_fixture(signed_cap)
+        emit_acknowledged_grant_audit(result, signed_cap)
+        result
+      end
+    rescue
+      _ -> {:error, :outcome_unknown}
+    end
+
+    def acknowledged_grant_fixture(_opts), do: {:error, :invalid_request}
+
+    @doc false
+    def revoke_fixture(capability_id), do: CapabilityStore.revoke_fixture(capability_id)
+
+    @doc false
+    def acknowledged_revoke_fixture(capability_id) do
+      result = CapabilityStore.acknowledged_revoke_fixture(capability_id)
+      emit_acknowledged_revoke_audit(result)
+      result
+    end
+
+    @doc false
+    def acknowledged_revoke_fixture(capability_id, fence) do
+      result = CapabilityStore.acknowledged_revoke_fixture(capability_id, fence)
+      emit_acknowledged_revoke_audit(result)
+      result
+    end
+
+    @doc false
+    def revoke_all_fixture(principal_id), do: CapabilityStore.revoke_all_fixture(principal_id)
+
+    @doc false
+    def revoke_by_session_fixture(session_id),
+      do: CapabilityStore.revoke_by_session_fixture(session_id)
+
+    @doc false
+    def revoke_by_task_fixture(task_id), do: CapabilityStore.revoke_by_task_fixture(task_id)
+
+    @doc false
+    def cascade_revoke_fixture(capability_id),
+      do: CapabilityStore.cascade_revoke_fixture(capability_id)
+
+    @doc false
+    def assign_role_fixture(principal_id, role_name, opts \\ []) do
+      alias Arbor.Security.Role
+
+      with {:ok, resources} <- Role.get(role_name) do
+        resources
+        |> Enum.reduce_while({:ok, []}, fn resource, {:ok, caps} ->
+          case grant_fixture(
+                 principal: principal_id,
+                 resource: resource,
+                 delegation_depth: Keyword.get(opts, :delegation_depth, 3)
+               ) do
+            {:ok, cap} -> {:cont, {:ok, [cap | caps]}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          {:ok, caps} -> {:ok, Enum.reverse(caps)}
+          error -> error
+        end
+      end
+    end
+
+    @doc false
+    def delegate_fixture(capability_id, new_principal_id, opts \\ []) do
+      with {:ok, parent_cap} <- CapabilityStore.get(capability_id),
+           private_key when is_binary(private_key) <- Keyword.get(opts, :delegator_private_key),
+           {:ok, child} <-
+             Capability.delegate(parent_cap, new_principal_id,
+               constraints: Keyword.get(opts, :constraints, %{}),
+               expires_at: Keyword.get(opts, :expires_at),
+               delegation_depth:
+                 Keyword.get(opts, :delegation_depth, max(parent_cap.delegation_depth - 1, 0)),
+               max_uses: Keyword.get(opts, :max_uses),
+               session_id: Keyword.get(opts, :session_id),
+               task_id: Keyword.get(opts, :task_id),
+               principal_scope: Keyword.get(opts, :principal_scope),
+               metadata: Keyword.get(opts, :metadata, %{})
+             ),
+           record <- Signer.sign_delegation(parent_cap, child, private_key),
+           child = %{child | delegation_chain: parent_cap.delegation_chain ++ [record]},
+           {:ok, signed_cap} <- SystemAuthority.sign_capability_for_test(child),
+           {:ok, :stored} <- CapabilityStore.put_fixture(signed_cap) do
+        {:ok, signed_cap}
+      else
+        _ -> {:error, :capability_mutation_unauthorized}
+      end
     end
   end
 
@@ -2947,11 +3274,187 @@ defmodule Arbor.Security do
 
   ## Examples
 
-      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.register_identity(identity, actor_authority)
   """
-  @spec register_identity(Identity.t()) :: :ok | {:error, term()}
-  def register_identity(identity),
-    do: register_agent_identity_with_public_key(identity)
+  @spec register_identity(Identity.t()) :: {:error, :identity_registration_unauthorized}
+  def register_identity(_identity), do: {:error, :identity_registration_unauthorized}
+
+  if Mix.env() == :test do
+    @doc false
+    @spec register_identity_fixture(Identity.t()) :: :ok | {:error, term()}
+    def register_identity_fixture(%Identity{} = identity) do
+      case Registry.register_fixture(identity) do
+        :ok ->
+          Events.record_identity_registered(identity.agent_id)
+          :ok
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  defp identity_status_actor(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :actor_authority) do
+        {:ok, authority} when not is_nil(authority) -> {:ok, authority}
+        _ -> {:error, :identity_status_mutation_unauthorized}
+      end
+    else
+      {:error, :identity_status_mutation_unauthorized}
+    end
+  end
+
+  defp identity_status_actor(_opts),
+    do: {:error, :identity_status_mutation_unauthorized}
+
+  defp identity_status_reason(opts) do
+    case Keyword.get(opts, :reason) do
+      nil -> {:ok, nil}
+      reason when is_binary(reason) -> {:ok, reason}
+      reason when is_atom(reason) -> {:ok, Atom.to_string(reason)}
+      _ -> {:error, :identity_status_mutation_unauthorized}
+    end
+  end
+
+  if Mix.env() == :test do
+    defp normalize_fixture_reason(nil), do: nil
+    defp normalize_fixture_reason(reason) when is_binary(reason), do: reason
+    defp normalize_fixture_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+    defp normalize_fixture_reason(reason), do: inspect(reason)
+  end
+
+  @doc """
+  Register an agent identity using both target-key possession and an
+  authenticated, currently authorized actor authority.
+  """
+  @spec register_identity(Identity.t(), term()) :: :ok | {:error, term()}
+  def register_identity(%Identity{} = identity, actor_authority) do
+    public_identity = Identity.public_only(identity)
+
+    with {:ok, possession_proof} <- Registry.registration_proof(identity),
+         {:ok, target_digest} <- Registry.registration_payload_digest(public_identity),
+         {:ok, actor_attestation} <-
+           SystemAuthority.issue_identity_registration_attestation(
+             actor_authority,
+             target_digest
+           ),
+         :ok <-
+           Registry.register_authorized(
+             public_identity,
+             possession_proof,
+             actor_attestation
+           ) do
+      Events.record_identity_registered(public_identity.agent_id)
+      :ok
+    end
+  end
+
+  def register_identity(_identity, _actor_authority),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc """
+  Re-register a public agent identity whose private key is already held by the
+  encrypted signing-key store. The store signs the registry's exact
+  domain-separated registration payload internally; private key bytes never
+  leave the security boundary.
+  """
+  @spec register_stored_identity(Identity.t()) ::
+          {:error, :identity_registration_unauthorized}
+  def register_stored_identity(_identity), do: {:error, :identity_registration_unauthorized}
+
+  @spec register_stored_identity(Identity.t(), term()) :: :ok | {:error, term()}
+  def register_stored_identity(%Identity{} = identity, actor_authority) do
+    public_identity = Identity.public_only(identity)
+
+    with {:ok, possession_proof} <- SigningKeyStore.build_registration_proof(public_identity) do
+      register_stored_identity(public_identity, actor_authority, possession_proof)
+    end
+  end
+
+  def register_stored_identity(_identity, _actor_authority),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc false
+  @spec register_stored_identity(Identity.t(), term(), binary()) :: :ok | {:error, term()}
+  def register_stored_identity(
+        %Identity{} = identity,
+        actor_authority,
+        possession_proof
+      )
+      when is_binary(possession_proof) do
+    public_identity = Identity.public_only(identity)
+
+    with {:ok, target_digest} <- Registry.registration_payload_digest(public_identity),
+         {:ok, actor_attestation} <-
+           SystemAuthority.issue_identity_registration_attestation(
+             actor_authority,
+             target_digest
+           ),
+         :ok <-
+           Registry.register_authorized(
+             public_identity,
+             possession_proof,
+             actor_attestation
+           ) do
+      Events.record_identity_registered(public_identity.agent_id)
+      :ok
+    end
+  end
+
+  def register_stored_identity(_identity, _actor_authority, _possession_proof),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc false
+  @spec register_scheduler_identity(Identity.t(), binary()) :: :ok | {:error, term()}
+  def register_scheduler_identity(%Identity{} = identity, possession_proof)
+      when is_binary(possession_proof) do
+    public_identity = Identity.public_only(identity)
+
+    case Registry.register_scheduler_identity(public_identity, possession_proof) do
+      :ok ->
+        Events.record_identity_registered(public_identity.agent_id)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def register_scheduler_identity(_identity, _possession_proof),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc false
+  @spec register_trust_capability_grant_identity(Identity.t(), binary()) ::
+          :ok | {:error, term()}
+  def register_trust_capability_grant_identity(%Identity{} = identity, possession_proof)
+      when is_binary(possession_proof) do
+    public_identity = Identity.public_only(identity)
+
+    case Registry.register_trust_capability_grant_identity(public_identity, possession_proof) do
+      :ok ->
+        Events.record_identity_registered(public_identity.agent_id)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def register_trust_capability_grant_identity(_identity, _possession_proof),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc false
+  @spec build_stored_identity_registration_proof(Identity.t()) ::
+          {:ok, binary()} | {:error, term()}
+  def build_stored_identity_registration_proof(%Identity{} = identity) do
+    identity
+    |> Identity.public_only()
+    |> SigningKeyStore.build_registration_proof()
+  end
+
+  def build_stored_identity_registration_proof(_identity),
+    do: {:error, :identity_registration_unauthorized}
 
   @doc """
   Whether OIDC is configured with at least one provider or a device flow.
@@ -3015,7 +3518,7 @@ defmodule Arbor.Security do
   def create_local_human_identity(opts \\ []) do
     with :ok <- admit_local_human_identity(),
          {:ok, identity, status} <-
-           Arbor.Security.OIDC.IdentityStore.load_or_create(local_human_claims(opts)),
+           Arbor.Security.OIDC.IdentityStore.load_or_create_local(local_human_claims(opts)),
          :ok <- ensure_local_human_registered(identity) do
       {:ok, identity, status}
     end
@@ -3076,7 +3579,26 @@ defmodule Arbor.Security do
   def register_oidc_identity(identity, id_token, provider_config) do
     public_identity = Identity.public_only(identity)
 
-    case Registry.register_oidc(public_identity, id_token, provider_config) do
+    result =
+      case identity do
+        %Identity{private_key: private_key} when is_binary(private_key) ->
+          Registry.register_oidc(identity, id_token, provider_config)
+
+        %Identity{} ->
+          with {:ok, proof} <-
+                 SigningKeyStore.build_oidc_registration_proof(
+                   public_identity,
+                   id_token,
+                   provider_config
+                 ) do
+            Registry.register_oidc_proven(public_identity, id_token, provider_config, proof)
+          end
+
+        _ ->
+          {:error, :invalid_oidc_registration}
+      end
+
+    case result do
       :ok ->
         Events.record_identity_registered(public_identity.agent_id)
         :ok
@@ -3093,9 +3615,32 @@ defmodule Arbor.Security do
   @doc """
   Remove an agent's identity from the registry.
   """
-  @spec deregister_identity(String.t()) :: :ok | {:error, term()}
-  def deregister_identity(agent_id) when is_binary(agent_id) do
-    Registry.deregister(agent_id)
+  @spec deregister_identity(String.t()) :: {:error, :identity_status_mutation_unauthorized}
+  def deregister_identity(_agent_id), do: {:error, :identity_status_mutation_unauthorized}
+
+  @spec deregister_identity(String.t(), keyword()) :: :ok | {:error, term()}
+  def deregister_identity(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    with {:ok, actor_authority} <- identity_status_actor(opts),
+         {:ok, digest} <- Registry.identity_status_payload_digest(agent_id, :deregister, nil),
+         {:ok, attestation} <-
+           SystemAuthority.issue_identity_status_mutation_attestation(
+             actor_authority,
+             :deregister,
+             agent_id,
+             digest
+           ),
+         :ok <- Registry.deregister_authorized(agent_id, attestation) do
+      :ok
+    end
+  end
+
+  def deregister_identity(_agent_id, _opts),
+    do: {:error, :identity_status_mutation_unauthorized}
+
+  if Mix.env() == :test do
+    @doc false
+    def deregister_identity_fixture(agent_id) when is_binary(agent_id),
+      do: Registry.deregister_fixture(agent_id)
   end
 
   @doc """
@@ -3173,6 +3718,12 @@ defmodule Arbor.Security do
   def unseal(sealed, recipient_private, sender_sign_public),
     do: Crypto.unseal(sealed, recipient_private, sender_sign_public)
 
+  if Mix.env() == :test do
+    @doc false
+    @spec sign_ed25519_fixture(binary(), binary()) :: binary()
+    def sign_ed25519_fixture(message, private_key), do: Crypto.sign(message, private_key)
+  end
+
   @doc """
   Look up principal IDs by identity display name for discovery only.
 
@@ -3212,18 +3763,32 @@ defmodule Arbor.Security do
       :ok = Arbor.Security.suspend_identity("agent_001", reason: "Suspicious activity")
   """
   @spec suspend_identity(String.t(), keyword()) :: :ok | {:error, term()}
-  def suspend_identity(agent_id, opts \\ []) do
-    reason = Keyword.get(opts, :reason)
+  def suspend_identity(agent_id, opts \\ [])
 
-    case Registry.suspend(agent_id, reason) do
-      :ok ->
-        Events.record_identity_suspended(agent_id, reason)
-        :ok
+  def suspend_identity(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    with {:ok, actor_authority} <- identity_status_actor(opts),
+         {:ok, reason} <- identity_status_reason(opts),
+         {:ok, digest} <- Registry.identity_status_payload_digest(agent_id, :suspend, reason),
+         {:ok, attestation} <-
+           SystemAuthority.issue_identity_status_mutation_attestation(
+             actor_authority,
+             :suspend,
+             agent_id,
+             digest
+           ) do
+      case Registry.suspend_authorized(agent_id, reason, attestation) do
+        :ok ->
+          Events.record_identity_suspended(agent_id, reason)
+          :ok
 
-      {:error, _} = error ->
-        error
+        {:error, _} = error ->
+          error
+      end
     end
   end
+
+  def suspend_identity(_agent_id, _opts),
+    do: {:error, :identity_status_mutation_unauthorized}
 
   @doc """
   Resume a suspended identity.
@@ -3235,17 +3800,33 @@ defmodule Arbor.Security do
 
       :ok = Arbor.Security.resume_identity("agent_001")
   """
-  @spec resume_identity(String.t()) :: :ok | {:error, term()}
-  def resume_identity(agent_id) do
-    case Registry.resume(agent_id) do
-      :ok ->
-        Events.record_identity_resumed(agent_id)
-        :ok
+  @spec resume_identity(String.t()) :: {:error, :identity_status_mutation_unauthorized}
+  def resume_identity(_agent_id), do: {:error, :identity_status_mutation_unauthorized}
 
-      {:error, _} = error ->
-        error
+  @spec resume_identity(String.t(), keyword()) :: :ok | {:error, term()}
+  def resume_identity(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    with {:ok, actor_authority} <- identity_status_actor(opts),
+         {:ok, digest} <- Registry.identity_status_payload_digest(agent_id, :resume, nil),
+         {:ok, attestation} <-
+           SystemAuthority.issue_identity_status_mutation_attestation(
+             actor_authority,
+             :resume,
+             agent_id,
+             digest
+           ) do
+      case Registry.resume_authorized(agent_id, attestation) do
+        :ok ->
+          Events.record_identity_resumed(agent_id)
+          :ok
+
+        {:error, _} = error ->
+          error
+      end
     end
   end
+
+  def resume_identity(_agent_id, _opts),
+    do: {:error, :identity_status_mutation_unauthorized}
 
   @doc """
   Revoke an agent's identity.
@@ -3263,16 +3844,78 @@ defmodule Arbor.Security do
       :ok = Arbor.Security.revoke_identity("agent_001", reason: "Account compromised")
   """
   @spec revoke_identity(String.t(), keyword()) :: :ok | {:error, term()}
-  def revoke_identity(agent_id, opts \\ []) do
-    reason = Keyword.get(opts, :reason)
+  def revoke_identity(agent_id, opts \\ [])
 
-    case Registry.revoke_identity(agent_id, reason) do
-      {:ok, cascade_count} ->
-        Events.record_identity_revoked(agent_id, reason, cascade_count)
-        :ok
+  def revoke_identity(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    with {:ok, actor_authority} <- identity_status_actor(opts),
+         {:ok, reason} <- identity_status_reason(opts),
+         {:ok, digest} <- Registry.identity_status_payload_digest(agent_id, :revoke, reason),
+         {:ok, status_attestation} <-
+           SystemAuthority.issue_identity_status_mutation_attestation(
+             actor_authority,
+             :revoke,
+             agent_id,
+             digest
+           ),
+         {:ok, capability_attestation} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke_all,
+             agent_id
+           ),
+         {:ok, _registry_count} <-
+           Registry.revoke_identity_authorized(agent_id, reason, status_attestation) do
+      case CapabilityStore.revoke_all_authorized(agent_id, capability_attestation) do
+        {:ok, cascade_count} ->
+          Events.record_identity_revoked(agent_id, reason, cascade_count)
+          :ok
 
-      {:error, _} = error ->
-        error
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  def revoke_identity(_agent_id, _opts),
+    do: {:error, :identity_status_mutation_unauthorized}
+
+  if Mix.env() == :test do
+    @doc false
+    def suspend_identity_fixture(agent_id, reason \\ nil) do
+      case Registry.suspend_fixture(agent_id, normalize_fixture_reason(reason)) do
+        :ok ->
+          Events.record_identity_suspended(agent_id, normalize_fixture_reason(reason))
+          :ok
+
+        other ->
+          other
+      end
+    end
+
+    @doc false
+    def resume_identity_fixture(agent_id) do
+      case Registry.resume_fixture(agent_id) do
+        :ok ->
+          Events.record_identity_resumed(agent_id)
+          :ok
+
+        other ->
+          other
+      end
+    end
+
+    @doc false
+    def revoke_identity_fixture(agent_id, reason \\ nil) do
+      normalized = normalize_fixture_reason(reason)
+
+      case Registry.revoke_identity_fixture(agent_id, normalized) do
+        {:ok, cascade_count} ->
+          Events.record_identity_revoked(agent_id, normalized, cascade_count)
+          :ok
+
+        other ->
+          other
+      end
     end
   end
 
@@ -3319,6 +3962,22 @@ defmodule Arbor.Security do
         action,
         opts
       ) do
+    check_if_principal_has_capability_for_resource_action(
+      principal_id,
+      resource_uri,
+      action,
+      opts,
+      :none
+    )
+  end
+
+  defp check_if_principal_has_capability_for_resource_action(
+         principal_id,
+         resource_uri,
+         action,
+         opts,
+         effect
+       ) do
     # If the caller passed `:file_path` and the URI is the bare
     # `arbor://fs/<op>` form, synthesize the path-embedded URI for
     # cap lookup. Without this, path-scoped caps like
@@ -3357,20 +4016,62 @@ defmodule Arbor.Security do
 
           with {:ok, resource_uri} <-
                  normalize_authorization_resource_uri(resource_uri, safe_opts),
-               reflex_context = build_reflex_context(resource_uri, action, safe_opts),
+               {:ok, approval_receipt, decision_opts} <-
+                 admit_approval_receipt(
+                   principal_id,
+                   resource_uri,
+                   action,
+                   decision_opts
+                 ),
+               event_opts = redact_approval_opts(safe_opts),
+               reflex_context = build_reflex_context(resource_uri, action, event_opts),
                :ok <-
-                 check_reflexes(principal_id, reflex_context, resource_uri, action, safe_opts) do
-            auth = build_auth_context(principal_id, safe_opts)
+                 check_reflexes(principal_id, reflex_context, resource_uri, action, event_opts) do
+            auth = build_auth_context(principal_id, event_opts)
 
             case AuthDecision.evaluate(auth, resource_uri, action, decision_opts) do
               {:ok, :authorized, cap, auth} ->
-                handle_authorized(cap, auth, principal_id, resource_uri, action, safe_opts)
+                with :ok <-
+                       consume_approval_receipt(
+                         approval_receipt,
+                         principal_id,
+                         resource_uri,
+                         action
+                       ) do
+                  handle_authorized(
+                    cap,
+                    auth,
+                    principal_id,
+                    resource_uri,
+                    action,
+                    event_opts,
+                    effect
+                  )
+                else
+                  {:error, reason} = error ->
+                    Events.record_authorization_denied(
+                      principal_id,
+                      resource_uri,
+                      reason,
+                      event_opts
+                    )
+
+                    error
+                end
 
               {:ok, :requires_approval, cap, auth} ->
-                handle_requires_approval(cap, auth, principal_id, resource_uri, action, safe_opts)
+                handle_requires_approval(
+                  cap,
+                  auth,
+                  principal_id,
+                  resource_uri,
+                  action,
+                  event_opts,
+                  effect
+                )
 
               {:error, reason, _auth} ->
-                Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+                Events.record_authorization_denied(principal_id, resource_uri, reason, event_opts)
                 {:error, reason}
             end
           else
@@ -3511,8 +4212,162 @@ defmodule Arbor.Security do
 
   defp extract_session_token(opts), do: {:ok, @session_token_absent, opts}
 
+  @doc "Return the canonical digest used to bind one approval to exact arguments."
+  @spec approval_argument_digest(term()) :: {:ok, String.t()} | {:error, atom()}
+  def approval_argument_digest(arguments) do
+    with {:ok, bytes} <- TaintEnvelope.canonical_json(arguments) do
+      {:ok, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
+    else
+      _ -> {:error, :invalid_approval_arguments}
+    end
+  rescue
+    _ -> {:error, :invalid_approval_arguments}
+  catch
+    _, _ -> {:error, :invalid_approval_arguments}
+  end
+
+  @doc "Issue a short-lived signed one-use receipt for an approved exact invocation."
+  @spec issue_approval_receipt(String.t(), String.t(), atom() | nil, String.t(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def issue_approval_receipt(principal_id, resource_uri, action, request_id, arguments) do
+    with {:ok, digest} <- approval_argument_digest(arguments) do
+      ApprovalReceiptBroker.issue(principal_id, resource_uri, action, digest, request_id)
+    end
+  end
+
+  @doc false
+  @spec claim_approval_receipt_issuer(keyword()) :: {:ok, binary()} | {:error, atom()}
+  def claim_approval_receipt_issuer(opts \\ []), do: ApprovalReceiptBroker.claim_issuer(opts)
+
+  @doc false
+  @spec issue_approval_receipt(
+          String.t(),
+          String.t(),
+          atom() | nil,
+          String.t(),
+          term(),
+          binary()
+        ) :: {:ok, map()} | {:error, atom()}
+  def issue_approval_receipt(
+        principal_id,
+        resource_uri,
+        action,
+        request_id,
+        arguments,
+        issuer_custody
+      ) do
+    with {:ok, digest} <- approval_argument_digest(arguments) do
+      ApprovalReceiptBroker.issue_authorized(
+        principal_id,
+        resource_uri,
+        action,
+        digest,
+        request_id,
+        issuer_custody
+      )
+    end
+  end
+
+  @doc false
+  def confirm_consumed_approval_receipt(
+        receipt,
+        principal_id,
+        resource_uri,
+        action,
+        argument_digest
+      ) do
+    ApprovalReceiptBroker.confirm_security_consumed(
+      receipt,
+      principal_id,
+      resource_uri,
+      action,
+      argument_digest
+    )
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    defdelegate build_identity_registration_proof_fixture(identity),
+      to: Registry,
+      as: :registration_proof
+
+    @doc false
+    defdelegate issue_approval_receipt_fixture(
+                  principal_id,
+                  resource_uri,
+                  action,
+                  argument_digest,
+                  request_id
+                ),
+                to: ApprovalReceiptBroker,
+                as: :issue_for_test
+
+    @doc false
+    defdelegate consume_approval_receipt_fixture(
+                  receipt,
+                  principal_id,
+                  resource_uri,
+                  action,
+                  argument_digest
+                ),
+                to: ApprovalReceiptBroker,
+                as: :consume
+  end
+
+  defp admit_approval_receipt(principal_id, resource_uri, action, opts) do
+    receipts = Keyword.get_values(opts, :approved_invocation)
+    digests = Keyword.get_values(opts, :argument_digest)
+    stripped = Keyword.drop(opts, [:approved_invocation, :argument_digest])
+
+    case {receipts, digests} do
+      {[], []} ->
+        {:ok, :none, stripped}
+
+      {[], [digest]} when is_binary(digest) ->
+        {:ok, :none, stripped}
+
+      {[receipt], [digest]} when is_binary(digest) ->
+        case ApprovalReceiptBroker.verify(receipt, principal_id, resource_uri, action, digest) do
+          :ok ->
+            {:ok, %{receipt: receipt, digest: digest},
+             Keyword.put(stripped, :approved_invocation, :security_verified)}
+
+          {:error, _reason} ->
+            {:error, :invalid_approval_receipt}
+        end
+
+      _ ->
+        {:error, :invalid_approval_receipt}
+    end
+  rescue
+    _ -> {:error, :invalid_approval_receipt}
+  catch
+    _, _ -> {:error, :invalid_approval_receipt}
+  end
+
+  defp consume_approval_receipt(:none, _principal, _resource, _action), do: :ok
+
+  defp consume_approval_receipt(
+         %{receipt: receipt, digest: digest},
+         principal,
+         resource,
+         action
+       ) do
+    ApprovalReceiptBroker.consume(receipt, principal, resource, action, digest)
+  end
+
+  defp redact_approval_opts(opts) do
+    Keyword.drop(opts, [:approved_invocation, :argument_digest])
+  rescue
+    _ -> []
+  end
+
   # Side effects for authorized decisions
   defp handle_authorized(cap, _auth, principal_id, resource_uri, action, opts) do
+    handle_authorized(cap, nil, principal_id, resource_uri, action, opts, :none)
+  end
+
+  defp handle_authorized(cap, _auth, principal_id, resource_uri, action, opts, effect) do
     safe_opts = Keyword.delete(opts, @source_owned_egress_opt)
 
     # Stateful constraint checks (rate limiting) — cap was already found by AuthDecision
@@ -3522,17 +4377,25 @@ defmodule Arbor.Security do
       # FileGuard for fs:// URIs — runs explicit (caller passed :file_path)
       # OR implicit (we have a matched cap and the URI's path-part is the
       # implicit file_path) defense-in-depth normalization.
-      file_guard_result = maybe_check_file_guard(principal_id, resource_uri, safe_opts, cap)
+      file_guard_result =
+        maybe_check_file_guard_for_effect(
+          effect,
+          principal_id,
+          resource_uri,
+          safe_opts,
+          cap
+        )
 
       case normalize_file_guard_result(file_guard_result) do
         :ok ->
-          Events.record_authorization_granted(principal_id, resource_uri, safe_opts)
-          if cap, do: maybe_check_max_uses(cap)
-
-          if cap,
-            do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, safe_opts)
-
-          {:ok, :authorized}
+          finalize_authorized_effect(
+            cap,
+            principal_id,
+            resource_uri,
+            action,
+            safe_opts,
+            effect
+          )
 
         {:error, reason} ->
           Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
@@ -3543,6 +4406,113 @@ defmodule Arbor.Security do
         Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
         error
     end
+  end
+
+  defp finalize_authorized_effect(
+         cap,
+         principal_id,
+         resource_uri,
+         action,
+         safe_opts,
+         effect
+       ) do
+    with :ok <- if(cap, do: maybe_consume_max_use(cap), else: :ok) do
+      effect
+      |> apply_authorized_effect(cap)
+      |> record_authorized_effect(
+        cap,
+        principal_id,
+        resource_uri,
+        action,
+        safe_opts
+      )
+    else
+      {:error, reason} = error ->
+        Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+        error
+    end
+  end
+
+  defp record_authorized_effect(
+         {:ok, :authorized} = result,
+         cap,
+         principal_id,
+         resource_uri,
+         action,
+         safe_opts
+       ) do
+    record_authorized_effect_success(
+      result,
+      cap,
+      principal_id,
+      resource_uri,
+      action,
+      safe_opts
+    )
+  end
+
+  defp record_authorized_effect(
+         {:ok, :authorized, _effect_result} = result,
+         cap,
+         principal_id,
+         resource_uri,
+         action,
+         safe_opts
+       ) do
+    record_authorized_effect_success(
+      result,
+      cap,
+      principal_id,
+      resource_uri,
+      action,
+      safe_opts
+    )
+  end
+
+  defp record_authorized_effect(
+         {:error, reason} = error,
+         _cap,
+         principal_id,
+         resource_uri,
+         _action,
+         safe_opts
+       ) do
+    Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+    error
+  end
+
+  defp record_authorized_effect(
+         _unexpected,
+         _cap,
+         principal_id,
+         resource_uri,
+         _action,
+         safe_opts
+       ) do
+    Events.record_authorization_denied(
+      principal_id,
+      resource_uri,
+      :invalid_authorized_effect,
+      safe_opts
+    )
+
+    {:error, :invalid_authorized_effect}
+  end
+
+  defp record_authorized_effect_success(
+         result,
+         cap,
+         principal_id,
+         resource_uri,
+         action,
+         safe_opts
+       ) do
+    Events.record_authorization_granted(principal_id, resource_uri, safe_opts)
+
+    if cap,
+      do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, safe_opts)
+
+    result
   end
 
   defp enforce_source_owned_egress_expectation(nil, _opts), do: :ok
@@ -3567,6 +4537,18 @@ defmodule Arbor.Security do
 
   # Side effects for requires_approval decisions
   defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
+    handle_requires_approval(cap, nil, principal_id, resource_uri, action, opts, :none)
+  end
+
+  defp handle_requires_approval(
+         cap,
+         _auth,
+         principal_id,
+         resource_uri,
+         action,
+         opts,
+         effect
+       ) do
     safe_opts = Keyword.delete(opts, @source_owned_egress_opt)
 
     # Standing capability constraints escalate as-is. Dynamic egress :ask uses a
@@ -3600,12 +4582,23 @@ defmodule Arbor.Security do
           # handle_authorized — otherwise an fs cap with requires_approval
           # silently skips symlink-escape detection.
           with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
-               fg_result <- maybe_check_file_guard(principal_id, resource_uri, safe_opts, cap),
+               fg_result <-
+                 maybe_check_file_guard_for_effect(
+                   effect,
+                   principal_id,
+                   resource_uri,
+                   safe_opts,
+                   cap
+                 ),
                :ok <- normalize_file_guard_result(fg_result) do
-            Events.record_authorization_granted(principal_id, resource_uri, safe_opts)
-            maybe_check_max_uses(cap)
-            maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, safe_opts)
-            {:ok, :authorized}
+            finalize_authorized_effect(
+              cap,
+              principal_id,
+              resource_uri,
+              action,
+              safe_opts,
+              effect
+            )
           else
             {:error, reason} = error ->
               Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
@@ -3692,49 +4685,63 @@ defmodule Arbor.Security do
   # Look up capability for side-effect operations (max_uses, receipt).
   @impl Arbor.Contracts.API.Security
   def grant_capability_to_principal_for_resource(opts) do
-    principal_id = Keyword.fetch!(opts, :principal)
-    resource_uri = Keyword.fetch!(opts, :resource)
-
-    case Capability.new(
-           resource_uri: resource_uri,
-           principal_id: principal_id,
-           expires_at: Keyword.get(opts, :expires_at),
-           not_before: Keyword.get(opts, :not_before),
-           constraints: Keyword.get(opts, :constraints, %{}),
-           delegation_depth: Keyword.get(opts, :delegation_depth, 3),
-           max_uses: Keyword.get(opts, :max_uses),
-           allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
-           session_id: Keyword.get(opts, :session_id),
-           task_id: Keyword.get(opts, :task_id),
-           principal_scope: Keyword.get(opts, :principal_scope),
-           metadata: Keyword.get(opts, :metadata, %{})
-         ) do
-      {:ok, cap} ->
-        {:ok, signed_cap} = SystemAuthority.sign_capability(cap)
-
-        case CapabilityStore.put(signed_cap) do
-          {:ok, :stored} ->
-            Events.record_capability_granted(signed_cap)
-            {:ok, signed_cap}
-
-          {:error, _} = error ->
-            error
-        end
-
-      error ->
-        error
+    with {:ok, actor_authority, actor_id} <- mutation_actor(opts),
+         {:ok, cap} <- build_grant_capability(opts, actor_id),
+         {:ok, authorized_cap, receipt} <-
+           SystemAuthority.authorize_capability_mutation(actor_authority, :grant, cap),
+         {:ok, signed_cap} <- CapabilityStore.put_authorized(authorized_cap, :grant, receipt) do
+      Events.record_capability_granted(signed_cap)
+      {:ok, signed_cap}
+    else
+      {:error, _} = error -> error
     end
   end
 
-  @impl Arbor.Contracts.API.Security
-  def revoke_capability_by_id(capability_id, _opts) do
-    case CapabilityStore.revoke(capability_id) do
-      :ok ->
-        Events.record_capability_revoked(capability_id)
-        :ok
+  defp build_grant_capability(opts, actor_id) when is_list(opts) and is_binary(actor_id) do
+    with true <- Keyword.keyword?(opts),
+         principal_id when is_binary(principal_id) <- Keyword.get(opts, :principal),
+         resource_uri when is_binary(resource_uri) <- Keyword.get(opts, :resource) do
+      Capability.new(
+        resource_uri: resource_uri,
+        principal_id: principal_id,
+        expires_at: Keyword.get(opts, :expires_at),
+        not_before: Keyword.get(opts, :not_before),
+        constraints: Keyword.get(opts, :constraints, %{}),
+        delegation_depth: Keyword.get(opts, :delegation_depth, 3),
+        max_uses: Keyword.get(opts, :max_uses),
+        allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
+        session_id: Keyword.get(opts, :session_id),
+        task_id: Keyword.get(opts, :task_id),
+        principal_scope: Keyword.get(opts, :principal_scope),
+        metadata: metadata_with_granter(Keyword.get(opts, :metadata, %{}), actor_id)
+      )
+    else
+      _ -> {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :invalid_request}
+  end
 
-      error ->
-        error
+  defp build_grant_capability(_opts, _actor_id), do: {:error, :invalid_request}
+
+  @impl Arbor.Contracts.API.Security
+  def revoke_capability_by_id(capability_id, opts) do
+    with {:ok, actor_authority, _actor_id} <- mutation_actor(opts),
+         {:ok, fence} <- current_capability_revocation_fence(capability_id),
+         {:ok, receipt} <-
+           SystemAuthority.issue_capability_revocation_attestation(
+             actor_authority,
+             :revoke,
+             fence
+           ) do
+      case CapabilityStore.revoke_authorized(fence, receipt) do
+        :ok ->
+          Events.record_capability_revoked(capability_id)
+          :ok
+
+        error ->
+          error
+      end
     end
   end
 
@@ -3746,30 +4753,94 @@ defmodule Arbor.Security do
   @impl Arbor.Contracts.API.Security
   def delegate_capability_from_principal_to_principal(capability_id, new_principal_id, opts) do
     with {:ok, parent_cap} <- CapabilityStore.get(capability_id),
-         delegator_private_key = Keyword.fetch!(opts, :delegator_private_key),
+         {:ok, actor_authority, actor_id} <- mutation_actor(opts),
+         true <- actor_id == parent_cap.principal_id,
          # Create the delegated capability once (without delegation record)
          {:ok, new_cap} <-
            Capability.delegate(parent_cap, new_principal_id,
              constraints: Keyword.get(opts, :constraints, %{}),
-             expires_at: Keyword.get(opts, :expires_at)
+             expires_at: Keyword.get(opts, :expires_at),
+             not_before: Keyword.get(opts, :not_before),
+             delegation_depth:
+               Keyword.get(opts, :delegation_depth, max(parent_cap.delegation_depth - 1, 0)),
+             max_uses: Keyword.get(opts, :max_uses),
+             allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
+             session_id: Keyword.get(opts, :session_id),
+             task_id: Keyword.get(opts, :task_id),
+             principal_scope: Keyword.get(opts, :principal_scope),
+             metadata: metadata_with_granter(Keyword.get(opts, :metadata, %{}), actor_id)
            ),
          # Sign a delegation record over the new cap's payload
-         delegation_record =
-           Signer.sign_delegation(parent_cap, new_cap, delegator_private_key),
+         {:ok, delegation_record} <-
+           SigningAuthorityBroker.sign_delegation(actor_authority, parent_cap, new_cap),
          # Attach the chain to the SAME capability (preserving id/timestamps)
          new_cap_with_chain = %{
            new_cap
            | delegation_chain: parent_cap.delegation_chain ++ [delegation_record]
          },
-         # Sign the new capability with system authority
-         {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain),
-         # Store with quota enforcement
-         {:ok, :stored} <- CapabilityStore.put(signed_cap) do
+         # The claimed delegator is selected from the current parent capability,
+         # never from caller input. Verify the complete chain before the system
+         # authority signs or the store observes it; possession of an unrelated
+         # private key must not create a record attributed to the parent.
+         :ok <- Signer.verify_delegation_chain(new_cap_with_chain, &Registry.lookup/1),
+         {:ok, authorized_cap, receipt} <-
+           SystemAuthority.authorize_capability_mutation(
+             actor_authority,
+             :delegate,
+             new_cap_with_chain
+           ),
+         {:ok, signed_cap} <-
+           CapabilityStore.put_authorized(authorized_cap, :delegate, receipt) do
       Events.record_capability_granted(signed_cap)
       Events.record_delegation_created(parent_cap.principal_id, new_principal_id, signed_cap.id)
       {:ok, signed_cap}
+    else
+      false -> {:error, :capability_mutation_unauthorized}
+      {:error, _} = error -> error
     end
   end
+
+  defp mutation_actor(opts) when is_list(opts) do
+    with authority when not is_nil(authority) <- Keyword.get(opts, :actor_authority),
+         {:ok, %{principal_id: actor_id}} <- SigningAuthorityBroker.owned_identity(authority) do
+      {:ok, authority, actor_id}
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp mutation_actor(_opts), do: {:error, :capability_mutation_unauthorized}
+
+  defp metadata_with_granter(metadata, actor_id) when is_map(metadata) do
+    metadata
+    |> Map.delete(:granter_id)
+    |> Map.delete("granter_id")
+    |> Map.put("granter_id", actor_id)
+  end
+
+  defp metadata_with_granter(_metadata, _actor_id), do: %{}
+
+  defp current_capability_revocation_fence(capability_id) when is_binary(capability_id) do
+    with {:ok, %Capability{} = cap} <- CapabilityStore.get(capability_id) do
+      {:ok,
+       %{
+         capability_id: cap.id,
+         principal_id: cap.principal_id,
+         capability_digest:
+           cap
+           |> Capability.signing_payload()
+           |> then(&:crypto.hash(:sha256, &1))
+           |> Base.encode16(case: :lower)
+       }}
+    end
+  rescue
+    _ -> {:error, :capability_mutation_unauthorized}
+  catch
+    _, _ -> {:error, :capability_mutation_unauthorized}
+  end
+
+  defp current_capability_revocation_fence(_capability_id),
+    do: {:error, :capability_mutation_unauthorized}
 
   # ===========================================================================
   # Identity contract implementations
@@ -3781,16 +4852,8 @@ defmodule Arbor.Security do
   end
 
   @impl Arbor.Contracts.API.Identity
-  def register_agent_identity_with_public_key(%Identity{} = identity) do
-    case Registry.register(Identity.public_only(identity)) do
-      :ok ->
-        Events.record_identity_registered(identity.agent_id)
-        :ok
-
-      {:error, _} = error ->
-        error
-    end
-  end
+  def register_agent_identity_with_public_key(%Identity{}),
+    do: {:error, :identity_registration_unauthorized}
 
   @impl Arbor.Contracts.API.Identity
   def lookup_public_key_for_agent(agent_id) do
@@ -3900,6 +4963,21 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Check whether the capability authorization service is available.
+
+  Cross-application callers use this semantic facade instead of depending on
+  the internal capability-store process name.
+  """
+  @spec capability_authorization_available?() :: boolean()
+  def capability_authorization_available?, do: Process.whereis(CapabilityStore) != nil
+
+  @doc "Whether a module is part of the Security runtime and must not be hot-loaded."
+  @spec protected_runtime_module?(module()) :: boolean()
+  def protected_runtime_module?(module) when is_atom(module) do
+    module in [__MODULE__, Arbor.Security.Kernel, CapabilityStore]
+  end
+
+  @doc """
   Get system statistics.
   """
   @spec stats() :: map()
@@ -3947,18 +5025,145 @@ defmodule Arbor.Security do
   @spec uri_registered?(String.t()) :: boolean()
   defdelegate uri_registered?(uri), to: UriRegistry, as: :registered?
 
-  @doc "Register an additional runtime URI prefix."
-  @spec register_uri_prefix(String.t()) :: :ok | {:error, term()}
-  defdelegate register_uri_prefix(prefix), to: UriRegistry, as: :register
+  @doc "Legacy raw-prefix mutation is retired; providers register their immutable projection."
+  @spec register_uri_prefix(String.t()) :: {:error, :uri_mutation_unauthorized}
+  def register_uri_prefix(_prefix), do: {:error, :uri_mutation_unauthorized}
+
+  @doc "Register the immutable URI-prefix projection of a configured provider module."
+  @spec register_uri_provider(module()) :: :ok | {:error, term()}
+  def register_uri_provider(provider) when is_atom(provider),
+    do: UriRegistry.register_provider(provider)
+
+  def register_uri_provider(_provider), do: {:error, :uri_mutation_unauthorized}
+
+  @doc "Look up an enrolled, active capability issuer and its envelope."
+  @spec lookup_issuer(String.t()) :: {:ok, map()} | {:error, atom()}
+  def lookup_issuer(issuer_id) when is_binary(issuer_id), do: IssuerRegistry.lookup(issuer_id)
+  def lookup_issuer(_issuer_id), do: {:error, :not_found}
+
+  @doc "Register a capability issuer through an authenticated actor authority."
+  @spec register_issuer(String.t(), Capability.t() | [Capability.t()], keyword()) ::
+          :ok | {:error, term()}
+  def register_issuer(issuer_id, envelopes, opts \\ []) when is_list(opts) do
+    envelope_list = List.wrap(envelopes)
+    actor_authority = Keyword.get(opts, :actor_authority)
+    actor_proof = Keyword.get(opts, :actor_proof)
+    registry_opts = Keyword.drop(opts, [:actor_authority, :actor_proof])
+
+    with :ok <- validate_exactly_one_actor_proof(actor_authority, actor_proof),
+         {:ok, digest} <-
+           IssuerRegistry.mutation_payload_digest(
+             :register,
+             issuer_id,
+             envelope_list,
+             registry_opts
+           ),
+         {:ok, proof} <-
+           issue_issuer_actor_attestation(actor_authority, actor_proof, :register, digest) do
+      IssuerRegistry.register_authorized(issuer_id, envelope_list, registry_opts, proof)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :issuer_mutation_unauthorized}
+    end
+  end
+
+  @doc "Update a capability issuer's envelopes through an authenticated actor authority."
+  @spec update_issuer_envelopes(String.t(), [Capability.t()], keyword()) ::
+          :ok | {:error, term()}
+  def update_issuer_envelopes(issuer_id, envelopes, opts \\ []) when is_list(opts) do
+    actor_authority = Keyword.get(opts, :actor_authority)
+    actor_proof = Keyword.get(opts, :actor_proof)
+    registry_opts = Keyword.drop(opts, [:actor_authority, :actor_proof])
+
+    with :ok <- validate_exactly_one_actor_proof(actor_authority, actor_proof),
+         {:ok, digest} <-
+           IssuerRegistry.mutation_payload_digest(:update, issuer_id, envelopes, registry_opts),
+         {:ok, proof} <-
+           issue_issuer_actor_attestation(actor_authority, actor_proof, :update, digest) do
+      IssuerRegistry.update_envelopes_authorized(
+        issuer_id,
+        envelopes,
+        registry_opts,
+        proof
+      )
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :issuer_mutation_unauthorized}
+    end
+  end
+
+  @doc "Revoke a capability issuer through an authenticated actor authority."
+  @spec revoke_issuer(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def revoke_issuer(issuer_id, reason \\ nil, opts \\ []) when is_list(opts) do
+    actor_authority = Keyword.get(opts, :actor_authority)
+    actor_proof = Keyword.get(opts, :actor_proof)
+
+    with :ok <- validate_exactly_one_actor_proof(actor_authority, actor_proof),
+         true <- Enum.sort(Keyword.keys(opts)) in [[:actor_authority], [:actor_proof]],
+         {:ok, digest} <- IssuerRegistry.mutation_payload_digest(:revoke, issuer_id, reason, []),
+         {:ok, proof} <-
+           issue_issuer_actor_attestation(actor_authority, actor_proof, :revoke, digest) do
+      IssuerRegistry.revoke_authorized(issuer_id, reason, proof)
+    else
+      false -> {:error, :issuer_mutation_unauthorized}
+      {:error, _} = error -> error
+    end
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    @spec list_issuers_fixture() :: [map()] | {:error, term()}
+    def list_issuers_fixture, do: IssuerRegistry.list()
+
+    @doc false
+    @spec register_issuer_fixture(String.t(), Capability.t() | [Capability.t()], keyword()) ::
+            :ok | {:error, term()}
+    def register_issuer_fixture(issuer_id, envelopes, opts \\ []),
+      do: IssuerRegistry.register_fixture(issuer_id, envelopes, opts)
+
+    @doc false
+    @spec revoke_issuer_fixture(String.t(), String.t() | nil) :: :ok | {:error, term()}
+    def revoke_issuer_fixture(issuer_id, reason \\ nil),
+      do: IssuerRegistry.revoke_fixture(issuer_id, reason)
+  end
+
+  @doc "Return the canonical full issuer-mutation digest used by actor proofs."
+  @spec issuer_mutation_payload_digest(atom(), String.t(), term(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def issuer_mutation_payload_digest(operation, issuer_id, payload, opts \\ []) do
+    IssuerRegistry.mutation_payload_digest(operation, issuer_id, payload, opts)
+  end
+
+  defp validate_exactly_one_actor_proof(authority, proof) do
+    case {is_nil(authority), is_nil(proof)} do
+      {false, true} -> :ok
+      {true, false} -> :ok
+      _ -> {:error, :issuer_mutation_unauthorized}
+    end
+  end
+
+  defp issue_issuer_actor_attestation(authority, nil, operation, digest),
+    do: SystemAuthority.issue_issuer_mutation_attestation(authority, operation, digest)
+
+  defp issue_issuer_actor_attestation(nil, proof, operation, digest),
+    do: SystemAuthority.issue_issuer_mutation_attestation_proof(proof, operation, digest)
+
+  defp issue_issuer_actor_attestation(_authority, _proof, _operation, _digest),
+    do: {:error, :issuer_mutation_unauthorized}
 
   # ===========================================================================
   # Keychain (Seed/Host Phase 4)
   # ===========================================================================
 
   @doc """
-  Endorse an agent's identity by signing their public key with the system authority.
+  Endorse a registered self-certifying identity through an authenticated actor.
   """
-  defdelegate endorse_agent(identity), to: SystemAuthority
+  @spec endorse_agent(Identity.t()) :: {:error, :identity_endorsement_unauthorized}
+  def endorse_agent(%Identity{}), do: {:error, :identity_endorsement_unauthorized}
+
+  @spec endorse_agent(Identity.t(), term()) :: {:ok, map()} | {:error, term()}
+  def endorse_agent(%Identity{} = identity, actor_authority),
+    do: SystemAuthority.endorse_agent(identity, actor_authority)
 
   @doc """
   Verify an agent endorsement signed by the system authority.
@@ -3970,12 +5175,75 @@ defmodule Arbor.Security do
   """
   defdelegate new_keychain(agent_id), to: Keychain, as: :new
 
+  @doc "Seal plaintext for a peer through the public Security facade."
+  @spec keychain_seal_for_peer(term(), String.t(), binary()) ::
+          {:ok, term()} | {:ok, term(), term()} | {:error, term()}
+  def keychain_seal_for_peer(keychain, peer_agent_id, plaintext),
+    do: Keychain.seal_for_peer(keychain, peer_agent_id, plaintext)
+
+  @doc "Unseal peer ciphertext through the public Security facade."
+  @spec keychain_unseal_from_peer(term(), String.t(), term()) ::
+          {:ok, binary()} | {:ok, binary(), term()} | {:error, term()}
+  def keychain_unseal_from_peer(keychain, sender_agent_id, sealed),
+    do: Keychain.unseal_from_peer(keychain, sender_agent_id, sealed)
+
+  @doc "Issue a caller-bound, operation-specific authority for internal channel crypto."
+  @spec issue_channel_authority(term(), :send | :read) :: {:ok, term()} | {:error, term()}
+  def issue_channel_authority(signing_authority, operation),
+    do: Arbor.Security.ChannelAuthorityBroker.issue(signing_authority, operation)
+
+  @doc "Close a caller-bound internal channel authority."
+  @spec close_channel_authority(term()) :: :ok | {:error, term()}
+  def close_channel_authority(channel_authority),
+    do: Arbor.Security.ChannelAuthorityBroker.close(channel_authority)
+
+  @doc "Resolve the authenticated principal bound to a live channel authority."
+  @spec channel_authority_principal(term(), :send | :read) ::
+          {:ok, String.t()} | {:error, term()}
+  def channel_authority_principal(channel_authority, operation),
+    do: Arbor.Security.ChannelAuthorityBroker.principal(channel_authority, operation)
+
+  @doc "Sign one internal channel message without exporting signing key material."
+  @spec sign_channel_message(term(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_channel_message(channel_authority, channel_id, content),
+    do: Arbor.Security.ChannelAuthorityBroker.sign(channel_authority, channel_id, content)
+
+  @doc "Seal one direct message without exporting either agent's key material."
+  @spec seal_channel_message(term(), String.t(), binary()) ::
+          {:ok, map()} | {:error, term()}
+  def seal_channel_message(channel_authority, peer_id, content),
+    do: Arbor.Security.ChannelAuthorityBroker.seal(channel_authority, peer_id, content)
+
+  @doc "Unseal one direct message without exporting either agent's key material."
+  @spec unseal_channel_message(term(), String.t(), map()) ::
+          {:ok, binary()} | {:error, term()}
+  def unseal_channel_message(channel_authority, sender_id, sealed),
+    do: Arbor.Security.ChannelAuthorityBroker.unseal(channel_authority, sender_id, sealed)
+
+  @doc "Verify a domain-bound internal channel message signature."
+  @spec verify_channel_message_signature(String.t(), String.t(), binary(), binary()) ::
+          boolean() | nil
+  def verify_channel_message_signature(sender_id, channel_id, content, signature),
+    do:
+      Arbor.Security.ChannelAuthorityBroker.verify(
+        sender_id,
+        channel_id,
+        content,
+        signature
+      )
+
   # ===========================================================================
   # Signing Key Storage
   # ===========================================================================
 
   @typedoc "Caller-held key material read from a private `.arbor.key` file."
   @type key_file_material :: %{agent_id: String.t(), private_key: binary()}
+
+  @doc "Parse bounded caller-supplied operator key-file contents."
+  @spec parse_operator_key_file_contents(binary()) ::
+          {:ok, key_file_material()} | {:error, term()}
+  def parse_operator_key_file_contents(contents), do: KeyFile.parse(contents)
 
   @doc "Write a new mode-0600 `.arbor.key` file without overwriting an existing file."
   @spec write_key_file(Path.t(), key_file_material()) :: {:ok, String.t()} | {:error, term()}
@@ -3989,17 +5257,119 @@ defmodule Arbor.Security do
 
   def key_file_principal(_path), do: {:error, :invalid_key_file_path}
 
-  @doc "Sign one payload from a mode-private key file without exposing its private key."
-  @spec sign_key_file_request(Path.t(), binary()) ::
+  @doc "Sign one payload from a caller-opened, mode-private key-file handle."
+  @spec sign_key_file_request(term(), binary()) ::
           {:ok, String.t(), SignedRequest.t()} | {:error, term()}
-  def sign_key_file_request(path, payload) when is_binary(path) and is_binary(payload) do
-    with {:ok, %{agent_id: principal_id, private_key: private_key}} <- KeyFile.read(path),
+  def sign_key_file_request(io_device, payload)
+      when not is_binary(io_device) and is_binary(payload) do
+    with {:ok, %{agent_id: principal_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
          {:ok, signed_request} <- SignedRequest.sign(payload, principal_id, private_key) do
       {:ok, principal_id, signed_request}
     end
   end
 
-  def sign_key_file_request(_path, _payload), do: {:error, :invalid_key_file_signing_args}
+  def sign_key_file_request(_io_device, _payload),
+    do: {:error, :key_file_signing_authority_required}
+
+  @doc """
+  Sign one canonical scheduler capability-attestation payload from a
+  caller-opened, mode-private key-file handle.
+
+  The payload must already begin with the exact length-prefixed
+  `arbor.scheduler.caps.v2` domain emitted by `Arbor.Scheduler.CapsFile`.
+  Security signs those bytes unchanged and never returns private key material.
+  """
+  @spec sign_scheduler_caps_payload(term(), binary()) ::
+          {:ok, String.t(), binary()} | {:error, term()}
+  def sign_scheduler_caps_payload(io_device, payload)
+      when not is_binary(io_device) and is_binary(payload) do
+    with :ok <- validate_scheduler_caps_payload(payload),
+         {:ok, %{agent_id: principal_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device) do
+      {:ok, principal_id, Crypto.sign(payload, private_key)}
+    end
+  end
+
+  def sign_scheduler_caps_payload(_io_device, _payload),
+    do: {:error, :scheduler_caps_signing_authority_required}
+
+  defp validate_scheduler_caps_payload(payload) do
+    domain_prefix =
+      <<byte_size(@scheduler_caps_signing_domain)::unsigned-big-integer-size(32),
+        @scheduler_caps_signing_domain::binary>>
+
+    if byte_size(payload) > byte_size(domain_prefix) and
+         byte_size(payload) <= @max_scheduler_caps_payload_bytes and
+         :binary.part(payload, 0, byte_size(domain_prefix)) == domain_prefix do
+      :ok
+    else
+      {:error, :invalid_scheduler_caps_payload}
+    end
+  end
+
+  @doc """
+  Build an exact, signed capability-grant request in an offline CLI process.
+
+  The returned capability and proof are submitted together with
+  `submit_signed_capability_grant/2`. The caller must open the key file and
+  pass its file handle; this facade never opens a caller-nominated path.
+  """
+  @spec prepare_key_file_capability_grant(term(), keyword()) ::
+          {:ok, Capability.t(), SignedRequest.t()} | {:error, term()}
+  def prepare_key_file_capability_grant(io_device, opts)
+      when not is_binary(io_device) and is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         false <- Keyword.has_key?(opts, :actor_authority),
+         {:ok, %{agent_id: actor_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
+         {:ok, cap} <- build_grant_capability(opts, actor_id),
+         {:ok, payload} <- SystemAuthority.capability_mutation_request_payload(:grant, cap),
+         {:ok, proof} <- SignedRequest.sign(payload, actor_id, private_key) do
+      {:ok, cap, proof}
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  def prepare_key_file_capability_grant(_path, _opts),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @doc "Submit a capability and its exact one-use actor proof to the authority boundary."
+  @spec submit_signed_capability_grant(Capability.t(), SignedRequest.t()) ::
+          {:ok, Capability.t()} | {:error, term()}
+  def submit_signed_capability_grant(%Capability{} = cap, %SignedRequest{} = actor_proof) do
+    with {:ok, authorized_cap, receipt} <-
+           SystemAuthority.authorize_capability_mutation_proof(actor_proof, :grant, cap),
+         {:ok, signed_cap} <- CapabilityStore.put_authorized(authorized_cap, :grant, receipt) do
+      Events.record_capability_granted(signed_cap)
+      {:ok, signed_cap}
+    else
+      {:error, _} = error -> error
+    end
+  end
+
+  def submit_signed_capability_grant(_cap, _actor_proof),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @doc "Sign an exact issuer-mutation digest in an offline CLI process."
+  @spec prepare_key_file_issuer_mutation(term(), atom(), String.t()) ::
+          {:ok, String.t(), SignedRequest.t()} | {:error, term()}
+  def prepare_key_file_issuer_mutation(io_device, operation, payload_digest)
+      when not is_binary(io_device) do
+    with {:ok, payload} <-
+           SystemAuthority.issuer_mutation_request_payload(operation, payload_digest),
+         {:ok, %{agent_id: actor_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
+         {:ok, proof} <- SignedRequest.sign(payload, actor_id, private_key) do
+      {:ok, actor_id, proof}
+    else
+      _ -> {:error, :issuer_mutation_unauthorized}
+    end
+  end
+
+  def prepare_key_file_issuer_mutation(_io_device, _operation, _payload_digest),
+    do: {:error, :issuer_mutation_unauthorized}
 
   @doc """
   Store an agent's signing private key (encrypted at rest).
@@ -4009,12 +5379,57 @@ defmodule Arbor.Security do
   """
   defdelegate store_signing_key(agent_id, private_key), to: SigningKeyStore, as: :put
 
-  @doc """
-  Load an agent's signing private key.
+  @doc false
+  @spec store_signing_keypair(String.t(), binary(), binary()) :: :ok | {:error, term()}
+  def store_signing_keypair(agent_id, signing_private_key, encryption_private_key),
+    do: SigningKeyStore.put_keypair(agent_id, signing_private_key, encryption_private_key)
 
-  Returns `{:ok, private_key}` or `{:error, :no_signing_key}`.
+  if Mix.env() == :test do
+    @doc false
+    defdelegate store_signing_key_fixture(agent_id, private_key),
+      to: SigningKeyStore,
+      as: :put_fixture
+
+    @doc false
+    defdelegate store_signing_keypair_fixture(
+                  agent_id,
+                  signing_private_key,
+                  encryption_private_key
+                ),
+                to: SigningKeyStore,
+                as: :put_keypair_fixture
+
+    @doc false
+    defdelegate delete_signing_key_fixture(agent_id),
+      to: SigningKeyStore,
+      as: :delete_fixture
+  end
+
+  @doc """
+  Retired raw-key API.
+
+  Private signing material is never returned through the public facade. Use an
+  owner-bound `SigningAuthority` for signing operations.
   """
-  defdelegate load_signing_key(agent_id), to: SigningKeyStore, as: :get
+  @spec load_signing_key(term()) :: {:error, :unauthorized}
+  def load_signing_key(_agent_id), do: {:error, :unauthorized}
+
+  @doc false
+  @spec build_stored_signing_authority_acquisition_proof(String.t(), atom(), pid(), atom()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def build_stored_signing_authority_acquisition_proof(
+        principal_id,
+        purpose,
+        owner,
+        registered_owner
+      ) do
+    SigningKeyStore.build_named_acquisition_proof(
+      principal_id,
+      purpose,
+      owner,
+      registered_owner
+    )
+  end
 
   @doc """
   Check whether an agent's encrypted signing key is available for use.
@@ -4027,6 +5442,16 @@ defmodule Arbor.Security do
           | {:error,
              :invalid_principal | :store_unavailable | :no_signing_key | :invalid_key_material}
   def signing_key_status(agent_id), do: SigningKeyStore.status(agent_id)
+
+  @doc false
+  @spec signing_key_public_identity(String.t(), keyword()) ::
+          {:ok, Identity.t()} | {:error, term()}
+  def signing_key_public_identity(agent_id, opts \\ []),
+    do: SigningKeyStore.load_public_identity(agent_id, opts)
+
+  @doc false
+  def migrate_legacy_signing_key_locator(locator, opts \\ []),
+    do: SigningKeyStore.migrate_legacy_locator(locator, opts)
 
   @doc """
   Delete an agent's signing key.
@@ -4115,9 +5540,7 @@ defmodule Arbor.Security do
 
   @doc "Reobserve pending mutation effects at their serialized owner before audit delivery."
   def reconcile_authority_audit do
-    GenServer.call(CapabilityStore, :reconcile_authority_audit, 30_000)
-  catch
-    :exit, _ -> {:error, :capability_store_unavailable}
+    CapabilityStore.reconcile_authority_audit()
   end
 
   @doc "Acknowledge the exact journal intent after the owning Historian consumer proves durable content."
@@ -4374,6 +5797,15 @@ defmodule Arbor.Security do
   end
 
   @doc false
+  @spec open_agent_lifecycle_authority(binary()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_agent_lifecycle_authority(session_token) when is_binary(session_token) do
+    SigningAuthorityBroker.open_agent_lifecycle_session(session_token)
+  end
+
+  def open_agent_lifecycle_authority(_session_token), do: {:error, :invalid_session_token}
+
+  @doc false
   @spec open_signing_authority(term(), term()) :: {:error, :possession_proof_required}
   def open_signing_authority(_agent_id, _opts) do
     {:error, :possession_proof_required}
@@ -4408,6 +5840,70 @@ defmodule Arbor.Security do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc "Sign a canonical peer identity endorsement with an owner-bound signing authority."
+  @spec sign_identity_endorsement(SigningAuthority.t(), String.t(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_identity_endorsement(authority, signer_id, target_id, target_public_key) do
+    SigningAuthorityBroker.sign_identity_endorsement(
+      authority,
+      signer_id,
+      target_id,
+      target_public_key
+    )
+  end
+
+  @doc "Verify a canonical peer identity endorsement against the registered signer identity."
+  @spec verify_identity_endorsement(String.t(), String.t(), binary(), binary()) ::
+          :ok | {:error, :invalid_identity_endorsement}
+  def verify_identity_endorsement(signer_id, target_id, target_public_key, signature)
+      when is_binary(signature) do
+    with {:ok, payload} <-
+           SigningAuthorityBroker.identity_endorsement_payload(
+             signer_id,
+             target_id,
+             target_public_key
+           ),
+         {:ok, signer_public_key} <- lookup_public_key(signer_id),
+         true <- Crypto.verify(payload, signature, signer_public_key) do
+      :ok
+    else
+      _ -> {:error, :invalid_identity_endorsement}
+    end
+  rescue
+    _ -> {:error, :invalid_identity_endorsement}
+  catch
+    _, _ -> {:error, :invalid_identity_endorsement}
+  end
+
+  def verify_identity_endorsement(_signer_id, _target_id, _target_public_key, _signature),
+    do: {:error, :invalid_identity_endorsement}
+
+  @doc "Return the principal bound to a live authority owned by the calling process."
+  @spec signing_authority_principal(SigningAuthority.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def signing_authority_principal(authority) do
+    with {:ok, %{principal_id: principal_id}} <- SigningAuthorityBroker.owned_identity(authority),
+         true <- is_binary(principal_id) and principal_id != "" do
+      {:ok, principal_id}
+    else
+      _ -> {:error, :signing_authority_unauthorized}
+    end
+  end
+
+  @doc false
+  @spec validate_signing_authority_owner(term(), pid(), String.t()) ::
+          :ok | {:error, :signing_authority_unauthorized}
+  def validate_signing_authority_owner(authority, owner, principal_id)
+      when is_pid(owner) and is_binary(principal_id) do
+    case SigningAuthorityBroker.recorded_identity(authority, owner) do
+      {:ok, %{principal_id: ^principal_id}} -> :ok
+      _ -> {:error, :signing_authority_unauthorized}
+    end
+  end
+
+  def validate_signing_authority_owner(_authority, _owner, _principal_id),
+    do: {:error, :signing_authority_unauthorized}
 
   @doc """
   Sign a domain-tagged detached message using a previously opened signing authority.
@@ -4509,13 +6005,13 @@ defmodule Arbor.Security do
       %{
         audience_host_id: binary,
         audience_install_id: binary,
-        issued_at: binary,
-        expires_at: binary,
         nonce: binary
       }
 
-  Caller-supplied boot, key, issuer, transaction digest, or private material
-  is rejected. Success returns a validated `arbor.extension.signed_envelope.v1`
+  The broker supplies the issuance instant and a short expiry from its own clock,
+  and reserves the nonce before signing. Caller-supplied time, boot, key, issuer,
+  transaction digest, or private material is rejected. Success returns a
+  validated `arbor.extension.signed_envelope.v1`
   wrapping `arbor.extension.activation_authorization.v1` after detached
   Ed25519 verification against the boot-bound Platform public key.
   """
@@ -4588,22 +6084,39 @@ defmodule Arbor.Security do
   @doc """
   Begin a bounded terminal device login for one chat target using only the
   configured device-flow provider. Existing human registration and chat grants
-  are required; this API never provisions either. The handle is a bearer secret.
+  are required; this API never provisions either. The handle remains bound to
+  the trusted transport source that admitted the flow.
   """
-  @spec begin_terminal_login(String.t()) ::
-          {:ok, map()} | {:error, :unauthorized | :login_unavailable}
-  defdelegate begin_terminal_login(target), to: Arbor.Security.TerminalLogin, as: :begin
+  @spec begin_terminal_login(String.t()) :: {:error, :terminal_login_source_required}
+  def begin_terminal_login(_target), do: {:error, :terminal_login_source_required}
+
+  @spec begin_terminal_login(String.t(), term()) ::
+          {:ok, map()} | {:error, term()}
+  def begin_terminal_login(target, source),
+    do: Arbor.Security.TerminalLogin.begin(target, source)
 
   @doc """
-  Poll a terminal login handle. Successful credential retrieval is one-shot;
-  a lost success response requires a new login. No OIDC token or key is returned.
+  Poll a terminal login handle from its trusted admission source. Successful
+  credential retrieval is one-shot; a lost success response requires a new
+  login. No OIDC token or key is returned.
   """
   @spec terminal_login_status(String.t()) :: {:ok, :pending | map()} | {:error, :unauthorized}
   defdelegate terminal_login_status(handle), to: Arbor.Security.TerminalLogin, as: :status
 
+  @spec terminal_login_status(String.t(), term()) ::
+          {:ok, :pending | map()} | {:error, :unauthorized}
+  defdelegate terminal_login_status(handle, source),
+    to: Arbor.Security.TerminalLogin,
+    as: :status
+
   @doc "Cancel a pending login and await retirement of its exact device-flow worker."
   @spec cancel_terminal_login(String.t()) :: :ok | {:error, :unauthorized}
   defdelegate cancel_terminal_login(handle), to: Arbor.Security.TerminalLogin, as: :cancel
+
+  @spec cancel_terminal_login(String.t(), term()) :: :ok | {:error, :unauthorized}
+  defdelegate cancel_terminal_login(handle, source),
+    to: Arbor.Security.TerminalLogin,
+    as: :cancel
 
   @doc """
   Preflight an unclaimed or disconnected terminal credential for socket upgrade.
@@ -4638,6 +6151,80 @@ defmodule Arbor.Security do
   @spec revoke_terminal_session(String.t()) :: :ok | {:error, :unauthorized}
   defdelegate revoke_terminal_session(credential), to: Arbor.Security.TerminalLogin, as: :revoke
 
+  @doc "Return the configured OIDC providers through the Security facade."
+  @spec oidc_providers() :: [map()]
+  def oidc_providers, do: Arbor.Security.OIDC.Config.providers()
+
+  @doc "Generate a cryptographically random OIDC state value."
+  @spec generate_oidc_state() :: String.t()
+  def generate_oidc_state, do: Arbor.Security.OIDC.AuthCodeFlow.generate_state()
+
+  @doc "Generate a cryptographically random OIDC nonce."
+  @spec generate_oidc_nonce() :: String.t()
+  def generate_oidc_nonce, do: Arbor.Security.OIDC.AuthCodeFlow.generate_nonce()
+
+  @doc "Build a validated OIDC authorization URL with PKCE."
+  @spec build_oidc_authorize_url(term(), String.t(), String.t(), term()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def build_oidc_authorize_url(provider, redirect_uri, state, opts \\ []),
+    do: Arbor.Security.OIDC.AuthCodeFlow.build_authorize_url(provider, redirect_uri, state, opts)
+
+  @doc "Exchange a validated OIDC authorization code for tokens."
+  @spec exchange_oidc_code(term(), String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def exchange_oidc_code(provider, code, redirect_uri, code_verifier),
+    do:
+      Arbor.Security.OIDC.AuthCodeFlow.exchange_code(provider, code, redirect_uri, code_verifier)
+
+  @doc "Verify an OIDC ID token and return its admitted claims."
+  @spec verify_oidc_token(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def verify_oidc_token(id_token, provider),
+    do: Arbor.Security.OIDC.TokenVerifier.verify(id_token, provider)
+
+  if Mix.env() == :test do
+    @doc false
+    @spec derive_oidc_principal_id_fixture(map()) :: String.t()
+    def derive_oidc_principal_id_fixture(claims),
+      do: Arbor.Security.OIDC.IdentityStore.derive_agent_id(claims)
+
+    @doc false
+    @spec restore_runtime_fixture() :: :ok | :skipped
+    def restore_runtime_fixture, do: Arbor.Security.TestBootstrap.start!()
+
+    @doc false
+    @spec put_oidc_jwks_fixture(map(), map(), pos_integer()) :: :ok | {:error, atom()}
+    def put_oidc_jwks_fixture(provider, jwks, ttl_ms \\ 60_000),
+      do: Arbor.Security.OIDC.JwksCache.put_fixture(provider, jwks, ttl_ms)
+
+    @doc false
+    @spec delete_oidc_jwks_fixture(map()) :: :ok
+    def delete_oidc_jwks_fixture(provider),
+      do: Arbor.Security.OIDC.JwksCache.delete_fixture(provider)
+
+    @doc false
+    @spec identity_security_sync_subscriber_fixture() :: map()
+    def identity_security_sync_subscriber_fixture do
+      %{
+        owner: Registry,
+        supervisor: {:application, :arbor_security},
+        child_id: Registry,
+        events: [
+          :identity_registered,
+          :identity_deregistered,
+          :identity_suspended,
+          :identity_resumed,
+          :identity_revoked
+        ]
+      }
+    end
+
+    @doc false
+    @spec load_or_create_oidc_identity_fixture(map()) ::
+            {:ok, Identity.t(), :existing | :created} | {:error, term()}
+    def load_or_create_oidc_identity_fixture(claims),
+      do: Arbor.Security.OIDC.IdentityStore.load_or_create_fixture(claims)
+  end
+
   @doc """
   Authenticate a human operator via OIDC device flow.
 
@@ -4668,6 +6255,27 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Issue a bounded human-session token from a caller-owned authority.
+
+  The authority must be live, owned by the calling process, and bound to the
+  same human principal. This keeps token minting coupled to the authenticated
+  OIDC result instead of exposing an ambient principal-id minting deputy.
+  """
+  @spec issue_human_session_token(String.t(), SigningAuthority.t(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def issue_human_session_token(principal_id, authority, opts \\ [])
+
+  def issue_human_session_token(principal_id, authority, opts)
+      when is_binary(principal_id) and is_list(opts) do
+    if human_identity?(principal_id),
+      do: Arbor.Security.SessionToken.generate_authorized(principal_id, authority, opts),
+      else: {:error, :session_token_issuance_unauthorized}
+  end
+
+  def issue_human_session_token(_principal_id, _authority, _opts),
+    do: {:error, :session_token_issuance_unauthorized}
+
+  @doc """
   Check if an agent ID represents a human (OIDC-authenticated) identity.
   """
   @spec human_identity?(String.t()) :: boolean()
@@ -4682,26 +6290,19 @@ defmodule Arbor.Security do
   # Old helpers moved to AuthDecision — deleted to avoid dead code.
 
   defp maybe_emit_receipt(cap, principal_id, resource_uri, action, result, opts) do
-    if Config.invocation_receipts_enabled?() do
-      case InvocationReceipt.new(
-             capability_id: cap.id,
-             principal_id: principal_id,
-             resource_uri: resource_uri,
-             action: action,
-             result: result,
-             delegation_chain: cap.delegation_chain,
-             session_id: cap.session_id,
-             task_id: cap.task_id
-           ) do
-        {:ok, receipt} ->
-          case SystemAuthority.sign_receipt(receipt) do
-            {:ok, signed_receipt} ->
-              Events.record_invocation_receipt(signed_receipt)
-              Keyword.get(opts, :receipt_callback, &Function.identity/1).(signed_receipt)
+    if Config.invocation_receipts_enabled?() and result == :granted do
+      proof =
+        receipt_issuance_proof(:invocation, %{
+          capability: cap,
+          principal_id: principal_id,
+          resource_uri: resource_uri,
+          action: action
+        })
 
-            {:error, _} ->
-              :ok
-          end
+      case InvocationReceiptBroker.issue_authorized(proof) do
+        {:ok, signed_receipt} ->
+          Events.record_invocation_receipt(signed_receipt)
+          Keyword.get(opts, :receipt_callback, &Function.identity/1).(signed_receipt)
 
         {:error, _} ->
           :ok
@@ -4711,19 +6312,38 @@ defmodule Arbor.Security do
     _ -> :ok
   end
 
-  defp maybe_check_max_uses(%Capability{max_uses: nil}), do: :ok
+  # This local closure is an unforgeable, caller-bound capability within the
+  # normal BEAM application boundary. Security-owned GenServers admit only local
+  # closures created by this module, then challenge them and require the issuing
+  # process and operation kind to match the GenServer call being handled. The
+  # proof never leaves this private authorization path or appears in
+  # caller-visible data.
+  defp receipt_issuance_proof(kind, payload) when is_atom(kind) and is_map(payload) do
+    caller = self()
 
-  defp maybe_check_max_uses(%Capability{max_uses: max_uses} = cap) do
-    case CapabilityStore.increment_usage(cap.id) do
-      {:ok, count} when count >= max_uses ->
-        CapabilityStore.revoke(cap.id)
+    fn challenge ->
+      {:arbor_security_receipt_issuance_v1, challenge, caller, kind, payload}
+    end
+  end
+
+  defp maybe_consume_max_use(%Capability{max_uses: nil}), do: :ok
+
+  defp maybe_consume_max_use(%Capability{} = cap) do
+    proof = receipt_issuance_proof(:capability_usage, %{capability: cap})
+
+    case CapabilityStore.consume_usage_authorized(proof) do
+      {:ok, :available} ->
+        :ok
+
+      {:ok, :exhausted} ->
         Events.record_capability_revoked(cap.id)
-
-      {:ok, _count} ->
         :ok
 
-      {:error, _} ->
-        :ok
+      {:error, reason} when reason in [:not_found, :usage_exhausted] ->
+        {:error, :max_uses_exhausted}
+
+      {:error, reason} ->
+        {:error, {:max_uses_unavailable, reason}}
     end
   end
 
@@ -4784,6 +6404,9 @@ defmodule Arbor.Security do
           {:ok, relativize_path(resolved, workspace)}
         end
 
+      {:error, _reason} = error ->
+        error
+
       :none ->
         normalize_unscoped_fs_path(file_path)
     end
@@ -4792,7 +6415,7 @@ defmodule Arbor.Security do
   defp workspace_root(opts) do
     case Keyword.get(opts, :workspace) do
       workspace when is_binary(workspace) and workspace != "" ->
-        {:ok, SafePath.normalize(workspace)}
+        SafePath.resolve_within(workspace, "/")
 
       _ ->
         :none
@@ -4861,6 +6484,78 @@ defmodule Arbor.Security do
   defp normalize_file_guard_result(:ok), do: :ok
   defp normalize_file_guard_result({:ok, _resolved_path}), do: :ok
   defp normalize_file_guard_result({:error, _} = err), do: err
+
+  # Descriptor-bound reads validate and open against the exact capability
+  # selected by AuthDecision. Running the legacy explicit FileGuard lookup
+  # first would select a second capability and lose that binding.
+  defp maybe_check_file_guard_for_effect(
+         {:read_file, _path},
+         _principal_id,
+         _resource_uri,
+         _opts,
+         %Capability{}
+       ),
+       do: :ok
+
+  defp maybe_check_file_guard_for_effect(
+         effect,
+         principal_id,
+         resource_uri,
+         opts,
+         cap
+       )
+       when effect == :none do
+    maybe_check_file_guard(principal_id, resource_uri, opts, cap)
+  end
+
+  defp maybe_check_file_guard_for_effect(
+         _effect,
+         _principal_id,
+         _resource_uri,
+         _opts,
+         _cap
+       ),
+       do: {:error, :invalid_authorized_effect}
+
+  defp apply_authorized_effect(:none, _cap), do: {:ok, :authorized}
+
+  defp apply_authorized_effect({:read_file, path}, %Capability{} = cap)
+       when is_binary(path) do
+    file_guard = file_guard_module()
+
+    with true <- Code.ensure_loaded?(file_guard),
+         true <- function_exported?(file_guard, :prepare_read_for_capability, 2),
+         true <- function_exported?(file_guard, :validate_opened_read_for_capability, 3),
+         {:ok, %{root_binding: root_binding, mode: mode}}
+         when mode in [:exact, :within_root] <-
+           file_guard.prepare_read_for_capability(path, cap),
+         root when is_binary(root) <- SafePath.binding_root(root_binding),
+         validator = fn opened_path ->
+           file_guard.validate_opened_read_for_capability(opened_path, root, cap)
+         end,
+         {:ok, content, opened_path} <-
+           execute_authorized_read(mode, path, root_binding, validator),
+         :ok <- file_guard.validate_opened_read_for_capability(opened_path, root, cap) do
+      {:ok, :authorized, {:ok, content, opened_path}}
+    else
+      false -> {:error, :file_guard_unavailable}
+      {:error, _reason} = error -> error
+      _unexpected -> {:error, :invalid_file_read_result}
+    end
+  rescue
+    _ -> {:error, :file_guard_error}
+  catch
+    :exit, _ -> {:error, :file_guard_error}
+  end
+
+  defp apply_authorized_effect(_effect, _cap),
+    do: {:error, :invalid_authorized_effect}
+
+  defp execute_authorized_read(:exact, path, root_binding, validator),
+    do: SafePath.read_exact_bound_checked(path, root_binding, validator)
+
+  defp execute_authorized_read(:within_root, path, root_binding, validator),
+    do: SafePath.read_within_bound_checked(path, root_binding, validator)
 
   defp maybe_check_file_guard(principal_id, resource_uri, opts, cap) do
     file_path = Keyword.get(opts, :file_path)
@@ -4981,7 +6676,14 @@ defmodule Arbor.Security do
     context
   end
 
-  # Extract file path from arbor:// resource URIs
-  defp extract_path_from_uri("arbor://fs/" <> rest), do: "/" <> rest
+  # Extract the filesystem path, excluding the URI operation segment. Reflex
+  # path matching performs its own lexical/real-path normalization.
+  defp extract_path_from_uri("arbor://fs/" <> _ = resource_uri) do
+    case Arbor.Security.FileGuard.parse_resource_uri(resource_uri) do
+      {:ok, _operation, path} -> path
+      _ -> nil
+    end
+  end
+
   defp extract_path_from_uri(_), do: nil
 end

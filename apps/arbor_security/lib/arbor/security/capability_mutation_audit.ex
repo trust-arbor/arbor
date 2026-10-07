@@ -60,8 +60,13 @@ defmodule Arbor.Security.CapabilityMutationAudit do
 
   @doc false
   @spec reason_class(term()) :: :capacity | :identity | :unavailable
-  def reason_class(reason) when reason in [:soft_capacity_exhausted, :capacity_exhausted],
-    do: :capacity
+  def reason_class(reason)
+      when reason in [
+             :soft_capacity_exhausted,
+             :capacity_exhausted,
+             :principal_capacity_exhausted
+           ],
+      do: :capacity
 
   def reason_class(reason) when reason in [:operation_terminal, :retired_version],
     do: :identity

@@ -30,6 +30,8 @@ defmodule Arbor.Signals.Telemetry do
 
   require Logger
 
+  alias Arbor.Signals.TelemetryBridge
+
   @logger_id "arbor-signals-telemetry-logger"
   @bridge_id "arbor-signals-telemetry-bridge"
   @security_bridge_id "arbor-signals-security-telemetry-bridge"
@@ -152,11 +154,7 @@ defmodule Arbor.Signals.Telemetry do
       opts = Map.get(metadata, :signal_opts, [])
       durable = Map.get(metadata, :signal_durable, config.durable)
 
-      if durable do
-        Arbor.Signals.durable_emit(category, type, data, opts)
-      else
-        Arbor.Signals.emit(category, type, data, opts)
-      end
+      emit_without_bus_reentry(category, type, data, opts, durable)
     end
 
     :ok
@@ -168,6 +166,29 @@ defmodule Arbor.Signals.Telemetry do
   defp sampled?(rate) when rate >= 1.0, do: true
   defp sampled?(rate) when rate <= 0.0, do: false
   defp sampled?(rate), do: :rand.uniform() <= rate
+
+  # Telemetry handlers execute synchronously in the emitting process. A Bus
+  # authorization can emit security telemetry while the Bus is still handling
+  # the subscribe request; publishing that bridged event inline would make the
+  # Bus perform an authenticated call to itself and time out. Defer only this
+  # reentrant case through the single bounded bridge worker. Signal bridging is
+  # an observability path; saturation is reported and dropped rather than
+  # creating unbounded publishers behind a busy Bus.
+  defp emit_without_bus_reentry(category, type, data, opts, durable) do
+    if Process.whereis(Arbor.Signals.Bus) == self() do
+      TelemetryBridge.enqueue(category, type, data, opts, durable)
+    else
+      emit(category, type, data, opts, durable)
+    end
+  end
+
+  defp emit(category, type, data, opts, true) do
+    Arbor.Signals.durable_emit(category, type, data, opts)
+  end
+
+  defp emit(category, type, data, opts, false) do
+    Arbor.Signals.emit(category, type, data, opts)
+  end
 
   defp default_signal_data(event, measurements, metadata) do
     %{

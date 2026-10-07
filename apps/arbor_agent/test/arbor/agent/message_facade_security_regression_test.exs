@@ -146,11 +146,11 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   end
 
   defp track_grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
 
     on_exit(fn ->
       # Revocation regressions may already have consumed this cleanup step.
-      assert Security.revoke(cap.id) in [:ok, {:error, :not_found}]
+      assert Security.revoke_fixture(cap.id) in [:ok, {:error, :not_found}]
       assert {:ok, capabilities} = Security.list_capabilities(principal)
       refute Enum.any?(capabilities, &(&1.id == cap.id))
     end)
@@ -563,18 +563,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     }
 
     {:ok, id_token} = Joken.Signer.sign(claims, signer)
+    provider = %{issuer: issuer, client_id: client_id}
 
-    table = :arbor_oidc_jwks_cache
-
-    if :ets.whereis(table) == :undefined do
-      :ets.new(table, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    true =
-      :ets.insert(
-        table,
-        {issuer, %{"keys" => [public_map]}, System.monotonic_time(:millisecond) + 60_000}
-      )
+    :ok = Security.put_oidc_jwks_fixture(provider, %{"keys" => [public_map]})
 
     {:ok, identity} = Arbor.Contracts.Security.Identity.generate(name: claims["name"])
 
@@ -596,15 +587,11 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         }
     }
 
-    assert :ok =
-             Security.register_oidc_identity(human_identity, id_token, %{
-               issuer: issuer,
-               client_id: client_id
-             })
+    assert :ok = Security.register_oidc_identity(human_identity, id_token, provider)
 
     on_exit(fn ->
-      if :ets.whereis(table) != :undefined, do: :ets.delete(table, issuer)
-      _ = Security.deregister_identity(human_id)
+      :ok = Security.delete_oidc_jwks_fixture(provider)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     human_identity
@@ -652,14 +639,14 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     resource = "arbor://chat/agent/" <> target
 
     assert {:ok, cap} =
-             Security.grant(
+             Security.grant_fixture(
                principal: caller,
                resource: resource,
                max_uses: 1,
                constraints: %{rate_limit: 1}
              )
 
-    on_exit(fn -> Security.revoke(cap.id) end)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     assert {:ok, token} = SessionToken.generate(caller)
 
     assert {:error, :unsupported_conversation_capability} =
@@ -718,7 +705,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                identity_verified: true
              )
 
-    assert :ok = Security.revoke(capability.id)
+    assert :ok = Security.revoke_fixture(capability.id)
 
     for result <- [
           Arbor.Agent.submit_conversation_command(caller, target, command, session_token: token),
@@ -753,7 +740,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     assert {:ok, %{events: [], head: 0}} =
              Arbor.Agent.conversation_events(caller, target, 0, session_token: token)
 
-    assert :ok = Security.revoke(capability.id)
+    assert :ok = Security.revoke_fixture(capability.id)
 
     assert {:error, :unauthorized} =
              Arbor.Agent.submit_conversation_command(caller, target, command,
@@ -854,7 +841,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                session_token: other_token
              )
 
-    assert :ok = Security.revoke(capability.id)
+    assert :ok = Security.revoke_fixture(capability.id)
 
     assert {:error, :unauthorized} =
              Arbor.Agent.conversation_command(caller, target, command.id, session_token: token)
@@ -1968,7 +1955,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         end)
 
       assert_receive :revoked_delivery_blocked, 1_000
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
       send(session_pid, :finish)
       assert {:error, :unauthorized} = Task.await(task)
       refute_receive {:revoked_delivery_signal, %{data: %{role: :assistant}}}, 200

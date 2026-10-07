@@ -45,6 +45,8 @@ defmodule Arbor.Trust do
     ApprovalGuard,
     Authority,
     CapabilityEnforcementMatrix,
+    CapabilityGrantOwner,
+    CapabilityGrantRequest,
     Config,
     ConfirmationTracker,
     Manager,
@@ -81,6 +83,101 @@ defmodule Arbor.Trust do
         :full ->
           Arbor.Trust.Supervisor.start_link(opts)
       end
+    end
+  end
+
+  if Mix.env() == :test do
+    @type runtime_fixture_error ::
+            {:application_start_failed, term()}
+            | :application_supervisor_unavailable
+            | {:child_start_failed, module(), term()}
+            | {:child_ownership_mismatch, module()}
+
+    @doc false
+    @spec restore_runtime_fixture() :: :ok | {:error, runtime_fixture_error()}
+    def restore_runtime_fixture do
+      with {:ok, _started} <- ensure_runtime_fixture_application(),
+           {:ok, application_supervisor} <- runtime_fixture_application_supervisor(),
+           {:ok, trust_supervisor} <-
+             ensure_runtime_fixture_child(
+               application_supervisor,
+               {Arbor.Trust.Supervisor, enabled: false},
+               Arbor.Trust.Supervisor
+             ),
+           {:ok, _store} <-
+             ensure_runtime_fixture_child(
+               trust_supervisor,
+               {Arbor.Trust.Store, []},
+               Arbor.Trust.Store
+             ),
+           {:ok, _manager} <-
+             ensure_runtime_fixture_child(
+               trust_supervisor,
+               {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false},
+               Arbor.Trust.Manager
+             ),
+           {:ok, _grant_owner} <-
+             ensure_runtime_fixture_child(
+               trust_supervisor,
+               {Arbor.Trust.CapabilityGrantOwner, []},
+               Arbor.Trust.CapabilityGrantOwner
+             ) do
+        :ok
+      end
+    end
+
+    defp ensure_runtime_fixture_application do
+      case Application.ensure_all_started(:arbor_trust) do
+        {:ok, started} -> {:ok, started}
+        {:error, reason} -> {:error, {:application_start_failed, reason}}
+      end
+    end
+
+    defp runtime_fixture_application_supervisor do
+      case Process.whereis(Arbor.Trust.ApplicationSupervisor) do
+        supervisor when is_pid(supervisor) -> {:ok, supervisor}
+        nil -> {:error, :application_supervisor_unavailable}
+      end
+    end
+
+    defp ensure_runtime_fixture_child(supervisor, child, child_id) do
+      spec = Supervisor.child_spec(child, id: child_id)
+
+      result =
+        case Supervisor.start_child(supervisor, spec) do
+          {:error, :already_present} -> Supervisor.restart_child(supervisor, child_id)
+          other -> other
+        end
+
+      case result do
+        {:ok, _pid} -> verify_runtime_fixture_child(supervisor, child_id)
+        {:ok, _pid, _info} -> verify_runtime_fixture_child(supervisor, child_id)
+        {:error, {:already_started, _pid}} -> verify_runtime_fixture_child(supervisor, child_id)
+        {:error, :running} -> verify_runtime_fixture_child(supervisor, child_id)
+        {:error, reason} -> {:error, {:child_start_failed, child_id, reason}}
+      end
+    catch
+      :exit, reason -> {:error, {:child_start_failed, child_id, reason}}
+    end
+
+    defp verify_runtime_fixture_child(supervisor, child_id) do
+      owned_pid =
+        Enum.find_value(Supervisor.which_children(supervisor), fn
+          {^child_id, pid, _type, _modules} when is_pid(pid) -> pid
+          _other -> nil
+        end)
+
+      case {owned_pid, Process.whereis(child_id)} do
+        {pid, pid} when is_pid(pid) ->
+          if Process.alive?(pid),
+            do: {:ok, pid},
+            else: {:error, {:child_ownership_mismatch, child_id}}
+
+        _other ->
+          {:error, {:child_ownership_mismatch, child_id}}
+      end
+    catch
+      :exit, _reason -> {:error, {:child_ownership_mismatch, child_id}}
     end
   end
 
@@ -326,6 +423,38 @@ defmodule Arbor.Trust do
   # Policy — Trust ↔ Capability Bridge
   # ===========================================================================
 
+  @doc "Build the canonical short-lived payload a session must sign for one JIT grant."
+  @spec build_capability_grant_request(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, binary()} | {:error, atom()}
+  def build_capability_grant_request(agent_id, resource_uri, session_id, opts \\ []) do
+    with {:ok, _request, payload} <-
+           CapabilityGrantRequest.build(agent_id, resource_uri, session_id, opts) do
+      {:ok, payload}
+    end
+  end
+
+  @doc "Return public provisioning status for the supervised JIT grant owner."
+  @spec capability_grant_owner_status() :: CapabilityGrantOwner.status()
+  def capability_grant_owner_status, do: CapabilityGrantOwner.status()
+
+  if Mix.env() == :test do
+    @doc false
+    @spec restart_capability_grant_owner_fixture() ::
+            CapabilityGrantOwner.status() | {:error, term()}
+    def restart_capability_grant_owner_fixture do
+      case Process.whereis(Arbor.Trust.Supervisor) do
+        supervisor when is_pid(supervisor) ->
+          with :ok <- Supervisor.terminate_child(supervisor, CapabilityGrantOwner),
+               {:ok, _pid} <- Supervisor.restart_child(supervisor, CapabilityGrantOwner) do
+            capability_grant_owner_status()
+          end
+
+        _ ->
+          {:error, :trust_supervisor_unavailable}
+      end
+    end
+  end
+
   @doc "Get the effective trust mode for an agent and resource URI."
   @spec effective_mode(String.t(), String.t(), keyword()) :: :block | :ask | :allow | :auto
   defdelegate effective_mode(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
@@ -478,6 +607,12 @@ defmodule Arbor.Trust do
   @spec record_approval_answer(:interaction | :consensus, String.t(), map()) ::
           {:ok, :recorded | :duplicate} | {:error, atom()}
   defdelegate record_approval_answer(source, request_id, expected),
+    to: Arbor.Trust.ConfirmationTracker
+
+  @doc false
+  @spec issue_approval_receipt(:interaction | :consensus, String.t(), map(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  defdelegate issue_approval_receipt(source, request_id, expected, arguments),
     to: Arbor.Trust.ConfirmationTracker
 
   @doc "Read advisory confirmation counters for an exact tracking prefix."

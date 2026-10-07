@@ -2,6 +2,7 @@ defmodule Arbor.Agent.ActionCycleServerTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.ActionCycleServer
+  alias Arbor.Contracts.Security.{Identity, SigningAuthority, SigningAuthorityBootstrap}
 
   @moduletag :fast
 
@@ -67,6 +68,79 @@ defmodule Arbor.Agent.ActionCycleServerTest do
   end
 
   describe "enqueue_percept/2" do
+    test "security regression: action cycle and bootstrap close ignore hostile state custody" do
+      {identity, bootstrap} = signing_bootstrap!(:action_cycle)
+      name = {:via, Registry, {Arbor.Agent.ActionCycleRegistry, identity.agent_id}}
+
+      llm_fn = fn _context ->
+        {:ok, %{"mental_actions" => [], "intent" => nil, "wait" => true}}
+      end
+
+      {:ok, pid} =
+        ActionCycleServer.start_link(
+          agent_id: identity.agent_id,
+          name: name,
+          signing_authority_bootstrap: bootstrap,
+          llm_fn: llm_fn
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      state = :sys.get_state(pid)
+      assert state.signing_authority == nil
+      assert state.signer == nil
+      assert state.signing_authority_bootstrap == nil
+
+      {:ok, forged_authority} =
+        SigningAuthority.new(
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: "agent_forged_action_cycle",
+          purpose: :action_cycle
+        )
+
+      {:ok, forged_bootstrap} =
+        SigningAuthorityBootstrap.new(
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: "agent_forged_action_cycle",
+          purpose: :action_cycle
+        )
+
+      forged = :ets.new(:forged_action_cycle_credentials, [:set, :private])
+
+      true =
+        :ets.insert(
+          forged,
+          {:action_cycle_credentials_v1,
+           %{
+             signing_authority: forged_authority,
+             signer: nil,
+             bootstrap: forged_bootstrap
+           }}
+        )
+
+      true = :ets.give_away(forged, pid, :forged_action_cycle_credentials)
+      assert eventually(fn -> :ets.info(forged, :owner) == pid end)
+
+      :sys.replace_state(pid, fn current ->
+        current
+        |> Map.put(:credential_custody, forged)
+        |> Map.put(:signing_authority, forged_authority)
+        |> Map.put(:signing_authority_bootstrap, forged_bootstrap)
+      end)
+
+      assert :ok = ActionCycleServer.enqueue_percept(pid, %{type: :security_regression})
+
+      assert eventually(fn ->
+               stats = ActionCycleServer.stats(pid)
+               stats.cycle_count == 1 and not stats.cycle_in_flight
+             end)
+
+      assert :ok = ActionCycleServer.close_bootstrap(pid)
+      assert {:error, :bootstrap_not_found} = Arbor.Security.claim_signing_authority(bootstrap)
+    end
+
     test "accepts percepts via pid", %{agent_id: agent_id} do
       name = {:via, Registry, {Arbor.Agent.ActionCycleRegistry, agent_id}}
 
@@ -213,6 +287,44 @@ defmodule Arbor.Agent.ActionCycleServerTest do
       # With empty queue, consecutive should be 0
       stats = ActionCycleServer.stats(pid)
       assert stats.consecutive_cycles == 0
+    end
+  end
+
+  defp signing_bootstrap!(purpose) do
+    {:ok, identity} =
+      Identity.generate(name: "action-cycle-custody-#{System.unique_integer([:positive])}")
+
+    :ok = Arbor.Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: purpose,
+        owner: self()
+      )
+
+    {:ok, bootstrap} = Arbor.Security.issue_signing_authority_bootstrap(proof)
+
+    on_exit(fn ->
+      _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    {identity, bootstrap}
+  end
+
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
     end
   end
 end

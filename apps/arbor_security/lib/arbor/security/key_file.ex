@@ -49,6 +49,7 @@ defmodule Arbor.Security.KeyFile do
   # "any non-empty id" — that would admit `system_authority` and other
   # non-principal locators into a private-key file.
   @known_principal_prefixes ["agent_", "human_"]
+  @max_key_file_bytes 4_096
 
   @doc """
   Parse `.arbor.key` file contents (as a binary).
@@ -65,7 +66,9 @@ defmodule Arbor.Security.KeyFile do
     - `{:invalid_agent_id, value}` — not in the `agent_` / `human_` allowlist
   """
   @spec parse(String.t()) :: {:ok, key_material()} | {:error, atom() | tuple()}
-  def parse(contents) when is_binary(contents) do
+  def parse(contents)
+      when is_binary(contents) and byte_size(contents) > 0 and
+             byte_size(contents) <= @max_key_file_bytes do
     fields =
       contents
       |> String.split("\n", trim: true)
@@ -83,6 +86,9 @@ defmodule Arbor.Security.KeyFile do
       {:ok, %{agent_id: agent_id, private_key: private_key}}
     end
   end
+
+  def parse(contents) when is_binary(contents), do: {:error, :invalid_key_file_size}
+  def parse(_contents), do: {:error, :invalid_key_file_contents}
 
   @doc """
   Serialize key material to `.arbor.key` file contents.
@@ -120,6 +126,27 @@ defmodule Arbor.Security.KeyFile do
       {:error, reason} when is_atom(reason) -> {:error, {:read_failed, reason}}
       {:error, _} = error -> error
     end
+  end
+
+  @doc false
+  @spec read_device(term()) :: {:ok, key_material()} | {:error, atom() | tuple()}
+  def read_device(io_device) do
+    with {:ok, info} <- :file.read_file_info(io_device, time: :posix),
+         stat = File.Stat.from_record(info),
+         :ok <- assert_private_mode(stat),
+         :ok <- admit_device_size(stat),
+         {:ok, 0} <- :file.position(io_device, :bof),
+         {:ok, contents} <- read_device_contents(io_device, stat.size) do
+      parse(contents)
+    else
+      {:error, reason} when is_atom(reason) -> {:error, {:read_failed, reason}}
+      {:error, _} = error -> error
+      _ -> {:error, {:read_failed, :einval}}
+    end
+  rescue
+    _ -> {:error, {:read_failed, :einval}}
+  catch
+    _, _ -> {:error, {:read_failed, :einval}}
   end
 
   @doc """
@@ -193,6 +220,19 @@ defmodule Arbor.Security.KeyFile do
 
   defp assert_private_mode(%File.Stat{type: type}), do: {:error, {:not_a_regular_file, type}}
   defp assert_private_mode(_), do: {:error, {:read_failed, :einval}}
+
+  defp admit_device_size(%File.Stat{size: size})
+       when is_integer(size) and size > 0 and size <= @max_key_file_bytes,
+       do: :ok
+
+  defp admit_device_size(_), do: {:error, :invalid_key_file_size}
+
+  defp read_device_contents(io_device, size) do
+    case :file.read(io_device, size + 1) do
+      {:ok, contents} when byte_size(contents) == size -> {:ok, contents}
+      _ -> {:error, :key_file_changed}
+    end
+  end
 
   defp mkdir_parent(path) do
     case File.mkdir_p(Path.dirname(path)) do

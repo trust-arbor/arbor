@@ -51,11 +51,16 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   use GenServer
 
+  alias Arbor.Contracts.Security.{SigningAuthority, SigningAuthorityBootstrap}
   alias Arbor.Orchestrator.Authorization
   alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.PipelineStatus
 
   require Logger
+
+  @credential_anchor {__MODULE__, :credentials}
+  @credential_schema :heartbeat_credentials_v1
 
   # 60 s: an ACP-backed beat (a Claude Code call) took ~14 s on a 10 s timer
   # and API beats routinely exceed 30 s, so shorter defaults ran back-to-back.
@@ -108,65 +113,85 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
     legacy_signer = Keyword.get(opts, :signer)
+    signing_authority_bootstrap = Keyword.get(opts, :signing_authority_bootstrap)
 
-    with {:ok, signing_authority} <- claim_signing_authority(opts),
-         :ok <- reject_mixed_credentials(signing_authority, legacy_signer) do
-      init_with_authority(opts, agent_id, signing_authority, legacy_signer)
-    else
-      {:error, reason} -> {:stop, {:heartbeat_init_failed, reason}}
+    case claim_signing_authority(opts) do
+      {:ok, signing_authority} ->
+        with :ok <- reject_mixed_credentials(signing_authority, legacy_signer),
+             :ok <-
+               open_credentials(%{
+                 signing_authority: signing_authority,
+                 signer: if(signing_authority, do: nil, else: legacy_signer),
+                 bootstrap: signing_authority_bootstrap
+               }),
+             {:ok, state} <- init_with_authority(opts, agent_id) do
+          {:ok, state}
+        else
+          {:error, reason} ->
+            close_init_credentials(signing_authority, signing_authority_bootstrap)
+            {:stop, {:heartbeat_init_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:stop, {:heartbeat_init_failed, reason}}
     end
   end
 
-  defp init_with_authority(opts, agent_id, signing_authority, legacy_signer) do
+  defp init_with_authority(opts, agent_id) do
     heartbeat_config = Keyword.get(opts, :heartbeat_config, %{})
     interval = Map.get(heartbeat_config, :interval, @default_interval)
     graph_path = Map.get(heartbeat_config, :graph)
 
-    # Parse the heartbeat DOT graph
-    {graph, dot_path} = load_heartbeat_graph(graph_path, opts)
+    with {:ok, {graph, dot_path}} <- resolve_heartbeat_graph(opts, graph_path) do
+      state = %{
+        agent_id: agent_id,
+        signer: nil,
+        signing_authority: nil,
+        heartbeat_graph: graph,
+        heartbeat_dot_path: dot_path,
+        heartbeat_interval: interval,
+        heartbeat_ref: nil,
+        heartbeat_in_flight: false,
+        heartbeat_task_pid: nil,
+        heartbeat_task_ref: nil,
+        heartbeat_failures: 0,
+        heartbeat_no_identity_beats: 0,
+        # Ordinal of the beat being started; feeds `session.beat_count` so the
+        # graph's mode selection can rate-limit idle reflection.
+        heartbeat_beat_count: 0,
+        heartbeat_disabled: false,
+        heartbeat_disabled_reason: nil,
+        heartbeat_last_error: nil,
+        heartbeat_last_completed_at: nil,
+        heartbeat_last_result: nil,
+        # Session LLM/system-prompt config. HeartbeatService is a sibling of
+        # Session, not a reader of Session state; Lifecycle copies this at start.
+        session_config: Keyword.get(opts, :config, %{}) || %{},
+        tenant_context: Keyword.get(opts, :tenant_context),
+        engine_runner: Keyword.get(opts, :engine_runner, &Engine.run/2),
+        orchestrator_authorizer:
+          Keyword.get(
+            opts,
+            :orchestrator_authorizer,
+            &Authorization.check_orchestrator_access/2
+          ),
+        # (B) Injectable so tests can simulate an orphan; defaults to the real Identity.Registry check.
+        identity_checker: Keyword.get(opts, :identity_checker, &identity_registered?/1)
+      }
 
-    state = %{
-      agent_id: agent_id,
-      signer: if(signing_authority, do: nil, else: legacy_signer),
-      signing_authority: signing_authority,
-      heartbeat_graph: graph,
-      heartbeat_dot_path: dot_path,
-      heartbeat_interval: interval,
-      heartbeat_ref: nil,
-      heartbeat_in_flight: false,
-      heartbeat_task_pid: nil,
-      heartbeat_task_ref: nil,
-      heartbeat_failures: 0,
-      heartbeat_no_identity_beats: 0,
-      # Ordinal of the beat being started; feeds `session.beat_count` so the
-      # graph's mode selection can rate-limit idle reflection.
-      heartbeat_beat_count: 0,
-      heartbeat_disabled: false,
-      heartbeat_disabled_reason: nil,
-      heartbeat_last_error: nil,
-      heartbeat_last_completed_at: nil,
-      heartbeat_last_result: nil,
-      # Session LLM/system-prompt config. HeartbeatService is a sibling of
-      # Session, not a reader of Session state; Lifecycle copies this at start.
-      session_config: Keyword.get(opts, :config, %{}) || %{},
-      tenant_context: Keyword.get(opts, :tenant_context),
-      engine_runner: Keyword.get(opts, :engine_runner, &Engine.run/2),
-      orchestrator_authorizer:
-        Keyword.get(
-          opts,
-          :orchestrator_authorizer,
-          &Authorization.check_orchestrator_access/2
-        ),
-      # (B) Injectable so tests can simulate an orphan; defaults to the real Identity.Registry check.
-      identity_checker: Keyword.get(opts, :identity_checker, &identity_registered?/1)
-    }
+      # A5: fire the first beat soon (short jittered delay), not a full interval
+      # later — autonomous activity should begin right after boot, before any user
+      # message. Subsequent beats use the configured interval.
+      {:ok, schedule_heartbeat(state, first_beat_delay())}
+    end
+  end
 
-    # A5: fire the first beat soon (short jittered delay), not a full interval
-    # later — autonomous activity should begin right after boot, before any user
-    # message. Subsequent beats use the configured interval.
-    state = schedule_heartbeat(state, first_beat_delay())
-
-    {:ok, state}
+  defp resolve_heartbeat_graph(opts, graph_path) do
+    case Keyword.fetch(opts, :heartbeat_graph) do
+      {:ok, %Graph{compiled: true} = graph} -> {:ok, {graph, nil}}
+      {:ok, _invalid} -> {:error, :invalid_heartbeat_graph}
+      :error -> {:ok, load_heartbeat_graph(graph_path, opts)}
+    end
   end
 
   @authority_claim_attempts 3
@@ -201,7 +226,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   @impl true
   def handle_call(:get_state, _from, state) do
-    {:reply, state, state}
+    {:reply, %{state | signer: nil, signing_authority: nil}, state}
   end
 
   @impl true
@@ -363,10 +388,15 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   @impl true
   def terminate(_reason, state) do
-    task_pid = Map.get(state, :heartbeat_task_pid)
-    run_ids = owned_heartbeat_run_ids(task_pid)
-    stop_heartbeat_task(state)
-    abandon_heartbeat_runs(run_ids)
+    try do
+      task_pid = Map.get(state, :heartbeat_task_pid)
+      run_ids = owned_heartbeat_run_ids(task_pid)
+      stop_heartbeat_task(state)
+      abandon_heartbeat_runs(run_ids)
+    after
+      close_credentials()
+    end
+
     :ok
   end
 
@@ -417,7 +447,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp do_start_heartbeat_task(state, engine_opts) do
     service_pid = self()
     notice_worker_ref = make_ref()
-    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(state.signing_authority)
+    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(signing_authority())
     heartbeat_graph = state.heartbeat_graph
     engine_runner = state.engine_runner
 
@@ -628,6 +658,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # every heartbeat ran with no goals/prompt context — LlmHandler still answered,
   # HeartbeatService logged content=nil because it read the dead-letter `llm.content`.
   defp session_projection(state) do
+    credentials = credentials()
+
     config =
       (Map.get(state, :session_config) || %{})
       |> Map.put("stream", false)
@@ -635,8 +667,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     %{
       agent_id: state.agent_id,
       session_id: "heartbeat:#{state.agent_id}",
-      signer: state.signer,
-      signing_authority: state.signing_authority,
+      signer: Map.get(credentials, :signer),
+      signing_authority: Map.get(credentials, :signing_authority),
       adapters: %{},
       config: config,
       pid: nil,
@@ -715,9 +747,98 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp authorize_orchestrator(state) do
     state.orchestrator_authorizer.(
       state.agent_id,
-      state.signing_authority || state.signer
+      signing_credential()
     )
   end
+
+  defp open_credentials(credentials) do
+    Arbor.Common.open_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      credentials,
+      &valid_credentials?/1
+    )
+  end
+
+  defp credentials do
+    case Arbor.Common.fetch_process_private_state(
+           @credential_anchor,
+           @credential_schema,
+           &valid_credentials?/1
+         ) do
+      {:ok, credentials} ->
+        credentials
+
+      {:error, :invalid_private_state} ->
+        %{signing_authority: nil, signer: nil, bootstrap: nil}
+    end
+  end
+
+  defp signing_authority, do: Map.get(credentials(), :signing_authority)
+
+  defp signing_credential do
+    credentials = credentials()
+    Map.get(credentials, :signing_authority) || Map.get(credentials, :signer)
+  end
+
+  defp valid_credentials?(
+         %{
+           signing_authority: authority,
+           signer: signer,
+           bootstrap: bootstrap
+         } = credentials
+       ) do
+    map_size(credentials) == 3 and
+      (is_nil(authority) or match?(%SigningAuthority{}, authority)) and
+      (is_nil(signer) or is_function(signer, 1)) and
+      (is_nil(bootstrap) or match?(%SigningAuthorityBootstrap{}, bootstrap)) and
+      (is_nil(authority) or is_nil(signer))
+  end
+
+  defp valid_credentials?(_), do: false
+
+  defp close_credentials do
+    case Arbor.Common.fetch_process_private_state(
+           @credential_anchor,
+           @credential_schema,
+           &valid_credentials?/1
+         ) do
+      {:ok, credentials} ->
+        close_authority(Map.get(credentials, :signing_authority))
+        close_bootstrap(Map.get(credentials, :bootstrap))
+
+      _ ->
+        :ok
+    end
+
+    Arbor.Common.close_process_private_state(@credential_anchor)
+  end
+
+  defp close_init_credentials(authority, bootstrap) do
+    close_authority(authority)
+    close_bootstrap(bootstrap)
+    Arbor.Common.close_process_private_state(@credential_anchor)
+  end
+
+  defp close_authority(%SigningAuthority{} = authority) do
+    Arbor.Security.close_signing_authority(authority)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_authority(_authority), do: :ok
+
+  defp close_bootstrap(%SigningAuthorityBootstrap{} = bootstrap) do
+    Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_bootstrap(_bootstrap), do: :ok
 
   # ===========================================================================
   # Graph loading

@@ -24,7 +24,7 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
 
     {:ok, workdir} = SafePath.resolve_real(temporary)
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     resources = [
       @resource,
@@ -35,13 +35,13 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
 
     caps =
       for resource <- resources do
-        {:ok, cap} = Security.grant(principal: identity.agent_id, resource: resource)
+        {:ok, cap} = Security.grant_fixture(principal: identity.agent_id, resource: resource)
         cap
       end
 
     on_exit(fn ->
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(temporary)
     end)
 
@@ -94,7 +94,7 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
 
   test "security regression: source read capability is required even for missing files",
        fixture do
-    Security.revoke(Enum.at(fixture.caps, 1).id)
+    Security.revoke_fixture(Enum.at(fixture.caps, 1).id)
     assert {:error, _} = execute(fixture)
     refute File.exists?(report(fixture, "morning-digest"))
   end
@@ -103,7 +103,7 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
        fixture do
     output = report(fixture, "morning-digest")
     File.write!(output, "preserve")
-    Security.revoke(List.last(fixture.caps).id)
+    Security.revoke_fixture(List.last(fixture.caps).id)
     assert {:error, _} = execute(fixture)
     assert File.read!(output) == "preserve"
     assert File.ls!(Path.dirname(output)) == ["#{fixture.date}.md"]

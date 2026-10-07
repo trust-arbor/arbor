@@ -67,7 +67,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
       reflex_checking_enabled: false,
       uri_registry_enforcement: false,
       constraint_enforcement_enabled: true,
-      session_token_secret: "conversation-proof-#{System.unique_integer([:positive])}"
+      session_token_secret: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     ]
 
     before =
@@ -93,7 +93,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
 
     on_exit(fn ->
       oidc.cleanup.()
-      _ = Security.deregister_identity(caller)
+      _ = Security.deregister_identity_fixture(caller)
     end)
 
     %{
@@ -129,7 +129,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
   end
 
   test "security regression: non-chat finite-use delivery receipts retain ordinary behavior", c do
-    resource = "arbor://memory/read/" <> c.caller
+    resource = "arbor://test/non_chat_receipt/" <> c.caller
     cap = grant(%{c | resource: resource}, max_uses: 1)
 
     assert {:ok, receipt} =
@@ -210,11 +210,11 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
     assert {:ok, receipt} = issue(c)
     on_exit(fn -> Security.discard_delivery_receipt(receipt) end)
     assert {:ok, :authorized} = Security.recheck_conversation_access(c.caller, c.target)
-    assert :ok = Security.suspend_identity(c.caller)
+    assert :ok = Security.suspend_identity_fixture(c.caller)
     assert {:error, :unauthorized} = Security.recheck_conversation_access(c.caller, c.target)
-    assert :ok = Security.resume_identity(c.caller)
+    assert :ok = Security.resume_identity_fixture(c.caller)
     assert {:ok, :authorized} = Security.recheck_conversation_access(c.caller, c.target)
-    assert :ok = Security.revoke(capability.id)
+    assert :ok = Security.revoke_fixture(capability.id)
     assert {:error, :unauthorized} = Security.recheck_conversation_access(c.caller, c.target)
   end
 
@@ -228,7 +228,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
       capability = grant(c, constraints: Map.put(constraint, :rate_limit, 1))
       assert {:error, :unsupported_conversation_capability} = issue(c)
       assert {:error, :unauthorized} = Security.recheck_conversation_access(c.caller, c.target)
-      assert :ok = Security.revoke(capability.id)
+      assert :ok = Security.revoke_fixture(capability.id)
     end
 
     grant(c, constraints: %{rate_limit: 1})
@@ -246,7 +246,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
       capability = grant(c, constraints: constraints)
       assert {:error, :unauthorized} = issue(c)
       assert {:error, :unauthorized} = Security.recheck_conversation_access(c.caller, c.target)
-      assert :ok = Security.revoke(capability.id)
+      assert :ok = Security.revoke_fixture(capability.id)
     end
 
     grant(c,
@@ -512,7 +512,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
     assert {:error, :unauthorized} =
              Security.recheck_conversation_session(c.caller, c.target, c.caller, other.token)
 
-    {:ok, expired} = SessionToken.generate(c.caller, ttl: -1)
+    expired = expired_session_token!(c.caller)
 
     assert {:error, :unauthorized} =
              Security.recheck_conversation_session(c.caller, c.target, c.caller, expired)
@@ -544,7 +544,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
              Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
 
     assert {:error, :unauthorized} = issue(c)
-    assert :ok = Security.revoke(capability.id)
+    assert :ok = Security.revoke_fixture(capability.id)
 
     assert {:error, :unauthorized} =
              Security.recheck_conversation_session(c.caller, c.target, c.caller, c.token)
@@ -742,7 +742,7 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
 
     on_exit(fn ->
       oidc.cleanup.()
-      Security.deregister_identity(oidc.identity.agent_id)
+      Security.deregister_identity_fixture(oidc.identity.agent_id)
     end)
 
     %{caller: oidc.identity.agent_id, token: token, private_key: oidc.identity.private_key}
@@ -758,9 +758,30 @@ defmodule Arbor.Security.ConversationAuthorizationSecurityRegressionTest do
       )
 
   defp grant(c, opts \\ []) do
-    assert {:ok, cap} = Security.grant([principal: c.caller, resource: c.resource] ++ opts)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} =
+             Security.grant_fixture([principal: c.caller, resource: c.resource] ++ opts)
+
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
+  end
+
+  defp expired_session_token!(principal) do
+    {:ok, token} = SessionToken.generate(principal)
+
+    {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+      Base.url_decode64(token, padding: false)
+
+    now = System.os_time(:second)
+
+    expired_bytes =
+      bytes
+      |> :erlang.binary_to_term([:safe])
+      |> Map.merge(%{iat: now - 120, exp: now - 60})
+      |> :erlang.term_to_binary()
+
+    secret = Application.fetch_env!(:arbor_security, :session_token_secret)
+    signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+    Base.url_encode64(signature <> expired_bytes, padding: false)
   end
 
   defp ensure_child(child) do

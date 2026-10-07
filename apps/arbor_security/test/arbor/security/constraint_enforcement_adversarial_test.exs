@@ -54,7 +54,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
     test "cap with max_uses=3 authorizes exactly 3 times, denies the 4th",
          %{agent_id: agent} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/exec/ls",
           max_uses: 3
@@ -69,7 +69,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
 
     test "cap with max_uses=1 (one-shot token)", %{agent_id: agent} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/secret_oneshot",
           max_uses: 1
@@ -79,9 +79,39 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       assert {:error, _} = Security.authorize(agent, "arbor://fs/read/secret_oneshot")
     end
 
+    test "security regression: concurrent authorization consumes a one-shot cap once",
+         %{agent_id: agent} do
+      resource = "arbor://shell/exec/one_shot_#{System.unique_integer([:positive])}"
+      {:ok, _cap} = Security.grant_fixture(principal: agent, resource: resource, max_uses: 1)
+      caller = self()
+
+      tasks =
+        for _ <- 1..32 do
+          Task.async(fn ->
+            send(caller, {:ready, self()})
+
+            receive do
+              :authorize -> Security.authorize(agent, resource)
+            end
+          end)
+        end
+
+      pids =
+        for _ <- tasks do
+          assert_receive {:ready, pid}, 1_000
+          pid
+        end
+
+      Enum.each(pids, &send(&1, :authorize))
+      results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+      assert Enum.count(results, &(&1 == {:ok, :authorized})) == 1
+      assert Enum.count(results, &match?({:error, _}, &1)) == 31
+    end
+
     test "max_uses: nil means unlimited", %{agent_id: agent} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/exec/echo"
         )
@@ -101,10 +131,10 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       resource = "arbor://shell/exec/rate_test_#{:erlang.unique_integer([:positive])}"
 
       # Reset the bucket explicitly in case a prior test left state.
-      RateLimiter.reset(agent, resource)
+      RateLimiter.reset_fixture(agent, resource)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: resource,
           constraints: %{rate_limit: 3}
@@ -121,11 +151,14 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       r1 = "arbor://shell/exec/sep1_#{:erlang.unique_integer([:positive])}"
       r2 = "arbor://shell/exec/sep2_#{:erlang.unique_integer([:positive])}"
 
-      RateLimiter.reset(agent, r1)
-      RateLimiter.reset(agent, r2)
+      RateLimiter.reset_fixture(agent, r1)
+      RateLimiter.reset_fixture(agent, r2)
 
-      {:ok, _} = Security.grant(principal: agent, resource: r1, constraints: %{rate_limit: 1})
-      {:ok, _} = Security.grant(principal: agent, resource: r2, constraints: %{rate_limit: 1})
+      {:ok, _} =
+        Security.grant_fixture(principal: agent, resource: r1, constraints: %{rate_limit: 1})
+
+      {:ok, _} =
+        Security.grant_fixture(principal: agent, resource: r2, constraints: %{rate_limit: 1})
 
       assert {:ok, :authorized} = Security.authorize(agent, r1)
       assert {:error, _} = Security.authorize(agent, r1)
@@ -144,7 +177,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       # The cap's resource_uri matcher grants /shell/**; the constraint
       # narrows to specific subpaths.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/**",
           constraints: %{
@@ -164,7 +197,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
     test "allowed_paths uses path-boundary match (no prefix-fooling)",
          %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/**",
           constraints: %{allowed_paths: ["arbor://shell/exec/git"]}
@@ -190,7 +223,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       excluded_end = rem(current_hour + 3, 24)
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/business_hours_only",
           constraints: %{
@@ -209,7 +242,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       window_end = rem(current_hour + 1, 24)
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/in_window",
           constraints: %{
@@ -243,7 +276,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       # runs in ApprovalGuard/Escalation, not the constraint enforcer.
       # Pin this so a future flip-to-strict surfaces here.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/write/needs_review",
           constraints: %{requires_approval: true}
@@ -277,10 +310,10 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       # (atom), the lookup returned nil on string-keyed maps, and the
       # rate limit was silently disabled.
       resource = "arbor://shell/exec/str_key_#{:erlang.unique_integer([:positive])}"
-      RateLimiter.reset(agent, resource)
+      RateLimiter.reset_fixture(agent, resource)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: resource,
           constraints: %{"rate_limit" => 1}
@@ -294,10 +327,10 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
 
     test "ATOM-keyed constraints ARE enforced (sanity check)", %{agent_id: agent} do
       resource = "arbor://shell/exec/atom_key_#{:erlang.unique_integer([:positive])}"
-      RateLimiter.reset(agent, resource)
+      RateLimiter.reset_fixture(agent, resource)
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: resource,
           constraints: %{rate_limit: 1}
@@ -313,7 +346,7 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
       # forward compatibility." Pin that behavior so a future change to
       # strict-mode (which would be a defensible call) is visible here.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/unknown_constraint",
           constraints: %{

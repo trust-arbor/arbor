@@ -9,7 +9,6 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Trust.Profile
-  alias Arbor.Security.CapabilityStore
   alias Arbor.Trust.Store, as: TrustStore
 
   @moduletag :fast
@@ -109,7 +108,7 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
     # Registered before the grant so a failed setup cannot leak authority.
     # A start_supervised Trust.Store is already stopped when on_exit runs.
     on_exit(fn ->
-      CapabilityStore.revoke_all(agent_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
       if Process.whereis(TrustStore), do: TrustStore.delete_profile(agent_id)
     end)
 
@@ -130,10 +129,10 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
   test "security regression: Trust pending approval retains its request ID without admitting an effect",
        %{agent_id: agent_id} do
     {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
-    Enum.each(capabilities, &Arbor.Security.revoke(&1.id))
+    Enum.each(capabilities, &Arbor.Security.revoke_fixture(&1.id))
 
     assert {:ok, _} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: @resource,
                constraints: %{requires_approval: true}
@@ -259,6 +258,8 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
   defp authorize_agent(agent_id) do
     {:ok, profile} = Profile.new(agent_id)
     :ok = TrustStore.store_profile(%{profile | rules: %{@resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: @resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: @resource)
   end
 end

@@ -133,12 +133,12 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
              AI.acp_managed_session_inventory(caller_id: caller_id)
 
     {:ok, capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: caller_id,
         resource: "arbor://agent/task/read/task-inventory-scope"
       )
 
-    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
 
     assert {:error, {:unauthorized, :task_read_required}} =
              AI.acp_managed_session_inventory(caller_id: caller_id, max_items: 1)
@@ -168,12 +168,12 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
     end
 
     {:ok, capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: caller_id,
         resource: "arbor://agent/task/read/#{task_id}"
       )
 
-    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
 
     assert {:ok, inventory} =
              AI.acp_managed_session_inventory(caller_id: caller_id, task_id: task_id)

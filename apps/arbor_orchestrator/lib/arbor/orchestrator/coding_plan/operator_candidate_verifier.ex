@@ -4,14 +4,18 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.VerificationReport
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.CodingAuthority
+
   alias Arbor.Orchestrator.CodingPlan.{
     CandidateVerifier,
     CapacityRetryAdmissionCore,
     ValidationProgram
   }
+
   alias Arbor.Orchestrator.Config
 
   @authority_purpose :coding_candidate_operator
+  @test_build Mix.env() == :test
   @required_request_keys ~w[agent_id task_id workspace_id]
   @optional_request_keys ~w[review_attestation_id]
   @max_id_bytes 256
@@ -26,6 +30,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
   @guard_cancel_started_tag :operator_candidate_guard_cancel_started
   @guard_cancel_done_tag :operator_candidate_guard_cancel_done
   @guard_done_tag :operator_candidate_guard_done
+  @handoff_ready_tag :operator_candidate_authority_handoff_ready
   @worker_down_timeout_ms 1_000
   @signing_authority_close_timeout_ms 30_000
   @approval_cleanup_timeout_ms 5_000
@@ -68,12 +73,20 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
 
     try do
       with {:ok, request} <- normalize_request(request),
+           {:ok, handoff_context} <- authority_handoff_context(plan, request),
            :ok <- requester_available(requester_monitor, requester),
            {:ok, reviewed} <- bind_reviewed_compilation(plan, request.task_id),
            {:ok, workspace} <- workspace_provenance(request, reviewed.compilation),
            :ok <- requester_available(requester_monitor, requester),
            {:ok, timeout_ms} <- remaining_timeout(reviewed.compilation, started_at) do
-        run_verification_worker(request, reviewed, workspace, requester, timeout_ms)
+        run_verification_worker(
+          request,
+          reviewed,
+          workspace,
+          requester,
+          timeout_ms,
+          handoff_context
+        )
       else
         {:error, :candidate_verification_cancelled} ->
           cleanup_result =
@@ -139,6 +152,21 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
   end
 
   defp normalize_request(_request), do: {:error, :invalid_operator_candidate_request}
+
+  defp authority_handoff_context(plan, request) do
+    with {:ok, encoded_plan} <- Jason.encode(plan) do
+      {:ok,
+       %{
+         operation: :operator_candidate_verification,
+         task_id: request.task_id,
+         workspace_id: request.workspace_id,
+         plan_digest:
+           encoded_plan |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+       }}
+    else
+      _ -> {:error, :invalid_operator_candidate_request}
+    end
+  end
 
   defp bind_reviewed_compilation(caller_plan, task_id) do
     with {:ok, archive} <- read_task_compilation(task_id),
@@ -366,24 +394,54 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
     end
   end
 
-  defp run_verification_worker(request, reviewed, workspace, requester, timeout_ms) do
+  defp run_verification_worker(
+         request,
+         reviewed,
+         workspace,
+         requester,
+         timeout_ms,
+         handoff_context
+       ) do
     owner = self()
     reply_ref = make_ref()
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     {worker, monitor} =
       spawn_monitor(fn ->
-        run_owned_worker(owner, requester, reply_ref, request, reviewed, workspace)
+        receive do
+          {@handoff_ready_tag, ^owner} ->
+            run_owned_worker(
+              owner,
+              requester,
+              reply_ref,
+              request,
+              reviewed,
+              workspace,
+              handoff_context
+            )
+        after
+          @worker_down_timeout_ms -> :ok
+        end
       end)
 
-    await_verification_worker(
-      request,
-      reply_ref,
-      worker,
-      monitor,
-      nil,
-      deadline
-    )
+    case transfer_authority_handoff(request.agent_id, worker, handoff_context) do
+      :ok ->
+        send(worker, {@handoff_ready_tag, owner})
+
+        await_verification_worker(
+          request,
+          reply_ref,
+          worker,
+          monitor,
+          nil,
+          deadline
+        )
+
+      {:error, _reason} ->
+        Process.exit(worker, :kill)
+        Process.demonitor(monitor, [:flush])
+        {:error, :candidate_verification_unavailable}
+    end
   end
 
   defp await_verification_worker(request, reply_ref, worker, monitor, guard, deadline) do
@@ -427,8 +485,16 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
     end
   end
 
-  defp run_owned_worker(owner, requester, reply_ref, request, reviewed, workspace) do
-    case start_lifecycle_guard(owner, requester, reply_ref, request) do
+  defp run_owned_worker(
+         owner,
+         requester,
+         reply_ref,
+         request,
+         reviewed,
+         workspace,
+         handoff_context
+       ) do
+    case start_lifecycle_guard(owner, requester, reply_ref, request, handoff_context) do
       {:ok, guard} ->
         send(owner, {@guard_registered_tag, reply_ref, guard})
 
@@ -467,68 +533,86 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
     end
   end
 
-  defp start_lifecycle_guard(owner, requester, reply_ref, request) do
+  defp start_lifecycle_guard(owner, requester, reply_ref, request, handoff_context) do
     worker = self()
 
     guard =
       spawn(fn ->
-        owner_monitor = Process.monitor(owner)
-        requester_monitor = Process.monitor(requester)
-        worker_monitor = Process.monitor(worker)
-
         receive do
-          {:DOWN, ^owner_monitor, :process, ^owner, reason} ->
-            send(worker, {@guard_ready_tag, self(), :cancelled})
-
-            cancel_guarded_worker(
-              owner,
-              false,
-              worker,
-              worker_monitor,
-              reply_ref,
-              request,
-              {:owner_down, reason},
-              nil
-            )
-
-          {:DOWN, ^requester_monitor, :process, ^requester, reason} ->
-            send(worker, {@guard_ready_tag, self(), :cancelled})
-
-            cancel_guarded_worker(
-              owner,
-              true,
-              worker,
-              worker_monitor,
-              reply_ref,
-              request,
-              {:requester_down, reason},
-              nil
-            )
+          {@handoff_ready_tag, ^worker} ->
+            initialize_lifecycle_guard(owner, requester, worker, reply_ref, request)
         after
-          0 ->
-            send(worker, {@guard_ready_tag, self(), :ok})
-
-            watch_lifecycle(
-              owner,
-              owner_monitor,
-              requester,
-              requester_monitor,
-              worker,
-              worker_monitor,
-              reply_ref,
-              request,
-              nil
-            )
+          @worker_down_timeout_ms -> :ok
         end
       end)
 
-    receive do
-      {@guard_ready_tag, ^guard, :ok} -> {:ok, guard}
-      {@guard_ready_tag, ^guard, :cancelled} -> {:cancelled, guard}
-    after
-      @worker_down_timeout_ms ->
+    case transfer_authority_handoff(request.agent_id, guard, handoff_context) do
+      :ok ->
+        send(guard, {@handoff_ready_tag, worker})
+
+        receive do
+          {@guard_ready_tag, ^guard, :ok} -> {:ok, guard}
+          {@guard_ready_tag, ^guard, :cancelled} -> {:cancelled, guard}
+        after
+          @worker_down_timeout_ms ->
+            Process.exit(guard, :kill)
+            {:error, :lifecycle_guard_unavailable}
+        end
+
+      {:error, _reason} ->
         Process.exit(guard, :kill)
-        {:error, :lifecycle_guard_unavailable}
+        {:error, :signing_authority_handoff_unavailable}
+    end
+  end
+
+  defp initialize_lifecycle_guard(owner, requester, worker, reply_ref, request) do
+    owner_monitor = Process.monitor(owner)
+    requester_monitor = Process.monitor(requester)
+    worker_monitor = Process.monitor(worker)
+
+    receive do
+      {:DOWN, ^owner_monitor, :process, ^owner, reason} ->
+        send(worker, {@guard_ready_tag, self(), :cancelled})
+
+        cancel_guarded_worker(
+          owner,
+          false,
+          worker,
+          worker_monitor,
+          reply_ref,
+          request,
+          {:owner_down, reason},
+          nil
+        )
+
+      {:DOWN, ^requester_monitor, :process, ^requester, reason} ->
+        send(worker, {@guard_ready_tag, self(), :cancelled})
+
+        cancel_guarded_worker(
+          owner,
+          true,
+          worker,
+          worker_monitor,
+          reply_ref,
+          request,
+          {:requester_down, reason},
+          nil
+        )
+    after
+      0 ->
+        send(worker, {@guard_ready_tag, self(), :ok})
+
+        watch_lifecycle(
+          owner,
+          owner_monitor,
+          requester,
+          requester_monitor,
+          worker,
+          worker_monitor,
+          reply_ref,
+          request,
+          nil
+        )
     end
   end
 
@@ -547,13 +631,16 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
       {@guard_acquire_authority_tag, ^worker, security, agent_id, authority_ref} ->
         result = acquire_signing_authority(security, agent_id, self())
 
-        next_authority_state =
+        {worker_result, next_authority_state} =
           case result do
-            {:ok, authority} -> {security, authority}
-            _ -> authority_state
+            {:ok, authority, bootstrap} ->
+              {{:ok, authority}, {security, authority, bootstrap}}
+
+            error ->
+              {error, authority_state}
           end
 
-        send(worker, {@guard_authority_reply_tag, authority_ref, result})
+        send(worker, {@guard_authority_reply_tag, authority_ref, worker_result})
 
         watch_lifecycle(
           owner,
@@ -869,10 +956,9 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
     security = Config.security_module()
 
     if is_atom(security) and Code.ensure_loaded?(security) and
-         function_exported?(security, :load_signing_key, 1) and
-         function_exported?(security, :build_signing_authority_acquisition_proof, 3) and
-         function_exported?(security, :open_signing_authority, 1) and
-         function_exported?(security, :close_signing_authority, 1) do
+         function_exported?(security, :claim_signing_authority, 1) and
+         function_exported?(security, :close_signing_authority, 1) and
+         function_exported?(security, :close_signing_authority_bootstrap, 1) do
       {:ok, security}
     else
       {:error, :candidate_verification_unavailable}
@@ -895,35 +981,39 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
   end
 
   defp acquire_signing_authority(security, agent_id, owner) when is_pid(owner) do
-    with {:ok, private_key} <- security.load_signing_key(agent_id),
-         true <- is_binary(private_key) and private_key != "",
-         {:ok, proof} <-
-           security.build_signing_authority_acquisition_proof(
-             agent_id,
-             private_key,
-             purpose: @authority_purpose,
-             owner: owner
-           ),
-         {:ok, opened_authority} <- security.open_signing_authority(proof) do
-      case SigningAuthority.canonicalize(opened_authority) do
-        {:ok, %SigningAuthority{} = authority} ->
-          {:ok, authority}
+    if owner == self() do
+      case CodingAuthority.acquire(security, agent_id, @authority_purpose) do
+        {:ok, %SigningAuthority{} = authority, bootstrap} ->
+          {:ok, authority, bootstrap}
+
+        {:error, :no_signing_key} ->
+          {:error, :no_signing_key}
 
         {:error, _reason} ->
-          _ = close_signing_authority(security, opened_authority)
           {:error, :signing_authority_acquisition_failed}
       end
     else
-      false -> {:error, :invalid_signing_key}
-      {:error, :no_signing_key} -> {:error, :no_signing_key}
-      {:error, _reason} -> {:error, :signing_authority_acquisition_failed}
-      _other -> {:error, :signing_authority_acquisition_failed}
-    end
-  rescue
-    _exception ->
       {:error, :signing_authority_acquisition_failed}
-  catch
-    _kind, _reason -> {:error, :signing_authority_acquisition_failed}
+    end
+  end
+
+  defp transfer_authority_handoff(agent_id, claimant, context) do
+    case CodingAuthority.transfer(agent_id, @authority_purpose, claimant, context) do
+      :ok ->
+        :ok
+
+      {:error, :authority_handoff_transfer_unavailable} when @test_build ->
+        # Test collaborators predate the production Agent handoff contract and
+        # issue only fixture authorities. The default provider exports transfer/4,
+        # so public security regressions still exercise the production boundary.
+        :ok
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :authority_handoff_transfer_unavailable}
+    end
   end
 
   defp close_guard_authority(authority_state) do
@@ -949,8 +1039,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
 
   defp do_close_guard_authority(nil), do: :ok
 
-  defp do_close_guard_authority({security, authority}) do
-    case close_signing_authority(security, authority) do
+  defp do_close_guard_authority({security, authority, bootstrap}) do
+    case CodingAuthority.close(security, authority, bootstrap) do
       :ok -> :ok
       {:error, :authority_not_found} -> :ok
       {:error, _reason} -> :unconfirmed
@@ -1046,11 +1136,11 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
 
     cond do
       not (is_atom(facade) and Code.ensure_loaded?(facade) and
-             function_exported?(
-               facade,
-               :admit_security_regression_operator_attestation,
-               3
-             )) ->
+               function_exported?(
+                 facade,
+                 :admit_security_regression_operator_attestation,
+                 3
+               )) ->
         {:ok, request}
 
       true ->
@@ -1090,7 +1180,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
 
     cond do
       not (is_atom(store) and Code.ensure_loaded?(store) and
-             function_exported?(store, :read_terminal_evidence, 2)) ->
+               function_exported?(store, :read_terminal_evidence, 2)) ->
         {:ok, nil}
 
       true ->

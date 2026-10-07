@@ -77,15 +77,15 @@ defmodule Arbor.Agent.Eval.SecurityReview.Tools do
     do: %{error: "read_file requires a string 'path'"}
 
   defp read_file(scope_dir, path) do
-    case SafePath.safe_join(scope_dir, path) do
-      {:ok, abs} ->
-        case File.read(abs) do
-          {:ok, content} -> %{path: path, content: String.slice(content, 0, @max_file_bytes)}
-          {:error, reason} -> %{error: "cannot read #{path}: #{inspect(reason)}"}
-        end
+    case SafePath.read_within(path, scope_dir) do
+      {:ok, content, _abs} ->
+        %{path: path, content: String.slice(content, 0, @max_file_bytes)}
 
-      {:error, _} ->
+      {:error, reason} when reason in [:path_traversal, :traversal_sequence] ->
         %{error: "path #{inspect(path)} is outside the review scope (denied)"}
+
+      {:error, reason} ->
+        %{error: "cannot read #{path}: #{inspect(reason)}"}
     end
   end
 
@@ -100,8 +100,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Tools do
       |> Enum.flat_map(fn abs ->
         rel = Path.relative_to(abs, scope_dir)
 
-        case File.read(abs) do
-          {:ok, content} -> matches_in(content, pattern, rel)
+        case SafePath.read_within(rel, scope_dir) do
+          {:ok, content, _verified_path} -> matches_in(content, pattern, rel)
           _ -> []
         end
       end)

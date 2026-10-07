@@ -77,9 +77,12 @@ defmodule Arbor.Orchestrator.Event do
   # Stage lifecycle
   # ---------------------------------------------------------------------------
 
-  @doc "Build a stage_started event."
-  def stage_started(node_id) do
+  @doc "Build a stage_started event, including the executable handler identity when supplied."
+  def stage_started(node_id, opts \\ []) do
     %{type: :stage_started, node_id: node_id}
+    |> maybe_put(:handler_module, Keyword.get(opts, :handler_module))
+    |> maybe_put(:handler_sha256, Keyword.get(opts, :handler_sha256))
+    |> maybe_put(:handler_identity_error, Keyword.get(opts, :handler_identity_error))
   end
 
   @doc """

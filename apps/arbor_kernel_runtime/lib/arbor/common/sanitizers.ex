@@ -72,6 +72,34 @@ defmodule Arbor.Common.Sanitizers do
   end
 
   @doc """
+  Build Req options that enforce the SSRF policy at connection time.
+
+  DNS is resolved and checked once during preparation and again inside Req's
+  Finch adapter immediately before the socket is opened. The adapter connects
+  to the checked IP tuple while retaining the URL hostname for Host, TLS SNI,
+  and certificate verification. Automatic redirects and transport overrides
+  are refused so every destination passes through the same gate.
+  """
+  @spec ssrf_req_options(String.t(), keyword(), keyword()) ::
+          {:ok, keyword()} | {:error, term()}
+  def ssrf_req_options(url, request_opts \\ [], security_opts \\ []) do
+    Arbor.Common.Sanitizers.SSRF.req_options(url, request_opts, security_opts)
+  end
+
+  @doc "Build SSRF-safe Req options under an existing monotonic operation deadline."
+  @spec ssrf_req_options(String.t(), keyword(), keyword(), integer()) ::
+          {:ok, keyword()} | {:error, term()}
+  def ssrf_req_options(url, request_opts, security_opts, deadline) do
+    Arbor.Common.Sanitizers.SSRF.req_options(url, request_opts, security_opts, deadline)
+  end
+
+  @doc "Start the monotonic deadline shared by one SSRF-protected HTTP operation."
+  @spec ssrf_request_deadline(keyword()) :: {:ok, integer()} | {:error, term()}
+  def ssrf_request_deadline(request_opts \\ []) do
+    Arbor.Common.Sanitizers.SSRF.request_deadline(request_opts)
+  end
+
+  @doc """
   Check if a value still needs sanitization for a given type.
 
   Returns `true` if the sanitization bit is NOT set on the taint.

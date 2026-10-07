@@ -198,6 +198,32 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
     assert {:error, :artifact_missing} = Task.execute(["--root", root, "--check"])
   end
 
+  @tag :slow
+  @tag timeout: 300_000
+  test "standalone check starts the minimal Git runtime", %{root: root} do
+    umbrella_root = umbrella_root()
+    build_path = Mix.Project.build_path() <> "-standalone-dev"
+
+    {output, status} =
+      System.cmd(
+        Path.join(umbrella_root, "bin/mix"),
+        ["arbor.packaging.safe_recovery_artifact", "--root", root, "--check"],
+        cd: umbrella_root,
+        env: [
+          {"MIX_ENV", "dev"},
+          {"ARBOR_DB", "sqlite"},
+          {"MIX_DEPS_PATH", System.get_env("MIX_DEPS_PATH") || Path.join(umbrella_root, "deps")},
+          {"MIX_BUILD_PATH", build_path}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 1, output
+    assert output =~ "overlay_digest_mismatch"
+    refute output =~ "invalid_head"
+    refute output =~ "git_shell_unavailable"
+  end
+
   test "finish_report and exit_reason for every mode", %{root: root} do
     assert {:ok, report} = Task.execute(["--root", root])
     assert :ok = Task.exit_reason("report", report)
@@ -328,6 +354,12 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
     end
 
     root
+  end
+
+  defp umbrella_root do
+    __DIR__
+    |> Path.join("../../../../../")
+    |> Path.expand()
   end
 
   defp plant_artifact!(root, observed) do

@@ -16,7 +16,12 @@ defmodule Arbor.Agent.Eval.OpenCodeZenAdmissionTest do
   end
 
   test "tier 2 fails when the eval never reaches a proposal" do
-    evidence = OpenCodeZenAdmission.tier2_from_trial(%{proposal_submitted: false, heartbeats_to_proposal: nil})
+    evidence =
+      OpenCodeZenAdmission.tier2_from_trial(%{
+        proposal_submitted: false,
+        heartbeats_to_proposal: nil
+      })
+
     assert evidence.passed == false
     assert evidence.reason == "no proposal submitted"
   end

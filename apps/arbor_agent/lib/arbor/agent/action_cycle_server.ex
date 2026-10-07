@@ -37,13 +37,21 @@ defmodule Arbor.Agent.ActionCycleServer do
   use GenServer
 
   alias Arbor.Agent.MindPrompt
-  alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
+
+  alias Arbor.Contracts.Security.{
+    AuthContext,
+    SignedRequest,
+    SigningAuthority,
+    SigningAuthorityBootstrap
+  }
 
   require Logger
 
   @default_max_consecutive 10
   @default_cycle_timeout 60_000
   @default_queue_max 50
+  @credential_anchor {__MODULE__, :credentials}
+  @credential_schema :action_cycle_credentials_v1
 
   # ── Public API ──────────────────────────────────────────────────
 
@@ -119,26 +127,73 @@ defmodule Arbor.Agent.ActionCycleServer do
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
 
-    with {:ok, {signing_authority, legacy_signer, bootstrap}} <-
-           authenticate_cycle_credential(agent_id, opts) do
-      llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
+    case authenticate_cycle_credential(agent_id, opts) do
+      {:ok, {signing_authority, legacy_signer, bootstrap}} ->
+        case open_credentials(%{
+               signing_authority: signing_authority,
+               signer: legacy_signer,
+               bootstrap: bootstrap
+             }) do
+          :ok ->
+            llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
 
-      state = %{
-        agent_id: agent_id,
-        signing_authority: signing_authority,
-        signer: legacy_signer,
-        signing_authority_bootstrap: bootstrap,
-        queue: :queue.new(),
-        cycle_in_flight: false,
-        cycle_count: 0,
-        consecutive_cycles: 0,
-        config: build_config(opts),
-        llm_fn: llm_fn
-      }
+            state = %{
+              agent_id: agent_id,
+              signing_authority: nil,
+              signer: nil,
+              signing_authority_bootstrap: nil,
+              queue: :queue.new(),
+              cycle_in_flight: false,
+              cycle_count: 0,
+              consecutive_cycles: 0,
+              config: build_config(opts),
+              llm_fn: llm_fn
+            }
 
-      {:ok, state}
-    else
-      {:error, reason} -> {:stop, {:action_cycle_authentication_failed, reason}}
+            if Keyword.get(opts, :acquire_owner_signing_authority, false) and
+                 is_nil(signing_authority) and is_nil(legacy_signer) and is_nil(bootstrap) do
+              {:ok, state, {:continue, :acquire_owner_signing_authority}}
+            else
+              {:ok, state}
+            end
+
+          {:error, reason} ->
+            close_init_credentials(signing_authority, bootstrap)
+            {:stop, {:action_cycle_authentication_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:stop, {:action_cycle_authentication_failed, reason}}
+    end
+  end
+
+  @impl true
+  def handle_continue(:acquire_owner_signing_authority, state) do
+    case Arbor.Agent.ProfileAuthorityOwner.issue_supervised_action_cycle_bootstrap(state.agent_id) do
+      {:ok, bootstrap} ->
+        case claim_signing_authority(bootstrap) do
+          {:ok, authority} ->
+            case replace_credentials(%{
+                   signing_authority: authority,
+                   signer: nil,
+                   bootstrap: bootstrap
+                 }) do
+              :ok ->
+                {:noreply, state}
+
+              {:error, reason} ->
+                close_authority(authority)
+                close_bootstrap_credential(bootstrap)
+                {:stop, {:action_cycle_authentication_failed, reason}, state}
+            end
+
+          {:error, reason} ->
+            close_bootstrap_credential(bootstrap)
+            {:stop, {:action_cycle_authentication_failed, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:stop, {:action_cycle_authentication_failed, reason}, state}
     end
   end
 
@@ -231,19 +286,68 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   @impl true
   def terminate(reason, state) when reason in [:normal, :shutdown] do
-    _ = close_bootstrap_state(state)
+    try do
+      _ = close_bootstrap_state(state)
+    after
+      Arbor.Common.close_process_private_state(@credential_anchor)
+    end
+
     :ok
   end
 
   def terminate(_reason, _state), do: :ok
 
-  defp close_bootstrap_state(%{signing_authority_bootstrap: nil} = state), do: {:ok, state}
+  defp close_bootstrap_state(state) do
+    credentials = credentials()
 
-  defp close_bootstrap_state(%{signing_authority_bootstrap: bootstrap} = state) do
-    case Arbor.Security.close_signing_authority_bootstrap(bootstrap) do
-      :ok -> {:ok, %{state | signing_authority_bootstrap: nil}}
-      {:error, reason} -> {:error, reason}
+    case Map.get(credentials, :bootstrap) do
+      nil ->
+        {:ok, state}
+
+      bootstrap ->
+        close_authority(Map.get(credentials, :signing_authority))
+
+        case close_bootstrap_credential(bootstrap) do
+          :ok ->
+            case replace_credentials(%{
+                   credentials
+                   | signing_authority: nil,
+                     bootstrap: nil
+                 }) do
+              :ok -> {:ok, state}
+              {:error, reason} -> {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
+  end
+
+  defp close_authority(%SigningAuthority{} = authority) do
+    Arbor.Security.close_signing_authority(authority)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_authority(_authority), do: :ok
+
+  defp close_bootstrap_credential(%SigningAuthorityBootstrap{} = bootstrap) do
+    Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_bootstrap_credential(_bootstrap), do: :ok
+
+  defp close_init_credentials(authority, bootstrap) do
+    close_authority(authority)
+    close_bootstrap_credential(bootstrap)
+    Arbor.Common.close_process_private_state(@credential_anchor)
   end
 
   # ── Queue Management ────────────────────────────────────────────
@@ -295,7 +399,7 @@ defmodule Arbor.Agent.ActionCycleServer do
     agent_id = state.agent_id
     timeout = config_val(state, :cycle_timeout, @default_cycle_timeout)
     llm_fn = state.llm_fn
-    signing_credential = state.signing_authority || state.signer
+    signing_credential = signing_credential()
 
     emit_signal(agent_id, :action_cycle_started, %{
       agent_id: agent_id,
@@ -433,6 +537,56 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   defp maybe_put_dispatcher_workspace(opts, workspace),
     do: Keyword.put(opts, :workspace, workspace)
+
+  defp open_credentials(credentials) do
+    Arbor.Common.open_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      credentials,
+      &valid_credentials?/1
+    )
+  end
+
+  defp replace_credentials(credentials) do
+    Arbor.Common.replace_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      credentials,
+      &valid_credentials?/1
+    )
+  end
+
+  defp credentials do
+    case Arbor.Common.fetch_process_private_state(
+           @credential_anchor,
+           @credential_schema,
+           &valid_credentials?/1
+         ) do
+      {:ok, credentials} -> credentials
+      {:error, :invalid_private_state} -> %{signing_authority: nil, signer: nil, bootstrap: nil}
+    end
+  end
+
+  defp signing_credential do
+    credentials = credentials()
+    Map.get(credentials, :signing_authority) || Map.get(credentials, :signer)
+  end
+
+  defp valid_credentials?(
+         %{
+           signing_authority: authority,
+           signer: signer,
+           bootstrap: bootstrap
+         } = credentials
+       ) do
+    map_size(credentials) == 3 and
+      (is_nil(authority) or match?(%SigningAuthority{}, authority)) and
+      (is_nil(signer) or is_function(signer, 1)) and
+      (is_nil(bootstrap) or match?(%SigningAuthorityBootstrap{}, bootstrap)) and
+      (is_nil(authority) or is_nil(signer))
+  end
+
+  defp valid_credentials?(_), do: false
 
   defp authenticate_cycle_signer(_agent_id, nil), do: {:ok, nil}
 

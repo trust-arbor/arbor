@@ -85,6 +85,7 @@ defmodule Arbor.AI.CatalogSectionTest do
       # nonexistent (which is the very loop the catalog exists to remove).
       assert section =~ "catalog truncated"
       assert section =~ "discovery"
+
       # Header + instruction + capped body + the overflow note — still bounded well under the raw 6k.
       assert byte_size(section) < 4_400
     end

@@ -9,7 +9,7 @@ defmodule Arbor.Security.Identity.VerifierTest do
 
   setup do
     {:ok, identity} = Identity.generate()
-    :ok = Registry.register(identity)
+    :ok = Registry.register_fixture(identity)
 
     {:ok, identity: identity}
   end

@@ -5,7 +5,7 @@ defmodule Arbor.Actions.Browser.Navigate do
   Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
   the facade-issued envelope fails closed and does not call `jido_browser`.
   The authorized path is `Arbor.Actions.authorize_and_execute/4`, then
-  `Web.validate_url/1` and the existing Navigate implementation. This
+  `Web.validate_browser_url/1` and the existing Navigate implementation. This
   surface never falls back to `Arbor.Shell.authorize_and_execute/3`.
   """
 
@@ -27,8 +27,8 @@ defmodule Arbor.Actions.Browser.Navigate do
   @impl true
   def run(%{url: url} = params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->
-      with :ok <- Web.validate_url(url) do
-        Browser.with_session(context, fn session ->
+      Browser.with_session(context, fn session ->
+        with :ok <- Web.validate_browser_url(url) do
           Actions.emit_started(__MODULE__, %{url: url})
 
           case JidoBrowser.Actions.Navigate.run(Map.put(params, :session, session), %{}) do
@@ -40,8 +40,8 @@ defmodule Arbor.Actions.Browser.Navigate do
               Actions.emit_failed(__MODULE__, reason)
               {:error, Browser.format_error(reason)}
           end
-        end)
-      end
+        end
+      end)
     end)
   end
 end

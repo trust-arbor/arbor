@@ -137,15 +137,14 @@ defmodule Arbor.Trust.ApprovalGuardTest do
       resource = "arbor://code/read/file.ex"
       cap = make_capability(resource, %{requires_approval: true})
 
-      approval = %{
-        request_id: "irq_approved_once",
-        principal_id: "agent_test",
-        resource_uri: resource,
-        decision: :approved
-      }
+      {approval, digest} = consumed_approval("agent_test", resource, "irq_approved_once")
 
       assert :ok =
-               ApprovalGuard.check(cap, "agent_test", resource, approved_invocation: approval)
+               ApprovalGuard.check(cap, "agent_test", resource,
+                 approved_invocation: approval,
+                 argument_digest: digest,
+                 approval_action: :execute
+               )
 
       assert {:error, :escalation_disabled} =
                ApprovalGuard.check(cap, "agent_test", resource)
@@ -169,30 +168,28 @@ defmodule Arbor.Trust.ApprovalGuardTest do
 
       cap = make_capability("arbor://shell/exec/grep")
 
-      approval = %{
-        request_id: "irq_approved",
-        principal_id: "agent_test",
-        resource_uri: "arbor://shell/exec/grep",
-        decision: :approved
-      }
+      resource = "arbor://shell/exec/grep"
+      {approval, digest} = consumed_approval("agent_test", resource, "irq_approved")
+
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/git",
+                 approved_invocation: approval,
+                 argument_digest: digest,
+                 approval_action: :execute
+               )
+
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, "agent_other", resource,
+                 approved_invocation: approval,
+                 argument_digest: digest,
+                 approval_action: :execute
+               )
 
       assert :ok =
-               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
-                 approved_invocation: approval
-               )
-
-      wrong_resource = %{approval | resource_uri: "arbor://shell/exec/git"}
-
-      assert {:error, :escalation_disabled} =
-               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
-                 approved_invocation: wrong_resource
-               )
-
-      wrong_principal = %{approval | principal_id: "agent_other"}
-
-      assert {:error, :escalation_disabled} =
-               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
-                 approved_invocation: wrong_principal
+               ApprovalGuard.check(cap, "agent_test", resource,
+                 approved_invocation: approval,
+                 argument_digest: digest,
+                 approval_action: :execute
                )
     end
 
@@ -280,6 +277,30 @@ defmodule Arbor.Trust.ApprovalGuardTest do
       constraints: constraints,
       metadata: %{}
     }
+  end
+
+  defp consumed_approval(principal_id, resource_uri, request_id) do
+    {:ok, digest} = Arbor.Security.approval_argument_digest(%{})
+
+    {:ok, receipt} =
+      Arbor.Security.issue_approval_receipt_fixture(
+        principal_id,
+        resource_uri,
+        :execute,
+        digest,
+        request_id
+      )
+
+    :ok =
+      Arbor.Security.consume_approval_receipt_fixture(
+        receipt,
+        principal_id,
+        resource_uri,
+        :execute,
+        digest
+      )
+
+    {receipt, digest}
   end
 
   # Route escalations to CapturingRouter for the duration of one test.

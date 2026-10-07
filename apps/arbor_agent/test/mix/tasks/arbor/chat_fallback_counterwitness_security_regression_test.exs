@@ -2,7 +2,6 @@ defmodule Mix.Tasks.Arbor.ChatFallbackCounterwitnessSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   @moduletag :fast
-  @moduletag :tmp_dir
   @source Path.expand("../../../../lib/mix/tasks/arbor/agent.ex", __DIR__)
   @copy Mix.Tasks.Arbor.ChatFallbackCounterwitnessTask
 
@@ -69,12 +68,18 @@ defmodule Mix.Tasks.Arbor.ChatFallbackCounterwitnessSecurityRegressionTest do
     :ok
   end
 
-  setup %{tmp_dir: dir} do
+  setup do
+    dir = scratch_dir!("arbor-chat-counterwitness")
     Process.put(:cli_counterwitness_root, dir)
     previous = Mix.shell()
     Mix.shell(Mix.Shell.Process)
-    on_exit(fn -> Mix.shell(previous) end)
-    :ok
+
+    on_exit(fn ->
+      Mix.shell(previous)
+      File.rm_rf!(dir)
+    end)
+
+    {:ok, tmp_dir: dir}
   end
 
   test "security regression: missing key cannot attempt compatibility Manager.chat", %{
@@ -126,5 +131,14 @@ defmodule Mix.Tasks.Arbor.ChatFallbackCounterwitnessSecurityRegressionTest do
     after
       0 -> Enum.reverse(events)
     end
+  end
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    path
   end
 end

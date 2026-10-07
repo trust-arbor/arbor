@@ -12,7 +12,6 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
   use Arbor.Test.BehavioralCase
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
 
   describe "scenario: capability authorization flow" do
     test "authorize succeeds when agent has matching capability", %{agent_id: agent_id} do
@@ -49,7 +48,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
         metadata: %{test: true}
       }
 
-      CapabilityStore.put(cap)
+      Arbor.Security.put_capability_fixture(cap)
 
       result = Arbor.Security.authorize(agent_id, "arbor://test/expired")
       # Expired caps should not authorize
@@ -60,7 +59,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       agent_id = "agent_grant_test_#{:erlang.unique_integer([:positive])}"
 
       {:ok, cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://test/behavioral/grant",
           constraints: %{max_requests: 10}
@@ -76,7 +75,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       agent_id = "agent_revoke_test_#{:erlang.unique_integer([:positive])}"
 
       {:ok, cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://test/behavioral/revoke"
         )
@@ -84,7 +83,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       assert {:ok, :authorized} =
                Arbor.Security.authorize(agent_id, "arbor://test/behavioral/revoke")
 
-      :ok = Arbor.Security.revoke(cap.id)
+      :ok = Arbor.Security.revoke_fixture(cap.id)
 
       assert {:error, _} = Arbor.Security.authorize(agent_id, "arbor://test/behavioral/revoke")
     end
@@ -137,7 +136,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
         agent_id = "agent_reflex_test_#{:erlang.unique_integer([:positive])}"
 
         {:ok, _cap} =
-          Arbor.Security.grant(
+          Arbor.Security.grant_fixture(
             principal: agent_id,
             resource: "arbor://shell/execute"
           )

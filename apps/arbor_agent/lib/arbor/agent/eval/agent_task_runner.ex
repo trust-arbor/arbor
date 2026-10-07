@@ -73,7 +73,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   """
   @spec run(String.t(), opts()) :: {:ok, map()} | {:error, term()}
   def run(task_id, opts \\ []) do
-    with {:ok, task} <- AgentTask.fetch(task_id) do
+    with {:ok, task} <- AgentTask.fetch(task_id),
+         {:ok, _actor_authority} <- require_actor_authority(opts) do
       # Agents are stochastic — a single run is a noisy point estimate. Repeat N
       # times (fresh memory-clean agent each) and report the pass RATE. One EvalRun
       # with N EvalResults; pass_rate + per-sample verdicts in the run metrics.
@@ -109,8 +110,18 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       end
     else
       :error -> {:error, {:unknown_task, task_id}}
+      {:error, _reason} = error -> error
     end
   end
+
+  defp require_actor_authority(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and not is_nil(Keyword.get(opts, :actor_authority)),
+      do: {:ok, Keyword.fetch!(opts, :actor_authority)},
+      else: {:error, :capability_mutation_unauthorized}
+  end
+
+  defp require_actor_authority(_opts),
+    do: {:error, :capability_mutation_unauthorized}
 
   # One sample = one fresh agent against a freshly-seeded scenario. Self-contained
   # lifecycle (seed → create → grant → drive → grade → judge → teardown → rm) so N
@@ -146,7 +157,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     {:ok, agent_id} = create_agent(task, opts)
 
     try do
-      grant_acp_recon_caps(agent_id, cwd)
+      grant_acp_recon_caps(agent_id, cwd, opts[:actor_authority])
       allow_tools_in_trust_profile(agent_id, task)
 
       t0 = System.monotonic_time(:millisecond)
@@ -171,7 +182,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         opts
       )
     after
-      teardown(agent_id)
+      teardown(agent_id, opts[:actor_authority])
     end
   end
 
@@ -179,10 +190,24 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # (tool names can be whole shell commands, e.g. Claude's Bash), and file reads to fs caps.
   # Grant the acp/tool namespace + read-only fs on the repo. The CLI is sandboxed to its cwd and
   # this is read-only recon; the grant is an AUDITABLE capability, not a blanket permission bypass.
-  defp grant_acp_recon_caps(agent_id, repo_root) do
-    Arbor.Security.grant(principal: agent_id, resource: "arbor://acp/tool/**")
-    Arbor.Security.grant(principal: agent_id, resource: fs_uri("read", repo_root))
-    Arbor.Security.grant(principal: agent_id, resource: fs_uri("list", repo_root))
+  defp grant_acp_recon_caps(agent_id, repo_root, actor_authority) do
+    Arbor.Security.grant(
+      principal: agent_id,
+      resource: "arbor://acp/tool/**",
+      actor_authority: actor_authority
+    )
+
+    Arbor.Security.grant(
+      principal: agent_id,
+      resource: fs_uri("read", repo_root),
+      actor_authority: actor_authority
+    )
+
+    Arbor.Security.grant(
+      principal: agent_id,
+      resource: fs_uri("list", repo_root),
+      actor_authority: actor_authority
+    )
   end
 
   defp acp_provider(opts) do
@@ -228,7 +253,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       {:ok, agent_id} = create_agent(task, opts)
 
       try do
-        grant_caps(agent_id, task, scenario_dir)
+        grant_caps(agent_id, task, scenario_dir, opts[:actor_authority])
         allow_tools_in_trust_profile(agent_id, task)
         t0 = System.monotonic_time(:millisecond)
 
@@ -253,7 +278,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
           opts
         )
       after
-        teardown(agent_id)
+        teardown(agent_id, opts[:actor_authority])
       end
     after
       if scenario_dir, do: File.rm_rf(scenario_dir)
@@ -409,7 +434,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # Multimodal: attach the task's seed image to the turn's user message so a
       # vision model SEES it (flows SessionConfig → config["user_media"] → context
       # → LlmHandler content-part list). nil for text tasks.
-      user_media: build_user_media(task)
+      user_media: build_user_media(task),
+      actor_authority: opts[:actor_authority]
     ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do
@@ -421,25 +447,43 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   defp grant_caps(
          agent_id,
          %AgentTask{tools: tools, capabilities: caps, read_paths: read_paths},
-         scenario_dir
+         scenario_dir,
+         actor_authority
        ) do
     # Fixtured-tool caps (web_search_eval etc.) by exact canonical URI.
     for tool <- tools, uri = @cap_uris[tool], not is_nil(uri) do
-      Arbor.Security.grant(principal: agent_id, resource: uri)
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: uri,
+        actor_authority: actor_authority
+      )
     end
 
     # Capability-based grants for tasks driven by REAL tools. fs caps are
     # path-scoped to the seeded scenario dir (FileGuard checks the file_path
     # against this scope); net/comms are granted as-is.
     for cap <- caps, uri = capability_uri(cap, scenario_dir), not is_nil(uri) do
-      Arbor.Security.grant(principal: agent_id, resource: uri)
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: uri,
+        actor_authority: actor_authority
+      )
     end
 
     # Extra READ-ONLY paths for recon tasks (read the real codebase to ground a plan):
     # path-scoped fs_read + fs_list on the real tree, separate from the deletable scenario_dir.
     for path <- read_paths, dir = Path.expand(path), File.exists?(dir) do
-      Arbor.Security.grant(principal: agent_id, resource: fs_uri("read", dir))
-      Arbor.Security.grant(principal: agent_id, resource: fs_uri("list", dir))
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: fs_uri("read", dir),
+        actor_authority: actor_authority
+      )
+
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: fs_uri("list", dir),
+        actor_authority: actor_authority
+      )
     end
 
     :ok
@@ -747,9 +791,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   # ── teardown ──
 
-  defp teardown(agent_id) do
+  defp teardown(agent_id, actor_authority) do
     Arbor.Agent.Manager.stop_agent(agent_id)
-    Arbor.Agent.Lifecycle.destroy(agent_id)
+    Arbor.Agent.Lifecycle.destroy(agent_id, actor_authority: actor_authority)
     :ok
   rescue
     e -> Logger.warning("eval teardown failed for #{agent_id}: #{Exception.message(e)}")

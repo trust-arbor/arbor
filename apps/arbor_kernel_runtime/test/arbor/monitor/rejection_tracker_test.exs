@@ -612,14 +612,15 @@ defmodule Arbor.Monitor.RejectionTrackerTest do
 
       RejectionTracker.record_rejection(fp1, "p1", "old reason")
 
-      # Wait near the window boundary
-      Process.sleep(150)
+      # Let fp1 expire before adding fp2. Oversleeping under a loaded scheduler
+      # cannot make fp2 stale because cleanup is triggered immediately after it.
+      Process.sleep(225)
 
       # Add fp2 rejection - should be recent enough to survive
       RejectionTracker.record_rejection(fp2, "p2", "new reason")
 
-      # Wait for cleanup to run
-      Process.sleep(150)
+      send(RejectionTracker, :cleanup_old_rejections)
+      _state = :sys.get_state(RejectionTracker)
 
       # fp1 should be cleaned up, fp2 should survive
       assert RejectionTracker.rejection_count(fp1) == 0

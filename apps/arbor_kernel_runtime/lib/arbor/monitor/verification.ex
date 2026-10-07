@@ -70,9 +70,9 @@ defmodule Arbor.Monitor.Verification do
   the same fingerprint is already being verified.
   """
   @spec start_verification(Fingerprint.t(), String.t()) ::
-          {:ok, String.t()} | {:error, :already_verifying}
+          {:ok, String.t()} | {:error, :already_verifying | :not_running | :unauthorized}
   def start_verification(%Fingerprint{} = fingerprint, proposal_id) do
-    GenServer.call(__MODULE__, {:start_verification, fingerprint, proposal_id})
+    authenticated_verification_call({:start_verification, fingerprint, proposal_id})
   end
 
   @doc """
@@ -81,9 +81,10 @@ defmodule Arbor.Monitor.Verification do
   Call this after each polling cycle with the newly detected anomalies.
   Returns list of verifications that failed due to recurrence.
   """
-  @spec check_recurrences([map()]) :: [verification_result()]
+  @spec check_recurrences([map()]) ::
+          [verification_result()] | {:error, :not_running | :unauthorized}
   def check_recurrences(anomalies) when is_list(anomalies) do
-    GenServer.call(__MODULE__, {:check_recurrences, anomalies})
+    authenticated_verification_call({:check_recurrences, anomalies})
   end
 
   @doc """
@@ -92,9 +93,9 @@ defmodule Arbor.Monitor.Verification do
   Call this after each polling cycle. Returns list of verifications
   that completed successfully (countdown reached 0).
   """
-  @spec tick() :: [verification_result()]
+  @spec tick() :: [verification_result()] | {:error, :not_running | :unauthorized}
   def tick do
-    GenServer.call(__MODULE__, :tick)
+    authenticated_verification_call(:tick)
   end
 
   @doc """
@@ -123,9 +124,9 @@ defmodule Arbor.Monitor.Verification do
   @doc """
   Cancel verification for a fingerprint.
   """
-  @spec cancel_verification(Fingerprint.t()) :: :ok
+  @spec cancel_verification(Fingerprint.t()) :: :ok | {:error, :not_running | :unauthorized}
   def cancel_verification(%Fingerprint{} = fingerprint) do
-    GenServer.call(__MODULE__, {:cancel_verification, fingerprint})
+    authenticated_verification_call({:cancel_verification, fingerprint})
   end
 
   @doc """
@@ -146,9 +147,9 @@ defmodule Arbor.Monitor.Verification do
   @doc """
   Clear all verification data (for testing).
   """
-  @spec clear_all() :: :ok
+  @spec clear_all() :: :ok | {:error, :not_running | :unauthorized}
   def clear_all do
-    GenServer.call(__MODULE__, :clear_all)
+    authenticated_verification_call(:clear_all)
   end
 
   # ============================================================================
@@ -157,28 +158,45 @@ defmodule Arbor.Monitor.Verification do
 
   @impl GenServer
   def init(opts) do
+    Process.flag(:sensitive, true)
+
     # Create ETS table if it doesn't exist
     if :ets.whereis(@verifying_table) == :undefined do
-      :ets.new(@verifying_table, [:named_table, :set, :public, read_concurrency: true])
+      :ets.new(@verifying_table, [:named_table, :set, :protected, read_concurrency: true])
     end
 
     config = %{
       soak_cycles: Keyword.get(opts, :soak_cycles, @default_soak_cycles),
       check_interval_ms: Keyword.get(opts, :check_interval_ms, @default_check_interval_ms),
-      signal_callback: Keyword.get(opts, :signal_callback)
+      signal_callback: Keyword.get(opts, :signal_callback),
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      trusted_mutation_producer: configured_test_producer(opts)
     }
 
     {:ok, config}
   end
 
   @impl GenServer
-  def handle_call({:start_verification, fingerprint, proposal_id}, _from, config) do
+  def handle_call({:start_verification, _fingerprint, _proposal_id}, _from, config),
+    do: {:reply, {:error, :unauthorized}, config}
+
+  def handle_call({:check_recurrences, _anomalies}, _from, config),
+    do: {:reply, {:error, :unauthorized}, config}
+
+  def handle_call(:tick, _from, config), do: {:reply, {:error, :unauthorized}, config}
+
+  def handle_call({:cancel_verification, _fingerprint}, _from, config),
+    do: {:reply, {:error, :unauthorized}, config}
+
+  def handle_call(:clear_all, _from, config), do: {:reply, {:error, :unauthorized}, config}
+
+  defp start_verification_state(fingerprint, proposal_id, config) do
     fp_hash = Fingerprint.hash(fingerprint)
     now = System.monotonic_time(:millisecond)
 
     case :ets.lookup(@verifying_table, fp_hash) do
       [{^fp_hash, %{outcome: :verifying}}] ->
-        {:reply, {:error, :already_verifying}, config}
+        {{:error, :already_verifying}, config}
 
       _ ->
         record = %{
@@ -198,11 +216,11 @@ defmodule Arbor.Monitor.Verification do
         )
 
         verification_id = "ver_#{fp_hash}_#{now}"
-        {:reply, {:ok, verification_id}, config}
+        {{:ok, verification_id}, config}
     end
   end
 
-  def handle_call({:check_recurrences, anomalies}, _from, config) do
+  defp check_recurrences_state(anomalies, config) do
     # Build fingerprints for all incoming anomalies
     incoming_hashes =
       anomalies
@@ -219,10 +237,10 @@ defmodule Arbor.Monitor.Verification do
         mark_ineffective(record, config)
       end)
 
-    {:reply, failures, config}
+    {failures, config}
   end
 
-  def handle_call(:tick, _from, config) do
+  defp tick_state(config) do
     # Decrement countdown for all verifying records
     verified =
       list_verifying()
@@ -239,23 +257,61 @@ defmodule Arbor.Monitor.Verification do
       end)
       |> Enum.filter(&(&1 != nil))
 
-    {:reply, verified, config}
+    {verified, config}
   end
 
-  def handle_call({:cancel_verification, fingerprint}, _from, config) do
+  defp cancel_verification_state(fingerprint, config) do
     fp_hash = Fingerprint.hash(fingerprint)
     :ets.delete(@verifying_table, fp_hash)
-    {:reply, :ok, config}
+    {:ok, config}
   end
 
-  def handle_call(:clear_all, _from, config) do
+  defp clear_all_state(config) do
     :ets.delete_all_objects(@verifying_table)
-    {:reply, :ok, config}
+    {:ok, config}
+  end
+
+  @impl GenServer
+  def handle_info(message, config) do
+    case Arbor.Common.handle_authenticated_call(message, config.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        {reply, config} = dispatch_authenticated(request, caller, config)
+        :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+        {:noreply, config}
+
+      result when result in [:pending, :expired, :rejected, :unrecognized] ->
+        {:noreply, config}
+    end
   end
 
   # ============================================================================
   # Internal Functions
   # ============================================================================
+
+  defp dispatch_authenticated(request, caller, config) do
+    if authorized_mutation_producer?(request, caller, config) do
+      apply_authenticated_mutation(request, config)
+    else
+      {{:error, :unauthorized}, config}
+    end
+  end
+
+  defp apply_authenticated_mutation(
+         {:start_verification, fingerprint, proposal_id},
+         config
+       ),
+       do: start_verification_state(fingerprint, proposal_id, config)
+
+  defp apply_authenticated_mutation({:check_recurrences, anomalies}, config),
+    do: check_recurrences_state(anomalies, config)
+
+  defp apply_authenticated_mutation(:tick, config), do: tick_state(config)
+
+  defp apply_authenticated_mutation({:cancel_verification, fingerprint}, config),
+    do: cancel_verification_state(fingerprint, config)
+
+  defp apply_authenticated_mutation(:clear_all, config), do: clear_all_state(config)
+  defp apply_authenticated_mutation(_request, config), do: {{:error, :unauthorized}, config}
 
   defp fingerprint_from_anomaly(%{
          skill: skill,
@@ -316,6 +372,8 @@ defmodule Arbor.Monitor.Verification do
   end
 
   defp emit_signal(config, event, payload) do
+    forward_to_ops_room(event, payload)
+
     case config.signal_callback do
       nil ->
         :ok
@@ -330,6 +388,87 @@ defmodule Arbor.Monitor.Verification do
 
       _ ->
         :ok
+    end
+  end
+
+  defp forward_to_ops_room(event, payload) do
+    Arbor.Monitor.AnomalyForwarder.forward(%{type: event, data: payload})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  if Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false) do
+    defp authenticated_verification_call(request) do
+      case Process.whereis(__MODULE__) do
+        pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, request)
+        _other -> {:error, :not_running}
+      end
+    catch
+      :exit, _reason -> {:error, :not_running}
+    end
+
+    defp configured_test_producer(opts), do: Keyword.get(opts, :trusted_mutation_producer)
+
+    defp authorized_mutation_producer?(_request, caller, config),
+      do: caller == config.trusted_mutation_producer
+  else
+    @verification_path [
+      Arbor.Monitor.Application,
+      Arbor.Monitor.HealingSupervisor,
+      __MODULE__
+    ]
+    @queue_path [
+      Arbor.Monitor.Application,
+      Arbor.Monitor.HealingSupervisor,
+      Arbor.Monitor.AnomalyQueue
+    ]
+    @poller_path [Arbor.Monitor.Application, Arbor.Monitor.Poller]
+
+    defp authenticated_verification_call(request) do
+      case Arbor.Common.supervised_registered_child_pid(
+             :arbor_kernel_runtime,
+             @verification_path,
+             __MODULE__
+           ) do
+        {:ok, pid} -> Arbor.Common.authenticated_call(pid, request)
+        {:error, :not_supervised_owner} -> {:error, :not_running}
+      end
+    catch
+      :exit, _reason -> {:error, :not_running}
+    end
+
+    defp configured_test_producer(_opts), do: nil
+
+    defp authorized_mutation_producer?(
+           request,
+           caller,
+           _config
+         )
+         when request == :tick or
+                (is_tuple(request) and elem(request, 0) == :check_recurrences) do
+      exact_supervised_caller?(caller, @poller_path, Arbor.Monitor.Poller)
+    end
+
+    defp authorized_mutation_producer?(
+           request,
+           caller,
+           _config
+         )
+         when is_tuple(request) and
+                elem(request, 0) in [:start_verification, :cancel_verification] do
+      exact_supervised_caller?(caller, @queue_path, Arbor.Monitor.AnomalyQueue)
+    end
+
+    defp authorized_mutation_producer?(_request, _caller, _config), do: false
+
+    defp exact_supervised_caller?(caller, path, name) do
+      case Arbor.Common.supervised_registered_child_pid(:arbor_kernel_runtime, path, name) do
+        {:ok, ^caller} -> true
+        _other -> false
+      end
     end
   end
 end

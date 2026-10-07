@@ -65,6 +65,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
           | {:server_running?, (-> boolean())}
           | {:target_node, (-> node())}
           | {:caller_resolver, (map() -> {:ok, String.t()} | {:error, term()})}
+          | {:capability_grant_builder,
+             (String.t(), keyword() -> {:ok, term(), term()} | {:error, term()})}
           | {:plan, map()}
 
   @doc false
@@ -106,6 +108,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
       ctx = %{
         target: target,
         caller_id: caller_id,
+        key_file: cli.key_file,
         agent_id: cli.agent_id,
         plan: plan,
         runtime_opts: runtime_opts,
@@ -324,18 +327,45 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
   defp allowed_grantee?(_ctx, _target), do: {:error, :unnamed_principal}
 
   defp invoke_grant(ctx, principal, uri) do
-    case rpc(
-           ctx,
-           Arbor.Security,
-           :grant,
-           [[principal: principal, resource: uri]],
-           @grant_rpc_timeout_ms
-         ) do
-      {:ok, _capability} -> :ok
-      :ok -> :ok
+    builder =
+      Keyword.get(
+        ctx.runtime_opts,
+        :capability_grant_builder,
+        &prepare_key_file_capability_grant/2
+      )
+
+    with {:ok, capability, actor_proof} <-
+           safe_callback(builder, [ctx.key_file, [principal: principal, resource: uri]]) do
+      case rpc(
+             ctx,
+             Arbor.Security,
+             :submit_signed_capability_grant,
+             [capability, actor_proof],
+             @grant_rpc_timeout_ms
+           ) do
+        {:ok, _capability} -> :ok
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+        {:badrpc, reason} -> {:error, {:rpc_unavailable, reason}}
+        other -> {:error, other}
+      end
+    else
       {:error, reason} -> {:error, reason}
-      {:badrpc, reason} -> {:error, {:rpc_unavailable, reason}}
-      other -> {:error, other}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp prepare_key_file_capability_grant(path, opts) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          Arbor.Security.prepare_key_file_capability_grant(io_device, opts)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
     end
   end
 

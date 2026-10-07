@@ -24,9 +24,9 @@ defmodule Arbor.Security.FileGuard do
 
   ## Usage
 
-      # Check if agent can access a file
-      case FileGuard.authorize("agent_001", "/project/src/main.ex", :read) do
-        {:ok, resolved_path} -> File.read!(resolved_path)
+      # Authorize and atomically read through the Security facade
+      case Arbor.Security.read_authorized_file("agent_001", "/project/src/main.ex") do
+        {:ok, content, opened_path} -> use_file(content, opened_path)
         {:error, reason} -> handle_denial(reason)
       end
 
@@ -152,6 +152,54 @@ defmodule Arbor.Security.FileGuard do
       end
     end
   end
+
+  @type read_mode :: :exact | :within_root
+  @type read_plan :: %{
+          root_binding: SafePath.root_binding(),
+          mode: read_mode()
+        }
+
+  @doc false
+  @spec prepare_read_for_capability(String.t(), Capability.t()) ::
+          {:ok, read_plan()} | {:error, term()}
+  def prepare_read_for_capability(requested_path, %Capability{} = capability)
+      when is_binary(requested_path) do
+    with true <- selected_capability_allows_read?(capability, requested_path),
+         {:ok, root} <- extract_read_root_from_capability(capability),
+         {:ok, root_binding} <- SafePath.bind_root(root),
+         canonical_root <- SafePath.binding_root(root_binding),
+         {:ok, checked_path} <- SafePath.resolve_within(requested_path, canonical_root),
+         :ok <- check_selected_read_scope(checked_path, canonical_root, capability),
+         :ok <- check_read_constraints(checked_path, canonical_root, capability) do
+      {:ok,
+       %{
+         root_binding: root_binding,
+         mode: read_mode(capability.resource_uri)
+       }}
+    else
+      false -> {:error, :no_capability}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def prepare_read_for_capability(_requested_path, _capability),
+    do: {:error, :invalid_capability}
+
+  @doc false
+  @spec validate_opened_read_for_capability(String.t(), String.t(), Capability.t()) ::
+          :ok | {:error, term()}
+  def validate_opened_read_for_capability(opened_path, root, %Capability{} = capability)
+      when is_binary(opened_path) and is_binary(root) do
+    with :ok <- check_selected_read_scope(opened_path, root, capability),
+         :ok <- check_read_constraints(opened_path, root, capability) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def validate_opened_read_for_capability(_opened_path, _root, _capability),
+    do: {:error, :invalid_capability}
 
   @doc """
   Build a filesystem resource URI.
@@ -413,9 +461,12 @@ defmodule Arbor.Security.FileGuard do
 
   defp find_parent_capability(agent_id, operation, requested_path) do
     # Look for capabilities that cover parent directories
-    case CapabilityStore.list_for_principal(agent_id) do
+    case CapabilityStore.list_valid_for_principal(agent_id) do
       {:ok, caps} ->
-        # Filter to fs capabilities for the right operation that cover this path
+        # Only verified, currently valid capabilities may participate in the
+        # parent-directory fallback. The primary lookup applies the same trust
+        # gates; falling back must never turn a stored unsigned record into
+        # authority.
         matching =
           Enum.filter(caps, fn cap ->
             fs_capability?(cap) and path_covered_by_capability?(cap, operation, requested_path)
@@ -450,15 +501,98 @@ defmodule Arbor.Security.FileGuard do
     end
   end
 
+  defp extract_read_root_from_capability(%Capability{resource_uri: "arbor://fs/**"}),
+    do: {:ok, "/"}
+
+  defp extract_read_root_from_capability(%Capability{resource_uri: uri}) do
+    with {:ok, :read, path} <- parse_resource_uri(uri) do
+      if String.ends_with?(uri, ["/**", "/*"]) do
+        {:ok, strip_uri_wildcards(path)}
+      else
+        {:ok, Path.dirname(path)}
+      end
+    end
+  end
+
+  defp selected_capability_allows_read?(capability, requested_path) do
+    Capability.grants_access?(capability, resource_uri(:read, requested_path))
+  end
+
+  defp read_mode("arbor://fs/**"), do: :within_root
+
+  defp read_mode(uri) when is_binary(uri) do
+    if String.ends_with?(uri, ["/**", "/*"]), do: :within_root, else: :exact
+  end
+
+  defp check_selected_read_scope(path, root, %Capability{resource_uri: uri}) do
+    canonical_root = canonical_root(root)
+
+    cond do
+      uri == "arbor://fs/**" or String.ends_with?(uri, "/**") ->
+        :ok
+
+      String.ends_with?(uri, "/*") ->
+        if relative_depth(path, canonical_root) == 1,
+          do: :ok,
+          else: {:error, :no_capability}
+
+      true ->
+        with {:ok, :read, exact_path} <- parse_resource_uri(uri),
+             {:ok, canonical_exact_path} <- SafePath.resolve_within(exact_path, canonical_root),
+             true <- canonical_exact_path == path do
+          :ok
+        else
+          _ -> {:error, :no_capability}
+        end
+    end
+  end
+
+  defp relative_depth(path, root) do
+    path
+    |> Path.relative_to(root)
+    |> Path.split()
+    |> Enum.reject(&(&1 in ["", "."]))
+    |> length()
+  end
+
   # Cap URIs use `/**` and `/*` as wildcard markers on the path-pattern.
   # The literal markers must NOT appear in the path-root we hand to
   # SafePath — `/Users/x/.arbor/reports/**` isn't a real directory, so
   # SafePath would reject every requested path within it as traversal.
   # Strip the wildcards to recover the actual directory bound.
   defp strip_uri_wildcards(path) do
-    path
-    |> String.replace_suffix("/**", "")
-    |> String.replace_suffix("/*", "")
+    case path
+         |> String.replace_suffix("/**", "")
+         |> String.replace_suffix("/*", "") do
+      "" -> "/"
+      root -> root
+    end
+  end
+
+  defp canonical_root(root) do
+    case SafePath.resolve_real(root) do
+      {:ok, resolved} -> resolved
+      {:error, _reason} -> root
+    end
+  end
+
+  defp check_read_constraints(path, root, %Capability{} = capability) do
+    # The descriptor root for an exact grant is the file's parent so the leaf
+    # can be opened with openat/O_NOFOLLOW. Constraint depth, however, is
+    # measured from the capability's scope. An exact file is depth zero in its
+    # own scope, matching authorize_with_capability/3 semantics.
+    constraint_root =
+      if read_mode(capability.resource_uri) == :exact,
+        do: path,
+        else: canonical_root(root)
+
+    constraints = capability.constraints
+
+    with :ok <- check_pattern_constraints(path, constraints),
+         :ok <- check_exclude_constraints(path, constraints),
+         :ok <- check_depth_constraints(path, constraint_root, constraints) do
+      :ok
+    end
   end
 
   defp resolve_and_validate_path(requested_path, root) do
@@ -562,8 +696,12 @@ defmodule Arbor.Security.FileGuard do
 
     if max_depth && is_integer(max_depth) do
       # Calculate depth relative to root
-      relative = String.trim_leading(resolved_path, root)
-      depth = relative |> String.split("/") |> Enum.reject(&(&1 == "")) |> length()
+      depth =
+        resolved_path
+        |> Path.relative_to(root)
+        |> Path.split()
+        |> Enum.reject(&(&1 in ["", "."]))
+        |> length()
 
       if depth <= max_depth do
         :ok
@@ -604,9 +742,12 @@ defmodule Arbor.Security.FileGuard do
   defp path_covered_by_capability?(cap, operation, requested_path) do
     case parse_resource_uri(cap.resource_uri) do
       {:ok, ^operation, cap_path} ->
-        # Check if requested path is under the capability's path
-        String.starts_with?(requested_path, cap_path) or
-          String.starts_with?(requested_path, cap_path <> "/")
+        cap_root = strip_uri_wildcards(cap_path)
+
+        # Use the shared path boundary so `/workspace` never covers the
+        # sibling `/workspace_evil`, and terminal URI wildcards are treated as
+        # syntax rather than literal directory names.
+        match?({:ok, _resolved}, SafePath.resolve_within(requested_path, cap_root))
 
       _ ->
         false

@@ -97,7 +97,7 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "vp05a1-test-secret-#{System.unique_integer([:positive])}"
+      "vp05a1-test-secret-at-least-thirty-two-bytes-#{System.unique_integer([:positive])}"
     )
 
     on_exit(fn ->
@@ -126,20 +126,39 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
 
     on_exit(fn ->
       oidc.cleanup.()
-      _ = Security.deregister_identity(human_id)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     human_id
   end
 
   defp grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
 
     on_exit(fn ->
-      _ = Security.revoke(cap.id)
+      _ = Security.revoke_fixture(cap.id)
     end)
 
     cap
+  end
+
+  defp expired_token(principal) do
+    {:ok, token} = SessionToken.generate(principal)
+
+    {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+      Base.url_decode64(token, padding: false)
+
+    now = System.os_time(:second)
+
+    payload =
+      bytes
+      |> :erlang.binary_to_term([:safe])
+      |> Map.merge(%{iat: now - 120, exp: now - 60})
+
+    expired_bytes = :erlang.term_to_binary(payload)
+    secret = Application.fetch_env!(:arbor_security, :session_token_secret)
+    signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+    Base.url_encode64(signature <> expired_bytes, padding: false)
   end
 
   defp attach_auth_events!(parent) do
@@ -230,10 +249,10 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
       # Non-human principal with a token minted for that agent id
       {:ok, agent_identity} = Identity.generate(name: "vp05a1-agent")
       agent_id = agent_identity.agent_id
-      assert :ok = Security.register_identity(agent_identity)
+      assert :ok = Security.register_identity_fixture(agent_identity)
 
       on_exit(fn ->
-        _ = Security.deregister_identity(agent_id)
+        _ = Security.deregister_identity_fixture(agent_id)
       end)
 
       grant!(agent_id, resource)
@@ -242,7 +261,7 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
       assert {:error, :invalid_session_token} =
                Security.authorize(agent_id, resource, :chat, session_token: agent_token)
 
-      assert {:ok, expired} = SessionToken.generate(human_a, ttl: -1)
+      expired = expired_token(human_a)
 
       assert {:error, :invalid_session_token} =
                Security.authorize(human_a, resource, :chat, session_token: expired)
@@ -309,7 +328,7 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
       grant!(human_id, resource)
       assert {:ok, token} = SessionToken.generate(human_id)
 
-      assert :ok = Security.suspend_identity(human_id, reason: "vp05a1")
+      assert :ok = Security.suspend_identity_fixture(human_id, reason: "vp05a1")
 
       assert {:error, {:unauthorized, :identity_suspended}} =
                Security.authorize(human_id, resource, :chat,
@@ -324,7 +343,7 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
       grant!(human_id, resource)
       assert {:ok, token} = SessionToken.generate(human_id)
 
-      assert :ok = Security.revoke_identity(human_id, reason: "vp05a1")
+      assert :ok = Security.revoke_identity_fixture(human_id, reason: "vp05a1")
 
       assert {:error, {:unauthorized, :identity_revoked}} =
                Security.authorize(human_id, resource, :chat,
@@ -361,7 +380,7 @@ defmodule Arbor.Security.SessionTokenAuthorizationSecurityRegressionTest do
       resource = "arbor://test/vp05a1_status_first_#{System.unique_integer([:positive])}"
       grant!(human_id, resource)
       assert {:ok, token} = SessionToken.generate(human_id)
-      assert :ok = Security.suspend_identity(human_id, reason: "status-first")
+      assert :ok = Security.suspend_identity_fixture(human_id, reason: "status-first")
 
       dummy_sr = %{
         agent_id: human_id,

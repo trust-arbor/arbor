@@ -32,8 +32,8 @@ defmodule Arbor.Agent.Test.ConversationTransportWeb do
         |> send_resp(302, "")
 
       path when path == prefix <> "/revoke" ->
-        :ok = Arbor.Security.revoke(fixture.primary_cap.id)
-        :ok = Arbor.Security.revoke(fixture.secondary_cap.id)
+        :ok = Arbor.Security.revoke_fixture(fixture.primary_cap.id)
+        :ok = Arbor.Security.revoke_fixture(fixture.secondary_cap.id)
         send(fixture.owner, :transport_revoked)
         send_resp(conn, 200, "revoked")
 

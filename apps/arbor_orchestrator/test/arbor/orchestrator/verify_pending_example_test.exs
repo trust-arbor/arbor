@@ -61,7 +61,7 @@ defmodule Arbor.Orchestrator.VerifyPendingExampleTest do
     assert identity.agent_id == agent_id
     # Idempotent: a sibling integration test in the same BEAM may have already
     # registered this same agent identity.
-    case Arbor.Security.Identity.Registry.register(identity) do
+    case Arbor.Security.register_identity_fixture(identity) do
       :ok -> :ok
       {:error, {:already_registered, _}} -> :ok
     end
@@ -156,7 +156,7 @@ defmodule Arbor.Orchestrator.VerifyPendingExampleTest do
         metadata: %{test: true, source: "verify_pending_example_test"}
       )
 
-    Arbor.Security.CapabilityStore.put(cap)
+    Arbor.Security.put_capability_fixture(cap)
     :ok
   end
 end

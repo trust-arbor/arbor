@@ -11,6 +11,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Trust.Policy
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
   @unknown_egress_tiers [:cloud, :internet, :not_a_tier, "external_provider", nil]
@@ -446,6 +447,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     ensure_security_children()
     assert {:ok, _} = restart_trust!(:activation_only, true)
     start_memory_profile_stack!()
+    {_identity, actor_authority} = actor_authority!()
 
     agent_id = "agent_auto_tighten_#{System.unique_integer([:positive])}"
     resource = "arbor://ai/generate"
@@ -461,7 +463,12 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
         }
       end)
 
-    {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+    {:ok, _cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: resource,
+        actor_authority: actor_authority
+      )
 
     assert {:ok, tightened} =
              Policy.tighten_public_opts(agent_id,

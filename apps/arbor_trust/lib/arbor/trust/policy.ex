@@ -52,7 +52,8 @@ defmodule Arbor.Trust.Policy do
       #=> true
 
       # Grant the universal baseline capabilities
-      {:ok, count} = Policy.grant_base_capabilities("agent_123")
+      {:ok, count} =
+        Policy.grant_base_capabilities("agent_123", actor_authority: authority)
   """
 
   alias Arbor.Contracts.Security.Classification
@@ -335,13 +336,16 @@ defmodule Arbor.Trust.Policy do
   Grant the universal baseline capabilities to an agent.
   Self-scoped (`/self/`) URIs are resolved to the agent's id. Returns
   `{:ok, count}` or `{:error, reason}` if the security infrastructure is down.
+
+  Requires a caller-owned Security signing authority in `:actor_authority`.
   """
-  @spec grant_base_capabilities(String.t()) ::
+  @spec grant_base_capabilities(String.t(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def grant_base_capabilities(agent_id) do
+  def grant_base_capabilities(agent_id, opts \\ []) do
     templates = Config.base_capabilities()
 
-    with :ok <- ensure_security_available() do
+    with :ok <- ensure_security_available(),
+         {:ok, actor_authority} <- fetch_actor_authority(opts) do
       results =
         Enum.map(templates, fn template ->
           resource_uri = resolve_uri(template.resource_uri, agent_id)
@@ -350,7 +354,8 @@ defmodule Arbor.Trust.Policy do
             principal: agent_id,
             resource: resource_uri,
             constraints: template.constraints,
-            metadata: %{source: :trust_baseline}
+            metadata: %{source: :trust_baseline},
+            actor_authority: actor_authority
           )
         end)
 
@@ -376,23 +381,34 @@ defmodule Arbor.Trust.Policy do
   @doc """
   Revoke all capabilities for an agent.
 
-  Calls `CapabilityStore.revoke_all/1` directly since the Security facade
-  doesn't expose bulk revocation.
+  Uses the Security facade's authenticated bulk-revocation boundary.
 
   ## Examples
 
-      {:ok, 12} = Policy.revoke_agent_capabilities("agent_123")
+      {:ok, 12} =
+        Policy.revoke_agent_capabilities("agent_123", actor_authority: authority)
   """
-  @spec revoke_agent_capabilities(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def revoke_agent_capabilities(agent_id) do
-    with :ok <- ensure_security_available() do
-      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+  @spec revoke_agent_capabilities(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def revoke_agent_capabilities(agent_id, opts \\ []) do
+    with :ok <- ensure_security_available(),
+         {:ok, actor_authority} <- fetch_actor_authority(opts) do
+      Arbor.Security.revoke_all(agent_id, actor_authority: actor_authority)
     end
   rescue
     e ->
       Logger.error("[Policy] Failed to revoke capabilities for #{agent_id}: #{inspect(e)}")
       {:error, :revoke_failed}
   end
+
+  defp fetch_actor_authority(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :actor_authority) do
+      {:ok, authority} when not is_nil(authority) -> {:ok, authority}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp fetch_actor_authority(_opts), do: {:error, :capability_mutation_unauthorized}
 
   # ===========================================================================
   # Internals
@@ -528,7 +544,7 @@ defmodule Arbor.Trust.Policy do
   end
 
   defp ensure_security_available do
-    if Process.whereis(Arbor.Security.CapabilityStore) != nil do
+    if Arbor.Security.capability_authorization_available?() do
       :ok
     else
       {:error, :security_unavailable}

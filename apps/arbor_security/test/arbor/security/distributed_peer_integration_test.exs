@@ -46,7 +46,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     await_classification(peer_node, :foreign)
 
     {:ok, identity} = Identity.generate(name: "foreign-peer-not-a-replay-target")
-    :ok = Registry.register(Identity.public_only(identity))
+    :ok = Registry.register_fixture(Identity.public_only(identity))
 
     {:ok, signed} =
       SignedRequest.sign("foreign-peer", identity.agent_id, identity.private_key)
@@ -85,7 +85,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     assert peer_node in ReplayPeers.list()
 
     {:ok, identity} = Identity.generate(name: "wedged-peer-fails-closed")
-    :ok = Registry.register(Identity.public_only(identity))
+    :ok = Registry.register_fixture(Identity.public_only(identity))
 
     {:ok, signed} =
       SignedRequest.sign("wedged-peer", identity.agent_id, identity.private_key)

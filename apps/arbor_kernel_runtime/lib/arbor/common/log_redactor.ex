@@ -20,36 +20,46 @@ defmodule Arbor.Common.LogRedactor do
   # Logger filters must stay cheap. Global walk budget + depth ceiling.
   @max_depth 12
   @max_nodes 256
+  @max_format_chars 4_096
 
   # Plain map — never include :__struct__, so Inspect/protocol cannot dispatch.
   @redacted_marker %{redacted: true}
   @redacted_binary "[REDACTED]"
+  @sensitive_key_pattern ~r/(?:^|_)(?:api_key|apikey|authorization|bearer|client_secret|cookie|credentials?|private_key|secret(?:_key)?|signed_request|access_token|refresh_token|auth_token|token|password|passwd|pwd)(?:$|_)/i
 
   @doc false
   def filter(%{msg: msg} = log_event, _extra) do
     try do
-      case msg do
-        {:string, str} when is_binary(str) ->
-          %{log_event | msg: {:string, redact_binary(str)}}
+      redacted_event =
+        case msg do
+          {:string, str} when is_binary(str) ->
+            %{log_event | msg: {:string, redact_binary(str)}}
 
-        {:report, %{label: label, report: _} = report} when is_tuple(label) ->
-          redact_otp_report(log_event, report)
+          {:string, chardata} ->
+            %{log_event | msg: {:string, chardata |> IO.chardata_to_string() |> redact_binary()}}
 
-        {:report, report} ->
-          {redacted, _budget} = walk(report, @max_depth, @max_nodes)
-          %{log_event | msg: {:report, redacted}}
+          {:report, %{label: label, report: _} = report} when is_tuple(label) ->
+            redact_otp_report(log_event, report)
 
-        _ ->
-          log_event
-      end
+          {:report, report} ->
+            {redacted, _budget} = walk(report, @max_depth, @max_nodes)
+            %{log_event | msg: {:report, redacted}}
+
+          {format, args}
+          when is_list(args) and (is_binary(format) or is_list(format)) ->
+            redact_format_message(log_event, format, args)
+
+          _ ->
+            log_event
+        end
+
+      redact_metadata(redacted_event)
     rescue
       _ ->
-        # Preserve the outer Logger message shape: report stays report, string
-        # stays string. Unsupported forms are left unchanged.
-        fail_closed(log_event, msg)
+        log_event |> fail_closed(msg) |> fail_closed_metadata()
     catch
       _, _ ->
-        fail_closed(log_event, msg)
+        log_event |> fail_closed(msg) |> fail_closed_metadata()
     end
   end
 
@@ -62,32 +72,14 @@ defmodule Arbor.Common.LogRedactor do
   # OTP translator — which needs `label` and a keyword `report` — rendered it
   # as `[error] nil`. Every crash in Arbor logged as "nil" until 2026-08-25.
   #
-  # Walk the report as usual. If the OTP shape survived, keep it as a report so
-  # the translator formats it. If the budget ate the structure, downgrade to a
-  # bounded, redacted string instead of an empty line: `inspect/2` with limits
-  # caps the allocation, and the string goes through the same
-  # `SensitiveData.redact/1` as every `{:string, _}` message.
-  defp redact_otp_report(log_event, %{label: label, report: report} = full) do
-    {redacted, _budget} = walk(full, @max_depth, @max_nodes)
-
-    if otp_shape_preserved?(full, redacted) do
-      %{log_event | msg: {:report, redacted}}
-    else
-      %{log_event | msg: {:string, otp_report_string(label, report)}}
-    end
+  # Render OTP reports ourselves with bounded inspect limits. The Logger OTP
+  # translator depends on both an exact report shape and private metadata. A
+  # structurally valid redacted report can still render as bare `nil` after its
+  # metadata is bounded, hiding the failure that operators need. A pre-rendered
+  # string preserves the reason without exposing the unredacted state.
+  defp redact_otp_report(log_event, %{label: label, report: report}) do
+    %{log_event | msg: {:string, otp_report_string(label, report)}}
   end
-
-  defp otp_shape_preserved?(%{report: original}, %{label: label, report: redacted})
-       when is_tuple(label) and is_list(original) and is_list(redacted) do
-    keyword_keys(original) == keyword_keys(redacted)
-  end
-
-  defp otp_shape_preserved?(%{report: original}, %{label: label, report: redacted})
-       when is_tuple(label) and is_map(original) and is_map(redacted) do
-    not Map.has_key?(redacted, :redacted) and Map.keys(original) == Map.keys(redacted)
-  end
-
-  defp otp_shape_preserved?(_original, _redacted), do: false
 
   # Keys of a proper keyword list, or :improper when it is not one (an
   # exhaustion marker in the spine makes the translator raise).
@@ -132,11 +124,43 @@ defmodule Arbor.Common.LogRedactor do
   defp fail_closed(log_event, {:report, _}),
     do: %{log_event | msg: {:report, @redacted_marker}}
 
+  defp fail_closed(log_event, {format, args})
+       when is_list(args) and (is_binary(format) or is_list(format)),
+       do: %{log_event | msg: {:string, @redacted_binary}}
+
   defp fail_closed(log_event, _), do: log_event
+
+  defp redact_format_message(log_event, format, args) do
+    # Redacting a format string and its arguments independently can remove a
+    # directive while leaving its argument behind. OTP then emits a formatter
+    # error instead of the log message. Render once with a bounded io_lib
+    # budget, redact the complete result, and return a valid string message.
+    rendered =
+      format
+      |> :io_lib.format(args, chars_limit: @max_format_chars)
+      |> IO.chardata_to_string()
+      |> redact_binary()
+
+    %{log_event | msg: {:string, rendered}}
+  end
+
+  defp redact_metadata(%{meta: metadata} = log_event) do
+    {redacted, _budget} = walk(metadata, @max_depth, @max_nodes)
+    %{log_event | meta: redacted}
+  end
+
+  defp redact_metadata(log_event), do: log_event
+
+  defp fail_closed_metadata(%{meta: _metadata} = log_event),
+    do: %{log_event | meta: @redacted_marker}
+
+  defp fail_closed_metadata(log_event), do: log_event
 
   # SensitiveData.redact/1 uses Regex/String operations that can raise on
   # invalid UTF-8. Never let that kill the Logger primary filter.
-  defp redact_binary(str) when is_binary(str) do
+  @doc "Redact secrets and sensitive data from an already-rendered string."
+  @spec redact_binary(binary()) :: binary()
+  def redact_binary(str) when is_binary(str) do
     try do
       SensitiveData.redact(str)
     rescue
@@ -144,6 +168,29 @@ defmodule Arbor.Common.LogRedactor do
     catch
       _, _ -> @redacted_binary
     end
+  end
+
+  @doc "Redact a term recursively, including values stored under sensitive field names."
+  @spec redact_term(term()) :: term()
+  def redact_term(term) do
+    try do
+      {redacted, _budget} = walk(term, @max_depth, @max_nodes)
+      redacted
+    rescue
+      _ -> @redacted_marker
+    catch
+      _, _ -> @redacted_marker
+    end
+  end
+
+  @doc "Redact a value using its associated configuration or report key."
+  @spec redact_value(term(), term()) :: term()
+  def redact_value(key, value) do
+    if sensitive_key?(key), do: @redacted_binary, else: redact_term(value)
+  rescue
+    _ -> @redacted_binary
+  catch
+    _, _ -> @redacted_binary
   end
 
   # --- Globally bounded term walk -------------------------------------------
@@ -166,11 +213,16 @@ defmodule Arbor.Common.LogRedactor do
   end
 
   defp walk(tuple, depth, budget) when is_tuple(tuple) do
-    if depth <= 0 do
-      {@redacted_marker, budget - 1}
-    else
-      # Index only; never Tuple.to_list/1 (full attacker-controlled allocation).
-      walk_tuple(tuple, 0, tuple_size(tuple), depth - 1, budget - 1, [])
+    cond do
+      depth <= 0 ->
+        {@redacted_marker, budget - 1}
+
+      tuple_size(tuple) == 2 and sensitive_key?(elem(tuple, 0)) ->
+        redact_sensitive_pair(tuple, depth, budget)
+
+      true ->
+        # Index only; never Tuple.to_list/1 (full attacker-controlled allocation).
+        walk_tuple(tuple, 0, tuple_size(tuple), depth - 1, budget - 1, [])
     end
   end
 
@@ -311,7 +363,13 @@ defmodule Arbor.Common.LogRedactor do
       walk_map_iterator(:maps.next(rest_iterator), depth, budget, acc, skip_struct?)
     else
       {key_redacted, budget_after_key} = walk(key, depth, budget)
-      {value_redacted, budget_left} = walk(value, depth, budget_after_key)
+
+      {value_redacted, budget_left} =
+        if sensitive_key?(key) do
+          {@redacted_binary, max(budget_after_key - 1, 0)}
+        else
+          walk(value, depth, budget_after_key)
+        end
 
       walk_map_iterator(
         :maps.next(rest_iterator),
@@ -333,4 +391,29 @@ defmodule Arbor.Common.LogRedactor do
       :collision
     end
   end
+
+  defp redact_sensitive_pair(tuple, depth, budget) do
+    {key_redacted, budget_left} = walk(elem(tuple, 0), depth - 1, budget - 1)
+
+    if budget_left > 0 do
+      {{key_redacted, @redacted_binary}, budget_left - 1}
+    else
+      {@redacted_marker, 0}
+    end
+  end
+
+  defp sensitive_key?(key) when is_atom(key) do
+    key |> Atom.to_string() |> sensitive_key?()
+  end
+
+  defp sensitive_key?(key) when is_binary(key) do
+    normalized =
+      key
+      |> String.trim()
+      |> String.replace(~r/[^A-Za-z0-9]+/u, "_")
+
+    Regex.match?(@sensitive_key_pattern, normalized)
+  end
+
+  defp sensitive_key?(_key), do: false
 end

@@ -5,15 +5,22 @@ defmodule Arbor.Scheduler.Application do
 
   @impl true
   def start(_type, _args) do
-    runtime_children =
-      if Application.get_env(:arbor_scheduler, :start_children, true) do
-        [
-          Arbor.Scheduler.RunLeaseSupervisor,
-          Arbor.Scheduler.RunIdentityReaper,
+    scheduler_mutation_token = make_ref()
+    start_children? = Application.get_env(:arbor_scheduler, :start_children, true)
 
+    runtime_children =
+      if start_children? do
+        [
           # Identity must start BEFORE Oban so the scheduler has its stable
           # SigningAuthority before workers can dispatch pipelines.
-          Arbor.Scheduler.Identity,
+          {Arbor.Scheduler.Identity, scheduler_mutation_token: scheduler_mutation_token},
+          {Arbor.Scheduler.RunLeaseSupervisor,
+           scheduler_mutation_token: scheduler_mutation_token},
+
+          # Reaping is authority-decreasing but still authenticated. It runs
+          # after Identity so cleanup uses the scheduler's owner-bound
+          # authority rather than an ambient Security mutation API.
+          {Arbor.Scheduler.RunIdentityReaper, scheduler_mutation_token: scheduler_mutation_token},
 
           # Oban — scheduling substrate. Repo lives in arbor_persistence.
           # Cron jobs configured under :arbor_scheduler, Oban; see
@@ -29,12 +36,36 @@ defmodule Arbor.Scheduler.Application do
       {Arbor.Scheduler.RuntimeSupervisor, runtime_children}
     ]
 
-    Supervisor.start_link(children,
-      strategy: :rest_for_one,
-      max_restarts: 5,
-      max_seconds: 5,
-      name: Arbor.Scheduler.ApplicationSupervisor
-    )
+    case Supervisor.start_link(children,
+           strategy: :rest_for_one,
+           max_restarts: 5,
+           max_seconds: 5,
+           name: Arbor.Scheduler.ApplicationSupervisor
+         ) do
+      {:ok, supervisor} = started ->
+        if start_children? do
+          case Arbor.Scheduler.Identity.await_ready() do
+            :ok ->
+              case Arbor.Scheduler.RunIdentityReaper.await_ready() do
+                :ok ->
+                  started
+
+                {:error, reason} ->
+                  Supervisor.stop(supervisor, :shutdown)
+                  {:error, {:run_identity_reaper_start_failed, reason}}
+              end
+
+            {:error, reason} ->
+              Supervisor.stop(supervisor, :shutdown)
+              {:error, {:scheduler_identity_start_failed, reason}}
+          end
+        else
+          started
+        end
+
+      error ->
+        error
+    end
   end
 end
 

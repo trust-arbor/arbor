@@ -55,36 +55,40 @@ defmodule Arbor.Common.Sanitizers.XSS do
   @spec sanitize(term(), Taint.t(), keyword()) ::
           {:ok, String.t(), Taint.t()} | {:error, term()}
   def sanitize(value, %Taint{} = taint, _opts \\ []) when is_binary(value) do
-    # Decode-first: resolve all encoding layers before sanitizing
-    decoded = decode_value(value)
+    case decode_value(value) do
+      {:error, :invalid_encoding} ->
+        {:error, :invalid_encoding}
 
-    sanitized =
-      decoded
-      |> html_entity_encode()
-      |> strip_script_tags()
-      |> block_javascript_uris()
-      |> block_event_handlers()
-      |> block_css_expressions()
+      decoded ->
+        sanitized =
+          decoded
+          |> html_entity_encode()
+          |> strip_script_tags()
+          |> block_javascript_uris()
+          |> block_event_handlers()
+          |> block_css_expressions()
 
-    updated_taint = %{taint | sanitizations: bor(taint.sanitizations, @bit)}
-    {:ok, sanitized, updated_taint}
+        updated_taint = %{taint | sanitizations: bor(taint.sanitizations, @bit)}
+        {:ok, sanitized, updated_taint}
+    end
   end
 
   @impl true
   @spec detect(term()) :: {:safe, float()} | {:unsafe, [String.t()]}
   def detect(value) when is_binary(value) do
-    # Decode first, then check for patterns
-    decoded = decode_value(value)
-    raw_patterns = detect_in(decoded)
+    case decode_value(value) do
+      {:error, :invalid_encoding} ->
+        {:unsafe, ["invalid_encoding"]}
 
-    # Also flag encoded sequences in the raw value as suspicious
-    encoding_patterns = detect_encoding_evasion(value)
+      decoded ->
+        raw_patterns = detect_in(decoded)
+        encoding_patterns = detect_encoding_evasion(value)
+        all_patterns = Enum.uniq(raw_patterns ++ encoding_patterns)
 
-    all_patterns = Enum.uniq(raw_patterns ++ encoding_patterns)
-
-    case all_patterns do
-      [] -> {:safe, 1.0}
-      patterns -> {:unsafe, patterns}
+        case all_patterns do
+          [] -> {:safe, 1.0}
+          patterns -> {:unsafe, patterns}
+        end
     end
   end
 
@@ -96,11 +100,20 @@ defmodule Arbor.Common.Sanitizers.XSS do
   Catches multi-layer encoding: `%253Cscript%253E` → `%3Cscript%3E` → `<script>`.
   Also normalizes Unicode escapes like `\\u003C` → `<`.
   """
-  @spec decode_value(String.t()) :: String.t()
+  @spec decode_value(String.t()) :: String.t() | {:error, :invalid_encoding}
   def decode_value(value) do
-    value
-    |> normalize_unicode_escapes()
-    |> iterative_url_decode(@max_decode_rounds)
+    try do
+      decoded =
+        value
+        |> normalize_unicode_escapes()
+        |> iterative_url_decode(@max_decode_rounds)
+
+      if String.valid?(decoded), do: decoded, else: {:error, :invalid_encoding}
+    rescue
+      _error -> {:error, :invalid_encoding}
+    catch
+      _kind, _reason -> {:error, :invalid_encoding}
+    end
   end
 
   @doc """

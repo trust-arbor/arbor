@@ -830,6 +830,7 @@ defmodule Arbor.Common.OAuth.DeviceCode do
          {:ok, uri} <- URI.new(url),
          :ok <- endpoint_scheme(uri, allow_http),
          :ok <- validate_host(uri.host),
+         :ok <- endpoint_userinfo(uri),
          :ok <- endpoint_fragment(uri),
          :ok <- validate_port(uri) do
       :ok
@@ -852,6 +853,9 @@ defmodule Arbor.Common.OAuth.DeviceCode do
 
   defp endpoint_fragment(%URI{fragment: nil}), do: :ok
   defp endpoint_fragment(_uri), do: {:error, {:invalid_params, :invalid_endpoint}}
+
+  defp endpoint_userinfo(%URI{userinfo: nil}), do: :ok
+  defp endpoint_userinfo(_uri), do: {:error, {:invalid_params, :invalid_endpoint}}
 
   defp validate_port(%URI{port: nil}), do: :ok
   defp validate_port(%URI{port: port}) when is_integer(port) and port in 1..65_535, do: :ok

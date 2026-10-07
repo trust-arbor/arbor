@@ -84,8 +84,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
     caller_capability = grant_scoped_capability(caller_id, resource, task_id, session_id)
 
     on_exit(fn ->
-      Arbor.Security.revoke(execution_capability.id)
-      Arbor.Security.revoke(caller_capability.id)
+      Arbor.Security.revoke_fixture(execution_capability.id)
+      Arbor.Security.revoke_fixture(caller_capability.id)
     end)
 
     node =
@@ -145,7 +145,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
     assert allowed_result =~ "file_read"
     refute allowed_result =~ "lacks authority"
 
-    assert :ok = Arbor.Security.revoke(caller_capability.id)
+    assert :ok = Arbor.Security.revoke_fixture(caller_capability.id)
 
     assert %{status: :success} = LlmHandler.execute(node, context, graph, opts)
     assert_receive {:scoped_tool_result, denied_result}
@@ -165,7 +165,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
         metadata: %{test: true}
       )
 
-    {:ok, :stored} = CapabilityStore.put(capability)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(capability)
     capability
   end
 

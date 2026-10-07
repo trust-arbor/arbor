@@ -85,6 +85,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @pg_group {:arbor, :recovery_coordinators}
   @settlement_retry_interval_ms 5_000
   @crash_durable_classes [:application_restart, :node_restart]
+  @credential_anchor {__MODULE__, :in_flight_recovery}
+  @credential_schema :recovery_authorities_v1
+  @max_private_recoveries 1_024
   @supersedable_heartbeat_graph_ids ~w(
     Heartbeat
     HeartbeatBare
@@ -140,6 +143,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   @impl true
   def init(opts) do
+    Process.flag(:sensitive, true)
+
     enabled =
       Keyword.get(
         opts,
@@ -200,48 +205,58 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     # substitute defaults or re-resolve caller/resolver store targets later.
     checkpoint_store_opts = capture_checkpoint_store_opts()
 
-    state = %{
-      enabled: enabled,
-      automatic_recovery: automatic_recovery,
-      automatic_recovery_disabled_reason: automatic_recovery_disabled_reason,
-      durability: durability,
-      journal_opts: journal_opts,
-      checkpoint_store_opts: checkpoint_store_opts,
-      max_concurrent: max_concurrent,
-      delay_ms: delay_ms,
-      resume_options_resolver: resume_options_resolver,
-      recovery_root: recovery_root,
-      recovering: %{},
-      recovered: [],
-      failed: [],
-      pending: [],
-      # Settlement failures retained for retry — never silently leave :recovering.
-      settlement_failures: []
-    }
+    with :ok <-
+           Arbor.Common.open_process_private_state(
+             @credential_anchor,
+             @credential_schema,
+             %{},
+             &valid_recovery_custody?/1
+           ) do
+      state = %{
+        enabled: enabled,
+        automatic_recovery: automatic_recovery,
+        automatic_recovery_disabled_reason: automatic_recovery_disabled_reason,
+        durability: durability,
+        journal_opts: journal_opts,
+        checkpoint_store_opts: checkpoint_store_opts,
+        max_concurrent: max_concurrent,
+        delay_ms: delay_ms,
+        resume_options_resolver: resume_options_resolver,
+        recovery_root: recovery_root,
+        recovering: %{},
+        recovered: [],
+        failed: [],
+        pending: [],
+        # Settlement failures retained for retry — never silently leave :recovering.
+        settlement_failures: []
+      }
 
-    if enabled do
-      join_pg_group()
-      :net_kernel.monitor_nodes(true)
-      Process.send_after(self(), :retry_settlements, @settlement_retry_interval_ms)
+      if enabled do
+        join_pg_group()
+        :net_kernel.monitor_nodes(true)
+        Process.send_after(self(), :retry_settlements, @settlement_retry_interval_ms)
 
-      # Always schedule discovery/heartbeat while enabled so an initially
-      # unhealthy durable backend can re-evaluate automatic recovery later.
-      # Preserve the configured startup delay; later discovery ticks use the
-      # conservative fixed interval to avoid hot-looping failed candidates.
-      Process.send_after(self(), :discover_interrupted, delay_ms)
-      Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+        # Always schedule discovery/heartbeat while enabled so an initially
+        # unhealthy durable backend can re-evaluate automatic recovery later.
+        # Preserve the configured startup delay; later discovery ticks use the
+        # conservative fixed interval to avoid hot-looping failed candidates.
+        Process.send_after(self(), :discover_interrupted, delay_ms)
+        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
 
-      unless automatic_recovery do
-        Logger.warning(
-          "[RecoveryCoordinator] Automatic crash recovery disabled: " <>
-            inspect(automatic_recovery_disabled_reason) <>
-            " (manual resume while journal is alive remains available; " <>
-            "eligibility rechecked on discovery ticks)"
-        )
+        unless automatic_recovery do
+          Logger.warning(
+            "[RecoveryCoordinator] Automatic crash recovery disabled: " <>
+              inspect(automatic_recovery_disabled_reason) <>
+              " (manual resume while journal is alive remains available; " <>
+              "eligibility rechecked on discovery ticks)"
+          )
+        end
       end
-    end
 
-    {:ok, state}
+      {:ok, state}
+    else
+      {:error, reason} -> {:stop, {:recovery_private_state_unavailable, reason}}
+    end
   end
 
   @impl true
@@ -331,15 +346,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             key = candidate.record.run_id
 
             case attempt_recovery(candidate, state) do
-              {:ok, task_ref, claimed} ->
-                {Map.put(acc, task_ref, %{
-                   run_id: key,
-                   source: claimed.source,
-                   record: claimed.record,
-                   settled?: false,
-                   signing_authority: claimed[:signing_authority],
-                   security_module: claimed[:security_module]
-                 }), fails, settlements}
+              {:ok, _task_ref, _claimed} ->
+                {Map.put(acc, key, true), fails, settlements}
 
               {:skip, :task_store_owned} ->
                 Logger.debug(
@@ -395,13 +403,13 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   end
 
   def handle_info({ref, result}, state) when is_reference(ref) do
-    Process.demonitor(ref, [:flush])
-
-    case Map.pop(state.recovering, ref) do
-      {nil, _} ->
+    case take_recovery_meta(ref) do
+      {:error, :invalid_private_state} ->
         {:noreply, state}
 
-      {%{run_id: pipeline_id} = meta, recovering} ->
+      {:ok, %{run_id: pipeline_id} = meta} ->
+        Process.demonitor(ref, [:flush])
+        recovering = Map.delete(state.recovering, pipeline_id)
         close_result = close_meta_authority(meta)
         combined = CodingRunRecoveryCore.combine_close_result(close_result, result)
 
@@ -437,11 +445,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    case Map.pop(state.recovering, ref) do
-      {nil, _} ->
+    case take_recovery_meta(ref) do
+      {:error, :invalid_private_state} ->
         {:noreply, state}
 
-      {%{run_id: pipeline_id} = meta, recovering} ->
+      {:ok, %{run_id: pipeline_id} = meta} ->
+        recovering = Map.delete(state.recovering, pipeline_id)
         close_result = close_meta_authority(meta)
 
         crash_reason =
@@ -574,6 +583,29 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  @impl true
+  def terminate(_reason, _state) do
+    # Read and retire every live authority before deleting its exact custody.
+    case recovery_custody() do
+      {:ok, custody} ->
+        Enum.each(custody, fn {ref, meta} ->
+          if Process.alive?(meta.task_pid), do: Process.exit(meta.task_pid, :kill)
+          Process.demonitor(ref, [:flush])
+          _ = close_meta_authority(meta)
+        end)
+
+      {:error, :invalid_private_state} ->
+        :ok
+    end
+
+    Arbor.Common.close_process_private_state(@credential_anchor)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   defp automatic_recovery_active?(%{enabled: true, automatic_recovery: true}), do: true
   defp automatic_recovery_active?(_), do: false
 
@@ -626,12 +658,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         %{record: %Record{run_id: id}} -> id
         _ -> nil
       end)
-      |> MapSet.union(
-        MapSet.new(Map.values(state.recovering), fn
-          %{run_id: id} when is_binary(id) -> id
-          _ -> nil
-        end)
-      )
+      |> MapSet.union(MapSet.new(Map.keys(state.recovering)))
       |> MapSet.delete(nil)
 
     new_ones =
@@ -877,10 +904,20 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                     end
                   )
 
-                {:ok, task.ref,
-                 claimed
-                 |> Map.put(:signing_authority, Keyword.get(resume_opts, :signing_authority))
-                 |> Map.put(:security_module, Keyword.get(resume_opts, :security_module))}
+                case remember_recovery_meta(task, claimed, resume_opts) do
+                  :ok ->
+                    {:ok, task.ref, claimed}
+
+                  {:error, reason} ->
+                    _ = Task.shutdown(task, :brutal_kill)
+
+                    close_resume_error(
+                      resume_opts,
+                      {:recovery_private_state_unavailable, reason},
+                      claimed,
+                      jopts
+                    )
+                end
               else
                 {:error, reason} ->
                   close_resume_error(resume_opts, reason, claimed, jopts)
@@ -1901,6 +1938,78 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp non_retryable_recovery_error?({:store_unavailable, _}), do: false
   defp non_retryable_recovery_error?({:durable_checkpoint, _}), do: false
   defp non_retryable_recovery_error?(_), do: false
+
+  defp remember_recovery_meta(task, claimed, resume_opts) do
+    meta = %{
+      task_pid: task.pid,
+      run_id: claimed.record.run_id,
+      source: claimed.source,
+      record: claimed.record,
+      settled?: false,
+      signing_authority: Keyword.get(resume_opts, :signing_authority),
+      security_module: Keyword.get(resume_opts, :security_module)
+    }
+
+    with {:ok, custody} <- recovery_custody(),
+         false <- Map.has_key?(custody, task.ref),
+         :ok <- replace_recovery_custody(Map.put(custody, task.ref, meta)) do
+      :ok
+    else
+      _ -> {:error, :invalid_private_state}
+    end
+  end
+
+  defp take_recovery_meta(ref) when is_reference(ref) do
+    with {:ok, custody} <- recovery_custody(),
+         {:ok, meta} <- Map.fetch(custody, ref),
+         :ok <- replace_recovery_custody(Map.delete(custody, ref)) do
+      {:ok, meta}
+    else
+      _ -> {:error, :invalid_private_state}
+    end
+  end
+
+  defp recovery_custody do
+    Arbor.Common.fetch_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      &valid_recovery_custody?/1
+    )
+  end
+
+  defp replace_recovery_custody(custody) do
+    Arbor.Common.replace_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      custody,
+      &valid_recovery_custody?/1
+    )
+  end
+
+  defp valid_recovery_custody?(custody) when is_map(custody) do
+    map_size(custody) <= @max_private_recoveries and
+      Enum.all?(custody, fn
+        {ref,
+         %{
+           task_pid: task_pid,
+           run_id: run_id,
+           source: source,
+           record: %Record{},
+           settled?: settled?,
+           signing_authority: authority,
+           security_module: security
+         }} ->
+          is_reference(ref) and is_pid(task_pid) and is_binary(run_id) and run_id != "" and
+            source in [:current, :legacy] and settled? == false and
+            (is_nil(authority) or match?(%SigningAuthority{}, authority)) and
+            (is_nil(security) or (is_atom(security) and not is_nil(security)))
+
+        _ ->
+          false
+      end)
+  end
+
+  defp valid_recovery_custody?(_), do: false
 
   defp close_resume_authority(opts) when is_list(opts) do
     close_meta_authority(%{

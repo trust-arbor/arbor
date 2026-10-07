@@ -15,7 +15,8 @@ defmodule Arbor.Actions.Code do
   ## Safety Levels
 
   - **CompileAndTest**: Safe — runs in agent's own worktree, nothing touches the running VM
-  - **HotLoad**: Powerful — requires `arbor://code/hot_load/{module}` capability and high trust tier
+  - **HotLoad**: Powerful — requires the exact
+    `arbor://code/hot_load/{module}` capability and an allowing granular trust policy
 
   ## Examples
 
@@ -27,14 +28,16 @@ defmodule Arbor.Actions.Code do
         %{agent_id: "agent_caller", worktree_path: "/path/to/agent/worktree"}
       )
 
-      # Powerful: hot-load with rollback
-      {:ok, result} = Arbor.Actions.Code.HotLoad.run(
+      # Powerful: hot-load with rollback through the authorization facade
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_caller",
+        Arbor.Actions.Code.HotLoad,
         %{
           module: "MyModule",
           source: "defmodule MyModule do ... end",
           verify_fn: "MyModule.health_check/0"
         },
-        %{}
+        %{agent_id: "agent_caller"}
       )
 
   ## Authorization
@@ -45,7 +48,7 @@ defmodule Arbor.Actions.Code do
     the Mix TCB (`Arbor.Actions.Mix.run_with_required_workspace/5`) after
     this action's envelope, never `Mix.Compile.run` / `Mix.Test.run`, and
     never trusted-system `Shell.execute/2` or `execute_direct/3`.
-  - HotLoad: `arbor://code/hot_load/{module}` (requires Trusted tier or above)
+  - HotLoad: `arbor://code/hot_load/{module}` (requires an allowing trust policy)
   """
 
   defmodule CompileAndTest do
@@ -339,14 +342,15 @@ defmodule Arbor.Actions.Code do
     @moduledoc """
     Hot-load a module into the running VM with automatic rollback.
 
-    This is a powerful action that requires high trust and specific capabilities.
+    This is a powerful action that requires an allowing trust policy and a
+    module-specific capability.
     It saves the current module beam binary, compiles new source, runs a
     verification function, and rolls back if verification fails.
 
     ## Security
 
     - Requires `arbor://code/hot_load/{module}` capability
-    - Requires Trusted tier or above
+    - Requires an allowing granular trust policy
     - Cannot hot-load protected modules (security, persistence, kernel)
     - All attempts are logged to EventLog permanently
 
@@ -420,9 +424,6 @@ defmodule Arbor.Actions.Code do
 
     # Modules that cannot be hot-loaded under any circumstances
     @protected_modules [
-      Arbor.Security,
-      Arbor.Security.Kernel,
-      Arbor.Security.CapabilityStore,
       Arbor.Persistence,
       Arbor.Persistence.EventLog,
       Arbor.Contracts
@@ -438,7 +439,7 @@ defmodule Arbor.Actions.Code do
 
       with {:ok, module} <- parse_module(module_str),
            :ok <- check_not_protected(module),
-           :ok <- authorize_hot_load(context, module_str),
+           {:ok, _principal_id} <- Actions.authorized_principal(context, __MODULE__),
            :ok <- validate_source_safety(source),
            {:ok, original_binary} <- save_original(module),
            {:ok, compiled_module} <- compile_source(source) do
@@ -460,31 +461,19 @@ defmodule Arbor.Actions.Code do
       end
     end
 
-    defp authorize_hot_load(context, module_str) do
-      if context[:agent_id] do
-        agent_id = context[:agent_id]
+    @doc false
+    @spec authorization_resource(map()) :: {:ok, String.t()} | {:error, term()}
+    def authorization_resource(params) when is_map(params) do
+      module_str = Map.get(params, :module) || Map.get(params, "module")
 
-        if agent_id && trust_authorization_available?() do
-          uri = "arbor://code/hot_load/#{module_str}"
-
-          case Arbor.Trust.authorize(agent_id, uri, :execute, verify_identity: false) do
-            {:ok, :authorized} -> :ok
-            {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
-            {:error, reason} -> {:error, {:unauthorized, reason}}
-          end
-        else
-          :ok
-        end
-      else
-        :ok
+      with {:ok, module} <- parse_module(module_str),
+           :ok <- check_not_protected(module) do
+        normalized_module = module |> Module.split() |> Enum.join(".")
+        {:ok, "arbor://code/hot_load/#{normalized_module}"}
       end
     end
 
-    defp trust_authorization_available? do
-      Code.ensure_loaded?(Arbor.Trust) and
-        function_exported?(Arbor.Trust, :authorize, 3) and
-        Process.whereis(Arbor.Security.CapabilityStore) != nil
-    end
+    def authorization_resource(_params), do: {:error, :invalid_hot_load_params}
 
     defp parse_module(module_str) when is_binary(module_str) do
       module_str =
@@ -504,8 +493,10 @@ defmodule Arbor.Actions.Code do
       end
     end
 
+    defp parse_module(_module_str), do: {:error, :invalid_module}
+
     defp check_not_protected(module) do
-      if module in @protected_modules do
+      if module in @protected_modules or Arbor.Security.protected_runtime_module?(module) do
         {:error, {:protected_module, module}}
       else
         :ok
@@ -674,6 +665,9 @@ defmodule Arbor.Actions.Code do
     defp format_error({:protected_module, module}) do
       "Cannot hot-load protected module: #{inspect(module)}"
     end
+
+    defp format_error(:action_principal_authority_required),
+      do: Actions.unauthorized_message(:action_principal_authority_required)
 
     defp format_error({:compile_error, msg}), do: "Compilation error: #{msg}"
     defp format_error({:parse_error, msg}), do: "Compilation error: #{msg}"

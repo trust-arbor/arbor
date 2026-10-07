@@ -75,7 +75,8 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
       restore_env(:arbor_security, :invocation_receipts_enabled, original_receipts)
 
       # Clean up capabilities granted during tests
-      if Process.whereis(CapabilityStore), do: CapabilityStore.revoke_all(@caller_id)
+      if Security.capability_authorization_available?(),
+        do: Arbor.Security.revoke_all_fixture(@caller_id)
     end)
 
     :ok
@@ -91,7 +92,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   describe "authorize_propose/3" do
     test "succeeds when caller has arbor://consensus/propose capability" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/propose"
         )
@@ -116,7 +117,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
       # submits directly via Coordinator after the cap check instead.
       # This test MUST fail on the pre-fix code and pass after.
       {:ok, _cap} =
-        Security.grant(principal: @caller_id, resource: "arbor://consensus/propose")
+        Security.grant_fixture(principal: @caller_id, resource: "arbor://consensus/propose")
 
       attrs = %{
         proposer: @caller_id,
@@ -149,7 +150,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   describe "authorize_ask/3" do
     test "succeeds when caller has arbor://consensus/ask capability" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/ask"
         )
@@ -178,7 +179,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
 
     test "passes auth when caller has arbor://consensus/decide capability" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/decide"
         )
@@ -197,7 +198,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   describe "authorize_cancel/3" do
     test "succeeds when caller has arbor://consensus/cancel capability" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/cancel"
         )
@@ -251,14 +252,14 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
     test "passes facade auth when caller has arbor://consensus/force_approve capability" do
       # Facade-level auth requires arbor://consensus/force_approve on caller_id
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/force_approve"
         )
 
       # Coordinator-level auth requires arbor://consensus/admin on approver_id
       {:ok, _admin_cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/admin"
         )
@@ -287,7 +288,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
 
     test "propose capability does NOT authorize force_approve" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/propose"
         )
@@ -320,14 +321,14 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
     test "passes facade auth when caller has arbor://consensus/force_reject capability" do
       # Facade-level auth requires arbor://consensus/force_reject on caller_id
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/force_reject"
         )
 
       # Coordinator-level auth requires arbor://consensus/admin on rejector_id
       {:ok, _admin_cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/admin"
         )
@@ -355,7 +356,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
 
     test "force_approve capability does NOT authorize force_reject" do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @caller_id,
           resource: "arbor://consensus/force_approve"
         )

@@ -634,7 +634,7 @@ defmodule Mix.Tasks.Arbor.Agent do
     with {:ok, principal} <- Arbor.Security.key_file_principal(key_path),
          envelope = %{envelope | sender_id: principal},
          {:ok, payload} <- Arbor.Agent.message_request_payload(principal, agent_id, envelope),
-         {:ok, ^principal, signed} <- Arbor.Security.sign_key_file_request(key_path, payload) do
+         {:ok, ^principal, signed} <- sign_key_file_request(key_path, payload) do
       remote(Arbor.Agent, :send_message, [
         principal,
         agent_id,
@@ -647,6 +647,20 @@ defmodule Mix.Tasks.Arbor.Agent do
 
       _ ->
         {:error, "operator key changed while signing"}
+    end
+  end
+
+  defp sign_key_file_request(path, payload) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          Arbor.Security.sign_key_file_request(io_device, payload)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
     end
   end
 

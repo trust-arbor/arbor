@@ -13,7 +13,7 @@ defmodule Arbor.Contracts.API.Identity do
 
       # Generate and register an identity
       {:ok, identity} = Arbor.Security.generate_identity()
-      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.register_identity(identity, actor_authority)
 
       # Look up a public key
       {:ok, public_key} = Arbor.Security.lookup_public_key(agent_id)

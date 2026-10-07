@@ -29,10 +29,13 @@ defmodule Arbor.Shell.TestAgentContainment do
     :ok = File.mkdir(root)
     {:ok, cwd} = SafePath.resolve_real(root)
     {:ok, identity} = Arbor.Security.generate_identity(name: "synthetic shell mechanics")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
 
     {:ok, _} =
-      Arbor.Security.grant(principal: identity.agent_id, resource: "arbor://fs/read#{cwd}/**")
+      Arbor.Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://fs/read#{cwd}/**"
+      )
 
     previous = Application.get_env(:arbor_shell, :agent_authorizer)
     Application.put_env(:arbor_shell, :agent_authorizer, __MODULE__)
@@ -44,8 +47,8 @@ defmodule Arbor.Shell.TestAgentContainment do
         else: Application.put_env(:arbor_shell, :agent_authorizer, previous)
 
       {:ok, caps} = Arbor.Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Arbor.Security.revoke(cap.id)
-      Arbor.Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)
+      Arbor.Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(cwd)
     end)
 

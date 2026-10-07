@@ -75,8 +75,15 @@ defmodule Arbor.Common.RegistryBaseTest do
     end
 
     case GenServer.whereis(registry) do
-      nil -> :ok
-      pid -> GenServer.stop(pid)
+      nil ->
+        :ok
+
+      pid ->
+        # The registry table is protected and transfers to its heir. Clear it
+        # through the test-only owner API before that transfer; a test process
+        # can no longer delete the table directly.
+        :ok = registry.reset()
+        GenServer.stop(pid)
     end
 
     # Give heir a moment to receive ETS-TRANSFER, then delete the table
@@ -519,45 +526,36 @@ defmodule Arbor.Common.RegistryBaseTest do
     end
   end
 
-  describe "persistent_term fast path" do
-    test "resolve uses persistent_term after lock_core" do
+  describe "owner-backed core reads" do
+    @tag :security_regression
+    test "lock_core does not publish a caller-mutable persistent_term snapshot" do
       :ok = BasicRegistry.register("fast", GoodImpl)
       :ok = BasicRegistry.lock_core()
 
-      # persistent_term should be populated
       pt_key = {BasicRegistry, :core_snapshot}
-      snapshot = :persistent_term.get(pt_key, nil)
-      assert is_map(snapshot)
-      assert Map.has_key?(snapshot, "fast")
+      assert :persistent_term.get(pt_key, nil) == nil
 
-      # Resolve should still work (via fast path)
       assert {:ok, GoodImpl} = BasicRegistry.resolve("fast")
       assert {:ok, GoodImpl} = BasicRegistry.resolve_stable("fast")
     end
 
-    test "reset clears persistent_term" do
+    test "reset clears owner-backed entries" do
       :ok = BasicRegistry.register("temp", GoodImpl)
       :ok = BasicRegistry.lock_core()
 
-      pt_key = {BasicRegistry, :core_snapshot}
-      assert :persistent_term.get(pt_key, nil) != nil
-
-      BasicRegistry.reset()
-      assert :persistent_term.get(pt_key, nil) == nil
+      assert :ok = BasicRegistry.reset()
+      assert {:error, :not_found} = BasicRegistry.resolve("temp")
+      refute BasicRegistry.core_locked?()
     end
 
-    test "record_failure invalidates persistent_term" do
+    test "record_failure is reflected by owner-backed stable reads" do
       ensure_started(CircuitBreakerRegistry)
 
       :ok = CircuitBreakerRegistry.register("failing", GoodImpl)
       :ok = CircuitBreakerRegistry.lock_core()
 
-      pt_key = {CircuitBreakerRegistry, :core_snapshot}
-      assert :persistent_term.get(pt_key, nil) != nil
-
-      :ok = CircuitBreakerRegistry.record_failure("failing")
-      # Snapshot invalidated after failure
-      assert :persistent_term.get(pt_key, nil) == nil
+      for _ <- 1..3, do: :ok = CircuitBreakerRegistry.record_failure("failing")
+      assert {:error, :unstable} = CircuitBreakerRegistry.resolve_stable("failing")
 
       stop_registry(CircuitBreakerRegistry)
     end
@@ -933,16 +931,17 @@ defmodule Arbor.Common.RegistryBaseTest do
       assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", node: :any)
     end
 
-    test "node: :any returns :not_found when not found locally and no remote members" do
-      assert {:error, :not_found} = BasicRegistry.resolve("nonexistent", node: :any)
+    test "node: :any fails closed when local lookup misses" do
+      assert {:error, :unauthenticated_remote_resolution} =
+               BasicRegistry.resolve("nonexistent", node: :any)
     end
 
     test "node: self() resolves locally" do
       assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", node: node())
     end
 
-    test "node: unknown_node returns :node_not_found" do
-      assert {:error, :node_not_found} =
+    test "node: unknown_node fails closed before remote lookup" do
+      assert {:error, :unauthenticated_remote_resolution} =
                BasicRegistry.resolve("local_handler", node: :unknown@nowhere)
     end
 
@@ -963,22 +962,22 @@ defmodule Arbor.Common.RegistryBaseTest do
       :ok
     end
 
-    test "returns module and metadata for existing entry" do
+    test "fails closed for an existing entry" do
       result = GenServer.call(BasicRegistry, {:resolve_remote, "remote_test"})
-      assert {:ok, GoodImpl, %{cost: :low}} = result
+      assert {:error, :unauthenticated_remote_resolution} = result
     end
 
-    test "returns :not_found for missing entry" do
+    test "fails closed for a missing entry" do
       result = GenServer.call(BasicRegistry, {:resolve_remote, "missing"})
-      assert {:error, :not_found} = result
+      assert {:error, :unauthenticated_remote_resolution} = result
     end
 
-    test "returns :unstable for entry over failure threshold" do
+    test "does not disclose unstable entries" do
       # BasicRegistry has default max_failures: 5
       for _ <- 1..5, do: BasicRegistry.record_failure("remote_test")
 
       result = GenServer.call(BasicRegistry, {:resolve_remote, "remote_test"})
-      assert {:error, :unstable} = result
+      assert {:error, :unauthenticated_remote_resolution} = result
     end
   end
 
@@ -1031,34 +1030,32 @@ defmodule Arbor.Common.RegistryBaseTest do
       :ok
     end
 
-    test "cache entries are stored in ETS with TTL" do
-      # Manually insert a cache entry
-      expiry = System.monotonic_time(:millisecond) + 30_000
+    test "unauthenticated callers cannot populate the remote cache" do
+      assert {:error, :unauthenticated_remote_resolution} =
+               GenServer.call(
+                 BasicRegistry,
+                 {:cache_remote, "cached_handler", GoodImpl, %{}, :remote@host}
+               )
 
-      :ets.insert(
-        :test_basic_registry,
-        {{:remote_cache, "cached_handler"}, GoodImpl, :remote@host, expiry}
-      )
+      assert [] = :ets.lookup(:test_basic_registry, {:remote_cache, "cached_handler"})
 
-      # Verify it's readable via resolve/2 with node: :any
-      # (local lookup will miss, but cache won't be checked for :any — that's the remote path)
-      # Instead, let's verify the raw ETS entry exists
-      assert [{{:remote_cache, "cached_handler"}, GoodImpl, :remote@host, ^expiry}] =
-               :ets.lookup(:test_basic_registry, {:remote_cache, "cached_handler"})
+      state = :sys.get_state(BasicRegistry)
+      refute Map.has_key?(state.remote_cache, {"cached_handler", :remote@host})
     end
 
     test "expired cache entries are ignored" do
-      # Insert an expired cache entry
       expiry = System.monotonic_time(:millisecond) - 1000
 
-      :ets.insert(
-        :test_basic_registry,
-        {{:remote_cache, "expired_handler"}, GoodImpl, :remote@host, expiry}
-      )
+      :sys.replace_state(BasicRegistry, fn state ->
+        put_in(
+          state,
+          [:remote_cache, {"expired_handler", :remote@host}],
+          {GoodImpl, :remote@host, expiry}
+        )
+      end)
 
-      # The entry exists but would be treated as :miss by the cache lookup
-      # resolve/2 will go through remote path and find no pg members
-      assert {:error, :not_found} = BasicRegistry.resolve("expired_handler", node: :any)
+      assert {:error, :unauthenticated_remote_resolution} =
+               BasicRegistry.resolve("expired_handler", node: :any)
     end
   end
 
@@ -1073,8 +1070,8 @@ defmodule Arbor.Common.RegistryBaseTest do
       :ok
     end
 
-    test "returns :node_not_found for unknown node" do
-      assert {:error, :node_not_found} =
+    test "fails closed for an unauthenticated remote node" do
+      assert {:error, :unauthenticated_remote_resolution} =
                BasicRegistry.call_remote("handler", :unknown@host, {:some_func, []})
     end
 

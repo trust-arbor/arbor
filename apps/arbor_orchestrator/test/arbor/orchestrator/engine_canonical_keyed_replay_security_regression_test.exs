@@ -202,11 +202,11 @@ defmodule Arbor.Orchestrator.EngineCanonicalKeyedReplaySecurityRegressionTest do
   end
 
   test "security regression: nil-binding keyed handlers replay pending visits" do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    :ok = Registry.register("g3c1_keyed_probe", KeyedNoDelegateHandler)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    :ok = Registry.register_fixture("g3c1_keyed_probe", KeyedNoDelegateHandler)
 
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
 
     ctx = start_backed_journal("g3c1_nilbind", :receipt)
     jopts = [server: ctx.journal_name]

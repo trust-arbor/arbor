@@ -62,8 +62,9 @@ defmodule Arbor.Common.ShellEscapeTest do
       assert ShellEscape.escape_arg(:atom) == "atom"
     end
 
-    test "handles empty string" do
-      assert ShellEscape.escape_arg("") == ""
+    @tag :security_regression
+    test "security regression: preserves an empty positional argument" do
+      assert ShellEscape.escape_arg("") == "''"
     end
 
     test "handles multiple special characters" do
@@ -96,6 +97,19 @@ defmodule Arbor.Common.ShellEscapeTest do
 
     test "handles empty list" do
       assert ShellEscape.escape_args([]) == ""
+    end
+
+    @tag :security_regression
+    test "security regression: does not collapse empty arguments" do
+      assert ShellEscape.escape_args(["command", "", "last"]) == "command '' last"
+    end
+  end
+
+  describe "escape_positionals/1" do
+    @tag :security_regression
+    test "security regression: leading dashes cannot become command options" do
+      assert ShellEscape.escape_positionals(["-danger", "two words"]) ==
+               "-- -danger 'two words'"
     end
   end
 

@@ -149,7 +149,7 @@ defmodule Arbor.Memory.PrivateRelationshipSecurityRegressionTest do
     assert {:error, _} = Task.await(copied)
     assert {:ok, %{fence: :not_found}} = Memory.get_private_relationship(admission)
 
-    assert :ok = Security.revoke(ctx.owner.write_cap.id)
+    assert :ok = Security.revoke_fixture(ctx.owner.write_cap.id)
     assert {:error, _} = Memory.apply_private_relationship_source(admission, source, :not_found)
   end
 

@@ -29,8 +29,9 @@ defmodule Arbor.Security.SessionToken do
 
   ## Usage
 
-      # Generate during OIDC callback
-      {:ok, token} = SessionToken.generate("human_abc123")
+      # Generate during an authenticated OIDC callback
+      {:ok, token} =
+        Arbor.Security.issue_human_session_token("human_abc123", authority)
 
       # Verify in authorize calls
       {:ok, principal_id} = SessionToken.verify(token)
@@ -41,32 +42,113 @@ defmodule Arbor.Security.SessionToken do
 
   require Logger
 
-  @default_ttl_seconds 86_400
-  @token_version 1
+  @default_ttl_seconds 3_600
+  @token_version 2
+  @approval_authority_ttl_seconds 300
+  @production_scopes [
+    "arbor://agent",
+    "arbor://approval",
+    "arbor://chat",
+    "arbor://comms",
+    "arbor://conversation",
+    "arbor://orchestrator",
+    "arbor://signals",
+    "arbor://task",
+    "arbor://template",
+    "arbor://trust",
+    "arbor://voice",
+    "arbor://workspace"
+  ]
+  @default_scopes if(Mix.env() == :test,
+                    do: ["arbor://test" | @production_scopes],
+                    else: @production_scopes
+                  )
+  @known_insecure_secret "arbor-dev-session-token-secret-change-in-prod"
   # Bound before Base64/HMAC work. Comfortably exceeds generated tokens.
   @max_token_bytes 4096
 
   @doc """
-  Generate a signed session token for a human principal.
+  Validate the process-wide token secret before the security application starts.
 
-  A trusted caller may pass `:max_expires_at` (Unix seconds) to cap the token
-  at the expiry of the authentication that established the session. Invalid
-  or elapsed bounds are rejected. Omitting it preserves the normal TTL.
+  Session authentication must never start with a missing, short, or repository-
+  known secret. Runtime configuration should supply at least 32 bytes through
+  `ARBOR_SESSION_TOKEN_SECRET`.
   """
-  @spec generate(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
-  def generate(principal_id, opts \\ []) when is_binary(principal_id) do
-    ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
+  @spec configuration_status() :: :ok | {:error, atom()}
+  def configuration_status do
+    case Application.get_env(:arbor_security, :session_token_secret) do
+      secret when is_binary(secret) and byte_size(secret) >= 32 ->
+        if secret == @known_insecure_secret,
+          do: {:error, :insecure_session_token_secret},
+          else: :ok
+
+      nil ->
+        {:error, :session_token_secret_missing}
+
+      _ ->
+        {:error, :invalid_session_token_secret}
+    end
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    @spec generate(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+    def generate(principal_id, opts \\ [])
+
+    def generate(principal_id, opts) when is_binary(principal_id) do
+      with :ok <- validate_generate_options(opts) do
+        do_generate(principal_id, opts, :fixture)
+      end
+    end
+
+    def generate(_principal_id, _opts), do: {:error, :invalid_principal}
+  else
+    @doc false
+    @spec generate(term(), term()) :: {:error, :session_token_issuance_unauthorized}
+    def generate(_principal_id, _opts \\ []),
+      do: {:error, :session_token_issuance_unauthorized}
+  end
+
+  @doc false
+  @spec generate_authorized(String.t(), term(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def generate_authorized(principal_id, authority, opts)
+      when is_binary(principal_id) and is_list(opts) do
+    with :ok <- validate_generate_options(opts),
+         {:ok, ^principal_id} <- Arbor.Security.signing_authority_principal(authority) do
+      do_generate(principal_id, opts, {:authority, authority})
+    else
+      _ -> {:error, :session_token_issuance_unauthorized}
+    end
+  end
+
+  def generate_authorized(_principal_id, _authority, _opts),
+    do: {:error, :session_token_issuance_unauthorized}
+
+  defp do_generate(principal_id, opts, registry_authorization) do
+    ttl = min(Keyword.get(opts, :ttl, @default_ttl_seconds), @default_ttl_seconds)
     now = DateTime.utc_now()
     expires_at = DateTime.add(now, ttl, :second)
     session_id = Keyword.get(opts, :session_id, generate_session_id())
 
-    with {:ok, expires_at} <- cap_expiry(expires_at, now, opts) do
+    with {:ok, expires_at} <- cap_expiry(expires_at, now, opts),
+         :ok <- validate_session_id(session_id),
+         scopes <- default_scopes(),
+         :ok <-
+           register_human_session(
+             registry_authorization,
+             session_id,
+             principal_id,
+             DateTime.to_unix(expires_at)
+           ) do
       payload = %{
         v: @token_version,
         pid: principal_id,
         sid: session_id,
         iat: DateTime.to_unix(now),
-        exp: DateTime.to_unix(expires_at)
+        exp: DateTime.to_unix(expires_at),
+        purpose: :human_session,
+        scopes: scopes
       }
 
       # Sign the EXACT bytes that get transported — never a re-serialization.
@@ -78,6 +160,24 @@ defmodule Arbor.Security.SessionToken do
       {:ok, token}
     end
   end
+
+  defp register_human_session({:authority, authority}, session_id, principal_id, expires_at) do
+    Arbor.Security.SessionRegistry.issue_human(
+      session_id,
+      principal_id,
+      expires_at,
+      authority
+    )
+  end
+
+  if Mix.env() == :test do
+    defp register_human_session(:fixture, session_id, principal_id, expires_at) do
+      Arbor.Security.SessionRegistry.issue_fixture(session_id, principal_id, expires_at)
+    end
+  end
+
+  defp register_human_session(_authorization, _session_id, _principal_id, _expires_at),
+    do: {:error, :session_token_issuance_unauthorized}
 
   defp cap_expiry(expires_at, now, opts) do
     case Keyword.fetch(opts, :max_expires_at) do
@@ -97,7 +197,24 @@ defmodule Arbor.Security.SessionToken do
   end
 
   @doc false
-  def generate_conversation(principal, target) do
+  def generate_conversation(_principal, _target),
+    do: {:error, :session_token_issuance_unauthorized}
+
+  @doc false
+  def generate_conversation_authorized(principal, target, receipt),
+    do: do_generate_conversation(principal, target, {:receipt, receipt})
+
+  @doc false
+  def generate_terminal_conversation(principal, target),
+    do: do_generate_conversation(principal, target, :terminal)
+
+  if Mix.env() == :test do
+    @doc false
+    def generate_conversation_fixture(principal, target),
+      do: do_generate_conversation(principal, target, :fixture)
+  end
+
+  defp do_generate_conversation(principal, target, registry_authorization) do
     if conversation_id?(principal, "human_") and conversation_target?(target) do
       now = DateTime.to_unix(DateTime.utc_now())
 
@@ -111,19 +228,69 @@ defmodule Arbor.Security.SessionToken do
         target: target
       }
 
-      bytes = :erlang.term_to_binary(payload)
-      {:ok, Base.url_encode64(mac(bytes) <> bytes, padding: false)}
+      with :ok <-
+             register_conversation_session(
+               registry_authorization,
+               payload.sid,
+               principal,
+               target,
+               payload.exp
+             ) do
+        bytes = :erlang.term_to_binary(payload)
+        {:ok, Base.url_encode64(mac(bytes) <> bytes, padding: false)}
+      end
     else
       {:error, :invalid_token_scope}
     end
   end
 
+  defp register_conversation_session(
+         {:receipt, receipt},
+         session_id,
+         principal,
+         target,
+         expires_at
+       ) do
+    Arbor.Security.SessionRegistry.issue_conversation(
+      session_id,
+      principal,
+      target,
+      expires_at,
+      receipt
+    )
+  end
+
+  defp register_conversation_session(:terminal, session_id, principal, target, expires_at) do
+    Arbor.Security.SessionRegistry.issue_terminal_conversation(
+      session_id,
+      principal,
+      target,
+      expires_at
+    )
+  end
+
+  if Mix.env() == :test do
+    defp register_conversation_session(:fixture, session_id, principal, _target, expires_at) do
+      Arbor.Security.SessionRegistry.issue_fixture(session_id, principal, expires_at)
+    end
+  end
+
+  defp register_conversation_session(
+         _authorization,
+         _session_id,
+         _principal,
+         _target,
+         _expires_at
+       ),
+       do: {:error, :session_token_issuance_unauthorized}
+
   @doc """
   Verify authentication for the actual resource and action.
 
-  Legacy v1 login tokens retain their existing behavior. Version 2 conversation
-  tokens can authenticate only `:chat` on their exact target; generic `verify/1`
-  deliberately rejects them, so other token consumers cannot widen their scope.
+  Version 2 human-session tokens carry a closed list of allowed URI namespaces.
+  Conversation tokens can authenticate only `:chat` on their exact target;
+  generic `verify/1` deliberately rejects them, so other token consumers cannot
+  widen their scope. Version 1's all-resource bearer semantics are retired.
   """
   def verify_for(token, resource, action)
       when is_binary(token) and byte_size(token) > 0 and byte_size(token) <= @max_token_bytes do
@@ -131,14 +298,46 @@ defmodule Arbor.Security.SessionToken do
          :ok <- verify_mac(bytes, signature),
          {:ok, payload} <- safe_decode_payload(bytes),
          :ok <- check_scope(payload, resource, action),
-         :ok <- check_expiry(payload) do
+         :ok <- check_expiry(payload),
+         :ok <- check_session(payload) do
       {:ok, payload.pid}
     end
   end
 
   def verify_for(_, _, _), do: {:error, :invalid_token}
 
-  defp check_scope(%{v: @token_version}, _, _), do: :ok
+  defp check_scope(
+         %{
+           v: @token_version,
+           purpose: :human_session,
+           scopes: scopes,
+           pid: principal,
+           sid: sid,
+           iat: issued,
+           exp: expires
+         } = payload,
+         resource,
+         action
+       )
+       when map_size(payload) == 7 and is_list(scopes) and is_binary(resource) do
+    cond do
+      not valid_general_claims?(principal, sid, issued, expires, scopes) ->
+        {:error, :invalid_token_scope}
+
+      approval_resource?(resource) and
+          System.system_time(:second) - issued >
+            @approval_authority_ttl_seconds ->
+        {:error, :approval_token_too_old}
+
+      Enum.any?(scopes, &scope_matches?(&1, resource, action)) ->
+        :ok
+
+      true ->
+        {:error, :invalid_token_scope}
+    end
+  end
+
+  defp check_scope(%{v: 1}, _, _), do: {:error, :legacy_session_token}
 
   defp check_scope(
          %{
@@ -193,7 +392,8 @@ defmodule Arbor.Security.SessionToken do
          :ok <- verify_mac(payload_bytes, signature),
          {:ok, payload} <- safe_decode_payload(payload_bytes),
          :ok <- check_version(payload),
-         :ok <- check_expiry(payload) do
+         :ok <- check_expiry(payload),
+         :ok <- check_session(payload) do
       {:ok, payload.pid}
     end
   end
@@ -252,7 +452,20 @@ defmodule Arbor.Security.SessionToken do
     _ -> {:error, :invalid_binary}
   end
 
-  defp check_version(%{v: @token_version}), do: :ok
+  defp check_version(%{v: @token_version, purpose: :human_session} = payload) do
+    if map_size(payload) == 7 and
+         valid_general_claims?(
+           payload.pid,
+           payload.sid,
+           payload.iat,
+           payload.exp,
+           payload.scopes
+         ),
+       do: :ok,
+       else: {:error, :malformed_token}
+  end
+
+  defp check_version(%{v: 1}), do: {:error, :legacy_session_token}
   defp check_version(%{v: v}), do: {:error, {:unsupported_version, v}}
 
   defp check_expiry(%{exp: exp}) do
@@ -265,13 +478,119 @@ defmodule Arbor.Security.SessionToken do
     end
   end
 
+  @doc "Revoke one session immediately by its opaque session id."
+  @spec revoke_session(String.t()) :: {:error, :session_mutation_unauthorized}
+  def revoke_session(_session_id), do: {:error, :session_mutation_unauthorized}
+
+  @doc "Authenticate and revoke the exact session represented by a bearer token."
+  @spec revoke(binary()) :: :ok | {:error, term()}
+  def revoke(token) when is_binary(token),
+    do: Arbor.Security.SessionRegistry.revoke_token(token)
+
+  def revoke(_), do: {:error, :invalid_token}
+
+  @doc false
+  def registry_revoke_claim(token)
+      when is_binary(token) and byte_size(token) > 0 and byte_size(token) <= @max_token_bytes do
+    if Arbor.Security.SessionRegistry.owner_process?() do
+      with {:ok, signature, bytes} <- split_token(token),
+           :ok <- verify_mac(bytes, signature),
+           {:ok, payload} <- safe_decode_payload(bytes),
+           :ok <- validate_revoke_payload(payload) do
+        {:ok, payload.sid}
+      else
+        _ -> {:error, :invalid_token}
+      end
+    else
+      {:error, :session_mutation_unauthorized}
+    end
+  end
+
+  def registry_revoke_claim(_), do: {:error, :invalid_token}
+
+  defp validate_revoke_payload(%{purpose: :human_session} = payload),
+    do: check_version(payload)
+
+  defp validate_revoke_payload(
+         %{
+           v: 2,
+           purpose: :conversation,
+           target: target,
+           pid: principal,
+           sid: sid,
+           iat: issued,
+           exp: expires
+         } = payload
+       ) do
+    if map_size(payload) == 7 and conversation_id?(principal, "human_") and
+         conversation_target?(target) and valid_session_id?(sid) and is_integer(issued) and
+         is_integer(expires) and expires - issued == 90,
+       do: :ok,
+       else: {:error, :invalid_token}
+  end
+
+  defp validate_revoke_payload(_), do: {:error, :invalid_token}
+
+  defp check_session(%{sid: sid, pid: principal}) do
+    if Arbor.Security.SessionRegistry.active?(sid, principal),
+      do: :ok,
+      else: {:error, :session_revoked}
+  end
+
+  defp validate_generate_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and
+         Enum.all?(Keyword.keys(opts), &(&1 in [:ttl, :max_expires_at, :session_id])) and
+         length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))) and
+         Keyword.get(opts, :ttl, @default_ttl_seconds) in 1..@default_ttl_seconds,
+       do: :ok,
+       else: {:error, :invalid_options}
+  end
+
+  defp validate_generate_options(_), do: {:error, :invalid_options}
+
+  defp validate_session_id(id) when is_binary(id) do
+    if byte_size(id) == 32 and String.valid?(id) and Regex.match?(~r/\A[0-9a-f]{32}\z/, id),
+      do: :ok,
+      else: {:error, :invalid_session_id}
+  end
+
+  defp validate_session_id(_), do: {:error, :invalid_session_id}
+
+  defp valid_general_claims?(principal, sid, issued, expires, scopes) do
+    is_binary(principal) and principal != "" and valid_session_id?(sid) and
+      is_integer(issued) and is_integer(expires) and expires > issued and
+      expires - issued <= @default_ttl_seconds and scopes == default_scopes()
+  end
+
+  defp valid_session_id?(id), do: validate_session_id(id) == :ok
+
+  defp default_scopes do
+    @default_scopes
+  end
+
+  defp scope_matches?(prefix, resource, _action) when is_binary(prefix) do
+    Arbor.Contracts.Security.CapabilityUri.prefix_match?(prefix, resource)
+  rescue
+    _ -> false
+  end
+
+  defp scope_matches?(_, _, _), do: false
+
+  defp approval_resource?(resource) do
+    Arbor.Contracts.Security.CapabilityUri.prefix_match?("arbor://approval", resource)
+  rescue
+    _ -> false
+  end
+
   defp mac(bytes) when is_binary(bytes) do
     :crypto.mac(:hmac, :sha256, token_secret(), bytes)
   end
 
   defp token_secret do
-    Application.get_env(:arbor_security, :session_token_secret) ||
-      raise "session_token_secret not configured — set config :arbor_security, :session_token_secret"
+    case configuration_status() do
+      :ok -> Application.fetch_env!(:arbor_security, :session_token_secret)
+      {:error, reason} -> raise "session token configuration rejected: #{reason}"
+    end
   end
 
   # Constant-time comparison to prevent timing attacks

@@ -27,12 +27,12 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
         name: "platform-activation-test"
       )
 
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     {:ok,
@@ -80,7 +80,7 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
 
     assert {:ok, authorized, [{:consume_nonce, _}]} =
              Arbor.KernelRuntime.authorize_platform_activation(staged, envelope,
-               now: ctx.context.issued_at
+               now: envelope["payload"]["issued_at"]
              )
 
     assert {:error, "not_ready"} = Activation.commit(authorized)
@@ -169,7 +169,7 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
     end)
 
     {:ok, active} = open_authority(ctx, :platform_activation)
-    assert :ok = Security.suspend_identity(ctx.agent_id, reason: "test suspend")
+    assert :ok = Security.suspend_identity_fixture(ctx.agent_id, reason: "test suspend")
 
     assert {:error, :identity_suspended} =
              Security.issue_platform_activation_authorization(
@@ -178,8 +178,8 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
                ctx.context
              )
 
-    assert :ok = Security.resume_identity(ctx.agent_id)
-    assert :ok = Security.revoke_identity(ctx.agent_id, reason: "test revoke")
+    assert :ok = Security.resume_identity_fixture(ctx.agent_id)
+    assert :ok = Security.revoke_identity_fixture(ctx.agent_id, reason: "test revoke")
 
     assert {:error, :identity_revoked} =
              Security.issue_platform_activation_authorization(
@@ -191,7 +191,7 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
 
   test "missing or wrong stored key denies signing", ctx do
     {:ok, authority} = open_authority(ctx, :platform_activation)
-    assert :ok = Security.delete_signing_key(ctx.agent_id)
+    assert :ok = Security.delete_signing_key_fixture(ctx.agent_id)
 
     assert {:error, reason} =
              Security.issue_platform_activation_authorization(
@@ -202,16 +202,16 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
 
     assert reason in [:no_signing_key, :signing_key_unavailable]
 
-    :ok = Security.store_signing_key(ctx.agent_id, ctx.private_key)
+    :ok = Security.store_signing_key_fixture(ctx.agent_id, ctx.private_key)
     {:ok, restored} = open_authority(ctx, :platform_activation)
     {:ok, other} = Identity.generate(name: "wrong-platform-key")
-    assert :ok = Security.store_signing_key(ctx.agent_id, other.private_key)
+    assert :ok = Security.store_signing_key_fixture(ctx.agent_id, other.private_key)
 
     assert {:error, :signing_key_mismatch} =
              Security.issue_platform_activation_authorization(
                restored,
                ctx.transaction,
-               ctx.context
+               bound_context()
              )
   end
 
@@ -222,8 +222,6 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
              Security.issue_platform_activation_authorization(authority, ctx.transaction, %{
                "audience_host_id" => "host.local",
                audience_install_id: "install.local",
-               issued_at: ctx.context.issued_at,
-               expires_at: ctx.context.expires_at,
                nonce: ctx.context.nonce
              })
 
@@ -265,26 +263,18 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
                ctx.context
              )
 
-    inverted = %{
-      ctx.context
-      | issued_at: "2026-08-18T00:00:00Z",
-        expires_at: "2026-08-17T01:00:00Z"
-    }
-
-    assert {:error, :invalid_validity_window} =
+    assert {:error, :forbidden_attribute} =
              Security.issue_platform_activation_authorization(
                authority,
                ctx.transaction,
-               inverted
+               Map.put(ctx.context, :issued_at, "2026-08-18T00:00:00Z")
              )
 
-    too_early = %{ctx.context | issued_at: "2026-08-16T00:00:00Z"}
-
-    assert {:error, :invalid_validity_window} =
+    assert {:error, :forbidden_attribute} =
              Security.issue_platform_activation_authorization(
                authority,
                ctx.transaction,
-               too_early
+               Map.put(ctx.context, :expires_at, "2027-08-17T00:00:00Z")
              )
 
     assert {:error, :invalid_nonce} =
@@ -298,7 +288,7 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
              Security.issue_platform_activation_authorization(
                authority,
                ctx.transaction,
-               %{ctx.context | audience_host_id: "Host.Local"}
+               %{bound_context() | audience_host_id: "Host.Local"}
              )
   end
 
@@ -308,24 +298,68 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
     assert {:ok, %SignedRequest{}} =
              Security.sign_with_authority(authority, "arbor://extension/activation")
 
+    assert {:error, :invalid_resource_binding} =
+             Security.sign_with_authority(authority, "arbitrary signing oracle bytes")
+
     refute function_exported?(Security, :sign_detached, 2)
+    refute function_exported?(SigningAuthorityBroker, :sign_detached, 2)
 
     assert {:error, :possession_proof_required} =
              Security.open_signing_authority(ctx.agent_id)
   end
 
-  test "internal detached sign rejects a live non-platform purpose before key use", ctx do
+  test "internal activation sign rejects a live non-platform purpose before key use", ctx do
     {:ok, session} = open_authority(ctx, :session)
 
     assert {:error, :purpose_mismatch} =
-             SigningAuthorityBroker.sign_detached(
+             SigningAuthorityBroker.sign_platform_activation(
                session,
-               "arbor.extension.activation_authorization.v1"
+               %{},
+               String.duplicate("aa", 16)
              )
 
     snapshot = SigningAuthorityBroker.debug_state()
     refute Enum.any?(snapshot.entries, & &1.has_private_key?)
     refute Map.has_key?(snapshot, :signing_message)
+  end
+
+  @tag :security_regression
+  test "security regression: platform authority cannot sign an arbitrary detached message", ctx do
+    {:ok, authority} = open_authority(ctx, :platform_activation)
+
+    assert {:error, :activation_reservation_missing} =
+             SigningAuthorityBroker.sign_platform_activation(
+               authority,
+               %{"payload" => %{}},
+               String.duplicate("aa", 16)
+             )
+  end
+
+  test "security regression: broker owns issuance time and refuses nonce reuse", ctx do
+    {:ok, authority} = open_authority(ctx, :platform_activation)
+    before = System.system_time(:second)
+
+    assert {:ok, envelope} =
+             Security.issue_platform_activation_authorization(
+               authority,
+               ctx.transaction,
+               ctx.context
+             )
+
+    after_issue = System.system_time(:second)
+    {:ok, issued_at, 0} = DateTime.from_iso8601(envelope["payload"]["issued_at"])
+    {:ok, expires_at, 0} = DateTime.from_iso8601(envelope["payload"]["expires_at"])
+    issued_unix = DateTime.to_unix(issued_at)
+
+    assert issued_unix in before..after_issue
+    assert DateTime.diff(expires_at, issued_at, :second) <= 60
+
+    assert {:error, :activation_nonce_reused} =
+             Security.issue_platform_activation_authorization(
+               authority,
+               ctx.transaction,
+               ctx.context
+             )
   end
 
   defp open_authority(ctx, purpose) do
@@ -342,12 +376,12 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
 
   defp register_other_identity do
     {:ok, identity} = Identity.generate(name: "alternate-platform-key")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{agent_id: identity.agent_id, private_key: identity.private_key}
@@ -366,9 +400,7 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
     %{
       audience_host_id: "host.local",
       audience_install_id: "install.local",
-      issued_at: "2026-08-17T00:00:00Z",
-      expires_at: "2026-08-18T00:00:00Z",
-      nonce: String.duplicate("aa", 16)
+      nonce: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
     }
   end
 

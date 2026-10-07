@@ -10,11 +10,11 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
   binding.
 
   The two lifecycle lanes are exact-parent regressions: they drive the
-  registered owner through the arity-1 production API with intents built by
-  the sole producer (`CapabilityAuditCore.intent/6`, v2 on the parent, v3
-  here), so on 52a2cc3fa they fail for the capacity reason: the prepare of
-  lifecycle ~1024 is refused `:soft_capacity_exhausted` once delivered
-  identities fill the entry budget.
+  registered owner through its compile-time test fixture API with intents
+  built by the sole producer (`CapabilityAuditCore.intent/6`, v2 on the
+  parent, v3 here), so on 52a2cc3fa they fail for the capacity reason: the
+  prepare of lifecycle ~1024 is refused `:soft_capacity_exhausted` once
+  delivered identities fill the entry budget.
 
   The no-consumer refusal-cost test pins a branch-internal regression: the
   first slice-4 T3 re-decoded the whole backlog on every capacity refusal
@@ -34,9 +34,9 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     `retired_operation_total + retirable_operation_count == own +
     foreign_acked`, and each T2 retires exactly one batch of 512;
   - hot operations this process did not deliver (foreign pending or
-    rejected) are attributed by a census of the owner's operations taken
-    from the same state snapshot the status is computed from
-    (`settled/1`); own operations are told apart by their principal.
+  rejected) are attributed by a census of the owner's operations taken
+  from the same state snapshot the status is computed from
+  (`settled/1`); own operations are told apart by their principal prefix.
 
   The lifecycle lanes assert their hot-set samples after the run, so on a
   journal that never retires the refused prepare stays the failure.
@@ -218,7 +218,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     # clause again, so T3 retires in memory and retries the SAME raw record:
     # its id is the caller's.
     rearm_retirement!(pid)
-    assert {:ok, admitted, "prepared"} = Owner.prepare(intent)
+    assert {:ok, admitted, "prepared"} = Owner.prepare(Owner, intent)
     assert admitted["operation_id"] == intent["operation_id"]
 
     assert [{%{count: ^retirable}, %{trigger: :capacity, ledger_state: :none}}] =
@@ -266,7 +266,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     assert before["capacity"]["retirable_operation_count"] == own + foreign_acked() + 1
 
     rearm_retirement!(pid)
-    assert {:error, :soft_capacity_exhausted} = Owner.prepare(intent)
+    assert {:error, :soft_capacity_exhausted} = Owner.prepare(Owner, intent)
     assert drain(@retired_event) == []
 
     assert [{_m, %{trigger: :capacity, outcome: :not_published, reason: :malformed}}] =
@@ -296,7 +296,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     # Inside the 5 s backoff a further capacity refusal answers the same
     # error without another in-memory compaction attempt.
     assert System.monotonic_time(:millisecond) < backoff_until
-    assert {:error, :soft_capacity_exhausted} = Owner.prepare(producer_grant(own + 2))
+    assert {:error, :soft_capacity_exhausted} = Owner.prepare(Owner, producer_grant(own + 2))
     assert System.monotonic_time(:millisecond) < backoff_until
     assert drain(@failed_event) == []
     assert drain(@retired_event) == []
@@ -319,18 +319,20 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     # Pending effect_applied grants cost 3 entries each (2 written, 1
     # reserved): 1024 of them fill the 3072-entry soft budget, fewer when
     # foreign operations share it, so grants are applied until the entry
-    # clause refuses one.
+    # clause refuses one. Each lifecycle uses a distinct principal so this
+    # remains a global journal-capacity test rather than a per-principal quota
+    # test.
     admitted =
       Enum.reduce_while(1..1100, 0, fn n, admitted ->
         intent = producer_grant(n)
 
-        case Owner.prepare(intent) do
+        case Owner.prepare(Owner, intent) do
           {:ok, _intent, "prepared"} ->
             expect!(
               n,
               :observe,
               {:ok, :committed},
-              Owner.observe(intent["operation_id"], :applied)
+              Owner.observe(Owner, intent["operation_id"], :applied)
             )
 
             {:cont, admitted + 1}
@@ -345,7 +347,8 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
     {elapsed_us, replies} =
       :timer.tc(fn ->
-        for n <- (admitted + 1)..(admitted + 20), do: Owner.prepare(producer_grant(n))
+        for n <- (admitted + 1)..(admitted + 20),
+            do: Owner.prepare(Owner, producer_grant(n))
       end)
 
     assert Enum.uniq(replies) == [{:error, :soft_capacity_exhausted}]
@@ -421,7 +424,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
   # ---------------------------------------------------------------------------
 
-  # One full lifecycle through the arity-1 production API of the registered
+  # One full lifecycle through the test-only fixture API of the registered
   # owner, acknowledged by this process as the registered consumer. Foreign
   # operations journaled into the registered owner can share the delivery
   # batch: the own item is found by operation id, and every item is
@@ -430,12 +433,12 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
   # in `foreign_acked/0`.
   defp full_lifecycle!(n) do
     intent = producer_grant(n)
-    expect!(n, :prepare, {:ok, :_, "prepared"}, Owner.prepare(intent))
+    expect!(n, :prepare, {:ok, :_, "prepared"}, Owner.prepare(Owner, intent))
     finish_lifecycle!(n, intent["operation_id"])
   end
 
   defp finish_lifecycle!(n, id) do
-    expect!(n, :observe, {:ok, :committed}, Owner.observe(id, :applied))
+    expect!(n, :observe, {:ok, :committed}, Owner.observe(Owner, id, :applied))
     assert {:ok, batch} = Owner.delivery_batch()
 
     assert Enum.any?(batch, &(&1["operation_id"] == id)),
@@ -489,7 +492,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
       Enum.reduce_while(1..2000, 0, fn n, own ->
         intent = producer_grant(n)
 
-        case Owner.prepare(intent) do
+        case Owner.prepare(Owner, intent) do
           {:ok, _intent, "prepared"} ->
             finish_lifecycle!(n, intent["operation_id"])
             {:cont, n}
@@ -539,9 +542,13 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
     Enum.reduce(state.core["operations"], empty, fn {_id, op}, acc ->
       side =
-        if get_in(op, ["intent", "audit", "data", "principal_id"]) == @principal,
-          do: :own,
-          else: :foreign
+        case get_in(op, ["intent", "audit", "data", "principal_id"]) do
+          principal when is_binary(principal) ->
+            if String.starts_with?(principal, @principal <> "_"), do: :own, else: :foreign
+
+          _other ->
+            :foreign
+        end
 
       acc = Map.update!(acc, side, &Map.update(&1, op["status"], 1, fn c -> c + 1 end))
 
@@ -570,7 +577,7 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
     data = %{
       "id" => capability_id,
-      "principal_id" => @principal,
+      "principal_id" => "#{@principal}_#{n}",
       "resource_uri" => "arbor://memory/read/ephemeral"
     }
 
@@ -650,8 +657,10 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     end
 
     true = Process.register(pid, Owner)
+    :ok = Owner.install_test_fixture(pid)
 
     on_exit(fn ->
+      :ok = Owner.clear_test_fixture()
       if Process.whereis(Owner) == pid, do: Process.unregister(Owner)
       if original && Process.alive?(original), do: Process.register(original, Owner)
     end)
@@ -661,7 +670,12 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     name = :"audit_retire_eph_consumer_#{System.unique_integer([:positive])}"
     true = Process.register(self(), name)
     previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_name)
+
+    previous_application =
+      Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+
     Application.put_env(:arbor_security, :authority_audit_consumer_name, name)
+    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
 
     on_exit(fn ->
       case previous do
@@ -670,6 +684,14 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
 
         :error ->
           Application.delete_env(:arbor_security, :authority_audit_consumer_name)
+      end
+
+      case previous_application do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
       end
     end)
 

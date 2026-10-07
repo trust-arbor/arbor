@@ -12,7 +12,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
 
   describe "register/1 and lookup/1" do
     test "round-trip succeeds", %{identity: identity} do
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       assert {:ok, public_key} = Registry.lookup(identity.agent_id)
       assert public_key == identity.public_key
@@ -24,6 +24,56 @@ defmodule Arbor.Security.Identity.RegistryTest do
   end
 
   describe "register/1 validation" do
+    test "security regression: replaceable bound-role fields cannot authorize scheduler or trust registration" do
+      role_pid_keys = [:scheduler_identity_pid, :trust_capability_grant_owner_pid]
+      original_role_fields = Registry |> :sys.get_state() |> Map.take(role_pid_keys)
+
+      on_exit(fn ->
+        :sys.replace_state(Registry, fn state ->
+          state
+          |> Map.drop(role_pid_keys)
+          |> Map.merge(original_role_fields)
+        end)
+      end)
+
+      for {pid_key, register} <- [
+            {:scheduler_identity_pid, &Registry.register_scheduler_identity/2},
+            {:trust_capability_grant_owner_pid,
+             &Registry.register_trust_capability_grant_identity/2}
+          ] do
+        attacker = self()
+        :sys.replace_state(Registry, &Map.put(&1, pid_key, attacker))
+
+        {:ok, identity} = Identity.generate()
+        {:ok, proof} = Registry.registration_proof(identity)
+
+        assert {:error, :identity_registration_unauthorized} = register.(identity, proof)
+        assert {:error, :not_found} = Registry.lookup(identity.agent_id)
+      end
+    end
+
+    test "security regression: public identity registration requires an authenticated actor", %{
+      identity: identity
+    } do
+      public_identity = Identity.public_only(identity)
+
+      assert {:error, :identity_registration_unauthorized} = Registry.register(public_identity)
+      assert {:error, :identity_registration_unauthorized} = Registry.register(identity)
+      assert {:error, :not_found} = Registry.lookup(identity.agent_id)
+    end
+
+    test "security regression: a proof from another identity cannot register an agent", %{
+      identity: identity
+    } do
+      {:ok, attacker} = Identity.generate()
+      {:ok, attacker_proof} = Registry.registration_proof(attacker)
+
+      assert {:error, :identity_registration_unauthorized} =
+               Registry.register(Identity.public_only(identity), attacker_proof)
+
+      assert {:error, :not_found} = Registry.lookup(identity.agent_id)
+    end
+
     test "rejects mismatched agent_id and public_key" do
       {:ok, identity} = Identity.generate()
 
@@ -33,20 +83,20 @@ defmodule Arbor.Security.Identity.RegistryTest do
         | agent_id: "agent_0000000000000000000000000000000000000000000000000000000000000000"
       }
 
-      assert {:error, {:agent_id_mismatch, _, :expected, _}} = Registry.register(tampered)
+      assert {:error, :invalid_identity} = Registry.register_fixture(tampered)
     end
 
     test "rejects duplicate registration", %{identity: identity} do
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
-      assert {:error, {:already_registered, _}} = Registry.register(identity)
+      assert {:error, {:already_registered, _}} = Registry.register_fixture(identity)
     end
 
     test "security regression: ordinary registration rejects human-prefixed identities" do
       oidc = Arbor.Security.OIDCTestHelper.issue_identity()
       on_exit(oidc.cleanup)
 
-      assert {:error, :oidc_proof_required} = Registry.register(oidc.identity)
+      assert {:error, :identity_registration_unauthorized} = Registry.register(oidc.identity)
       assert {:error, :not_found} = Registry.lookup(oidc.identity.agent_id)
     end
 
@@ -55,7 +105,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
 
       on_exit(fn ->
         oidc.cleanup.()
-        _ = Registry.deregister(oidc.identity.agent_id)
+        _ = Registry.deregister_fixture(oidc.identity.agent_id)
       end)
 
       assert :ok = Registry.register_oidc(oidc.identity, oidc.id_token, oidc.provider)
@@ -115,15 +165,17 @@ defmodule Arbor.Security.Identity.RegistryTest do
       :ok
     end
 
-    test "default (no policy) allows registration", %{identity: identity} do
-      assert :ok = Registry.register(identity)
+    test "default policy admits only the explicit test fixture path", %{identity: identity} do
+      assert :ok = Registry.register_fixture(identity)
     end
 
     test "a denying policy blocks registration with :registration_denied", %{identity: identity} do
       Application.put_env(:arbor_security, :registration_policy, TogglePolicy)
       Application.put_env(:arbor_security, :test_policy_verdict, {:error, :no_enrollment_token})
 
-      assert {:error, {:registration_denied, :no_enrollment_token}} = Registry.register(identity)
+      assert {:error, {:registration_denied, :no_enrollment_token}} =
+               Registry.register_fixture(identity)
+
       # And the identity was NOT created.
       assert {:error, :not_found} = Registry.lookup(identity.agent_id)
     end
@@ -134,7 +186,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
       Application.put_env(:arbor_security, :test_policy_verdict, :ok)
       Application.put_env(:arbor_security, :test_policy_notify, self())
 
-      assert :ok = Registry.register(identity)
+      assert :ok = Registry.register_fixture(identity)
 
       # Exactly one consultation — a policy that consumes a one-time token
       # must not be double-charged.
@@ -146,7 +198,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
       Application.put_env(:arbor_security, :registration_policy, NoCallbackPolicy)
 
       assert {:error, {:registration_denied, :registration_policy_unavailable}} =
-               Registry.register(identity)
+               Registry.register_fixture(identity)
     end
 
     test "the policy cannot weaken the self-certifying check" do
@@ -161,13 +213,13 @@ defmodule Arbor.Security.Identity.RegistryTest do
         | agent_id: "agent_0000000000000000000000000000000000000000000000000000000000000000"
       }
 
-      assert {:error, {:agent_id_mismatch, _, :expected, _}} = Registry.register(tampered)
+      assert {:error, :invalid_identity} = Registry.register_fixture(tampered)
     end
   end
 
   describe "registered?/1" do
     test "returns true for registered agent", %{identity: identity} do
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
       assert Registry.registered?(identity.agent_id)
     end
 
@@ -178,23 +230,23 @@ defmodule Arbor.Security.Identity.RegistryTest do
 
   describe "deregister/1" do
     test "removes identity", %{identity: identity} do
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
       assert Registry.registered?(identity.agent_id)
 
-      :ok = Registry.deregister(identity.agent_id)
+      :ok = Registry.deregister_fixture(identity.agent_id)
       refute Registry.registered?(identity.agent_id)
       assert {:error, :not_found} = Registry.lookup(identity.agent_id)
     end
 
     test "returns error for unknown agent" do
-      assert {:error, :not_found} = Registry.deregister("agent_unknown")
+      assert {:error, :not_found} = Registry.deregister_fixture("agent_unknown")
     end
   end
 
   describe "lookup_by_name/1" do
     test "finds agents by name" do
       {:ok, identity} = Identity.generate(name: "code-reviewer")
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       assert {:ok, [agent_id]} = Registry.lookup_by_name("code-reviewer")
       assert agent_id == identity.agent_id
@@ -203,8 +255,8 @@ defmodule Arbor.Security.Identity.RegistryTest do
     test "returns multiple agents with the same name" do
       {:ok, id1} = Identity.generate(name: "worker")
       {:ok, id2} = Identity.generate(name: "worker")
-      :ok = Registry.register(id1)
-      :ok = Registry.register(id2)
+      :ok = Registry.register_fixture(id1)
+      :ok = Registry.register_fixture(id2)
 
       assert {:ok, agent_ids} = Registry.lookup_by_name("worker")
       assert length(agent_ids) == 2
@@ -218,7 +270,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
 
     test "unnamed agents are not indexed" do
       {:ok, identity} = Identity.generate()
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       # nil name should not be indexed
       assert {:error, :not_found} = Registry.lookup_by_name("nil")
@@ -228,11 +280,11 @@ defmodule Arbor.Security.Identity.RegistryTest do
   describe "deregister removes name index" do
     test "name lookup fails after deregister" do
       {:ok, identity} = Identity.generate(name: "temp-agent")
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       assert {:ok, _} = Registry.lookup_by_name("temp-agent")
 
-      :ok = Registry.deregister(identity.agent_id)
+      :ok = Registry.deregister_fixture(identity.agent_id)
 
       # Name index should have empty list, returning not_found
       result = Registry.lookup_by_name("temp-agent")
@@ -244,7 +296,7 @@ defmodule Arbor.Security.Identity.RegistryTest do
     test "tracks registration counts", %{identity: identity} do
       stats_before = Registry.stats()
 
-      :ok = Registry.register(identity)
+      :ok = Registry.register_fixture(identity)
 
       stats_after = Registry.stats()
       assert stats_after.total_registered == stats_before.total_registered + 1

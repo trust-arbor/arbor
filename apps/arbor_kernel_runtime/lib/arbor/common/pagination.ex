@@ -147,7 +147,7 @@ defmodule Arbor.Common.Pagination do
         do_filter_after_cursor(items, cursor_timestamp, cursor_id, order)
 
       :error ->
-        items
+        []
     end
   end
 

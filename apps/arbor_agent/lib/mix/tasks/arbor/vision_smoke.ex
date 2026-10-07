@@ -45,7 +45,9 @@ defmodule Mix.Tasks.Arbor.VisionSmoke do
           b64 = audio_path |> File.read!() |> String.trim()
 
           [
-            Arbor.LLM.ContentPart.text("What passphrase is spoken in this audio? Reply with just the words."),
+            Arbor.LLM.ContentPart.text(
+              "What passphrase is spoken in this audio? Reply with just the words."
+            ),
             # Arbor's :audio ContentPart (raw map — no base64 constructor yet).
             %{kind: :audio, data: b64, media_type: "audio/wav", url: nil}
           ]

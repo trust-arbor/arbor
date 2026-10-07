@@ -50,11 +50,11 @@ defmodule Arbor.Agent.ConversationSignedBindingSecurityRegressionTest do
     target = "agent_signed_target_#{System.unique_integer([:positive])}"
 
     assert {:ok, cap} =
-             Security.grant(principal: caller, resource: "arbor://chat/agent/" <> target)
+             Security.grant_fixture(principal: caller, resource: "arbor://chat/agent/" <> target)
 
     on_exit(fn ->
-      Security.revoke(cap.id)
-      Security.deregister_identity(caller)
+      Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(caller)
       oidc.cleanup.()
     end)
 

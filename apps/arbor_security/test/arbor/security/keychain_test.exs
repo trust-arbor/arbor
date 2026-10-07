@@ -354,6 +354,52 @@ defmodule Arbor.Security.KeychainTest do
       assert reason in [:hmac_verification_failed, :invalid_encryption_key]
     end
 
+    test "security regression: a bare un-HMACed keychain payload is rejected" do
+      kc = Keychain.new("agent_test")
+      root_key = :crypto.strong_rand_bytes(32)
+
+      {:ok, serialized} = Keychain.serialize(kc, root_key)
+      outer = Jason.decode!(serialized)
+
+      assert {:error, :invalid_payload} = Keychain.deserialize(outer["payload"], root_key)
+    end
+
+    test "security regression: encryption and authentication use separate derived keys" do
+      kc = Keychain.new("agent_test")
+      root_key = :crypto.strong_rand_bytes(32)
+
+      {:ok, serialized} = Keychain.serialize(kc, root_key)
+      outer = Jason.decode!(serialized)
+      inner = Jason.decode!(outer["payload"])
+
+      encryption_key =
+        Arbor.Security.Crypto.derive_key(root_key, "arbor-keychain-encryption-v2", 32)
+
+      authentication_key =
+        Arbor.Security.Crypto.derive_key(root_key, "arbor-keychain-authentication-v2", 32)
+
+      refute encryption_key == root_key
+      refute authentication_key == root_key
+      refute encryption_key == authentication_key
+
+      {:ok, stored_hmac} = Base.decode64(outer["hmac"])
+
+      assert Plug.Crypto.secure_compare(
+               stored_hmac,
+               :crypto.mac(:hmac, :sha256, authentication_key, outer["payload"])
+             )
+
+      {:ok, ciphertext} = Base.decode64(inner["private_encrypted"])
+      {:ok, iv} = Base.decode64(inner["iv"])
+      {:ok, tag} = Base.decode64(inner["tag"])
+
+      assert {:ok, _private_json} =
+               Arbor.Security.Crypto.decrypt(ciphertext, encryption_key, iv, tag)
+
+      assert {:error, :decryption_failed} =
+               Arbor.Security.Crypto.decrypt(ciphertext, authentication_key, iv, tag)
+    end
+
     test "security regression (M3): tampering a PLAINTEXT public field fails deserialization" do
       # M3: the serialized keychain encrypts private keys but the public fields
       # (agent_id, public keys, peer info) sit in plaintext. Without an HMAC over

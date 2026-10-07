@@ -19,7 +19,7 @@ defmodule Arbor.Security.NativeConversationNotices do
         with {:ok, %{owner_pid: ^owner, principal_id: ^principal} = source} <-
                apply(adapter, :acquire, [principal, owner]),
              payload = acquisition_payload(source),
-             {:ok, proof} <- SigningAuthorityBroker.sign(authority, payload) do
+             {:ok, proof} <- SigningAuthorityBroker.sign_native_notice_source(authority, payload) do
           NativeNoticeBroker.open(source, authority, proof, ticket)
         else
           _ -> {:error, :native_notice_source_required}

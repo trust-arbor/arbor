@@ -33,6 +33,8 @@ defmodule Mix.Tasks.Arbor.Hands.Capture do
       exit({:shutdown, 1})
     end
 
+    validate_name(name)
+
     lines = opts[:lines] || 50
 
     # Check for summary file first
@@ -60,6 +62,17 @@ defmodule Mix.Tasks.Arbor.Hands.Capture do
       {:error, reason} ->
         Mix.shell().error("Error reading summary: #{inspect(reason)}")
         capture_output(name, lines)
+    end
+  end
+
+  defp validate_name(name) do
+    case Hands.validate_name(name) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_hand_name} ->
+        Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
+        exit({:shutdown, 1})
     end
   end
 

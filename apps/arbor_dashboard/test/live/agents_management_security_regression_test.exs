@@ -76,7 +76,7 @@ defmodule Arbor.Dashboard.Live.AgentsManagementSecurityRegressionTest do
       other = Humans.human!()
       {:ok, mismatch} = Security.SessionToken.generate(other)
       {:ok, expired} = Security.SessionToken.generate(ctx.human_id, ttl: -1)
-      {:ok, terminal} = Security.SessionToken.generate_conversation(ctx.human_id, target.target)
+      {:ok, terminal} = Security.issue_conversation_session_fixture(ctx.human_id, target.target)
 
       for token <- [nil, "forged", mismatch, expired, terminal] do
         {:ok, view, _} = live(session(%{ctx | token: token}), "/agents")
@@ -94,7 +94,7 @@ defmodule Arbor.Dashboard.Live.AgentsManagementSecurityRegressionTest do
       target = Fixture.target!()
       cap = Fixture.grant!(ctx.human_id, operation, target.target)
       {:ok, view, _} = live(session(ctx), "/agents")
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
       {html, effects} = click(view, unquote(event), target.target)
       assert effects == []
       assert html =~ "Agent management was refused."
@@ -122,7 +122,7 @@ defmodule Arbor.Dashboard.Live.AgentsManagementSecurityRegressionTest do
     target = Fixture.target!()
     Fixture.grant!(ctx.human_id, :destroy, target.target)
     {:ok, view, _} = live(session(ctx), "/agents")
-    assert :ok = Security.revoke_identity(ctx.human_id, reason: "private mounted fixture")
+    assert :ok = Security.revoke_identity_fixture(ctx.human_id, "private mounted fixture")
     {html, effects} = click(view, "delete-agent", target.target)
     assert effects == []
     assert html =~ "Agent management was refused."

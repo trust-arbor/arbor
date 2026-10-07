@@ -300,3 +300,7 @@ malformed value. Prove recovery with independently retained signed checkpoints
 and actual predecessor receipts, plus changed-evidence rejection. Do not copy
 one owner's normalization into another whose current schema already includes
 the field (found 2026-10-06 while backporting Workflow input taint into Main).
+
+<!-- applied-learning: durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity -->
+<a id="applied-learning-durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity"></a>
+**Durable security fences must align encoding, locking, and bootstrap with declared capacity.** A 100,000-entry revocation ledger failed on entry 257 because its generic canonical encoder capped object keys; per-namespace locks also raced on one shared whole-map file, and lazy initialization treated a missing fence as pristine. Choose an encoding whose structural limits cover the persisted schema, lock by canonical backing-artifact identity across the full read/modify/publish transaction, and preserve independent initialization evidence so loss cannot silently reset history. Regress the real capacity boundary, concurrent writers, and loss plus restart (found 2026-10-07 while closing SSEC-010 rollback replay).

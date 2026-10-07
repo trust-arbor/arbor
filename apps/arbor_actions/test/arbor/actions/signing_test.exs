@@ -17,7 +17,7 @@ defmodule Arbor.Actions.SigningTest do
     agent_id = identity.agent_id
 
     # Register identity so Verifier can look up the public key
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
 
     # A read target the auth chain will actually accept. Two layers must pass:
     # (1) capability matching — since the C8 fix (2026-06-09) a concrete cap grants
@@ -30,7 +30,7 @@ defmodule Arbor.Actions.SigningTest do
     read_path = Path.join(read_dir, "arbor_signing_test_nonexistent_file")
 
     {:ok, _cap} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: agent_id,
         resource: "arbor://fs/read#{read_dir}/**"
       )
@@ -39,7 +39,7 @@ defmodule Arbor.Actions.SigningTest do
       # Clean up capabilities for this agent
       case Arbor.Security.list_capabilities(agent_id) do
         {:ok, caps} ->
-          Enum.each(caps, fn cap -> Arbor.Security.revoke(cap.id) end)
+          Enum.each(caps, fn cap -> Arbor.Security.revoke_fixture(cap.id) end)
 
         _ ->
           :ok
@@ -191,7 +191,7 @@ defmodule Arbor.Actions.SigningTest do
          } do
       action = Arbor.Actions.TestFixtures.BoundNestedInnerAction
       resource = Arbor.Actions.canonical_uri_for(action, %{})
-      {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      {:ok, _capability} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
 
       {:ok, signed} =
         SignedRequest.sign("arbor://not-the-action-resource", agent_id, identity.private_key)
@@ -217,7 +217,7 @@ defmodule Arbor.Actions.SigningTest do
          %{agent_id: agent_id} do
       action = Arbor.Actions.TestFixtures.BoundNestedInnerAction
       resource = Arbor.Actions.canonical_uri_for(action, %{})
-      {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      {:ok, _capability} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
 
       forged_request = %{
         "principal_id" => agent_id,
@@ -351,7 +351,7 @@ defmodule Arbor.Actions.SigningTest do
     test "security regression: public agent call cannot evaluate an absolute pattern without a base",
          %{agent_id: agent_id} do
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read"
         )
@@ -369,7 +369,7 @@ defmodule Arbor.Actions.SigningTest do
 
     test "public agent call preserves workspace-relative glob behavior", %{agent_id: agent_id} do
       {:ok, _cap} =
-        Arbor.Security.grant(
+        Arbor.Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read"
         )

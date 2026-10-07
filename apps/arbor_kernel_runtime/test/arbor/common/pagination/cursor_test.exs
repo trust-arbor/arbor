@@ -125,8 +125,10 @@ defmodule Arbor.Common.Pagination.CursorTest do
       assert Cursor.filter_records(records, nil, :desc, opts) == records
     end
 
-    test "invalid cursor returns all records", %{records: records, opts: opts} do
-      assert Cursor.filter_records(records, "invalid", :desc, opts) == records
+    @tag :security_regression
+    test "security regression: invalid cursor fails closed", %{records: records, opts: opts} do
+      assert Cursor.filter_records(records, "invalid", :desc, opts) == []
+      assert Cursor.filter_records(records, "123:", :desc, opts) == []
     end
 
     test "filters desc from middle cursor", %{records: records, opts: opts} do
@@ -163,8 +165,13 @@ defmodule Arbor.Common.Pagination.CursorTest do
       assert Cursor.filter_records_datetime(records, nil, :desc, opts) == records
     end
 
-    test "invalid cursor returns all records", %{records: records, opts: opts} do
-      assert Cursor.filter_records_datetime(records, "invalid", :desc, opts) == records
+    @tag :security_regression
+    test "security regression: invalid datetime cursor fails closed", %{
+      records: records,
+      opts: opts
+    } do
+      assert Cursor.filter_records_datetime(records, "invalid", :desc, opts) == []
+      assert Cursor.filter_records_datetime(records, "123:", :desc, opts) == []
     end
 
     test "filters desc from cursor", %{records: records, opts: opts} do

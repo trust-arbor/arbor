@@ -337,44 +337,23 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @doc """
   Ensure the agent has security capabilities for all resolved tools.
 
-  Deprecated: with the trust-layer PolicyEnforcer enabled, capabilities are
-  granted JIT on first use. This function is retained for backward
-  compatibility when PolicyEnforcer is disabled.
+  Visibility is never an authority source. Missing capabilities are granted
+  only after the exact selected action presents a signed one-use request to the
+  Trust capability-grant owner.
   """
-  @spec ensure_tool_capabilities(String.t(), [String.t()]) :: :ok
-  def ensure_tool_capabilities(agent_id, tool_names) do
-    # Skip if trust-layer PolicyEnforcer is enabled — JIT grants handle this.
-    if policy_enforcer_enabled?() do
-      :ok
-    else
-      do_ensure_tool_capabilities(agent_id, tool_names)
-    end
-  end
+  @spec ensure_tool_capabilities(String.t(), [String.t()]) ::
+          {:error, :capability_mutation_unauthorized}
+  def ensure_tool_capabilities(_agent_id, _tool_names),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @spec ensure_tool_capabilities(String.t(), [String.t()], term()) ::
+          {:error, :capability_mutation_unauthorized}
+  def ensure_tool_capabilities(_agent_id, _tool_names, _actor_authority),
+    do: {:error, :capability_mutation_unauthorized}
 
   # ===========================================================================
   # Internals
   # ===========================================================================
-
-  defp do_ensure_tool_capabilities(agent_id, tool_names) do
-    # arbor_security is a hard dep — Arbor.Security.grant/1 is called directly.
-    tool_names
-    |> Enum.each(fn name ->
-      with {:ok, uri} <- Arbor.Actions.tool_name_to_canonical_uri(name) do
-        Arbor.Security.grant(
-          principal: agent_id,
-          resource: uri,
-          constraints: %{},
-          metadata: %{source: :progressive_disclosure}
-        )
-      end
-    end)
-
-    :ok
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
 
   defp get_effective_mode(agent_id, resource_uri) do
     # arbor_trust is a hard dep — Arbor.Trust.effective_mode/3 is called directly.
@@ -383,15 +362,6 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     _ -> :allow
   catch
     :exit, _ -> :allow
-  end
-
-  defp policy_enforcer_enabled? do
-    # arbor_trust is a hard dep — Arbor.Trust.Config is called directly.
-    Arbor.Trust.Config.policy_enforcer_enabled?()
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
   end
 
   # Cap the total tool list to stay under model limits.

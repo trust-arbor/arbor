@@ -35,9 +35,28 @@ defmodule Mix.Tasks.Arbor.Helpers do
   alias Mix.Tasks.Arbor.LifecycleIdentity
 
   @node_base_name "arbor_dev"
-  @pid_file Path.expand("~/.arbor/arbor-dev.pid")
   @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
   @node_id_file Path.expand("~/.arbor/node_id")
+
+  @distribution_dir_name "distribution"
+  @distribution_cookie_file_name ".erlang.cookie"
+  @blocked_vm_flag_env ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS)
+  @dotenv_allowed_exact MapSet.new(~w(
+    ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    OPENAI_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+    XAI_API_KEY GROK_CODE_XAI_API_KEY ZAI_API_KEY ZAI_CODING_PLAN_API_KEY
+    OLLAMA_API_KEY OLLAMA_BASE_URL LM_STUDIO_BASE_URL
+    BRAVE_API_KEY BRAVE_SEARCH_API_KEY EXA_API_KEY TINYFISH_API_KEY LIMITLESS_API_KEY
+    CURSOR_API_KEY CURSOR_AUTH_TOKEN
+    DATABASE_URL DB_HOST DB_USER DB_PASS DB_SSL
+    DASHBOARD_HOST DASHBOARD_PORT DASHBOARD_USER DASHBOARD_PASS SECRET_KEY_BASE
+    OIDC_ALLOW_HTTP OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES
+    OIDC_DEVICE_FLOW OIDC_DEVICE_CLIENT_ID
+    SIGNAL_FROM SIGNAL_ACCOUNT SIGNAL_TO SIGNAL_CLI_PATH
+    SMTP_USER SMTP_PASS SMTP_HOST SMTP_PORT EMAIL_TO
+    UNIFIED_LLM_DEFAULT_MODEL UNIFIED_LLM_DEFAULT_PROVIDER
+  ))
+  @dotenv_allowed_prefixes ["ARBOR_", "CONTACT_"]
 
   # WireGuard interface names by platform
   @wg_interfaces_linux ["wg0", "wg1", "wg-arbor"]
@@ -45,12 +64,13 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   @doc """
   Loads .env file from the project root if it exists.
-  Only sets variables that aren't already in the environment
-  (env vars take precedence over .env).
-  """
-  def load_dotenv do
-    env_file = Path.join(File.cwd!(), ".env")
 
+  Only Arbor configuration plus explicitly supported provider, database, and
+  application runtime variables are admitted. Process-control variables such
+  as `PATH`, `HOME`, `MIX_ENV`, and Erlang VM flags are ignored. Existing
+  environment variables take precedence over `.env`.
+  """
+  def load_dotenv(env_file \\ Path.join(File.cwd!(), ".env")) do
     if File.exists?(env_file) do
       env_file
       |> File.read!()
@@ -72,7 +92,10 @@ defmodule Mix.Tasks.Arbor.Helpers do
       [key, value] ->
         key = String.trim(key)
         value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
-        unless System.get_env(key), do: System.put_env(key, value)
+
+        if dotenv_key_allowed?(key) and is_nil(System.get_env(key)) do
+          System.put_env(key, value)
+        end
 
       _ ->
         :ok
@@ -144,6 +167,95 @@ defmodule Mix.Tasks.Arbor.Helpers do
   end
 
   def log_file, do: @log_file
+
+  @doc false
+  def blocked_vm_flag_env, do: @blocked_vm_flag_env
+
+  @doc false
+  @spec dotenv_key_allowed?(term()) :: boolean()
+  def dotenv_key_allowed?(key) when is_binary(key) do
+    valid_name? = Regex.match?(~r/\A[A-Z][A-Z0-9_]*\z/, key)
+
+    valid_name? and
+      (MapSet.member?(@dotenv_allowed_exact, key) or
+         Enum.any?(@dotenv_allowed_prefixes, &String.starts_with?(key, &1)))
+  end
+
+  def dotenv_key_allowed?(_key), do: false
+
+  @doc false
+  def distribution_cookie_home(home \\ arbor_home()) do
+    Path.join(home, @distribution_dir_name)
+  end
+
+  @doc false
+  def distribution_cookie_file(home \\ arbor_home()) do
+    Path.join(distribution_cookie_home(home), @distribution_cookie_file_name)
+  end
+
+  @doc false
+  @spec prepare_distribution_cookie(String.t() | atom(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def prepare_distribution_cookie(cookie, home \\ arbor_home())
+
+  def prepare_distribution_cookie(cookie, home)
+      when (is_binary(cookie) or is_atom(cookie)) and is_binary(home) do
+    cookie = to_string(cookie)
+
+    if valid_distribution_cookie?(cookie) do
+      try do
+        ensure_runtime_dirs(home)
+        cookie_home = distribution_cookie_home(home)
+        ensure_private_dir!(cookie_home)
+        replace_private_file!(distribution_cookie_file(home), cookie <> "\n")
+        {:ok, cookie_home}
+      rescue
+        error -> {:error, {:distribution_cookie_write_failed, Exception.message(error)}}
+      end
+    else
+      {:error, :invalid_distribution_cookie}
+    end
+  end
+
+  def prepare_distribution_cookie(_cookie, _home), do: {:error, :invalid_distribution_cookie}
+
+  @doc false
+  def distribution_bind_mode(host) when is_binary(host) do
+    normalized = host |> String.trim() |> String.downcase()
+
+    cond do
+      normalized == "localhost" -> "loopback_v4"
+      normalized in ["::1", "[::1]"] -> "loopback_v6"
+      ipv4_loopback?(normalized) -> "loopback_v4"
+      true -> "default"
+    end
+  end
+
+  def distribution_bind_mode(_host), do: "default"
+
+  defp ipv4_loopback?(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, {127, _, _, _}} -> true
+      _ -> false
+    end
+  end
+
+  @doc false
+  def runtime_bootstrap_file(project_dir \\ File.cwd!()) do
+    Path.join(project_dir, "bin/arbor-runtime-home-bootstrap.exs") |> Path.expand()
+  end
+
+  @doc false
+  def elixir_executable(name) when name in ["elixir", "iex", "mix"] do
+    elixir_lib = :code.lib_dir(:elixir) |> to_string() |> Path.expand()
+    elixir_root = elixir_lib |> Path.dirname() |> Path.dirname()
+    Path.join([elixir_root, "bin", name])
+  end
+
+  @doc false
+  def erlang_bin_dir do
+    :code.root_dir() |> to_string() |> Path.join("bin")
+  end
 
   # ─── Persisted managed-node identity ───────────────────────────────────
   #
@@ -428,15 +540,58 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   On a fresh node (e.g. a brand-new Proxmox host) `~/.arbor/logs` doesn't exist
   yet, so the background launch's `> #{@log_file}` shell redirect fails with
-  "cannot create … : Directory nonexistent". Create both parents up front;
-  `mkdir -p` semantics make this idempotent. (`Path.dirname(@log_file)` also
-  creates `~/.arbor`, covering the pid file, but we ensure both explicitly.)
+  "cannot create … : Directory nonexistent". Create both private directories
+  up front; `mkdir -p` semantics make this idempotent.
   """
-  @spec ensure_runtime_dirs() :: :ok
-  def ensure_runtime_dirs do
-    File.mkdir_p!(Path.dirname(@log_file))
-    File.mkdir_p!(Path.dirname(@pid_file))
+  @spec ensure_runtime_dirs(String.t()) :: :ok
+  def ensure_runtime_dirs(home \\ arbor_home()) do
+    logs_dir = Path.join(home, "logs")
+    ensure_private_dir!(home)
+    ensure_private_dir!(logs_dir)
     :ok
+  end
+
+  defp ensure_private_dir!(path) do
+    File.mkdir_p!(path)
+    File.chmod!(path, 0o700)
+  end
+
+  defp valid_distribution_cookie?(cookie) do
+    byte_size(cookie) in 1..255 and
+      cookie
+      |> :binary.bin_to_list()
+      |> Enum.all?(&(&1 in 33..126))
+  end
+
+  # Publish secret bytes only after the fresh staging inode is mode 0600.
+  # The containing directory is already mode 0700, and rename replaces an old
+  # cookie atomically so a concurrent launcher sees either complete value.
+  defp replace_private_file!(path, contents) do
+    suffix = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+    staging = Path.join(Path.dirname(path), ".#{Path.basename(path)}.tmp-#{suffix}")
+
+    try do
+      case File.open(staging, [:write, :binary, :exclusive]) do
+        {:ok, io} ->
+          try do
+            File.chmod!(staging, 0o600)
+            :ok = IO.binwrite(io, contents)
+            :ok = :file.sync(io)
+          after
+            File.close(io)
+          end
+
+          File.rename!(staging, path)
+          File.chmod!(path, 0o600)
+
+        {:error, reason} ->
+          raise File.Error, reason: reason, action: "open private staging file", path: staging
+      end
+    rescue
+      error ->
+        File.rm(staging)
+        reraise error, __STACKTRACE__
+    end
   end
 
   @doc """
@@ -483,6 +638,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
       ensure_epmd()
       suffix = :rand.uniform(99_999)
       host = node_hostname()
+      configure_distribution_bind(host)
       # Safe: suffix is bounded integer from :rand, host is detected IP or env var
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"arbor_mix_#{suffix}@#{host}"
@@ -491,6 +647,19 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
 
     :ok
+  end
+
+  defp configure_distribution_bind(host) do
+    case distribution_bind_mode(host) do
+      "loopback_v4" ->
+        Application.put_env(:kernel, :inet_dist_use_interface, {127, 0, 0, 1})
+
+      "loopback_v6" ->
+        Application.put_env(:kernel, :inet_dist_use_interface, {0, 0, 0, 0, 0, 0, 0, 1})
+
+      "default" ->
+        :ok
+    end
   end
 
   defp ensure_epmd do

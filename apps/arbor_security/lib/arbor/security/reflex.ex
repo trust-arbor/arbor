@@ -58,6 +58,7 @@ defmodule Arbor.Security.Reflex do
   """
 
   alias Arbor.Contracts.Security.Reflex, as: ReflexContract
+  alias Arbor.Common.SafePath
   alias Arbor.Security.Reflex.Registry
 
   @type check_context :: %{
@@ -117,8 +118,42 @@ defmodule Arbor.Security.Reflex do
   Useful for testing individual reflexes.
   """
   @spec matches?(ReflexContract.t(), check_context()) :: boolean()
+  def matches?(%ReflexContract{trigger: {:path, glob}} = reflex, %{path: path} = context)
+      when is_binary(glob) and is_binary(path) do
+    globs = [glob, normalize_reflex_path(glob)] |> Enum.uniq()
+    paths = [path, normalize_reflex_path(path)] |> Enum.uniq()
+
+    Enum.any?(globs, fn candidate_glob ->
+      candidate_reflex = %{reflex | trigger: {:path, candidate_glob}}
+
+      Enum.any?(paths, fn candidate_path ->
+        ReflexContract.matches?(candidate_reflex, Map.put(context, :path, candidate_path))
+      end)
+    end)
+  end
+
   def matches?(%ReflexContract{} = reflex, context) do
     ReflexContract.matches?(reflex, context)
+  end
+
+  defp normalize_reflex_path(path) do
+    home = System.user_home!()
+
+    expanded =
+      path
+      |> String.replace_prefix("$HOME", home)
+      |> Path.expand()
+
+    if String.contains?(expanded, ["*", "?"]) do
+      expanded
+    else
+      case SafePath.resolve_real(expanded) do
+        {:ok, real} -> real
+        _ -> expanded
+      end
+    end
+  rescue
+    _ -> path
   end
 
   @doc """
@@ -133,17 +168,10 @@ defmodule Arbor.Security.Reflex do
       reflex = Reflex.pattern("my_check", ~r/dangerous/, :block)
       :ok = Arbor.Security.Reflex.register(:my_check, reflex)
   """
-  @spec register(atom(), ReflexContract.t(), keyword()) :: :ok | {:error, :already_exists}
-  def register(id, %ReflexContract{} = reflex, opts \\ []) do
-    case Registry.register(id, reflex, opts) do
-      :ok ->
-        emit_reflex_registered(id, reflex)
-        :ok
-
-      error ->
-        error
-    end
-  end
+  @spec register(atom(), ReflexContract.t(), keyword()) ::
+          {:error, :reflex_mutation_unauthorized}
+  def register(_id, %ReflexContract{}, _opts \\ []),
+    do: {:error, :reflex_mutation_unauthorized}
 
   @doc """
   Unregister a reflex by ID.
@@ -154,17 +182,8 @@ defmodule Arbor.Security.Reflex do
 
       :ok = Arbor.Security.Reflex.unregister(:my_check)
   """
-  @spec unregister(atom()) :: :ok | {:error, :not_found}
-  def unregister(id) do
-    case Registry.unregister(id) do
-      :ok ->
-        emit_reflex_unregistered(id)
-        :ok
-
-      error ->
-        error
-    end
-  end
+  @spec unregister(atom()) :: {:error, :reflex_mutation_unauthorized}
+  def unregister(_id), do: {:error, :reflex_mutation_unauthorized}
 
   @doc """
   List all registered reflexes.
@@ -190,23 +209,9 @@ defmodule Arbor.Security.Reflex do
   @doc """
   Enable or disable a reflex.
   """
-  @spec set_enabled(atom(), boolean()) :: :ok | {:error, :not_found}
-  def set_enabled(id, enabled) when is_boolean(enabled) do
-    case Registry.get(id) do
-      {:ok, reflex} ->
-        updated =
-          if enabled do
-            ReflexContract.enable(reflex)
-          else
-            ReflexContract.disable(reflex)
-          end
-
-        Registry.register(id, updated, force: true)
-
-      error ->
-        error
-    end
-  end
+  @spec set_enabled(atom(), boolean()) :: {:error, :reflex_mutation_unauthorized}
+  def set_enabled(_id, enabled) when is_boolean(enabled),
+    do: {:error, :reflex_mutation_unauthorized}
 
   @doc """
   Get reflex statistics.
@@ -269,19 +274,6 @@ defmodule Arbor.Security.Reflex do
   end
 
   # ── Telemetry Emissions ──
-
-  defp emit_reflex_registered(id, reflex) do
-    Arbor.Security.Telemetry.emit(:reflex_registered, %{
-      reflex_id: id,
-      reflex_name: reflex.name,
-      reflex_type: reflex.type,
-      response: reflex.response
-    })
-  end
-
-  defp emit_reflex_unregistered(id) do
-    Arbor.Security.Telemetry.emit(:reflex_unregistered, %{reflex_id: id})
-  end
 
   defp emit_reflex_logged(reflex, context) do
     Arbor.Security.Telemetry.emit(:reflex_logged, %{

@@ -5,6 +5,9 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
 
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.SigningAuthorityBroker
+  alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
 
   @supervisor Arbor.Security.Supervisor
@@ -71,6 +74,84 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
       assert is_pid(owned), "#{inspect(id)} is not a live supervisor child"
       assert Process.whereis(id) == owned
     end)
+
+    agent_id = SystemAuthority.agent_id()
+    public_key = SystemAuthority.public_key()
+
+    assert {:ok, ^public_key} = Registry.lookup(agent_id)
+    assert %{active_capabilities: active_capabilities} = CapabilityStore.stats()
+    assert is_integer(active_capabilities)
+    assert {:ok, %{"serving" => true}} = Arbor.Security.audit_journal_status()
+  end
+
+  test "security regression: direct SystemAuthority startup cannot deadlock or trust a squatted Registry name" do
+    real_registry = Process.whereis(Registry)
+    assert is_pid(real_registry)
+    assert Process.unregister(Registry)
+
+    test_pid = self()
+
+    squatter =
+      spawn(fn ->
+        true = Process.register(self(), Registry)
+        send(test_pid, {:identity_registry_squatter_ready, self()})
+        registry_squatter_loop(test_pid)
+      end)
+
+    assert_receive {:identity_registry_squatter_ready, ^squatter}
+    assert Process.whereis(Registry) == squatter
+
+    try do
+      assert :ok = Supervisor.terminate_child(@supervisor, SystemAuthority)
+      assert :ok = Supervisor.delete_child(@supervisor, SystemAuthority)
+
+      start_task =
+        Task.async(fn ->
+          Supervisor.start_child(@supervisor, {SystemAuthority, []})
+        end)
+
+      start_result =
+        case Task.yield(start_task, 2_000) do
+          {:ok, result} ->
+            result
+
+          nil ->
+            Task.shutdown(start_task, :brutal_kill)
+            flunk("SystemAuthority startup blocked its own supervisor")
+        end
+
+      assert {:ok, authority_pid} = start_result
+      assert Process.whereis(SystemAuthority) == authority_pid
+
+      agent_id = SystemAuthority.agent_id()
+      assert {:ok, public_key} = Registry.lookup(agent_id)
+      assert public_key == SystemAuthority.public_key()
+
+      # Startup-token lookup and registration must follow Registry's
+      # supervisor-owned directory pid. The process holding only the registered
+      # name must receive neither request nor token.
+      refute_received {:identity_registry_squatter_called, _message}
+    after
+      if Process.whereis(Registry) == squatter do
+        Process.unregister(Registry)
+      end
+
+      if Process.alive?(squatter), do: Process.exit(squatter, :kill)
+      if Process.alive?(real_registry), do: Process.register(real_registry, Registry)
+
+      case Supervisor.terminate_child(@supervisor, SystemAuthority) do
+        :ok -> :ok
+        {:error, :not_found} -> :ok
+      end
+
+      case Supervisor.delete_child(@supervisor, SystemAuthority) do
+        :ok -> :ok
+        {:error, :not_found} -> :ok
+      end
+
+      assert :ok = TestBootstrap.restore_supervised_tree!()
+      assert %{authority_count: 0} = SigningAuthorityBroker.debug_state()
+    end
   end
 
   test "security regression: deleted-child recovery preserves reverse rest_for_one listing order" do
@@ -160,5 +241,13 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
       {^id, pid, _type, _modules} when is_pid(pid) -> pid
       _other -> nil
     end)
+  end
+
+  defp registry_squatter_loop(test_pid) do
+    receive do
+      message ->
+        send(test_pid, {:identity_registry_squatter_called, message})
+        registry_squatter_loop(test_pid)
+    end
   end
 end

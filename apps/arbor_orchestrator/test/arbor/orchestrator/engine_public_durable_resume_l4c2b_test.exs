@@ -171,10 +171,10 @@ defmodule Arbor.Orchestrator.EnginePublicDurableResumeL4C2bTest do
       end
     end)
 
-    saved_handlers = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    :ok = Registry.register("l4c2b_side", SideProbe)
-    on_exit(fn -> Registry.restore_custom_handlers(saved_handlers) end)
+    saved_handlers = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    :ok = Registry.register_fixture("l4c2b_side", SideProbe)
+    on_exit(fn -> Registry.restore_fixtures(saved_handlers) end)
 
     :ok
   end

@@ -50,6 +50,8 @@ defmodule Arbor.Security.TestBootstrap do
 
     @supervisor Arbor.Security.Supervisor
     @restart_attempts 256
+    @foreign_stop_timeout 100
+    @foreign_kill_timeout 1_000
 
     # Forward rest_for_one startup order (capabilities first). On this OTP,
     # Supervisor.which_children/1 lists the same children in reverse, so order
@@ -59,23 +61,31 @@ defmodule Arbor.Security.TestBootstrap do
     # UriRegistry is omitted on purpose: this list is the prior test_helper
     # topology, not a copy of the production Application child list.
     @canonical_start_ids [
+      Arbor.Security.MasterKeyAccessOwner,
       :arbor_security_capabilities,
       :arbor_security_identities,
       :arbor_security_signing_keys,
       :arbor_security_issuers,
+      Arbor.Security.SigningKeyStore.Owner,
+      Arbor.Security.OIDC.TokenCacheOwner,
       Arbor.Security.Identity.Registry,
       Arbor.Security.IssuerRegistry,
       Arbor.Security.Identity.NonceCache,
+      Arbor.Security.SessionRegistry,
       Arbor.Security.Identity.ReplayPeers,
       Arbor.Security.SystemAuthority,
       Arbor.Security.SigningAuthorityStateOwner,
       Arbor.Security.SigningAuthorityBroker,
+      Arbor.Security.ChannelAuthorityBroker,
       Arbor.Security.Constraint.RateLimiter,
       Arbor.Security.AuditJournalOwner,
       Arbor.Security.CapabilityStore,
+      Arbor.Security.InvocationReceiptBroker,
       Arbor.Security.Reflex.Registry,
       Arbor.Security.DeliveryReceiptBroker,
+      Arbor.Security.ApprovalReceiptBroker,
       Arbor.Security.NativeNoticeBroker,
+      Arbor.Security.OIDC.JwksCache,
       Arbor.Security.TerminalLogin
     ]
 
@@ -119,7 +129,7 @@ defmodule Arbor.Security.TestBootstrap do
       _ = Application.ensure_all_started(:arbor_security)
       # Classify/order proofs use @canonical_start_ids; rebuild uses generated
       # specs. Assert they stay in lockstep even on the :ok path.
-      _ = canonical_child_specs(make_ref())
+      _ = canonical_startup_plan(make_ref())
 
       if Process.whereis(@supervisor) do
         reconcile_tree!()
@@ -191,6 +201,7 @@ defmodule Arbor.Security.TestBootstrap do
 
     defp restart_terminated_children! do
       entries = child_entries()
+      startup_context = existing_startup_context!()
       # Shared-token pair: see @signing_authority_pair. The running half is
       # proven owned; the terminated half restarts from the existing spec.
       pair_down? = Enum.any?(@signing_authority_pair, &(child_pid_for(entries, &1) == :undefined))
@@ -199,9 +210,11 @@ defmodule Arbor.Security.TestBootstrap do
         cond do
           id in @signing_authority_pair and pair_down? ->
             restart_present_child!(id)
+            complete_started_child!(id, startup_context)
 
           child_pid_for(entries, id) == :undefined ->
             restart_present_child!(id)
+            complete_started_child!(id, startup_context)
 
           true ->
             :ok
@@ -246,14 +259,17 @@ defmodule Arbor.Security.TestBootstrap do
     defp start_canonical_children! do
       # One token for both SigningAuthority halves, matching Application.start/2.
       token = make_ref()
+      plan = canonical_startup_plan(token)
 
-      Enum.each(canonical_child_specs(token), fn spec ->
+      Enum.each(plan.specs, fn spec ->
         case Supervisor.start_child(@supervisor, spec) do
           {:ok, _pid} ->
             prove_owned!(spec.id)
+            complete_started_child!(spec.id, plan)
 
           {:ok, _pid, _info} ->
             prove_owned!(spec.id)
+            complete_started_child!(spec.id, plan)
 
           {:error, {:already_started, pid}} ->
             raise "TestBootstrap: #{inspect(spec.id)} name occupied by #{inspect(pid)} " <>
@@ -269,7 +285,9 @@ defmodule Arbor.Security.TestBootstrap do
       end)
     end
 
-    defp canonical_child_specs(token) do
+    defp canonical_startup_plan(token) do
+      system_authority_registration_token = make_ref()
+
       snapshot =
         case Arbor.Security.Config.startup_store_snapshot(:test_bootstrap) do
           {:ok, snapshot} ->
@@ -279,46 +297,102 @@ defmodule Arbor.Security.TestBootstrap do
             raise "TestBootstrap: authority store snapshot failed: #{inspect(reason)}"
         end
 
+      role_specs =
+        case Arbor.Security.Config.signing_key_owner_roles() do
+          {:ok, role_specs} -> role_specs
+          {:error, reason} -> raise "TestBootstrap: signing key roles failed: #{inspect(reason)}"
+        end
+
+      store_tokens =
+        Map.new(
+          [
+            :arbor_security_capabilities,
+            :arbor_security_identities,
+            :arbor_security_signing_keys,
+            :arbor_security_issuers
+          ],
+          &{&1, make_ref()}
+        )
+
       store_specs =
         for {name, namespace, extra_opts} <- [
               {:arbor_security_capabilities, "capabilities",
-               [hydration_limit: snapshot.capabilities_hydration_limit]},
-              {:arbor_security_identities, "identities", []},
-              {:arbor_security_signing_keys, "signing_keys", []},
-              {:arbor_security_issuers, "issuers", []}
+               [
+                 hydration_limit: snapshot.capabilities_hydration_limit,
+                 mutation_owners: [Arbor.Security.CapabilityStore]
+               ]},
+              {:arbor_security_identities, "identities",
+               [mutation_owners: [Arbor.Security.Identity.Registry]]},
+              {:arbor_security_signing_keys, "signing_keys",
+               [
+                 mutation_owners: [
+                   Arbor.Security.SigningKeyStore.Owner
+                 ]
+               ]},
+              {:arbor_security_issuers, "issuers",
+               [mutation_owners: [Arbor.Security.IssuerRegistry]]}
             ] do
           store_opts =
             Arbor.Security.Config.authority_store_start_opts(
               name,
               namespace,
               snapshot,
-              extra_opts
+              Keyword.put(
+                extra_opts,
+                :backend_opts,
+                record_authentication_token: Map.fetch!(store_tokens, name)
+              )
             )
+            |> Keyword.put(:defer_hydration, true)
 
           Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name)
         end
 
       core_specs =
         [
-          {Arbor.Security.Identity.Registry, []},
-          {Arbor.Security.IssuerRegistry, []},
+          {Arbor.Security.SigningKeyStore.Owner, role_specs: role_specs},
+          {Arbor.Security.OIDC.TokenCacheOwner, []},
+          {Arbor.Security.Identity.Registry,
+           system_authority_registration_token: system_authority_registration_token,
+           defer_initialization: true,
+           registration_role_specs:
+             Map.take(role_specs, [
+               :system_authority,
+               :scheduler_owner,
+               :trust_grant_owner
+             ])},
+          {Arbor.Security.IssuerRegistry, defer_initialization: true},
           {Arbor.Security.Identity.NonceCache, []},
+          {Arbor.Security.SessionRegistry, []},
           {Arbor.Security.Identity.ReplayPeers, []},
-          {Arbor.Security.SystemAuthority, []},
+          {Arbor.Security.SystemAuthority,
+           system_authority_registration_token: system_authority_registration_token,
+           defer_initialization: true},
           {Arbor.Security.SigningAuthorityStateOwner, broker_token: token},
-          {Arbor.Security.SigningAuthorityBroker, state_owner_token: token},
+          {Arbor.Security.SigningAuthorityBroker,
+           state_owner_token: token, defer_initialization: true},
+          {Arbor.Security.ChannelAuthorityBroker, []},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.AuditJournalOwner,
            Arbor.Security.Config.audit_journal_start_opts(snapshot)},
           {Arbor.Security.CapabilityStore, []},
+          {Arbor.Security.InvocationReceiptBroker, []},
           {Arbor.Security.Reflex.Registry, []},
           {Arbor.Security.DeliveryReceiptBroker, []},
+          {Arbor.Security.ApprovalReceiptBroker, []},
           {Arbor.Security.NativeNoticeBroker, []},
+          {Arbor.Security.OIDC.JwksCache, []},
           {Arbor.Security.TerminalLogin, []}
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))
 
-      specs = store_specs ++ core_specs
+      master_key_owner_spec =
+        Supervisor.child_spec(
+          {Arbor.Security.MasterKeyAccessOwner, store_tokens: store_tokens},
+          []
+        )
+
+      specs = [master_key_owner_spec | store_specs] ++ core_specs
       spec_ids = Enum.map(specs, & &1.id)
 
       unless spec_ids == @canonical_start_ids do
@@ -326,7 +400,170 @@ defmodule Arbor.Security.TestBootstrap do
                 "ids=#{inspect(@canonical_start_ids)} spec_ids=#{inspect(spec_ids)}"
       end
 
-      specs
+      %{
+        specs: specs,
+        security_supervisor_pid: security_supervisor_pid!(),
+        system_authority_registration_token: system_authority_registration_token,
+        signing_authority_owner_token: token,
+        startup_timeouts: %{
+          default: require_startup_timeout!(Arbor.Security.Config.startup_timeout_ms()),
+          capabilities:
+            require_startup_timeout!(
+              Arbor.Security.Config.startup_timeout_ms(snapshot.capabilities_hydration_limit)
+            )
+        }
+      }
+    end
+
+    defp complete_started_child!(name, startup_context)
+         when name in [
+                :arbor_security_capabilities,
+                :arbor_security_identities,
+                :arbor_security_signing_keys,
+                :arbor_security_issuers
+              ] do
+      timeout =
+        if name == :arbor_security_capabilities,
+          do: startup_context.startup_timeouts.capabilities,
+          else: startup_context.startup_timeouts.default
+
+      require_startup_ready!(
+        name,
+        Arbor.Security.AuthorityStore.complete_startup(
+          startup_context.security_supervisor_pid,
+          name,
+          timeout
+        )
+      )
+    end
+
+    defp complete_started_child!(Arbor.Security.Identity.Registry, startup_context) do
+      require_startup_ready!(
+        Arbor.Security.Identity.Registry,
+        Arbor.Security.Identity.Registry.complete_startup(
+          startup_context.security_supervisor_pid,
+          startup_context.system_authority_registration_token,
+          startup_context.startup_timeouts.default
+        )
+      )
+    end
+
+    defp complete_started_child!(Arbor.Security.IssuerRegistry, startup_context) do
+      require_startup_ready!(
+        Arbor.Security.IssuerRegistry,
+        Arbor.Security.IssuerRegistry.complete_startup(
+          startup_context.security_supervisor_pid,
+          startup_context.startup_timeouts.default
+        )
+      )
+    end
+
+    defp complete_started_child!(Arbor.Security.SystemAuthority, startup_context) do
+      require_startup_ready!(
+        Arbor.Security.SystemAuthority,
+        Arbor.Security.SystemAuthority.complete_startup(
+          startup_context.security_supervisor_pid,
+          startup_context.system_authority_registration_token,
+          startup_context.startup_timeouts.default
+        )
+      )
+    end
+
+    defp complete_started_child!(Arbor.Security.SigningAuthorityBroker, startup_context) do
+      require_startup_ready!(
+        Arbor.Security.SigningAuthorityBroker,
+        Arbor.Security.SigningAuthorityBroker.complete_startup(
+          startup_context.security_supervisor_pid,
+          startup_context.signing_authority_owner_token,
+          startup_context.startup_timeouts.default
+        )
+      )
+    end
+
+    defp complete_started_child!(Arbor.Security.CapabilityStore, startup_context) do
+      require_startup_ready!(
+        Arbor.Security.CapabilityStore,
+        Arbor.Security.CapabilityStore.complete_startup(
+          startup_context.security_supervisor_pid,
+          startup_context.startup_timeouts.default
+        )
+      )
+    end
+
+    defp complete_started_child!(_name, _startup_context), do: :ok
+
+    defp require_startup_ready!(_name, :ok), do: :ok
+
+    # In a running test application the normal continuation may win the race
+    # with this explicit barrier. SystemAuthority reports that settled state as
+    # `:already_initialized`; prove the public identity is live before accepting
+    # it as ready.
+    defp require_startup_ready!(
+           Arbor.Security.SystemAuthority,
+           {:error, :already_initialized}
+         ) do
+      agent_id = Arbor.Security.SystemAuthority.agent_id()
+      public_key = Arbor.Security.SystemAuthority.public_key()
+
+      case Arbor.Security.Identity.Registry.lookup(agent_id) do
+        {:ok, ^public_key} ->
+          :ok
+
+        other ->
+          raise "TestBootstrap: initialized SystemAuthority is not registered: #{inspect(other)}"
+      end
+    end
+
+    defp require_startup_ready!(name, {:error, reason}) do
+      raise "TestBootstrap: complete startup for #{inspect(name)} failed: #{inspect(reason)}"
+    end
+
+    defp require_startup_timeout!({:ok, timeout}), do: timeout
+
+    defp require_startup_timeout!({:error, reason}) do
+      raise "TestBootstrap: startup timeout configuration failed: #{inspect(reason)}"
+    end
+
+    defp existing_startup_context! do
+      %{
+        security_supervisor_pid: security_supervisor_pid!(),
+        system_authority_registration_token:
+          child_start_opt!(
+            Arbor.Security.Identity.Registry,
+            :system_authority_registration_token
+          ),
+        signing_authority_owner_token:
+          child_start_opt!(Arbor.Security.SigningAuthorityBroker, :state_owner_token),
+        startup_timeouts: %{
+          default: require_startup_timeout!(Arbor.Security.Config.startup_timeout_ms()),
+          capabilities:
+            require_startup_timeout!(
+              Arbor.Security.Config.startup_timeout_ms(
+                child_start_opt!(:arbor_security_capabilities, :hydration_limit)
+              )
+            )
+        }
+      }
+    end
+
+    defp child_start_opt!(child_id, key) do
+      with {:ok, %{start: {_module, :start_link, [opts]}}} <-
+             :supervisor.get_childspec(@supervisor, child_id),
+           true <- is_list(opts),
+           {:ok, value} <- Keyword.fetch(opts, key) do
+        value
+      else
+        _other ->
+          raise "TestBootstrap: startup option #{inspect(key)} unavailable for " <>
+                  inspect(child_id)
+      end
+    end
+
+    defp security_supervisor_pid! do
+      case Process.whereis(@supervisor) do
+        pid when is_pid(pid) -> pid
+        nil -> raise "TestBootstrap: Security supervisor is unavailable"
+      end
     end
 
     defp restart_present_child!(child_id, attempt \\ 0)
@@ -395,19 +632,24 @@ defmodule Arbor.Security.TestBootstrap do
     end
 
     defp stop_foreign_pid(pid) do
+      monitor = Process.monitor(pid)
+
       try do
-        GenServer.stop(pid)
-        :ok
+        GenServer.stop(pid, :normal, @foreign_stop_timeout)
       catch
-        :exit, reason ->
-          # Swallow an exit only once the target is confirmed dead. A live pid
-          # after stop is an invariant violation; fail closed.
-          if Process.alive?(pid) do
-            raise "TestBootstrap: foreign pid #{inspect(pid)} still alive after " <>
-                    "stop exit #{inspect(reason)}"
-          else
-            :ok
-          end
+        :exit, _reason -> :ok
+      end
+
+      if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^pid, _reason} ->
+          :ok
+      after
+        @foreign_kill_timeout ->
+          Process.demonitor(monitor, [:flush])
+
+          raise "TestBootstrap: foreign pid #{inspect(pid)} survived bounded cleanup"
       end
     end
 

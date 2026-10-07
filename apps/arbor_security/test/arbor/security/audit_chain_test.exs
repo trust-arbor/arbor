@@ -22,12 +22,29 @@ defmodule Arbor.Security.AuditChainTest do
     {:ok, parent} = Identity.generate(name: "human-parent")
     {:ok, agent} = Identity.generate(name: "child-agent")
 
-    :ok = Registry.register(parent)
-    :ok = Registry.register(agent)
+    :ok = Registry.register_fixture(parent)
+    :ok = Registry.register_fixture(agent)
 
-    on_exit(fn -> restore_env(:event_log_adapter, previous) end)
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        parent.agent_id,
+        parent.private_key,
+        purpose: :audit_chain_test
+      )
 
-    {:ok, parent: parent, agent: agent}
+    {:ok, actor_authority} =
+      Security.open_ephemeral_signing_authority(proof, parent.private_key)
+
+    on_exit(fn ->
+      Security.close_signing_authority(actor_authority)
+      Security.revoke_all_fixture(parent.agent_id)
+      Security.revoke_all_fixture(agent.agent_id)
+      Security.deregister_identity_fixture(agent.agent_id)
+      Security.deregister_identity_fixture(parent.agent_id)
+      restore_env(:event_log_adapter, previous)
+    end)
+
+    {:ok, parent: parent, agent: agent, actor_authority: actor_authority}
   end
 
   # ======================================================================
@@ -35,18 +52,18 @@ defmodule Arbor.Security.AuditChainTest do
   # ======================================================================
 
   describe "delegation chain verification" do
-    test "authorization succeeds with valid delegation chain", %{parent: parent, agent: agent} do
+    test "authorization succeeds with valid delegation chain", ctx do
       # Grant parent a capability and delegate to agent
       {:ok, _cap} =
-        Security.grant(
-          principal: parent.agent_id,
+        Security.grant_fixture(
+          principal: ctx.parent.agent_id,
           resource: "arbor://audit/chain/valid",
           delegation_depth: 3
         )
 
       {:ok, [delegated]} =
-        Security.delegate_to_agent(parent.agent_id, agent.agent_id,
-          delegator_private_key: parent.private_key,
+        Security.delegate_to_agent(ctx.parent.agent_id, ctx.agent.agent_id,
+          actor_authority: ctx.actor_authority,
           resources: ["arbor://audit/chain/valid"]
         )
 
@@ -54,15 +71,16 @@ defmodule Arbor.Security.AuditChainTest do
 
       # Agent should be authorized (chain verification passes)
       assert {:ok, :authorized} =
-               Security.authorize(agent.agent_id, "arbor://audit/chain/valid")
+               Security.authorize(ctx.agent.agent_id, "arbor://audit/chain/valid")
     end
 
     test "authorization fails with broken delegation chain (tampered signature)", %{
       parent: parent,
-      agent: agent
+      agent: agent,
+      actor_authority: actor_authority
     } do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: parent.agent_id,
           resource: "arbor://audit/chain/tampered",
           delegation_depth: 3
@@ -70,18 +88,18 @@ defmodule Arbor.Security.AuditChainTest do
 
       {:ok, [delegated]} =
         Security.delegate_to_agent(parent.agent_id, agent.agent_id,
-          delegator_private_key: parent.private_key,
+          actor_authority: actor_authority,
           resources: ["arbor://audit/chain/tampered"]
         )
 
       # Revoke the valid delegated cap, then store a tampered version
-      :ok = Security.revoke(delegated.id)
+      :ok = Security.revoke_fixture(delegated.id)
 
       [record] = delegated.delegation_chain
       tampered_record = %{record | delegator_signature: :crypto.strong_rand_bytes(64)}
       tampered_cap = %{delegated | delegation_chain: [tampered_record]}
 
-      {:ok, :stored} = Arbor.Security.CapabilityStore.put(tampered_cap)
+      {:ok, :stored} = Arbor.Security.CapabilityStore.put_fixture(tampered_cap)
 
       # Authorization fails — the store filters out caps with broken chains
       # during find_authorizing (defense-in-depth: auth-level check would
@@ -92,11 +110,12 @@ defmodule Arbor.Security.AuditChainTest do
 
     test "verify_delegation_chain directly catches tampered signatures", %{
       parent: parent,
-      agent: agent
+      agent: agent,
+      actor_authority: actor_authority
     } do
       # Verify the Signer-level check directly (the auth path uses this)
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: parent.agent_id,
           resource: "arbor://audit/chain/direct-verify",
           delegation_depth: 3
@@ -104,7 +123,7 @@ defmodule Arbor.Security.AuditChainTest do
 
       {:ok, [delegated]} =
         Security.delegate_to_agent(parent.agent_id, agent.agent_id,
-          delegator_private_key: parent.private_key,
+          actor_authority: actor_authority,
           resources: ["arbor://audit/chain/direct-verify"]
         )
 
@@ -128,7 +147,7 @@ defmodule Arbor.Security.AuditChainTest do
 
     test "empty delegation chain passes verification", %{parent: parent} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: parent.agent_id,
           resource: "arbor://audit/chain/direct",
           delegation_depth: 3
@@ -139,9 +158,13 @@ defmodule Arbor.Security.AuditChainTest do
                Security.authorize(parent.agent_id, "arbor://audit/chain/direct")
     end
 
-    test "config toggle disables auth-level chain verification", %{parent: parent, agent: agent} do
+    test "config toggle disables auth-level chain verification", %{
+      parent: parent,
+      agent: agent,
+      actor_authority: actor_authority
+    } do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: parent.agent_id,
           resource: "arbor://audit/chain/toggle",
           delegation_depth: 3
@@ -149,7 +172,7 @@ defmodule Arbor.Security.AuditChainTest do
 
       {:ok, [_delegated]} =
         Security.delegate_to_agent(parent.agent_id, agent.agent_id,
-          delegator_private_key: parent.private_key,
+          actor_authority: actor_authority,
           resources: ["arbor://audit/chain/toggle"]
         )
 
@@ -189,7 +212,7 @@ defmodule Arbor.Security.AuditChainTest do
 
     test "trace_id propagates through authorization events", %{parent: parent} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: parent.agent_id,
           resource: "arbor://audit/trace/auth",
           delegation_depth: 3
@@ -217,7 +240,7 @@ defmodule Arbor.Security.AuditChainTest do
   # ======================================================================
 
   describe "signature persistence" do
-    test "verification event includes signature proof", %{parent: parent} do
+    test "verification event includes hashed signature proof", %{parent: parent} do
       # Create a signed request
       payload = "arbor://audit/sig/test"
       {:ok, signed} = SignedRequest.sign(payload, parent.agent_id, parent.private_key)
@@ -229,17 +252,19 @@ defmodule Arbor.Security.AuditChainTest do
 
       matching =
         Enum.find(events, fn e ->
-          e.data["agent_id"] == parent.agent_id and e.data["signature"] != nil
+          e.data["agent_id"] == parent.agent_id and e.data["signature_hash"] != nil
         end)
 
       assert matching != nil
-      assert is_binary(matching.data["signature"])
+      assert is_binary(matching.data["signature_hash"])
+      assert byte_size(matching.data["signature_hash"]) == 64
       assert is_binary(matching.data["payload_hash"])
-      assert is_binary(matching.data["nonce"])
+      assert is_binary(matching.data["nonce_hash"])
+      assert byte_size(matching.data["nonce_hash"]) == 64
       assert is_binary(matching.data["signed_at"])
     end
 
-    test "failed verification event includes nonce metadata", %{parent: parent} do
+    test "failed verification event includes hashed nonce metadata", %{parent: parent} do
       # Create a signed request from parent but use agent's ID (will fail if IDs mismatch,
       # but let's create a request with wrong key to fail verification)
       payload = "arbor://audit/sig/fail"
@@ -253,11 +278,12 @@ defmodule Arbor.Security.AuditChainTest do
 
       matching =
         Enum.find(events, fn e ->
-          e.data["agent_id"] == parent.agent_id and e.data["nonce"] != nil
+          e.data["agent_id"] == parent.agent_id and e.data["nonce_hash"] != nil
         end)
 
       assert matching != nil
-      assert is_binary(matching.data["nonce"])
+      assert is_binary(matching.data["nonce_hash"])
+      assert byte_size(matching.data["nonce_hash"]) == 64
       assert is_binary(matching.data["signed_at"])
     end
   end

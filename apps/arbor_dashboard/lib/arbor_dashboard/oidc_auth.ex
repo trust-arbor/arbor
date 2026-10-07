@@ -22,7 +22,6 @@ defmodule Arbor.Dashboard.OidcAuth do
   import Plug.Conn
 
   alias Arbor.Dashboard.SessionAuth
-  alias Arbor.Security.OIDC.{AuthCodeFlow, Config, IdentityStore, TokenVerifier}
 
   require Logger
 
@@ -120,14 +119,16 @@ defmodule Arbor.Dashboard.OidcAuth do
         |> halt()
 
       provider ->
-        state = AuthCodeFlow.generate_state()
+        state = Arbor.Security.generate_oidc_state()
+        nonce = Arbor.Security.generate_oidc_nonce()
         redirect_uri = callback_uri(conn)
 
-        case AuthCodeFlow.build_authorize_url(provider, redirect_uri, state) do
+        case Arbor.Security.build_oidc_authorize_url(provider, redirect_uri, state, nonce: nonce) do
           {:ok, authorize_url, code_verifier} ->
             conn
             |> fetch_session()
             |> put_session("oidc_state", state)
+            |> put_session("oidc_nonce", nonce)
             |> put_session("oidc_code_verifier", code_verifier)
             |> redirect_to(authorize_url)
             |> halt()
@@ -165,28 +166,32 @@ defmodule Arbor.Dashboard.OidcAuth do
         conn = conn |> fetch_session() |> fetch_query_params()
         params = conn.query_params
         stored_state = get_session(conn, "oidc_state")
+        stored_nonce = get_session(conn, "oidc_nonce")
         code_verifier = get_session(conn, "oidc_code_verifier")
+        verifying_provider = Map.put(provider, :expected_nonce, stored_nonce)
 
         with :ok <- verify_state(params["state"], stored_state),
+             :ok <- verify_nonce_session(stored_nonce),
              {:ok, token_response} <-
-               AuthCodeFlow.exchange_code(
+               Arbor.Security.exchange_oidc_code(
                  provider,
                  params["code"],
                  callback_uri(conn),
                  code_verifier
                ),
              {:ok, claims} <-
-               TokenVerifier.verify(token_response["id_token"], provider),
-             {:ok, identity, _status} <- IdentityStore.load_or_create(claims),
-             :ok <- register_login_identity(identity, token_response["id_token"], provider),
-             {:ok, session_token} <- Arbor.Security.SessionToken.generate(identity.agent_id) do
+               Arbor.Security.verify_oidc_token(
+                 token_response["id_token"],
+                 verifying_provider
+               ),
+             {:ok, agent_id, session_token} <-
+               authenticate_browser_session(
+                 token_response["id_token"],
+                 verifying_provider,
+                 claims
+               ) do
           # The proof authenticates the login subject. Conversation ownership
           # resolves aliases after exact-subject authentication in Security.
-          agent_id = identity.agent_id
-
-          # Ensure human has capabilities via role assignment
-          ensure_role(agent_id)
-
           # Ensure user workspace directory exists
           ensure_workspace(agent_id)
 
@@ -198,6 +203,7 @@ defmodule Arbor.Dashboard.OidcAuth do
 
           conn
           |> delete_session("oidc_state")
+          |> delete_session("oidc_nonce")
           |> delete_session("oidc_code_verifier")
           |> delete_session("return_to")
           |> put_session("agent_id", agent_id)
@@ -212,6 +218,7 @@ defmodule Arbor.Dashboard.OidcAuth do
 
             conn
             |> delete_session("oidc_state")
+            |> delete_session("oidc_nonce")
             |> delete_session("oidc_code_verifier")
             |> delete_session("agent_id")
             |> delete_session("session_token")
@@ -265,34 +272,12 @@ defmodule Arbor.Dashboard.OidcAuth do
     end
   end
 
-  defp ensure_role(agent_id) do
-    # M1: default role used to be :admin — any user who completed the OIDC
-    # flow got assigned :admin unless the operator explicitly configured a
-    # different :default_role. That made every authenticated user a root
-    # principal by default. The fallback is now :viewer (least privilege);
-    # operators who want admin must opt in via the OIDC config.
-    role = Arbor.Security.OIDC.Config.get() |> Keyword.get(:default_role, :viewer)
-
-    case Arbor.Security.assign_role(agent_id, role) do
-      {:ok, _caps} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[OidcAuth] Role assignment failed: #{inspect(reason)}")
-    end
-
-    for resource <- login_grant_resources() do
-      Arbor.Security.grant(
-        principal: agent_id,
-        resource: resource,
-        metadata: %{source: :oidc_login}
-      )
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+  defp verify_nonce_session(nonce)
+       when is_binary(nonce) and byte_size(nonce) in 1..1_024 do
+    if String.valid?(nonce), do: :ok, else: {:error, :invalid_nonce}
   end
+
+  defp verify_nonce_session(_nonce), do: {:error, :invalid_nonce}
 
   defp ensure_workspace(agent_id) do
     workspace = Arbor.Contracts.TenantContext.default_workspace_root(agent_id)
@@ -301,16 +286,27 @@ defmodule Arbor.Dashboard.OidcAuth do
     _ -> :ok
   end
 
-  defp register_login_identity(identity, id_token, provider) do
-    case Arbor.Security.register_oidc_identity(identity, id_token, provider) do
-      :ok ->
-        :ok
+  defp authenticate_browser_session(id_token, provider, claims) do
+    with {:ok, agent_id, authority} <- Arbor.Security.authenticate_oidc_token(id_token, provider) do
+      try do
+        case Arbor.Security.issue_human_session_token(
+               agent_id,
+               authority,
+               session_token_expiry_opts(claims)
+             ) do
+          {:ok, token} -> {:ok, agent_id, token}
+          {:error, _} = error -> error
+        end
+      after
+        _ = Arbor.Security.close_signing_authority(authority)
+      end
+    end
+  end
 
-      {:error, {:already_registered, id}} when id == identity.agent_id ->
-        if Arbor.Security.identity_active?(id), do: :ok, else: {:error, :identity_inactive}
-
-      {:error, _} = error ->
-        error
+  defp session_token_expiry_opts(claims) do
+    case Map.get(claims, "exp") || Map.get(claims, :exp) do
+      expires_at when is_integer(expires_at) -> [max_expires_at: expires_at]
+      _ -> []
     end
   end
 
@@ -318,7 +314,7 @@ defmodule Arbor.Dashboard.OidcAuth do
   def configured?, do: oidc_provider() != nil
 
   defp oidc_provider do
-    case Config.providers() do
+    case Arbor.Security.oidc_providers() do
       [provider | _] -> provider
       _ -> nil
     end
@@ -367,10 +363,6 @@ defmodule Arbor.Dashboard.OidcAuth do
       display_name = get_session(conn, "user_display_name") || @local_dev_operator_name
       local_dev_operator? = agent_id == @local_dev_operator_id
 
-      if local_dev_operator? do
-        ensure_local_dev_operator_authority(agent_id)
-      end
-
       conn
       |> put_session("agent_id", agent_id)
       |> put_session("user_display_name", display_name)
@@ -380,20 +372,6 @@ defmodule Arbor.Dashboard.OidcAuth do
     else
       conn
     end
-  end
-
-  defp ensure_local_dev_operator_authority(agent_id) do
-    case Arbor.Security.assign_role(agent_id, :external_agent_registrar) do
-      {:ok, _capabilities} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[OidcAuth] Local registrar setup failed: #{inspect(reason)}")
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   @doc """

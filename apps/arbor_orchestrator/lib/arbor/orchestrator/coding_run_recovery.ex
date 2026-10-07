@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
 
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.CodingAuthority
   alias Arbor.Orchestrator.CodingPlan.ArtifactStore
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.RunLifecycle.Record
@@ -45,8 +46,8 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
     case security_facade() do
       {:ok, security} ->
         case open_resume_authority(security, principal_id) do
-          {:ok, opened} ->
-            finish_resume_authority(security, opened, principal_id)
+          {:ok, opened, bootstrap} ->
+            finish_resume_authority(security, opened, bootstrap, principal_id)
 
           {:error, _} = error ->
             error
@@ -61,10 +62,16 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
 
   @spec close_authority(module(), term()) :: :ok | {:error, term()}
   def close_authority(security, authority) when is_atom(security) do
-    case security.close_signing_authority(authority) do
-      :ok -> :ok
-      {:error, _} = error -> error
-      other -> {:error, {:unexpected_close_result, other}}
+    case take_authority_bootstrap(authority) do
+      nil ->
+        case security.close_signing_authority(authority) do
+          :ok -> :ok
+          {:error, _} = error -> error
+          other -> {:error, {:unexpected_close_result, other}}
+        end
+
+      bootstrap ->
+        CodingAuthority.close(security, authority, bootstrap)
     end
   rescue
     exception -> {:error, {:authority_close_failed, Exception.message(exception)}}
@@ -75,38 +82,21 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
   def close_authority(_security, _authority), do: {:error, :security_unavailable}
 
   defp open_resume_authority(security, principal_id) do
-    with {:ok, private_key} <- security.load_signing_key(principal_id),
-         true <- is_binary(private_key) and private_key != "",
-         {:ok, proof} <-
-           security.build_signing_authority_acquisition_proof(
-             principal_id,
-             private_key,
-             purpose: :coding_task_recovery,
-             owner: self()
-           ),
-         {:ok, opened} <- security.open_signing_authority(proof) do
-      {:ok, opened}
-    else
-      false -> {:error, :invalid_signing_key}
+    case CodingAuthority.acquire(security, principal_id, :coding_task_recovery) do
+      {:ok, authority, bootstrap} -> {:ok, authority, bootstrap}
       {:error, :no_signing_key} -> {:error, :authentication_unavailable}
       {:error, :broker_unavailable} -> {:error, :broker_unavailable}
       {:error, :security_unavailable} -> {:error, :security_unavailable}
       {:error, reason} -> {:error, {:signing_authority_acquisition_failed, reason}}
-      other -> {:error, {:signing_authority_acquisition_failed, other}}
     end
-  rescue
-    exception ->
-      {:error, {:signing_authority_acquisition_failed, Exception.message(exception)}}
-  catch
-    kind, reason ->
-      {:error, {:signing_authority_acquisition_failed, {kind, reason}}}
   end
 
-  defp finish_resume_authority(security, opened, principal_id) do
+  defp finish_resume_authority(security, opened, bootstrap, principal_id) do
     result =
       try do
         case SigningAuthority.canonicalize(opened) do
           {:ok, %SigningAuthority{principal_id: ^principal_id} = authority} ->
+            remember_authority_bootstrap(authority, bootstrap)
             {:ok, authority, security}
 
           {:ok, %SigningAuthority{}} ->
@@ -129,7 +119,7 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
 
       {:error, reason} ->
         Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore.combine_close_result(
-          close_authority(security, opened),
+          CodingAuthority.close(security, opened, bootstrap),
           {:error, reason}
         )
     end
@@ -271,13 +261,24 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
     security = Config.security_module()
 
     if is_atom(security) and Code.ensure_loaded?(security) and
-         function_exported?(security, :load_signing_key, 1) and
-         function_exported?(security, :build_signing_authority_acquisition_proof, 3) and
-         function_exported?(security, :open_signing_authority, 1) and
-         function_exported?(security, :close_signing_authority, 1) do
+         function_exported?(security, :claim_signing_authority, 1) and
+         function_exported?(security, :close_signing_authority, 1) and
+         function_exported?(security, :close_signing_authority_bootstrap, 1) do
       {:ok, security}
     else
       {:error, :security_unavailable}
     end
   end
+
+  defp remember_authority_bootstrap(%SigningAuthority{token: token}, bootstrap)
+       when is_binary(token) do
+    Process.put({__MODULE__, :authority_bootstrap, token}, bootstrap)
+    :ok
+  end
+
+  defp take_authority_bootstrap(%SigningAuthority{token: token}) when is_binary(token) do
+    Process.delete({__MODULE__, :authority_bootstrap, token})
+  end
+
+  defp take_authority_bootstrap(_authority), do: nil
 end

@@ -338,14 +338,14 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
 
       {:ok, identity} = Identity.generate(name: "cap-check-authority")
       public_identity = Identity.public_only(identity)
-      :ok = Security.register_identity(public_identity)
-      :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+      :ok = Security.register_identity_fixture(public_identity)
+      :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
       :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
 
       on_exit(fn ->
         _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
-        _ = Security.delete_signing_key(identity.agent_id)
-        _ = Security.deregister_identity(identity.agent_id)
+        _ = Security.delete_signing_key_fixture(identity.agent_id)
+        _ = Security.deregister_identity_fixture(identity.agent_id)
         ensure_broker_started()
       end)
 

@@ -61,7 +61,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
             full_sql_page(scope, opts, page)
 
           :retire_human_after_sql_read ->
-            :ok = Arbor.Security.deregister_identity(page.owner_id)
+            :ok = Arbor.Security.deregister_identity_fixture(page.owner_id)
             {:ok, page}
 
           _ ->
@@ -252,13 +252,13 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
     human = %{human_id: oidc.identity.agent_id, token: human_token}
 
     on_exit(fn ->
-      assert Security.deregister_identity(human.human_id) in [:ok, {:error, :not_found}]
+      assert Security.deregister_identity_fixture(human.human_id) in [:ok, {:error, :not_found}]
       oidc.cleanup.()
     end)
 
     {:ok, identity} = Identity.generate(name: "Native notice Branch owner")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
     chat_cap = Humans.grant!(human.human_id, "arbor://chat/agent/" <> identity.agent_id)
 
     assert {:ok, _} =
@@ -387,8 +387,8 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
         state
       end)
 
-      Security.delete_signing_key(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      Security.delete_signing_key_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
       Arbor.Trust.delete_trust_profile(identity.agent_id)
     end)
 
@@ -490,7 +490,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
 
   test "security regression: revoked exact publish grant prevents new native SQL effect", c do
     assert send_turn!(c).outcome.text == @stored_reply
-    assert :ok = Security.revoke(c.notice_cap.id)
+    assert :ok = Security.revoke_fixture(c.notice_cap.id)
     denied = notice_params("Revoked grant private text")
     replace_turn!(c, notice_dot(denied))
 
@@ -535,7 +535,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
   test "security regression: original recipient chat revocation closes publication and reader",
        c do
     assert send_turn!(c).outcome.text == @stored_reply
-    assert :ok = Security.revoke(c.chat_cap.id)
+    assert :ok = Security.revoke_fixture(c.chat_cap.id)
     state = run_heartbeat!(c, notice_params("Revoked recipient private text"))
     assert state.heartbeat_last_error != nil
     assert row_count(c) == 1

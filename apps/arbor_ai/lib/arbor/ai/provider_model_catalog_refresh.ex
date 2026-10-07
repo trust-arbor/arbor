@@ -141,5 +141,4 @@ defmodule Arbor.AI.ProviderModelCatalogRefresh do
         :error
     end
   end
-
 end

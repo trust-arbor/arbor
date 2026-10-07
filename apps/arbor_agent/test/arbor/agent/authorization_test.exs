@@ -78,10 +78,10 @@ defmodule Arbor.Agent.AuthorizationTest do
     legacy = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
     Application.put_env(:arbor_agent, :legacy_agents_dir, dir)
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     on_exit(fn ->
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
       Enum.each(old, fn {app, key, previous} -> restore_env(app, key, previous) end)
       restore_env(:arbor_agent, :legacy_agents_dir, legacy)
       File.rm_rf!(dir)
@@ -257,13 +257,13 @@ defmodule Arbor.Agent.AuthorizationTest do
 
   defp grant(caller, uri, approval?) do
     {:ok, capability} =
-      Security.grant(
+      Security.grant_fixture(
         principal: caller,
         resource: uri,
         constraints: %{requires_approval: approval?}
       )
 
-    on_exit(fn -> Security.revoke(capability.id) end)
+    on_exit(fn -> Security.revoke_fixture(capability.id) end)
     capability
   end
 

@@ -105,10 +105,16 @@ defmodule Arbor.Memory.SignalsTest do
 
     test "emit_decision/4 returns :ok" do
       assert :ok =
-               Signals.emit_decision("agent_001", "Use GenServer over Agent", %{
-                 alternatives: ["Agent", "GenServer", "raw process"],
-                 chosen: "GenServer"
-               }, reasoning: "Need state + call/cast", confidence: 0.9)
+               Signals.emit_decision(
+                 "agent_001",
+                 "Use GenServer over Agent",
+                 %{
+                   alternatives: ["Agent", "GenServer", "raw process"],
+                   chosen: "GenServer"
+                 },
+                 reasoning: "Need state + call/cast",
+                 confidence: 0.9
+               )
     end
 
     test "emit_decision/3 with defaults returns :ok" do
@@ -149,11 +155,17 @@ defmodule Arbor.Memory.SignalsTest do
 
     test "query_episodes/2 filters by outcome", %{agent_id: agent_id} do
       Signals.emit_episode_archived(agent_id, %{
-        id: "ep_s", description: "Success ep", outcome: :success, importance: 0.5
+        id: "ep_s",
+        description: "Success ep",
+        outcome: :success,
+        importance: 0.5
       })
 
       Signals.emit_episode_archived(agent_id, %{
-        id: "ep_f", description: "Failure ep", outcome: :failure, importance: 0.5
+        id: "ep_f",
+        description: "Failure ep",
+        outcome: :failure,
+        importance: 0.5
       })
 
       Process.sleep(50)
@@ -167,7 +179,9 @@ defmodule Arbor.Memory.SignalsTest do
 
     test "query_episodes/2 filters by search text", %{agent_id: agent_id} do
       Signals.emit_episode_archived(agent_id, %{
-        id: "ep_mg", description: "Migration completed", outcome: :success
+        id: "ep_mg",
+        description: "Migration completed",
+        outcome: :success
       })
 
       Process.sleep(50)
@@ -184,9 +198,16 @@ defmodule Arbor.Memory.SignalsTest do
     end
 
     test "query_archived_knowledge/2 returns archived nodes", %{agent_id: agent_id} do
-      Signals.emit_knowledge_archived(agent_id, %{
-        id: "node_1", type: :concept, content: "Elixir patterns", relevance: 0.1
-      }, :low_relevance)
+      Signals.emit_knowledge_archived(
+        agent_id,
+        %{
+          id: "node_1",
+          type: :concept,
+          content: "Elixir patterns",
+          relevance: 0.1
+        },
+        :low_relevance
+      )
 
       Process.sleep(50)
 
@@ -198,13 +219,27 @@ defmodule Arbor.Memory.SignalsTest do
     end
 
     test "query_archived_knowledge/2 filters by node_type", %{agent_id: agent_id} do
-      Signals.emit_knowledge_archived(agent_id, %{
-        id: "n_c", type: :concept, content: "A concept", relevance: 0.1
-      }, :low_relevance)
+      Signals.emit_knowledge_archived(
+        agent_id,
+        %{
+          id: "n_c",
+          type: :concept,
+          content: "A concept",
+          relevance: 0.1
+        },
+        :low_relevance
+      )
 
-      Signals.emit_knowledge_archived(agent_id, %{
-        id: "n_p", type: :person, content: "A person", relevance: 0.1
-      }, :low_relevance)
+      Signals.emit_knowledge_archived(
+        agent_id,
+        %{
+          id: "n_p",
+          type: :person,
+          content: "A person",
+          relevance: 0.1
+        },
+        :low_relevance
+      )
 
       Process.sleep(50)
 
@@ -257,15 +292,6 @@ defmodule Arbor.Memory.SignalsTest do
   # ============================================================================
 
   defp ensure_signals_bus_started do
-    unless Process.whereis(Arbor.Signals.Bus) do
-      for child <- [
-            {Arbor.Signals.Store, []},
-            {Arbor.Signals.TopicKeys, []},
-            {Arbor.Signals.Channels, []},
-            {Arbor.Signals.Bus, []}
-          ] do
-        Supervisor.start_child(Arbor.Signals.Supervisor, child)
-      end
-    end
+    :ok = Arbor.Signals.restore_runtime_fixture()
   end
 end

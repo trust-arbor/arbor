@@ -26,11 +26,7 @@ defmodule Arbor.Orchestrator.RunJournalMonotonicHeartbeatTest do
     run_id = "mono_hb_#{suffix}"
 
     {:ok, journal} =
-      start_supervised(
-        {RunJournal,
-         name: journal_name,
-         ets_table: ets_table}
-      )
+      start_supervised({RunJournal, name: journal_name, ets_table: ets_table})
 
     on_exit(fn ->
       try do

@@ -165,6 +165,14 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
 
       assert Enum.any?(result.violations, &(&1.type == :personal_name))
     end
+
+    @tag :security_regression
+    test "security regression: treats configured names as literals" do
+      result = PIIDetection.run(%{code: "defmodule Harmless do\nend", additional_names: [".*"]})
+
+      assert result.passed
+      refute Enum.any?(result.violations, &(&1.type == :personal_name))
+    end
   end
 
   describe "credit card numbers" do
@@ -385,6 +393,48 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
   end
 
   describe "ReDoS protection" do
+    @tag :security_regression
+    test "security regression: fails closed before scanning oversized source" do
+      result = PIIDetection.run(%{code: String.duplicate("x", 524_289)})
+
+      refute result.passed
+
+      assert Enum.any?(result.violations, fn violation ->
+               violation.type == :pii_scan_incomplete and
+                 String.contains?(violation.message, "input too large")
+             end)
+    end
+
+    @tag :security_regression
+    test "security regression: too-many-lines failure remains reportable" do
+      code = Enum.join(List.duplicate("#", 16_385), "\n")
+
+      assert {:ok, result} = Arbor.Eval.run(PIIDetection, code: code)
+      assert [violation] = result.violations
+      assert violation.type == :pii_scan_incomplete
+      assert violation.message == "PII scan failed closed: too many lines"
+      assert violation.line == nil
+    end
+
+    @tag :security_regression
+    test "security regression: raw text scanning fails closed on oversized input" do
+      assert [{"PII scan failed closed", "input too large"}] =
+               PIIDetection.scan_text(String.duplicate("x", 524_289))
+    end
+
+    @tag :security_regression
+    @tag timeout: 5_000
+    test "security regression: one deadline bounds all attacker-provided regex matches" do
+      pathological = ~r/(*NO_JIT)(*NO_START_OPT)^(a|aa)+$/
+      adversarial_line = String.duplicate("a", 30) <> "b"
+      code = Enum.join(List.duplicate(adversarial_line, 20), "\n")
+
+      result = PIIDetection.run(%{code: code, additional_patterns: [pathological]})
+
+      refute result.passed
+      assert Enum.any?(result.violations, &(&1.type == :pii_scan_incomplete))
+    end
+
     @tag :slow
     test "handles pathological input without hanging" do
       evil_input = ~s|api_key: "| <> String.duplicate("a", 10_000)

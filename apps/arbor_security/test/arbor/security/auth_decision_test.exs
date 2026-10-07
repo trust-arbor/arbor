@@ -29,16 +29,16 @@ defmodule Arbor.Security.AuthDecisionTest do
 
     test "check/4 authorizes a registered principal through a store-granted capability" do
       {:ok, identity} = Arbor.Security.generate_identity()
-      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.register_identity_fixture(identity)
       agent_id = identity.agent_id
       uri = "arbor://historian/query"
 
-      assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: uri)
+      assert {:ok, cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
       assert is_binary(cap.id)
 
       on_exit(fn ->
-        _ = Arbor.Security.revoke(cap.id)
-        _ = Arbor.Security.deregister_identity(agent_id)
+        _ = Arbor.Security.revoke_fixture(cap.id)
+        _ = Arbor.Security.deregister_identity_fixture(agent_id)
       end)
 
       result = AuthDecision.check(agent_id, uri)
@@ -68,10 +68,10 @@ defmodule Arbor.Security.AuthDecisionTest do
 
       on_exit(fn ->
         oidc.cleanup.()
-        _ = Registry.deregister(human_id)
+        _ = Registry.deregister_fixture(human_id)
       end)
 
-      :ok = Registry.suspend(human_id, "H5 regression test")
+      :ok = Registry.suspend_fixture(human_id, "H5 regression test")
 
       # Grant a matching capability so the only thing standing between the
       # caller and authorization is the identity status check.
@@ -85,7 +85,7 @@ defmodule Arbor.Security.AuthDecisionTest do
         expires_at: DateTime.add(now, 3600, :second)
       }
 
-      Arbor.Security.CapabilityStore.put(cap)
+      Arbor.Security.CapabilityStore.put_fixture(cap)
 
       result = AuthDecision.check(human_id, "arbor://test/h5_resource_#{n}")
 
@@ -170,16 +170,17 @@ defmodule Arbor.Security.AuthDecisionTest do
 
     test "evaluate/4 resolves a wildcard store-granted capability for a marked-verified principal" do
       {:ok, identity} = Arbor.Security.generate_identity()
-      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.register_identity_fixture(identity)
       agent_id = identity.agent_id
       granted_uri = "arbor://historian/**"
       target_uri = "arbor://historian/query"
 
-      assert {:ok, granted} = Arbor.Security.grant(principal: agent_id, resource: granted_uri)
+      assert {:ok, granted} =
+               Arbor.Security.grant_fixture(principal: agent_id, resource: granted_uri)
 
       on_exit(fn ->
-        _ = Arbor.Security.revoke(granted.id)
-        _ = Arbor.Security.deregister_identity(agent_id)
+        _ = Arbor.Security.revoke_fixture(granted.id)
+        _ = Arbor.Security.deregister_identity_fixture(agent_id)
       end)
 
       auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()

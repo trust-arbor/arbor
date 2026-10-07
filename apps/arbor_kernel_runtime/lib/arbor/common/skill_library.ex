@@ -5,7 +5,7 @@ defmodule Arbor.Common.SkillLibrary do
   Scans configured directories for skill definitions using adapters
   (`SkillAdapter`, `FabricAdapter`, `RawAdapter`), parses each file
   into an `Arbor.Contracts.Skill` struct, and caches the results in
-  a `:public` ETS table (`:arbor_skill_library`) for zero-cost reads.
+  a protected ETS table (`:arbor_skill_library`) for zero-cost reads.
 
   ## Adapters
 
@@ -43,13 +43,21 @@ defmodule Arbor.Common.SkillLibrary do
   require Logger
 
   alias Arbor.Common.Config
-  alias Arbor.Common.SkillLibrary.{EmbeddingText, FabricAdapter, RawAdapter, SkillAdapter}
+
+  alias Arbor.Common.SkillLibrary.{
+    EmbeddingText,
+    FabricAdapter,
+    RawAdapter,
+    ScanGuard,
+    SkillAdapter
+  }
 
   @behaviour Arbor.Contracts.SkillLibrary
 
   @table :arbor_skill_library
 
   @adapters [SkillAdapter, FabricAdapter, RawAdapter]
+  @skill_name_pattern ~r/\A[a-z0-9][a-z0-9\-]{0,63}\z/
 
   @doc "Prepare an immutable version and exact use URI. This read does not grant approval."
   defdelegate prepare_approval(name), to: Arbor.Common.SkillLibrary.Versions, as: :prepare
@@ -380,7 +388,7 @@ defmodule Arbor.Common.SkillLibrary do
 
   @impl GenServer
   def init(opts) do
-    # Create the ETS table — public + read_concurrency for lock-free reads
+    # Reads remain lock-free, but only this GenServer may mutate the cache.
     create_table()
 
     dirs = Keyword.get(opts, :dirs) || configured_dirs()
@@ -439,7 +447,7 @@ defmodule Arbor.Common.SkillLibrary do
 
   defp create_table do
     if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
+      :ets.new(@table, [:set, :protected, :named_table, read_concurrency: true])
     end
 
     :ok
@@ -481,7 +489,7 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   defp scan_one_dir(resolved) when is_binary(resolved) do
-    with true <- File.dir?(resolved),
+    with true <- ScanGuard.directory?(resolved),
          {:ok, count} <- do_index(resolved, overwrite: false) do
       if count > 0, do: Logger.info("[SkillLibrary] Indexed #{count} skills from #{resolved}")
     else
@@ -494,14 +502,14 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   defp do_index(dir, opts) when is_binary(dir) do
-    if File.dir?(dir) do
+    if ScanGuard.directory?(dir) do
       overwrite? = Keyword.get(opts, :overwrite, false)
 
       count =
         @adapters
         |> Enum.flat_map(fn adapter -> adapter.list(dir) end)
         |> Enum.uniq()
-        |> Enum.reduce(0, &index_one_file(&1, overwrite?, &2))
+        |> Enum.reduce(0, &index_one_file(&1, dir, overwrite?, &2))
 
       {:ok, count}
     else
@@ -509,23 +517,42 @@ defmodule Arbor.Common.SkillLibrary do
     end
   end
 
-  defp index_one_file(path, overwrite?, acc) do
+  defp index_one_file(path, source_root, overwrite?, acc) do
     adapter = adapter_for(path)
 
     case adapter.parse(path) do
-      {:ok, skill} -> maybe_insert(skill, overwrite?, acc)
-      {:error, reason} -> log_skip(path, reason, acc)
+      {:ok, skill} ->
+        skill
+        |> apply_source_policy(source_root)
+        |> maybe_insert(overwrite?, acc)
+
+      {:error, reason} ->
+        log_skip(path, reason, acc)
     end
   end
 
   defp maybe_insert(skill, overwrite?, acc) do
     name = skill_name(skill)
 
-    if overwrite? or ets_lookup(name) == :error do
-      ets_insert(name, skill)
-      acc + 1
-    else
-      acc
+    cond do
+      not valid_skill_name?(name) ->
+        log_skip(skill_field(skill, :path), :invalid_skill_name, acc)
+
+      true ->
+        case ets_lookup(name) do
+          :error ->
+            ets_insert(name, skill)
+            acc + 1
+
+          {:ok, existing} ->
+            if source_priority(skill) > source_priority(existing) or
+                 (overwrite? and source_priority(skill) == source_priority(existing)) do
+              ets_insert(name, skill)
+              acc + 1
+            else
+              acc
+            end
+        end
     end
   end
 
@@ -537,10 +564,76 @@ defmodule Arbor.Common.SkillLibrary do
   defp do_register(skill) do
     name = skill_name(skill)
 
-    if name && is_binary(name) && byte_size(name) > 0 do
+    if valid_skill_name?(name) do
+      # register/1 is deliberately an unprivileged ingestion boundary.  Only
+      # the directory scanner can establish bundled/operator provenance; a
+      # caller-supplied :trusted marker must never mint that authority.
+      skill =
+        skill
+        |> Map.put(:taint, :untrusted)
+        |> Map.put(:provenance, %{origin: "runtime_registration"})
+
       ets_insert(name, skill)
     else
-      {:error, {:invalid_skill, "skill must have a non-empty name"}}
+      {:error, {:invalid_skill, "name must be lowercase alphanumeric with hyphens, 1-64 chars"}}
+    end
+  end
+
+  defp valid_skill_name?(name) when is_binary(name),
+    do: Regex.match?(@skill_name_pattern, name)
+
+  defp valid_skill_name?(_name), do: false
+
+  defp apply_source_policy(skill, source_root) do
+    {taint, origin} = source_policy(source_root)
+
+    provenance =
+      case skill_field(skill, :provenance) do
+        value when is_map(value) -> value
+        _ -> %{}
+      end
+      |> Map.merge(%{
+        origin: origin,
+        source_root: Path.expand(source_root),
+        source_path: skill_field(skill, :path)
+      })
+
+    skill
+    |> Map.put(:taint, taint)
+    |> Map.put(:provenance, provenance)
+  end
+
+  defp source_policy(source_root) do
+    root = Path.expand(source_root)
+    project = Path.expand(".agents/skills")
+    bundled = Application.app_dir(:arbor_kernel_runtime, "priv/library/skills") |> Path.expand()
+    personal = Path.expand("~/.agents/skills")
+    arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
+    operator = Path.join(arbor_home, "library/skills") |> Path.expand()
+
+    cond do
+      root == project -> {:untrusted, "project:#{File.cwd!()}"}
+      root == bundled -> {:trusted, "bundled"}
+      root == operator -> {:trusted, "operator"}
+      root == personal -> {:derived, "personal"}
+      true -> {:untrusted, "configured:#{root}"}
+    end
+  end
+
+  # Precedence is enforced at insertion time as well as by default directory
+  # order. This keeps a caller-supplied directory order from letting a project
+  # or other untrusted source shadow product or operator content.
+  defp source_priority(skill) do
+    provenance = skill_field(skill, :provenance) || %{}
+    origin = Map.get(provenance, :origin) || Map.get(provenance, "origin")
+
+    cond do
+      origin == "operator" -> 4
+      origin == "bundled" -> 3
+      origin == "personal" -> 2
+      is_binary(origin) and String.starts_with?(origin, "project:") -> 1
+      is_binary(origin) and String.starts_with?(origin, "configured:") -> 1
+      true -> 1
     end
   end
 
@@ -651,20 +744,19 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   @doc """
-  Default skill directories, in precedence order. `maybe_insert/3` uses first-defined-wins, so
-  EARLIER dirs override LATER ones — personal overrides project overrides bundled:
+  Default skill directories, in precedence order. `maybe_insert/3` uses first-defined-wins.
+  Explicit operator-owned skills may override product defaults; lower-trust sources cannot:
 
-    1. `~/.agents/skills` — personal cross-tool skills (the vendor-neutral `.agents/` standard
-       that Gemini CLI / agentskills.io converged on; shared across AI tools).
-    2. `$ARBOR_HOME/library/skills` (default `~/.arbor/library/skills`) — personal Arbor skills,
+    1. `$ARBOR_HOME/library/skills` (default `~/.arbor/library/skills`) — operator Arbor skills,
        the writable per-install layer that survives system updates.
-    3. `.agents/skills` (relative to cwd) — project cross-tool skills for this repo.
-    4. Product skills bundled with `arbor_kernel_runtime` (`priv/library/skills`) — version-controlled +
+    2. Product skills bundled with `arbor_kernel_runtime` (`priv/library/skills`) — version-controlled +
        shipped inside `mix release` artifacts (`Application.app_dir/2` resolves the packaged path
        at runtime, `_build/.../priv/library/skills` in dev).
+    3. `~/.agents/skills` — personal cross-tool skills, tagged `:derived`.
+    4. `.agents/skills` (relative to cwd) — untrusted project-local skills.
 
-  A same-named skill in an earlier dir wins (so a user's `~/.arbor/library/skills/foo` overrides
-  the bundled `foo`). Only existing directories are returned, so a missing tier is a no-op.
+  A same-named skill in an earlier dir wins. Only real (non-symlink) directories are returned,
+  so a missing or linked tier is a no-op.
   `.claude/skills/` is deliberately NOT scanned — that's Claude-Code-CLI-scoped, not runtime-agent
   skills. Override the whole set via `config :arbor_kernel, common: [skill_dirs: ...]`.
   """
@@ -673,12 +765,12 @@ defmodule Arbor.Common.SkillLibrary do
     arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
 
     [
-      Path.expand("~/.agents/skills"),
       Path.join(arbor_home, "library/skills"),
-      Path.expand(".agents/skills"),
-      Application.app_dir(:arbor_kernel_runtime, "priv/library/skills")
+      Application.app_dir(:arbor_kernel_runtime, "priv/library/skills"),
+      Path.expand("~/.agents/skills"),
+      Path.expand(".agents/skills")
     ]
-    |> Enum.filter(&File.dir?/1)
+    |> Enum.filter(&ScanGuard.directory?/1)
   end
 
   defp skill_capability do
@@ -836,7 +928,7 @@ defmodule Arbor.Common.SkillLibrary do
       compatibility: skill_field(skill_map, :compatibility),
       allowed_tools: skill_field(skill_map, :allowed_tools, []),
       content_hash: skill_field(skill_map, :content_hash) || content_hash(skill_map),
-      taint: to_string(skill_field(skill_map, :taint, "trusted")),
+      taint: to_string(skill_field(skill_map, :taint, "untrusted")),
       provenance: skill_field(skill_map, :provenance, %{}),
       metadata: skill_field(skill_map, :metadata, %{})
     }

@@ -16,19 +16,20 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
   setup do
     original = Process.whereis(AuditJournalOwner)
     true = Process.unregister(AuditJournalOwner)
-    root = Path.join(System.tmp_dir!(), "capability-audit-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    File.chmod!(root, 0o700)
+    root = scratch_dir!("capability-audit")
     {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: root)
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
     principal = "agent_audit_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
+      :ok = AuditJournalOwner.clear_test_fixture()
+
       if Process.whereis(AuditJournalOwner) == nil and Process.alive?(journal),
         do: Process.register(journal, AuditJournalOwner)
 
       {:ok, caps} = Security.list_capabilities(principal)
-      Enum.each(caps, fn cap -> Security.revoke(cap.id) end)
+      Enum.each(caps, fn cap -> Security.revoke_fixture(cap.id) end)
       if Process.alive?(journal), do: GenServer.stop(journal)
       true = Process.register(original, AuditJournalOwner)
       File.rm_rf!(root)
@@ -37,13 +38,26 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
     %{principal: principal, journal: journal, root: root}
   end
 
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
   test "security regression: missing journal refuses a new public grant before live or durable authority",
        ctx do
     true = Process.unregister(AuditJournalOwner)
 
     try do
       assert {:error, _} =
-               Security.grant(principal: ctx.principal, resource: "arbor://memory/read/audit")
+               Security.grant_fixture(
+                 principal: ctx.principal,
+                 resource: "arbor://memory/read/audit"
+               )
 
       assert {:ok, []} = Security.list_capabilities(ctx.principal)
 
@@ -61,13 +75,16 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
   test "security regression: public grant and revoke leave distinct applied journal operations",
        ctx do
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/audit")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/audit"
+             )
 
     assert {:ok,
             [%{"status" => "effect_applied", "effect_class" => "authority_increase"} = grant]} =
              Security.audit_journal_pending_operations()
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:ok, pending} = Security.audit_journal_pending_operations()
     assert length(pending) == 2
 
@@ -84,12 +101,15 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
   test "security regression: journal outage does not block an acknowledged emergency revoke",
        ctx do
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/audit")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/audit"
+             )
 
     true = Process.unregister(AuditJournalOwner)
 
     try do
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
       assert {:ok, []} = Security.list_capabilities(ctx.principal)
 
       assert {:error, :not_found} =
@@ -105,17 +125,23 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
   test "security regression: a poisoned journal refuses authority increases but still permits reductions",
        ctx do
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/audit")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/audit"
+             )
 
     assert :ok = AuditJournalOwner.__test_inject__(ctx.journal, :write_error, :injected_write)
 
     assert {:error, _} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/write/audit")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/write/audit"
+             )
 
     assert :ok = AuditJournalOwner.__test_inject__(ctx.journal, :clear)
     assert {:ok, caps} = Security.list_capabilities(ctx.principal)
     assert Enum.map(caps, & &1.id) == [cap.id]
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:ok, []} = Security.list_capabilities(ctx.principal)
   end
 
@@ -146,7 +172,7 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
                  assert is_binary(id) and String.starts_with?(id, "inv_")
 
                  assert {:ok, cap} =
-                          Security.grant(
+                          Security.grant_fixture(
                             principal: ctx.principal,
                             resource: "arbor://memory/read/audit",
                             metadata: %{correlation_id: "forged"}
@@ -161,7 +187,7 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
     assert {:ok, [%{"intent" => %{"correlation_id" => ^invocation_id}}]} =
              AuditJournalOwner.pending_intents()
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:ok, pending} = AuditJournalOwner.pending_intents()
     revoke = Enum.find(pending, &(&1["intent"]["operation"] == "capability_revoke"))
     refute Map.has_key?(revoke["intent"], "correlation_id")

@@ -48,7 +48,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
 
       for agent <- [principal, caller] do
         case Security.list_capabilities(agent) do
-          {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+          {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
           _ -> :ok
         end
       end
@@ -84,7 +84,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
   end
 
   defp grant!(agent, resource) do
-    {:ok, cap} = Security.grant(principal: agent, resource: resource)
+    {:ok, cap} = Security.grant_fixture(principal: agent, resource: resource)
     cap
   end
 

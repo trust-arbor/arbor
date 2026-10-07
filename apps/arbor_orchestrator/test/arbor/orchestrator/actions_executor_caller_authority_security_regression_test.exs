@@ -53,22 +53,22 @@ defmodule Arbor.Orchestrator.ActionsExecutorCallerAuthoritySecurityRegressionTes
     output = Path.join(root, "must-not-exist.txt")
 
     {:ok, target_capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: target,
         resource: "arbor://fs/write/**",
         task_id: "task_confused_deputy"
       )
 
     {:ok, caller_lobby} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: caller,
         resource: "arbor://orchestrator/execute/**",
         task_id: "task_confused_deputy"
       )
 
     on_exit(fn ->
-      Arbor.Security.revoke(target_capability.id)
-      Arbor.Security.revoke(caller_lobby.id)
+      Arbor.Security.revoke_fixture(target_capability.id)
+      Arbor.Security.revoke_fixture(caller_lobby.id)
     end)
 
     effective =

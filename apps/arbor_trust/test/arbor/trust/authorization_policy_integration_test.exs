@@ -15,6 +15,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   alias Arbor.Security.CapabilityStore
   alias Arbor.Trust
   alias Arbor.Trust.EventStore
+  alias Arbor.Trust.PolicyEnforcer
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   defmodule RaisingPolicy do
     def effective_mode(_principal, _uri, _opts), do: :ask
@@ -71,33 +73,39 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     agent_id = "agent_policy_auth_#{:erlang.unique_integer([:positive])}"
     {:ok, _profile} = Trust.create_trust_profile(agent_id)
+    {_identity, actor_authority} = actor_authority!()
 
-    {:ok, agent_id: agent_id}
+    {:ok, agent_id: agent_id, actor_authority: actor_authority}
   end
 
   test "security regression: trust-gated shell cap does not auto-authorize", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://shell/exec/echo"
-    grant_capability(agent_id, uri)
+    grant_capability(agent_id, uri, actor_authority)
 
     assert Arbor.Trust.Policy.confirmation_mode(agent_id, uri) == :gated
     assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :execute)
   end
 
-  test "trust-auto URI with a held cap authorizes", %{agent_id: agent_id} do
+  test "trust-auto URI with a held cap authorizes", %{
+    agent_id: agent_id,
+    actor_authority: actor_authority
+  } do
     uri = "arbor://code/read/#{agent_id}/file.ex"
-    grant_capability(agent_id, uri)
+    grant_capability(agent_id, uri, actor_authority)
 
     assert {:ok, :authorized} = Trust.authorize(agent_id, uri, :read)
   end
 
   test "TRUST-15 security regression: hostile taint gates held auto capabilities", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://test/process"
     set_profile_rules(agent_id, %{uri => :auto})
-    grant_capability(agent_id, uri)
+    grant_capability(agent_id, uri, actor_authority)
 
     assert {:ok, :authorized} =
              Trust.authorize(agent_id, uri, :execute,
@@ -115,13 +123,17 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   end
 
   test "B6 security regression: low-risk read auto-grants with profile constraints", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://fs/read/b6/note.txt"
     set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
 
     assert {:ok, :authorized} =
-             Trust.authorize(agent_id, uri, :read, verify_identity: false)
+             Trust.authorize(agent_id, uri, :read,
+               verify_identity: false,
+               actor_authority: actor_authority
+             )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
     assert cap.constraints == %{rate_limit: 300}
@@ -132,13 +144,17 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   test "B6 security regression: irreversible profile-backed actions escalate instead of auto-run",
        %{
-         agent_id: agent_id
+         agent_id: agent_id,
+         actor_authority: actor_authority
        } do
     uri = "arbor://agent/create"
     set_profile_rules(agent_id, %{uri => :auto})
 
     assert {:error, :escalation_disabled} =
-             Trust.authorize(agent_id, uri, :execute, verify_identity: false)
+             Trust.authorize(agent_id, uri, :execute,
+               verify_identity: false,
+               actor_authority: actor_authority
+             )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
     assert cap.metadata[:source] == :trust_policy_enforcer
@@ -199,7 +215,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   end
 
   test "B8 negative control: explicit profile policy can still widen authorization", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://memory/recall"
 
@@ -211,7 +228,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:ok, :authorized} =
              Trust.authorize(agent_id, uri, :read,
                security_ceilings: %{},
-               verify_identity: false
+               verify_identity: false,
+               actor_authority: actor_authority
              )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
@@ -219,29 +237,36 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert cap.metadata[:profile_uri] == uri
   end
 
-  test "security ceilings gate code/write even for permissive profiles", %{agent_id: agent_id} do
+  test "security ceilings gate code/write even for permissive profiles", %{
+    agent_id: agent_id,
+    actor_authority: actor_authority
+  } do
     promote_to_hands_off(agent_id)
     uri = "arbor://code/write/foo.ex"
-    grant_capability(agent_id, uri)
+    grant_capability(agent_id, uri, actor_authority)
 
     assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :execute)
   end
 
   test "security regression: trust-ask minting does not encode kernel approval constraints", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://code/write/minted-ask.ex"
     Application.put_env(:arbor_trust, :policy_module, AskPolicy)
 
-    assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :execute)
+    assert {:error, :escalation_disabled} =
+             Trust.authorize(agent_id, uri, :execute, actor_authority: actor_authority)
+
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
     assert cap.metadata[:source] == :trust_policy_enforcer
     assert cap.metadata[:mode] == :ask
     refute cap.constraints[:requires_approval]
   end
 
-  test "security regression: baseline-only profile migration revokes stale policy caps", %{
-    agent_id: agent_id
+  test "security regression: explicit authenticated sync revokes stale policy caps", %{
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     uri = "arbor://memory/recall"
     Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
@@ -255,18 +280,25 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
       Arbor.Security.grant(
         principal: agent_id,
         resource: uri,
-        metadata: %{source: :trust_policy_enforcer, mode: :auto}
+        metadata: %{source: :trust_policy_enforcer, mode: :auto},
+        actor_authority: actor_authority
       )
 
-    assert {:ok, ^stale_cap} = CapabilityStore.get(stale_cap.id)
+    assert {:ok, ^stale_cap} = Arbor.Security.get_capability_fixture(stale_cap.id)
 
     {:ok, _profile} =
       Arbor.Trust.Store.update_profile(agent_id, fn profile ->
         %{profile | baseline: :ask}
       end)
 
-    Process.sleep(50)
-    assert {:error, :not_found} = CapabilityStore.get(stale_cap.id)
+    assert {:ok, ^stale_cap} = Arbor.Security.get_capability_fixture(stale_cap.id)
+
+    assert :ok =
+             PolicyEnforcer.sync_capabilities(agent_id,
+               actor_authority: actor_authority
+             )
+
+    assert {:error, :not_found} = Arbor.Security.get_capability_fixture(stale_cap.id)
   end
 
   test "pre-approved bounded code/write cap bypasses the ceiling", %{agent_id: agent_id} do
@@ -286,9 +318,12 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :execute)
   end
 
-  test "trust subsystem error fails closed to gated", %{agent_id: agent_id} do
+  test "trust subsystem error fails closed to gated", %{
+    agent_id: agent_id,
+    actor_authority: actor_authority
+  } do
     uri = "arbor://historian/query"
-    grant_capability(agent_id, uri)
+    grant_capability(agent_id, uri, actor_authority)
     Application.put_env(:arbor_trust, :policy_module, RaisingPolicy)
 
     assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :query)
@@ -313,7 +348,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   end
 
   test "workspace file_path trust grants are minted against workspace-relative URIs", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    actor_authority: actor_authority
   } do
     workspace =
       System.tmp_dir!()
@@ -330,7 +366,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
              Trust.authorize(agent_id, "arbor://fs/read", :execute,
                file_path: file_path,
                workspace: workspace,
-               verify_identity: false
+               verify_identity: false,
+               actor_authority: actor_authority
              )
 
     assert {:ok, cap} =
@@ -353,8 +390,14 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     end)
   end
 
-  defp grant_capability(agent_id, resource_uri) do
-    {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+  defp grant_capability(agent_id, resource_uri, actor_authority) do
+    {:ok, cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: resource_uri,
+        actor_authority: actor_authority
+      )
+
     cap
   end
 
@@ -371,7 +414,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
       metadata: %{provenance: %{source: :caps_file, issuer_id: "agent_test_issuer"}}
     }
 
-    {:ok, :stored} = CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     cap
   end
 

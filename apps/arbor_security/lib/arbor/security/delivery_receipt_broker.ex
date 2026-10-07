@@ -11,14 +11,24 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   alias Arbor.Security.Config
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.PrivateMemory
+  alias Arbor.Security.PrivateState
+  alias Arbor.Security.ReceiptIssuanceProof
+  alias Arbor.Security.SupervisedOwner
 
   @token_bytes 32
   @default_ttl_ms 30_000
   @default_max_entries 4_096
   @default_cleanup_interval_ms 5_000
   @max_token_attempts 8
+  @owner_table :arbor_security_delivery_receipt_broker_directory
+  @private_state_anchor {__MODULE__, :private_state}
+  @private_state_schema :delivery_receipt_broker_v1
 
-  @type issue_error :: :broker_full | :receipt_issue_failed | :broker_unavailable
+  @type issue_error ::
+          :broker_full
+          | :receipt_issue_failed
+          | :broker_unavailable
+          | :receipt_issuance_unauthorized
   @type consume_error :: :invalid_receipt | :broker_unavailable
 
   # ---------------------------------------------------------------------------
@@ -47,6 +57,14 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
       when is_binary(principal_id) and is_binary(resource_uri) do
     safe_call(server, {:issue, principal_id, resource_uri, action})
   end
+
+  @doc false
+  @spec issue_authorized(function()) ::
+          {:ok, DeliveryReceipt.t()} | {:error, issue_error()}
+  def issue_authorized(proof) when is_function(proof, 1),
+    do: safe_call(__MODULE__, {:issue_authorized, proof})
+
+  def issue_authorized(_proof), do: {:error, :receipt_issuance_unauthorized}
 
   @doc false
   @spec consume(binary(), String.t(), atom() | nil) ::
@@ -97,6 +115,13 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     )
   end
 
+  @doc false
+  def issue_conversation_authorized(proof) when is_function(proof, 1),
+    do: safe_call(__MODULE__, {:issue_conversation_authorized, proof})
+
+  def issue_conversation_authorized(_proof),
+    do: {:error, :receipt_issuance_unauthorized}
+
   def issue_conversation_operation(principal, resource, canonical_owner, expected, digest)
       when is_binary(digest) and byte_size(digest) == 32 do
     safe_call(
@@ -104,6 +129,13 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
       {:issue_conversation_operation, principal, resource, canonical_owner, expected, digest}
     )
   end
+
+  @doc false
+  def issue_conversation_operation_authorized(proof) when is_function(proof, 1),
+    do: safe_call(__MODULE__, {:issue_conversation_operation_authorized, proof})
+
+  def issue_conversation_operation_authorized(_proof),
+    do: {:error, :receipt_issuance_unauthorized}
 
   def consume_conversation_operation(token, resource, digest)
       when is_binary(token) and is_binary(resource) and is_binary(digest) and
@@ -131,11 +163,33 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   def memory_attestation_scope(token, owner),
     do: safe_call(__MODULE__, {:memory_attestation_scope, token, owner})
 
+  if Mix.env() == :test do
+    @doc false
+    def set_clock_fixture(clock) when is_function(clock, 0),
+      do: safe_call(__MODULE__, {:set_clock_fixture, clock})
+
+    def set_clock_fixture(_clock), do: {:error, :invalid_test_fixture}
+  end
+
   defp safe_call(server, request) do
-    GenServer.call(server, request)
+    target = safe_call_target(server)
+
+    case target do
+      pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, request)
+      _ -> {:error, :broker_unavailable}
+    end
   catch
     :exit, _ -> {:error, :broker_unavailable}
   end
+
+  defp safe_call_target(__MODULE__), do: default_owner_pid()
+
+  if Mix.env() == :test do
+    defp safe_call_target(server) when is_pid(server), do: server
+    defp safe_call_target(server) when is_atom(server), do: Process.whereis(server)
+  end
+
+  defp safe_call_target(_server), do: nil
 
   # ---------------------------------------------------------------------------
   # Server
@@ -143,6 +197,17 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
   @impl true
   def init(opts) do
+    Process.flag(:sensitive, true)
+    name = Keyword.get(opts, :name, __MODULE__)
+
+    with :ok <- maybe_claim_directory(name) do
+      init_state(opts, name)
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp init_state(opts, name) do
     ttl_ms = positive_int(Keyword.get(opts, :ttl_ms), @default_ttl_ms)
     max_entries = positive_int(Keyword.get(opts, :max_entries), @default_max_entries)
 
@@ -154,90 +219,143 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
     schedule_cleanup(cleanup_interval_ms)
 
-    {:ok,
-     %{
-       entries: %{},
-       memory_admissions: %{},
-       memory_monitors: %{},
-       memory_ttl_ms: Config.private_memory_admission_ttl_ms(),
-       ttl_ms: ttl_ms,
-       max_entries: max_entries,
-       cleanup_interval_ms: cleanup_interval_ms,
-       clock: clock_fun,
-       stats: %{
-         issued: 0,
-         consumed: 0,
-         discarded: 0,
-         expired: 0,
-         rejected_full: 0,
-         rejected_issue: 0,
-         rejected_consume: 0
-       }
-     }}
+    state = %{
+      authorization_required: name == __MODULE__,
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      entries: %{},
+      memory_admissions: %{},
+      memory_monitors: %{},
+      memory_ttl_ms: Config.private_memory_admission_ttl_ms(),
+      ttl_ms: ttl_ms,
+      max_entries: max_entries,
+      cleanup_interval_ms: cleanup_interval_ms,
+      clock: clock_fun,
+      stats: %{
+        issued: 0,
+        consumed: 0,
+        discarded: 0,
+        expired: 0,
+        rejected_full: 0,
+        rejected_issue: 0,
+        rejected_consume: 0
+      }
+    }
+
+    {:ok, PrivateState.new(@private_state_anchor, @private_state_schema, state)}
   end
 
   @impl true
-  def handle_call({:issue, principal_id, resource_uri, action}, _from, state) do
-    # Skip O(n) expiry prune while under capacity; prune once at capacity and
-    # re-check before returning :broker_full. Periodic cleanup still runs.
-    state =
-      if map_size(state.entries) >= state.max_entries do
-        prune_expired(state)
-      else
-        state
-      end
+  def handle_call(_request, _from, private_state),
+    do: {:reply, {:error, :receipt_issuance_unauthorized}, private_state}
 
-    now = state.clock.()
-
-    cond do
-      map_size(state.entries) >= state.max_entries ->
-        state = bump(state, :rejected_full)
-        {:reply, {:error, :broker_full}, state}
-
-      true ->
-        case mint_receipt(state, principal_id, resource_uri, action, now) do
-          {:ok, receipt, state} ->
-            {:reply, {:ok, receipt}, bump(state, :issued)}
-
-          {:error, reason, state} ->
-            {:reply, {:error, reason}, state}
-        end
+  defp handle_authenticated_request({:issue, principal_id, resource_uri, action}, _from, state) do
+    if state.authorization_required do
+      {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
+    else
+      issue_reply(state, principal_id, resource_uri, action)
     end
   end
 
-  def handle_call(
-        {:issue_conversation, principal, resource, canonical_owner, expected_engagement_id},
-        from,
-        state
-      ) do
-    case handle_call({:issue, principal, resource, :chat}, from, state) do
-      {:reply, {:ok, receipt}, next} ->
-        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
-        next = put_in(next, [:entries, token, :canonical_owner_id], canonical_owner)
-        next = put_in(next, [:entries, token, :expected_engagement_id], expected_engagement_id)
-        {:reply, {:ok, receipt}, next}
-
-      other ->
-        other
+  defp handle_authenticated_request({:issue_authorized, proof}, {caller, _tag}, state) do
+    with {:ok,
+          %{principal_id: principal_id, resource_uri: resource_uri, action: action} = payload} <-
+           ReceiptIssuanceProof.admit(proof, caller, :delivery),
+         true <- map_size(payload) == 3,
+         true <- is_binary(principal_id) and is_binary(resource_uri) do
+      issue_reply(state, principal_id, resource_uri, action)
+    else
+      _ -> {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
     end
   end
 
-  def handle_call(
-        {:issue_conversation_operation, principal, resource, owner, expected, digest},
-        from,
-        state
-      ) do
-    case handle_call({:issue_conversation, principal, resource, owner, expected}, from, state) do
-      {:reply, {:ok, receipt}, next} ->
-        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
-        {:reply, {:ok, receipt}, put_in(next, [:entries, token, :operation_digest], digest)}
-
-      other ->
-        other
+  defp handle_authenticated_request(
+         {:issue_conversation, principal, resource, canonical_owner, expected_engagement_id},
+         _from,
+         state
+       ) do
+    if state.authorization_required do
+      {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
+    else
+      issue_conversation_reply(
+        state,
+        principal,
+        resource,
+        canonical_owner,
+        expected_engagement_id
+      )
     end
   end
 
-  def handle_call({:conversation_owner, token, principal, resource}, _from, state) do
+  defp handle_authenticated_request(
+         {:issue_conversation_authorized, proof},
+         {caller, _tag},
+         state
+       ) do
+    with {:ok,
+          %{
+            principal_id: principal,
+            resource_uri: resource,
+            canonical_owner_id: canonical_owner,
+            expected_engagement_id: expected_engagement_id
+          } = payload} <- ReceiptIssuanceProof.admit(proof, caller, :conversation_delivery),
+         true <- map_size(payload) == 4,
+         true <-
+           is_binary(principal) and is_binary(resource) and is_binary(canonical_owner) and
+             (is_nil(expected_engagement_id) or is_binary(expected_engagement_id)) do
+      issue_conversation_reply(
+        state,
+        principal,
+        resource,
+        canonical_owner,
+        expected_engagement_id
+      )
+    else
+      _ -> {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
+    end
+  end
+
+  defp handle_authenticated_request(
+         {:issue_conversation_operation, principal, resource, owner, expected, digest},
+         _from,
+         state
+       ) do
+    if state.authorization_required do
+      {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
+    else
+      issue_conversation_operation_reply(state, principal, resource, owner, expected, digest)
+    end
+  end
+
+  defp handle_authenticated_request(
+         {:issue_conversation_operation_authorized, proof},
+         {caller, _tag},
+         state
+       ) do
+    with {:ok,
+          %{
+            principal_id: principal,
+            resource_uri: resource,
+            canonical_owner_id: owner,
+            expected_engagement_id: expected,
+            operation_digest: digest
+          } = payload} <-
+           ReceiptIssuanceProof.admit(proof, caller, :conversation_operation_delivery),
+         true <- map_size(payload) == 5,
+         true <-
+           is_binary(principal) and is_binary(resource) and is_binary(owner) and
+             (is_nil(expected) or is_binary(expected)) and is_binary(digest) and
+             byte_size(digest) == 32 do
+      issue_conversation_operation_reply(state, principal, resource, owner, expected, digest)
+    else
+      _ -> {:reply, {:error, :receipt_issuance_unauthorized}, bump(state, :rejected_issue)}
+    end
+  end
+
+  defp handle_authenticated_request(
+         {:conversation_owner, token, principal, resource},
+         _from,
+         state
+       ) do
     now = state.clock.()
 
     reply =
@@ -259,7 +377,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:consume, token, resource_uri, action}, _from, state) do
+  defp handle_authenticated_request({:consume, token, resource_uri, action}, _from, state) do
     now = state.clock.()
     {entry, entries} = Map.pop(state.entries, token)
     state = %{state | entries: entries}
@@ -285,7 +403,11 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:consume_conversation_operation, token, resource, digest}, _from, state) do
+  defp handle_authenticated_request(
+         {:consume_conversation_operation, token, resource, digest},
+         _from,
+         state
+       ) do
     now = state.clock.()
     {entry, entries} = Map.pop(state.entries, token)
     state = %{state | entries: entries}
@@ -315,7 +437,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:discard, token}, _from, state) do
+  defp handle_authenticated_request({:discard, token}, _from, state) do
     {entry, entries} = Map.pop(state.entries, token)
     state = %{state | entries: entries}
 
@@ -329,7 +451,11 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, :ok, state}
   end
 
-  def handle_call({:memory_exchange, token, agent_id, sender_id, context}, {owner, _}, state) do
+  defp handle_authenticated_request(
+         {:memory_exchange, token, agent_id, sender_id, context},
+         {owner, _},
+         state
+       ) do
     {entry, entries} = Map.pop(state.entries, token)
     state = prune_memory_admissions(%{state | entries: entries})
     resource = "arbor://chat/agent/" <> agent_id
@@ -361,7 +487,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:memory_activate, token, engagement_id}, {owner, _}, state) do
+  defp handle_authenticated_request({:memory_activate, token, engagement_id}, {owner, _}, state) do
     state = prune_memory_admissions(state)
 
     with {:ok, %{status: :pending} = entry} <- memory_entry(state, token, owner),
@@ -379,7 +505,11 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:memory_check_engagement, token, engagement_id}, {owner, _}, state) do
+  defp handle_authenticated_request(
+         {:memory_check_engagement, token, engagement_id},
+         {owner, _},
+         state
+       ) do
     state = prune_memory_admissions(state)
 
     result =
@@ -394,7 +524,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, result, state}
   end
 
-  def handle_call({:memory_binding, token}, {owner, _}, state) do
+  defp handle_authenticated_request({:memory_binding, token}, {owner, _}, state) do
     state = prune_memory_admissions(state)
 
     reply =
@@ -413,7 +543,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:memory_scope, token}, {owner, _}, state) do
+  defp handle_authenticated_request({:memory_scope, token}, {owner, _}, state) do
     state = prune_memory_admissions(state)
 
     reply =
@@ -425,7 +555,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, reply, state}
   end
 
-  def handle_call({:memory_close, token}, {owner, _}, state) do
+  defp handle_authenticated_request({:memory_close, token}, {owner, _}, state) do
     state = prune_memory_admissions(state)
 
     case Map.get(state.memory_admissions, token) do
@@ -435,11 +565,16 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     end
   end
 
-  def handle_call({:memory_attestation_scope, token, owner}, {caller, _}, state) do
+  defp handle_authenticated_request({:memory_attestation_scope, token, owner}, {caller, _}, state) do
     state = prune_memory_admissions(state)
 
     reply =
-      with true <- caller == Process.whereis(Arbor.Security.SystemAuthority),
+      with true <-
+             SupervisedOwner.authorized?(
+               caller,
+               :arbor_security,
+               [Arbor.Security.SystemAuthority]
+             ),
            {:ok, %{status: :active, scope: scope}} <- memory_entry(state, token, owner) do
         {:ok, scope}
       else
@@ -449,7 +584,7 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, reply, state}
   end
 
-  def handle_call(:stats, _from, state) do
+  defp handle_authenticated_request(:stats, _from, state) do
     stats =
       Map.merge(state.stats, %{
         active: map_size(state.entries)
@@ -458,21 +593,64 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, stats, state}
   end
 
-  @impl true
-  def handle_info(:cleanup, state) do
+  if Mix.env() == :test do
+    defp handle_authenticated_request({:set_clock_fixture, clock}, _from, state)
+         when is_function(clock, 0),
+         do: {:reply, :ok, %{state | clock: clock}}
+  end
+
+  defp handle_private_info(:cleanup, state) do
     state = state |> prune_expired() |> prune_memory_admissions()
     schedule_cleanup(state.cleanup_interval_ms)
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  defp handle_private_info({:DOWN, ref, :process, _pid, _reason}, state) do
     case Map.get(state.memory_monitors, ref) do
       nil -> {:noreply, state}
       token -> {:noreply, remove_memory_admission(state, token)}
     end
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  defp handle_private_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        case handle_authenticated_request(request, {caller, reply_to}, state) do
+          {:reply, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:noreply, next_state}
+
+          {:stop, reason, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:stop, reason, next_state}
+        end
+
+      result when result in [:pending, :expired, :rejected] ->
+        {:noreply, state}
+
+      :unrecognized ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info(message, private_state) do
+    with {:ok, state} <- private_state(private_state) do
+      case handle_private_info(message, state) do
+        {:noreply, next_state} ->
+          case put_private_state(private_state, next_state) do
+            :ok -> {:noreply, private_state}
+            {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+          end
+
+        {:stop, reason, next_state} ->
+          _ = put_private_state(private_state, next_state)
+          {:stop, reason, private_state}
+      end
+    else
+      {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+    end
+  end
 
   @impl true
   def format_status(status) when is_map(status) do
@@ -485,9 +663,126 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     |> maybe_redact_status_field(:log)
   end
 
+  @impl true
+  def terminate(_reason, private_state) do
+    case private_state(private_state) do
+      {:ok, state} ->
+        Enum.each(Map.keys(state.memory_monitors), &Process.demonitor(&1, [:flush]))
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    PrivateState.delete(private_state, @private_state_anchor)
+    :ok
+  end
+
+  defp private_state(state) do
+    PrivateState.fetch(
+      state,
+      @private_state_anchor,
+      @private_state_schema,
+      &valid_private_state?/1
+    )
+  end
+
+  defp put_private_state(handle, state) do
+    PrivateState.replace(
+      handle,
+      @private_state_anchor,
+      @private_state_schema,
+      state,
+      &valid_private_state?/1
+    )
+  end
+
+  defp valid_private_state?(state) when is_map(state) do
+    Map.keys(state) |> Enum.sort() ==
+      [
+        :authenticated_calls,
+        :authorization_required,
+        :cleanup_interval_ms,
+        :clock,
+        :entries,
+        :max_entries,
+        :memory_admissions,
+        :memory_monitors,
+        :memory_ttl_ms,
+        :stats,
+        :ttl_ms
+      ] and
+      is_boolean(state.authorization_required) and is_reference(state.authenticated_calls) and
+      is_map(state.entries) and is_map(state.memory_admissions) and
+      is_map(state.memory_monitors) and is_map(state.stats) and is_function(state.clock, 0) and
+      Enum.all?(
+        [state.cleanup_interval_ms, state.max_entries, state.memory_ttl_ms, state.ttl_ms],
+        &(is_integer(&1) and &1 > 0)
+      )
+  end
+
+  defp valid_private_state?(_state), do: false
+
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  defp issue_reply(state, principal_id, resource_uri, action) do
+    # Skip O(n) expiry prune while under capacity; prune once at capacity and
+    # re-check before returning :broker_full. Periodic cleanup still runs.
+    state =
+      if map_size(state.entries) >= state.max_entries do
+        prune_expired(state)
+      else
+        state
+      end
+
+    now = state.clock.()
+
+    cond do
+      map_size(state.entries) >= state.max_entries ->
+        state = bump(state, :rejected_full)
+        {:reply, {:error, :broker_full}, state}
+
+      true ->
+        case mint_receipt(state, principal_id, resource_uri, action, now) do
+          {:ok, receipt, state} ->
+            {:reply, {:ok, receipt}, bump(state, :issued)}
+
+          {:error, reason, state} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  defp issue_conversation_reply(
+         state,
+         principal,
+         resource,
+         canonical_owner,
+         expected_engagement_id
+       ) do
+    case issue_reply(state, principal, resource, :chat) do
+      {:reply, {:ok, receipt}, next} ->
+        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
+        next = put_in(next, [:entries, token, :canonical_owner_id], canonical_owner)
+        next = put_in(next, [:entries, token, :expected_engagement_id], expected_engagement_id)
+        {:reply, {:ok, receipt}, next}
+
+      other ->
+        other
+    end
+  end
+
+  defp issue_conversation_operation_reply(state, principal, resource, owner, expected, digest) do
+    case issue_conversation_reply(state, principal, resource, owner, expected) do
+      {:reply, {:ok, receipt}, next} ->
+        {:ok, token} = DeliveryReceipt.bearer_token(receipt)
+        {:reply, {:ok, receipt}, put_in(next, [:entries, token, :operation_digest], digest)}
+
+      other ->
+        other
+    end
+  end
 
   defp create_memory_admission(
          state,
@@ -573,6 +868,25 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
         do: remove_memory_admission(acc, token),
         else: acc
     end)
+  end
+
+  defp maybe_claim_directory(__MODULE__) do
+    table = :ets.new(@owner_table, [:named_table, :protected, :set, read_concurrency: true])
+    true = :ets.insert(table, {:owner, self()})
+    :ok
+  rescue
+    _ -> {:error, :broker_owner_directory_unavailable}
+  end
+
+  defp maybe_claim_directory(_custom_name), do: :ok
+
+  defp default_owner_pid do
+    SupervisedOwner.protected_directory_owner(
+      @owner_table,
+      :owner,
+      :arbor_security,
+      [__MODULE__]
+    )
   end
 
   defp mint_receipt(state, principal_id, resource_uri, action, now) do

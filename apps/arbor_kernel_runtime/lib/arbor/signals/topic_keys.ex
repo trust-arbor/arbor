@@ -206,6 +206,11 @@ defmodule Arbor.Signals.TopicKeys do
     {:reply, stats, state}
   end
 
+  @impl true
+  def handle_call(_request, _from, state) do
+    {:reply, {:error, :unsupported_request}, state}
+  end
+
   # Private helpers
 
   defp generate_key_info(version \\ 1) do

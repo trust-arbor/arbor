@@ -1,5 +1,5 @@
 defmodule Arbor.SignalsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Signals
   alias Arbor.Signals.Signal
@@ -122,8 +122,51 @@ defmodule Arbor.SignalsTest do
       assert :ok = Signals.emit_signal(signal)
 
       Process.sleep(50)
-      {:ok, fetched} = Signals.get_signal(signal.id)
+      {:ok, [fetched | _]} = Signals.recent(type: :prebuilt, limit: 1)
       assert fetched.data.value == 42
+    end
+
+    test "security regression: preconstructed attribution and event identity are restamped" do
+      test_pid = self()
+
+      attacker_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(attacker_pid, :kill) end)
+
+      {:ok, sub_id} =
+        Signals.subscribe(
+          "activity.attribution_security_regression",
+          fn signal ->
+            send(test_pid, {:restamped_signal, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      on_exit(fn -> Signals.unsubscribe(sub_id) end)
+
+      forged = %{
+        Signal.new(:activity, :attribution_security_regression, %{value: 42})
+        | id: "sig_attacker_chosen",
+          timestamp: DateTime.add(DateTime.utc_now(), 86_400, :second),
+          emitter_pid: attacker_pid,
+          origin_node: :attacker@invalid
+      }
+
+      before_emit = DateTime.utc_now()
+      assert :ok = Signals.emit_signal(forged)
+      assert_receive {:restamped_signal, delivered}, 1_000
+
+      refute delivered.id == forged.id
+      assert String.starts_with?(delivered.id, "sig_")
+      assert DateTime.compare(delivered.timestamp, before_emit) in [:eq, :gt]
+      assert delivered.emitter_pid == self()
+      assert delivered.origin_node == node()
     end
   end
 
@@ -237,8 +280,8 @@ defmodule Arbor.SignalsTest do
       Signals.emit_signal(signal)
       Process.sleep(50)
 
-      assert {:ok, fetched} = Signals.get_signal_by_id(signal.id)
-      assert fetched.id == signal.id
+      assert {:ok, [fetched | _]} = Signals.get_recent_signals_from_buffer(type: :fetch_cb)
+      refute fetched.id == signal.id
     end
 
     test "query_signals_with_filters/1" do
@@ -256,8 +299,9 @@ defmodule Arbor.SignalsTest do
       assert :ok = Signals.emit_preconstructed_signal(signal)
 
       Process.sleep(50)
-      assert {:ok, fetched} = Signals.get_signal(signal.id)
+      assert {:ok, [fetched | _]} = Signals.recent(type: :precon_cb, limit: 1)
       assert fetched.data.x == 99
+      refute fetched.id == signal.id
     end
   end
 end

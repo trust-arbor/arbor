@@ -85,6 +85,12 @@ defmodule Arbor.Memory do
 
   require Logger
 
+  if Mix.env() == :test do
+    @doc false
+    @spec restore_runtime_fixture(keyword()) :: :ok | :skipped
+    def restore_runtime_fixture(opts \\ []), do: Arbor.Memory.TestBootstrap.start!(opts)
+  end
+
   # ============================================================================
   # Agent Lifecycle
   # ============================================================================

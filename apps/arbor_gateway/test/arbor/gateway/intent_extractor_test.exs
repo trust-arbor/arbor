@@ -94,6 +94,7 @@ defmodule Arbor.Gateway.IntentExtractorTest do
 
     test "uses classification for routing" do
       header = "-----BEGIN " <> "PRIVATE KEY-----"
+
       classification = %{
         findings: [{"Private Key", header}],
         sanitized_prompt: "deploy with [REDACTED]",

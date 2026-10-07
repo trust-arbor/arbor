@@ -323,6 +323,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "detects AWS key in context_updates" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :success,
         context_updates: %{"response" => "Your key is " <> aws}
@@ -337,6 +338,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "detects GitHub PAT in context_updates" do
       gh = "ghp_" <> "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+
       outcome = %Outcome{
         status: :success,
         context_updates: %{"output" => gh}
@@ -363,6 +365,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "warn mode appends to notes instead of halting" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :success,
         notes: "existing note",
@@ -379,6 +382,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "warn mode handles nil notes" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :success,
         notes: nil,
@@ -394,6 +398,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "redact mode replaces secrets with [REDACTED]" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :success,
         context_updates: %{"response" => "Key: " <> aws <> " done"}
@@ -409,6 +414,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "redact mode preserves non-string values" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :success,
         context_updates: %{
@@ -491,11 +497,11 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "detects private key" do
       header = "-----BEGIN " <> "RSA PRIVATE KEY-----"
+
       outcome = %Outcome{
         status: :success,
         context_updates: %{
-          "output" =>
-            header <> "\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----"
+          "output" => header <> "\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----"
         }
       }
 
@@ -506,6 +512,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
 
     test "handles partial_success status" do
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       outcome = %Outcome{
         status: :partial_success,
         context_updates: %{"response" => aws}
@@ -619,6 +626,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
       Chain.register("secret_scan_integration", Arbor.Orchestrator.Middleware.SecretScan)
 
       aws = "AKIA" <> "IOSFODNN7EXAMPLE"
+
       handler = fn _node, _ctx, _graph, _opts ->
         %Outcome{
           status: :success,

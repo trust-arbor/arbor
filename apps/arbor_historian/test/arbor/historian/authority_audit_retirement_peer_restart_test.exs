@@ -198,7 +198,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
 
       defp pair(principal, n) do
         with {:ok, cap} <- grant(principal, "pair-#{n}"),
-             :ok <- Security.revoke(cap.id),
+             :ok <- Security.revoke_fixture(cap.id),
              {:ok, %{audit: :recorded}} <- Security.capability_mutation_audit_status() do
           []
         else
@@ -239,13 +239,16 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
 
       def grant(principal, suffix),
         do:
-          Security.grant(principal: principal, resource: "arbor://memory/read/peer-sql/#{suffix}")
+          Security.grant_fixture(
+            principal: principal,
+            resource: "arbor://memory/read/peer-sql/#{suffix}"
+          )
 
-      def acknowledged_grant(opts), do: Security.acknowledged_grant(opts)
+      def acknowledged_grant(opts), do: Security.acknowledged_grant_fixture(opts)
       def flush, do: Historian.flush_authority_audit()
       def status, do: Security.audit_journal_status()
       def pending, do: Security.audit_journal_pending_operations()
-      def raw_append(record), do: AuditJournalOwner.append(record)
+      def raw_append(record), do: AuditJournalOwner.append(AuditJournalOwner, record)
 
       def read(stream),
         do: Persistence.read_stream(@target_name, EctoEventLog, stream, repo: Repo)

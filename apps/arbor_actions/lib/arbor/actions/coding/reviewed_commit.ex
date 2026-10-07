@@ -458,19 +458,16 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
     # Fresh exact-resource SignedRequest for the nested git commit — never
     # reuse the outer coding_reviewed_commit signed request/nonce.
-    with {:ok, fresh_sr} <- fresh_signed_request(resource, context) do
+    with {:ok, fresh_sr} <- fresh_signed_request(resource, context),
+         {:ok, approval_receipt} <-
+           maybe_issue_approval_receipt(agent_id, resource, request_id, git_params) do
       retry_context =
         context
         |> put_signed_request(fresh_sr)
         |> maybe_drop_legacy_signed_request(fresh_sr)
         |> then(fn ctx ->
           if is_binary(request_id) do
-            Map.put(ctx, :approved_invocation, %{
-              request_id: request_id,
-              principal_id: agent_id,
-              resource_uri: resource,
-              decision: :approved
-            })
+            Map.put(ctx, :approved_invocation, approval_receipt)
           else
             ctx
           end
@@ -518,6 +515,28 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
           {:error, "approved commit failed: #{inspect(reason)}"}
       end
     end
+  end
+
+  defp maybe_issue_approval_receipt(agent_id, resource, request_id, params)
+       when is_binary(request_id) do
+    Arbor.Trust.issue_approval_receipt(
+      approval_source(request_id),
+      request_id,
+      %{
+        agent_id: agent_id,
+        principal_id: agent_id,
+        resource_uri: resource,
+        decision: :approve
+      },
+      params
+    )
+  end
+
+  defp maybe_issue_approval_receipt(_agent_id, _resource, _request_id, _params),
+    do: {:ok, nil}
+
+  defp approval_source(request_id) do
+    if interaction_request?(request_id), do: :interaction, else: :consensus
   end
 
   defp adopt_head(path, bindings, request_id, note) do

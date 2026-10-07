@@ -107,7 +107,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     WorkerPhaseCore
   }
 
-  alias Arbor.Orchestrator.CodingRunRecovery
+  alias Arbor.Orchestrator.{CodingAuthority, CodingRunRecovery}
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
@@ -396,7 +396,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, canonical_plan, compilation, readiness_report} <-
            admit_coding_plan(task, agent_id),
          {:ok, security} <- security_facade(),
-         {:ok, authority} <- acquire_signing_authority(security, agent_id) do
+         {:ok, authority, authority_bootstrap} <-
+           acquire_signing_authority(security, agent_id) do
       try do
         with {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
              {:ok, artifacts} <-
@@ -486,7 +487,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       after
         # The broker monitors this run process, but normal terminal outcomes
         # must release the authority before returning to TaskStore.
-        _ = close_signing_authority(security, authority)
+        _ = CodingAuthority.close(security, authority, authority_bootstrap)
       end
     end
   end
@@ -3379,65 +3380,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     security = Config.security_module()
 
     if is_atom(security) and Code.ensure_loaded?(security) and
-         function_exported?(security, :load_signing_key, 1) and
-         function_exported?(security, :build_signing_authority_acquisition_proof, 3) and
-         function_exported?(security, :open_signing_authority, 1) and
+         function_exported?(security, :claim_signing_authority, 1) and
          function_exported?(security, :sign_with_authority, 2) and
-         function_exported?(security, :close_signing_authority, 1) do
+         function_exported?(security, :close_signing_authority, 1) and
+         function_exported?(security, :close_signing_authority_bootstrap, 1) do
       {:ok, security}
     else
       {:error, :security_unavailable}
     end
   end
 
-  # The decrypted key exists only while the owner-bound possession proof is
-  # constructed. The broker retains the reload-stable authority, never this
-  # key or a closure over it.
   defp acquire_signing_authority(security, agent_id) do
-    with {:ok, private_key} <- security.load_signing_key(agent_id),
-         true <- is_binary(private_key) and private_key != "",
-         {:ok, proof} <-
-           security.build_signing_authority_acquisition_proof(
-             agent_id,
-             private_key,
-             purpose: :coding_task_executor,
-             owner: self()
-           ),
-         {:ok, opened_authority} <- security.open_signing_authority(proof) do
-      case SigningAuthority.canonicalize(opened_authority) do
-        {:ok, authority} ->
-          {:ok, authority}
+    case CodingAuthority.acquire(security, agent_id, :coding_task_executor) do
+      {:ok, %SigningAuthority{} = authority, bootstrap} ->
+        {:ok, authority, bootstrap}
 
-        {:error, reason} ->
-          # A broker may have opened a live token before a malformed return
-          # crossed this boundary. Always attempt public-facade cleanup before
-          # reporting the canonicalization failure.
-          _ = close_signing_authority(security, opened_authority)
-          {:error, {:signing_authority_acquisition_failed, reason}}
-      end
-    else
-      false -> {:error, :invalid_signing_key}
-      {:error, :no_signing_key} -> {:error, :no_signing_key}
-      {:error, reason} -> {:error, {:signing_authority_acquisition_failed, reason}}
-      other -> {:error, {:signing_authority_acquisition_failed, other}}
-    end
-  rescue
-    exception ->
-      {:error, {:signing_authority_acquisition_failed, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {:signing_authority_acquisition_failed, {kind, reason}}}
-  end
+      {:error, :no_signing_key} ->
+        {:error, :no_signing_key}
 
-  defp close_signing_authority(security, authority) do
-    case security.close_signing_authority(authority) do
-      :ok -> :ok
-      {:error, _reason} = error -> error
-      other -> {:error, {:unexpected_close_result, other}}
+      {:error, reason} ->
+        {:error, {:signing_authority_acquisition_failed, reason}}
     end
-  rescue
-    exception -> {:error, {:authority_close_failed, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {:authority_close_failed, {kind, reason}}}
   end
 
   # Validate the authority before dispatching to the runner. The public

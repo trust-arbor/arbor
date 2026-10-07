@@ -67,7 +67,15 @@ defmodule Arbor.Orchestrator.SessionTest do
   end
 
   alias Arbor.Orchestrator
-  alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+
+  alias Arbor.Contracts.Security.{
+    Identity,
+    SigningAuthority,
+    SigningAuthorityBootstrap,
+    Taint,
+    TaintEnvelope
+  }
+
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Context
@@ -125,6 +133,123 @@ defmodule Arbor.Orchestrator.SessionTest do
       end,
       append_session_entries: fn _uuid, entries -> {:ok, length(entries)} end
     }
+  end
+
+  test "security regression: private authority custody survives hostile state-table substitution",
+       %{logs_root: logs_root} do
+    {identity, bootstrap} = signing_bootstrap!(:session)
+    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
+
+    dot = """
+    digraph Turn {
+      start [shape=Mdiamond]
+      respond [type="compute", simulate="true"]
+      format [type="transform", transform="identity", source_key="last_response", output_key="session.response"]
+      done [shape=Msquare]
+      start -> respond -> format -> done
+    }
+    """
+
+    turn_path = Path.join(logs_root, "private-authority-turn.dot")
+    File.write!(turn_path, dot)
+
+    {:ok, pid} =
+      Arbor.Orchestrator.Session.start_link(
+        session_id: "private-authority-#{System.unique_integer([:positive])}",
+        agent_id: identity.agent_id,
+        turn_dot: turn_path,
+        heartbeat_dot: turn_path,
+        signing_authority_bootstrap: bootstrap,
+        adapters: succeeding_persist_adapters(),
+        config: %{"stream" => false}
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+    end)
+
+    state = :sys.get_state(pid)
+    assert state.signing_authority == nil
+    assert state.signer == nil
+
+    {:ok, forged_authority} =
+      SigningAuthority.new(
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: "agent_forged_session",
+        purpose: :session
+      )
+
+    {:ok, forged_bootstrap} =
+      SigningAuthorityBootstrap.new(
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: "agent_forged_session",
+        purpose: :session
+      )
+
+    forged = :ets.new(:forged_session_credentials, [:set, :private])
+
+    true =
+      :ets.insert(
+        forged,
+        {:session_credentials_v1,
+         %{signing_authority: forged_authority, signer: nil, bootstrap: forged_bootstrap}}
+      )
+
+    true = :ets.give_away(forged, pid, :forged_session_credentials)
+    assert eventually(fn -> :ets.info(forged, :owner) == pid end)
+
+    :sys.replace_state(pid, fn current ->
+      current
+      |> Map.put(:credential_custody, forged)
+      |> Map.put(:signing_authority, forged_authority)
+    end)
+
+    assert {:ok, %{content: content}} =
+             Arbor.Orchestrator.Session.send_message(pid, "custody remains live")
+
+    assert content =~ "Simulated"
+    assert Arbor.Orchestrator.Session.get_state(pid).signing_authority == nil
+
+    GenServer.stop(pid)
+    assert {:error, :bootstrap_not_found} = Arbor.Security.claim_signing_authority(bootstrap)
+  end
+
+  defp signing_bootstrap!(purpose) do
+    {:ok, identity} =
+      Identity.generate(name: "session-private-custody-#{System.unique_integer([:positive])}")
+
+    :ok = Arbor.Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: purpose,
+        owner: self()
+      )
+
+    {:ok, bootstrap} = Arbor.Security.issue_signing_authority_bootstrap(proof)
+
+    on_exit(fn ->
+      _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    {identity, bootstrap}
+  end
+
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(5)
+      eventually(fun, attempts - 1)
+    end
   end
 
   test "malformed signing-authority bootstrap fails closed during init" do

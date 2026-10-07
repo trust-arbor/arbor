@@ -315,7 +315,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
                end
              )
 
-    assert_receive {:verification_rpc, :arbor_test@localhost, Arbor.Orchestrator,
+    assert_receive {:verification_rpc, :arbor_test@localhost, Arbor.Agent,
                     :verify_coding_candidate_for_operator, plan, request, 22_000}
 
     assert plan["budgets"]["wall_clock_ms"] == 12_000
@@ -344,7 +344,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
       expected_request = verification_request(profile)
 
       rpc = fn _target,
-               Arbor.Orchestrator,
+               Arbor.Agent,
                :verify_coding_candidate_for_operator,
                [_plan, request],
                _timeout ->
@@ -550,7 +550,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
     test_pid = self()
 
     spawn_request = fn _target,
-                       Arbor.Orchestrator,
+                       Arbor.Agent,
                        :verify_coding_candidate_for_operator_rpc,
                        [requester, reply_to, correlation_id, _plan, _request],
                        [:monitor] ->
@@ -575,7 +575,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
     assert {:badrpc, :timeout} =
              Check.cancellable_verification_rpc(
                node(),
-               Arbor.Orchestrator,
+               Arbor.Agent,
                :verify_coding_candidate_for_operator,
                [%{}, %{}],
                50,

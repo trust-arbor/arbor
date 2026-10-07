@@ -2,12 +2,14 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
   use ExUnit.Case, async: false
 
   @moduletag :fast
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   setup :start_infrastructure
 
   describe "enumerate_authority/3" do
     test "returns held caps plus profile-mintable candidate URIs without minting", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      actor_authority: actor_authority
     } do
       set_policy_enforcer_enabled(true)
 
@@ -16,7 +18,13 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
         "arbor://code/write" => :block
       })
 
-      {:ok, held_cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, held_cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read",
+          actor_authority: actor_authority
+        )
+
       {:ok, caps_before} = Arbor.Security.list_capabilities(agent_id)
 
       {:ok, snapshot} =
@@ -126,17 +134,18 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
     )
 
     agent_id = "agent_authority_enum_#{System.unique_integer([:positive])}"
+    {_identity, actor_authority} = actor_authority!()
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
         case Arbor.Security.list_capabilities(agent_id) do
-          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke(&1.id))
+          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke_fixture(&1.id))
           _ -> :ok
         end
       end
     end)
 
-    {:ok, agent_id: agent_id}
+    {:ok, agent_id: agent_id, actor_authority: actor_authority}
   end
 
   defp ensure_started(module, opts \\ []) do

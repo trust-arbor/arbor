@@ -127,7 +127,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "vp05d2a1r-test-secret-#{System.unique_integer([:positive])}"
+      "vp05d2a1r-delivery-receipt-security-regression-secret-#{System.unique_integer([:positive])}"
     )
 
     on_exit(fn ->
@@ -182,7 +182,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
 
     on_exit(fn ->
       oidc.cleanup.()
-      _ = Security.deregister_identity(human_id)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     {human_id, private_key}
@@ -193,10 +193,10 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       [principal: principal, resource: resource]
       |> Keyword.merge(opts)
 
-    assert {:ok, cap} = Security.grant(grant_opts)
+    assert {:ok, cap} = Security.grant_fixture(grant_opts)
 
     on_exit(fn ->
-      _ = Security.revoke(cap.id)
+      _ = Security.revoke_fixture(cap.id)
     end)
 
     cap
@@ -231,6 +231,41 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
   end
 
   describe "security regression: authorized human issue and consume" do
+    test "security regression: direct broker calls cannot mint consumable receipts", %{
+      active_before: active_before
+    } do
+      human_id = register_human!()
+      resource = resource!()
+      digest = :crypto.hash(:sha256, "conversation-operation")
+
+      assert {:error, :receipt_issuance_unauthorized} =
+               DeliveryReceiptBroker.issue(human_id, resource, :chat)
+
+      assert {:error, :receipt_issuance_unauthorized} =
+               DeliveryReceiptBroker.issue_conversation(human_id, resource, human_id)
+
+      assert {:error, :receipt_issuance_unauthorized} =
+               DeliveryReceiptBroker.issue_conversation_operation(
+                 human_id,
+                 resource,
+                 human_id,
+                 nil,
+                 digest
+               )
+
+      assert DeliveryReceiptBroker.stats().active == active_before
+
+      grant!(human_id, resource)
+      assert {:ok, token} = SessionToken.generate(human_id)
+
+      assert {:ok, receipt} =
+               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
+                 session_token: token
+               )
+
+      assert {:ok, ^human_id} = Security.consume_delivery_receipt(receipt, resource, :chat)
+    end
+
     test "security regression: issue then exact consume returns Security-owned principal" do
       human_id = register_human!()
       resource = resource!()
@@ -351,10 +386,10 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
     } do
       {:ok, agent_identity} = Identity.generate(name: "vp05d2a1r-agent")
       agent_id = agent_identity.agent_id
-      assert :ok = Security.register_identity(agent_identity)
+      assert :ok = Security.register_identity_fixture(agent_identity)
 
       on_exit(fn ->
-        _ = Security.deregister_identity(agent_id)
+        _ = Security.deregister_identity_fixture(agent_id)
       end)
 
       resource = resource!()

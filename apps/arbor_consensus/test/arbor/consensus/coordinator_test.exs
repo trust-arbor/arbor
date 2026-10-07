@@ -1375,7 +1375,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
       metadata: %{test: true}
     }
 
-    Arbor.Security.CapabilityStore.put(cap)
+    Arbor.Security.put_capability_fixture(cap)
   end
 
   defp ensure_authorization_request_topic! do

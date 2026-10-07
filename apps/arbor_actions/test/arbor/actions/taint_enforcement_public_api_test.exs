@@ -16,13 +16,13 @@ defmodule Arbor.Actions.TaintEnforcementPublicApiTest do
     File.mkdir_p!(workspace)
 
     {:ok, capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: principal,
         resource: "arbor://fs/write#{workspace}/**"
       )
 
     on_exit(fn ->
-      Arbor.Security.revoke(capability.id)
+      Arbor.Security.revoke_fixture(capability.id)
       File.rm_rf!(workspace)
     end)
 

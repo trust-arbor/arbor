@@ -71,7 +71,7 @@ if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
     )
 
   # Insert directly (unsigned — accepted because capability_signing_required: false)
-  Arbor.Security.CapabilityStore.put(cap)
+  Arbor.Security.put_capability_fixture(cap)
 
   # Grant orchestrator execute for all test agent IDs used across the suite.
   # Session gate check (authorize/3) requires this capability for send_message
@@ -101,7 +101,7 @@ if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
         metadata: %{test: true}
       )
 
-    Arbor.Security.CapabilityStore.put(agent_cap)
+    Arbor.Security.put_capability_fixture(agent_cap)
   end
 end
 
@@ -126,7 +126,7 @@ defmodule Arbor.Orchestrator.TestCapabilities do
           metadata: %{test: true}
         )
 
-      Arbor.Security.CapabilityStore.put(cap)
+      Arbor.Security.put_capability_fixture(cap)
       :ok
     else
       :ok
@@ -151,7 +151,7 @@ defmodule Arbor.Orchestrator.TestCapabilities do
         metadata: %{test: true}
       )
 
-    {:ok, :stored} = Arbor.Security.CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     :ok
   end
 
@@ -164,7 +164,7 @@ defmodule Arbor.Orchestrator.TestCapabilities do
   def revoke_all(agent_id) when is_binary(agent_id) do
     if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
          function_exported?(Arbor.Security.CapabilityStore, :revoke_all, 1) do
-      _ = Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      _ = Arbor.Security.revoke_all_fixture(agent_id)
       :ok
     else
       :ok

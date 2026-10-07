@@ -543,7 +543,14 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     def load_signing_key(_agent_id), do: {:error, {:private_key, "must-not-cross-boundary"}}
     def build_signing_authority_acquisition_proof(_agent_id, _private_key, _opts), do: :unused
     def open_signing_authority(_proof), do: :unused
+
+    def claim_signing_authority(_bootstrap),
+      do: {:error, {:private_key, "must-not-cross-boundary"}}
+
     def close_signing_authority(_authority), do: :ok
+
+    def close_signing_authority_bootstrap(bootstrap),
+      do: Arbor.Security.close_signing_authority_bootstrap(bootstrap)
   end
 
   defmodule DelayedCloseSecurity do
@@ -554,6 +561,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     end
 
     def open_signing_authority(proof), do: Arbor.Security.open_signing_authority(proof)
+    def claim_signing_authority(bootstrap), do: Arbor.Security.claim_signing_authority(bootstrap)
+
+    def close_signing_authority_bootstrap(bootstrap),
+      do: Arbor.Security.close_signing_authority_bootstrap(bootstrap)
 
     def close_signing_authority(authority) do
       delay =
@@ -563,6 +574,23 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
       Process.sleep(delay)
       Arbor.Security.close_signing_authority(authority)
+    end
+  end
+
+  defmodule TestAuthorityProvider do
+    def issue_signing_authority_bootstrap(agent_id, purpose) do
+      keys = Application.fetch_env!(:arbor_orchestrator, :operator_candidate_authority_keys)
+
+      with {:ok, private_key} <- Map.fetch(keys, agent_id),
+           {:ok, proof} <-
+             Arbor.Security.build_signing_authority_acquisition_proof(
+               agent_id,
+               private_key,
+               purpose: purpose,
+               owner: self()
+             ) do
+        Arbor.Security.issue_signing_authority_bootstrap(proof)
+      end
     end
   end
 
@@ -605,6 +633,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
     previous = %{
       security_module: Application.get_env(:arbor_orchestrator, :security_module),
+      authority_provider: Application.get_env(:arbor_orchestrator, :coding_authority_provider),
       actions_executor:
         Application.get_env(:arbor_orchestrator, :coding_candidate_actions_executor),
       logs_root: Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
@@ -630,6 +659,12 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     }
 
     Application.put_env(:arbor_orchestrator, :security_module, Security)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_authority_provider,
+      TestAuthorityProvider
+    )
 
     Application.put_env(
       :arbor_orchestrator,
@@ -673,17 +708,30 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
         name: "operator-candidate-#{System.unique_integer([:positive, :monotonic])}"
       )
 
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :operator_candidate_authority_keys,
+      %{identity.agent_id => identity.private_key}
+    )
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
+      Application.delete_env(:arbor_orchestrator, :operator_candidate_authority_keys)
 
       restore_env(
         :arbor_orchestrator,
         :security_module,
         previous.security_module
+      )
+
+      restore_env(
+        :arbor_orchestrator,
+        :coding_authority_provider,
+        previous.authority_provider
       )
 
       restore_env(
@@ -810,7 +858,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
                     authority, {:ok, _signed_request}}
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-success")
+             Security.sign_with_authority(authority, "arbor://test/signing/after-success")
 
     assert {:ok, ^report} = VerificationReport.normalize(report)
     assert report["status"] == "passed"
@@ -846,7 +894,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
                     authority, {:ok, _signed_request}}
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-error")
+             Security.sign_with_authority(authority, "arbor://test/signing/after-error")
   end
 
   test "unconfirmed approval cleanup preserves the original worker error", ctx do
@@ -863,7 +911,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     assert cleanup_opts[:cleanup_reason] == :task_termination
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-unconfirmed-cleanup")
+             Security.sign_with_authority(
+               authority,
+               "arbor://test/signing/after-unconfirmed-cleanup"
+             )
   end
 
   test "genuine authority is revoked when the code-owned wall-clock deadline expires", ctx do
@@ -883,7 +934,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
                     authority, {:ok, _signed_request}}
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-deadline")
+             Security.sign_with_authority(authority, "arbor://test/signing/after-deadline")
 
     refute Agent.get(ctx.approval_state, & &1.pending)
   end
@@ -913,7 +964,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
 
     assert eventually(fn ->
-             Security.sign_with_authority(authority, "after-timeout") ==
+             Security.sign_with_authority(authority, "arbor://test/signing/after-timeout") ==
                {:error, :authority_not_found}
            end)
 
@@ -959,7 +1010,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     refute Agent.get(ctx.approval_state, & &1.pending)
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-requester-death")
+             Security.sign_with_authority(authority, "arbor://test/signing/after-requester-death")
 
     assert_receive {:DOWN, ^rpc_monitor, :process, ^rpc_pid, :normal}
   end
@@ -1002,7 +1053,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     refute Agent.get(ctx.approval_state, & &1.pending)
 
     assert {:error, :authority_not_found} =
-             Security.sign_with_authority(authority, "after-delayed-cancellation")
+             Security.sign_with_authority(
+               authority,
+               "arbor://test/signing/after-delayed-cancellation"
+             )
 
     assert_receive {:DOWN, ^rpc_monitor, :process, ^rpc_pid, :normal}
   end

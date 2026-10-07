@@ -14,7 +14,6 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
 
   alias Arbor.Common.ActionRegistry
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
@@ -384,12 +383,12 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
         metadata: %{test: true}
       )
 
-    assert {:ok, :stored} = CapabilityStore.put(action_capability)
+    assert {:ok, :stored} = Arbor.Security.put_capability_fixture(action_capability)
     on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all(agent_id) end)
 
     on_event = fn
       %{type: :stage_completed, node_id: "cache"} ->
-        :ok = Arbor.Security.revoke(action_capability.id)
+        :ok = Arbor.Security.revoke_fixture(action_capability.id)
 
       _event ->
         :ok

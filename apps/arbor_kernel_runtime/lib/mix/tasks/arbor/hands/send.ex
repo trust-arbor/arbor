@@ -24,6 +24,7 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
 
     case positional do
       [name | message_parts] when message_parts != [] ->
+        validate_name(name)
         message = Enum.join(message_parts, " ")
         send_message(name, message)
 
@@ -34,6 +35,17 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
 
       _ ->
         Mix.shell().error("Usage: mix arbor.hands.send <name> \"message\"")
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp validate_name(name) do
+    case Hands.validate_name(name) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_hand_name} ->
+        Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
         exit({:shutdown, 1})
     end
   end
@@ -56,10 +68,15 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
     end
   end
 
-  # L9: Sanitize message to prevent tmux control sequence injection.
-  # Strip control characters (except printable ASCII + common unicode).
+  @doc false
+  @spec sanitize_message(String.t()) :: String.t()
+  def sanitize_message(message) when is_binary(message) do
+    String.replace(message, ~r/[\x00-\x1f\x7f]/, "")
+  end
+
+  # Strip terminal control characters before either local or container tmux.
   defp send_to_tmux(session, message) do
-    safe_message = String.replace(message, ~r/[\x00-\x1f\x7f]/, "")
+    safe_message = sanitize_message(message)
 
     System.cmd("tmux", ["send-keys", "-t", session, safe_message, "Enter"],
       stderr_to_stdout: true
@@ -76,7 +93,7 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
         "send-keys",
         "-t",
         "claude",
-        message,
+        sanitize_message(message),
         "Enter"
       ],
       stderr_to_stdout: true

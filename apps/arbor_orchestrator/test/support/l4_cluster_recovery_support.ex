@@ -26,7 +26,7 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Security.CapabilityStore
 
-  @handler_type "l4_cluster_side"
+  @handler_type "test.l4_cluster_side"
 
   # ---------------------------------------------------------------------------
   # Controller-owned central store (survives remote app / node loss)
@@ -673,7 +673,7 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   end
 
   def register_side_handler! do
-    :ok = Registry.register(@handler_type, SideEffectHandler)
+    :ok = Registry.register_fixture(@handler_type, SideEffectHandler)
   end
 
   def grant_agent_system! do
@@ -687,7 +687,7 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
           metadata: %{test: true, l4_cluster: true}
         )
 
-      case CapabilityStore.put(cap) do
+      case Arbor.Security.put_capability_fixture(cap) do
         {:ok, _} -> :ok
         :ok -> :ok
         other -> other
@@ -850,7 +850,7 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
           metadata: %{test: true, design_checkpoint: true, task_id: task_id}
         )
 
-      case CapabilityStore.put(cap) do
+      case Arbor.Security.put_capability_fixture(cap) do
         {:ok, _} -> :ok
         :ok -> :ok
         other -> throw({:grant_failed, resource_uri, other})

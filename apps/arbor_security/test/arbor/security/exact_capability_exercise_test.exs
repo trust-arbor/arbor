@@ -31,7 +31,7 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
     Application.put_env(:arbor_security, :strict_identity_mode, true)
 
     {:ok, identity} = Identity.generate(name: "exact-capability-exercise")
-    :ok = Registry.register(identity)
+    :ok = Registry.register_fixture(identity)
 
     on_exit(fn ->
       restore_env(:identity_verification, previous.identity_verification)
@@ -63,15 +63,15 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
     agent_id: agent_id
   } do
     capability_id = grant_route_capability(agent_id, @resource)
-    assert :ok = Security.suspend_identity(agent_id, reason: "test")
-    on_exit(fn -> Security.resume_identity(agent_id) end)
+    assert :ok = Security.suspend_identity_fixture(agent_id, reason: "test")
+    on_exit(fn -> Security.resume_identity_fixture(agent_id) end)
 
     assert {:error, :unauthorized} = exercise(agent_id, capability_id)
   end
 
   test "revoked identity cannot exercise a capability", %{agent_id: agent_id} do
     capability_id = grant_route_capability(agent_id, @resource)
-    assert :ok = Security.revoke_identity(agent_id, reason: "test")
+    assert :ok = Security.revoke_identity_fixture(agent_id, reason: "test")
 
     assert {:error, :unauthorized} = exercise(agent_id, capability_id)
   end
@@ -203,8 +203,9 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
         :error -> grant_opts
       end
 
-    assert {:ok, capability_id} = Security.grant_capability_id(grant_opts)
-    on_exit(fn -> Security.revoke(capability_id) end)
+    assert {:ok, capability} = Security.grant_fixture(grant_opts)
+    capability_id = capability.id
+    on_exit(fn -> Security.revoke_fixture(capability_id) end)
     capability_id
   end
 

@@ -20,8 +20,7 @@ defmodule Arbor.Scheduler.CapsFile do
   """
 
   alias Arbor.Contracts.Security.{Capability, CapabilityUri}
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.IssuerRegistry
+  alias Arbor.Security
 
   @current_version 2
   @signing_domain "arbor.scheduler.caps.v2"
@@ -472,7 +471,7 @@ defmodule Arbor.Scheduler.CapsFile do
   end
 
   defp lookup_issuer(issuer_id) do
-    case IssuerRegistry.lookup(issuer_id) do
+    case Security.lookup_issuer(issuer_id) do
       {:ok, _} = ok -> ok
       {:error, :not_found} -> {:error, :issuer_not_found}
       {:error, :revoked} -> {:error, :issuer_revoked}
@@ -482,7 +481,7 @@ defmodule Arbor.Scheduler.CapsFile do
   end
 
   defp verify_signature(parsed, public_key) do
-    if Crypto.verify(signing_payload(parsed), parsed.signature, public_key),
+    if Security.verify_detached(signing_payload(parsed), parsed.signature, public_key) == :ok,
       do: :ok,
       else: {:error, :invalid_signature}
   end

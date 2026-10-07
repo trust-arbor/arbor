@@ -3,6 +3,7 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Signals.Adapters.CapabilityAuthorizer
   alias Arbor.Signals.Config.Testing
 
@@ -135,6 +136,50 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
       assert_received {:authorize_check, "human_abc", _, :subscribe,
                        [session_token: "a", session_token: "b"]}
+    end
+  end
+
+  describe "authorize_channel_principal/3" do
+    @tag :security_regression
+    test "security regression: a caller-marked identity without signed proof is denied" do
+      Testing.put(:security_module, __MODULE__.MockSecurityAllows)
+
+      context =
+        "agent_channel_spoof"
+        |> AuthContext.new()
+        |> AuthContext.mark_verified()
+
+      assert {:error, :unauthorized} =
+               CapabilityAuthorizer.authorize_channel_principal(context, :send, "chan_test")
+    end
+
+    test "signed channel requests are authorized against the bounded channel resource" do
+      Testing.put(:security_module, __MODULE__.MockSecurityCapture)
+      proof = %{signed: :request}
+      context = AuthContext.new("agent_channel", signed_request: proof)
+      digest = :crypto.hash(:sha256, "chan_test") |> Base.encode16(case: :lower)
+
+      assert {:ok, "agent_channel"} =
+               CapabilityAuthorizer.authorize_channel_principal(context, :send, "chan_test")
+
+      assert_received {:authorize_check, "agent_channel", resource, :send,
+                       [signed_request: ^proof, verify_identity: true]}
+
+      assert resource == "arbor://signals/channel/send/" <> digest
+    end
+
+    @tag :security_regression
+    test "security regression: missing and malformed channel security providers fail closed" do
+      context = AuthContext.new("agent_channel", signed_request: %{signed: :request})
+
+      for provider <- [nil, __MODULE__.MockSecurityNoAuthorize, __MODULE__.MockSecurityMalformed] do
+        if provider,
+          do: Testing.put(:security_module, provider),
+          else: Testing.delete(:security_module)
+
+        assert {:error, :unauthorized} =
+                 CapabilityAuthorizer.authorize_channel_principal(context, :send, "chan_test")
+      end
     end
   end
 

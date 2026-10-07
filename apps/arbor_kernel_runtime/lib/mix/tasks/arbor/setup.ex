@@ -14,11 +14,12 @@ defmodule Mix.Tasks.Arbor.Setup do
   2. Fetch dependencies (`mix deps.get`)
   3. Set up `.env` from `.env.example` (if `.env` doesn't exist)
   4. Generate `ARBOR_COOKIE` if not already set in `.env`
-  5. Ensure `~/.arbor/` directory structure exists
-  6. Create database (`mix ecto.create`)
-  7. Run migrations (`mix ecto.migrate`)
-  8. Compile the project
-  9. Print summary with next steps
+  5. Generate `ARBOR_SESSION_TOKEN_SECRET` if not already set in `.env`
+  6. Ensure `~/.arbor/` directory structure exists
+  7. Create database (`mix ecto.create`)
+  8. Run migrations (`mix ecto.migrate`)
+  9. Compile the project
+  10. Print summary with next steps
 
   ## Options
 
@@ -63,6 +64,7 @@ defmodule Mix.Tasks.Arbor.Setup do
     step("Fetching dependencies", &fetch_deps/0)
     step("Setting up environment", &setup_env/0)
     step("Configuring distribution cookie", fn -> setup_cookie(opts) end)
+    step("Configuring session-token secret", &setup_session_token_secret/0)
 
     if opts[:node_host] do
       step("Setting node host", fn -> setup_node_host(opts[:node_host]) end)
@@ -199,25 +201,33 @@ defmodule Mix.Tasks.Arbor.Setup do
       "restore bin/mix with executable mode in the Arbor project root"
   end
 
-  defp setup_env do
-    env_path = Path.join(File.cwd!(), ".env")
-    example_path = Path.join(File.cwd!(), ".env.example")
+  @doc false
+  def setup_env(project_root \\ File.cwd!()) when is_binary(project_root) do
+    env_path = Path.join(project_root, ".env")
+    example_path = Path.join(project_root, ".env.example")
 
     cond do
       File.exists?(env_path) ->
+        File.chmod!(env_path, 0o600)
         {:skip, ".env already exists"}
 
       File.exists?(example_path) ->
-        File.cp!(example_path, env_path)
-        {:ok, "created .env from .env.example"}
+        case create_private_file(env_path, File.read!(example_path)) do
+          :ok -> {:ok, "created .env from .env.example (mode 600)"}
+          {:error, :eexist} -> {:skip, ".env already exists"}
+          {:error, reason} -> {:error, "could not create .env: #{inspect(reason)}"}
+        end
 
       true ->
         {:skip, "no .env.example found"}
     end
   end
 
-  defp setup_cookie(opts) do
-    env_path = Path.join(File.cwd!(), ".env")
+  @doc false
+  def setup_cookie(_opts, project_root \\ File.cwd!()) when is_binary(project_root) do
+    env_path = Path.join(project_root, ".env")
+
+    if File.exists?(env_path), do: File.chmod!(env_path, 0o600)
 
     cond do
       # Already set in environment
@@ -233,19 +243,45 @@ defmodule Mix.Tasks.Arbor.Setup do
         cookie = generate_cookie()
         append_to_env(env_path, "ARBOR_COOKIE", cookie)
         System.put_env("ARBOR_COOKIE", cookie)
-
-        if opts[:node_host] do
-          {:ok, "generated and added to .env"}
-        else
-          {:ok, "generated and added to .env"}
-        end
+        {:ok, "generated and added to private .env"}
 
       true ->
         cookie = generate_cookie()
-        # No .env file — just set it in the environment for this session
+        :ok = create_private_file!(env_path, "ARBOR_COOKIE=#{cookie}\n")
         System.put_env("ARBOR_COOKIE", cookie)
-        {:ok, "generated (add ARBOR_COOKIE=#{cookie} to your shell profile)"}
+        {:ok, "generated and saved to private .env"}
     end
+  end
+
+  @doc false
+  @spec setup_session_token_secret(String.t()) ::
+          {:ok, String.t()} | {:skip, String.t()} | {:error, String.t()}
+  def setup_session_token_secret(project_root \\ File.cwd!()) when is_binary(project_root) do
+    env_path = Path.join(project_root, ".env")
+
+    if File.exists?(env_path), do: File.chmod!(env_path, 0o600)
+
+    cond do
+      System.get_env("ARBOR_SESSION_TOKEN_SECRET") not in [nil, ""] ->
+        {:skip, "ARBOR_SESSION_TOKEN_SECRET already set in environment"}
+
+      env_has_key?(env_path, "ARBOR_SESSION_TOKEN_SECRET") ->
+        {:skip, "ARBOR_SESSION_TOKEN_SECRET already in .env"}
+
+      File.exists?(env_path) ->
+        secret = generate_session_token_secret()
+        append_to_env(env_path, "ARBOR_SESSION_TOKEN_SECRET", secret)
+        System.put_env("ARBOR_SESSION_TOKEN_SECRET", secret)
+        {:ok, "generated and added to private .env"}
+
+      true ->
+        secret = generate_session_token_secret()
+        :ok = create_private_file!(env_path, "ARBOR_SESSION_TOKEN_SECRET=#{secret}\n")
+        System.put_env("ARBOR_SESSION_TOKEN_SECRET", secret)
+        {:ok, "generated and saved to private .env"}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
   end
 
   defp setup_node_host(host) do
@@ -264,12 +300,14 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
   end
 
-  defp ensure_directories do
-    arbor_dir = Path.expand("~/.arbor")
+  @doc false
+  def ensure_directories(arbor_dir \\ Path.expand("~/.arbor")) when is_binary(arbor_dir) do
     logs_dir = Path.join(arbor_dir, "logs")
 
     File.mkdir_p!(arbor_dir)
+    File.chmod!(arbor_dir, 0o700)
     File.mkdir_p!(logs_dir)
+    File.chmod!(logs_dir, 0o700)
 
     {:ok, "~/.arbor/ ready (including logs/)"}
   end
@@ -313,10 +351,17 @@ defmodule Mix.Tasks.Arbor.Setup do
         """
 
         File.mkdir_p!(Path.dirname(path))
-        File.write!(path, contents)
-        File.chmod!(path, 0o600)
 
-        {:ok, "generated #{identity.agent_id} at #{path} (mode 600)"}
+        case create_private_file(path, contents) do
+          :ok ->
+            {:ok, "generated #{identity.agent_id} at #{path} (mode 600)"}
+
+          {:error, :eexist} ->
+            {:skip, "#{path} already exists"}
+
+          {:error, reason} ->
+            {:error, "could not create operator identity: #{inspect(reason)}"}
+        end
 
       {:error, reason} ->
         {:error, "could not generate operator identity: #{inspect(reason)}"}
@@ -343,14 +388,13 @@ defmodule Mix.Tasks.Arbor.Setup do
 
   defp create_sqlite_db do
     db_path = get_sqlite_db_path()
-    db_dir = Path.dirname(db_path)
 
-    unless File.dir?(db_dir) do
-      File.mkdir_p!(db_dir)
-    end
+    with_private_sqlite_storage(db_path, fn ->
+      # ecto.create handles SQLite file creation. The wrapper makes the parent
+      # private first and hardens the resulting file even if Ecto raises or exits.
+      Mix.Task.run("ecto.create", ["-r", "Arbor.Persistence.Repo", "--quiet"])
+    end)
 
-    # ecto.create handles SQLite file creation
-    Mix.Task.run("ecto.create", ["-r", "Arbor.Persistence.Repo", "--quiet"])
     {:ok, "SQLite database at #{db_path}"}
   rescue
     e ->
@@ -428,6 +472,25 @@ defmodule Mix.Tasks.Arbor.Setup do
     Keyword.get(config, :database, Path.expand("~/.arbor/arbor_dev.db"))
   end
 
+  @doc false
+  @spec with_private_sqlite_storage(String.t(), (-> result)) :: result when result: term()
+  def with_private_sqlite_storage(database, create_fun)
+      when is_binary(database) and is_function(create_fun, 0) do
+    if filesystem_sqlite_database?(database) do
+      database = Path.expand(database)
+      ensure_private_sqlite_parent!(Path.dirname(database))
+      ensure_private_sqlite_file!(database)
+
+      try do
+        create_fun.()
+      after
+        ensure_private_sqlite_file!(database)
+      end
+    else
+      create_fun.()
+    end
+  end
+
   defp check_postgres do
     config = Application.get_env(:arbor_persistence, Arbor.Persistence.Repo, [])
     hostname = Keyword.get(config, :hostname, "localhost")
@@ -447,8 +510,42 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
   end
 
+  defp filesystem_sqlite_database?(database) do
+    database != "" and database != ":memory:" and not String.starts_with?(database, "file:")
+  end
+
+  defp ensure_private_sqlite_parent!(directory) do
+    File.mkdir_p!(directory)
+
+    case File.lstat(directory) do
+      {:ok, %File.Stat{type: :directory}} -> File.chmod!(directory, 0o700)
+      {:ok, %File.Stat{type: type}} -> raise "SQLite parent must be a directory, got: #{type}"
+      {:error, reason} -> raise File.Error, reason: reason, action: "inspect", path: directory
+    end
+  end
+
+  defp ensure_private_sqlite_file!(database) do
+    case File.lstat(database) do
+      {:ok, %File.Stat{type: :regular}} ->
+        File.chmod!(database, 0o600)
+
+      {:ok, %File.Stat{type: type}} ->
+        raise "SQLite database must be a regular file, got: #{type}"
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "inspect", path: database
+    end
+  end
+
   defp generate_cookie do
     :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
+  end
+
+  defp generate_session_token_secret do
+    :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
   end
 
   defp env_has_key?(env_path, key) do
@@ -472,7 +569,7 @@ defmodule Mix.Tasks.Arbor.Setup do
     # Ensure there's a newline before appending
     separator = if String.ends_with?(content, "\n"), do: "", else: "\n"
 
-    File.write!(env_path, content <> separator <> "#{key}=#{value}\n")
+    replace_private_file!(env_path, content <> separator <> "#{key}=#{value}\n")
   end
 
   defp update_env_key(env_path, key, value) do
@@ -491,7 +588,55 @@ defmodule Mix.Tasks.Arbor.Setup do
         end
       end)
 
-    File.write!(env_path, updated)
+    replace_private_file!(env_path, updated)
+  end
+
+  defp create_private_file!(path, contents) do
+    case create_private_file(path, contents) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "create private file", path: path
+    end
+  end
+
+  # Create an empty inode exclusively, make it private, then write secret bytes.
+  # This avoids the write-then-chmod exposure window under a permissive umask.
+  defp create_private_file(path, contents) do
+    case File.open(path, [:write, :binary, :exclusive]) do
+      {:ok, io} ->
+        try do
+          File.chmod!(path, 0o600)
+          :ok = IO.binwrite(io, contents)
+          :ok = :file.sync(io)
+          :ok
+        after
+          File.close(io)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error ->
+      File.rm(path)
+      reraise error, __STACKTRACE__
+  end
+
+  defp replace_private_file!(path, contents) do
+    suffix = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+    staging = Path.join(Path.dirname(path), ".#{Path.basename(path)}.tmp-#{suffix}")
+
+    try do
+      :ok = create_private_file!(staging, contents)
+      File.rename!(staging, path)
+      File.chmod!(path, 0o600)
+    rescue
+      error ->
+        File.rm(staging)
+        reraise error, __STACKTRACE__
+    end
   end
 
   # ── Output ───────────────────────────────────────────────────────────

@@ -103,8 +103,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
 
       revoke_all_capabilities(identity.agent_id)
       _ = Arbor.Trust.delete_trust_profile(identity.agent_id)
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     # MIX_ENV=test deliberately has no operator Apple image or dependency
@@ -114,8 +114,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
     # ActionsExecutor. Production workspace inspection and Mix.Compile still
     # produce and validate all evidence.
 
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     action_resources = [
       Arbor.Actions.canonical_uri_for(Arbor.Actions.Coding.Workspace.Inspect, %{}),
@@ -124,7 +124,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
 
     for resource <- action_resources do
       assert {:ok, _capability} =
-               Security.grant(principal: identity.agent_id, resource: resource)
+               Security.grant_fixture(principal: identity.agent_id, resource: resource)
     end
 
     assert {:ok, _profile} =
@@ -446,7 +446,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
     case Security.list_capabilities(agent_id) do
       {:ok, capabilities} ->
         Enum.each(capabilities, fn capability ->
-          _ = Security.revoke(capability.id)
+          _ = Security.revoke_fixture(capability.id)
         end)
 
       _ ->

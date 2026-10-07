@@ -63,7 +63,7 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert MapSet.new(Map.keys(status)) == @status_keys
     assert MapSet.new(Map.keys(status["retirement"])) == @retirement_keys
 
-    assert status["last_refusal"] in ~w(none soft_capacity_exhausted capacity_exhausted retired_version operation_terminal)
+    assert status["last_refusal"] in ~w(none soft_capacity_exhausted capacity_exhausted principal_capacity_exhausted retired_version operation_terminal)
 
     assert status["retirement"]["ledger_state"] in ~w(none absent bound bound_orphan mismatch ahead)
 
@@ -88,6 +88,7 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     refute function_exported?(Arbor.Security, :audit_journal_pending_operations, 1)
     refute function_exported?(Arbor.Security, :audit_journal_append, 1)
     refute function_exported?(Arbor.Security, :append_audit_journal_record, 1)
+    refute function_exported?(Owner, :append, 1)
   end
 
   test "security regression: disabled append is an error not success", %{name: name} do
@@ -276,25 +277,13 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     refute inspect(status) =~ "source_invalid"
     :ok = GenServer.stop(pid)
 
-    previous_trap_exit = Process.flag(:trap_exit, true)
-
-    try do
-      started = Owner.start_link(mode: :durable, root: root, name: name)
-
-      case started do
-        {:ok, restarted} ->
-          assert {:ok, pending} = Owner.pending_operations(restarted)
-          refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
-          assert {:ok, after_status} = Owner.status(restarted)
-          assert after_status["serving"] == true
-          assert after_status["poisoned"] == false
-
-        {:error, {:journal_open_failed, _reason}} ->
-          refute Process.whereis(name)
-      end
-    after
-      Process.flag(:trap_exit, previous_trap_exit)
-    end
+    assert {:ok, restarted} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, pending} = Owner.pending_operations(restarted)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+    assert {:ok, after_status} = Owner.status(restarted)
+    assert after_status["serving"] == false
+    assert after_status["poisoned"] == true
+    assert {:error, :journal_poisoned} = Owner.append(restarted, extra)
   end
 
   test "security regression: publish_uncertain poisons with commit_uncertain and never acknowledges extra",

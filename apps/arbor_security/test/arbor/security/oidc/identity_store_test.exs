@@ -36,7 +36,7 @@ defmodule Arbor.Security.OIDC.IdentityStoreTest do
     end
   end
 
-  describe "load_or_create/1" do
+  describe "load_or_create_fixture/1" do
     test "creates new identity when SigningKeyStore unavailable" do
       claims = %{
         iss: "https://test.arbor.dev",
@@ -45,10 +45,10 @@ defmodule Arbor.Security.OIDC.IdentityStoreTest do
         name: "Test User"
       }
 
-      case IdentityStore.load_or_create(claims) do
+      case IdentityStore.load_or_create_fixture(claims) do
         {:ok, identity, :created} ->
           assert String.starts_with?(identity.agent_id, "human_")
-          assert identity.private_key != nil
+          assert identity.private_key == nil
           assert identity.public_key != nil
           assert identity.metadata["identity_type"] == "human"
           assert identity.metadata["oidc_email"] == "test@example.com"

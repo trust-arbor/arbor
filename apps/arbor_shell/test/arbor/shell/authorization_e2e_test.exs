@@ -15,12 +15,8 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
 
   setup do
-    # Ensure Security processes are running
-    ensure_security_started()
-
     # Disable features that interfere with minimal authorization tests
     prev_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
     prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
@@ -554,7 +550,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
   defp grant_shell_capability(agent_id, resource_uri) do
     cap = %Capability{
-      id: "cap_shell_e2e_#{:erlang.unique_integer([:positive])}",
+      id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
       resource_uri: resource_uri,
       principal_id: agent_id,
       granted_at: DateTime.utc_now(),
@@ -565,7 +561,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       metadata: %{test: true}
     }
 
-    {:ok, :stored} = CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     cap
   end
 
@@ -609,31 +605,6 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
         do_eventually(predicate, deadline)
       else
         false
-      end
-    end
-  end
-
-  defp ensure_security_started do
-    security_children = [
-      {Arbor.Security.Identity.Registry, []},
-      {Arbor.Security.Identity.NonceCache, []},
-      {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.Reflex.Registry, []}
-    ]
-
-    if Process.whereis(Arbor.Security.Supervisor) do
-      for child <- security_children do
-        try do
-          case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-            {:ok, _pid} -> :ok
-            {:error, {:already_started, _pid}} -> :ok
-            {:error, :already_present} -> :ok
-            _other -> :ok
-          end
-        catch
-          :exit, _ -> :ok
-        end
       end
     end
   end

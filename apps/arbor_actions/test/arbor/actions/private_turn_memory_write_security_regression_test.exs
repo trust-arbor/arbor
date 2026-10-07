@@ -94,8 +94,10 @@ defmodule Arbor.Actions.PrivateTurnMemoryWriteSecurityRegressionTest do
           "arbor://orchestrator/execute",
           @probe_resource
         ] do
-      assert {:ok, capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
-      on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+      assert {:ok, capability} =
+               Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
+
+      on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
     end
 
     %{agent_id: agent_id, context: %{agent_id: agent_id, taint_policy: :permissive}}

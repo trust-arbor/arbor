@@ -38,7 +38,6 @@ defmodule Arbor.Security.AuditJournalFile do
 
   import Arbor.Security.AuditJournalFileProofs
 
-  alias Arbor.Common.SafePath
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFileCore
   alias Arbor.Security.AuditRetirementLedger
@@ -148,7 +147,7 @@ defmodule Arbor.Security.AuditJournalFile do
          {:ok, root} <- validate_root(root),
          {:ok, path} <- resolve_file_path(root, opts),
          :ok <- refuse_ledger_name(path),
-         {:ok, path} <- contained_in_root(path, root),
+         {:ok, _contained} <- contained_in_root(path, root),
          {:ok, _parent} <- validate_parent(path, root),
          {:ok, fd, identity} <- open_target(path, root) do
       finish_open(fd, root, path, identity)
@@ -597,8 +596,11 @@ defmodule Arbor.Security.AuditJournalFile do
 
     with {:ok, name} <- AuditJournalFileCore.candidate_basename(Path.basename(handle.path)),
          path = Path.join(parent, name),
-         {:ok, resolved} <- contained_in_root(path, handle.root) do
-      {:ok, resolved}
+         {:ok, _contained} <- contained_in_root(path, handle.root) do
+      # Preserve the lexical candidate path. Returning its resolved target
+      # would turn a leftover symlink into the source journal pathname and let
+      # cleanup unlink the live journal before source reproof.
+      {:ok, path}
     end
   end
 
@@ -772,11 +774,11 @@ defmodule Arbor.Security.AuditJournalFile do
          :ok <- require_expected_size(fstat, handle.file_size),
          :ok <- require_expected_size(fstat, handle.offset),
          {:ok, data} <- read_all(handle.fd, handle.file_size),
-         {:ok, empty} <- AuditJournalFileCore.new(),
-         {:ok, replay} <- AuditJournalFileCore.consume(empty, data),
-         :ok <- require_replay_complete(replay),
-         :ok <- require_source_tip(replay, source),
-         :ok <- require_core_equal(replay.core, handle.core) do
+         # The handle core was semantically admitted when this descriptor was
+         # opened and after every append. Re-folding every JSON record here is
+         # redundant: the predecessor chain and final source binding prove
+         # that the descriptor still contains those exact admitted bytes.
+         :ok <- AuditJournalFileCore.verify_source_binding(data, source) do
       :ok
     else
       {:error, reason} -> {:error, map_source_tip(reason)}
@@ -978,14 +980,6 @@ defmodule Arbor.Security.AuditJournalFile do
       :ok
     else
       {:error, :candidate_proof_failed}
-    end
-  end
-
-  defp require_source_tip(replay, source) do
-    if AuditJournalFileCore.source_tip_match?(replay, source) do
-      :ok
-    else
-      {:error, :source_tip_mismatch}
     end
   end
 
@@ -1747,10 +1741,11 @@ defmodule Arbor.Security.AuditJournalFile do
   end
 
   defp default_file_path(root) do
-    case SafePath.safe_join(root, @default_name) do
-      {:ok, path} -> {:ok, path}
-      {:error, _reason} -> {:error, :path_escape}
-    end
+    # `root` has already been canonicalized and the leaf is a trusted literal.
+    # Keep the lexical pathname here so `open_target/2` can lstat and reject a
+    # pre-existing symlink. SafePath.safe_join/2 returns the resolved target,
+    # which would erase that evidence before the file-rule check.
+    {:ok, Path.join(root, @default_name)}
   end
 
   defp explicit_file_path(path) do

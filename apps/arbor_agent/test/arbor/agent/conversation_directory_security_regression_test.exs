@@ -171,7 +171,7 @@ defmodule Arbor.Agent.ConversationDirectorySecurityRegressionTest do
     cap = grant(c.linked.id, c.target)
     assert {:ok, %{conversations: [%{engagement_id: id}]}} = list(c.linked)
     assert id == c.own.engagement_id
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:ok, %{conversations: []}} = list(c.linked)
     assert {:ok, %{conversations: [_]}} = list(c.primary)
   end
@@ -181,12 +181,12 @@ defmodule Arbor.Agent.ConversationDirectorySecurityRegressionTest do
     assert {:error, :not_found} = reference(c.primary, "eng_00000000000000000000000000000000")
     assert {:ok, %{engagement_id: id}} = reference(c.primary, c.own.engagement_id)
     assert id == c.own.engagement_id
-    assert :ok = Security.revoke(c.cap.id)
+    assert :ok = Security.revoke_fixture(c.cap.id)
     assert {:error, :not_found} = reference(c.primary, c.own.engagement_id)
   end
 
   test "security regression revocation during preview prevents publication", c do
-    Process.put(:after_preview_read, fn -> Security.revoke(c.cap.id) end)
+    Process.put(:after_preview_read, fn -> Security.revoke_fixture(c.cap.id) end)
     assert {:ok, %{conversations: []}} = list(c.primary)
     assert_receive {:preview_read, _, _}
   end
@@ -283,7 +283,7 @@ defmodule Arbor.Agent.ConversationDirectorySecurityRegressionTest do
     {:ok, token} = SessionToken.generate(oidc.identity.agent_id)
 
     on_exit(fn ->
-      Security.deregister_identity(oidc.identity.agent_id)
+      Security.deregister_identity_fixture(oidc.identity.agent_id)
       oidc.cleanup.()
     end)
 
@@ -306,9 +306,12 @@ defmodule Arbor.Agent.ConversationDirectorySecurityRegressionTest do
 
   defp grant(principal, target) do
     assert {:ok, cap} =
-             Security.grant(principal: principal, resource: "arbor://chat/agent/" <> target)
+             Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://chat/agent/" <> target
+             )
 
-    on_exit(fn -> Security.revoke(cap.id) end)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

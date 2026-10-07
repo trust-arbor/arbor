@@ -13,7 +13,14 @@ defmodule Arbor.Signals.Config do
         signals: [
           authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
           restricted_topics: [:security, :identity],
-          security_sync_subscribers: %{},
+          security_sync_subscribers: %{
+            role: %{
+              owner: RegisteredOwner,
+              supervisor: {:application, :owner_application},
+              child_id: RegisteredOwner,
+              events: [:event]
+            }
+          },
           durable_sink_module: nil,
           security_module: nil,
           crypto_module: nil,
@@ -42,6 +49,17 @@ defmodule Arbor.Signals.Config do
   @default_node_rate_limit 1000
   @default_batch_interval_ms 50
   @default_max_batch_size 500
+
+  @doc """
+  Security boundary for all Erlang-distribution signal transport.
+
+  A holder of the distribution cookie can execute arbitrary code on a
+  connected node and is therefore a cluster root. Node zones and relay peer
+  membership are routing and load-shedding inputs; they are not authorization
+  boundaries. This value is deliberately not configurable.
+  """
+  @spec cluster_trust_boundary() :: :distribution_cookie_root
+  def cluster_trust_boundary, do: :distribution_cookie_root
 
   @doc """
   Return the configured subscription authorizer module.
@@ -93,6 +111,88 @@ defmodule Arbor.Signals.Config do
   end
 
   def security_sync_owner(_role, _event), do: :error
+
+  @doc false
+  @spec security_sync_owner_provenance(atom(), atom()) ::
+          {:ok,
+           %{
+             owner: atom(),
+             supervisor: pid() | {:application, atom()},
+             child_id: term()
+           }}
+          | :error
+  def security_sync_owner_provenance(role, event) when is_atom(role) and is_atom(event) do
+    security_sync_owner_provenance(role, event, security_sync_subscribers_snapshot())
+  end
+
+  def security_sync_owner_provenance(_role, _event), do: :error
+
+  @doc false
+  @spec security_sync_owner_provenance(atom(), atom(), map()) ::
+          {:ok,
+           %{
+             owner: atom(),
+             supervisor: pid() | {:application, atom()},
+             child_id: term()
+           }}
+          | :error
+  def security_sync_owner_provenance(role, event, subscribers)
+      when is_atom(role) and is_atom(event) and is_map(subscribers) do
+    with %{owner: owner, supervisor: supervisor, child_id: child_id, events: events} <-
+           Map.get(subscribers, role),
+         true <- valid_registered_name?(owner),
+         true <- valid_supervisor_root?(supervisor),
+         true <- valid_child_id?(child_id),
+         true <- valid_security_sync_events?(events),
+         true <- event in events do
+      {:ok, %{owner: owner, supervisor: supervisor, child_id: child_id}}
+    else
+      _other -> :error
+    end
+  end
+
+  def security_sync_owner_provenance(_role, _event, _subscribers), do: :error
+
+  @doc false
+  @spec security_sync_subscribers_snapshot() :: map()
+  def security_sync_subscribers_snapshot do
+    case get(:security_sync_subscribers, @default_security_sync_subscribers) do
+      subscribers when is_map(subscribers) -> subscribers
+      _other -> %{}
+    end
+  end
+
+  @doc false
+  @spec security_sync_publisher(atom()) :: {:ok, atom()} | :error
+  def security_sync_publisher(event) when is_atom(event) do
+    security_sync_publisher(event, security_sync_subscribers_snapshot())
+  end
+
+  def security_sync_publisher(_event), do: :error
+
+  @doc false
+  @spec security_sync_publisher(atom(), map()) :: {:ok, atom()} | :error
+  def security_sync_publisher(event, subscribers) when is_atom(event) and is_map(subscribers) do
+    publishers = subscribers |> security_sync_publishers_for(event) |> Enum.uniq()
+
+    case publishers do
+      [owner] -> {:ok, owner}
+      _ -> :error
+    end
+  end
+
+  def security_sync_publisher(_event, _subscribers), do: :error
+
+  defp security_sync_publishers_for(subscribers, event) when is_map(subscribers) do
+    for {_role, %{owner: owner, events: events}} <- subscribers,
+        is_atom(owner),
+        owner not in [nil, true, false],
+        valid_security_sync_events?(events),
+        event in events,
+        do: owner
+  end
+
+  defp security_sync_publishers_for(_subscribers, _event), do: []
 
   @doc """
   Whether any well-formed security-sync role is configured.
@@ -195,6 +295,17 @@ defmodule Arbor.Signals.Config do
 
   defp valid_security_sync_event?(_event), do: false
 
+  defp valid_registered_name?(name), do: is_atom(name) and name not in [nil, true, false]
+
+  defp valid_supervisor_root?(pid) when is_pid(pid), do: true
+
+  defp valid_supervisor_root?({:application, application}),
+    do: is_atom(application) and application not in [nil, true, false]
+
+  defp valid_supervisor_root?(_other), do: false
+
+  defp valid_child_id?(child_id), do: child_id not in [nil, true, false]
+
   @doc """
   Return the configured auto-rotation interval for channel keys in milliseconds.
 
@@ -295,6 +406,11 @@ defmodule Arbor.Signals.Config do
   @doc "Channel decrypt module (default `Arbor.Signals.Channels`)."
   @spec channels_module() :: module()
   def channels_module, do: get(:channels_module, @default_channels_module)
+
+  @doc "Authorizer that verifies channel principal envelopes (default capability authorizer)."
+  @spec channel_principal_authorizer() :: module() | term()
+  def channel_principal_authorizer,
+    do: get(:channel_principal_authorizer, @default_authorizer)
 
   @namespace :signals
 

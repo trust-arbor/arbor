@@ -5,7 +5,6 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
 
   alias Arbor.Dashboard.OidcAuth
   alias Arbor.Security
-  alias Arbor.Security.OIDC.IdentityStore
 
   @moduletag :fast
 
@@ -22,6 +21,8 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
   end
 
   setup do
+    :ok = Security.restore_runtime_fixture()
+
     uid = System.unique_integer([:positive, :monotonic])
     root = Path.join(System.tmp_dir!(), "arbor-dashboard-oidc-#{uid}")
     File.mkdir_p!(root)
@@ -52,10 +53,6 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
       )
     end
 
-    if Process.whereis(Arbor.Security.Identity.Registry) == nil do
-      start_supervised!(Arbor.Security.Identity.Registry)
-    end
-
     if Process.whereis(:arbor_user_config) == nil do
       start_supervised!({Arbor.Persistence.BufferedStore, name: :arbor_user_config, backend: nil})
     end
@@ -66,6 +63,7 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
       "iss" => issuer,
       "sub" => "operator",
       "aud" => "dashboard",
+      "nonce" => "dashboard-browser-nonce",
       "iat" => System.os_time(:second),
       "exp" => System.os_time(:second) + 3600
     }
@@ -78,18 +76,6 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
     {:ok, token} = Joken.Signer.sign(claims, signer)
     Process.put(:dashboard_oidc_id_token, token)
 
-    table = :arbor_oidc_jwks_cache
-
-    if :ets.whereis(table) == :undefined do
-      :ets.new(table, [:named_table, :public, :set])
-    end
-
-    :ets.insert(
-      table,
-      {issuer, %{"keys" => [Map.merge(public, %{"alg" => "ES256", "kid" => kid})]},
-       System.monotonic_time(:millisecond) + 60_000}
-    )
-
     provider = %{
       issuer: issuer,
       client_id: "dashboard",
@@ -97,20 +83,25 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
       endpoints: %{token_endpoint: issuer <> "/token"}
     }
 
+    :ok =
+      Security.put_oidc_jwks_fixture(
+        provider,
+        %{"keys" => [Map.merge(public, %{"alg" => "ES256", "kid" => kid})]}
+      )
+
     Application.put_env(:arbor_security, :oidc, providers: [provider])
-    subject = IdentityStore.derive_agent_id(claims)
+    subject = Security.derive_oidc_principal_id_fixture(claims)
 
     on_exit(fn ->
-      if Process.whereis(Arbor.Security.Identity.Registry),
-        do: Security.deregister_identity(subject)
+      _ = Security.deregister_identity_fixture(subject)
 
       if Process.whereis(:arbor_security_signing_keys),
-        do: Security.SigningKeyStore.delete(subject)
+        do: Security.delete_signing_key_fixture(subject)
 
       if Process.whereis(:arbor_user_config),
         do: Arbor.Persistence.BufferedStore.delete("alias:" <> subject, name: :arbor_user_config)
 
-      if :ets.whereis(table) != :undefined, do: :ets.delete(table, issuer)
+      :ok = Security.delete_oidc_jwks_fixture(provider)
 
       Enum.each(env, fn
         {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
@@ -154,10 +145,10 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
        %{subject: subject, claims: claims, id_token: id_token, provider: provider} do
     # Establish the prior registered login independently of callback registration,
     # so the predecessor fails at the inactive-login gate itself.
-    assert {:ok, identity, _} = IdentityStore.load_or_create(claims)
+    assert {:ok, identity, _} = Security.load_or_create_oidc_identity_fixture(claims)
     assert :ok = Security.register_oidc_identity(identity, id_token, provider)
     assert callback().status == 302
-    assert :ok = Security.suspend_identity(subject)
+    assert :ok = Security.suspend_identity_fixture(subject)
 
     denied =
       callback(%{
@@ -174,12 +165,25 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
     refute get_session(denied, "local_dev_operator")
   end
 
+  test "security regression: dashboard callback rejects an ID token from another nonce" do
+    denied = callback(%{"oidc_nonce" => "different-browser-nonce"})
+
+    assert denied.status == 401
+    refute get_session(denied, "session_token")
+    refute get_session(denied, "agent_id")
+    refute get_session(denied, "oidc_nonce")
+  end
+
   defp callback(previous_session \\ %{}) do
     session =
-      Map.merge(previous_session, %{
-        "oidc_state" => "state",
-        "oidc_code_verifier" => String.duplicate("v", 43)
-      })
+      Map.merge(
+        %{
+          "oidc_state" => "state",
+          "oidc_nonce" => "dashboard-browser-nonce",
+          "oidc_code_verifier" => String.duplicate("v", 43)
+        },
+        previous_session
+      )
 
     conn(:get, "/auth/callback?code=code&state=state")
     |> init_test_session(session)

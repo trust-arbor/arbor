@@ -183,7 +183,7 @@ defmodule Arbor.Actions.BrowserTest do
         )
 
       assert {:error, msg} = result
-      assert msg =~ "Blocked host"
+      assert msg =~ "SSRF prevention"
     end
 
     test "blocks private IPs after the principal gate" do
@@ -195,7 +195,7 @@ defmodule Arbor.Actions.BrowserTest do
         )
 
       assert {:error, msg} = result
-      assert msg =~ "Blocked private IP"
+      assert msg =~ "private_ip"
     end
 
     test "blocks metadata endpoint after the principal gate" do
@@ -207,7 +207,7 @@ defmodule Arbor.Actions.BrowserTest do
         )
 
       assert {:error, msg} = result
-      assert msg =~ "Blocked host"
+      assert msg =~ "SSRF prevention"
     end
 
     test "blocks non-http schemes after the principal gate" do
@@ -219,7 +219,33 @@ defmodule Arbor.Actions.BrowserTest do
         )
 
       assert {:error, msg} = result
-      assert msg =~ "Blocked scheme"
+      assert msg =~ "blocked_scheme"
+    end
+
+    @tag :security_regression
+    test "security regression: browser DNS navigation fails closed without a pin-capable transport" do
+      result =
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "https://example.com"},
+          %{browser_session: :fake}
+        )
+
+      assert {:error, msg} = result
+      assert msg =~ "dns_pinning_required"
+    end
+
+    @tag :security_regression
+    test "security regression: browser IP navigation fails closed when redirects cannot be pinned" do
+      result =
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "https://8.8.8.8"},
+          %{browser_session: :fake}
+        )
+
+      assert {:error, msg} = result
+      assert msg =~ "cannot preserve redirect pins"
     end
 
     @tag :security_regression

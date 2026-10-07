@@ -19,10 +19,12 @@ defmodule Arbor.Security.NativeNoticeBroker do
     Config,
     ConversationNoticeCore,
     NativeConversationNotices,
+    PrivateState,
     SigningAuthorityBroker
   }
 
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.SupervisedOwner
 
   @max_sources 256
   @max_workers 1_024
@@ -32,6 +34,8 @@ defmodule Arbor.Security.NativeNoticeBroker do
   @max_acquisitions 256
   @max_mutations 1_024
   @max_generations 2_048
+  @private_state_anchor {__MODULE__, :private_state}
+  @private_state_schema :native_notice_broker_v1
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   def open(source, authority, proof, ticket), do: call({:open, source, authority, proof, ticket})
@@ -63,7 +67,10 @@ defmodule Arbor.Security.NativeNoticeBroker do
   end
 
   defp call(message) do
-    GenServer.call(__MODULE__, message, 5_000)
+    case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+      pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, message, 5_000)
+      nil -> {:error, :notice_unavailable}
+    end
   rescue
     _ -> {:error, :notice_unavailable}
   catch
@@ -74,35 +81,27 @@ defmodule Arbor.Security.NativeNoticeBroker do
   def init(_opts) do
     Process.flag(:sensitive, true)
     Process.send_after(self(), :sweep, 1_000)
-    private = :ets.new(__MODULE__, [:set, :private])
 
-    :ets.insert(
-      private,
-      {:state,
-       %{
-         sources: %{},
-         workers: %{},
-         reservations: %{},
-         monitors: %{},
-         generations: %{},
-         acquisitions: %{},
-         mutations: %{}
-       }}
-    )
+    state = %{
+      sources: %{},
+      workers: %{},
+      reservations: %{},
+      monitors: %{},
+      generations: %{},
+      acquisitions: %{},
+      mutations: %{},
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody()
+    }
 
-    {:ok, %{private: private}}
+    {:ok, PrivateState.new(@private_state_anchor, @private_state_schema, state)}
   end
 
   # Ordinary state/status introspection sees only a non-authoritative private
   # ETS locator. Source, bootstrap, custody and mutation handles remain owned by
   # this actor; a copied locator cannot be read by any other PID.
   @impl true
-  def handle_call(message, from, %{private: private} = carrier) do
-    [{:state, state}] = :ets.lookup(private, :state)
-    {:reply, reply, next} = handle_private_call(message, from, state)
-    :ets.insert(private, {:state, next})
-    {:reply, reply, carrier}
-  end
+  def handle_call(_message, _from, private_state),
+    do: {:reply, {:error, :native_notice_source_required}, private_state}
 
   defp handle_private_call({:open, facts, authority, proof, ticket}, {caller, _}, state) do
     acquisition = state.acquisitions[ticket]
@@ -282,7 +281,8 @@ defmodule Arbor.Security.NativeNoticeBroker do
            ConversationNoticeCore.new(scope, mailbox["recipient_subject_id"], params, taints),
          {:ok, payload} <- ConversationNoticeCore.payload(scope, value),
          {:ok, resource} <- ConversationNoticeCore.resource(scope, value),
-         {:ok, proof} <- SigningAuthorityBroker.sign(source.authority, payload),
+         {:ok, proof} <-
+           SigningAuthorityBroker.sign_native_notice_publication(source.authority, payload),
          {:ok, decision} <-
            Arbor.Security.prepare_native_notice_capability(
              source.facts.principal_id,
@@ -444,11 +444,41 @@ defmodule Arbor.Security.NativeNoticeBroker do
     do: {:reply, {:error, :native_notice_source_required}, state}
 
   @impl true
-  def handle_info(message, %{private: private} = carrier) do
-    [{:state, state}] = :ets.lookup(private, :state)
-    {:noreply, next} = handle_private_info(message, state)
-    :ets.insert(private, {:state, next})
-    {:noreply, carrier}
+  def handle_info(message, private_state) do
+    with {:ok, state} <- private_state(private_state) do
+      case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+        {:authenticated, caller, request, reply_to} ->
+          {:reply, reply, next_state} = handle_private_call(request, {caller, reply_to}, state)
+
+          case put_private_state(private_state, next_state) do
+            :ok ->
+              :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+              {:noreply, private_state}
+
+            {:error, _reason} ->
+              :ok =
+                Arbor.Common.reply_authenticated_call(
+                  reply_to,
+                  {:error, :native_notice_source_required}
+                )
+
+              {:stop, :invalid_private_state, private_state}
+          end
+
+        result when result in [:pending, :expired, :rejected] ->
+          {:noreply, private_state}
+
+        :unrecognized ->
+          {:noreply, next_state} = handle_private_info(message, state)
+
+          case put_private_state(private_state, next_state) do
+            :ok -> {:noreply, private_state}
+            {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+          end
+      end
+    else
+      {:error, _reason} -> {:stop, :invalid_private_state, private_state}
+    end
   end
 
   @impl true
@@ -494,6 +524,66 @@ defmodule Arbor.Security.NativeNoticeBroker do
         {:noreply, state}
     end
   end
+
+  defp handle_private_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, private_state) do
+    case private_state(private_state) do
+      {:ok, state} -> Enum.each(Map.keys(state.monitors), &Process.demonitor(&1, [:flush]))
+      {:error, _reason} -> :ok
+    end
+
+    PrivateState.delete(private_state, @private_state_anchor)
+    :ok
+  end
+
+  defp private_state(state) do
+    PrivateState.fetch(
+      state,
+      @private_state_anchor,
+      @private_state_schema,
+      &valid_private_state?/1
+    )
+  end
+
+  defp put_private_state(handle, state) do
+    PrivateState.replace(
+      handle,
+      @private_state_anchor,
+      @private_state_schema,
+      state,
+      &valid_private_state?/1
+    )
+  end
+
+  defp valid_private_state?(state) when is_map(state) do
+    Map.keys(state) |> Enum.sort() ==
+      [
+        :acquisitions,
+        :authenticated_calls,
+        :generations,
+        :monitors,
+        :mutations,
+        :reservations,
+        :sources,
+        :workers
+      ] and is_reference(state.authenticated_calls) and
+      Enum.all?(
+        [
+          state.acquisitions,
+          state.generations,
+          state.monitors,
+          state.mutations,
+          state.reservations,
+          state.sources,
+          state.workers
+        ],
+        &is_map/1
+      )
+  end
+
+  defp valid_private_state?(_state), do: false
 
   defp source_for(state, worker) do
     case state.sources[worker.source] do

@@ -14,11 +14,11 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
   setup do
     {:ok, identity} = Identity.generate(name: "tool-exposure-test")
     agent_id = identity.agent_id
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     on_exit(fn ->
       case Security.list_capabilities(agent_id) do
-        {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+        {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
         _ -> :ok
       end
     end)
@@ -37,7 +37,7 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
 
     test "includes an action after its canonical URI is granted", %{agent_id: agent_id} do
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
 
       modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
@@ -47,7 +47,7 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
 
     test "excludes actions whose URI was not granted", %{agent_id: agent_id} do
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
 
       modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
@@ -125,8 +125,10 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
 
     test "APIAgent exposure keeps dual-use graph actions and hides session syscalls even with orchestrator grant",
          %{agent_id: agent_id} do
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://orchestrator/execute")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
+
+      {:ok, _} =
+        Security.grant_fixture(principal: agent_id, resource: "arbor://orchestrator/execute")
 
       modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
@@ -137,7 +139,7 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
 
     test "is a subset of all_actions/0", %{agent_id: agent_id} do
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
 
       all = MapSet.new(Arbor.Actions.all_actions())
       exposed = MapSet.new(Arbor.Actions.tool_modules_for_agent(agent_id))
@@ -157,7 +159,7 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
         "arbor://shell/exec" => :block
       })
 
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/list")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/list")
 
       assert {:ok, names} = Arbor.Actions.discoverable_tool_names(agent_id)
       assert "file_read" in names

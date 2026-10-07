@@ -1,7 +1,7 @@
 defmodule Arbor.Gateway.Chat.TerminalLoginTest.Security do
   @moduledoc false
-  def begin_terminal_login(target) do
-    send(self(), {:login_start, target})
+  def begin_terminal_login(target, source) do
+    send(self(), {:login_start, target, source})
 
     Process.get(
       :terminal_start,
@@ -16,13 +16,13 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest.Security do
     )
   end
 
-  def terminal_login_status(handle) do
-    send(self(), {:login_poll, handle})
+  def terminal_login_status(handle, source) do
+    send(self(), {:login_poll, handle, source})
     Process.get(:terminal_poll, {:ok, :pending})
   end
 
-  def cancel_terminal_login(handle) do
-    send(self(), {:login_cancel, handle})
+  def cancel_terminal_login(handle, source) do
+    send(self(), {:login_cancel, handle, source})
     :ok
   end
 
@@ -99,19 +99,20 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest do
            }
 
     assert get_resp_header(start, "cache-control") == ["no-store"]
-    assert_receive {:login_start, "agent_a"}
+    assert_receive {:login_start, "agent_a", source}
+    assert is_binary(source) and byte_size(source) == 43
 
     assert json(call(request("/api/chat/login/poll", %{handle: @handle}))) == %{
              "status" => "pending"
            }
 
-    assert_receive {:login_poll, @handle}
+    assert_receive {:login_poll, @handle, ^source}
 
     assert json(call(request("/api/chat/login/cancel", %{handle: @handle}))) == %{
              "status" => "closed"
            }
 
-    assert_receive {:login_cancel, @handle}
+    assert_receive {:login_cancel, @handle, ^source}
   end
 
   test "completion projects only the scoped credential and public binding" do
@@ -153,8 +154,8 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest do
       assert call(request(path, %{}, method: method)).status == 401
     end
 
-    refute_receive {:login_start, _}
-    refute_receive {:login_poll, _}
+    refute_receive {:login_start, _, _}
+    refute_receive {:login_poll, _, _}
     refute_receive {:login_logout, _}
   end
 
@@ -171,7 +172,7 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest do
     ]
 
     for conn <- bad, do: assert(call(conn).status == 401)
-    refute_receive {:login_start, _}
+    refute_receive {:login_start, _, _}
 
     assert call(
              request("/api/chat/login/start", %{target: "agent_a"},
@@ -198,7 +199,7 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest do
            |> call()
            |> Map.fetch!(:status) == 401
 
-    refute_receive {:login_start, _}
+    refute_receive {:login_start, _, _}
   end
 
   test "security regression: anonymous login still passes through the IP limiter" do
@@ -206,6 +207,33 @@ defmodule Arbor.Gateway.Chat.TerminalLoginTest do
     peer = {127, 0, 0, 119}
     assert call(request("/api/chat/login/start", %{target: "agent_a"}, peer: peer)).status == 200
     assert call(request("/api/chat/login/start", %{target: "agent_a"}, peer: peer)).status == 429
+  end
+
+  test "security regression: login admission is bound to trusted transport peer" do
+    peer = {127, 0, 0, 120}
+
+    first =
+      request("/api/chat/login/start", %{target: "agent_a"}, peer: peer)
+      |> put_req_header("x-forwarded-for", "203.0.113.10")
+      |> call()
+
+    second =
+      request("/api/chat/login/start", %{target: "agent_a"}, peer: peer)
+      |> put_req_header("x-forwarded-for", "203.0.113.11")
+      |> call()
+
+    third =
+      request("/api/chat/login/start", %{target: "agent_a"}, peer: {127, 0, 0, 121})
+      |> call()
+
+    assert first.status == 200
+    assert second.status == 200
+    assert third.status == 200
+    assert_receive {:login_start, "agent_a", source_a}
+    assert_receive {:login_start, "agent_a", source_b}
+    assert_receive {:login_start, "agent_a", source_c}
+    assert source_a == source_b
+    refute source_a == source_c
   end
 
   test "security regression: Conversation credential never authenticates another API" do

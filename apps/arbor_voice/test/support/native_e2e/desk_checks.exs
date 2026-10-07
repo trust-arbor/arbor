@@ -179,7 +179,10 @@ defmodule Arbor.Voice.NativeDeskE2E do
     assert :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
     user = oidc.identity.agent_id
     agent = "agent_native_e2e_#{suffix}"
-    assert {:ok, cap} = Security.grant(principal: user, resource: "arbor://chat/agent/" <> agent)
+
+    assert {:ok, cap} =
+             Security.grant_fixture(principal: user, resource: "arbor://chat/agent/" <> agent)
+
     assert {:ok, payload} = Security.conversation_session_request_payload(user, agent)
     assert {:ok, signed} = SignedRequest.sign(payload, user, oidc.identity.private_key)
     assert {:ok, token} = Security.issue_signed_conversation_session(user, agent, signed)
@@ -221,8 +224,8 @@ defmodule Arbor.Voice.NativeDeskE2E do
           is_pid(pid),
           do: DynamicSupervisor.terminate_child(Arbor.Voice.DeskSupervisor, pid)
 
-      _ = Security.revoke(cap.id)
-      _ = Security.deregister_identity(user)
+      _ = Security.revoke_fixture(cap.id)
+      _ = Security.deregister_identity_fixture(user)
       oidc.cleanup.()
 
       for {app, entries} <- [{:arbor_security, previous}, {:arbor_voice, before_voice}],
@@ -337,7 +340,7 @@ defmodule Arbor.Voice.NativeDeskE2E do
     assert {:ok, id} = start(ctx)
     assert_receive {:effect, {:create, :source, _, _}}
     assert_receive {:effect, {:held, executor}}
-    assert :ok = Security.revoke(ctx.capability.id)
+    assert :ok = Security.revoke_fixture(ctx.capability.id)
     send(executor, :release_native)
     assert %{terminal: true, state: :cancelled} = done(id)
     refute_receive {:provider_opened, _}, 30

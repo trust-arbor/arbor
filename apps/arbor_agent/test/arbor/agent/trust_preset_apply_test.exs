@@ -335,7 +335,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       caller_id = "human_registrar_#{System.unique_integer([:positive])}"
 
       assert {:ok, _capabilities} =
-               Arbor.Security.assign_role(caller_id, :external_agent_registrar)
+               Arbor.Security.assign_role_fixture(caller_id, :external_agent_registrar)
 
       assert {:ok, profile, identity} =
                Arbor.Agent.register_external_agent(
@@ -692,7 +692,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       cleanup(agent_id)
 
       assert {:ok, _capability} =
-               Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec")
+               Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec")
 
       assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)

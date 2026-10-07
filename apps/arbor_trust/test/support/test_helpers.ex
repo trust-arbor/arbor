@@ -25,4 +25,34 @@ defmodule Arbor.Trust.TestHelpers do
   catch
     :exit, _ -> :ok
   end
+
+  @doc "Open an authorized, caller-owned Security authority for mutation integration tests."
+  def actor_authority!(purpose \\ :trust_test_mutation) do
+    {:ok, identity} = Arbor.Contracts.Security.Identity.generate()
+    :ok = Arbor.Security.register_identity_fixture(identity)
+
+    {:ok, mutation_capability} =
+      Arbor.Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://security/**"
+      )
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: purpose,
+        owner: self()
+      )
+
+    {:ok, authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      _ = Arbor.Security.revoke_fixture(mutation_capability.id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    {identity, authority}
+  end
 end

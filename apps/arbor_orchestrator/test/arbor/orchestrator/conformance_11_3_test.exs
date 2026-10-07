@@ -36,14 +36,14 @@ defmodule Arbor.Orchestrator.Conformance113Test do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 
   test "11.3 engine resolves start node, executes handlers, writes status files, and stops at terminal" do
-    :ok = Registry.register("probe", ProbeHandler)
+    :ok = Registry.register_fixture("probe", ProbeHandler)
 
     dot = """
     digraph Flow {
@@ -70,7 +70,7 @@ defmodule Arbor.Orchestrator.Conformance113Test do
   end
 
   test "11.3 edge selection priority applies condition before preferred/suggested/weight/lexical" do
-    :ok = Registry.register("priority.custom", PriorityHandler)
+    :ok = Registry.register_fixture("priority.custom", PriorityHandler)
 
     dot = """
     digraph Flow {
@@ -105,7 +105,7 @@ defmodule Arbor.Orchestrator.Conformance113Test do
   end
 
   test "11.3 preferred label beats suggested ids and weight when no condition matches" do
-    :ok = Registry.register("priority.custom", PriorityHandler)
+    :ok = Registry.register_fixture("priority.custom", PriorityHandler)
 
     dot = """
     digraph Flow {

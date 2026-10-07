@@ -1,7 +1,41 @@
 import Config
 
+config :arbor_kernel_runtime, expose_test_fixtures: true
+
+config :arbor_security,
+  session_token_secret: "arbor-test-session-token-secret-32-bytes-minimum",
+  # Test fixtures deliberately create arbitrary OIDC subjects. Production
+  # defaults to provider subject/domain allowlists.
+  oidc_registration_mode: :allow
+
 # Load .env at compile time so ARBOR_DB is available for adapter selection
 dotenv_path = Path.join(__DIR__, "../.env")
+
+# Keep synchronized with Mix.Tasks.Arbor.Helpers.dotenv_key_allowed?/1. Config
+# evaluation happens before that module is guaranteed to be compiled, so this
+# boundary must remain self-contained.
+dotenv_allowed_exact =
+  MapSet.new(~w(
+    ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    OPENAI_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+    XAI_API_KEY GROK_CODE_XAI_API_KEY ZAI_API_KEY ZAI_CODING_PLAN_API_KEY
+    OLLAMA_API_KEY OLLAMA_BASE_URL LM_STUDIO_BASE_URL
+    BRAVE_API_KEY BRAVE_SEARCH_API_KEY EXA_API_KEY TINYFISH_API_KEY LIMITLESS_API_KEY
+    CURSOR_API_KEY CURSOR_AUTH_TOKEN
+    DATABASE_URL DB_HOST DB_USER DB_PASS DB_SSL
+    DASHBOARD_HOST DASHBOARD_PORT DASHBOARD_USER DASHBOARD_PASS SECRET_KEY_BASE
+    OIDC_ALLOW_HTTP OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES
+    OIDC_DEVICE_FLOW OIDC_DEVICE_CLIENT_ID
+    SIGNAL_FROM SIGNAL_ACCOUNT SIGNAL_TO SIGNAL_CLI_PATH
+    SMTP_USER SMTP_PASS SMTP_HOST SMTP_PORT EMAIL_TO
+    UNIFIED_LLM_DEFAULT_MODEL UNIFIED_LLM_DEFAULT_PROVIDER
+  ))
+
+dotenv_key_allowed? = fn key ->
+  Regex.match?(~r/\A[A-Z][A-Z0-9_]*\z/, key) and
+    (MapSet.member?(dotenv_allowed_exact, key) or
+       String.starts_with?(key, ["ARBOR_", "CONTACT_"]))
+end
 
 if File.exists?(dotenv_path) do
   dotenv_path
@@ -13,7 +47,9 @@ if File.exists?(dotenv_path) do
       [key, value] ->
         key = key |> String.trim() |> String.replace_leading("export ", "")
         value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
-        unless System.get_env(key), do: System.put_env(key, value)
+
+        if dotenv_key_allowed?.(key) and is_nil(System.get_env(key)),
+          do: System.put_env(key, value)
 
       _ ->
         :skip

@@ -282,10 +282,24 @@ defmodule Arbor.Voice.CLI.Transport do
     with {:ok, security} <- Config.security_module(),
          {:ok, principal} <- security.key_file_principal(path),
          {:ok, payload} <- security.conversation_session_request_payload(principal, agent),
-         {:ok, ^principal, signed} <- security.sign_key_file_request(path, payload) do
+         {:ok, ^principal, signed} <- sign_key_file_request(security, path, payload) do
       {:ok, principal, signed}
     else
       _ -> {:error, :operator_authentication_failed}
+    end
+  end
+
+  defp sign_key_file_request(security, path, payload) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          security.sign_key_file_request(io_device, payload)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, _reason} ->
+        {:error, :operator_authentication_failed}
     end
   end
 

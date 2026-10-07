@@ -152,8 +152,8 @@ defmodule Arbor.Common.CapabilityIndex do
 
   @impl true
   def init(opts) do
-    table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    tokens = :ets.new(@token_table, [:named_table, :bag, :public, read_concurrency: true])
+    table = :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
+    tokens = :ets.new(@token_table, [:named_table, :bag, :protected, read_concurrency: true])
 
     providers = Keyword.get(opts, :providers, [])
 

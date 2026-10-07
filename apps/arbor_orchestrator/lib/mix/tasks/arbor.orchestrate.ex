@@ -426,46 +426,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     end
   end
 
-  # arbor_security is a hard dep — Arbor.Security[.OIDC.*] is called directly.
-  defp authenticate_with_oidc do
-    # Try cached token first
-    case Arbor.Security.OIDC.load_cached_token() do
-      {:ok, cache_data} ->
-        id_token = get_in(cache_data, ["token_response", "id_token"])
-
-        case Arbor.Security.authenticate_oidc_token(id_token) do
-          {:ok, agent_id, signing_authority} ->
-            success("Authenticated: #{agent_id}")
-            {:ok, agent_id, signing_authority}
-
-          {:error, reason} ->
-            warn("Cached token invalid (#{inspect(reason)}), starting device flow...")
-            run_device_flow()
-        end
-
-      :expired ->
-        # Try refresh
-        try_refresh_or_device_flow()
-
-      {:error, _} ->
-        run_device_flow()
-    end
-  end
-
-  defp try_refresh_or_device_flow do
-    with {:ok, cache_data} <- Arbor.Security.OIDC.load_cached_token(),
-         refresh_token when is_binary(refresh_token) <-
-           get_in(cache_data, ["token_response", "refresh_token"]),
-         config when not is_nil(config) <- Arbor.Security.OIDC.Config.device_flow(),
-         {:ok, new_tokens} <- Arbor.Security.OIDC.DeviceFlow.refresh(config, refresh_token),
-         id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
-         {:ok, agent_id, signing_authority} <- Arbor.Security.authenticate_oidc_token(id_token) do
-      success("Re-authenticated via refresh: #{agent_id}")
-      {:ok, agent_id, signing_authority}
-    else
-      _ -> run_device_flow()
-    end
-  end
+  defp authenticate_with_oidc, do: run_device_flow()
 
   defp run_device_flow do
     case Arbor.Security.authenticate_oidc() do

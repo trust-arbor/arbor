@@ -729,8 +729,7 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
        [
          name: server,
          retention_journal: :disabled,
-         linux_dependency_baseline_materializer:
-           Arbor.Actions.TestLinuxBaselineMaterializer,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer,
          retained_archive: Keyword.fetch!(opts, :retained_archive)
        ]},
       id: server

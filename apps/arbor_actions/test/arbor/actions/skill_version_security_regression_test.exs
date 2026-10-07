@@ -141,7 +141,7 @@ defmodule Arbor.Actions.SkillVersionSecurityRegressionTest do
     assert id == cap.id
     assert Enum.all?(manifest.implementation, &(byte_size(&1.loaded_md5) == 32))
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert {:ok, result} =
              BuildPrompt.run(%{mode: "heartbeat", working_memory: %{active_skills: entries}}, %{
@@ -323,7 +323,7 @@ defmodule Arbor.Actions.SkillVersionSecurityRegressionTest do
         do:
           grant!(owner, Security.authorization_resource_uri("arbor://fs/#{op}", file_path: path))
 
-    Process.put(:skill_test_after_request, fn -> :ok = Security.revoke(cap.id) end)
+    Process.put(:skill_test_after_request, fn -> :ok = Security.revoke_fixture(cap.id) end)
     assert {:error, _} = Skill.Compile.run(%{skill_name: name}, %{agent_id: owner})
     assert_received {:skill_compile_request, _}
     refute File.exists?(path)
@@ -333,14 +333,14 @@ defmodule Arbor.Actions.SkillVersionSecurityRegressionTest do
     {:ok, identity} = Identity.generate()
 
     :ok =
-      Security.register_identity(Identity.public_only(identity))
+      Security.register_identity_fixture(Identity.public_only(identity))
 
     identity.agent_id
   end
 
   defp grant!(owner, uri) do
-    {:ok, cap} = Security.grant(principal: owner, resource: uri)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    {:ok, cap} = Security.grant_fixture(principal: owner, resource: uri)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

@@ -16,7 +16,7 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
       reflex_checking_enabled: false,
       uri_registry_enforcement: false,
       constraint_enforcement_enabled: true,
-      session_token_secret: "notice-read-#{System.unique_integer([:positive])}"
+      session_token_secret: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     ]
 
     before = for {key, _} <- overrides, do: {key, Application.fetch_env(:arbor_security, key)}
@@ -24,16 +24,16 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
     oidc = OIDCTestHelper.issue_identity()
     assert :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
     {:ok, target} = Identity.generate(name: "notice-read-target")
-    assert :ok = Security.register_identity(Identity.public_only(target))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(target))
     {:ok, token} = SessionToken.generate(oidc.identity.agent_id)
     subject = oidc.identity.agent_id
     resource = "arbor://chat/agent/" <> target.agent_id
-    {:ok, cap} = Security.grant(principal: subject, resource: resource)
+    {:ok, cap} = Security.grant_fixture(principal: subject, resource: resource)
 
     on_exit(fn ->
       oidc.cleanup.()
-      Security.deregister_identity(subject)
-      Security.deregister_identity(target.agent_id)
+      Security.deregister_identity_fixture(subject)
+      Security.deregister_identity_fixture(target.agent_id)
 
       for {key, previous} <- before do
         case previous do
@@ -76,8 +76,11 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
              read(c, fn owner, release ->
                scope = scope(c, owner)
                page = page(scope, c.subject)
-               assert :ok = Security.revoke(c.cap.id)
-               assert {:ok, _} = Security.grant(principal: c.subject, resource: c.resource)
+               assert :ok = Security.revoke_fixture(c.cap.id)
+
+               assert {:ok, _} =
+                        Security.grant_fixture(principal: c.subject, resource: c.resource)
+
                release.(scope, page)
              end)
   end
@@ -90,7 +93,7 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
                Application.put_env(
                  :arbor_security,
                  :session_token_secret,
-                 "rotated-notice-read-secret"
+                 Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
                )
 
                release.(scope, page(scope, c.subject))
@@ -121,7 +124,7 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
                fn owner, release ->
                  scope = scope(c, owner)
                  page = page(scope, c.subject)
-                 assert :ok = Security.deregister_identity(c.subject)
+                 assert :ok = Security.deregister_identity_fixture(c.subject)
                  release.(scope, page)
                end
              )
@@ -243,10 +246,10 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
 
   test "nonhuman unsupported domain requires fresh exact proof and consumes no allowance", c do
     {:ok, reader} = Identity.generate(name: "signed-notice-reader")
-    assert :ok = Security.register_identity(Identity.public_only(reader))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(reader))
 
     {:ok, _cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: reader.agent_id,
         resource: c.resource,
         constraints: %{rate_limit: 1}
@@ -284,7 +287,7 @@ defmodule Arbor.Security.ConversationNoticeReadSecurityRegressionTest do
                expected_resource: c.resource
              )
 
-    Security.deregister_identity(reader.agent_id)
+    Security.deregister_identity_fixture(reader.agent_id)
   end
 
   defp read(c, continuation) do

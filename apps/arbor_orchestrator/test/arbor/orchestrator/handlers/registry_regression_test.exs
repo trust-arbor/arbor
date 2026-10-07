@@ -239,8 +239,8 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
 
   describe "custom handlers" do
     setup do
-      snapshot = Registry.snapshot_custom_handlers()
-      on_exit(fn -> Registry.restore_custom_handlers(snapshot) end)
+      snapshot = Registry.snapshot_fixtures()
+      on_exit(fn -> Registry.restore_fixtures(snapshot) end)
       :ok
     end
 
@@ -251,7 +251,7 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
         def execute(_, _, _, _), do: %Arbor.Orchestrator.Engine.Outcome{status: :success}
       end
 
-      Registry.register("compute", TestHandler)
+      Registry.register_fixture("compute", TestHandler)
       node = %Node{id: "test", attrs: %{"type" => "compute"}}
       assert Registry.resolve(node) == TestHandler
     end

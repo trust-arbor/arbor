@@ -56,11 +56,11 @@ defmodule Arbor.Agent.ConversationWindowSecurityRegressionTest do
     target = "agent_window_#{System.unique_integer([:positive])}"
 
     assert {:ok, cap} =
-             Security.grant(principal: caller, resource: "arbor://chat/agent/" <> target)
+             Security.grant_fixture(principal: caller, resource: "arbor://chat/agent/" <> target)
 
     on_exit(fn ->
-      Security.revoke(cap.id)
-      Security.deregister_identity(caller)
+      Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(caller)
       oidc.cleanup.()
     end)
 
@@ -84,13 +84,13 @@ defmodule Arbor.Agent.ConversationWindowSecurityRegressionTest do
              Arbor.Agent.conversation_window(c.caller, c.target, signed_request: proof)
 
     refute_receive {:window_read, _, _, _}
-    assert :ok = Security.revoke(c.cap.id)
+    assert :ok = Security.revoke_fixture(c.cap.id)
     assert {:error, :unauthorized} = read(c, [])
     refute_receive {:window_read, _, _, _}
   end
 
   test "security regression authorization is rechecked before publishing a window", c do
-    Process.put(:after_window_read, fn -> Security.revoke(c.cap.id) end)
+    Process.put(:after_window_read, fn -> Security.revoke_fixture(c.cap.id) end)
     assert {:error, :unauthorized} = read(c, [])
     assert_receive {:window_read, _, _, _}
   end

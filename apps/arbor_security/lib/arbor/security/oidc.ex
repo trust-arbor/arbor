@@ -3,10 +3,10 @@ defmodule Arbor.Security.OIDC do
   OIDC authentication facade for Arbor.
 
   Orchestrates the full authentication flow:
-  1. Device flow (for CLI) or token verification (for cached tokens)
+  1. Device flow (for CLI) or direct token verification
   2. OIDC claim extraction
   3. Persistent human keypair binding (via IdentityStore)
-  4. Identity registration + capability grants
+  4. Identity registration
   5. Owner-bound signing-authority acquisition
 
   ## Usage
@@ -20,17 +20,14 @@ defmodule Arbor.Security.OIDC do
 
   alias Arbor.Contracts.Security.Identity, as: IdentityContract
   alias Arbor.Contracts.Security.SigningAuthority
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.OIDC.Config
   alias Arbor.Security.OIDC.DeviceFlow
   alias Arbor.Security.OIDC.IdentityStore
+  alias Arbor.Security.OIDC.TokenCacheOwner
   alias Arbor.Security.OIDC.TokenVerifier
   alias Arbor.Security.SigningKeyStore
 
   require Logger
-
-  @token_cache_encryption_info "arbor-oidc-token-cache-v1"
 
   @doc """
   Run the full device authorization flow (interactive CLI).
@@ -39,9 +36,7 @@ defmodule Arbor.Security.OIDC do
   2. Polls until user authorizes
   3. Verifies the ID token
   4. Loads or creates persistent keypair
-  5. Registers identity + grants capabilities
-  6. Caches the token for future sessions
-
+  5. Registers identity
   Returns `{:ok, agent_id, signing_authority}` on success. The authority is
   owned by the calling process and is revoked automatically when that process
   exits.
@@ -58,13 +53,10 @@ defmodule Arbor.Security.OIDC do
            :ok <- print_device_flow_instructions(device_response),
            {:ok, token_response} <- DeviceFlow.poll(config, device_response),
            id_token when is_binary(id_token) <- Map.get(token_response, "id_token"),
-           {:ok, claims} <- TokenVerifier.verify(id_token, config),
-           {:ok, identity, status} <- IdentityStore.load_or_create(claims),
-           :ok <- ensure_registered(identity, id_token, config),
-           :ok <- ensure_capabilities(identity.agent_id) do
-        cache_token(token_response, claims)
-
-        with {:ok, authority} <- open_operator_authority(identity) do
+           {:ok, _claims} <- TokenVerifier.verify(id_token, config),
+           {:ok, identity, status} <- IdentityStore.load_or_create(id_token, config),
+           :ok <- ensure_registered(identity, id_token, config) do
+        with {:ok, authority} <- open_operator_authority(identity, id_token, config) do
           log_auth_result(identity, status)
           {:ok, identity.agent_id, authority}
         end
@@ -89,11 +81,10 @@ defmodule Arbor.Security.OIDC do
     if is_nil(config) do
       {:error, :no_matching_provider}
     else
-      with {:ok, claims} <- TokenVerifier.verify(id_token, config),
-           {:ok, identity, _status} <- IdentityStore.load_or_create(claims),
-           :ok <- ensure_registered(identity, id_token, config),
-           :ok <- ensure_capabilities(identity.agent_id) do
-        with {:ok, authority} <- open_operator_authority(identity) do
+      with {:ok, _claims} <- TokenVerifier.verify(id_token, config),
+           {:ok, identity, _status} <- IdentityStore.load_or_create(id_token, config),
+           :ok <- ensure_registered(identity, id_token, config) do
+        with {:ok, authority} <- open_operator_authority(identity, id_token, config) do
           {:ok, identity.agent_id, authority}
         end
       end
@@ -121,61 +112,47 @@ defmodule Arbor.Security.OIDC do
 
   def open_operator_authority(_identity), do: {:error, :invalid_oidc_identity}
 
-  @doc """
-  Load a cached OIDC token from disk.
-
-  Returns `{:ok, token_map}` if a valid (non-expired) cached token exists,
-  `:expired` if cached but expired, or `{:error, reason}` on failure.
-  """
-  @spec load_cached_token() :: {:ok, map()} | :expired | {:error, term()}
-  def load_cached_token do
-    path = Config.token_cache_path()
-
-    case File.read(path) do
-      {:ok, encrypted} ->
-        decrypt_cached_token(encrypted)
-
-      {:error, :enoent} ->
-        {:error, :no_cached_token}
-
-      {:error, reason} ->
-        {:error, {:cache_read_failed, reason}}
+  @doc false
+  @spec open_operator_authority(IdentityContract.t(), String.t(), map()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_operator_authority(
+        %IdentityContract{agent_id: principal_id, private_key: nil},
+        id_token,
+        provider_config
+      )
+      when is_binary(principal_id) and is_binary(id_token) and is_map(provider_config) do
+    with {:ok, proof} <-
+           SigningKeyStore.build_oidc_acquisition_proof(
+             id_token,
+             provider_config,
+             :oidc_operator,
+             self()
+           ) do
+      Arbor.Security.open_signing_authority(proof)
     end
   end
 
+  def open_operator_authority(%IdentityContract{} = identity, _id_token, _provider_config),
+    do: open_operator_authority(identity)
+
+  def open_operator_authority(_, _, _), do: {:error, :invalid_oidc_identity}
+
   @doc """
-  Cache an OIDC token response to disk (encrypted).
+  Retired OIDC token-cache read boundary.
+
+  OIDC bearer and refresh tokens are never returned from persisted storage.
   """
-  @spec cache_token(map(), map()) :: :ok | {:error, term()}
-  def cache_token(token_response, claims) do
-    path = Config.token_cache_path()
+  @spec load_cached_token() :: {:error, :oidc_token_cache_unauthorized}
+  def load_cached_token, do: TokenCacheOwner.load()
 
-    cache_data = %{
-      "token_response" => token_response,
-      "claims" => claims,
-      "cached_at" => DateTime.utc_now() |> DateTime.to_iso8601()
-    }
+  @doc """
+  Retired OIDC token-cache write boundary.
 
-    with {:ok, enc_key} <- get_cache_encryption_key(),
-         {:ok, json} <- Jason.encode(cache_data) do
-      {ciphertext, iv, tag} = Crypto.encrypt(json, enc_key)
-
-      # Pack: iv (12) + tag (16) + ciphertext
-      packed = iv <> tag <> ciphertext
-
-      dir = Path.dirname(path)
-      File.mkdir_p!(dir)
-
-      case File.write(path, packed) do
-        :ok ->
-          File.chmod(path, 0o600)
-          :ok
-
-        {:error, reason} ->
-          {:error, {:cache_write_failed, reason}}
-      end
-    end
-  end
+  Device authentication keeps provider tokens only for the live operation and
+  does not persist them.
+  """
+  @spec cache_token(map(), map()) :: {:error, :oidc_token_cache_unauthorized}
+  def cache_token(token_response, claims), do: TokenCacheOwner.store(token_response, claims)
 
   # --- Private ---
 
@@ -201,34 +178,10 @@ defmodule Arbor.Security.OIDC do
   end
 
   defp ensure_registered(identity, id_token, provider_config) do
-    if Code.ensure_loaded?(IdentityRegistry) and
-         Process.whereis(IdentityRegistry) != nil do
-      case Arbor.Security.register_oidc_identity(identity, id_token, provider_config) do
-        :ok -> :ok
-        {:error, {:already_registered, _}} -> :ok
-        {:error, reason} -> {:error, {:registration_failed, reason}}
-      end
-    else
-      # Registry not running — skip (dev/test without full security stack)
-      :ok
-    end
-  end
-
-  defp ensure_capabilities(agent_id) do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :assign_role, 3) do
-      role = Arbor.Security.Role.default_human_role()
-
-      case Arbor.Security.assign_role(agent_id, role) do
-        {:ok, _caps} ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("[OIDC] Failed to assign role #{role}: #{inspect(reason)}")
-          :ok
-      end
-    else
-      :ok
+    case Arbor.Security.register_oidc_identity(identity, id_token, provider_config) do
+      :ok -> :ok
+      {:error, {:already_registered, _}} -> :ok
+      {:error, reason} -> {:error, {:registration_failed, reason}}
     end
   end
 
@@ -249,40 +202,6 @@ defmodule Arbor.Security.OIDC do
       end
     else
       _ -> nil
-    end
-  end
-
-  defp decrypt_cached_token(packed) when byte_size(packed) > 28 do
-    <<iv::binary-size(12), tag::binary-size(16), ciphertext::binary>> = packed
-
-    with {:ok, enc_key} <- get_cache_encryption_key(),
-         {:ok, json} <- Crypto.decrypt(ciphertext, enc_key, iv, tag),
-         {:ok, cache_data} <- Jason.decode(json) do
-      # Check if the ID token is expired
-      case get_in(cache_data, ["claims", "exp"]) do
-        exp when is_integer(exp) ->
-          now = DateTime.utc_now() |> DateTime.to_unix()
-
-          if exp > now do
-            {:ok, cache_data}
-          else
-            :expired
-          end
-
-        _ ->
-          {:ok, cache_data}
-      end
-    else
-      {:error, :decryption_failed} -> {:error, :cache_corrupted}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp decrypt_cached_token(_), do: {:error, :invalid_cache_format}
-
-  defp get_cache_encryption_key do
-    with {:ok, master_key} <- SigningKeyStore.ensure_master_key_for_oidc() do
-      {:ok, Crypto.derive_key(master_key, @token_cache_encryption_info, 32)}
     end
   end
 

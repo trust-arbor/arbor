@@ -14,7 +14,16 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.delete(:agent_directory_module)
     Testing.put(:k1d_test_pid, self())
 
-    {:ok, _pid} = start_supervised(AnomalyForwarder)
+    owner_secret = :crypto.strong_rand_bytes(32)
+    owner_proof = :crypto.hash(:sha256, owner_secret)
+
+    {:ok, _pid} =
+      start_supervised(
+        {AnomalyForwarder,
+         trusted_producers: %{anomaly_detected: self()}, channel_owner_proof: owner_proof}
+      )
+
+    Process.put({__MODULE__, :channel_owner_secret}, owner_secret)
 
     :ok
   end
@@ -25,7 +34,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:agent_directory_module, __MODULE__.DirectoryWithDiagnostician)
     Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
 
     assert_received {:create, "ops-room", participants}
 
@@ -33,8 +42,8 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
 
     assert %{id: "anomaly_forwarder", name: "Monitor", type: :system} in participants
 
-    send(AnomalyForwarder, {:signal, anomaly_signal()})
-    assert :ok = AnomalyForwarder.set_channel(channel_id)
+    assert :ok = AnomalyForwarder.forward(anomaly_signal())
+    _state = :sys.get_state(AnomalyForwarder)
 
     assert_received {:deliver, ^channel_id, "anomaly_forwarder", "Monitor", :system, content}
     assert content =~ "[ANOMALY]"
@@ -44,7 +53,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.delete(:agent_directory_module)
     Testing.delete(:channel_bridge_module)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
 
     refute_received {:create, _, _}
     assert Process.alive?(Process.whereis(AnomalyForwarder))
@@ -54,7 +63,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:agent_directory_module, __MODULE__.DirectoryWithoutDiagnostician)
     Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
 
     refute_received {:create, _, _}
   end
@@ -63,12 +72,12 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
     Testing.put(:agent_directory_module, __MODULE__.MalformedAtomDirectory)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
     refute_received {:create, _, _}
 
     Testing.put(:agent_directory_module, __MODULE__.MalformedIdDirectory)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
     refute_received {:create, _, _}
   end
 
@@ -76,15 +85,15 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
     Testing.put(:agent_directory_module, __MODULE__.RaisingDirectory)
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
     refute_received {:create, _, _}
 
     Testing.put(:agent_directory_module, __MODULE__.ThrowingDirectory)
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
     refute_received {:create, _, _}
 
     Testing.put(:agent_directory_module, __MODULE__.ExitingDirectory)
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
     refute_received {:create, _, _}
   end
 
@@ -92,7 +101,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:agent_directory_module, __MODULE__.EmptyDirectory)
     Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
-    HealingSupervisor.setup_ops_room_fallback()
+    setup_ops_room_fallback()
 
     refute_received {:create, _, _}
   end
@@ -101,15 +110,15 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
     Testing.put(:agent_directory_module, __MODULE__.DirectoryWithDiagnostician)
     Testing.put(:channel_bridge_module, __MODULE__.RaisingCreateBridge)
 
-    HealingSupervisor.setup_ops_room_fallback()
-    send(AnomalyForwarder, {:signal, anomaly_signal()})
+    setup_ops_room_fallback()
+    assert :ok = AnomalyForwarder.forward(anomaly_signal())
     _ = :sys.get_state(AnomalyForwarder)
     refute_received {:deliver, _, _, _, _, _}
 
     Testing.put(:channel_bridge_module, __MODULE__.MalformedCreateBridge)
 
-    HealingSupervisor.setup_ops_room_fallback()
-    send(AnomalyForwarder, {:signal, anomaly_signal()})
+    setup_ops_room_fallback()
+    assert :ok = AnomalyForwarder.forward(anomaly_signal())
     _ = :sys.get_state(AnomalyForwarder)
     refute_received {:deliver, _, _, _, _, _}
   end
@@ -119,6 +128,10 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
       type: :anomaly_detected,
       data: %{skill: :beam, severity: :warning, details: %{metric: :reductions}}
     }
+  end
+
+  defp setup_ops_room_fallback do
+    HealingSupervisor.setup_ops_room_fallback(Process.get({__MODULE__, :channel_owner_secret}))
   end
 
   defmodule DirectoryWithDiagnostician do

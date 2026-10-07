@@ -25,12 +25,12 @@ defmodule Arbor.Actions.RelationshipPrivateScopeSecurityRegressionTest do
     end
 
     assert {:ok, identity} = Identity.generate()
-    assert :ok = Security.register_identity(identity)
+    assert :ok = Security.register_identity_fixture(identity)
 
     on_exit(fn ->
       {:ok, caps} = Security.list_capabilities(identity.agent_id)
-      Enum.each(caps, &Security.revoke(&1.id))
-      Security.deregister_identity(identity.agent_id)
+      Enum.each(caps, &Security.revoke_fixture(&1.id))
+      Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{agent_id: identity.agent_id}
@@ -148,7 +148,7 @@ defmodule Arbor.Actions.RelationshipPrivateScopeSecurityRegressionTest do
   end
 
   defp grant!(agent_id, resource) do
-    assert {:ok, _} = Security.grant(principal: agent_id, resource: resource)
+    assert {:ok, _} = Security.grant_fixture(principal: agent_id, resource: resource)
   end
 
   defp observe_calls(fun, mfas) do

@@ -53,7 +53,7 @@ defmodule Arbor.Security.IdentityVerifiedPassthroughTest do
     principal = "agent_" <> hex
     uri = "arbor://historian/query"
 
-    {:ok, _cap} = Security.grant(principal: principal, resource: uri)
+    {:ok, _cap} = Security.grant_fixture(principal: principal, resource: uri)
 
     {:ok, principal: principal, uri: uri}
   end

@@ -166,6 +166,30 @@ defmodule Arbor.Actions.FileTest do
       assert message =~ "permission denied" or message =~ "Failed to write"
     end
 
+    @tag :security_regression
+    @tag spec: "KSEC-012"
+    test "security regression: public write rejects a workspace symlink escape", %{
+      tmp_dir: tmp_dir
+    } do
+      workspace = Path.join(tmp_dir, "workspace")
+      outside = Path.join(tmp_dir, "outside")
+      escape = Path.join(workspace, "escape")
+      outside_file = Path.join(outside, "sentinel.txt")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(outside)
+      File.write!(outside_file, "preserve")
+      File.ln_s!(outside, escape)
+
+      assert {:error, message} =
+               FileActions.Write.run(
+                 %{path: "escape/sentinel.txt", content: "overwrite"},
+                 %{workspace: workspace}
+               )
+
+      assert message =~ "Path traversal denied"
+      assert File.read!(outside_file) == "preserve"
+    end
+
     test "generates tool schema" do
       tool = FileActions.Write.to_tool()
       assert is_map(tool)

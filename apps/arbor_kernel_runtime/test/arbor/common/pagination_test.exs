@@ -117,8 +117,9 @@ defmodule Arbor.Common.PaginationTest do
       assert hd(filtered).id == "3"
     end
 
-    test "returns all items for invalid cursor", %{items_desc: items} do
-      assert Pagination.filter_after_cursor(items, "invalid", :desc) == items
+    @tag :security_regression
+    test "security regression: invalid cursor fails closed", %{items_desc: items} do
+      assert Pagination.filter_after_cursor(items, "invalid", :desc) == []
     end
   end
 

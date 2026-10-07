@@ -13,7 +13,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
 
   @moduletag :fast
 
-  alias Arbor.Signals.Channels
+  alias Arbor.Signals.AuthorizedChannelsTestClient, as: Channels
 
   # Mock modules (same as channels_test.exs)
   defmodule MockCrypto do
@@ -80,6 +80,12 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:crypto_module, MockCrypto)
     Arbor.Signals.Config.Testing.put(:identity_registry_module, MockRegistry)
+
+    Arbor.Signals.Config.Testing.put(
+      :channel_principal_authorizer,
+      Arbor.Signals.TestChannelPrincipalAuthorizer
+    )
+
     Arbor.Signals.Config.Testing.put(:channel_rotate_on_leave, true)
     :ok
   end
@@ -89,7 +95,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
   # ---------------------------------------------------------------------------
 
   defp create_channel_with_members(creator_id, member_ids) do
-    {:ok, channel, key} = Channels.create("stress-channel", creator_id)
+    {:ok, channel, :server_managed} = Channels.create("stress-channel", creator_id)
 
     # Add members by accepting mock invitations
     Enum.each(member_ids, fn member_id ->
@@ -102,6 +108,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
       {:ok, invitation} = Channels.invite(channel.id, member_id, sender_keychain)
 
       recipient_keychain = %{
+        agent_id: member_id,
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
         signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
@@ -116,7 +123,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
         )
     end)
 
-    {channel.id, key}
+    {channel.id, channel.key_version}
   end
 
   # ---------------------------------------------------------------------------
@@ -155,6 +162,30 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
   # ---------------------------------------------------------------------------
 
   describe "key rotation during concurrent sends" do
+    test "brief supervisor stalls do not reject an authorized send" do
+      creator = "agent_creator_#{:rand.uniform(100_000)}"
+      {channel_id, _key} = create_channel_with_members(creator, [])
+      signals_supervisor = Process.whereis(Arbor.Signals.Supervisor)
+
+      on_exit(fn ->
+        if is_pid(signals_supervisor) and Process.alive?(signals_supervisor) do
+          :sys.resume(signals_supervisor)
+        end
+      end)
+
+      :ok = :sys.suspend(signals_supervisor)
+
+      send_task =
+        Task.async(fn ->
+          Channels.send(channel_id, creator, :chat, %{text: "ownership proof waits"})
+        end)
+
+      assert eventually(fn -> supervisor_call_queued?(signals_supervisor) end)
+      assert Task.yield(send_task, 100) == nil
+      :ok = :sys.resume(signals_supervisor)
+      assert :ok = Task.await(send_task, 2_000)
+    end
+
     test "sends succeed even when rotation happens concurrently" do
       Enum.each(1..@stress_iterations, fn _iteration ->
         creator = "agent_creator_#{:rand.uniform(100_000)}"
@@ -205,24 +236,16 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
     test "key changes after rotation" do
       creator = "agent_creator_#{:rand.uniform(100_000)}"
       member = "agent_member_#{:rand.uniform(100_000)}"
-      {channel_id, _key} = create_channel_with_members(creator, [member])
-
-      # Get key before rotation
-      {:ok, key_before} = Channels.get_key(channel_id, creator)
+      {channel_id, version_before} = create_channel_with_members(creator, [member])
 
       # Rotate
-      {:ok, new_key, members_to_reinvite} = Channels.rotate_key(channel_id, creator)
+      {:ok, :server_managed, members_to_reinvite} = Channels.rotate_key(channel_id, creator)
 
-      # Key should have changed
-      assert new_key != key_before
+      {:ok, rotated_channel} = Channels.get(channel_id)
+      assert rotated_channel.key_version == version_before + 1
 
       # The member should be in the reinvite list
       assert member in members_to_reinvite
-
-      # Channel key should be the new key
-      {:ok, key_after} = Channels.get_key(channel_id, creator)
-      assert key_after == new_key
-      assert key_after != key_before
     end
   end
 
@@ -237,14 +260,14 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
       {channel_id, _key} = create_channel_with_members(creator, [member])
 
       # Perform multiple rapid rotations
-      keys =
+      versions =
         for _i <- 1..10 do
-          {:ok, new_key, _members} = Channels.rotate_key(channel_id, creator)
-          new_key
+          {:ok, :server_managed, _members} = Channels.rotate_key(channel_id, creator)
+          {:ok, channel} = Channels.get(channel_id)
+          channel.key_version
         end
 
-      # All keys should be unique
-      assert length(Enum.uniq(keys)) == 10, "Some rotation keys were duplicated"
+      assert versions == Enum.to_list(2..11)
 
       # Channel should still be functional
       {:ok, channel} = Channels.get(channel_id)
@@ -275,9 +298,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
       assert Enum.all?(results, fn r -> match?({:ok, _, _}, r) end),
              "Some rotations failed: #{inspect(results)}"
 
-      # Keys should all be different
-      keys = Enum.map(results, fn {:ok, key, _} -> key end)
-      assert length(Enum.uniq(keys)) == 5, "Concurrent rotations produced duplicate keys"
+      assert Enum.all?(results, fn {:ok, reference, _} -> reference == :server_managed end)
 
       # Final key version should reflect all rotations
       {:ok, channel} = Channels.get(channel_id)
@@ -298,7 +319,7 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
         stayer = "agent_stayer_#{:rand.uniform(100_000)}"
         {channel_id, _key} = create_channel_with_members(creator, [leaver, stayer])
 
-        {:ok, key_before} = Channels.get_key(channel_id, creator)
+        {:ok, channel_before} = Channels.get(channel_id)
 
         # Concurrent: stayer sends messages while leaver leaves
         send_task =
@@ -323,9 +344,9 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
         {:leave, leave_status} = leave_result
         assert leave_status == :ok
 
-        # Key should have rotated due to leave
-        {:ok, key_after} = Channels.get_key(channel_id, creator)
-        assert key_after != key_before
+        # Key version should have advanced due to leave.
+        {:ok, channel_after} = Channels.get(channel_id)
+        assert channel_after.key_version > channel_before.key_version
 
         # Channel should still work for remaining members
         assert :ok = Channels.send(channel_id, creator, :chat, %{text: "still works"})
@@ -371,6 +392,31 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
 
       assert stats_after.messages_sent == stats_before.messages_sent + send_count
       assert stats_after.key_rotations == stats_before.key_rotations + 1
+    end
+  end
+
+  defp supervisor_call_queued?(supervisor) do
+    case Process.info(supervisor, :message_queue_len) do
+      {:message_queue_len, count} when count > 0 -> true
+      _other -> false
+    end
+  end
+
+  defp eventually(predicate, timeout_ms \\ 500) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(predicate, deadline)
+  end
+
+  defp do_eventually(predicate, deadline) do
+    if predicate.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(5)
+        do_eventually(predicate, deadline)
+      end
     end
   end
 end

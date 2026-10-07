@@ -50,12 +50,151 @@ defmodule Arbor.Signals do
 
   use Boundary,
     top_level?: true,
-    deps: [Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
+    deps: [Arbor.Common, Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
     exports: :all
 
   @behaviour Arbor.Contracts.API.Signals
 
   alias Arbor.Signals.{Bus, Config, DurableSink, Relay, Signal, Store, Taint, TopicKeys}
+
+  if Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false) do
+    @runtime_fixture_children [
+      {Arbor.Signals.Store, []},
+      {Arbor.Signals.TopicKeys, []},
+      {Arbor.Signals.Channels, []},
+      {Arbor.Signals.SubscriptionRegistry, []},
+      {Arbor.Signals.TelemetryBridge, []},
+      {Arbor.Signals.Bus, []},
+      {Arbor.Signals.Relay, []}
+    ]
+
+    @doc false
+    def build_signal_fixture(category, type, data, opts \\ []),
+      do: Signal.new(category, type, data, opts)
+
+    @doc false
+    def receive_relay_batch_fixture(signals, from_node),
+      do: Relay.receive_batch_fixture(signals, from_node)
+
+    @doc false
+    def list_subscriptions_fixture, do: Bus.list_subscriptions()
+
+    @doc false
+    def bus_pid_fixture do
+      with supervisor when is_pid(supervisor) <- Process.whereis(Arbor.Signals.Supervisor),
+           {:ok, bus} <- runtime_fixture_child_pid(supervisor, Bus) do
+        bus
+      else
+        _unavailable_or_unowned -> nil
+      end
+    catch
+      :exit, _reason -> nil
+    end
+
+    @doc false
+    def restart_bus_fixture do
+      supervisor = Process.whereis(Arbor.Signals.Supervisor)
+
+      with true <- is_pid(supervisor),
+           {:ok, old_bus} <- runtime_fixture_child_pid(supervisor, Bus),
+           :ok <- Supervisor.terminate_child(supervisor, Bus),
+           restart_result <- Supervisor.restart_child(supervisor, Bus),
+           {:ok, new_bus} <- normalize_fixture_restart(restart_result),
+           {:ok, ^new_bus} <- runtime_fixture_child_pid(supervisor, Bus) do
+        {:ok, old_bus, new_bus}
+      else
+        false -> {:error, :signals_bus_unavailable}
+        {:error, reason} -> {:error, reason}
+      end
+    catch
+      :exit, _reason -> {:error, :signals_bus_unavailable}
+    end
+
+    @doc false
+    def restore_runtime_fixture do
+      with {:ok, _apps} <- Application.ensure_all_started(:arbor_kernel_runtime),
+           supervisor when is_pid(supervisor) <- Process.whereis(Arbor.Signals.Supervisor),
+           :ok <- restore_runtime_fixture_children(supervisor, @runtime_fixture_children),
+           ^supervisor <- Process.whereis(Arbor.Signals.Supervisor) do
+        :ok
+      else
+        nil -> {:error, :signals_supervisor_unavailable}
+        supervisor when is_pid(supervisor) -> {:error, :signals_supervisor_replaced}
+        {:error, reason} -> {:error, reason}
+      end
+    catch
+      :exit, _reason -> {:error, :signals_supervisor_unavailable}
+    end
+
+    defp restore_runtime_fixture_children(_supervisor, []), do: :ok
+
+    defp restore_runtime_fixture_children(supervisor, [{module, _opts} = child | rest]) do
+      with :ok <- start_runtime_fixture_child(supervisor, module, child),
+           :ok <- verify_runtime_fixture_child(supervisor, module) do
+        restore_runtime_fixture_children(supervisor, rest)
+      end
+    end
+
+    defp start_runtime_fixture_child(supervisor, module, child) do
+      case Supervisor.start_child(supervisor, child) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          case Supervisor.restart_child(supervisor, module) do
+            {:ok, _pid} -> :ok
+            {:ok, _pid, _info} -> :ok
+            {:error, :running} -> :ok
+            {:error, reason} -> {:error, {module, reason}}
+          end
+
+        {:error, reason} ->
+          {:error, {module, reason}}
+      end
+    end
+
+    defp verify_runtime_fixture_child(supervisor, module) do
+      case runtime_fixture_child_pid(supervisor, module) do
+        {:ok, _pid} -> :ok
+        {:error, reason} -> {:error, {module, reason}}
+      end
+    end
+
+    defp runtime_fixture_child_pid(supervisor, module) do
+      child_pid =
+        Enum.find_value(Supervisor.which_children(supervisor), fn
+          {^module, pid, :worker, _modules} when is_pid(pid) -> pid
+          _other -> nil
+        end)
+
+      case {child_pid, Process.whereis(module)} do
+        {pid, pid} when is_pid(pid) ->
+          if Process.alive?(pid), do: {:ok, pid}, else: {:error, :not_alive}
+
+        {nil, registered} when is_pid(registered) ->
+          {:error, :foreign_registered_name}
+
+        {_owned, _registered} ->
+          {:error, :ownership_mismatch}
+      end
+    end
+
+    defp normalize_fixture_restart({:ok, pid}) when is_pid(pid), do: {:ok, pid}
+    defp normalize_fixture_restart({:ok, pid, _info}) when is_pid(pid), do: {:ok, pid}
+    defp normalize_fixture_restart({:error, reason}), do: {:error, reason}
+  end
+
+  @doc """
+  Return the enforced trust model for cluster signal transport.
+
+  Every node that possesses the Erlang distribution cookie is a cluster root.
+  Signal origin fields are attribution, not proof of a less-privileged peer.
+  """
+  @spec cluster_trust_boundary() :: :distribution_cookie_root
+  def cluster_trust_boundary, do: Config.cluster_trust_boundary()
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -88,7 +227,11 @@ defmodule Arbor.Signals do
   LLM call traces, worker lifecycle, security audit events.
 
   Same API as `emit/4` but additionally dispatches the original data to
-  the configured durable sink. Dispatch waits for the sink callback; a
+  the configured durable sink. Restricted categories fail closed at this
+  boundary: their realtime signal is protected, but no durable sink receives
+  the plaintext while the only available topic keys are node-local and
+  ephemeral. A stable durable-encryption provider must be introduced before
+  those categories can be persisted safely. Dispatch waits for the sink callback; a
   ready sink's `:ok` means persist was observed, not fire-and-forget.
   Best-effort at this layer: this function still returns `:ok` after a
   sink persist failure so the bus emit is not rolled back. Standalone
@@ -101,14 +244,27 @@ defmodule Arbor.Signals do
   `source_node` keys so JSON admission cannot emit duplicate names;
   system value wins.
   """
-  @spec durable_emit(atom(), atom(), map(), keyword()) :: :ok
+  @spec durable_emit(atom(), atom(), map(), keyword()) ::
+          :ok | {:error, :restricted_durable_encryption_unavailable}
   def durable_emit(category, type, data, opts \\ []) do
-    emit(category, type, Map.put(data, :permanent, true), opts)
+    if category in Config.restricted_topics() do
+      # Preserve realtime delivery, but do not mark the event permanent. Topic
+      # keys are process-local and cannot make a restart-safe checkpoint.
+      case emit(category, type, data, opts) do
+        :ok -> {:error, :restricted_durable_encryption_unavailable}
+        error -> error
+      end
+    else
+      case emit(category, type, Map.put(data, :permanent, true), opts) do
+        :ok ->
+          stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
+          DurableSink.dispatch(stream_id, type, data, opts)
+          :ok
 
-    stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
-    DurableSink.dispatch(stream_id, type, data, opts)
-
-    :ok
+        error ->
+          error
+      end
+    end
   end
 
   @doc """
@@ -164,9 +320,17 @@ defmodule Arbor.Signals do
 
   @doc false
   @spec subscribe_security_sync(atom(), atom()) ::
-          {:ok, String.t(), pid()} | {:error, :unauthorized}
+          {:ok, String.t(), pid(), reference()} | {:error, :unauthorized}
   def subscribe_security_sync(role, event),
     do: Bus.subscribe_security_sync(role, event)
+
+  @doc false
+  @spec security_sync_transport_configured?() :: boolean()
+  def security_sync_transport_configured?, do: Config.security_sync_transport_configured?()
+
+  @doc false
+  @spec security_sync_role_configured?(atom()) :: boolean()
+  def security_sync_role_configured?(role), do: Config.security_sync_role_configured?(role)
 
   @doc """
   Whether remote-origin security-sync mutations may be applied.
@@ -243,25 +407,32 @@ defmodule Arbor.Signals do
     do: emit_preconstructed_signal(signal, true)
 
   defp emit_preconstructed_signal(%Signal{} = signal, async?) do
-    # Stamp emitter_pid and origin_node if not already set
-    signal = if signal.emitter_pid, do: signal, else: %{signal | emitter_pid: self()}
-    signal = if signal.origin_node, do: signal, else: %{signal | origin_node: node()}
+    # Event identity and attribution are owned by this boundary. A caller may
+    # preserve lineage and metadata, but cannot inject an old/future timestamp,
+    # collide with an existing ID, or impersonate another process/node.
+    signal = restamp_local_signal(signal)
 
     if healthy?() do
       # Encrypt restricted-topic signals BEFORE storing to prevent
       # plaintext sensitive data in the Store. Bus.publish will skip
       # re-encryption if already encrypted (__encrypted__: true marker).
       protected = protect_restricted_signal(signal)
-      store_signal(protected, async?)
-      Bus.publish(protected)
 
-      :telemetry.execute(
-        [:arbor, :signals, :emitted],
-        %{count: 1},
-        %{category: signal.category, type: signal.type}
-      )
+      case Bus.publish_canonical(protected) do
+        {:ok, canonical} ->
+          store_signal(canonical, async?)
 
-      :ok
+          :telemetry.execute(
+            [:arbor, :signals, :emitted],
+            %{count: 1},
+            %{category: canonical.category, type: canonical.type}
+          )
+
+          :ok
+
+        {:error, _reason} = error ->
+          error
+      end
     else
       {:error, :signal_system_not_ready}
     end
@@ -275,7 +446,8 @@ defmodule Arbor.Signals do
   defp protect_restricted_signal(%Signal{category: category, data: data} = signal) do
     restricted_topics = Config.restricted_topics()
 
-    if category in restricted_topics and data != %{} and not already_encrypted?(data) do
+    if category in restricted_topics and data != %{} and not already_encrypted?(data) and
+         not portable_security_sync_signal?(signal) do
       try do
         with {:ok, json} <- Jason.encode(data),
              {:ok, encrypted} <- TopicKeys.encrypt(category, json) do
@@ -297,6 +469,29 @@ defmodule Arbor.Signals do
 
   defp already_encrypted?(%{__encrypted__: true}), do: true
   defp already_encrypted?(_), do: false
+
+  # TopicKeys are deliberately node-local. Encrypting the monotonic security
+  # mutations that must cross the cluster makes them undecryptable on every
+  # peer and silently defeats revocation. These events carry identifiers and
+  # state transitions rather than secrets; cluster admission remains enforced
+  # by Relay and the security consumers. Authority-adding events stay encrypted
+  # and are rejected remotely while authenticated sync transport is absent.
+  defp portable_security_sync_signal?(%Signal{category: category, type: type}) do
+    category in [:security, :identity] and
+      (type == :nonce_seen or type in Config.authority_reducing_security_mutations())
+  end
+
+  defp restamp_local_signal(%Signal{} = signal) do
+    Signal.new(signal.category, signal.type, signal.data,
+      source: signal.source,
+      cause_id: signal.cause_id,
+      correlation_id: signal.correlation_id,
+      metadata: signal.metadata,
+      scope: signal.scope
+    )
+    |> Map.put(:emitter_pid, self())
+    |> Map.put(:origin_node, node())
+  end
 
   @impl true
   def subscribe_to_signals_matching_pattern(pattern, handler, opts) do

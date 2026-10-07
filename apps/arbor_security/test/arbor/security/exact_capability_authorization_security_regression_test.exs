@@ -9,9 +9,12 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
 
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Security
   alias Arbor.Security.{CapabilityStore, DisclosureCapability, SystemAuthority}
+  alias Arbor.Security.Identity.Registry
+
+  @authority_key {__MODULE__, :actor_authority}
 
   @moduletag :fast
   @moduletag security: :regression
@@ -29,7 +32,32 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
     Application.put_env(:arbor_security, :uri_registry_enforcement, false)
     Application.put_env(:arbor_security, :reflex_checking_enabled, false)
 
+    {:ok, actor} = Identity.generate(name: "exact-capability-actor")
+    :ok = Registry.register_fixture(actor)
+    target = "agent_" <> String.duplicate("a", 32)
+
+    {:ok, mutation_cap} =
+      Security.grant_fixture(
+        principal: actor.agent_id,
+        resource: "arbor://security/grant/#{target}"
+      )
+
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        actor.agent_id,
+        actor.private_key,
+        purpose: :exact_capability_authorization_test
+      )
+
+    {:ok, actor_authority} =
+      Security.open_ephemeral_signing_authority(proof, actor.private_key)
+
+    Process.put(@authority_key, actor_authority)
+
     on_exit(fn ->
+      Security.close_signing_authority(actor_authority)
+      Security.revoke_fixture(mutation_cap.id)
+      Security.deregister_identity_fixture(actor.agent_id)
       restore(:capability_signing_required, previous.signing)
       restore(:identity_verification, previous.identity)
       restore(:uri_registry_enforcement, previous.uri)
@@ -59,7 +87,7 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
 
   defp grant!(attrs) do
     assert {:ok, cap} =
-             Security.grant(
+             Security.grant_fixture(
                principal: attrs.principal,
                resource: attrs.resource,
                session_id: Map.get(attrs, :session_id),
@@ -68,7 +96,7 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
                expires_at: Map.get(attrs, :expires_at)
              )
 
-    on_exit(fn -> _ = Security.revoke(cap.id) end)
+    on_exit(fn -> _ = Security.revoke_fixture(cap.id) end)
     cap
   end
 
@@ -86,7 +114,7 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
     test "security regression: revoked intended capability cannot be replaced by an unbound covering cap" do
       attrs = fixture()
       intended = grant!(attrs)
-      :ok = Security.revoke(intended.id)
+      :ok = Security.revoke_fixture(intended.id)
 
       substitute =
         grant!(%{attrs | session_id: nil, task_id: nil, principal_scope: nil})
@@ -107,7 +135,7 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
     test "security regression: mixed and string exact option keys cannot fall back to a substitute" do
       attrs = fixture()
       intended = grant!(attrs)
-      :ok = Security.revoke(intended.id)
+      :ok = Security.revoke_fixture(intended.id)
       _substitute = grant!(%{attrs | session_id: nil, task_id: nil, principal_scope: nil})
 
       for opts <- [
@@ -228,9 +256,9 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
           expires_at: DateTime.add(now, -1, :second)
         )
 
-      {:ok, expired} = SystemAuthority.sign_capability(expired)
-      assert {:ok, :stored} = CapabilityStore.put(expired)
-      on_exit(fn -> _ = Security.revoke(expired.id) end)
+      {:ok, expired} = SystemAuthority.sign_capability_for_test(expired)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(expired)
+      on_exit(fn -> _ = Security.revoke_fixture(expired.id) end)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -241,7 +269,7 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
                )
 
       revoked = grant!(attrs)
-      :ok = Security.revoke(revoked.id)
+      :ok = Security.revoke_fixture(revoked.id)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -260,8 +288,8 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
           principal_scope: attrs.principal_scope
         )
 
-      assert {:ok, :stored} = CapabilityStore.put(unsigned)
-      on_exit(fn -> _ = Security.revoke(unsigned.id) end)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(unsigned)
+      on_exit(fn -> _ = Security.revoke_fixture(unsigned.id) end)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -275,10 +303,10 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
         unsigned
         |> Map.put(:id, "cap_" <> String.duplicate("d", 32))
         |> Map.put(:delegation_chain, [%{forged: true}])
-        |> SystemAuthority.sign_capability()
+        |> SystemAuthority.sign_capability_for_test()
 
-      assert {:ok, :stored} = CapabilityStore.put(signed_invalid_chain)
-      on_exit(fn -> _ = Security.revoke(signed_invalid_chain.id) end)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(signed_invalid_chain)
+      on_exit(fn -> _ = Security.revoke_fixture(signed_invalid_chain.id) end)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -296,10 +324,11 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
                  principal_scope: attrs.principal_scope,
                  destination: "api.example.test",
                  provider: "example",
-                 runtime: "arbor"
+                 runtime: "arbor",
+                 actor_authority: Process.get(@authority_key)
                )
 
-      on_exit(fn -> _ = Security.revoke(disclosure.id) end)
+      on_exit(fn -> _ = Security.revoke_fixture(disclosure.id) end)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -319,10 +348,10 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
         |> Map.put(:id, "cap_" <> String.duplicate("e", 32))
         |> Map.put(:parent_capability_id, "cap_" <> String.duplicate("f", 32))
         |> Map.put(:delegation_chain, [])
-        |> SystemAuthority.sign_capability()
+        |> SystemAuthority.sign_capability_for_test()
 
-      assert {:ok, :stored} = CapabilityStore.put(parent_without_chain)
-      on_exit(fn -> _ = Security.revoke(parent_without_chain.id) end)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(parent_without_chain)
+      on_exit(fn -> _ = Security.revoke_fixture(parent_without_chain.id) end)
 
       assert {:error, :unauthorized} =
                Security.authorize(
@@ -356,18 +385,10 @@ defmodule Arbor.Security.ExactCapabilityAuthorizationSecurityRegressionTest do
       {:ok, malformed_id_cap} =
         cap
         |> Map.put(:id, "cap_" <> String.duplicate("g", 32))
-        |> SystemAuthority.sign_capability()
+        |> SystemAuthority.sign_capability_for_test()
 
-      assert {:ok, :stored} = CapabilityStore.put(malformed_id_cap)
-      on_exit(fn -> _ = Security.revoke(malformed_id_cap.id) end)
-
-      assert {:error, :invalid_exact_capability_id} =
-               Security.authorize(
-                 attrs.principal,
-                 attrs.resource,
-                 :connect,
-                 exact_opts(malformed_id_cap, attrs)
-               )
+      assert {:error, _reason} = CapabilityStore.put_fixture(malformed_id_cap)
+      assert {:ok, ^cap} = CapabilityStore.get(cap.id)
 
       assert {:error, :invalid_exact_capability_scope} =
                Security.authorize(

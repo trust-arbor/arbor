@@ -11,6 +11,32 @@ dotenv_path =
     Path.join(File.cwd!(), ".env")
   end
 
+# Keep synchronized with Mix.Tasks.Arbor.Helpers.dotenv_key_allowed?/1. Runtime
+# config executes before applications start, so the admission policy stays
+# self-contained here rather than calling application code.
+dotenv_allowed_exact =
+  MapSet.new(~w(
+    ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    OPENAI_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+    XAI_API_KEY GROK_CODE_XAI_API_KEY ZAI_API_KEY ZAI_CODING_PLAN_API_KEY
+    OLLAMA_API_KEY OLLAMA_BASE_URL LM_STUDIO_BASE_URL
+    BRAVE_API_KEY BRAVE_SEARCH_API_KEY EXA_API_KEY TINYFISH_API_KEY LIMITLESS_API_KEY
+    CURSOR_API_KEY CURSOR_AUTH_TOKEN
+    DATABASE_URL DB_HOST DB_USER DB_PASS DB_SSL
+    DASHBOARD_HOST DASHBOARD_PORT DASHBOARD_USER DASHBOARD_PASS SECRET_KEY_BASE
+    OIDC_ALLOW_HTTP OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES
+    OIDC_DEVICE_FLOW OIDC_DEVICE_CLIENT_ID
+    SIGNAL_FROM SIGNAL_ACCOUNT SIGNAL_TO SIGNAL_CLI_PATH
+    SMTP_USER SMTP_PASS SMTP_HOST SMTP_PORT EMAIL_TO
+    UNIFIED_LLM_DEFAULT_MODEL UNIFIED_LLM_DEFAULT_PROVIDER
+  ))
+
+dotenv_key_allowed? = fn key ->
+  Regex.match?(~r/\A[A-Z][A-Z0-9_]*\z/, key) and
+    (MapSet.member?(dotenv_allowed_exact, key) or
+       String.starts_with?(key, ["ARBOR_", "CONTACT_"]))
+end
+
 if File.exists?(dotenv_path) do
   if config_env() != :prod and dotenv_path == Path.join(File.cwd!(), ".env") do
     IO.puts("[arbor] Loading .env from CWD: #{dotenv_path} (dev/test only)")
@@ -25,12 +51,20 @@ if File.exists?(dotenv_path) do
       [key, value] ->
         key = key |> String.trim() |> String.replace_leading("export ", "")
         value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
-        System.put_env(key, value)
+
+        if dotenv_key_allowed?.(key) and is_nil(System.get_env(key)),
+          do: System.put_env(key, value)
 
       _ ->
         :skip
     end
   end)
+end
+
+if session_token_secret = System.get_env("ARBOR_SESSION_TOKEN_SECRET") do
+  if session_token_secret != "" do
+    config :arbor_security, session_token_secret: session_token_secret
+  end
 end
 
 # Native audio is an explicit host opt-in while physical qualification is pending.
@@ -282,6 +316,18 @@ if config_env() != :test do
       end
 
       config :arbor_security, authority_state_root: dir
+
+    _unset ->
+      :ok
+  end
+
+  case System.get_env("ARBOR_SECURITY_REVOCATION_LEDGER_PATH") do
+    path when is_binary(path) and path != "" ->
+      unless Path.type(path) == :absolute do
+        raise "ARBOR_SECURITY_REVOCATION_LEDGER_PATH must be an absolute path"
+      end
+
+      config :arbor_security, revocation_ledger_path: path
 
     _unset ->
       :ok

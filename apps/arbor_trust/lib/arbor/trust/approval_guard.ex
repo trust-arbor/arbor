@@ -207,19 +207,23 @@ defmodule Arbor.Trust.ApprovalGuard do
   end
 
   defp approved_invocation?(principal_id, resource_uri, opts) do
-    case opt(opts, :approved_invocation) do
-      approval when is_map(approval) ->
-        approval_field(approval, :principal_id) == principal_id and
-          approval_field(approval, :resource_uri) == resource_uri and
-          approval_field(approval, :decision) in [:approved, :approve, "approved", "approve"] and
-          is_binary(approval_field(approval, :request_id))
+    receipt = opt(opts, :approved_invocation)
+    digest = opt(opts, :argument_digest)
+    action = opt(opts, :approval_action) || :execute
 
-      _ ->
-        false
-    end
+    is_map(receipt) and is_binary(digest) and
+      Arbor.Security.confirm_consumed_approval_receipt(
+        receipt,
+        principal_id,
+        resource_uri,
+        action,
+        digest
+      ) == :ok
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
-
-  defp approval_field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
   defp opt(opts, key) when is_list(opts) do
     case Keyword.fetch(opts, key) do

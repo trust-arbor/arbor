@@ -26,7 +26,9 @@ defmodule Arbor.Security.PreloadedFallbackTest do
 
   alias Arbor.Contracts.Security.{AuthContext, Capability}
   alias Arbor.Security.AuthDecision
+  alias Arbor.Security.Identity.Registry
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Contracts.Security.Identity
 
   defmodule CrashingStore do
     @moduledoc false
@@ -143,9 +145,16 @@ defmodule Arbor.Security.PreloadedFallbackTest do
 
     test "strict outage denies even with a signed preloaded cap", %{agent_id: agent_id} do
       Application.put_env(:arbor_security, :strict_identity_mode, true)
+      {:ok, identity} = Identity.generate(name: agent_id)
+      :ok = Registry.register_fixture(identity)
+      on_exit(fn -> Registry.deregister_fixture(identity.agent_id) end)
+
       uri = "arbor://historian/query"
-      cap = signed_cap(agent_id, uri)
-      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      cap = signed_cap(identity.agent_id, uri)
+
+      auth =
+        AuthContext.new(identity.agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
       result = AuthDecision.evaluate(auth, uri, :query)
 
       assert match?({:error, {:unauthorized, :capability_store_unavailable}, _}, result)
@@ -168,7 +177,7 @@ defmodule Arbor.Security.PreloadedFallbackTest do
 
   defp signed_cap(agent_id, uri) do
     {:ok, cap} = Capability.new(resource_uri: uri, principal_id: agent_id)
-    {:ok, signed} = SystemAuthority.sign_capability(cap)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
     signed
   end
 

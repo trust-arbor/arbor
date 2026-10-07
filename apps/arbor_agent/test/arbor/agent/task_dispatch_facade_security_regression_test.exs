@@ -239,10 +239,10 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
         _ -> :ets.insert(@table, {:grant_calls, [opts]})
       end
 
-      Security.grant(opts)
+      Security.grant_fixture(opts)
     end
 
-    def revoke(id), do: Security.revoke(id)
+    def revoke(id), do: Security.revoke_fixture(id)
   end
 
   setup_all do
@@ -368,10 +368,10 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
   end
 
   defp track_grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
 
     on_exit(fn ->
-      _ = Security.revoke(cap.id)
+      _ = Security.revoke_fixture(cap.id)
     end)
 
     cap
@@ -440,18 +440,9 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
     }
 
     {:ok, id_token} = Joken.Signer.sign(claims, signer)
+    provider = %{issuer: issuer, client_id: client_id}
 
-    table = :arbor_oidc_jwks_cache
-
-    if :ets.whereis(table) == :undefined do
-      :ets.new(table, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    true =
-      :ets.insert(
-        table,
-        {issuer, %{"keys" => [public_map]}, System.monotonic_time(:millisecond) + 60_000}
-      )
+    :ok = Security.put_oidc_jwks_fixture(provider, %{"keys" => [public_map]})
 
     {:ok, identity} = Arbor.Contracts.Security.Identity.generate(name: claims["name"])
 
@@ -473,15 +464,11 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
         }
     }
 
-    assert :ok =
-             Security.register_oidc_identity(human_identity, id_token, %{
-               issuer: issuer,
-               client_id: client_id
-             })
+    assert :ok = Security.register_oidc_identity(human_identity, id_token, provider)
 
     on_exit(fn ->
-      if :ets.whereis(table) != :undefined, do: :ets.delete(table, issuer)
-      _ = Security.deregister_identity(human_id)
+      :ok = Security.delete_oidc_jwks_fixture(provider)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     human_id

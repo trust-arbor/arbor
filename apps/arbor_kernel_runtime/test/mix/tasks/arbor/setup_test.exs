@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Arbor.SetupTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -49,6 +49,109 @@ defmodule Mix.Tasks.Arbor.SetupTest do
     assert File.read!(path) == sentinel
   end
 
+  test "security regression: setup creates .env with mode 0600", %{tmp: tmp} do
+    example = Path.join(tmp, ".env.example")
+    env = Path.join(tmp, ".env")
+    File.write!(example, "ARBOR_DB=sqlite\n")
+    File.chmod!(example, 0o644)
+
+    assert {:ok, message} = Setup.setup_env(tmp)
+    assert message =~ "mode 600"
+    assert File.read!(env) == "ARBOR_DB=sqlite\n"
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(env)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
+  test "security regression: generated cookie is saved privately and not returned in output", %{
+    tmp: tmp
+  } do
+    previous = System.get_env("ARBOR_COOKIE")
+    System.delete_env("ARBOR_COOKIE")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("ARBOR_COOKIE", previous),
+        else: System.delete_env("ARBOR_COOKIE")
+    end)
+
+    assert {:ok, message} = Setup.setup_cookie([], tmp)
+    env = Path.join(tmp, ".env")
+    assert [_, cookie] = Regex.run(~r/^ARBOR_COOKIE=([0-9a-f]{64})$/m, File.read!(env))
+    refute message =~ cookie
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(env)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
+  test "security regression: setup generates a private session-token secret", %{tmp: tmp} do
+    previous = System.get_env("ARBOR_SESSION_TOKEN_SECRET")
+    System.delete_env("ARBOR_SESSION_TOKEN_SECRET")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("ARBOR_SESSION_TOKEN_SECRET", previous),
+        else: System.delete_env("ARBOR_SESSION_TOKEN_SECRET")
+    end)
+
+    File.write!(Path.join(tmp, ".env"), "ARBOR_DB=sqlite\n")
+
+    assert {:ok, message} = Setup.setup_session_token_secret(tmp)
+    env = Path.join(tmp, ".env")
+
+    assert [_, encoded] =
+             Regex.run(~r/^ARBOR_SESSION_TOKEN_SECRET=([A-Za-z0-9_-]{43})$/m, File.read!(env))
+
+    assert {:ok, secret} = Base.url_decode64(encoded, padding: false)
+    assert byte_size(secret) == 32
+    refute message =~ encoded
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(env)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
+  test "security regression: setup makes Arbor runtime and log directories mode 0700", %{
+    tmp: tmp
+  } do
+    arbor_home = Path.join(tmp, ".arbor")
+    assert {:ok, _} = Setup.ensure_directories(arbor_home)
+
+    for path <- [arbor_home, Path.join(arbor_home, "logs")] do
+      assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+      assert Bitwise.band(mode, 0o777) == 0o700
+    end
+  end
+
+  test "security regression: SQLite setup makes a custom parent 0700 and database 0600", %{
+    tmp: tmp
+  } do
+    database = Path.join([tmp, "custom", "data", "arbor.db"])
+    parent = Path.dirname(database)
+    File.mkdir_p!(parent)
+    File.chmod!(parent, 0o755)
+
+    assert :created =
+             Setup.with_private_sqlite_storage(database, fn ->
+               assert_mode(parent, 0o700)
+               File.write!(database, "new sqlite bytes")
+               File.chmod!(database, 0o644)
+               :created
+             end)
+
+    assert_mode(parent, 0o700)
+    assert_mode(database, 0o600)
+
+    File.chmod!(parent, 0o755)
+    File.chmod!(database, 0o644)
+
+    assert :existing =
+             Setup.with_private_sqlite_storage(database, fn ->
+               assert_mode(parent, 0o700)
+               assert_mode(database, 0o600)
+               :existing
+             end)
+
+    assert_mode(parent, 0o700)
+    assert_mode(database, 0o600)
+  end
+
   test "fetch_deps uses the absolute reviewed wrapper with exact argv in a fresh process", %{
     tmp: tmp
   } do
@@ -96,5 +199,10 @@ defmodule Mix.Tasks.Arbor.SetupTest do
     assert {:error, message} = Setup.resolve_mix_wrapper(tmp)
     assert message =~ "is not executable at #{wrapper}"
     assert message =~ "restore bin/mix with executable mode"
+  end
+
+  defp assert_mode(path, expected) do
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == expected
   end
 end

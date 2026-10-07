@@ -146,13 +146,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     first =
       Task.async(fn ->
@@ -217,8 +217,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   test "security regression: three unverified legacy answers cannot satisfy human graduation" do
     agent_id = "agent_unknown_streak_#{System.unique_integer([:positive])}"
     resource_uri = Arbor.Actions.canonical_uri_for(Arbor.Actions.Session.Classify, %{})
-    assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    assert {:ok, cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
 
     for _ <- 1..3 do
       execution =
@@ -250,13 +250,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -283,19 +283,19 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   test "security regression: authority approval retry mints a fresh exact-resource proof" do
     Application.put_env(:arbor_security, :identity_verification, true)
     {:ok, identity} = Identity.generate(name: "approval-authority-retry")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     action_module = Arbor.Actions.Session.Classify
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, capability} =
-             Security.grant(principal: identity.agent_id, resource: resource_uri)
+             Security.grant_fixture(principal: identity.agent_id, resource: resource_uri)
 
     on_exit(fn ->
-      _ = Security.revoke(capability.id)
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.revoke_fixture(capability.id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
@@ -357,13 +357,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -392,13 +392,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -433,13 +433,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -471,13 +471,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -508,13 +508,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, gated_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: resource_uri,
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(gated_capability.id) end)
 
     execution =
       Task.async(fn ->
@@ -550,10 +550,10 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     {:ok, binding} = Arbor.Actions.runtime_descriptor(action_module)
 
     assert {:ok, agent_capability} =
-             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
 
     assert {:ok, caller_capability} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: caller_id,
                resource: resource_uri,
                task_id: task_id,
@@ -561,8 +561,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
              )
 
     on_exit(fn ->
-      Arbor.Security.revoke(agent_capability.id)
-      Arbor.Security.revoke(caller_capability.id)
+      Arbor.Security.revoke_fixture(agent_capability.id)
+      Arbor.Security.revoke_fixture(caller_capability.id)
     end)
 
     execution =
@@ -581,7 +581,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
       end)
 
     request = await_pending_request(agent_id)
-    assert :ok = Arbor.Security.revoke(caller_capability.id)
+    assert :ok = Arbor.Security.revoke_fixture(caller_capability.id)
     assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
 
     assert {:error, message} = Task.await(execution, 3_000)
@@ -599,10 +599,10 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     Application.put_env(:arbor_orchestrator, :phase5_action_binding_test_pid, self())
 
     assert {:ok, capability} =
-             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
 
     on_exit(fn ->
-      Arbor.Security.revoke(capability.id)
+      Arbor.Security.revoke_fixture(capability.id)
       :ok = ActionRegistry.restore(registry_snapshot)
       restore_env(:arbor_orchestrator, :phase5_action_binding_test_pid, previous_pid)
     end)
@@ -642,10 +642,10 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     File.mkdir_p!(root)
 
     assert {:ok, capability} =
-             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
 
     on_exit(fn ->
-      Arbor.Security.revoke(capability.id)
+      Arbor.Security.revoke_fixture(capability.id)
       File.rm_rf(root)
       File.rm_rf(displaced)
     end)
@@ -677,9 +677,9 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     assert {:ok, capability} =
-             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
 
-    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
 
     execution =
       Task.async(fn ->

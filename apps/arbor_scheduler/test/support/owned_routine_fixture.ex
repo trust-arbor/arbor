@@ -9,7 +9,6 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   alias Arbor.Scheduler
   alias Arbor.Scheduler.{CapsFile, RoutineCatalog}
   alias Arbor.Security
-  alias Arbor.Security.{Crypto, IssuerRegistry}
   alias Arbor.Trust
   alias Arbor.Trust.PolicyHost
   alias Ecto.Adapters.Postgres
@@ -258,7 +257,9 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
       end
 
     :ok =
-      IssuerRegistry.register(issuer.agent_id, envelopes, reason: "test-owned routine manifest")
+      Security.register_issuer_fixture(issuer.agent_id, envelopes,
+        reason: "test-owned routine manifest"
+      )
 
     descriptors = Enum.map(resources, &%{resource_uri: &1, constraints: %{}})
 
@@ -274,7 +275,9 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
         }
       )
 
-    signature = Crypto.sign(CapsFile.signing_payload(payload), issuer.private_key)
+    signature =
+      Security.sign_ed25519_fixture(CapsFile.signing_payload(payload), issuer.private_key)
+
     caps_path = Path.rootname(dot) <> ".caps.json"
     File.write!(caps_path, Jason.encode!(CapsFile.manifest_map(payload, signature)))
     assert {:ok, _} = apply(RoutineCatalog, :load, ["morning_digest"])
@@ -300,7 +303,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     File.write!(report(fixture, "morning-digest"), "previous digest")
 
     on_exit(fn ->
-      IssuerRegistry.revoke(issuer.agent_id, "test cleanup")
+      Security.revoke_issuer_fixture(issuer.agent_id, "test cleanup")
       if Process.alive?(oban), do: Supervisor.stop(oban)
     end)
 
@@ -312,7 +315,9 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
 
     caps =
       for resource <- apply(RoutineCatalog, :resources, [workdir]) do
-        {:ok, cap} = Security.grant(principal: identity.agent_id, resource: resource)
+        {:ok, cap} =
+          Security.grant_fixture(principal: identity.agent_id, resource: resource)
+
         cap
       end
 
@@ -326,7 +331,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
              Trust.ensure_trust_profile(identity.agent_id, baseline: :block, rules: rules)
 
     on_exit(fn ->
-      for cap <- caps, do: Security.revoke(cap.id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
       Trust.delete_trust_profile(identity.agent_id)
     end)
 
@@ -335,8 +340,8 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
 
   def identity! do
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
-    on_exit(fn -> Security.deregister_identity(identity.agent_id) end)
+    :ok = Security.register_identity_fixture(identity)
+    on_exit(fn -> Security.deregister_identity_fixture(identity.agent_id) end)
     identity
   end
 
@@ -376,7 +381,10 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
         %{
           proof
           | signature:
-              Crypto.sign(SignedRequest.signing_payload(proof), owner.identity.private_key)
+              Security.sign_ed25519_fixture(
+                SignedRequest.signing_payload(proof),
+                owner.identity.private_key
+              )
         }
 
       :error ->

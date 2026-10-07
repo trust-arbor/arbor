@@ -168,7 +168,11 @@ defmodule Arbor.Actions.TrustTest do
 
       assert {:ok, _result} =
                ApplyProfile.run(
-                 %{agent_id: agent_id, baseline: "allow", rules: %{"arbor://code/read" => "auto"}},
+                 %{
+                   agent_id: agent_id,
+                   baseline: "allow",
+                   rules: %{"arbor://code/read" => "auto"}
+                 },
                  %{agent_id: "agent_actor_under_test"}
                )
 

@@ -35,9 +35,10 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
   @tool_name "delegate_to_agent"
 
   @spec demo(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def demo(prompt, _opts \\ []) do
-    with {:ok, token} <- OAuth.access_token(:xai),
-         {:ok, delegate_id} <- mint_delegate_agent(),
+  def demo(prompt, opts \\ []) do
+    with {:ok, actor_authority} <- require_actor_authority(opts),
+         {:ok, token} <- OAuth.access_token(:xai),
+         {:ok, delegate_id} <- mint_delegate_agent(actor_authority),
          {:ok, sock} <- connect(token) do
       try do
         sock
@@ -59,9 +60,10 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
   (play with `ffplay -f s16le -ar 24000 -ac 1 -nodisp -autoexit <file>`).
   """
   @spec converse_audio(binary(), keyword()) :: {:ok, map()} | {:error, term()}
-  def converse_audio(audio, _opts \\ []) when is_binary(audio) do
-    with {:ok, token} <- OAuth.access_token(:xai),
-         {:ok, delegate_id} <- mint_delegate_agent(),
+  def converse_audio(audio, opts \\ []) when is_binary(audio) do
+    with {:ok, actor_authority} <- require_actor_authority(opts),
+         {:ok, token} <- OAuth.access_token(:xai),
+         {:ok, delegate_id} <- mint_delegate_agent(actor_authority),
          {:ok, sock} <- connect(token) do
       try do
         sock
@@ -74,10 +76,11 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
     end
   end
 
-  @spec converse_audio_file(String.t()) :: {:ok, map()} | {:error, term()}
-  def converse_audio_file(pcm_path) do
-    with {:ok, audio} <- File.read(pcm_path),
-         {:ok, result} <- converse_audio(audio) do
+  @spec converse_audio_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def converse_audio_file(pcm_path, opts \\ []) do
+    with {:ok, _actor_authority} <- require_actor_authority(opts),
+         {:ok, audio} <- File.read(pcm_path),
+         {:ok, result} <- converse_audio(audio, opts) do
       out = pcm_path <> ".out.pcm"
       File.write(out, result.audio)
       {:ok, Map.put(result, :audio_path, out)}
@@ -98,35 +101,69 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
   """
   @spec converse_from_mic(pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
   def converse_from_mic(seconds \\ 6, opts \\ []) do
-    device = opts[:device] || ":default"
-    mic = "/tmp/arbor_mic_in.pcm"
+    with {:ok, _actor_authority} <- require_actor_authority(opts) do
+      device = opts[:device] || ":default"
+      mic = "/tmp/arbor_mic_in.pcm"
 
-    Logger.info("[VoiceOrch] recording #{seconds}s from mic (#{device})…")
+      Logger.info("[VoiceOrch] recording #{seconds}s from mic (#{device})…")
 
-    {_, rc} =
-      System.cmd("ffmpeg", [
-        "-y", "-loglevel", "error", "-f", "avfoundation", "-i", device,
-        "-ar", "16000", "-ac", "1", "-t", to_string(seconds), "-f", "s16le", mic
-      ], stderr_to_stdout: true)
+      {_, rc} =
+        System.cmd(
+          "ffmpeg",
+          [
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "avfoundation",
+            "-i",
+            device,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-t",
+            to_string(seconds),
+            "-f",
+            "s16le",
+            mic
+          ],
+          stderr_to_stdout: true
+        )
 
-    cond do
-      rc != 0 -> {:error, {:mic_record_failed, rc}}
-      true ->
-        case converse_audio_file(mic) do
-          {:ok, r} ->
-            play_audio(r.audio_path)
-            {:ok, r}
+      cond do
+        rc != 0 ->
+          {:error, {:mic_record_failed, rc}}
 
-          err ->
-            err
-        end
+        true ->
+          case converse_audio_file(mic, opts) do
+            {:ok, r} ->
+              play_audio(r.audio_path)
+              {:ok, r}
+
+            err ->
+              err
+          end
+      end
     end
   end
 
   defp play_audio(pcm_path) do
     System.cmd(
       "ffplay",
-      ["-nodisp", "-autoexit", "-loglevel", "error", "-f", "s16le", "-ar", "24000", "-ac", "1", pcm_path],
+      [
+        "-nodisp",
+        "-autoexit",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        "24000",
+        "-ac",
+        "1",
+        pcm_path
+      ],
       stderr_to_stdout: true
     )
 
@@ -231,8 +268,11 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
 
   defp loop(sock, acc) do
     case recv_event(sock) do
-      {:ok, sock, %{"type" => type} = event} -> handle(type, event, sock, acc)
-      {:error, reason} -> {:error, {:recv, reason, %{text: acc.text, delegations: acc.delegations}}}
+      {:ok, sock, %{"type" => type} = event} ->
+        handle(type, event, sock, acc)
+
+      {:error, reason} ->
+        {:error, {:recv, reason, %{text: acc.text, delegations: acc.delegations}}}
     end
   end
 
@@ -326,7 +366,7 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
 
   # ── minimal ACP-capable delegate identity (for AcpSession.Handler authorization) ──
 
-  defp mint_delegate_agent do
+  defp mint_delegate_agent(actor_authority) when not is_nil(actor_authority) do
     name = "voice-delegate-#{System.unique_integer([:positive, :monotonic])}"
 
     model_config = %{
@@ -337,32 +377,77 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
       start_opts: []
     }
 
-    start_opts = [template: "researcher", display_name: name, model_config: model_config, tools: []]
+    start_opts = [
+      template: "researcher",
+      display_name: name,
+      model_config: model_config,
+      tools: [],
+      actor_authority: actor_authority
+    ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do
       {:ok, agent_id, _pid} ->
-        grant_acp_caps(agent_id)
-        {:ok, agent_id}
+        case grant_acp_caps(agent_id, actor_authority) do
+          :ok ->
+            {:ok, agent_id}
+
+          {:error, reason} ->
+            _ = Arbor.Agent.Lifecycle.destroy(agent_id, actor_authority: actor_authority)
+            {:error, {:delegate_capability_grant_failed, reason}}
+        end
 
       {:error, reason} ->
         {:error, {:delegate_agent_create_failed, reason}}
     end
   end
 
-  defp grant_acp_caps(agent_id) do
+  defp mint_delegate_agent(_actor_authority),
+    do: {:error, :capability_mutation_unauthorized}
+
+  defp grant_acp_caps(agent_id, actor_authority) do
     cwd = File.cwd!()
-    Arbor.Security.grant(principal: agent_id, resource: "arbor://acp/tool/**")
-    Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read/#{String.trim_leading(cwd, "/")}/**")
-    Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/list/#{String.trim_leading(cwd, "/")}/**")
-    Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/write/#{String.trim_leading(cwd, "/")}/**")
 
-    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-      %{profile | baseline: :allow}
-      |> Arbor.Trust.Authority.set_rule("arbor://acp/tool", :allow)
-    end)
+    resources = [
+      "arbor://acp/tool/**",
+      "arbor://fs/read/#{String.trim_leading(cwd, "/")}/**",
+      "arbor://fs/list/#{String.trim_leading(cwd, "/")}/**",
+      "arbor://fs/write/#{String.trim_leading(cwd, "/")}/**"
+    ]
 
-    :ok
+    with :ok <- grant_each_capability(agent_id, resources, actor_authority),
+         {:ok, profile} <- Arbor.Trust.ensure_trust_profile(agent_id),
+         rules = Map.put(profile.rules || %{}, "arbor://acp/tool", :allow),
+         {:ok, _profile} <-
+           Arbor.Trust.ensure_trust_profile(agent_id, baseline: :allow, rules: rules) do
+      :ok
+    end
   end
+
+  defp grant_each_capability(agent_id, resources, actor_authority) do
+    Enum.reduce_while(resources, :ok, fn resource, :ok ->
+      case Arbor.Security.grant(
+             principal: agent_id,
+             resource: resource,
+             actor_authority: actor_authority
+           ) do
+        {:ok, _capability} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp require_actor_authority(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :actor_authority) do
+        {:ok, authority} when not is_nil(authority) -> {:ok, authority}
+        _ -> {:error, :capability_mutation_unauthorized}
+      end
+    else
+      {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp require_actor_authority(_opts), do: {:error, :capability_mutation_unauthorized}
 
   # ── Mint WebSocket plumbing ──
 
@@ -381,8 +466,17 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
       msg ->
         case Mint.WebSocket.stream(conn, msg) do
           {:ok, conn, resps} ->
-            status = Enum.find_value(resps, status, fn {:status, ^ref, s} -> s; _ -> nil end)
-            headers = Enum.find_value(resps, headers, fn {:headers, ^ref, h} -> h; _ -> nil end)
+            status =
+              Enum.find_value(resps, status, fn
+                {:status, ^ref, s} -> s
+                _ -> nil
+              end)
+
+            headers =
+              Enum.find_value(resps, headers, fn
+                {:headers, ^ref, h} -> h
+                _ -> nil
+              end)
 
             if Enum.any?(resps, &match?({:done, ^ref}, &1)),
               do: {:ok, conn, status, headers},

@@ -386,7 +386,7 @@ defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
     on_exit(fn -> Arbor.Comms.untrack_presence(self(), ctx.human.human_id, :dashboard) end)
     {:ok, handle} = Arbor.Comms.open_conversation_source(ctx.binding, self(), make_ref())
     {:ok, receipt} = Arbor.Comms.request_conversation_interaction(handle, spec(), 10_000)
-    assert :ok = Arbor.Security.revoke(ctx.chat_cap.id)
+    assert :ok = Arbor.Security.revoke_fixture(ctx.chat_cap.id)
 
     assert {:error, _} =
              Arbor.Security.recheck_conversation_owner(
@@ -517,7 +517,7 @@ defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
     Humans.grant!(ctx.human.human_id, "arbor://approval/answer/" <> ctx.scope.agent_id)
 
     {:ok, chat_token} =
-      Arbor.Security.SessionToken.generate_conversation(ctx.human.human_id, ctx.scope.agent_id)
+      Arbor.Security.issue_conversation_session_fixture(ctx.human.human_id, ctx.scope.agent_id)
 
     chat_ctx = %{ctx | human: %{ctx.human | token: chat_token}}
 

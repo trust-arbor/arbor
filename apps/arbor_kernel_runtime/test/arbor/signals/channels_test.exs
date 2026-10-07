@@ -4,7 +4,8 @@ defmodule Arbor.Signals.ChannelsTest do
   @moduletag :fast
 
   alias Arbor.Signals.Channel
-  alias Arbor.Signals.Channels
+  alias Arbor.Signals.AuthorizedChannelsTestClient, as: Channels
+  alias Arbor.Signals.Channels, as: PublicChannels
 
   # Mock modules for testing without arbor_security dependency
   defmodule MockCrypto do
@@ -71,19 +72,24 @@ defmodule Arbor.Signals.ChannelsTest do
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:crypto_module, MockCrypto)
     Arbor.Signals.Config.Testing.put(:identity_registry_module, MockRegistry)
+
+    Arbor.Signals.Config.Testing.put(
+      :channel_principal_authorizer,
+      Arbor.Signals.TestChannelPrincipalAuthorizer
+    )
+
     :ok
   end
 
   describe "create/3" do
-    test "creates a new channel with generated key" do
-      {:ok, channel, key} = Channels.create("Test Channel", "agent_creator")
+    test "creates a new channel while retaining its generated key" do
+      {:ok, channel, key_reference} = Channels.create("Test Channel", "agent_creator")
 
       assert String.starts_with?(channel.id, "chan_")
       assert channel.name == "Test Channel"
       assert channel.creator_id == "agent_creator"
       assert Channel.member?(channel, "agent_creator")
-      assert is_binary(key)
-      assert byte_size(key) == 32
+      assert key_reference == :server_managed
     end
 
     test "channels have unique IDs" do
@@ -91,6 +97,51 @@ defmodule Arbor.Signals.ChannelsTest do
       {:ok, channel2, _} = Channels.create("Channel 2", "agent_b")
 
       refute channel1.id == channel2.id
+    end
+
+    @tag :security_regression
+    test "security regression: caller-asserted member ids cannot authorize channel operations" do
+      creator = "agent_spoofed_creator"
+      {:ok, channel, :server_managed} = Channels.create("Spoof Boundary", creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.create("Forged Creator", creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.invite(channel.id, "agent_target", %{agent_id: creator})
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.accept_invitation(
+                 channel.id,
+                 "agent_target",
+                 creator,
+                 %{},
+                 %{}
+               )
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.send(channel.id, creator, :chat_message, %{text: "forged"})
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.leave(channel.id, creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.revoke(channel.id, "agent_target", creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.rotate_key(channel.id, creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.schedule_rotation(channel.id, creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.cancel_scheduled_rotation(channel.id, creator)
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.decrypt_for_member(channel.id, creator, %{})
+
+      assert {:error, :authenticated_principal_required} =
+               PublicChannels.list_channels(creator)
     end
   end
 
@@ -154,7 +205,7 @@ defmodule Arbor.Signals.ChannelsTest do
 
   describe "accept_invitation/4" do
     test "adds invitee as member after accepting" do
-      {:ok, channel, key} = Channels.create("Accept Test", "agent_host")
+      {:ok, channel, :server_managed} = Channels.create("Accept Test", "agent_host")
 
       host_keychain = %{
         agent_id: "agent_host",
@@ -170,20 +221,63 @@ defmodule Arbor.Signals.ChannelsTest do
         signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      # Mock sealed key contains the actual key as ciphertext in our mock
-      sealed_key = %{invitation.sealed_key | ciphertext: key}
-
-      {:ok, updated_channel, received_key} =
+      {:ok, updated_channel, key_reference} =
         Channels.accept_invitation(
           channel.id,
           "agent_guest",
           invitation.inviter_id,
-          sealed_key,
+          invitation.sealed_key,
           guest_keychain
         )
 
       assert Channel.member?(updated_channel, "agent_guest")
-      assert received_key == key
+      assert key_reference == :server_managed
+    end
+
+    @tag :security_regression
+    test "security regression: invitation is pinned to the recipient identity and cannot replay" do
+      {:ok, channel, _key} = Channels.create("Pinned Invite", "agent_host")
+
+      host_keychain = %{
+        agent_id: "agent_host",
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
+      }
+
+      guest_keychain = %{
+        agent_id: "agent_guest",
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
+      }
+
+      {:ok, invitation} = Channels.invite(channel.id, "agent_guest", host_keychain)
+
+      assert {:error, :recipient_identity_mismatch} =
+               Channels.accept_invitation(
+                 channel.id,
+                 "agent_attacker",
+                 invitation.inviter_id,
+                 invitation.sealed_key,
+                 guest_keychain
+               )
+
+      assert {:ok, _, _} =
+               Channels.accept_invitation(
+                 channel.id,
+                 "agent_guest",
+                 invitation.inviter_id,
+                 invitation.sealed_key,
+                 guest_keychain
+               )
+
+      assert {:error, :invitation_not_pending} =
+               Channels.accept_invitation(
+                 channel.id,
+                 "agent_guest",
+                 invitation.inviter_id,
+                 invitation.sealed_key,
+                 guest_keychain
+               )
     end
   end
 
@@ -206,7 +300,7 @@ defmodule Arbor.Signals.ChannelsTest do
 
   describe "leave/2" do
     test "removes member from channel" do
-      {:ok, channel, key} = Channels.create("Leave Test", "agent_alice")
+      {:ok, channel, :server_managed} = Channels.create("Leave Test", "agent_alice")
 
       alice_keychain = %{
         agent_id: "agent_alice",
@@ -223,14 +317,13 @@ defmodule Arbor.Signals.ChannelsTest do
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_bob", alice_keychain)
-      sealed_key = %{invitation.sealed_key | ciphertext: key}
 
       {:ok, _, _} =
         Channels.accept_invitation(
           channel.id,
           "agent_bob",
           invitation.inviter_id,
-          sealed_key,
+          invitation.sealed_key,
           bob_keychain
         )
 
@@ -241,7 +334,7 @@ defmodule Arbor.Signals.ChannelsTest do
     end
 
     test "assigns new creator when creator leaves" do
-      {:ok, channel, key} = Channels.create("Creator Leave", "agent_alice")
+      {:ok, channel, :server_managed} = Channels.create("Creator Leave", "agent_alice")
 
       alice_keychain = %{
         agent_id: "agent_alice",
@@ -257,14 +350,12 @@ defmodule Arbor.Signals.ChannelsTest do
         signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      sealed_key = %{invitation.sealed_key | ciphertext: key}
-
       {:ok, _, _} =
         Channels.accept_invitation(
           channel.id,
           "agent_bob",
           invitation.inviter_id,
-          sealed_key,
+          invitation.sealed_key,
           bob_keychain
         )
 
@@ -283,13 +374,13 @@ defmodule Arbor.Signals.ChannelsTest do
   end
 
   describe "rotate_key/2" do
-    test "generates new key and increments version" do
-      {:ok, channel, original_key} = Channels.create("Rotate Test", "agent_admin")
+    test "retains the new key and increments version" do
+      {:ok, channel, :server_managed} = Channels.create("Rotate Test", "agent_admin")
 
-      {:ok, new_key, members_to_reinvite} = Channels.rotate_key(channel.id, "agent_admin")
+      {:ok, key_reference, members_to_reinvite} =
+        Channels.rotate_key(channel.id, "agent_admin")
 
-      refute new_key == original_key
-      assert byte_size(new_key) == 32
+      assert key_reference == :server_managed
       assert members_to_reinvite == []
 
       {:ok, updated} = Channels.get(channel.id)
@@ -297,7 +388,7 @@ defmodule Arbor.Signals.ChannelsTest do
     end
 
     test "fails when requester is not the creator" do
-      {:ok, channel, key} = Channels.create("Auth Rotate", "agent_owner")
+      {:ok, channel, :server_managed} = Channels.create("Auth Rotate", "agent_owner")
 
       owner_keychain = %{
         agent_id: "agent_owner",
@@ -313,14 +404,12 @@ defmodule Arbor.Signals.ChannelsTest do
         signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      sealed_key = %{invitation.sealed_key | ciphertext: key}
-
       {:ok, _, _} =
         Channels.accept_invitation(
           channel.id,
           "agent_member",
           invitation.inviter_id,
-          sealed_key,
+          invitation.sealed_key,
           member_keychain
         )
 
@@ -328,7 +417,7 @@ defmodule Arbor.Signals.ChannelsTest do
     end
 
     test "returns list of members to reinvite" do
-      {:ok, channel, key} = Channels.create("Reinvite Test", "agent_owner")
+      {:ok, channel, :server_managed} = Channels.create("Reinvite Test", "agent_owner")
 
       owner_keychain = %{
         agent_id: "agent_owner",
@@ -344,14 +433,12 @@ defmodule Arbor.Signals.ChannelsTest do
         signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      sealed_key = %{invitation.sealed_key | ciphertext: key}
-
       {:ok, _, _} =
         Channels.accept_invitation(
           channel.id,
           "agent_member",
           invitation.inviter_id,
-          sealed_key,
+          invitation.sealed_key,
           member_keychain
         )
 
@@ -360,21 +447,41 @@ defmodule Arbor.Signals.ChannelsTest do
       assert "agent_member" in members_to_reinvite
       refute "agent_owner" in members_to_reinvite
     end
+
+    @tag :security_regression
+    test "security regression: rotation emits no self-authenticated key redistribution" do
+      test_pid = self()
+
+      {:ok, subscription_id} =
+        Arbor.Signals.Bus.subscribe(
+          "channel.key_redistributed",
+          fn signal -> send(test_pid, {:redistributed, signal}) end,
+          principal_id: "channel_rotation_regression",
+          async: false
+        )
+
+      {:ok, channel, _key} = Channels.create("No TOFU Rotation", "agent_owner")
+      assert {:ok, _new_key, []} = Channels.rotate_key(channel.id, "agent_owner")
+
+      refute_received {:redistributed, _signal}
+      :ok = Arbor.Signals.Bus.unsubscribe(subscription_id)
+    end
   end
 
   describe "get_key/2" do
-    test "returns key for channel member" do
-      {:ok, channel, expected_key} = Channels.create("Key Test", "agent_member")
+    @tag :security_regression
+    test "security regression: raw keys are never exported for asserted member ids" do
+      {:ok, channel, _expected_key} = Channels.create("Key Test", "agent_member")
 
-      {:ok, key} = Channels.get_key(channel.id, "agent_member")
-
-      assert key == expected_key
+      assert {:error, :raw_key_export_disabled} =
+               Channels.get_key(channel.id, "agent_member")
     end
 
-    test "fails for non-member" do
+    test "fails closed identically for a non-member" do
       {:ok, channel, _} = Channels.create("Key Auth", "agent_owner")
 
-      assert {:error, :not_a_member} = Channels.get_key(channel.id, "agent_outsider")
+      assert {:error, :raw_key_export_disabled} =
+               Channels.get_key(channel.id, "agent_outsider")
     end
   end
 
@@ -416,37 +523,26 @@ defmodule Arbor.Signals.ChannelsTest do
     end
   end
 
-  describe "decrypt_for_member/3 (H4 regression — minimal closure)" do
+  describe "decrypt_for_member/3" do
     setup do
       n = System.unique_integer([:positive])
       creator = "agent_h4_creator_#{n}"
       stranger = "agent_h4_stranger_#{n}"
 
-      {:ok, channel, key} = Channels.create("h4_test_channel_#{n}", creator)
+      {:ok, channel, :server_managed} = Channels.create("h4_test_channel_#{n}", creator)
 
-      # Encrypt a fake plaintext with the channel key — same shape decrypt
-      # expects.
-      plaintext = "hello h4 #{n}"
-      iv = :crypto.strong_rand_bytes(12)
-
-      {ct, tag} =
-        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
-
-      payload = %{ciphertext: ct, iv: iv, tag: tag}
+      payload = %{
+        ciphertext: :crypto.strong_rand_bytes(32),
+        iv: :crypto.strong_rand_bytes(12),
+        tag: :crypto.strong_rand_bytes(16)
+      }
 
       %{
         channel_id: channel.id,
         creator: creator,
         stranger: stranger,
-        plaintext: plaintext,
         payload: payload
       }
-    end
-
-    test "members can decrypt via the server-side path",
-         %{channel_id: channel_id, creator: creator, plaintext: plaintext, payload: payload} do
-      assert {:ok, decrypted} = Channels.decrypt_for_member(channel_id, creator, payload)
-      assert decrypted == plaintext
     end
 
     test "security regression (H4): non-members cannot decrypt",
@@ -461,13 +557,7 @@ defmodule Arbor.Signals.ChannelsTest do
     end
 
     test "garbled payload fails closed",
-         %{channel_id: channel_id, creator: creator} do
-      garbled = %{
-        ciphertext: :crypto.strong_rand_bytes(32),
-        iv: :crypto.strong_rand_bytes(12),
-        tag: :crypto.strong_rand_bytes(16)
-      }
-
+         %{channel_id: channel_id, creator: creator, payload: garbled} do
       assert {:error, :decryption_failed} =
                Channels.decrypt_for_member(channel_id, creator, garbled)
     end

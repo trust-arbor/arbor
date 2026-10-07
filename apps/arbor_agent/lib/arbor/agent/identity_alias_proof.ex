@@ -73,11 +73,25 @@ defmodule Arbor.Agent.IdentityAliasProof do
           {:ok, String.t(), SignedRequest.t()} | {:error, term()}
   def prove(path, mutation) when is_binary(path) do
     with {:ok, payload} <- IdentityAliasProofCore.canonical_payload(mutation) do
-      Arbor.Security.sign_key_file_request(path, payload)
+      with_key_file(path, &Arbor.Security.sign_key_file_request(&1, payload))
     end
   end
 
   def prove(_path, _mutation), do: {:error, :invalid_proof_args}
+
+  defp with_key_file(path, callback) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          callback.(io_device)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
+    end
+  end
 
   @doc """
   Read a key file the caller holds and produce a mutation-bound SignedRequest.

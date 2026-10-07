@@ -74,7 +74,7 @@ defmodule Arbor.Actions.WebPrincipalSecurityRegressionTest do
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
@@ -163,10 +163,35 @@ defmodule Arbor.Actions.WebPrincipalSecurityRegressionTest do
     end
   end
 
+  @tag spec: "KSEC-013"
+  test "security regression: authorized Browse propagates invalid UTF-8 as an action error",
+       %{agent_id: agent_id} do
+    authorize_agent(agent_id, "arbor://net/http")
+
+    transport = fn _request, _finch_name, _finch_options ->
+      {:ok, %Finch.Response{status: 200, body: <<0xFF>>, headers: [], trailers: []}}
+    end
+
+    assert {:error, message} =
+             Arbor.Actions.authorize_and_execute(
+               agent_id,
+               Web.Browse,
+               %{url: "https://8.8.8.8/invalid"},
+               %{
+                 agent_id: agent_id,
+                 ssrf_finch_request: transport
+               }
+             )
+
+    assert message =~ "invalid_utf8"
+  end
+
   defp authorize_agent(agent_id, resource) do
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: %{resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

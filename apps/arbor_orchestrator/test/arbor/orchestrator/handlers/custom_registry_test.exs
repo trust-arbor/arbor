@@ -19,19 +19,17 @@ defmodule Arbor.Orchestrator.Handlers.CustomRegistryTest do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    on_exit(fn -> Registry.unregister_fixture("test.my_custom_type") end)
     :ok
   end
 
   test "custom handler registration routes type to custom module" do
-    :ok = Registry.register("my_custom_type", CustomPassHandler)
+    :ok = Registry.register_fixture("test.my_custom_type", CustomPassHandler)
 
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      custom [type="my_custom_type"]
+      custom [type="test.my_custom_type"]
       exit [shape=Msquare]
       start -> custom -> exit
     }

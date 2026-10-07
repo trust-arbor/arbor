@@ -24,6 +24,8 @@ defmodule Arbor.Signals.ClusterTestHelpers do
       {Arbor.Signals.Store, []},
       {Arbor.Signals.TopicKeys, []},
       {Arbor.Signals.Channels, []},
+      {Arbor.Signals.SubscriptionRegistry, []},
+      {Arbor.Signals.TelemetryBridge, []},
       {Arbor.Signals.Bus, []},
       {Arbor.Signals.Relay, []}
     ]
@@ -36,10 +38,36 @@ defmodule Arbor.Signals.ClusterTestHelpers do
 
   @doc "Subscribe to a pattern and forward matching signals to the given pid."
   def subscribe_and_forward(pattern, target_pid, label) do
-    Arbor.Signals.Bus.subscribe(pattern, fn signal ->
-      send(target_pid, {label, signal})
-      :ok
+    caller = self()
+    ready_ref = make_ref()
+
+    spawn(fn ->
+      result =
+        Arbor.Signals.Bus.subscribe(pattern, fn signal ->
+          send(target_pid, {label, signal})
+          :ok
+        end)
+
+      send(caller, {ready_ref, result})
+
+      case result do
+        {:ok, _subscription_id} ->
+          target_ref = Process.monitor(target_pid)
+
+          receive do
+            {:DOWN, ^target_ref, :process, ^target_pid, _reason} -> :ok
+          end
+
+        _error ->
+          :ok
+      end
     end)
+
+    receive do
+      {^ready_ref, result} -> result
+    after
+      5_000 -> {:error, :subscription_start_timeout}
+    end
   end
 
   @doc "Emit a cluster-scoped signal."
@@ -55,6 +83,46 @@ defmodule Arbor.Signals.ClusterTestHelpers do
   @doc "Get relay stats."
   def relay_stats do
     Arbor.Signals.Relay.stats()
+  end
+
+  # ── Security Distributed Sync ─────────────────────────────────────────
+
+  @doc "Configure the supervised identity registry as a security-sync owner."
+  def configure_identity_security_sync do
+    put_signals(:security_sync_subscribers, %{
+      identity_registry: apply(Arbor.Security, :identity_security_sync_subscriber_fixture, [])
+    })
+
+    Application.put_env(:arbor_security, :distributed_signals, true)
+  end
+
+  @doc "Start Security's canonical test tree after signal infrastructure is running."
+  def start_security_sync do
+    apply(Arbor.Security, :restore_runtime_fixture, [])
+  end
+
+  @doc "Generate and register an identity, returning only its public representation."
+  def create_security_identity(name) do
+    with {:ok, identity} <- apply(Arbor.Security, :generate_identity, [[name: name]]),
+         public_identity <- apply(Arbor.Contracts.Security.Identity, :public_only, [identity]),
+         :ok <- apply(Arbor.Security, :register_identity_fixture, [public_identity]) do
+      {:ok, public_identity}
+    end
+  end
+
+  @doc "Register a public identity through the Security test facade."
+  def register_security_identity(identity) do
+    apply(Arbor.Security, :register_identity_fixture, [identity])
+  end
+
+  @doc "Suspend an identity; the supervised Registry emits the restricted cluster signal."
+  def suspend_security_identity(agent_id) do
+    apply(Arbor.Security, :suspend_identity_fixture, [agent_id, "distributed security sync"])
+  end
+
+  @doc "Read identity status through the public Security facade."
+  def security_identity_status(agent_id) do
+    apply(Arbor.Security, :identity_status, [agent_id])
   end
 
   # ── BufferedStore ──────────────────────────────────────────────────────
@@ -116,6 +184,12 @@ defmodule Arbor.Signals.ClusterTestHelpers do
           :ok
       end
     end
+
+    # DistributedSync now converges the durable authority into the live
+    # projection. The old fixture started only a loose ETS table, so a remote
+    # knowledge signal failed closed with :store_unavailable and left the
+    # stale projection behind.
+    :ok = apply(Arbor.Memory, :restore_runtime_fixture, [[]])
 
     mod = Arbor.Memory.DistributedSync
     start_and_unlink(mod, [], mod)

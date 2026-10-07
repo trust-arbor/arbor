@@ -45,12 +45,13 @@ defmodule Arbor.Security.OIDC.Discovery do
           issuer: String.t(),
           authorization_endpoint: String.t() | nil,
           token_endpoint: String.t() | nil,
-          device_authorization_endpoint: String.t() | nil
+          device_authorization_endpoint: String.t() | nil,
+          jwks_uri: String.t() | nil
         }
 
   @doc """
-  Resolve an issuer's authorization, token, and device endpoints under the closed
-  policy.
+  Resolve an issuer's authorization, token, device, and JWKS endpoints under
+  the closed policy.
 
   An endpoint absent from the document is returned as `nil` — the caller
   decides whether the one it needs is required (this preserves the historical
@@ -62,7 +63,7 @@ defmodule Arbor.Security.OIDC.Discovery do
     * `:allow_http` — permit an `http://` issuer (loopback/dev). Default `false`.
     * `:endpoints` — pin endpoints and skip discovery entirely. A map with
       `:authorization_endpoint`, `:token_endpoint`, and/or
-      `:device_authorization_endpoint`.
+      `:device_authorization_endpoint`/`:jwks_uri`.
     * `:trusted_origins` — additional origins accepted alongside the issuer's.
     * `:http_client` — `Arbor.Common.OAuth.HttpClient` adapter override.
     * `:max_response_bytes`, `:timeout_ms` — budget overrides.
@@ -100,13 +101,23 @@ defmodule Arbor.Security.OIDC.Discovery do
              :device,
              normalized,
              normalized_opts
+           ),
+         {:ok, jwks} <-
+           endpoint_for_operation(
+             document,
+             "jwks_uri",
+             normalized_opts.for,
+             :jwks,
+             normalized,
+             normalized_opts
            ) do
       {:ok,
        %{
          issuer: normalized,
          authorization_endpoint: authorize,
          token_endpoint: token,
-         device_authorization_endpoint: device
+         device_authorization_endpoint: device,
+         jwks_uri: jwks
        }}
     end
   end
@@ -278,6 +289,9 @@ defmodule Arbor.Security.OIDC.Discovery do
 
   defp normalize_pinned_endpoint_key("device_authorization_endpoint"),
     do: {:ok, :device_authorization_endpoint}
+
+  defp normalize_pinned_endpoint_key(:jwks_uri), do: {:ok, :jwks_uri}
+  defp normalize_pinned_endpoint_key("jwks_uri"), do: {:ok, :jwks_uri}
 
   defp normalize_pinned_endpoint_key(_), do: {:error, :pinned_endpoint_key}
 
@@ -540,6 +554,7 @@ defmodule Arbor.Security.OIDC.Discovery do
       "device_authorization_endpoint",
       Map.get(pinned, :device_authorization_endpoint)
     )
+    |> maybe_put_pinned("jwks_uri", Map.get(pinned, :jwks_uri))
   end
 
   defp maybe_put_pinned(doc, _key, nil), do: doc
@@ -630,11 +645,13 @@ defmodule Arbor.Security.OIDC.Discovery do
   defp applies_to_operation?(:token, :token), do: true
   defp applies_to_operation?(:token, :both), do: true
   defp applies_to_operation?(:device, :device), do: true
+  defp applies_to_operation?(:jwks, :jwks), do: true
   defp applies_to_operation?(_field, _operation), do: false
 
   defp validate_operation(:authorize), do: :ok
   defp validate_operation(:token), do: :ok
   defp validate_operation(:device), do: :ok
+  defp validate_operation(:jwks), do: :ok
   defp validate_operation(:both), do: :ok
   defp validate_operation(_other), do: {:error, {:invalid_discovery_operation, :unsupported}}
 

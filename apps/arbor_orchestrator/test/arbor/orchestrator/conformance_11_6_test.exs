@@ -18,9 +18,9 @@ defmodule Arbor.Orchestrator.Conformance116Test do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 
@@ -187,7 +187,7 @@ defmodule Arbor.Orchestrator.Conformance116Test do
   end
 
   test "11.6 custom handlers are registerable by type string" do
-    :ok = Registry.register("custom.11_6", CustomConformanceHandler)
+    :ok = Registry.register_fixture("custom.11_6", CustomConformanceHandler)
 
     dot = """
     digraph Flow {

@@ -68,7 +68,7 @@ defmodule Arbor.Consensus.ApprovalAnswerSecurityRegressionTest do
   end
 
   test "revocation prevents authenticated terminal transition", ctx do
-    assert :ok = Security.revoke(ctx.cap.id)
+    assert :ok = Security.revoke_fixture(ctx.cap.id)
     assert {:error, {:unauthorized, :approval_answer_required}} = answer(ctx, :approve)
     assert {:ok, proposal} = Consensus.get_proposal(ctx.id, ctx.server)
     assert proposal.status == :evaluating

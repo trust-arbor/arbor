@@ -3,8 +3,7 @@ defmodule Arbor.Security.OIDCTestHelper do
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.OIDC.IdentityStore
-
-  @jwks_cache_table :arbor_oidc_jwks_cache
+  alias Arbor.Security.OIDC.JwksCache
 
   # Explicit fixture for tests whose owned identity universe has no aliases.
   # Production never installs this fallback; missing resolver/store denies.
@@ -26,18 +25,29 @@ defmodule Arbor.Security.OIDCTestHelper do
     public_map = Map.merge(public_map, %{"alg" => "ES256", "kid" => kid})
     signer = Joken.Signer.create("ES256", private_map, %{"kid" => kid})
 
-    claims = %{
-      "iss" => issuer,
-      "sub" => subject,
-      "aud" => client_id,
-      "exp" => System.os_time(:second) + 3_600,
-      "iat" => System.os_time(:second),
-      "email" => "operator-#{unique}@example.test",
-      "name" => "OIDC Test Operator"
-    }
+    claims =
+      Map.merge(
+        %{
+          "iss" => issuer,
+          "sub" => subject,
+          "aud" => client_id,
+          "exp" => System.os_time(:second) + 3_600,
+          "iat" => System.os_time(:second),
+          "email" => "operator-#{unique}@example.test",
+          "name" => "OIDC Test Operator"
+        },
+        Keyword.get(opts, :claim_overrides, %{})
+      )
 
     {:ok, id_token} = Joken.Signer.sign(claims, signer)
-    cache_jwks(issuer, %{"keys" => [public_map]})
+
+    provider =
+      Map.merge(
+        %{issuer: issuer, client_id: client_id},
+        Keyword.get(opts, :provider_overrides, %{})
+      )
+
+    cache_jwks(provider, %{"keys" => [public_map]})
 
     {:ok, identity} = Identity.generate(name: claims["name"])
     human_id = IdentityStore.derive_agent_id(claims)
@@ -55,9 +65,10 @@ defmodule Arbor.Security.OIDCTestHelper do
     %{
       identity: human_identity,
       id_token: id_token,
-      provider: %{issuer: issuer, client_id: client_id},
+      provider: provider,
+      jwks: %{"keys" => [public_map]},
       claims: claims,
-      cleanup: fn -> delete_cached_jwks(issuer) end
+      cleanup: fn -> delete_cached_jwks(provider) end
     }
   end
 
@@ -68,28 +79,11 @@ defmodule Arbor.Security.OIDCTestHelper do
     Enum.join([header, payload, tampered], ".")
   end
 
-  defp cache_jwks(issuer, jwks) do
-    ensure_jwks_table()
-    expires_at = System.monotonic_time(:millisecond) + 60_000
-    true = :ets.insert(@jwks_cache_table, {issuer, jwks, expires_at})
-    :ok
+  defp cache_jwks(provider, jwks) do
+    JwksCache.put_fixture(provider, jwks)
   end
 
-  defp delete_cached_jwks(issuer) do
-    if :ets.whereis(@jwks_cache_table) != :undefined do
-      :ets.delete(@jwks_cache_table, issuer)
-    end
-
-    :ok
-  end
-
-  defp ensure_jwks_table do
-    if :ets.whereis(@jwks_cache_table) == :undefined do
-      :ets.new(@jwks_cache_table, [:set, :public, :named_table])
-    end
-
-    :ok
-  rescue
-    ArgumentError -> :ok
+  defp delete_cached_jwks(provider) do
+    JwksCache.delete_fixture(provider)
   end
 end

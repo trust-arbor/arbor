@@ -30,6 +30,26 @@ defmodule Arbor.Security.RuntimeAuthorityRootConfigTest do
     assert {0, {:ok, ^root}, _output} = read_runtime(:prod, root)
   end
 
+  test "security regression: production accepts an explicit independent revocation path" do
+    path = "/operator-owned/production-fence/capability-revocations.json"
+
+    assert {0, {:ok, ^path}, _output} =
+             read_runtime(:prod, nil, :revocation_ledger_path, path)
+  end
+
+  test "test config ignores an ambient revocation path" do
+    assert {0, :error, _output} =
+             read_runtime(:test, nil, :revocation_ledger_path, "/operator-owned/fence.json")
+  end
+
+  test "security regression: production rejects a relative revocation path" do
+    {status, :no_result, output} =
+      read_runtime(:prod, nil, :revocation_ledger_path, "relative/fence.json")
+
+    assert status != 0
+    assert output =~ "ARBOR_SECURITY_REVOCATION_LEDGER_PATH must be an absolute path"
+  end
+
   for env <- [:dev, :prod] do
     test "security regression: #{env} rejects a relative explicit authority root" do
       {status, :no_result, output} = read_runtime(unquote(env), "relative/security")
@@ -40,7 +60,7 @@ defmodule Arbor.Security.RuntimeAuthorityRootConfigTest do
 
   # Evaluate the complete runtime config in a fresh BEAM without application
   # code, dotenv, inherited credentials, or any live authority/journal owner.
-  defp read_runtime(env, root) do
+  defp read_runtime(env, root, key \\ :authority_state_root, ledger_path \\ nil) do
     cwd =
       Path.join(System.tmp_dir!(), "arbor-authority-config-#{System.unique_integer([:positive])}")
 
@@ -50,7 +70,7 @@ defmodule Arbor.Security.RuntimeAuthorityRootConfigTest do
 
     expression = """
     config = Config.Reader.read!(#{inspect(@runtime_path)}, env: #{inspect(env)})
-    value = config |> Keyword.get(:arbor_security, []) |> Keyword.fetch(:authority_state_root)
+    value = config |> Keyword.get(:arbor_security, []) |> Keyword.fetch(#{inspect(key)})
     File.write!(#{inspect(result_path)}, :erlang.term_to_binary(value), [:exclusive])
     """
 
@@ -66,6 +86,7 @@ defmodule Arbor.Security.RuntimeAuthorityRootConfigTest do
         "ARBOR_ENV_PATH" => Path.join(cwd, "absent.env"),
         "ARBOR_DATA_DIR" => Path.join(cwd, "data"),
         "ARBOR_SECURITY_STATE_DIR" => root,
+        "ARBOR_SECURITY_REVOCATION_LEDGER_PATH" => ledger_path,
         "SECRET_KEY_BASE" => String.duplicate("configuration-test-only-", 4)
       })
       |> Map.to_list()

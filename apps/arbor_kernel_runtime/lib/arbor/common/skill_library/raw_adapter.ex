@@ -31,6 +31,7 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   """
 
   alias Arbor.Contracts.Skill
+  alias Arbor.Common.SkillLibrary.ScanGuard
 
   @skill_filename "SKILL.md"
 
@@ -58,7 +59,7 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   """
   @spec parse(String.t()) :: {:ok, parsed_skill()} | {:error, term()}
   def parse(path) when is_binary(path) do
-    with {:ok, content} <- File.read(path) do
+    with {:ok, content} <- ScanGuard.read_regular(path) do
       attrs = %{
         name: name_from_path(path),
         description: extract_description(content),
@@ -93,23 +94,18 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   """
   @spec list(String.t()) :: [String.t()]
   def list(dir) when is_binary(dir) do
-    if File.dir?(dir) do
-      dir
-      |> File.ls!()
-      |> Enum.flat_map(&classify_entry(Path.join(dir, &1), &1))
-      |> Enum.sort()
-    else
-      []
-    end
+    dir
+    |> ScanGuard.entries()
+    |> Enum.flat_map(&classify_entry/1)
+    |> Enum.sort()
   end
 
-  defp classify_entry(full_path, entry) do
-    cond do
-      File.dir?(full_path) and has_skill_file?(full_path) -> []
-      File.dir?(full_path) -> list_raw_files(full_path)
-      raw_file?(entry) -> [full_path]
-      true -> []
-    end
+  defp classify_entry({full_path, _entry, %File.Stat{type: :directory}}) do
+    if has_skill_file?(full_path), do: [], else: list_raw_files(full_path)
+  end
+
+  defp classify_entry({full_path, entry, %File.Stat{type: :regular, size: size}}) do
+    if raw_file?(entry) and size <= 2 * 1024 * 1024, do: [full_path], else: []
   end
 
   # --- Private Helpers ---
@@ -178,14 +174,20 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   defp has_skill_file?(dir) do
     dir
     |> Path.join(@skill_filename)
-    |> File.exists?()
+    |> ScanGuard.regular_file?()
   end
 
   # List .md and .txt files directly inside a directory (non-recursive).
   defp list_raw_files(dir) do
     dir
-    |> File.ls!()
-    |> Enum.filter(&raw_file?/1)
-    |> Enum.map(&Path.join(dir, &1))
+    |> ScanGuard.entries()
+    |> Enum.flat_map(fn
+      {path, name, %File.Stat{type: :regular, size: size}}
+      when size <= 2 * 1024 * 1024 ->
+        if raw_file?(name), do: [path], else: []
+
+      _other ->
+        []
+    end)
   end
 end

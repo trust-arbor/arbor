@@ -77,8 +77,8 @@ defmodule Arbor.Actions.SandboxSecurityRegressionTest do
       File.rm_rf(base_path)
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(caller_id)
-        Arbor.Security.CapabilityStore.revoke_all(victim_id)
+        Arbor.Security.revoke_all_fixture(caller_id)
+        Arbor.Security.revoke_all_fixture(victim_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
@@ -97,8 +97,7 @@ defmodule Arbor.Actions.SandboxSecurityRegressionTest do
       restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
     end)
 
-    {:ok,
-     caller_id: caller_id, target_id: target_id, victim_id: victim_id, base_path: base_path}
+    {:ok, caller_id: caller_id, target_id: target_id, victim_id: victim_id, base_path: base_path}
   end
 
   test "security regression: Create.run/2 with only context[:agent_id] is denied and does not create",
@@ -191,7 +190,9 @@ defmodule Arbor.Actions.SandboxSecurityRegressionTest do
   defp authorize_agent(agent_id, resource) do
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: %{resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
   end
 
   defp cleanup_sandbox(id) do

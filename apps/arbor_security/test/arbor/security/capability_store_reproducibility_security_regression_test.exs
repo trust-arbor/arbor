@@ -65,8 +65,7 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
     assert beam1 == beam2
     assert cert2 == cert1
 
-    assert {:reply, {:error, :not_found}, probed_equal} =
-             probe_revoke(@fixture_module, certified_v1)
+    assert {:noreply, probed_equal} = probe_migration(@fixture_module, certified_v1)
 
     assert Map.fetch!(probed_equal, @cert_field) == cert1
 
@@ -79,8 +78,7 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
     assert cert3 != cert1
     assert source_identity(cert3) == expected_epoch(source_v2)
 
-    assert {:reply, {:error, :not_found}, probed_stale} =
-             probe_revoke(@fixture_module, certified_v1)
+    assert {:noreply, probed_stale} = probe_migration(@fixture_module, certified_v1)
 
     assert Map.fetch!(probed_stale, @cert_field) == cert3
     refute Map.fetch!(probed_stale, @cert_field) == cert1
@@ -88,8 +86,7 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
     assert File.read!(path) == source_v2
     _uri_beam_v2 = compile_dep_fixture(uri_path, @fixture_uri_module, uri_fixture_source(2))
 
-    assert {:reply, {:error, :not_found}, probed_dep} =
-             probe_revoke(@fixture_module, probed_stale)
+    assert {:noreply, probed_dep} = probe_migration(@fixture_module, probed_stale)
 
     # Behavioral: parent source-only cert is unchanged by a URI-fixture reload.
     refute Map.fetch!(probed_dep, @cert_field) == cert3
@@ -104,8 +101,8 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
 
     unload_fixture(@fixture_uri_module)
 
-    assert {:stop, :certification_identity_unavailable, {:error, :capability_store_unavailable},
-            _stopped} = probe_revoke(@fixture_module, probed_dep)
+    assert {:stop, :certification_identity_unavailable, _stopped} =
+             probe_migration(@fixture_module, probed_dep)
   end
 
   defp exclusive_scratch_dir! do
@@ -210,9 +207,7 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
 
   defp source_identity(source) when is_binary(source) and byte_size(source) == 32, do: source
 
-  defp probe_revoke(module, preserved) do
-    module.handle_call({:revoke, "cap_absent_e0b2p"}, {self(), make_ref()}, preserved)
-  end
+  defp probe_migration(module, preserved), do: module.handle_info(:cleanup, preserved)
 
   defp expected_epoch(source) do
     :crypto.hash(:sha256, [@cert_epoch_domain, <<0>>, source])

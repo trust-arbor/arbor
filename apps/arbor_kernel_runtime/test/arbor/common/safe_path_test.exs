@@ -133,6 +133,47 @@ defmodule Arbor.Common.SafePathTest do
       assert {:ok, "/workspace/etc/passwd"} =
                SafePath.resolve_within("a/b/c/../../../etc/passwd", "/workspace")
     end
+
+    @tag spec: "KSEC-012"
+    test "security regression: resolves ancestor symlinks before checking containment", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      outside = Path.join(tmp_dir, "outside")
+      File.mkdir!(root)
+      File.mkdir!(outside)
+      File.write!(Path.join(outside, "secret"), "secret")
+      File.ln_s!(outside, Path.join(root, "escape"))
+
+      assert {:error, :path_traversal} = SafePath.resolve_within("escape/secret", root)
+      assert {:error, :path_traversal} = SafePath.safe_join(root, "escape/secret")
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: applies dot-dot after resolving a symlink", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "root")
+      outside = Path.join(tmp_dir, "outside")
+      outside_child = Path.join(outside, "child")
+      File.mkdir!(root)
+      File.mkdir_p!(outside_child)
+      File.write!(Path.join(outside, "secret"), "secret")
+      File.ln_s!(outside_child, Path.join(root, "escape"))
+
+      assert {:error, :path_traversal} = SafePath.resolve_within("escape/../secret", root)
+    end
+
+    test "accepts symlinks whose resolved target stays inside the root", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "root")
+      target = Path.join(root, "target")
+      File.mkdir!(root)
+      File.mkdir!(target)
+      File.write!(Path.join(target, "file"), "ok")
+      File.ln_s!(target, Path.join(root, "inside"))
+
+      assert {:ok, resolved} = SafePath.resolve_within("inside/file", root)
+      assert {:ok, canonical_target} = SafePath.resolve_real(Path.join(target, "file"))
+      assert resolved == canonical_target
+    end
   end
 
   describe "safe_join/2" do
@@ -153,6 +194,341 @@ defmodule Arbor.Common.SafePathTest do
     test "rejects absolute user paths" do
       assert {:error, :path_traversal} = SafePath.safe_join("/workspace", "/etc/passwd")
       assert {:error, :path_traversal} = SafePath.safe_join("/workspace", "/absolute/path")
+    end
+  end
+
+  describe "read_within/2" do
+    @tag spec: "KSEC-012"
+    test "security regression: the native reader is BEAM-embedded and never resolved from priv" do
+      artifact = Arbor.Common.SafePath.NativeReaderArtifact
+
+      assert {:module, ^artifact} = Code.ensure_loaded(artifact)
+      binary = artifact.binary()
+      assert is_binary(binary)
+      assert byte_size(binary) > 0
+
+      assert artifact.binary_sha256() ==
+               Base.encode16(:crypto.hash(:sha256, binary), case: :lower)
+
+      safe_path_beam = :code.which(SafePath)
+      assert is_list(safe_path_beam)
+
+      assert {:ok, {_module, [{:imports, imports}]}} =
+               :beam_lib.chunks(safe_path_beam, [:imports])
+
+      refute {:code, :priv_dir, 1} in imports
+      refute {:code, :lib_dir, 1} in imports
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: materialized helper is sealed against same-uid file writes", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      File.mkdir!(root)
+      File.write!(Path.join(root, "file.txt"), "inside")
+      test_process = self()
+
+      sealed_hook = fn directory, executable ->
+        assert {:ok, %File.Stat{type: :directory, mode: directory_mode}} =
+                 File.lstat(directory, time: :posix)
+
+        assert {:ok, %File.Stat{type: :regular, mode: executable_mode}} =
+                 File.lstat(executable, time: :posix)
+
+        assert Bitwise.band(directory_mode, 0o777) == 0o500
+        assert Bitwise.band(executable_mode, 0o777) == 0o500
+        assert {:error, write_reason} = File.write(executable, "attacker-native-image")
+        assert write_reason in [:eacces, :eperm]
+        send(test_process, {:sealed_materialization, directory, executable})
+        :ok
+      end
+
+      assert {:ok, "inside", _resolved} =
+               SafePath.read_within_materialization_fixture(
+                 "file.txt",
+                 root,
+                 fn -> :ok end,
+                 sealed_hook
+               )
+
+      assert_received {:sealed_materialization, directory, executable}
+      refute File.exists?(executable)
+      refute File.exists?(directory)
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: caller death during materialization cannot strand a native helper",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      root = Path.join(tmp_dir, "root")
+      File.mkdir!(root)
+      File.write!(Path.join(root, "file.txt"), "inside")
+      test_process = self()
+
+      sealed_hook = fn directory, executable ->
+        send(test_process, {:blocked_materialization, directory, executable})
+
+        receive do
+          :never_released -> :ok
+        end
+      end
+
+      {caller, caller_monitor} =
+        spawn_monitor(fn ->
+          SafePath.read_within_materialization_fixture(
+            "file.txt",
+            root,
+            fn -> :ok end,
+            sealed_hook
+          )
+        end)
+
+      assert_receive {:blocked_materialization, directory, executable}, 1_000
+      assert File.exists?(directory)
+      assert File.exists?(executable)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :killed}, 1_000
+
+      assert eventually(fn ->
+               not File.exists?(executable) and not File.exists?(directory)
+             end)
+    end
+
+    test "reads a regular file through its verified descriptor", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "root")
+      File.mkdir!(root)
+      File.write!(Path.join(root, "file.txt"), "inside")
+
+      assert {:ok, "inside", resolved} = SafePath.read_within("file.txt", root)
+      assert {:ok, canonical} = SafePath.resolve_real(Path.join(root, "file.txt"))
+      assert resolved == canonical
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: checked validation runs before descriptor data is read", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      candidate = Path.join(root, "candidate.txt")
+      File.mkdir!(root)
+      File.write!(candidate, "before-validation")
+      assert {:ok, canonical_candidate} = SafePath.resolve_real(candidate)
+
+      validator = fn opened_path ->
+        assert opened_path == canonical_candidate
+        File.write!(candidate, "after-validation")
+        :ok
+      end
+
+      assert {:ok, "after-validation", ^canonical_candidate} =
+               SafePath.read_within_checked(candidate, root, validator)
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: validator denial closes the opened descriptor without DATA", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      candidate = Path.join(root, "candidate.txt")
+      File.mkdir!(root)
+      File.write!(candidate, "must-not-be-returned")
+      assert {:ok, canonical_candidate} = SafePath.resolve_real(candidate)
+      test_process = self()
+
+      validator = fn opened_path ->
+        send(test_process, {:validated, opened_path})
+        {:error, :constraint_denied}
+      end
+
+      assert {:error, :constraint_denied} =
+               SafePath.read_within_checked(candidate, root, validator)
+
+      assert_received {:validated, ^canonical_candidate}
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: a bound root replacement is rejected before read", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      original_root = Path.join(tmp_dir, "original-root")
+      File.mkdir!(root)
+      File.write!(Path.join(root, "candidate.txt"), "inside")
+      assert {:ok, canonical_root} = SafePath.resolve_real(root)
+      assert {:ok, binding} = SafePath.bind_root(root)
+      assert SafePath.binding_root(binding) == canonical_root
+
+      File.rename!(root, original_root)
+      File.mkdir!(root)
+      File.write!(Path.join(root, "candidate.txt"), "outside-secret")
+
+      assert {:error, :path_changed} =
+               SafePath.read_within_bound_checked("candidate.txt", binding, fn _path -> :ok end)
+
+      assert {:error, :path_changed} =
+               SafePath.read_exact_bound_checked("candidate.txt", binding, fn _path -> :ok end)
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: native protocol self-unlinks before READY and X emits no DATA", %{
+      tmp_dir: tmp_dir
+    } do
+      token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+      helper_directory = Path.join("/tmp", "arbor-safe-path-reader-" <> token)
+      helper = Path.join(helper_directory, "reader")
+      root = Path.join(tmp_dir, "root")
+      File.mkdir!(helper_directory)
+
+      on_exit(fn ->
+        _ = File.chmod(helper_directory, 0o700)
+        File.rm_rf!(helper_directory)
+      end)
+
+      File.write!(helper, Arbor.Common.SafePath.NativeReaderArtifact.binary())
+      File.chmod!(helper, 0o500)
+      File.chmod!(helper_directory, 0o500)
+      File.mkdir!(root)
+      File.write!(Path.join(root, "candidate.txt"), "must-not-be-emitted")
+
+      assert {:ok, canonical_root} = SafePath.resolve_real(root)
+      assert {:ok, %File.Stat{major_device: device, inode: inode}} = File.stat(canonical_root)
+
+      args = [
+        helper_directory,
+        helper,
+        canonical_root,
+        Integer.to_string(device),
+        Integer.to_string(inode),
+        "candidate.txt"
+      ]
+
+      port =
+        Port.open({:spawn_executable, to_charlist(helper)}, [
+          :binary,
+          :exit_status,
+          :use_stdio,
+          args: Enum.map(args, &to_charlist/1)
+        ])
+
+      assert_receive {^port, {:data, "READY\n"}}, 1_000
+      refute File.exists?(helper)
+      refute File.exists?(helper_directory)
+      assert Port.command(port, "O")
+      assert_receive {^port, {:data, "FILE\n"}}, 1_000
+      assert Port.command(port, "X")
+      assert_receive {^port, {:exit_status, 0}}, 1_000
+      refute_receive {^port, {:data, _unexpected}}, 100
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: a symlink swap between check and open cannot escape", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      outside = Path.join(tmp_dir, "outside.txt")
+      candidate = Path.join(root, "candidate.txt")
+      File.mkdir!(root)
+      File.write!(candidate, "inside")
+      File.write!(outside, "outside-secret")
+
+      swap = fn ->
+        File.rm!(candidate)
+        File.ln_s!(outside, candidate)
+        :ok
+      end
+
+      assert {:error, reason} = SafePath.read_within_fixture("candidate.txt", root, swap)
+      assert reason in [:path_changed, :path_traversal]
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: the opened root stays pinned across a pathname replacement", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      pinned_root = Path.join(tmp_dir, "pinned-root")
+      outside = Path.join(tmp_dir, "outside")
+      File.mkdir!(root)
+      File.mkdir!(outside)
+      File.write!(Path.join(root, "candidate.txt"), "inside")
+      File.write!(Path.join(outside, "candidate.txt"), "outside-secret")
+      assert {:ok, canonical_candidate} = SafePath.resolve_real(Path.join(root, "candidate.txt"))
+
+      replace_root = fn ->
+        File.rename!(root, pinned_root)
+        File.ln_s!(outside, root)
+        :ok
+      end
+
+      assert {:ok, "inside", resolved} =
+               SafePath.read_within_fixture("candidate.txt", root, replace_root)
+
+      assert resolved == canonical_candidate
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: an ancestor replacement cannot redirect the descriptor walk", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      ancestor = Path.join(root, "ancestor")
+      pinned_ancestor = Path.join(root, "pinned-ancestor")
+      outside = Path.join(tmp_dir, "outside")
+      File.mkdir_p!(ancestor)
+      File.mkdir!(outside)
+      File.write!(Path.join(ancestor, "candidate.txt"), "inside")
+      File.write!(Path.join(outside, "candidate.txt"), "outside-secret")
+
+      replace_ancestor = fn ->
+        File.rename!(ancestor, pinned_ancestor)
+        File.ln_s!(outside, ancestor)
+        :ok
+      end
+
+      result =
+        SafePath.read_within_fixture("ancestor/candidate.txt", root, replace_ancestor)
+
+      case result do
+        {:ok, content, _resolved} -> assert content == "inside"
+        {:error, _reason} -> :ok
+      end
+    end
+  end
+
+  describe "read_exact/2" do
+    test "reads only the exact regular-file leaf", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "root")
+      candidate = Path.join(root, "candidate.txt")
+      File.mkdir!(root)
+      File.write!(candidate, "inside")
+
+      assert {:ok, "inside", resolved} = SafePath.read_exact(candidate, root)
+      assert {:ok, canonical} = SafePath.resolve_real(candidate)
+      assert resolved == canonical
+    end
+
+    @tag spec: "KSEC-012"
+    test "security regression: an exact leaf swap is rejected before descriptor data is returned",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      root = Path.join(tmp_dir, "root")
+      candidate = Path.join(root, "candidate.txt")
+      sibling = Path.join(root, "sibling-secret.txt")
+      File.mkdir!(root)
+      File.write!(candidate, "inside")
+      File.write!(sibling, "sibling-secret")
+
+      swap = fn ->
+        File.rm!(candidate)
+        File.ln_s!(sibling, candidate)
+        :ok
+      end
+
+      assert {:error, reason} = SafePath.read_exact_fixture(candidate, root, swap)
+      assert reason in [:not_regular, :path_changed, :path_traversal]
     end
   end
 
@@ -401,6 +777,23 @@ defmodule Arbor.Common.SafePathTest do
   # ==========================================================================
 
   describe "resolve_real edge cases" do
+    @tag spec: "KSEC-012"
+    test "security regression: does not collapse dot-dot before following a symlink", %{
+      tmp_dir: tmp_dir
+    } do
+      root = Path.join(tmp_dir, "root")
+      outside = Path.join(tmp_dir, "outside")
+      outside_child = Path.join(outside, "child")
+      File.mkdir!(root)
+      File.mkdir_p!(outside_child)
+      File.write!(Path.join(outside, "secret"), "secret")
+      File.ln_s!(outside_child, Path.join(root, "link"))
+
+      assert {:ok, resolved} = SafePath.resolve_real(Path.join(root, "link/../secret"))
+      assert {:ok, canonical_outside} = SafePath.resolve_real(Path.join(outside, "secret"))
+      assert resolved == canonical_outside
+    end
+
     test "resolves symlink chains", %{tmp_dir: tmp_dir} do
       real_file = Path.join(tmp_dir, "real.txt")
       link1 = Path.join(tmp_dir, "link1.txt")
@@ -452,6 +845,18 @@ defmodule Arbor.Common.SafePathTest do
 
       assert Exception.message(%SafePath.TraversalError{reason: :custom_reason}) =~
                "custom_reason"
+    end
+  end
+
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
     end
   end
 end

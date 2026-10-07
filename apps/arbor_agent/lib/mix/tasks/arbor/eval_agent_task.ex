@@ -88,6 +88,7 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     rate_line =
       if n > 1 do
         pct = round((Map.get(r, :pass_rate) || 0.0) * 100)
+
         "\n  PASS RATE:               #{Map.get(r, :pass_count)}/#{n} (#{pct}%)  verdicts: #{inspect(Map.get(r, :sample_verdicts))}"
       else
         ""

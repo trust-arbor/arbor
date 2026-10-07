@@ -256,9 +256,6 @@ defmodule Arbor.Trust.Store do
         clear_failed_deletion(profile.agent_id)
         emit_distributed_signal(:profile_updated, profile.agent_id)
 
-        # Sync capabilities to match the new trust profile rules
-        sync_capabilities_async(profile.agent_id)
-
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, :ok, %{state | cache_stats: new_stats}}
 
@@ -422,10 +419,6 @@ defmodule Arbor.Trust.Store do
         clear_failed_deletion(agent_id)
         emit_distributed_signal(:profile_updated, agent_id)
 
-        if profile.rules != updated.rules or profile.baseline != updated.baseline do
-          sync_capabilities_async(agent_id)
-        end
-
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
 
@@ -474,18 +467,6 @@ defmodule Arbor.Trust.Store do
 
   defp maybe_filter_by_tier(profiles, tier) do
     Enum.filter(profiles, &(&1.tier == tier))
-  end
-
-  # Async capability sync — revokes stale capabilities after trust profile changes.
-  # Runs in a Task to avoid blocking the GenServer.
-  defp sync_capabilities_async(agent_id) do
-    Task.start(fn ->
-      Arbor.Trust.PolicyEnforcer.sync_capabilities(agent_id)
-    end)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   defp load_persisted_profiles(%{persistence_mode: :memory}), do: 0

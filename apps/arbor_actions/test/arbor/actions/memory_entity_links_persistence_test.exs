@@ -89,8 +89,8 @@ defmodule Arbor.Actions.MemoryEntityLinksPersistenceTest do
           "arbor://memory/write",
           "arbor://memory/add_knowledge"
         ] do
-      assert {:ok, cap} = Arbor.Security.grant(principal: agent, resource: resource)
-      on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+      assert {:ok, cap} = Arbor.Security.grant_fixture(principal: agent, resource: resource)
+      on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     end
 
     on_exit(fn ->

@@ -45,6 +45,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
 
     on_exit(fn ->
       :telemetry.detach(handler)
+      :ok = AuditJournalOwner.clear_test_fixture()
       current = Process.whereis(AuditJournalOwner)
 
       if current != original do
@@ -53,7 +54,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
       end
 
       case Security.list_capabilities(principal) do
-        {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+        {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
         _ -> :ok
       end
     end)
@@ -75,7 +76,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
     caps =
       for n <- 1..count do
         assert {:ok, cap} =
-                 Security.grant(
+                 Security.grant_fixture(
                    principal: ctx.principal,
                    resource: "arbor://memory/read/degraded/#{n}"
                  )
@@ -89,7 +90,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
     log =
       try do
         capture_log([level: :warning], fn ->
-          Enum.each(caps, fn cap -> assert :ok = Security.revoke(cap.id) end)
+          Enum.each(caps, fn cap -> assert :ok = Security.revoke_fixture(cap.id) end)
         end)
       after
         Process.register(journal, AuditJournalOwner)
@@ -130,7 +131,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
     healthy = swap_owner!(ctx, operational_root())
 
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/cap")
+             Security.grant_fixture(principal: ctx.principal, resource: "arbor://memory/read/cap")
 
     # 3072 retained identities that no publication can reclaim (effect_rejected
     # terminals are never retired): every increase is refused by capacity.
@@ -138,7 +139,10 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
     drain(@refused)
 
     assert {:error, :audit_unavailable} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/write/cap")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/write/cap"
+             )
 
     # Parent 52a2cc3fa: no event and a stale status without a reason.
     assert [{%{count: 1}, %{operation: :grant, reason: :capacity}}] = drain(@refused)
@@ -151,7 +155,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
 
     log =
       capture_log([level: :warning], fn ->
-        assert :ok = Security.revoke(cap.id)
+        assert :ok = Security.revoke_fixture(cap.id)
       end)
 
     assert [{%{count: 1}, %{reason: :capacity}}] = drain(@degraded)
@@ -191,6 +195,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
       AuditJournalOwner.start_link(mode: :durable, root: root, capacity_profile: :operational)
 
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
 
     on_exit(fn ->
       if Process.alive?(journal), do: GenServer.stop(journal)

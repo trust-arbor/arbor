@@ -78,7 +78,7 @@ defmodule Arbor.Actions.ShellTest do
     end)
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "shell-action-test")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
     agent_id = identity.agent_id
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
 
@@ -89,17 +89,17 @@ defmodule Arbor.Actions.ShellTest do
       })
 
     {:ok, _capability} =
-      Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec/**")
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
 
       if Process.whereis(Arbor.Security.Identity.Registry) do
-        Arbor.Security.deregister_identity(agent_id)
+        Arbor.Security.deregister_identity_fixture(agent_id)
       end
     end)
 
@@ -111,7 +111,10 @@ defmodule Arbor.Actions.ShellTest do
 
     :ok = File.mkdir(root)
     {:ok, cwd} = SafePath.resolve_real(root)
-    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
+    {:ok, _} =
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
     Process.put(:shell_test_cwd, cwd)
     previous_authorizer = Application.get_env(:arbor_shell, :agent_authorizer)
     Application.put_env(:arbor_shell, :agent_authorizer, Shell)
@@ -403,24 +406,24 @@ defmodule Arbor.Actions.ShellTest do
       end)
 
       {:ok, identity} = Arbor.Security.generate_identity(name: "shell-approval-test")
-      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.register_identity_fixture(identity)
       agent_id = identity.agent_id
       resource_uri = "arbor://shell/exec/grep"
 
       {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
       rules = Map.put(profile.rules, resource_uri, :auto)
       :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
-      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+      {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
 
       on_exit(fn ->
         if Process.whereis(Arbor.Security.CapabilityStore) do
-          Arbor.Security.CapabilityStore.revoke_all(agent_id)
+          Arbor.Security.revoke_all_fixture(agent_id)
         end
 
         if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
 
         if Process.whereis(Arbor.Security.Identity.Registry) do
-          Arbor.Security.deregister_identity(agent_id)
+          Arbor.Security.deregister_identity_fixture(agent_id)
         end
       end)
 
@@ -465,7 +468,7 @@ defmodule Arbor.Actions.ShellTest do
           | rules: Map.put(profile.rules, echo_uri, :auto)
         })
 
-      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: echo_uri)
+      {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: echo_uri)
 
       if Process.whereis(Arbor.Trust.Manager) == nil do
         start_supervised!(
@@ -474,7 +477,10 @@ defmodule Arbor.Actions.ShellTest do
       end
 
       cwd = Process.get(:shell_test_cwd)
-      {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
+      {:ok, _} =
+        Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
       {:ok, _} = Arbor.Trust.set_rule(agent_id, "arbor://fs/read#{cwd}", :auto)
       command = "echo shell-approval-ok"
 
@@ -536,7 +542,8 @@ defmodule Arbor.Actions.ShellTest do
               |> Map.put("arbor://shell/exec/**", :auto)
         })
 
-      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+      {:ok, _cap} =
+        Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec/**")
 
       prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
       Application.delete_env(:arbor_shell, :compound_shell_enabled)

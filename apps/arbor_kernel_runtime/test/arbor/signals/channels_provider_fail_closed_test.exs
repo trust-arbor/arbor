@@ -3,12 +3,18 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
 
   @moduletag :fast
 
-  alias Arbor.Signals.Channels
+  alias Arbor.Signals.AuthorizedChannelsTestClient, as: Channels
   alias Arbor.Signals.Config.Testing
 
   setup do
     Arbor.Signals.TestCase.ensure_processes()
     Testing.isolate_namespace()
+
+    Testing.put(
+      :channel_principal_authorizer,
+      Arbor.Signals.TestChannelPrincipalAuthorizer
+    )
+
     :ok
   end
 
@@ -126,7 +132,7 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
   end
 
   defp assert_alive do
-    pid = Process.whereis(Channels)
+    pid = Process.whereis(Arbor.Signals.Channels)
     assert is_pid(pid)
     assert Process.alive?(pid)
   end

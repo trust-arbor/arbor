@@ -9,7 +9,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
 
   defmodule HookView do
     use Phoenix.LiveView
-    on_mount {Arbor.Dashboard.Nav, :default}
+    on_mount({Arbor.Dashboard.Nav, :default})
 
     def mount(_params, session, socket) do
       {:ok, assign(socket, observer: session["observer"])}
@@ -184,7 +184,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
         :expired -> signed(@subject, ttl: -1)
         :wrong_subject -> signed("human_other_subject")
         :malformed -> "not-a-session-proof"
-        :scoped -> elem(SessionToken.generate_conversation(@subject, "agent_target"), 1)
+        :scoped -> elem(Security.issue_conversation_session_fixture(@subject, "agent_target"), 1)
       end
 
     %{

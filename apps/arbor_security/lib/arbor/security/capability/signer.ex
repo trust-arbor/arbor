@@ -10,6 +10,8 @@ defmodule Arbor.Security.Capability.Signer do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.Crypto
 
+  @delegation_record_version "arbor-delegation-record-v2"
+
   @doc """
   Sign a capability with a private key, setting `issuer_id` and `issuer_signature`.
 
@@ -52,15 +54,21 @@ defmodule Arbor.Security.Capability.Signer do
   @spec sign_delegation(Capability.t(), Capability.t(), binary()) :: map()
   def sign_delegation(%Capability{} = parent_cap, %Capability{} = new_cap, delegator_private_key)
       when is_binary(delegator_private_key) do
-    payload = delegation_signing_payload(new_cap)
-    signature = Crypto.sign(payload, delegator_private_key)
-
-    %{
+    record = %{
       delegator_id: parent_cap.principal_id,
-      delegator_signature: signature,
+      delegatee_id: new_cap.principal_id,
+      parent_capability_id: parent_cap.id,
+      capability_id: new_cap.id,
+      payload_digest: delegation_payload_digest(new_cap),
       constraints: new_cap.constraints,
       delegated_at: DateTime.utc_now()
     }
+
+    Map.put(
+      record,
+      :delegator_signature,
+      Crypto.sign(delegation_record_payload(record), delegator_private_key)
+    )
   end
 
   @doc """
@@ -74,17 +82,29 @@ defmodule Arbor.Security.Capability.Signer do
   """
   @spec verify_delegation_chain(Capability.t(), (String.t() -> {:ok, binary()} | {:error, term()})) ::
           :ok | {:error, :broken_delegation_chain}
-  def verify_delegation_chain(%Capability{delegation_chain: []}, _key_lookup_fn), do: :ok
+  # An empty chain is valid only for a root capability. A delegated capability
+  # must carry the signed link from its parent; otherwise clearing the chain
+  # would turn a delegated token into an unverifiable root-shaped token.
+  def verify_delegation_chain(
+        %Capability{delegation_chain: [], parent_capability_id: nil},
+        _key_lookup_fn
+      ),
+      do: :ok
+
+  def verify_delegation_chain(%Capability{delegation_chain: []}, _key_lookup_fn),
+    do: {:error, :broken_delegation_chain}
 
   def verify_delegation_chain(%Capability{} = cap, key_lookup_fn)
       when is_function(key_lookup_fn, 1) do
-    cap.delegation_chain
-    |> Enum.all?(fn record ->
-      verify_delegation_record(record, cap, key_lookup_fn)
-    end)
-    |> case do
-      true -> :ok
-      false -> {:error, :broken_delegation_chain}
+    records = cap.delegation_chain
+
+    with true <- is_list(records) and records != [],
+         true <- Enum.all?(records, &verify_delegation_record(&1, key_lookup_fn)),
+         true <- valid_chain_links?(records),
+         true <- final_record_matches_capability?(List.last(records), cap) do
+      :ok
+    else
+      _ -> {:error, :broken_delegation_chain}
     end
   end
 
@@ -108,20 +128,99 @@ defmodule Arbor.Security.Capability.Signer do
     |> Capability.signing_payload()
   end
 
-  defp verify_delegation_record(
-         %{delegator_id: delegator_id, delegator_signature: signature},
-         cap,
-         key_lookup_fn
-       ) do
-    case key_lookup_fn.(delegator_id) do
-      {:ok, public_key} ->
-        payload = delegation_signing_payload(cap)
-        Crypto.verify(payload, signature, public_key)
+  defp delegation_payload_digest(%Capability{} = cap) do
+    cap
+    |> delegation_signing_payload()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 
-      {:error, _} ->
-        false
+  defp delegation_record_payload(record) do
+    with {:ok, delegator_id} <- record_field(record, :delegator_id),
+         {:ok, delegatee_id} <- record_field(record, :delegatee_id),
+         {:ok, parent_capability_id} <- record_field(record, :parent_capability_id),
+         {:ok, capability_id} <- record_field(record, :capability_id),
+         {:ok, payload_digest} <- record_field(record, :payload_digest),
+         {:ok, delegated_at} <- record_field(record, :delegated_at) do
+      [
+        @delegation_record_version,
+        delegator_id,
+        delegatee_id,
+        parent_capability_id,
+        capability_id,
+        payload_digest,
+        encode_datetime(delegated_at)
+      ]
+      |> Enum.map_join(&length_prefix/1)
+    else
+      _ -> :invalid_delegation_record
     end
   end
 
-  defp verify_delegation_record(_, _cap, _key_lookup_fn), do: false
+  defp verify_delegation_record(
+         record,
+         key_lookup_fn
+       ) do
+    with {:ok, delegator_id} when is_binary(delegator_id) <-
+           record_field(record, :delegator_id),
+         {:ok, signature} when is_binary(signature) and byte_size(signature) == 64 <-
+           record_field(record, :delegator_signature),
+         {:ok, public_key} when is_binary(public_key) <- key_lookup_fn.(delegator_id),
+         payload when is_binary(payload) <- delegation_record_payload(record) do
+      Crypto.verify(payload, signature, public_key)
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp valid_chain_links?([_record]), do: true
+
+  defp valid_chain_links?([record, next | rest]) do
+    with {:ok, delegatee_id} <- record_field(record, :delegatee_id),
+         {:ok, capability_id} <- record_field(record, :capability_id),
+         {:ok, next_delegator_id} <- record_field(next, :delegator_id),
+         {:ok, next_parent_capability_id} <- record_field(next, :parent_capability_id),
+         true <- delegatee_id == next_delegator_id,
+         true <- capability_id == next_parent_capability_id do
+      valid_chain_links?([next | rest])
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_chain_links?(_), do: false
+
+  defp final_record_matches_capability?(record, %Capability{} = cap) do
+    with {:ok, delegatee_id} <- record_field(record, :delegatee_id),
+         {:ok, parent_capability_id} <- record_field(record, :parent_capability_id),
+         {:ok, capability_id} <- record_field(record, :capability_id),
+         {:ok, payload_digest} <- record_field(record, :payload_digest) do
+      delegatee_id == cap.principal_id and
+        parent_capability_id == cap.parent_capability_id and
+        capability_id == cap.id and
+        payload_digest == delegation_payload_digest(cap)
+    else
+      _ -> false
+    end
+  end
+
+  defp record_field(record, key) when is_map(record) do
+    case Map.fetch(record, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(record, Atom.to_string(key))
+    end
+  end
+
+  defp record_field(_record, _key), do: :error
+
+  defp encode_datetime(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp encode_datetime(value) when is_binary(value), do: value
+  defp encode_datetime(_value), do: :invalid_datetime
+
+  defp length_prefix(value) when is_binary(value), do: <<byte_size(value)::32, value::binary>>
+  defp length_prefix(_value), do: <<0::32>>
 end

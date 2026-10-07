@@ -164,18 +164,23 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       assert status["capacity"]["retired_operation_total"] == 600
     end
 
-    test "a torn-tail journal skips T1 and starts degraded as before" do
+    test "a torn-tail journal is forensically recovered before T1 retirement" do
       root = unique_root()
       write_journal(root, v2_snapshot(delivered_terminals(1..600)))
       File.write!(journal_path(root), "AJL", [:append])
       {name, _pid} = start_owner(root)
 
+      assert [{%{count: 600}, %{trigger: :boot}}] = drain(@retired_event)
       status = status!(name)
-      assert status["torn_tail"] == true
-      assert status["serving"] == false
-      assert status["retirement"]["floor"] == 1
-      assert [] = drain(@retired_event)
-      refute File.exists?(ledger_path(root))
+      assert status["torn_tail"] == false
+      assert status["serving"] == true
+      assert status["retirement"]["floor"] == 3
+      assert status["retirement"]["ledger_state"] == "bound"
+      assert status["capacity"]["retired_operation_total"] == 600
+      assert File.exists?(ledger_path(root))
+
+      quarantine = Path.join(root, ".audit-quarantine")
+      assert Enum.any?(File.ls!(quarantine), &String.starts_with?(&1, "torn-tail-"))
     end
 
     test "a paused ledger at boot is logged once; T1 installs v3 non-retiring and admission is closed" do
@@ -461,7 +466,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
 
       max_retained =
         Enum.reduce(1..total, 0, fn n, max_retained ->
-          intent = grant(n)
+          intent = capacity_grant(n)
           assert {:ok, _, "prepared"} = Owner.prepare(name, intent)
           assert {:ok, :committed} = Owner.observe(name, intent["operation_id"], :applied)
           assert {:ok, [item]} = Owner.delivery_batch(name)
@@ -512,7 +517,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
 
       applied =
         Enum.reduce_while(1..1400, [], fn n, acc ->
-          intent = grant(n)
+          intent = capacity_grant(n)
 
           case Owner.prepare(name, intent) do
             {:ok, _, "prepared"} ->
@@ -719,7 +724,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
       # operation first shifts that value by one so the walk passes through
       # exactly 3 (the last admissible value). Readiness must flip exactly
       # when the core starts refusing the next increase.
-      rejected = grant(0)
+      rejected = capacity_grant(0)
       assert {:ok, _, "prepared"} = Owner.prepare(name, rejected)
 
       assert {:ok, :committed} =
@@ -746,7 +751,7 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
                do: :dense,
                else: mode
 
-          case Owner.prepare(name, grant(n)) do
+          case Owner.prepare(name, capacity_grant(n)) do
             {:ok, _, "prepared"} ->
               if reading do
                 assert reading["admission_open"],
@@ -836,23 +841,43 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     do: with_registered_owner(name, fn _server -> fun.() end)
 
   # Swap the registered owner so the arity-0 facade (and
-  # execution_policy_snapshot) read this journal; `fun` receives the
+  # execution_policy_snapshot) read this journal. The facade deliberately
+  # rejects name-only impersonation, so install the explicit test fixture while
+  # the temporary owner holds the registered name. `fun` receives the
   # registered name to address it by. Returns `fun`'s result.
   defp with_registered_owner(name, fun) when is_function(fun, 1) do
     original = Process.whereis(Owner)
     pid = Process.whereis(name)
+
+    previous_fixture =
+      Application.fetch_env(:arbor_security, :audit_journal_owner_test_fixture)
+
+    assert Enum.any?(Supervisor.which_children(Arbor.Security.Supervisor), fn
+             {Owner, ^original, :worker, _modules} -> true
+             _other -> false
+           end)
+
     true = Process.unregister(Owner)
     true = Process.unregister(name)
     true = Process.register(pid, Owner)
+    :ok = Owner.install_test_fixture(pid)
 
     try do
       fun.(Owner)
     after
+      :ok = Owner.clear_test_fixture()
       if Process.whereis(Owner) == pid, do: Process.unregister(Owner)
       if Process.alive?(pid), do: Process.register(pid, name)
       Process.register(original, Owner)
+      restore_owner_fixture(previous_fixture)
     end
   end
+
+  defp restore_owner_fixture({:ok, pid}),
+    do: Application.put_env(:arbor_security, :audit_journal_owner_test_fixture, pid)
+
+  defp restore_owner_fixture(:error),
+    do: Application.delete_env(:arbor_security, :audit_journal_owner_test_fixture)
 
   defp restart_owner(pid, root, opts \\ []) do
     stop(pid)
@@ -896,7 +921,12 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
     name = :"audit_retire_consumer_#{System.unique_integer([:positive])}"
     true = Process.register(self(), name)
     previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_name)
+
+    previous_application =
+      Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+
     Application.put_env(:arbor_security, :authority_audit_consumer_name, name)
+    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
 
     on_exit(fn ->
       case previous do
@@ -905,6 +935,14 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
 
         :error ->
           Application.delete_env(:arbor_security, :authority_audit_consumer_name)
+      end
+
+      case previous_application do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
       end
     end)
 
@@ -1055,6 +1093,17 @@ defmodule Arbor.Security.AuditRetirementOwnerTest do
   # Intents and records
 
   defp grant(n), do: intent(3, n)
+
+  # Global-capacity fixtures must not trip the independent per-principal
+  # authority-increase ceiling before reaching the journal entry boundary.
+  defp capacity_grant(n) do
+    {:ok, intent} =
+      facts(3, n)
+      |> put_in(["audit", "data", "principal_id"], "agent_capacity_#{n}")
+      |> AuditJournal.admit_intent()
+
+    intent
+  end
 
   defp producer_grant(capability_id) do
     data = %{

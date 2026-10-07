@@ -188,11 +188,13 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
       end
     end)
 
-    saved_handlers = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    :ok = Registry.register("ckpt_cfg_side", SideProbe)
-    :ok = Registry.register("ckpt_cfg_block", BlockProbe)
-    on_exit(fn -> Registry.restore_custom_handlers(saved_handlers) end)
+    :ok = Registry.register_fixture("test.ckpt_cfg_side", SideProbe)
+    :ok = Registry.register_fixture("test.ckpt_cfg_block", BlockProbe)
+
+    on_exit(fn ->
+      Registry.unregister_fixture("test.ckpt_cfg_side")
+      Registry.unregister_fixture("test.ckpt_cfg_block")
+    end)
 
     :ok
   end
@@ -555,7 +557,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
     """
     digraph Flow {
       start [shape=Mdiamond]
-      task [type="ckpt_cfg_side"]
+      task [type="test.ckpt_cfg_side"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -566,7 +568,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
     """
     digraph Flow {
       start [shape=Mdiamond]
-      task [type="ckpt_cfg_block"]
+      task [type="test.ckpt_cfg_block"]
       exit [shape=Msquare]
       start -> task -> exit
     }

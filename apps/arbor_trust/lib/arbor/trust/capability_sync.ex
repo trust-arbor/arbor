@@ -2,16 +2,13 @@ defmodule Arbor.Trust.CapabilitySync do
   @moduledoc """
   Synchronizes capabilities with trust profile lifecycle events.
 
-  This module subscribes to trust events and grants or revokes capabilities at
-  well-defined lifecycle points. Capabilities are never minted/stripped from a
-  trust band — the trust tier was retired. Grants are the universal baseline
-  floor plus freeze/unfreeze enforcement (rules-based).
+  Capability changes require a caller-owned Security signing authority. Trust
+  events remain observability messages and never mint or revoke authority.
 
   ## Behavior
 
-  - On profile creation: Grant the universal baseline capabilities
-  - On trust freeze: Revoke all modifiable capabilities (rules-based enforcement)
-  - On trust unfreeze: Restore the universal baseline capabilities
+  - Explicit authenticated sync: Grant the universal baseline capabilities
+  - Trust lifecycle events: Observe only; they carry no authenticated actor
 
   ## Usage
 
@@ -45,11 +42,21 @@ defmodule Arbor.Trust.CapabilitySync do
   @doc """
   Manually sync the universal baseline capabilities for an agent.
 
-  This is useful for initial setup or recovery scenarios.
+  This is useful for initial setup or recovery scenarios. The caller must pass
+  its owner-bound Security signing authority in `:actor_authority`.
   """
-  @spec sync_capabilities(String.t()) :: {:ok, map()} | {:error, term()}
-  def sync_capabilities(agent_id) do
-    GenServer.call(__MODULE__, {:sync_capabilities, agent_id})
+  @spec sync_capabilities(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def sync_capabilities(agent_id, opts \\ []) do
+    case Keyword.fetch(opts, :actor_authority) do
+      {:ok, authority} when not is_nil(authority) ->
+        # Signing authorities are bound to the caller PID. Execute the sync in
+        # this process rather than transferring bearer authority to the
+        # long-lived CapabilitySync server.
+        do_sync_capabilities(agent_id, authority)
+
+      _ ->
+        {:error, :capability_mutation_unauthorized}
+    end
   end
 
   @doc """
@@ -98,9 +105,8 @@ defmodule Arbor.Trust.CapabilitySync do
   end
 
   @impl true
-  def handle_call({:sync_capabilities, agent_id}, _from, state) do
-    result = do_sync_capabilities(agent_id)
-    {:reply, result, state}
+  def handle_call({:sync_capabilities, _agent_id}, _from, state) do
+    {:reply, {:error, :capability_mutation_unauthorized}, state}
   end
 
   @impl true
@@ -151,61 +157,27 @@ defmodule Arbor.Trust.CapabilitySync do
 
   # Private functions
 
-  defp handle_trust_event(agent_id, event_type, metadata) do
-    # NOTE: tier-change handling (:tier_changed and the side-effect fallback that
-    # granted/revoked capabilities on tier movement) was removed in the
-    # tier-minting kill sweep (P0 gate #1). Tier no longer moves from score/points
-    # arithmetic, so capabilities are never minted or stripped on tier change.
-    # The remaining handlers cover the one-time creation grant and the
-    # freeze/unfreeze enforcement path, which is rules-based, not tier-based.
-    case event_type do
-      :trust_frozen ->
-        handle_trust_frozen(agent_id, metadata)
-
-      :trust_unfrozen ->
-        handle_trust_unfrozen(agent_id)
-
-      :profile_created ->
-        # Grant the universal baseline capabilities for new profiles (tier-independent).
-        grant_base_capabilities(agent_id)
-
-      _ ->
-        :ok
+  defp handle_trust_event(agent_id, event_type, _metadata) do
+    if event_type in [:trust_frozen, :trust_unfrozen, :profile_created] do
+      Logger.debug("CapabilitySync observed non-authoritative trust event",
+        agent_id: agent_id,
+        event_type: event_type
+      )
     end
+
+    :ok
   end
 
-  defp handle_trust_frozen(agent_id, metadata) do
-    Logger.warning("Revoking capabilities due to trust freeze",
-      agent_id: agent_id,
-      reason: Map.get(metadata, :reason)
-    )
-
-    # Revoke all capabilities except read-only
-    revoke_modifiable_capabilities(agent_id)
-  end
-
-  defp handle_trust_unfrozen(agent_id) do
-    Logger.info("Restoring baseline capabilities after trust unfreeze",
-      agent_id: agent_id
-    )
-
-    # Restore the universal baseline floor only. Role/template-specific caps are
-    # NOT re-minted on a trust-state change — re-granting elevated capabilities
-    # on unfreeze was the kind of trust-state→capability minting the 2026-06-14
-    # tier-minting kill removed.
-    do_sync_capabilities(agent_id)
-  end
-
-  defp do_sync_capabilities(agent_id) do
+  defp do_sync_capabilities(agent_id, actor_authority) do
     case Manager.get_trust_profile(agent_id) do
       {:ok, _profile} ->
-        grant_base_capabilities(agent_id)
+        grant_base_capabilities(agent_id, actor_authority)
 
       {:error, :not_found} ->
         # Create profile first
         case Manager.create_trust_profile(agent_id) do
           {:ok, _profile} ->
-            grant_base_capabilities(agent_id)
+            grant_base_capabilities(agent_id, actor_authority)
 
           {:error, reason} ->
             {:error, reason}
@@ -216,14 +188,14 @@ defmodule Arbor.Trust.CapabilitySync do
     end
   end
 
-  defp grant_base_capabilities(agent_id) do
+  defp grant_base_capabilities(agent_id, actor_authority) do
     principal_id = ensure_agent_prefix(agent_id)
     templates = Config.base_capabilities()
 
     results =
       Enum.map(templates, fn template ->
         resource_uri = expand_resource_uri(template.resource_uri, agent_id)
-        grant_or_skip_capability(principal_id, resource_uri, template)
+        grant_or_skip_capability(principal_id, resource_uri, template, actor_authority)
       end)
 
     granted = Enum.count(results, fn r -> match?({:granted, _}, r) end)
@@ -240,26 +212,26 @@ defmodule Arbor.Trust.CapabilitySync do
     {:ok, %{granted: granted, existing: existing, errors: errors}}
   end
 
-  defp grant_or_skip_capability(principal_id, resource_uri, template) do
+  defp grant_or_skip_capability(principal_id, resource_uri, template, actor_authority) do
     case find_existing_capability(principal_id, resource_uri) do
       {:ok, _cap} ->
         {:already_exists, resource_uri}
 
       {:error, :not_found} ->
-        do_grant_capability(principal_id, resource_uri, template)
+        do_grant_capability(principal_id, resource_uri, template, actor_authority)
     end
   end
 
-  defp do_grant_capability(principal_id, resource_uri, template) do
+  defp do_grant_capability(principal_id, resource_uri, template, actor_authority) do
     case Arbor.Security.grant(
            principal: principal_id,
            resource: resource_uri,
            constraints: template.constraints,
            metadata: %{
              source: :trust_baseline,
-             granter_id: "trust_system",
              synced_at: DateTime.utc_now()
-           }
+           },
+           actor_authority: actor_authority
          ) do
       {:ok, cap} ->
         {:granted, cap.id}
@@ -267,36 +239,6 @@ defmodule Arbor.Trust.CapabilitySync do
       {:error, reason} ->
         {:error, resource_uri, reason}
     end
-  end
-
-  defp revoke_modifiable_capabilities(agent_id) do
-    principal_id = ensure_agent_prefix(agent_id)
-
-    # Get the universal baseline capabilities (the read-only floor preserved
-    # across a freeze).
-    read_only_uris =
-      Config.base_capabilities()
-      |> Enum.map(fn t -> expand_resource_uri(t.resource_uri, agent_id) end)
-      |> MapSet.new()
-
-    case Arbor.Security.list_capabilities(principal_id) do
-      {:ok, capabilities} ->
-        revoke_non_readonly_capabilities(capabilities, read_only_uris)
-
-      {:error, reason} ->
-        Logger.error("Failed to list capabilities for freeze",
-          agent_id: agent_id,
-          reason: reason
-        )
-    end
-  end
-
-  defp revoke_non_readonly_capabilities(capabilities, read_only_uris) do
-    Enum.each(capabilities, fn cap ->
-      unless MapSet.member?(read_only_uris, cap.resource_uri) do
-        Arbor.Security.revoke(cap.id)
-      end
-    end)
   end
 
   defp find_existing_capability(principal_id, resource_uri) do

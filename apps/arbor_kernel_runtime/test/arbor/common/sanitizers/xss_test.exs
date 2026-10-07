@@ -91,6 +91,14 @@ defmodule Arbor.Common.Sanitizers.XSSTest do
       assert Bitwise.band(updated.sanitizations, 0b00000010) == 0b00000010
       assert Bitwise.band(updated.sanitizations, @bit) == @bit
     end
+
+    @tag :security_regression
+    test "security regression: malformed encodings fail closed instead of crashing" do
+      taint = %Taint{level: :untrusted}
+
+      assert {:error, :invalid_encoding} = XSS.sanitize("\\uD800", taint)
+      assert {:error, :invalid_encoding} = XSS.sanitize("%FF", taint)
+    end
   end
 
   describe "detect/1" do
@@ -143,6 +151,12 @@ defmodule Arbor.Common.Sanitizers.XSSTest do
       assert "unicode_escape_lt" in patterns
     end
 
+    @tag :security_regression
+    test "security regression: malformed encodings are unsafe instead of crashing" do
+      assert {:unsafe, ["invalid_encoding"]} = XSS.detect("\\uD800")
+      assert {:unsafe, ["invalid_encoding"]} = XSS.detect("%FF")
+    end
+
     test "non-string returns safe" do
       assert {:safe, 1.0} = XSS.detect(42)
     end
@@ -167,6 +181,11 @@ defmodule Arbor.Common.Sanitizers.XSSTest do
 
     test "stable value not modified" do
       assert XSS.decode_value("hello") == "hello"
+    end
+
+    @tag :security_regression
+    test "security regression: rejects invalid Unicode scalar values" do
+      assert XSS.decode_value("\\uD800") == {:error, :invalid_encoding}
     end
   end
 

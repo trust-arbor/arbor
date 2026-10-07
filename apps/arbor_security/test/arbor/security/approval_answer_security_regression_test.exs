@@ -20,12 +20,13 @@ defmodule Arbor.Security.ApprovalAnswerSecurityRegressionTest do
     assert {:error, :approval_answer_required} =
              Security.authorize_approval_answer(ctx.human_id, uri <> "_other", ctx.token)
 
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert {:error, :approval_answer_required} =
              Security.authorize_approval_answer(ctx.human_id, uri, ctx.token)
   end
 
+  @tag spec: "SSEC-006"
   test "security regression: fabricated, mismatched, agent and expired proof cannot answer",
        ctx do
     uri = "arbor://approval/answer/#{ctx.agent_id}"
@@ -33,7 +34,7 @@ defmodule Arbor.Security.ApprovalAnswerSecurityRegressionTest do
     other = Fixture.human!()
     {:ok, wrong} = SessionToken.generate(other)
     {:ok, agent_token} = SessionToken.generate(ctx.agent_id)
-    {:ok, expired} = SessionToken.generate(ctx.human_id, ttl: -1)
+    expired = expired_session_token!(ctx.human_id)
 
     for token <- [nil, "", "forged", wrong, agent_token, expired, String.duplicate("x", 4097)] do
       assert {:error, :approval_answer_required} =
@@ -41,7 +42,7 @@ defmodule Arbor.Security.ApprovalAnswerSecurityRegressionTest do
     end
 
     assert :ok = Security.authorize_approval_answer(ctx.human_id, uri, ctx.token)
-    assert :ok = Security.suspend_identity(ctx.human_id, reason: "approval test")
+    assert :ok = Security.suspend_identity_fixture(ctx.human_id, reason: "approval test")
 
     assert {:error, :approval_answer_required} =
              Security.authorize_approval_answer(ctx.human_id, uri, ctx.token)
@@ -53,6 +54,25 @@ defmodule Arbor.Security.ApprovalAnswerSecurityRegressionTest do
 
     assert {:error, :approval_answer_required} =
              Security.authorize_approval_answer(ctx.human_id, uri, ctx.token)
+  end
+
+  defp expired_session_token!(principal) do
+    {:ok, token} = SessionToken.generate(principal)
+
+    {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+      Base.url_decode64(token, padding: false)
+
+    now = System.os_time(:second)
+
+    expired_bytes =
+      bytes
+      |> :erlang.binary_to_term([:safe])
+      |> Map.merge(%{iat: now - 120, exp: now - 60})
+      |> :erlang.term_to_binary()
+
+    secret = Application.fetch_env!(:arbor_security, :session_token_secret)
+    signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+    Base.url_encode64(signature <> expired_bytes, padding: false)
   end
 
   test "closed authority API accepts exact task constraints but no caller bypass options", ctx do

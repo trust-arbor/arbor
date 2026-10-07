@@ -80,7 +80,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest.Tracking
         _ -> []
       end
 
-    :ets.insert(@table, {:closes, [%{closer: __MODULE__} | list]})
+    :ets.insert(@table, {:closes, [%{closer: __MODULE__, authority: authority} | list]})
 
     case {:ets.lookup(@table, :authority), :ets.lookup(@table, :close_reply)} do
       {[{:authority, ^authority}], [{:close_reply, :ok}]} ->
@@ -302,11 +302,84 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest do
     refute inspected =~ "%Arbor.Contracts.Security.SigningAuthority"
   end
 
+  test "security regression: in-flight recovery authority ignores transferred custody substitution",
+       %{suffix: suffix} do
+    type = "g3b_private_custody_#{suffix}"
+    barrier = "recovery_private_custody_#{suffix}"
+    barrier_key = {__MODULE__.BlockingHandler, barrier}
+    :persistent_term.put(barrier_key, {self(), make_ref()})
+    on_exit(fn -> :persistent_term.erase(barrier_key) end)
+
+    :ok = Registry.register_fixture(type, __MODULE__.BlockingHandler)
+    TrackingCloser.set_mode(:open_ok)
+    {identity, authority} = real_recovery_authority("g3b-private-custody-#{suffix}")
+    TrackingCloser.set_authority(authority)
+    {coord, journal, local_node} = start_coord(suffix, "private_custody")
+
+    {logs, dot_path, graph_hash} =
+      prepare_engine_graph(suffix, "private_custody", blocking_dot(type, barrier))
+
+    run_id = "run_private_custody_#{suffix}"
+    seed_start_checkpoint!(logs, run_id, authority, graph_hash)
+
+    put_interrupted(journal, local_node, run_id, identity.agent_id,
+      logs_root: logs,
+      graph_hash: graph_hash,
+      dot_source_path: dot_path
+    )
+
+    send(coord, :discover_interrupted)
+    assert_receive {:recovery_private_custody_started, task_pid, gate_ref}, 5_000
+    assert RecoveryCoordinator.status(coord).recovering == 1
+
+    state = :sys.get_state(coord)
+    assert state.recovering == %{run_id => true}
+    refute inspect(state, limit: :infinity, printable_limit: :infinity) =~ "SigningAuthority"
+
+    {:ok, forged_authority} =
+      SigningAuthority.new(%{
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: "agent_forged_recovery",
+        purpose: :coding_task_recovery
+      })
+
+    forged_ref = make_ref()
+
+    forged_meta = %{
+      task_pid: task_pid,
+      run_id: "forged_recovery",
+      source: :current,
+      record: %Record{run_id: "forged_recovery", pipeline_id: "forged_recovery"},
+      settled?: false,
+      signing_authority: forged_authority,
+      security_module: TrackingCloser
+    }
+
+    forged = :ets.new(:forged_recovery_credentials, [:set, :private])
+
+    true =
+      :ets.insert(
+        forged,
+        {:recovery_authorities_v1, %{forged_ref => forged_meta}}
+      )
+
+    true = :ets.give_away(forged, coord, :forged_recovery_credentials)
+    wait_until(fn -> :ets.info(forged, :owner) == coord end)
+
+    :sys.replace_state(coord, &Map.put(&1, :credential_custody, forged))
+    send(task_pid, {:continue_recovery_private_custody, gate_ref})
+
+    wait_until(fn -> RecoveryCoordinator.status(coord).recovered == 1 end, 150)
+    assert [%{closer: TrackingCloser, authority: ^authority}] = TrackingCloser.closes()
+    assert RecoveryCoordinator.status(coord).recovering == 0
+    refute_forbidden_settlement(coord)
+  end
+
   test "authentic Engine handler exception/DOWN closes through the captured opener", %{
     suffix: suffix
   } do
     type = "g3b_boom_#{suffix}"
-    :ok = Registry.register(type, __MODULE__.BoomHandler)
+    :ok = Registry.register_fixture(type, __MODULE__.BoomHandler)
     TrackingCloser.set_mode(:open_ok)
     {identity, authority} = real_recovery_authority("g3b-accounting-boom-#{suffix}")
     TrackingCloser.set_authority(authority)
@@ -476,6 +549,27 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest do
     def execute(_node, _context, _graph, _opts), do: raise("g3b-recovery-boom")
   end
 
+  defmodule BlockingHandler do
+    @moduledoc false
+    @behaviour Arbor.Orchestrator.Handlers.Handler
+
+    @impl true
+    def idempotency, do: :pure
+
+    @impl true
+    def execute(node, _context, _graph, _opts) do
+      barrier = node.attrs["barrier"]
+      {test_pid, gate_ref} = :persistent_term.get({__MODULE__, barrier})
+      send(test_pid, {:recovery_private_custody_started, self(), gate_ref})
+
+      receive do
+        {:continue_recovery_private_custody, ^gate_ref} -> {:ok, %{"recovered" => true}}
+      after
+        5_000 -> {:error, :recovery_private_custody_timeout}
+      end
+    end
+  end
+
   defp prepare_engine_graph(suffix, label, source) do
     logs = Path.join(System.tmp_dir!(), "g3b_acct_#{label}_#{suffix}_engine")
     File.mkdir_p!(logs)
@@ -509,8 +603,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest do
 
   defp real_recovery_authority(name) do
     {:ok, identity} = Identity.generate(name: name)
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     {:ok, proof} =
       Security.build_signing_authority_acquisition_proof(
@@ -524,8 +618,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest do
 
     on_exit(fn ->
       _ = Security.close_signing_authority(authority)
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     {identity, authority}
@@ -548,6 +642,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorAuthorityAccountingTest do
       boom [type="#{type}"]
       done [shape=Msquare]
       start -> boom -> done
+    }
+    """
+  end
+
+  defp blocking_dot(type, barrier) do
+    """
+    digraph G3BPrivateCustody {
+      start [shape=Mdiamond]
+      hold [type="#{type}", barrier="#{barrier}"]
+      done [shape=Msquare]
+      start -> hold -> done
     }
     """
   end

@@ -85,6 +85,7 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Contracts.Security.{SigningAuthority, SigningAuthorityBootstrap}
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.SteeringMessage
@@ -100,6 +101,9 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
   alias Arbor.Orchestrator.Session.PrivateMemory
   alias Arbor.Orchestrator.Session.TurnEgress
+
+  @credential_anchor {__MODULE__, :credentials}
+  @credential_schema :session_credentials_v1
 
   # ── Contract module availability (runtime bridge) ──────────────────
   # Checked at runtime so the orchestrator works standalone without
@@ -157,8 +161,8 @@ defmodule Arbor.Orchestrator.Session do
     # Monotonic start time of the in-flight turn (native units), for the
     # [:arbor, :session, :turn] telemetry event emitted on completion.
     turn_started_at: nil,
-    # Legacy signer compatibility only. Production Lifecycle wiring stores the
-    # reload-stable authority below and leaves this nil.
+    # Compatibility projection only. Live credentials are held in exact,
+    # process-owned private custody and these fields remain nil.
     signer: nil,
     signing_authority: nil,
     # Progressive tool disclosure: tools discovered via find_tools during session
@@ -746,6 +750,7 @@ defmodule Arbor.Orchestrator.Session do
     trace_id = Keyword.get(opts, :trace_id)
     checkpoint = Keyword.get(opts, :checkpoint)
     legacy_signer = Keyword.get(opts, :signer)
+    signing_authority_bootstrap = Keyword.get(opts, :signing_authority_bootstrap)
     tenant_context = Keyword.get(opts, :tenant_context)
 
     # Initialize compactor if configured (runtime bridge — module lives in arbor_agent).
@@ -755,71 +760,70 @@ defmodule Arbor.Orchestrator.Session do
     compactor = Builders.init_compactor(requested_compactor_spec)
     compactor_spec = if is_nil(compactor), do: nil, else: requested_compactor_spec
 
-    with {:ok, signing_authority} <- claim_signing_authority(opts),
-         :ok <- reject_mixed_credentials(signing_authority, legacy_signer),
-         {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path) do
-      # Build contract structs if available (runtime bridge)
-      {session_config, session_state, behavior} =
-        Builders.build_contract_structs(
-          session_id: session_id,
-          agent_id: agent_id,
-          session_type: session_type,
-          trace_id: trace_id,
-          config: config,
-          behavior: Keyword.get(opts, :behavior)
-        )
+    case claim_signing_authority(opts) do
+      {:ok, signing_authority} ->
+        with :ok <- reject_mixed_credentials(signing_authority, legacy_signer),
+             :ok <-
+               open_credentials(%{
+                 signing_authority: signing_authority,
+                 signer: if(signing_authority, do: nil, else: legacy_signer),
+                 bootstrap: signing_authority_bootstrap
+               }),
+             {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path) do
+          # Build contract structs if available (runtime bridge)
+          {session_config, session_state, behavior} =
+            Builders.build_contract_structs(
+              session_id: session_id,
+              agent_id: agent_id,
+              session_type: session_type,
+              trace_id: trace_id,
+              config: config,
+              behavior: Keyword.get(opts, :behavior)
+            )
 
-      state = %__MODULE__{
-        session_id: session_id,
-        agent_id: agent_id,
-        turn_graph: turn_graph,
-        turn_dot_path: turn_dot_path,
-        compactor: compactor,
-        compactor_spec: compactor_spec,
-        adapters: adapters,
-        session_type: session_type,
-        execution_mode: execution_mode,
-        config: config,
-        seed_ref: seed_ref,
-        signal_topic: signal_topic,
-        trace_id: trace_id,
-        session_config: session_config,
-        session_state: session_state,
-        behavior: behavior,
-        signer: if(signing_authority, do: nil, else: legacy_signer),
-        signing_authority: signing_authority,
-        tenant_context: tenant_context,
-        pid: self()
-      }
+          state = %__MODULE__{
+            session_id: session_id,
+            agent_id: agent_id,
+            turn_graph: turn_graph,
+            turn_dot_path: turn_dot_path,
+            compactor: compactor,
+            compactor_spec: compactor_spec,
+            adapters: adapters,
+            session_type: session_type,
+            execution_mode: execution_mode,
+            config: config,
+            seed_ref: seed_ref,
+            signal_topic: signal_topic,
+            trace_id: trace_id,
+            session_config: session_config,
+            session_state: session_state,
+            behavior: behavior,
+            signer: nil,
+            signing_authority: nil,
+            tenant_context: tenant_context,
+            pid: self()
+          }
 
-      # Restore from checkpoint if provided (crash recovery)
-      state =
-        if checkpoint do
-          Builders.apply_checkpoint(state, checkpoint)
+          # Restore from checkpoint if provided (crash recovery)
+          state =
+            if checkpoint do
+              Builders.apply_checkpoint(state, checkpoint)
+            else
+              state
+            end
+
+          # Visibility never grants authority. Missing capabilities are requested
+          # one at a time through the signed Trust grant-owner path at execution.
+          safe_subscribe_profile_signals(agent_id)
+          {:ok, state}
         else
-          state
+          {:error, reason} ->
+            close_init_credentials(signing_authority, signing_authority_bootstrap)
+            {:stop, {:session_init_failed, reason}}
         end
 
-      # Grant security capabilities for the session's resolved tool set.
-      # Tool exposure is the floor plus HELD capabilities (ToolDisclosure); the
-      # agent still needs matching capabilities for Security.authorize to succeed.
-      alias Arbor.Orchestrator.Session.ToolDisclosure
-
-      resolved_tools =
-        ToolDisclosure.resolve_tools(
-          config,
-          Map.get(state, :discovered_tools, MapSet.new()),
-          agent_id: agent_id
-        )
-
-      ToolDisclosure.ensure_tool_capabilities(agent_id, resolved_tools)
-
-      # Subscribe to trust profile changes for reactive tool updates
-      safe_subscribe_profile_signals(agent_id)
-
-      {:ok, state}
-    else
-      {:error, reason} -> {:stop, {:session_init_failed, reason}}
+      {:error, reason} ->
+        {:stop, {:session_init_failed, reason}}
     end
   end
 
@@ -1183,7 +1187,7 @@ defmodule Arbor.Orchestrator.Session do
     session_pid = self()
     turn_graph = state.turn_graph
     notice_worker_ref = make_ref()
-    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(state.signing_authority)
+    notice_source = Arbor.Orchestrator.NativeNoticeWorker.open_source(signing_authority())
 
     # Load-bearing: deactivate fence BEFORE send so Session cannot observe an
     # active fence while handling the terminal result. The `after` block is an
@@ -1563,7 +1567,7 @@ defmodule Arbor.Orchestrator.Session do
         )
 
       # Revoke stale JIT-granted capabilities for this session
-      safe_revoke_session_capabilities(state.session_id)
+      safe_revoke_session_capabilities(state.session_id, signing_authority())
 
       Logger.debug(
         "Session #{state.session_id}: rebuilt tools after profile change (#{length(resolved_tools)} tools)"
@@ -1655,11 +1659,15 @@ defmodule Arbor.Orchestrator.Session do
 
   @impl true
   def terminate(_reason, state) do
-    PrivateMemory.close_all(state)
+    try do
+      PrivateMemory.close_all(state)
 
-    # Orderly shutdown: fence/kill/revoke any active authority-bearing turn.
-    if state.turn_in_flight do
-      _ = cleanup_turn_terminal(state, kill_task?: true)
+      # Orderly shutdown: fence/kill/revoke any active authority-bearing turn.
+      if state.turn_in_flight do
+        _ = cleanup_turn_terminal(state, kill_task?: true)
+      end
+    after
+      close_credentials()
     end
 
     :ok
@@ -1736,7 +1744,10 @@ defmodule Arbor.Orchestrator.Session do
     lifecycle_probe(:before_revoke, %{task_alive?: task_alive?(task_pid)})
 
     disclosure_revoked =
-      revoke_disclosure_observed(TurnEgress.disclosure_id_from_authority(state.turn_authority))
+      revoke_disclosure_observed(
+        TurnEgress.disclosure_id_from_authority(state.turn_authority),
+        signing_authority()
+      )
 
     lifecycle_probe(:revoked, %{task_alive?: task_alive?(task_pid)})
 
@@ -1757,15 +1768,17 @@ defmodule Arbor.Orchestrator.Session do
     _, _ -> :unconfirmed
   end
 
-  defp revoke_disclosure_observed(nil), do: :ok
+  defp revoke_disclosure_observed(nil, _actor_authority), do: :ok
 
-  defp revoke_disclosure_observed(id) do
-    Arbor.Security.revoke(id)
+  defp revoke_disclosure_observed(id, actor_authority) when not is_nil(actor_authority) do
+    Arbor.Security.revoke(id, actor_authority: actor_authority)
   rescue
     _ -> :unconfirmed
   catch
     _, _ -> :unconfirmed
   end
+
+  defp revoke_disclosure_observed(_id, _actor_authority), do: :unconfirmed
 
   defp task_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
   defp task_alive?(_), do: false
@@ -2570,9 +2583,8 @@ defmodule Arbor.Orchestrator.Session do
     if new_names == [] do
       state
     else
-      # Grant security capabilities for newly discovered tools
-      ToolDisclosure.ensure_tool_capabilities(state.agent_id, new_names)
-
+      # Discovery changes visibility only. The exact selected action must pass
+      # the same signed one-use JIT request as any other missing capability.
       merged = ToolDisclosure.merge_discovered(state.discovered_tools, new_names)
       %{state | discovered_tools: merged}
     end
@@ -3247,8 +3259,10 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp do_prepare_live_turn(user_message, turn_authority, turn_token, state) do
+    credential_state = credential_projection(state)
+
     pre_values =
-      state
+      credential_state
       |> Builders.build_turn_values(user_message.content)
       |> maybe_put_user_message_task_id(user_message)
 
@@ -3273,13 +3287,13 @@ defmodule Arbor.Orchestrator.Session do
       )
 
     with {:ok, %{route: route, provider_route_input: route_input}} <-
-           TurnEgress.resolve_frozen_route(state, state.turn_graph),
+           TurnEgress.resolve_frozen_route(credential_state, state.turn_graph),
          {:ok, frozen_tier} <-
            TurnEgress.admit_frozen_tier(Arbor.AI.egress_tier_for(route.provider)),
          fence = TurnEgress.new_fence(),
          {:ok, authority, cap_id} <-
            TurnEgress.issue_disclosure_if_needed(
-             state,
+             credential_state,
              turn_authority,
              route,
              frozen_tier
@@ -3289,7 +3303,8 @@ defmodule Arbor.Orchestrator.Session do
           prepared_cleanup = %{
             conversation_source: conversation_source,
             fence: fence,
-            cap_id: cap_id
+            cap_id: cap_id,
+            actor_authority: signing_authority()
           }
 
           try do
@@ -3306,7 +3321,7 @@ defmodule Arbor.Orchestrator.Session do
               })
 
             engine_opts =
-              state
+              credential_state
               |> Builders.build_engine_opts(final_values,
                 source: :turn,
                 steering_binding: {turn_token, user_message.engagement_id},
@@ -3335,6 +3350,7 @@ defmodule Arbor.Orchestrator.Session do
                authority: authority,
                fence: fence,
                cap_id: cap_id,
+               actor_authority: signing_authority(),
                turn_token: turn_token,
                engine_opts: engine_opts,
                conversation_source: conversation_source,
@@ -3353,7 +3369,12 @@ defmodule Arbor.Orchestrator.Session do
           end
 
         {:error, _} ->
-          cleanup_prepared_partial(%{fence: fence, cap_id: cap_id})
+          cleanup_prepared_partial(%{
+            fence: fence,
+            cap_id: cap_id,
+            actor_authority: signing_authority()
+          })
+
           {:error, :turn_preparation_refused}
       end
     else
@@ -3370,7 +3391,12 @@ defmodule Arbor.Orchestrator.Session do
   defp cleanup_prepared_partial(prepared) when is_map(prepared) do
     retire_conversation_source(Map.get(prepared, :conversation_source), :source_retired)
     TurnEgress.deactivate_fence(Map.get(prepared, :fence))
-    TurnEgress.safe_revoke_disclosure(Map.get(prepared, :cap_id))
+
+    TurnEgress.safe_revoke_disclosure(
+      Map.get(prepared, :cap_id),
+      Map.get(prepared, :actor_authority)
+    )
+
     :ok
   rescue
     _ -> :ok
@@ -3679,6 +3705,8 @@ defmodule Arbor.Orchestrator.Session do
         turn_task_pid: nil,
         turn_caller_ref: nil,
         turn_timeout_ref: nil,
+        signer: nil,
+        signing_authority: nil,
         turn_authority: nil,
         consultation: nil,
         private_memory_admissions: %{},
@@ -3790,9 +3818,108 @@ defmodule Arbor.Orchestrator.Session do
   defp authorize_orchestrator(state) do
     Arbor.Orchestrator.Authorization.check_orchestrator_access(
       state.agent_id,
-      state.signing_authority || state.signer
+      signing_credential()
     )
   end
+
+  defp open_credentials(credentials) do
+    Arbor.Common.open_process_private_state(
+      @credential_anchor,
+      @credential_schema,
+      credentials,
+      &valid_credentials?/1
+    )
+  end
+
+  defp credentials do
+    case Arbor.Common.fetch_process_private_state(
+           @credential_anchor,
+           @credential_schema,
+           &valid_credentials?/1
+         ) do
+      {:ok, credentials} ->
+        credentials
+
+      {:error, :invalid_private_state} ->
+        %{signing_authority: nil, signer: nil, bootstrap: nil}
+    end
+  end
+
+  defp signing_authority, do: Map.get(credentials(), :signing_authority)
+
+  defp signing_credential do
+    credentials = credentials()
+    Map.get(credentials, :signing_authority) || Map.get(credentials, :signer)
+  end
+
+  defp credential_projection(state) do
+    credentials = credentials()
+
+    %{
+      state
+      | signing_authority: Map.get(credentials, :signing_authority),
+        signer: Map.get(credentials, :signer)
+    }
+  end
+
+  defp valid_credentials?(
+         %{
+           signing_authority: authority,
+           signer: signer,
+           bootstrap: bootstrap
+         } = credentials
+       ) do
+    map_size(credentials) == 3 and
+      (is_nil(authority) or match?(%SigningAuthority{}, authority)) and
+      (is_nil(signer) or is_function(signer, 1)) and
+      (is_nil(bootstrap) or match?(%SigningAuthorityBootstrap{}, bootstrap)) and
+      (is_nil(authority) or is_nil(signer))
+  end
+
+  defp valid_credentials?(_), do: false
+
+  defp close_credentials do
+    case Arbor.Common.fetch_process_private_state(
+           @credential_anchor,
+           @credential_schema,
+           &valid_credentials?/1
+         ) do
+      {:ok, credentials} ->
+        close_authority(Map.get(credentials, :signing_authority))
+        close_bootstrap(Map.get(credentials, :bootstrap))
+
+      _ ->
+        :ok
+    end
+
+    Arbor.Common.close_process_private_state(@credential_anchor)
+  end
+
+  defp close_init_credentials(authority, bootstrap) do
+    close_authority(authority)
+    close_bootstrap(bootstrap)
+    Arbor.Common.close_process_private_state(@credential_anchor)
+  end
+
+  defp close_authority(%SigningAuthority{} = authority) do
+    Arbor.Security.close_signing_authority(authority)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_authority(_authority), do: :ok
+
+  defp close_bootstrap(%SigningAuthorityBootstrap{} = bootstrap) do
+    Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp close_bootstrap(_bootstrap), do: :ok
 
   @authority_claim_attempts 3
   @authority_claim_delay_ms 10
@@ -3912,13 +4039,16 @@ defmodule Arbor.Orchestrator.Session do
   # Revoke session-scoped capabilities (cleanup after profile change or
   # termination). arbor_security is a hard dep; the rescue/catch guards only
   # against the CapabilityStore process not being alive.
-  defp safe_revoke_session_capabilities(session_id) do
-    Arbor.Security.revoke_by_session(session_id)
+  defp safe_revoke_session_capabilities(session_id, actor_authority)
+       when not is_nil(actor_authority) do
+    Arbor.Security.revoke_by_session(session_id, actor_authority: actor_authority)
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
   end
+
+  defp safe_revoke_session_capabilities(_session_id, _actor_authority), do: :ok
 
   # Emit the [:arbor, :session, :turn] telemetry event on turn completion. Async turns
   # can't use :telemetry.span/3 (dispatch and result land in different callbacks), so we

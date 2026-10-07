@@ -457,14 +457,14 @@ defmodule Arbor.Commands.CodingG3C1DescriptorResourceRestartTest do
 
     {:ok, identity} = Identity.generate(name: "g3c1-desc-#{suffix}")
     {:ok, caller_identity} = Identity.generate(name: "g3c1-desc-control-#{suffix}")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.register_identity(Identity.public_only(caller_identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.register_identity_fixture(Identity.public_only(caller_identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
-      _ = Security.deregister_identity(caller_identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(caller_identity.agent_id)
     end)
 
     agent = identity.agent_id
@@ -487,8 +487,8 @@ defmodule Arbor.Commands.CodingG3C1DescriptorResourceRestartTest do
     grant_capability!(caller, "arbor://action/coding/workspace/release")
     grant_capability!(caller, "arbor://action/council/review_change")
 
-    on_exit(fn -> _ = Arbor.Security.CapabilityStore.revoke_all(agent) end)
-    on_exit(fn -> _ = Arbor.Security.CapabilityStore.revoke_all(caller) end)
+    on_exit(fn -> _ = Arbor.Security.revoke_all_fixture(agent) end)
+    on_exit(fn -> _ = Arbor.Security.revoke_all_fixture(caller) end)
 
     lease_context = %{task_id: task_id, agent_id: agent}
 
@@ -1041,7 +1041,7 @@ defmodule Arbor.Commands.CodingG3C1DescriptorResourceRestartTest do
         metadata: %{test: true}
       )
 
-    {:ok, :stored} = Arbor.Security.CapabilityStore.put(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     :ok
   end
 

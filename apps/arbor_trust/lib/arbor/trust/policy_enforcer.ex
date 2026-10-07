@@ -10,8 +10,8 @@ defmodule Arbor.Trust.PolicyEnforcer do
   points policy -> kernel.
   """
 
-  alias Arbor.Security.CapabilityStore
   alias Arbor.Trust.CapabilityProfileRegistry
+  alias Arbor.Trust.CapabilityGrantOwner
   alias Arbor.Trust.Config
 
   require Logger
@@ -32,7 +32,7 @@ defmodule Arbor.Trust.PolicyEnforcer do
   def ensure_capability(principal_id, resource_uri, opts \\ []) do
     with {:ok, resource_uri} <-
            Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts) do
-      case find_existing_capability(principal_id, resource_uri) do
+      case find_existing_capability(principal_id, resource_uri, opts) do
         {:ok, cap} -> {:ok, cap}
         {:error, :not_found} -> check(principal_id, resource_uri, opts)
         {:error, _reason} -> {:error, :unauthorized}
@@ -47,11 +47,38 @@ defmodule Arbor.Trust.PolicyEnforcer do
           {:ok, map()} | {:error, term()}
   def check(principal_id, resource_uri, opts \\ []) do
     if enabled?() do
+      with signed_request when not is_nil(signed_request) <-
+             Keyword.get(opts, :capability_grant_request),
+           {:ok, cap} <- CapabilityGrantOwner.request(signed_request, grant_owner()) do
+        if cap.principal_id == principal_id and cap.resource_uri == resource_uri do
+          {:ok, cap}
+        else
+          {:error, :unauthorized}
+        end
+      else
+        _ -> {:error, :unauthorized}
+      end
+    else
+      {:error, :unauthorized}
+    end
+  end
+
+  @doc false
+  @spec grant_spec(String.t(), String.t(), keyword()) ::
+          {:ok, %{profile: map(), mode: :ask | :allow | :auto, constraints: map()}}
+          | {:error, :unauthorized}
+  def grant_spec(principal_id, resource_uri, opts \\ []) do
+    if enabled?() do
       mode = get_effective_mode(principal_id, resource_uri, opts)
 
       case grant_decision(resource_uri, mode) do
         {:grant, profile, grant_mode} ->
-          auto_grant(principal_id, resource_uri, opts, profile, grant_mode)
+          {:ok,
+           %{
+             profile: profile,
+             mode: grant_mode,
+             constraints: profile.default_constraints
+           }}
 
         {:deny, reason} ->
           log_mint_denial(principal_id, resource_uri, mode, reason)
@@ -60,6 +87,10 @@ defmodule Arbor.Trust.PolicyEnforcer do
     else
       {:error, :unauthorized}
     end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    :exit, _ -> {:error, :unauthorized}
   end
 
   @doc """
@@ -89,11 +120,15 @@ defmodule Arbor.Trust.PolicyEnforcer do
 
   @doc """
   Audit and re-sync trust-minted capabilities after a profile change.
+
+  Requires a caller-owned Security signing authority in `:actor_authority`.
   """
-  @spec sync_capabilities(String.t()) :: :ok
-  def sync_capabilities(principal_id) do
+  @spec sync_capabilities(String.t(), keyword()) :: :ok | {:error, term()}
+  def sync_capabilities(principal_id, opts \\ []) do
     if enabled?() do
-      do_sync_capabilities(principal_id)
+      with {:ok, actor_authority} <- fetch_actor_authority(opts) do
+        do_sync_capabilities(principal_id, actor_authority)
+      end
     else
       :ok
     end
@@ -103,12 +138,14 @@ defmodule Arbor.Trust.PolicyEnforcer do
   @spec enabled?() :: boolean()
   def enabled?, do: Config.policy_enforcer_enabled?()
 
-  defp find_existing_capability(principal_id, resource_uri) do
-    if Code.ensure_loaded?(CapabilityStore) and
-         function_exported?(CapabilityStore, :find_authorizing, 2) do
-      CapabilityStore.find_authorizing(principal_id, resource_uri)
-    else
-      {:error, :store_unavailable}
+  defp find_existing_capability(principal_id, resource_uri, opts) do
+    with {:ok, capabilities} <- Arbor.Security.list_capabilities(principal_id) do
+      case Enum.find(capabilities, fn capability ->
+             Arbor.Security.capability_authorizes?(capability, resource_uri, opts)
+           end) do
+        nil -> {:error, :not_found}
+        capability -> {:ok, capability}
+      end
     end
   rescue
     _ -> {:error, :store_unavailable}
@@ -116,115 +153,75 @@ defmodule Arbor.Trust.PolicyEnforcer do
     :exit, _ -> {:error, :store_unavailable}
   end
 
-  defp do_sync_capabilities(principal_id) do
-    with true <- Code.ensure_loaded?(CapabilityStore),
-         {:ok, caps} <- CapabilityStore.list_for_principal(principal_id) do
-      revoked =
+  defp do_sync_capabilities(principal_id, actor_authority) do
+    with {:ok, caps} <- Arbor.Security.list_capabilities(principal_id) do
+      stale_caps =
         caps
         |> Enum.filter(&trust_minted?/1)
-        |> Enum.count(fn cap ->
+        |> Enum.filter(fn cap ->
           current_mode = get_effective_mode(principal_id, cap.resource_uri, [])
           minted_mode = minted_mode(cap)
           requires_approval? = approval_required?(cap)
 
-          stale? =
-            cond do
-              current_mode == :block -> true
-              minted_mode == :ask -> current_mode != :ask
-              minted_mode in [:auto, :allow] -> current_mode not in [:auto, :allow]
-              is_nil(minted_mode) and requires_approval? -> current_mode in [:auto, :allow]
-              is_nil(minted_mode) and not requires_approval? -> current_mode == :ask
-              true -> false
-            end
-
-          if stale? do
-            Arbor.Security.revoke(cap.id)
-            true
-          else
-            false
+          cond do
+            current_mode == :block -> true
+            minted_mode == :ask -> current_mode != :ask
+            minted_mode in [:auto, :allow] -> current_mode not in [:auto, :allow]
+            is_nil(minted_mode) and requires_approval? -> current_mode in [:auto, :allow]
+            is_nil(minted_mode) and not requires_approval? -> current_mode == :ask
+            true -> false
           end
         end)
 
-      if revoked > 0 do
-        Logger.info(
-          "[Trust.PolicyEnforcer] Synced #{revoked} stale capabilities for #{principal_id}",
-          principal_id: principal_id,
-          revoked: revoked
-        )
-      end
-
-      :ok
+      revoke_stale_capabilities(stale_caps, principal_id, actor_authority)
     else
-      _ -> :ok
+      {:error, reason} -> {:error, {:capability_list_failed, reason}}
     end
   rescue
     e ->
       Logger.warning("[Trust.PolicyEnforcer] sync_capabilities crashed: #{inspect(e)}")
-      :ok
+      {:error, :capability_sync_failed}
   catch
-    :exit, _ -> :ok
+    :exit, reason -> {:error, {:capability_sync_exit, reason}}
   end
 
-  defp auto_grant(principal_id, resource_uri, opts, profile, mode) do
-    constraints = profile.default_constraints
-
-    grant_opts = [
-      principal: principal_id,
-      resource: resource_uri,
-      constraints: constraints,
-      metadata: %{
-        source: @source,
-        legacy_source: @legacy_source,
-        mode: mode,
-        granted_by: __MODULE__,
-        granted_at: DateTime.utc_now(),
-        profile_uri: profile.uri_prefix,
-        profile_effect_class: profile.effect_class,
-        profile_blast_radius: profile.blast_radius,
-        profile_reversibility: profile.reversibility,
-        profile_default_approval: profile.default_approval
-      }
-    ]
-
-    grant_opts =
-      case Keyword.get(opts, :session_id) do
-        nil -> grant_opts
-        session_id -> Keyword.put(grant_opts, :session_id, session_id)
+  defp revoke_stale_capabilities(stale_caps, principal_id, actor_authority) do
+    stale_caps
+    |> Enum.reduce_while({:ok, 0}, fn cap, {:ok, revoked} ->
+      case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
+        :ok -> {:cont, {:ok, revoked + 1}}
+        {:error, reason} -> {:halt, {:error, {:capability_revocation_failed, cap.id, reason}}}
+        other -> {:halt, {:error, {:capability_revocation_failed, cap.id, other}}}
       end
+    end)
+    |> case do
+      {:ok, revoked} ->
+        if revoked > 0 do
+          Logger.info(
+            "[Trust.PolicyEnforcer] Synced #{revoked} stale capabilities for #{principal_id}",
+            principal_id: principal_id,
+            revoked: revoked
+          )
+        end
 
-    case Arbor.Security.grant(grant_opts) do
-      {:ok, cap} ->
-        Logger.debug(
-          "[Trust.PolicyEnforcer] minted #{resource_uri} for #{principal_id}",
-          principal_id: principal_id,
-          resource_uri: resource_uri,
-          mode: mode
-        )
+        :ok
 
-        safe_emit_signal(:policy_enforcer_grant, %{
-          principal_id: principal_id,
-          resource_uri: resource_uri,
-          constraints: constraints,
-          mode: mode,
-          source: @source
-        })
-
-        {:ok, cap}
-
-      {:error, reason} ->
-        Logger.debug(
-          "[Trust.PolicyEnforcer] grant failed for #{resource_uri}: #{inspect(reason)}",
-          principal_id: principal_id,
-          resource_uri: resource_uri,
-          reason: reason
-        )
-
-        {:error, :unauthorized}
+      {:error, _reason} = error ->
+        error
     end
-  rescue
-    e ->
-      Logger.warning("[Trust.PolicyEnforcer] grant crashed: #{inspect(e)}")
-      {:error, :unauthorized}
+  end
+
+  defp fetch_actor_authority(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :actor_authority) do
+      {:ok, authority} when not is_nil(authority) -> {:ok, authority}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp fetch_actor_authority(_opts), do: {:error, :capability_mutation_unauthorized}
+
+  defp grant_owner do
+    Application.get_env(:arbor_trust, :capability_grant_owner, CapabilityGrantOwner)
   end
 
   defp get_effective_mode(principal_id, resource_uri, opts) do
@@ -309,13 +306,5 @@ defmodule Arbor.Trust.PolicyEnforcer do
   defp approval_required?(cap) do
     cap.constraints[:requires_approval] == true or
       cap.constraints["requires_approval"] == true
-  end
-
-  defp safe_emit_signal(type, data) do
-    Arbor.Signals.emit(:security, type, data)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 end

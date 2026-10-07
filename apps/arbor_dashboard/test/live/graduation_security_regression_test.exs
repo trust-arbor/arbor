@@ -166,7 +166,7 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     observe!(ctx)
     {:ok, view, _} = live(authenticated_conn(ctx), "/agents")
     render_click(view, "select-agent", %{"id" => ctx.agent_id})
-    assert :ok = Security.revoke(ctx.promotion_cap.id)
+    assert :ok = Security.revoke_fixture(ctx.promotion_cap.id)
     html = view |> element("[phx-click='graduation:accept']") |> render_click()
     assert html =~ "unavailable without a current authenticated human session"
     assert has_element?(view, "[phx-click='graduation:accept']")

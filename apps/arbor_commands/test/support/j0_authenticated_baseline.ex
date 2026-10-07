@@ -519,7 +519,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
           stop_case_agent(Map.get(state, :control))
         after
           Enum.each(List.wrap(Map.get(state, :grants)), fn cap ->
-            _ = Arbor.Security.revoke(cap.id)
+            _ = Arbor.Security.revoke_fixture(cap.id)
           end)
         end
       end
@@ -568,7 +568,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
   defp stop_case_agent(%{agent_id: agent_id}) do
     stop_live_session(agent_id)
     _ = Arbor.Memory.cleanup_for_agent(agent_id)
-    _ = Arbor.Security.deregister_identity(agent_id)
+    _ = Arbor.Security.deregister_identity_fixture(agent_id)
     :ok
   end
 

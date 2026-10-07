@@ -1,16 +1,17 @@
 defmodule Arbor.Security.Store.JSONFile do
   @moduledoc """
-  JSON file-backed storage backend with local-node durable CAS.
+  JSON file-backed storage backend with connected-cluster durable CAS.
 
   Implements `Arbor.Contracts.Persistence.Store` for structured
   `%Arbor.Contracts.Persistence.Record{}` values only.
 
   ## Durability class
 
-  Returns `:node_restart`: live records and generation tombstones survive a full
+  Returns `:node_restart`: authenticated live records and generation tombstones survive a full
   local BEAM node restart when the configured directory remains on durable local
   disk. All get/list paths that can migrate and all mutating paths share one
-  backend-owned lock per `(canonical_real_base, namespace)` on **this node only**.
+  backend-owned lock per `(canonical_real_base, namespace)` across every
+  currently connected visible or hidden Erlang node.
 
   Publication writes an exclusive same-directory temporary file (mode `0600`
   before content), file-syncs, then atomically renames onto the target.
@@ -23,10 +24,15 @@ defmodule Arbor.Security.Store.JSONFile do
 
   ## Non-claims
 
-  - No cross-node, partition-safe, or hostile multi-user filesystem linearizability.
+  - No partition-safe or hostile multi-user filesystem linearizability. Nodes
+    that cannot see each other must not write the same local filesystem root.
   - No host power-loss durability when directory sync is unavailable.
-  - No fencing for unmigrated legacy files until the first successful Revision
-    transition and version-2 publication.
+  - Version-1 and unauthenticated version-2 records require an explicit offline
+    migration. They are never admitted or rewritten during normal startup.
+  - The independent revocation ledger plus its initialization marker detects
+    stale authority records and ledger-only loss. It cannot detect an attacker
+    rolling back or deleting both independent files together; same-UID storage
+    compromise remains outside this durability boundary.
   - Inventory bounds apply to logical records before hydration or migration;
     `File.ls/1` still materializes directory names and does not bound same-UID
     filesystem resource consumption.
@@ -57,6 +63,8 @@ defmodule Arbor.Security.Store.JSONFile do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Persistence.Revision
+  alias Arbor.Security.Store.RecordAuthenticator
+  alias Arbor.Security.Store.RevocationLedger
 
   @default_base_dir ".arbor/security"
   @max_key_bytes 512
@@ -67,6 +75,8 @@ defmodule Arbor.Security.Store.JSONFile do
   # Exact staging name from create_temp_path/1 only.
   @temp_name_re ~r/^\.[0-9a-f]{64}\.[0-9]+\.[0-9a-f]{8}\.tmp$/
   @known_unsupported_dir_sync ~w(eisdir enotsup einval enotty eopnotsupp)a
+  @authenticated_version 3
+  @unauthenticated_version 2
 
   # ---------------------------------------------------------------------------
   # Store callbacks
@@ -142,7 +152,7 @@ defmodule Arbor.Security.Store.JSONFile do
     # Validate limit before any base creation / namespace resolution.
     with {:ok, limit} <- Revision.authoritative_list_limit(opts),
          {:ok, ctx} <- namespace_context(opts) do
-      with_ns_lock(ctx, fn -> inventory_list(ctx, limit) end)
+      with_ns_lock(ctx, fn operation_ctx -> inventory_list(operation_ctx, limit) end)
     end
   end
 
@@ -151,7 +161,7 @@ defmodule Arbor.Security.Store.JSONFile do
 
   def bounded_list(limit, opts) when is_integer(limit) and limit > 0 and is_list(opts) do
     with {:ok, ctx} <- namespace_context(opts) do
-      with_ns_lock(ctx, fn -> inventory_list(ctx, limit) end)
+      with_ns_lock(ctx, fn operation_ctx -> inventory_list(operation_ctx, limit) end)
     end
   end
 
@@ -257,9 +267,20 @@ defmodule Arbor.Security.Store.JSONFile do
   end
 
   defp publish_tombstone(ctx, tombstone) do
-    with :ok <- publish_entry(ctx, tombstone) do
-      _ = retire_legacy(ctx)
-      :ok
+    with :ok <- record_revocation(ctx, tombstone) do
+      case publish_entry(ctx, tombstone) do
+        :ok ->
+          _ = retire_legacy(ctx)
+          :ok
+
+        {:error, reason} = error ->
+          if capability_namespace?(ctx) do
+            RevocationLedger.physical_tombstone_failed(reason)
+            :ok
+          else
+            error
+          end
+      end
     end
   end
 
@@ -306,15 +327,40 @@ defmodule Arbor.Security.Store.JSONFile do
   end
 
   defp publish_live(ctx, %Record{} = stored) do
-    case publish_entry(ctx, stored) do
-      :ok ->
-        _ = retire_legacy(ctx)
-        :ok
+    with :ok <- ensure_revocation_ledger(ctx) do
+      case publish_entry(ctx, stored) do
+        :ok ->
+          _ = retire_legacy(ctx)
+          :ok
 
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
     end
   end
+
+  defp ensure_revocation_ledger(ctx) do
+    case Map.get(ctx, :revocation_snapshot, :not_applicable) do
+      :not_applicable -> :ok
+      snapshot -> RevocationLedger.ensure_initialized_locked(snapshot, ctx.security_opts)
+    end
+  end
+
+  defp record_revocation(ctx, {:tombstone, generation}) do
+    if capability_namespace?(ctx) do
+      RevocationLedger.record_locked(
+        ctx.revocation_snapshot,
+        ctx.key,
+        generation,
+        ctx.security_opts
+      )
+    else
+      :ok
+    end
+  end
+
+  defp capability_namespace?(%{namespace: "capabilities"}), do: true
+  defp capability_namespace?(_ctx), do: false
 
   # ---------------------------------------------------------------------------
   # Context, lock, identity
@@ -322,17 +368,34 @@ defmodule Arbor.Security.Store.JSONFile do
 
   defp with_context(key, opts, fun) do
     with {:ok, ctx} <- key_context(key, opts) do
-      with_ns_lock(ctx, fn -> fun.(ctx) end)
+      with_ns_lock(ctx, fun)
     end
   end
 
   defp with_ns_lock(ctx, fun) do
     resource = {__MODULE__, :namespace_lock, ctx.real_base, ctx.ns_digest}
     id = {resource, self()}
+    nodes = [node() | Node.list(:connected)] |> Enum.uniq() |> Enum.sort()
 
-    case :global.trans(id, fun, [node()], @lock_retries) do
+    # Keep this lock order stable: namespace first, shared ledger second. The
+    # ledger lease spans snapshot admission, the authority operation, and any
+    # ledger publication so separate authority roots cannot lose updates when
+    # they intentionally share one ledger.
+    operation = fn -> with_revocation_snapshot(ctx, fun) end
+
+    case :global.trans(id, operation, nodes, @lock_retries) do
       :aborted -> {:error, :lock_aborted}
       other -> other
+    end
+  end
+
+  defp with_revocation_snapshot(ctx, fun) do
+    if capability_namespace?(ctx) do
+      RevocationLedger.with_snapshot(ctx.real_base, ctx.security_opts, fn snapshot ->
+        fun.(Map.put(ctx, :revocation_snapshot, snapshot))
+      end)
+    else
+      fun.(ctx)
     end
   end
 
@@ -356,6 +419,7 @@ defmodule Arbor.Security.Store.JSONFile do
            key_digest: key_digest,
            ns_dir: ns_dir,
            v2_path: v2_path,
+           security_opts: security_opts(opts),
            legacy_path: legacy_path(real_base, namespace, key),
            legacy_dir: legacy_dir(real_base, namespace)
          }}
@@ -379,6 +443,7 @@ defmodule Arbor.Security.Store.JSONFile do
            key_digest: nil,
            ns_dir: ns_dir,
            v2_path: nil,
+           security_opts: security_opts(opts),
            legacy_path: nil,
            legacy_dir: legacy_dir(real_base, namespace)
          }}
@@ -392,6 +457,15 @@ defmodule Arbor.Security.Store.JSONFile do
       name when is_atom(name) -> validate_namespace(Atom.to_string(name))
       name -> validate_namespace(name)
     end
+  end
+
+  defp security_opts(opts) do
+    Keyword.take(opts, [
+      :record_auth_key,
+      :record_authentication_token,
+      :security_supervisor_pid,
+      :revocation_ledger_path
+    ])
   end
 
   defp validate_key(key) when is_binary(key) do
@@ -537,21 +611,19 @@ defmodule Arbor.Security.Store.JSONFile do
   # Load / migrate
   # ---------------------------------------------------------------------------
 
-  defp load_entry(ctx, opts) do
-    migrate? = Keyword.get(opts, :migrate?, true)
-
+  defp load_entry(ctx, _opts) do
     case open_managed_regular_file(ctx.real_base, ctx.ns_dir, ctx.v2_path) do
       {:ok, real_file} ->
-        read_v2_file(real_file, ctx.namespace, ctx.key, ctx.key_digest)
+        read_authenticated_file(real_file, ctx)
 
       {:error, :enoent} ->
         # Distinguish missing parent/file from parent being a forbidden type.
         case lstat_managed_dir(ctx.ns_dir) do
           {:ok, :directory} ->
-            load_legacy_or_absent(ctx, migrate?)
+            load_legacy_or_absent(ctx)
 
           {:error, :enoent} ->
-            load_legacy_or_absent(ctx, migrate?)
+            load_legacy_or_absent(ctx)
 
           {:error, reason} ->
             {:error, reason}
@@ -562,20 +634,64 @@ defmodule Arbor.Security.Store.JSONFile do
     end
   end
 
-  defp load_legacy_or_absent(ctx, migrate?) do
+  defp load_legacy_or_absent(ctx) do
     case read_legacy_raw(ctx) do
-      {:ok, recovered} ->
-        if migrate? do
-          migrate_legacy(ctx, recovered)
-        else
-          {:ok, {:legacy_raw, recovered}}
-        end
+      {:ok, _recovered} ->
+        {:error, :offline_migration_required}
 
       {:error, :not_found} ->
-        {:ok, :absent}
+        revocation_fence_for_absent(ctx)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp revocation_fence_for_absent(ctx) do
+    case Map.get(ctx, :revocation_snapshot, :not_applicable) do
+      :not_applicable ->
+        {:ok, :absent}
+
+      snapshot ->
+        if RevocationLedger.missing?(snapshot) do
+          {:ok, :absent}
+        else
+          case RevocationLedger.generation(snapshot, ctx.key) do
+            0 -> {:ok, :absent}
+            generation -> {:ok, {:tombstone, generation}}
+          end
+        end
+    end
+  end
+
+  defp revocation_generation(ctx) do
+    case Map.get(ctx, :revocation_snapshot, :not_applicable) do
+      :not_applicable ->
+        {:ok, 0}
+
+      snapshot ->
+        if RevocationLedger.missing?(snapshot),
+          do: {:error, :revocation_ledger_missing},
+          else: {:ok, RevocationLedger.generation(snapshot, ctx.key)}
+    end
+  end
+
+  defp apply_revocation_fence(ctx, entry) do
+    if capability_namespace?(ctx) do
+      with {:ok, revoked_generation} <- revocation_generation(ctx) do
+        case entry do
+          %Record{generation: generation} when generation <= revoked_generation ->
+            {:ok, {:tombstone, revoked_generation}}
+
+          {:tombstone, generation} ->
+            {:ok, {:tombstone, max(generation, revoked_generation)}}
+
+          %Record{} = record ->
+            {:ok, record}
+        end
+      end
+    else
+      {:ok, entry}
     end
   end
 
@@ -636,19 +752,6 @@ defmodule Arbor.Security.Store.JSONFile do
 
       {:error, _} ->
         {:error, :malformed_legacy}
-    end
-  end
-
-  defp migrate_legacy(ctx, recovered) do
-    case Revision.apply_put(:absent, recovered) do
-      {:ok, fenced} ->
-        case publish_live(ctx, fenced) do
-          :ok -> {:ok, fenced}
-          {:error, _} = err -> err
-        end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -765,12 +868,13 @@ defmodule Arbor.Security.Store.JSONFile do
   # Envelope encode / decode
   # ---------------------------------------------------------------------------
 
-  defp read_v2_file(path, expected_ns, expected_key, expected_digest) do
+  defp read_authenticated_file(path, ctx) do
     with {:ok, json} <- File.read(path),
          {:ok, decoded} <- Jason.decode(json),
-         {:ok, entry} <- decode_v2(decoded, expected_ns, expected_key),
-         :ok <- verify_digest_filename(expected_key, expected_digest) do
-      {:ok, entry}
+         {:ok, entry} <- decode_envelope(decoded, ctx.namespace, ctx.key, ctx.security_opts),
+         :ok <- verify_digest_filename(ctx.key, ctx.key_digest),
+         {:ok, fenced_entry} <- apply_revocation_fence(ctx, entry) do
+      {:ok, fenced_entry}
     else
       {:error, :enoent} -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -787,29 +891,49 @@ defmodule Arbor.Security.Store.JSONFile do
     end
   end
 
-  defp decode_v2(map, expected_ns, expected_key) when is_map(map) do
-    with :ok <- require_keys(map, ["version", "namespace", "key", "entry"]),
-         :ok <- match_version(map["version"]),
+  defp decode_envelope(
+         %{"version" => @authenticated_version, "authentication" => auth} = map,
+         expected_ns,
+         expected_key,
+         security_opts
+       ) do
+    projection = Map.delete(map, "authentication")
+
+    with :ok <-
+           require_exact_keys(map, ["version", "namespace", "key", "entry", "authentication"]),
          :ok <- match_namespace(map["namespace"], expected_ns),
-         :ok <- match_key(map["key"], expected_key) do
+         :ok <- match_key(map["key"], expected_key),
+         :ok <- RecordAuthenticator.verify(projection, auth, :authority_record, security_opts) do
       decode_entry(map["entry"], expected_key)
     end
   end
 
-  defp decode_v2(_, _, _), do: {:error, :malformed_envelope}
+  defp decode_envelope(
+         %{"version" => @unauthenticated_version} = map,
+         expected_ns,
+         expected_key,
+         _security_opts
+       ) do
+    with :ok <- require_exact_keys(map, ["version", "namespace", "key", "entry"]),
+         :ok <- match_namespace(map["namespace"], expected_ns),
+         :ok <- match_key(map["key"], expected_key),
+         {:ok, _entry} <- decode_entry(map["entry"], expected_key) do
+      {:error, :offline_migration_required}
+    end
+  end
 
-  defp require_keys(map, keys) when is_map(map) do
-    if Enum.all?(keys, &Map.has_key?(map, &1)) do
+  defp decode_envelope(_map, _expected_ns, _expected_key, _security_opts),
+    do: {:error, :malformed_envelope}
+
+  defp require_exact_keys(map, keys) when is_map(map) do
+    if MapSet.new(Map.keys(map)) == MapSet.new(keys) do
       :ok
     else
       {:error, :malformed_envelope}
     end
   end
 
-  defp require_keys(_value, _keys), do: {:error, :malformed_envelope}
-
-  defp match_version(2), do: :ok
-  defp match_version(_), do: {:error, :malformed_envelope}
+  defp require_exact_keys(_value, _keys), do: {:error, :malformed_envelope}
 
   defp match_namespace(ns, expected) when ns == expected, do: :ok
   defp match_namespace(_, _), do: {:error, :identity_mismatch}
@@ -866,7 +990,7 @@ defmodule Arbor.Security.Store.JSONFile do
 
   defp decode_entry(_, _), do: {:error, :malformed_envelope}
 
-  # Only inserted_at may be null on live v2 records.
+  # Only inserted_at may be null on live records.
   defp decode_nullable_timestamp(nil), do: {:ok, nil}
 
   defp decode_nullable_timestamp(value) when is_binary(value) do
@@ -889,38 +1013,44 @@ defmodule Arbor.Security.Store.JSONFile do
 
   defp encode_envelope(ctx, %Record{} = record) do
     with {:ok, inserted_at} <- encode_timestamp(record.inserted_at),
-         {:ok, updated_at} <- encode_timestamp(record.updated_at) do
-      {:ok,
-       %{
-         "version" => 2,
-         "namespace" => ctx.namespace,
-         "key" => ctx.key,
-         "entry" => %{
-           "kind" => "record",
-           "id" => record.id,
-           "key" => record.key,
-           "generation" => record.generation,
-           "revision" => record.revision,
-           "inserted_at" => inserted_at,
-           "updated_at" => updated_at,
-           "data" => record.data,
-           "metadata" => record.metadata
-         }
-       }}
+         {:ok, updated_at} <- encode_timestamp(record.updated_at),
+         projection <- %{
+           "version" => @authenticated_version,
+           "namespace" => ctx.namespace,
+           "key" => ctx.key,
+           "entry" => %{
+             "kind" => "record",
+             "id" => record.id,
+             "key" => record.key,
+             "generation" => record.generation,
+             "revision" => record.revision,
+             "inserted_at" => inserted_at,
+             "updated_at" => updated_at,
+             "data" => record.data,
+             "metadata" => record.metadata
+           }
+         },
+         {:ok, authentication} <-
+           RecordAuthenticator.seal(projection, :authority_record, ctx.security_opts) do
+      {:ok, Map.put(projection, "authentication", authentication)}
     end
   end
 
   defp encode_envelope(ctx, {:tombstone, gen}) when is_integer(gen) and gen >= 1 do
-    {:ok,
-     %{
-       "version" => 2,
-       "namespace" => ctx.namespace,
-       "key" => ctx.key,
-       "entry" => %{
-         "kind" => "tombstone",
-         "generation" => gen
-       }
-     }}
+    projection = %{
+      "version" => @authenticated_version,
+      "namespace" => ctx.namespace,
+      "key" => ctx.key,
+      "entry" => %{
+        "kind" => "tombstone",
+        "generation" => gen
+      }
+    }
+
+    with {:ok, authentication} <-
+           RecordAuthenticator.seal(projection, :authority_record, ctx.security_opts) do
+      {:ok, Map.put(projection, "authentication", authentication)}
+    end
   end
 
   defp encode_timestamp(nil), do: {:ok, nil}
@@ -1143,19 +1273,19 @@ defmodule Arbor.Security.Store.JSONFile do
   # ---------------------------------------------------------------------------
 
   defp inventory_list(ctx, limit) do
-    with {:ok, v2_entries} <- collect_v2_entries(ctx),
-         {:ok, legacy_entries} <- collect_legacy_entries(ctx, v2_entries) do
+    with {:ok, v2_entries} <- collect_v2_entries(ctx, limit),
+         {:ok, legacy_entries} <- collect_legacy_entries(ctx, v2_entries, limit) do
       merged = Map.merge(legacy_entries, v2_entries)
       count = map_size(merged)
 
       if is_integer(limit) and count > limit do
-        # Fail before any migration side effects.
+        # Fail before inspecting whether legacy records need offline migration.
         {:error, :inventory_limit_exceeded}
       else
-        with :ok <- migrate_legacy_entries(ctx, merged) do
+        with :ok <- reject_legacy_entries(merged) do
           live_keys =
             merged
-            |> Enum.filter(fn {_k, class} -> class in [:live, :legacy_live] end)
+            |> Enum.filter(fn {_k, class} -> class == :live end)
             |> Enum.map(fn {k, _} -> k end)
 
           {:ok, live_keys}
@@ -1164,7 +1294,7 @@ defmodule Arbor.Security.Store.JSONFile do
     end
   end
 
-  defp collect_v2_entries(ctx) do
+  defp collect_v2_entries(ctx, limit) do
     case lstat_managed_dir(ctx.ns_dir) do
       {:error, :enoent} ->
         {:ok, %{}}
@@ -1173,16 +1303,34 @@ defmodule Arbor.Security.Store.JSONFile do
         {:error, reason}
 
       {:ok, :directory} ->
-        collect_v2_names(ctx)
+        collect_v2_names(ctx, limit)
     end
   end
 
-  defp collect_v2_names(ctx) do
+  defp collect_v2_names(ctx, limit) do
     with {:ok, names} <- File.ls(ctx.ns_dir) do
-      Enum.reduce_while(names, {:ok, %{}}, fn name, {:ok, acc} ->
-        reduce_v2_name(ctx, name, acc)
-      end)
+      if bounded_v2_name_count(names, limit) > limit do
+        {:error, :inventory_limit_exceeded}
+      else
+        Enum.reduce_while(names, {:ok, %{}}, fn name, {:ok, acc} ->
+          reduce_v2_name(ctx, name, acc)
+        end)
+      end
     end
+  end
+
+  defp bounded_v2_name_count(names, limit) do
+    Enum.reduce_while(names, 0, fn name, count ->
+      next = if v2_record_name?(name), do: count + 1, else: count
+      if next > limit, do: {:halt, next}, else: {:cont, next}
+    end)
+  end
+
+  defp v2_record_name?(name) do
+    String.ends_with?(name, ".json") and
+      name
+      |> String.trim_trailing(".json")
+      |> then(&Regex.match?(@digest_hex_re, &1))
   end
 
   defp reduce_v2_name(ctx, name, acc) do
@@ -1191,9 +1339,18 @@ defmodule Arbor.Security.Store.JSONFile do
         {:cont, {:ok, acc}}
 
       String.ends_with?(name, ".json") ->
-        case ingest_v2_name(ctx, name) do
-          {:ok, key, class} -> {:cont, {:ok, Map.put(acc, key, class)}}
-          {:error, reason} -> {:halt, {:error, reason}}
+        stem = String.trim_trailing(name, ".json")
+
+        if Regex.match?(@digest_hex_re, stem) do
+          case ingest_v2_name(ctx, name) do
+            {:ok, key, class} -> {:cont, {:ok, Map.put(acc, key, class)}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        else
+          case quarantine_foreign_json(ctx, name) do
+            :ok -> {:cont, {:ok, acc}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
         end
 
       true ->
@@ -1206,18 +1363,16 @@ defmodule Arbor.Security.Store.JSONFile do
     stem = String.trim_trailing(name, ".json")
 
     with {:ok, real_file} <- open_managed_regular_file(ctx.real_base, ctx.ns_dir, path),
-         true <- Regex.match?(@digest_hex_re, stem) || {:error, :identity_mismatch},
          {:ok, json} <- File.read(real_file),
          {:ok, decoded} <- Jason.decode(json),
-         :ok <- require_keys(decoded, ["version", "namespace", "key", "entry"]),
-         :ok <- match_version(decoded["version"]),
-         :ok <- match_namespace(decoded["namespace"], ctx.namespace),
-         key when is_binary(key) <- decoded["key"] || {:error, :malformed_envelope},
+         true <- is_map(decoded) || {:error, :malformed_envelope},
+         key when is_binary(key) <- Map.get(decoded, "key") || {:error, :malformed_envelope},
          {:ok, key} <- validate_key(key),
          :ok <- verify_digest_filename(key, stem),
-         {:ok, entry} <- decode_entry(decoded["entry"], key) do
+         {:ok, entry} <- decode_envelope(decoded, ctx.namespace, key, ctx.security_opts),
+         {:ok, fenced_entry} <- apply_revocation_fence(%{ctx | key: key}, entry) do
       class =
-        case entry do
+        case fenced_entry do
           %Record{} -> :live
           {:tombstone, _} -> :tombstone
         end
@@ -1226,14 +1381,66 @@ defmodule Arbor.Security.Store.JSONFile do
     else
       {:error, :enoent} -> {:error, :malformed_envelope}
       {:error, reason} -> {:error, reason}
-      false -> {:error, :identity_mismatch}
       _ -> {:error, :malformed_envelope}
     end
   end
 
-  defp collect_legacy_entries(%{legacy_dir: nil}, _v2_entries), do: {:ok, %{}}
+  defp quarantine_foreign_json(ctx, name) do
+    source = Path.join(ctx.ns_dir, name)
+    fingerprint = digest_hex(name)
+    suffix = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    quarantine_dir = Path.join(ctx.ns_dir, ".quarantine")
+    target = Path.join(quarantine_dir, "foreign-#{fingerprint}-#{suffix}")
 
-  defp collect_legacy_entries(ctx, v2_entries) do
+    outcome =
+      with :ok <- ensure_under_root(ctx.real_base, source),
+           :ok <- ensure_under_root(ctx.real_base, quarantine_dir),
+           :ok <- ensure_under_root(ctx.real_base, target),
+           :ok <- ensure_quarantine_dir(quarantine_dir),
+           :ok <- File.rename(source, target),
+           :ok <- fsync_directory(quarantine_dir),
+           :ok <- fsync_directory(ctx.ns_dir) do
+        :quarantined
+      else
+        _ -> :quarantine_failed
+      end
+
+    Logger.warning("JSONFile handled foreign authority-state entry",
+      fingerprint: fingerprint,
+      outcome: outcome
+    )
+
+    case outcome do
+      :quarantined -> :ok
+      :quarantine_failed -> {:error, :foreign_entry_quarantine_failed}
+    end
+  end
+
+  defp ensure_quarantine_dir(path) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        with :ok <- File.mkdir(path),
+             :ok <- File.chmod(path, 0o700),
+             {:ok, %File.Stat{type: :directory, mode: mode}} <- File.lstat(path),
+             true <- Bitwise.band(mode, 0o777) == 0o700 do
+          :ok
+        else
+          _ -> {:error, :quarantine_unavailable}
+        end
+
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        if Bitwise.band(mode, 0o777) == 0o700,
+          do: :ok,
+          else: {:error, :quarantine_unavailable}
+
+      _ ->
+        {:error, :quarantine_unavailable}
+    end
+  end
+
+  defp collect_legacy_entries(%{legacy_dir: nil}, _v2_entries, _limit), do: {:ok, %{}}
+
+  defp collect_legacy_entries(ctx, v2_entries, limit) do
     legacy_dir = ctx.legacy_dir
 
     # For named namespaces, missing legacy dir is empty. For nil namespace the
@@ -1246,35 +1453,59 @@ defmodule Arbor.Security.Store.JSONFile do
         {:error, reason}
 
       {:ok, :directory} ->
-        collect_legacy_names(ctx, v2_entries)
+        collect_legacy_names(ctx, v2_entries, limit)
     end
   end
 
-  defp collect_legacy_names(ctx, v2_entries) do
-    with {:ok, names} <- File.ls(ctx.legacy_dir) do
+  defp collect_legacy_names(ctx, v2_entries, limit) do
+    with {:ok, names} <- File.ls(ctx.legacy_dir),
+         :ok <- ensure_legacy_inventory_within_limit(ctx, names, v2_entries, limit) do
       Enum.reduce_while(names, {:ok, %{}}, fn name, {:ok, acc} ->
         reduce_legacy_name(ctx, v2_entries, name, acc)
       end)
     end
   end
 
+  defp ensure_legacy_inventory_within_limit(_ctx, _names, _v2_entries, nil), do: :ok
+
+  defp ensure_legacy_inventory_within_limit(ctx, names, v2_entries, limit)
+       when is_integer(limit) do
+    count =
+      Enum.reduce_while(names, map_size(v2_entries), fn name, count ->
+        next =
+          case legacy_inventory_key(ctx, v2_entries, name) do
+            {:ok, _key} -> count + 1
+            :skip -> count
+          end
+
+        if next > limit, do: {:halt, next}, else: {:cont, next}
+      end)
+
+    if count > limit, do: {:error, :inventory_limit_exceeded}, else: :ok
+  end
+
   defp reduce_legacy_name(ctx, v2_entries, name, acc) do
-    if String.ends_with?(name, ".json") do
-      key = String.trim_trailing(name, ".json")
-      reduce_legacy_json(ctx, v2_entries, name, key, acc)
-    else
-      {:cont, {:ok, acc}}
+    case legacy_inventory_key(ctx, v2_entries, name) do
+      {:ok, key} -> reduce_legacy_json(ctx, name, key, acc)
+      :skip -> {:cont, {:ok, acc}}
     end
   end
 
-  defp reduce_legacy_json(ctx, v2_entries, name, key, acc) do
-    cond do
-      Map.has_key?(v2_entries, key) ->
-        {:cont, {:ok, acc}}
+  defp legacy_inventory_key(ctx, v2_entries, name) do
+    if String.ends_with?(name, ".json") do
+      key = String.trim_trailing(name, ".json")
 
+      if not Map.has_key?(v2_entries, key) and legacy_safe_identity?(ctx.namespace, key),
+        do: {:ok, key},
+        else: :skip
+    else
+      :skip
+    end
+  end
+
+  defp reduce_legacy_json(ctx, name, key, acc) do
+    cond do
       not legacy_safe_identity?(ctx.namespace, key) ->
-        # Unsafe legacy filenames are not inventory authority; skip rather than
-        # interpolating them into managed paths.
         {:cont, {:ok, acc}}
 
       true ->
@@ -1300,28 +1531,10 @@ defmodule Arbor.Security.Store.JSONFile do
     end
   end
 
-  defp migrate_legacy_entries(ctx, merged) do
-    legacy_keys =
-      merged
-      |> Enum.filter(fn {_k, class} -> class == :legacy_live end)
-      |> Enum.map(fn {k, _} -> k end)
-
-    Enum.reduce_while(legacy_keys, :ok, fn key, :ok ->
-      opts =
-        [base_dir: ctx.real_base] ++
-          if is_nil(ctx.namespace), do: [], else: [name: ctx.namespace]
-
-      case key_context(key, opts) do
-        {:ok, key_ctx} ->
-          case load_legacy_or_absent(key_ctx, true) do
-            {:ok, _} -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
+  defp reject_legacy_entries(merged) do
+    if Enum.any?(merged, fn {_key, class} -> class == :legacy_live end),
+      do: {:error, :offline_migration_required},
+      else: :ok
   end
 
   defp temp_name?(name) when is_binary(name), do: Regex.match?(@temp_name_re, name)

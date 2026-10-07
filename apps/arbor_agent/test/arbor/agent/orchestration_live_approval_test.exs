@@ -52,20 +52,21 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     operator_id = "agent_live_operator_#{unique}"
 
     {:ok, _} =
-      Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/write#{tmp_dir}/**")
-
-    {:ok, _} = Arbor.Security.grant(principal: operator_id, resource: "arbor://approval/read")
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://fs/write#{tmp_dir}/**")
 
     {:ok, _} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(principal: operator_id, resource: "arbor://approval/read")
+
+    {:ok, _} =
+      Arbor.Security.grant_fixture(
         principal: operator_id,
         resource: "arbor://approval/answer/#{agent_id}"
       )
 
     on_exit(fn ->
       File.rm_rf!(tmp_dir)
-      Arbor.Security.CapabilityStore.revoke_all(agent_id)
-      Arbor.Security.CapabilityStore.revoke_all(operator_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
+      Arbor.Security.revoke_all_fixture(operator_id)
       restore_config(original_config)
     end)
 

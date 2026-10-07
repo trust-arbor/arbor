@@ -44,8 +44,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   """
 
   setup do
-    custom_handlers = Registry.snapshot_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(custom_handlers) end)
+    custom_handlers = Registry.snapshot_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(custom_handlers) end)
     :ok
   end
 
@@ -592,7 +592,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     catalog = catalog!([BindingOriginalAction])
     {:ok, {expected, digest}} = ExecutionManifest.build(compiled_graph!(), catalog, graph_hash)
 
-    :ok = Registry.register("exec", Arbor.Orchestrator.TestHandlers.AlternateExec)
+    :ok = Registry.register_fixture("exec", Arbor.Orchestrator.TestHandlers.AlternateExec)
     drifted_graph = compiled_graph!()
 
     assert {:error, {:execution_manifest_field_mismatch, :compiled_graph_hash}} =

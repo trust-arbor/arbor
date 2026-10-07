@@ -409,6 +409,11 @@ defmodule Arbor.Common.SafeAtomTest do
       assert :"activity:agent_started" = SafeAtom.encode_event_type(:activity, :agent_started)
       assert :"security:violation" = SafeAtom.encode_event_type(:security, :violation)
     end
+
+    @tag :security_regression
+    test "security regression: does not intern a new Cartesian-product atom" do
+      assert :unknown = SafeAtom.encode_event_type(:erlang, :undefined)
+    end
   end
 
   describe "infer_subject_type/1" do

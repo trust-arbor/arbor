@@ -489,6 +489,6 @@ defmodule Arbor.AI.AcpPool.ToolServer do
     Code.ensure_loaded?(Arbor.Actions) and
       function_exported?(Arbor.Actions, :authorize_and_execute, 4) and
       Code.ensure_loaded?(Arbor.Security) and
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
+      Arbor.Security.capability_authorization_available?()
   end
 end

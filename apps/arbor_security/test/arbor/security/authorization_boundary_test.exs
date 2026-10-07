@@ -42,7 +42,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
   end
 
   defp grant_capability(agent_id, resource, opts \\ []) do
-    Security.grant(
+    Security.grant_fixture(
       Keyword.merge(
         [principal: agent_id, resource: resource],
         opts
@@ -166,29 +166,37 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       assert {:error, _reason} = result
     end
 
-    test "delegation at depth > 0 succeeds", %{agent_id: agent_id} do
+    test "delegation at depth > 0 succeeds" do
       delegate_agent = "agent_delegate_#{:erlang.unique_integer([:positive])}"
 
-      # Generate identity for agent so delegation signing works
-      {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      {:ok, delegator} = Security.generate_identity(name: "authorization-boundary-delegator")
+      :ok = Security.register_identity_fixture(delegator)
 
-      # Grant with depth 2
-      {:ok, cap} =
-        grant_capability(agent_id, "arbor://fs/read/**", delegation_depth: 2)
+      {:ok, proof} =
+        Security.build_signing_authority_acquisition_proof(
+          delegator.agent_id,
+          delegator.private_key,
+          purpose: :authorization_boundary_test,
+          owner: self()
+        )
 
-      result =
-        Security.delegate(cap.id, delegate_agent, delegator_private_key: identity.private_key)
+      {:ok, actor_authority} =
+        Security.open_ephemeral_signing_authority(proof, delegator.private_key)
 
-      case result do
-        {:ok, delegated_cap} ->
-          assert delegated_cap.principal_id == delegate_agent
-          assert delegated_cap.delegation_depth == 1
+      try do
+        {:ok, cap} =
+          grant_capability(delegator.agent_id, "arbor://fs/read/**", delegation_depth: 2)
 
-        {:error, reason} ->
-          # If delegation fails for other reasons (e.g. key mismatch), that's OK
-          # as long as it wasn't a depth-related failure
-          refute reason == :delegation_depth_exceeded
+        assert {:ok, delegated_cap} =
+                 Security.delegate(cap.id, delegate_agent, actor_authority: actor_authority)
+
+        assert delegated_cap.principal_id == delegate_agent
+        assert delegated_cap.delegation_depth == 1
+      after
+        _ = CapabilityStore.revoke_all_fixture(delegator.agent_id)
+        _ = CapabilityStore.revoke_all_fixture(delegate_agent)
+        _ = Security.close_signing_authority(actor_authority)
+        _ = Security.deregister_identity_fixture(delegator.agent_id)
       end
     end
   end
@@ -279,7 +287,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/test.txt")
 
       # Revoke
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
 
       # Should now be denied
       result = Security.authorize(agent_id, "arbor://fs/read/test.txt")
@@ -368,7 +376,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       # Generate a fresh identity (agent_id comes from the keypair hash)
       {:ok, identity} = Security.generate_identity()
       agent_id = identity.agent_id
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
       # Grant capability for this identity's agent_id
       {:ok, _cap} = grant_capability(agent_id, "arbor://fs/read/**")
@@ -377,14 +385,14 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/test.txt")
 
       # Suspend
-      :ok = Security.suspend_identity(agent_id, reason: "test suspension")
+      :ok = Security.suspend_identity_fixture(agent_id, reason: "test suspension")
 
       # Should now be denied
       result = Security.authorize(agent_id, "arbor://fs/read/test.txt")
       assert {:error, {:unauthorized, :identity_suspended}} = result
 
       # Resume
-      :ok = Security.resume_identity(agent_id)
+      :ok = Security.resume_identity_fixture(agent_id)
 
       # Should work again
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/test.txt")

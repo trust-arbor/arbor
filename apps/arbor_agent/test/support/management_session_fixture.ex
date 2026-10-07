@@ -106,7 +106,7 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
 
   def target! do
     {:ok, identity} = Security.generate_identity()
-    assert :ok = Security.register_identity(identity)
+    assert :ok = Security.register_identity_fixture(identity)
     target = identity.agent_id
 
     profile = %Profile{

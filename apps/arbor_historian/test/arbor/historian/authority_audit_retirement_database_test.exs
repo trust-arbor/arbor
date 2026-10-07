@@ -280,7 +280,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     # G: an exact-facts grant that stays live, delivered, then retired with
     # the first T2 publication (512 delivered identities).
     g_opts = exact_grant_opts(ctx.principal, "retired-g")
-    assert {:ok, :applied, g_id} = Security.acknowledged_grant(g_opts)
+    assert {:ok, :applied, g_id} = Security.acknowledged_grant_fixture(g_opts)
 
     assert {:ok, [%{"operation_id" => g_op, "status" => "effect_applied"}]} =
              Security.audit_journal_pending_operations()
@@ -298,15 +298,20 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     assert {:ok, [g_event]} = read(SinkRepo, g_stream)
     assert g_event.data["intent"]["audit"]["data"]["capability_id"] == g_id
     v2_twin = legacy_twin(g_event.data["intent"])
-    assert {:error, :retired_version} = AuditJournalOwner.append(prepared_record(v2_twin))
+
+    assert {:error, :retired_version} =
+             AuditJournalOwner.append(AuditJournalOwner, prepared_record(v2_twin))
 
     # Historian forgets G's stream. The journal never consults Historian:
     # G's v2 twin is still below the floor, and re-presenting G's exact live
     # facts short-circuits at the store without reaching the journal.
     assert :ok = Historian.delete_stream_content(g_stream)
     assert {:ok, true} = Historian.stream_content_absent?(g_stream)
-    assert {:error, :retired_version} = AuditJournalOwner.append(prepared_record(v2_twin))
-    assert {:ok, :idempotent, ^g_id} = Security.acknowledged_grant(g_opts)
+
+    assert {:error, :retired_version} =
+             AuditJournalOwner.append(AuditJournalOwner, prepared_record(v2_twin))
+
+    assert {:ok, :idempotent, ^g_id} = Security.acknowledged_grant_fixture(g_opts)
     assert {:ok, []} = Security.audit_journal_pending_operations()
     assert {:ok, %{delivered: 0, pending: 0}} = Historian.flush_authority_audit()
     assert {:ok, true} = Historian.stream_content_absent?(g_stream)
@@ -359,7 +364,9 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     assert final["pending_count"] == 0
     assert final["capacity"]["retired_operation_total"] == 512
     assert final["capacity"]["retained_operation_count"] == 2
-    assert {:error, :retired_version} = AuditJournalOwner.append(prepared_record(v2_twin))
+
+    assert {:error, :retired_version} =
+             AuditJournalOwner.append(AuditJournalOwner, prepared_record(v2_twin))
   end
 
   # ---------------------------------------------------------------------------
@@ -367,7 +374,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   defp grant_and_revoke!(principal, n) do
     case grant(principal, "pair-#{n}") do
       {:ok, cap} ->
-        case Security.revoke(cap.id) do
+        case Security.revoke_fixture(cap.id) do
           :ok ->
             {:ok, audit} = Security.capability_mutation_audit_status()
 
@@ -384,7 +391,11 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
   end
 
   defp grant(principal, suffix),
-    do: Security.grant(principal: principal, resource: "arbor://memory/read/retire-sql/#{suffix}")
+    do:
+      Security.grant_fixture(
+        principal: principal,
+        resource: "arbor://memory/read/retire-sql/#{suffix}"
+      )
 
   defp exact_grant_opts(principal, suffix) do
     [

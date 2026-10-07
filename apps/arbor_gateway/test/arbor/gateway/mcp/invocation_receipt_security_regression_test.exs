@@ -67,7 +67,7 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
         else: Application.put_env(:arbor_security, :invocation_receipts_enabled, previous)
 
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
-      for cap <- caps, do: Arbor.Security.revoke(cap.id)
+      for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)
       if Process.alive?(server_pid), do: GenServer.stop(server_pid, :normal, 1_000)
     end)
 
@@ -77,7 +77,7 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
   test "security regression: an authorized MCP tool call emits its invocation receipt",
        %{agent_id: agent_id} do
     uri = "arbor://mcp/#{@server}/sample_tool"
-    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: uri)
+    {:ok, _} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
 
     assert {:ok, %{value: _, taint: %{level: :untrusted}}} =
              Arbor.Gateway.call_mcp_tool(@server, "sample_tool", %{"input" => "x"},
@@ -92,7 +92,7 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
   test "security regression: an authorized MCP resource read emits its invocation receipt",
        %{agent_id: agent_id} do
     uri = "arbor://mcp/#{@server}/resource/#{@resource_name}"
-    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: uri)
+    {:ok, _} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
 
     assert {:ok, %{value: _, taint: %{level: :untrusted}}} =
              Arbor.Gateway.read_mcp_resource(@server, @resource_uri, agent_id: agent_id)

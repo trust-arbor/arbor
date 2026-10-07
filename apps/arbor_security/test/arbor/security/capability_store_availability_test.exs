@@ -1,13 +1,13 @@
 defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
   @moduledoc """
-  Isolated availability regressions for VP-05D2A0. These temporarily remove
-  registered process names, so they must remain synchronous and run outside a
-  live development node.
+  Isolated availability regressions for VP-05D2A0. These temporarily terminate
+  exact supervised authority children, so they must remain synchronous and run
+  outside a live development node.
   """
 
   use ExUnit.Case, async: false
 
-  alias Arbor.Security.{CapabilityStore, SystemAuthority}
+  alias Arbor.Security.{CapabilityStore, SystemAuthority, TestBootstrap}
 
   setup do
     previous = Application.get_env(:arbor_security, :egress_gate_enforcing)
@@ -28,7 +28,7 @@ defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
   test "security regression: unavailable CapabilityStore fails egress closed" do
     {ctx, cap} = issue_disclosure!()
 
-    without_registered_name(CapabilityStore, fn ->
+    without_supervised_child(CapabilityStore, fn ->
       assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
                Arbor.Security.authorize_egress(
                  ctx.agent_id,
@@ -42,7 +42,7 @@ defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
   test "security regression: unavailable SystemAuthority verifier fails egress closed" do
     {ctx, cap} = issue_disclosure!()
 
-    without_registered_name(SystemAuthority, fn ->
+    without_supervised_child(SystemAuthority, fn ->
       assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
                Arbor.Security.authorize_egress(
                  ctx.agent_id,
@@ -56,9 +56,9 @@ defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
   test "security regression: unavailable signer returns an issuance error" do
     ctx = context()
 
-    without_registered_name(SystemAuthority, fn ->
+    without_supervised_child(SystemAuthority, fn ->
       assert {:error, :system_authority_unavailable} =
-               Arbor.Security.issue_disclosure_capability(issue_opts(ctx))
+               Arbor.Security.issue_disclosure_capability_fixture(issue_opts(ctx))
     end)
   end
 
@@ -66,15 +66,15 @@ defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
   test "security regression: unavailable store returns an issuance error" do
     ctx = context()
 
-    without_registered_name(CapabilityStore, fn ->
+    without_supervised_child(CapabilityStore, fn ->
       assert {:error, :capability_store_unavailable} =
-               Arbor.Security.issue_disclosure_capability(issue_opts(ctx))
+               Arbor.Security.issue_disclosure_capability_fixture(issue_opts(ctx))
     end)
   end
 
   defp issue_disclosure! do
     ctx = context()
-    {:ok, cap} = Arbor.Security.issue_disclosure_capability(issue_opts(ctx))
+    {:ok, cap} = Arbor.Security.issue_disclosure_capability_fixture(issue_opts(ctx))
     {ctx, cap}
   end
 
@@ -114,19 +114,29 @@ defmodule Arbor.Security.CapabilityStoreAvailabilityTest do
     ]
   end
 
-  defp without_registered_name(name, fun) do
-    pid = Process.whereis(name)
-    assert is_pid(pid)
-    assert Process.unregister(name)
+  defp without_supervised_child(child_id, fun) do
+    supervisor = Process.whereis(Arbor.Security.Supervisor)
+    assert is_pid(supervisor)
+    pid = supervised_child_pid(supervisor, child_id)
+    assert Process.whereis(child_id) == pid
+    assert :ok = Supervisor.terminate_child(supervisor, child_id)
+    assert Process.whereis(child_id) == nil
 
     try do
       fun.()
     after
-      if Process.alive?(pid) and is_nil(Process.whereis(name)) do
-        Process.register(pid, name)
-      end
+      assert :ok = TestBootstrap.restore_supervised_tree!()
     end
 
-    assert Process.whereis(name) == pid
+    replacement = supervised_child_pid(supervisor, child_id)
+    assert is_pid(replacement)
+    assert Process.whereis(child_id) == replacement
+  end
+
+  defp supervised_child_pid(supervisor, child_id) do
+    Enum.find_value(Supervisor.which_children(supervisor), fn
+      {^child_id, pid, :worker, _modules} when is_pid(pid) -> pid
+      _other -> nil
+    end)
   end
 end

@@ -2,7 +2,9 @@ defmodule Arbor.Agent.ManagerTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.{Character, Manager, Profile, ProfileStore, Registry}
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security
 
   @store_name :arbor_agent_profiles
 
@@ -62,6 +64,45 @@ defmodule Arbor.Agent.ManagerTest do
       created_at: DateTime.utc_now(),
       version: 1
     }
+  end
+
+  defp mcp_mutation_context! do
+    unique = System.unique_integer([:positive])
+    {:ok, actor} = Identity.generate(name: "manager-mcp-actor-#{unique}")
+    {:ok, target} = Identity.generate(name: "manager-mcp-target-#{unique}")
+    :ok = Security.register_identity_fixture(Identity.public_only(actor))
+    :ok = Security.register_identity_fixture(Identity.public_only(target))
+
+    mutation_caps =
+      for operation <- [:grant, :revoke] do
+        {:ok, cap} =
+          Security.grant_fixture(
+            principal: actor.agent_id,
+            resource: "arbor://security/#{operation}/#{target.agent_id}"
+          )
+
+        cap
+      end
+
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        actor.agent_id,
+        actor.private_key,
+        purpose: :mcp_config_test,
+        owner: self()
+      )
+
+    {:ok, authority} = Security.open_signing_authority(proof)
+
+    on_exit(fn ->
+      _ = Security.close_signing_authority(authority)
+      _ = Security.revoke_all_fixture(target.agent_id)
+      Enum.each(mutation_caps, &Security.revoke_fixture(&1.id))
+      _ = Security.deregister_identity_fixture(target.agent_id)
+      _ = Security.deregister_identity_fixture(actor.agent_id)
+    end)
+
+    %{agent_id: target.agent_id, authority: authority}
   end
 
   # Safely call Manager functions that go through Lifecycle.create,
@@ -756,11 +797,11 @@ defmodule Arbor.Agent.ManagerTest do
     end
   end
 
-  describe "set_mcp_config/2" do
+  describe "set_mcp_config/3" do
     @describetag :fast
 
     test "stores MCP server config in profile metadata" do
-      agent_id = "agent_mcp_config_#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
       profile = make_profile(agent_id)
       ProfileStore.store_profile(profile)
 
@@ -769,7 +810,7 @@ defmodule Arbor.Agent.ManagerTest do
         %{name: "fs", transport: :stdio, command: ["npx", "fs-server", "/tmp"]}
       ]
 
-      assert :ok = Manager.set_mcp_config(agent_id, servers)
+      assert :ok = Manager.set_mcp_config(agent_id, servers, actor_authority: authority)
 
       {:ok, updated} = ProfileStore.load_profile(agent_id)
       stored_servers = updated.metadata[:mcp_servers] || updated.metadata["mcp_servers"]
@@ -778,18 +819,24 @@ defmodule Arbor.Agent.ManagerTest do
 
     test "returns error for non-existent profile" do
       result =
-        Manager.set_mcp_config("nonexistent-mcp-#{System.unique_integer()}", [%{name: "test"}])
+        Manager.set_mcp_config(
+          "nonexistent-mcp-#{System.unique_integer()}",
+          [%{name: "test"}],
+          actor_authority: make_ref()
+        )
 
       assert {:error, _} = result
     end
 
     test "overwrites previous MCP config" do
-      agent_id = "agent_mcp_overwrite_#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
       profile = make_profile(agent_id, metadata: %{mcp_servers: [%{name: "old"}]})
       ProfileStore.store_profile(profile)
 
       new_servers = [%{name: "new-server", transport: :http, url: "http://localhost:8080"}]
-      assert :ok = Manager.set_mcp_config(agent_id, new_servers)
+
+      assert :ok =
+               Manager.set_mcp_config(agent_id, new_servers, actor_authority: authority)
 
       {:ok, updated} = ProfileStore.load_profile(agent_id)
       stored_servers = updated.metadata[:mcp_servers] || updated.metadata["mcp_servers"]
@@ -797,11 +844,11 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "stores empty server list" do
-      agent_id = "mcp-empty-set-#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
       profile = make_profile(agent_id, metadata: %{mcp_servers: [%{name: "existing"}]})
       ProfileStore.store_profile(profile)
 
-      assert :ok = Manager.set_mcp_config(agent_id, [])
+      assert :ok = Manager.set_mcp_config(agent_id, [], actor_authority: authority)
 
       {:ok, updated} = ProfileStore.load_profile(agent_id)
       stored_servers = updated.metadata[:mcp_servers] || updated.metadata["mcp_servers"]
@@ -809,7 +856,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
   end
 
-  describe "security regression: set_mcp_config/2 is the MCP server approval (Imp D7)" do
+  describe "security regression: set_mcp_config/3 is the MCP server approval (Imp D7)" do
     # Before 2026-09-28 set_mcp_config only wrote metadata, and connect_mcp_servers
     # connected whatever that metadata held. It now grants one capability per
     # server bound to its exact config, and Gateway.connect_mcp_server/2 refuses
@@ -832,39 +879,47 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     setup do
-      agent_id = "agent_mcp_approval_#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
       ProfileStore.store_profile(make_profile(agent_id))
 
       on_exit(fn ->
         if Process.whereis(Arbor.Security.CapabilityStore),
-          do: Arbor.Security.CapabilityStore.revoke_all(agent_id)
+          do: Arbor.Security.revoke_all_fixture(agent_id)
       end)
 
-      %{agent_id: agent_id}
+      %{agent_id: agent_id, authority: authority}
     end
 
     test "grants exactly the configured servers' approvals and revokes replaced ones", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      authority: authority
     } do
       github = %{name: "github", transport: :stdio, command: ["npx", "github-server"]}
       fs = %{name: "fs", transport: :stdio, command: ["npx", "fs-server", "/tmp"]}
 
-      assert :ok = Manager.set_mcp_config(agent_id, [github, fs])
+      assert :ok =
+               Manager.set_mcp_config(agent_id, [github, fs], actor_authority: authority)
+
       assert approvals(agent_id) == Enum.sort([approval_uri(github), approval_uri(fs)])
 
       edited = %{github | command: ["npx", "github-server", "--extra"]}
-      assert :ok = Manager.set_mcp_config(agent_id, [edited])
+      assert :ok = Manager.set_mcp_config(agent_id, [edited], actor_authority: authority)
       assert approvals(agent_id) == [approval_uri(edited)]
 
-      assert :ok = Manager.set_mcp_config(agent_id, [])
+      assert :ok = Manager.set_mcp_config(agent_id, [], actor_authority: authority)
       assert approvals(agent_id) == []
     end
 
     test "a server without a name is rejected and nothing is stored or granted", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      authority: authority
     } do
       assert {:error, {:invalid_mcp_server, _}} =
-               Manager.set_mcp_config(agent_id, [%{transport: :stdio, command: ["x"]}])
+               Manager.set_mcp_config(
+                 agent_id,
+                 [%{transport: :stdio, command: ["x"]}],
+                 actor_authority: authority
+               )
 
       {:ok, profile} = ProfileStore.load_profile(agent_id)
       refute Map.has_key?(profile.metadata || %{}, :mcp_servers)

@@ -75,10 +75,13 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
     identity = principal!(c)
 
     {:ok, cap} =
-      Security.grant(principal: identity.agent_id, resource: "arbor://fs/read#{c.root}/**")
+      Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://fs/read#{c.root}/**"
+      )
 
     assert {:ok, %{stdout: "synthetic boot binding", exit_code: 0}} = read(c, identity)
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
     assert {:error, _} = read(c, identity)
   end
 
@@ -120,12 +123,14 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     File.write!(Path.join(c.root, "input"), "synthetic boot binding")
     {:ok, identity} = Security.generate_identity(name: "synthetic boot authorizer")
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
     {:ok, profile} = Profile.new(identity.agent_id)
     :ok = Store.store_profile(profile)
     {:ok, _} = Trust.set_rule(identity.agent_id, "arbor://shell/exec/cat", :auto)
     {:ok, _} = Trust.set_rule(identity.agent_id, "arbor://fs/read#{c.root}", :auto)
-    {:ok, _} = Security.grant(principal: identity.agent_id, resource: "arbor://shell/exec/cat")
+
+    {:ok, _} =
+      Security.grant_fixture(principal: identity.agent_id, resource: "arbor://shell/exec/cat")
 
     on_exit(fn ->
       case previous_guard do
@@ -134,8 +139,8 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
       end
 
       {:ok, caps} = Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     identity

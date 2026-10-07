@@ -3,6 +3,18 @@ defmodule Arbor.Monitor.DiagnosticsTest do
 
   alias Arbor.Monitor.Diagnostics
 
+  defmodule StrictServer do
+    use GenServer
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok)
+
+    @impl true
+    def init(:ok), do: {:ok, %{}}
+
+    @impl true
+    def handle_call(:ping, _from, state), do: {:reply, :pong, state}
+  end
+
   describe "inspect_process/1" do
     test "returns process info for valid pid" do
       pid = spawn(fn -> Process.sleep(1000) end)
@@ -68,10 +80,33 @@ defmodule Arbor.Monitor.DiagnosticsTest do
       Supervisor.stop(sup)
     end
 
+    @tag :security_regression
+    @tag spec: "KSEC-005"
+    test "security regression: configured restart limit is not reported as observed restarts" do
+      {:ok, sup} = Supervisor.start_link([], strategy: :one_for_one, max_restarts: 7)
+
+      assert %{restart_intensity: 0} = Diagnostics.inspect_supervisor(sup)
+
+      Supervisor.stop(sup)
+    end
+
     test "returns nil for non-supervisor process" do
       pid = spawn(fn -> Process.sleep(1000) end)
       assert Diagnostics.inspect_supervisor(pid) == nil
       Process.exit(pid, :kill)
+    end
+
+    test "security regression: public diagnostics cannot crash a strict GenServer target" do
+      pid = start_supervised!(StrictServer)
+      monitor = Process.monitor(pid)
+
+      # Diagnostics.inspect_supervisor/1 is the owning library's exported
+      # lower-level public boundary. The monitor.read_diagnostics action calls
+      # this exact function after parsing the caller-supplied pid string.
+      assert Diagnostics.inspect_supervisor(pid) == nil
+      assert Process.alive?(pid)
+      assert :pong == GenServer.call(pid, :ping)
+      refute_receive {:DOWN, ^monitor, :process, ^pid, _reason}
     end
 
     test "includes child information" do

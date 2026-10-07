@@ -68,7 +68,9 @@ defmodule Arbor.Security.Keychain do
     channel_keys: %{}
   ]
 
-  @keychain_version 1
+  @keychain_version 2
+  @encryption_key_info "arbor-keychain-encryption-v2"
+  @authentication_key_info "arbor-keychain-authentication-v2"
 
   @doc """
   Create a new keychain with fresh Ed25519 and X25519 keypairs.
@@ -406,7 +408,8 @@ defmodule Arbor.Security.Keychain do
 
     # Encrypt private data
     private_json = Jason.encode!(private_data)
-    {ciphertext, iv, tag} = Crypto.encrypt(private_json, encryption_key)
+    content_key = keychain_encryption_key(@keychain_version, encryption_key)
+    {ciphertext, iv, tag} = Crypto.encrypt(private_json, content_key)
 
     # Combine into payload
     payload = %{
@@ -419,7 +422,8 @@ defmodule Arbor.Security.Keychain do
 
     # HMAC over the entire payload to protect public data integrity
     payload_json = Jason.encode!(payload)
-    hmac = :crypto.mac(:hmac, :sha256, encryption_key, payload_json)
+    authentication_key = keychain_authentication_key(@keychain_version, encryption_key)
+    hmac = :crypto.mac(:hmac, :sha256, authentication_key, payload_json)
 
     {:ok, Jason.encode!(%{"payload" => payload_json, "hmac" => Base.encode64(hmac)})}
   end
@@ -440,7 +444,8 @@ defmodule Arbor.Security.Keychain do
          {:ok, ciphertext} <- Base.decode64(data["private_encrypted"]),
          {:ok, iv} <- Base.decode64(data["iv"]),
          {:ok, tag} <- Base.decode64(data["tag"]),
-         {:ok, private_json} <- Crypto.decrypt(ciphertext, encryption_key, iv, tag),
+         content_key = keychain_encryption_key(data["version"], encryption_key),
+         {:ok, private_json} <- Crypto.decrypt(ciphertext, content_key, iv, tag),
          {:ok, private_data} <- Jason.decode(private_json) do
       build_keychain_from_data(data["public"], private_data)
     else
@@ -553,6 +558,9 @@ defmodule Arbor.Security.Keychain do
     }
   end
 
+  # Version 1 reused the raw root key for encryption and authentication. Keep
+  # migration out of the ordinary read path so restoring a checkpoint can
+  # never silently reactivate that retired construction.
   defp verify_version(@keychain_version), do: :ok
   defp verify_version(_), do: {:error, :unsupported_version}
 
@@ -561,25 +569,28 @@ defmodule Arbor.Security.Keychain do
          encryption_key,
          _raw
        ) do
-    with {:ok, expected_hmac} <- Base.decode64(hmac_b64) do
-      actual_hmac = :crypto.mac(:hmac, :sha256, encryption_key, inner_json)
+    with {:ok, data} <- Jason.decode(inner_json),
+         :ok <- verify_version(data["version"]),
+         {:ok, expected_hmac} <- Base.decode64(hmac_b64) do
+      authentication_key = keychain_authentication_key(data["version"], encryption_key)
+      actual_hmac = :crypto.mac(:hmac, :sha256, authentication_key, inner_json)
 
       if Plug.Crypto.secure_compare(actual_hmac, expected_hmac) do
-        Jason.decode(inner_json)
+        {:ok, data}
       else
         {:error, :hmac_verification_failed}
       end
     end
   end
 
-  # Backward compatibility: payloads without HMAC wrapper
-  defp verify_and_extract_payload(data, _encryption_key, _raw) when is_map(data) do
-    if Map.has_key?(data, "version") do
-      {:ok, data}
-    else
-      {:error, :invalid_payload}
-    end
-  end
+  defp verify_and_extract_payload(_data, _encryption_key, _raw),
+    do: {:error, :invalid_payload}
+
+  defp keychain_encryption_key(@keychain_version, root_key),
+    do: Crypto.derive_key(root_key, @encryption_key_info, 32)
+
+  defp keychain_authentication_key(@keychain_version, root_key),
+    do: Crypto.derive_key(root_key, @authentication_key_info, 32)
 
   defp build_keychain_from_data(public, private) do
     with {:ok, sign_pub} <- Base.decode64(public["signing_public"]),

@@ -28,7 +28,7 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
   def start_server(agent_id, opts \\ []) do
     name = {:via, Registry, {@registry, agent_id}}
 
-    with {:ok, child_opts, generated_bootstrap} <- prepare_child_opts(agent_id, opts) do
+    with {:ok, child_opts, generated_bootstrap} <- prepare_child_opts(opts) do
       child_opts = Keyword.merge(child_opts, agent_id: agent_id, name: name)
 
       case DynamicSupervisor.start_child(__MODULE__, {ActionCycleServer, child_opts}) do
@@ -85,7 +85,7 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
     end
   end
 
-  defp prepare_child_opts(agent_id, opts) do
+  defp prepare_child_opts(opts) do
     cond do
       Keyword.has_key?(opts, :signing_authority_bootstrap) ->
         {:ok, opts, false}
@@ -96,13 +96,9 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
         {:ok, opts, false}
 
       true ->
-        with {:ok, bootstrap} <-
-               Arbor.Agent.Lifecycle.issue_signing_authority_bootstrap(
-                 agent_id,
-                 :action_cycle
-               ) do
-          {:ok, Keyword.put(opts, :signing_authority_bootstrap, bootstrap), true}
-        end
+        # The child acquires after DynamicSupervisor admission in handle_continue/2.
+        # No ambient caller of start_server/2 receives or can claim the bootstrap.
+        {:ok, Keyword.put(opts, :acquire_owner_signing_authority, true), false}
     end
   end
 

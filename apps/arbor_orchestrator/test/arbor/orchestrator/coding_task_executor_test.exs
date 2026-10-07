@@ -732,7 +732,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     def run_file_as(_path, _principal, %SigningAuthority{} = authority, opts) do
       reload_security_facade!()
 
-      with {:ok, _signed} <- Arbor.Security.sign_with_authority(authority, "reload-stable-run"),
+      with {:ok, _signed} <-
+             Arbor.Security.sign_with_authority(
+               authority,
+               "arbor://test/signing/reload-stable-run"
+             ),
            {:ok, derived} <-
              Arbor.Security.derive_secret_with_authority(authority, :coding_task_reload) do
         send(Keyword.fetch!(opts, :spawning_pid), {:reloaded_authority, authority, derived})
@@ -815,7 +819,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule FakeSecurity do
     @moduledoc false
 
-    alias Arbor.Contracts.Security.SigningAuthority
+    alias Arbor.Contracts.Security.{SigningAuthority, SigningAuthorityBootstrap}
+
+    def issue_signing_authority_bootstrap(agent_id, purpose) do
+      SigningAuthorityBootstrap.new(
+        token: :crypto.hash(:sha256, :erlang.term_to_binary({agent_id, purpose, self()})),
+        principal_id: agent_id,
+        purpose: purpose
+      )
+    end
+
+    def claim_signing_authority(%SigningAuthorityBootstrap{
+          principal_id: agent_id,
+          purpose: purpose
+        }) do
+      if Process.get(:coding_executor_authority_open_reply) do
+        Process.get(:coding_executor_authority_open_reply)
+      else
+        {:ok,
+         %SigningAuthority{
+           token: :crypto.hash(:sha256, :erlang.term_to_binary({agent_id, self()})),
+           principal_id: agent_id,
+           purpose: purpose
+         }}
+      end
+    end
+
+    def close_signing_authority_bootstrap(%SigningAuthorityBootstrap{}), do: :ok
 
     def load_signing_key(agent_id) do
       case Process.get(:coding_executor_signing_key) do
@@ -981,6 +1011,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule StoredKeyAuthorityProvider do
+    def issue_signing_authority_bootstrap(agent_id, purpose) do
+      keys = Application.fetch_env!(:arbor_orchestrator, :coding_authority_test_keys)
+
+      with {:ok, private_key} <- Map.fetch(keys, agent_id),
+           {:ok, proof} <-
+             Arbor.Security.build_signing_authority_acquisition_proof(
+               agent_id,
+               private_key,
+               purpose: purpose,
+               owner: self()
+             ) do
+        Arbor.Security.issue_signing_authority_bootstrap(proof)
+      end
+    end
+  end
+
   defmodule FakePipelineStatus do
     @moduledoc false
     def get(run_id) do
@@ -1054,6 +1101,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       pipeline_status_module: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
       coding_task_control_facade:
         Application.get_env(:arbor_orchestrator, :coding_task_control_facade),
+      coding_authority_provider:
+        Application.get_env(:arbor_orchestrator, :coding_authority_provider),
       security_module: Application.get_env(:arbor_orchestrator, :security_module),
       security_available_override:
         Application.get_env(:arbor_orchestrator, :security_available_override),
@@ -1080,6 +1129,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
     Application.put_env(:arbor_orchestrator, :pipeline_status_module, FakePipelineStatus)
     Application.put_env(:arbor_orchestrator, :coding_task_control_facade, FakeTaskControlFacade)
+    Application.put_env(:arbor_orchestrator, :coding_authority_provider, FakeSecurity)
     Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
     Application.put_env(:arbor_orchestrator, :coding_executor_test_observer, self())
@@ -1186,6 +1236,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_worktree_roots, originals.coding_worktree_roots)
       restore(:pipeline_status_module, originals.pipeline_status_module)
       restore(:coding_task_control_facade, originals.coding_task_control_facade)
+      restore(:coding_authority_provider, originals.coding_authority_provider)
       restore(:security_module, originals.security_module)
       restore(:security_available_override, originals.security_available_override)
       restore(:security_required, originals.security_required)
@@ -3715,13 +3766,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       {:ok, identity} = Identity.generate(name: "coding-task-reload")
       {:ok, caller_identity} = Identity.generate(name: "coding-task-reload-caller")
       caller_id = caller_identity.agent_id
-      :ok = Security.register_identity(Identity.public_only(identity))
-      :ok = Security.register_identity(Identity.public_only(caller_identity))
-      :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+      :ok = Security.register_identity_fixture(Identity.public_only(identity))
+      :ok = Security.register_identity_fixture(Identity.public_only(caller_identity))
+      :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_authority_test_keys,
+        %{identity.agent_id => identity.private_key}
+      )
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_authority_provider,
+        StoredKeyAuthorityProvider
+      )
 
       for principal <- [identity.agent_id, caller_id] do
         assert {:ok, _capability} =
-                 Security.grant(
+                 Security.grant_fixture(
                    principal: principal,
                    resource: "arbor://**",
                    delegation_depth: 0,
@@ -3736,9 +3799,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       on_exit(fn ->
         _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
         _ = Arbor.Orchestrator.TestCapabilities.revoke_all(caller_id)
-        _ = Security.delete_signing_key(identity.agent_id)
-        _ = Security.deregister_identity(identity.agent_id)
-        _ = Security.deregister_identity(caller_id)
+        _ = Security.delete_signing_key_fixture(identity.agent_id)
+        _ = Security.deregister_identity_fixture(identity.agent_id)
+        _ = Security.deregister_identity_fixture(caller_id)
+        Application.delete_env(:arbor_orchestrator, :coding_authority_test_keys)
       end)
 
       assert {:ok, _result} =
@@ -3755,7 +3819,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert is_binary(derived)
 
       assert {:error, :authority_not_found} =
-               Security.sign_with_authority(authority, "after-coding-task-close")
+               Security.sign_with_authority(
+                 authority,
+                 "arbor://test/signing/after-coding-task-close"
+               )
     end
 
     test "security regression: real Orchestrator facade receives authority separately" do
@@ -8559,6 +8626,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Application.delete_env(:arbor_orchestrator, :coding_plan_artifact_store)
       Application.delete_env(:arbor_orchestrator, :pipeline_status_module)
       Application.delete_env(:arbor_orchestrator, :coding_task_control_facade)
+      Application.delete_env(:arbor_orchestrator, :coding_authority_provider)
       Application.delete_env(:arbor_orchestrator, :security_module)
 
       assert Config.coding_pipeline_runner() == Arbor.Orchestrator
@@ -8566,6 +8634,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Config.coding_plan_artifact_store() == ArtifactStore
       assert Config.pipeline_status_module() == Arbor.Orchestrator.PipelineStatus
       assert Config.coding_task_control_facade() == Arbor.AI
+      assert Config.coding_authority_provider() == Module.concat(["Arbor", "Agent"])
       assert Config.security_module() == Arbor.Security
       assert is_binary(Config.coding_pipeline_path())
       assert String.ends_with?(Config.coding_pipeline_path(), "coding-change-v1.dot")

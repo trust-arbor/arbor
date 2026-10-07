@@ -356,7 +356,10 @@ defmodule Arbor.AI.Runtime.DispatchAuthorizationSecurityRegressionTest do
              )
 
     assert_receive {:authorize_acp, "acp:claude", :acp, "claude-wire", :anthropic}
-    assert_receive {:prepare, %Request{provider: "anthropic", runtime: :acp, model: "claude-wire"}}
+
+    assert_receive {:prepare,
+                    %Request{provider: "anthropic", runtime: :acp, model: "claude-wire"}}
+
     assert_receive {:execute, %Request{provider: "anthropic", runtime: :acp}}
 
     assert_receive {:authorize_acp, "acp:codex", :acp, "codex-wire", :openai}

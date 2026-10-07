@@ -14,6 +14,84 @@ defmodule Arbor.Signals.BusTest do
   end
 
   describe "subscribe/3 and publish/1" do
+    @tag :security_regression
+    test "security regression: arbitrary publishers cannot inject security-sync mutations" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "security.capability_revoked",
+          fn signal ->
+            send(test_pid, {:forged_security_sync, signal})
+            :ok
+          end,
+          async: false,
+          principal_id: "agent_security_sync_observer"
+        )
+
+      on_exit(fn -> Bus.unsubscribe(sub_id) end)
+
+      forged =
+        Signal.new(:security, :capability_revoked, %{
+          origin_node: :attacker@node,
+          capability_ids: ["cap_victim"]
+        })
+
+      assert {:error, :unauthorized} = Bus.publish(forged)
+      refute_receive {:forged_security_sync, _signal}, 100
+
+      GenServer.cast(Bus, {:publish, forged})
+      refute_receive {:forged_security_sync, _signal}, 100
+    end
+
+    @tag :security_regression
+    test "security regression: public publication restamps attribution and raw casts are denied" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "activity.*",
+          fn signal ->
+            send(test_pid, {:bus_attribution, signal})
+            :ok
+          end,
+          async: false,
+          filter: fn signal ->
+            signal.type in [:bus_attribution_public, :bus_attribution_raw]
+          end
+        )
+
+      on_exit(fn -> Bus.unsubscribe(sub_id) end)
+
+      forged_emitter = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(forged_emitter, :kill) end)
+      future = DateTime.add(DateTime.utc_now(), 86_400, :second)
+
+      forged = %{
+        Signal.new(:activity, :bus_attribution_public, %{})
+        | id: "sig_forged_public",
+          timestamp: future,
+          emitter_pid: forged_emitter,
+          origin_node: :forged@node
+      }
+
+      assert :ok = Bus.publish(forged)
+      assert_receive {:bus_attribution, public}
+      refute public.id == forged.id
+      refute public.timestamp == future
+      assert public.emitter_pid == self()
+      assert public.origin_node == node()
+
+      raw_forged = %{
+        forged
+        | id: "sig_forged_raw",
+          type: :bus_attribution_raw
+      }
+
+      GenServer.cast(Bus, {:publish, raw_forged})
+      refute_receive {:bus_attribution, _raw}, 100
+    end
+
     test "wildcard pattern receives all signals" do
       test_pid = self()
 
@@ -165,6 +243,72 @@ defmodule Arbor.Signals.BusTest do
 
       Bus.unsubscribe(sub_id)
     end
+
+    test "security regression: raising and throwing filters cannot crash the bus" do
+      bus_pid = Process.whereis(Bus)
+      test_pid = self()
+
+      {:ok, raising_sub} =
+        Bus.subscribe("activity.filter_guard", fn _ -> :ok end,
+          filter: fn _ -> raise "filter crash" end
+        )
+
+      {:ok, throwing_sub} =
+        Bus.subscribe("activity.filter_guard", fn _ -> :ok end,
+          filter: fn _ -> throw(:filter_escape) end
+        )
+
+      {:ok, good_sub} =
+        Bus.subscribe(
+          "activity.filter_guard",
+          fn signal ->
+            send(test_pid, {:filter_guard_delivered, signal.type})
+            :ok
+          end,
+          async: false
+        )
+
+      Bus.publish(Signal.new(:activity, :filter_guard, %{}))
+
+      assert_receive {:filter_guard_delivered, :filter_guard}, 1_000
+      assert Process.whereis(Bus) == bus_pid
+      assert Process.alive?(bus_pid)
+      assert {:error, :not_found} = Bus.unsubscribe(raising_sub)
+      assert {:error, :not_found} = Bus.unsubscribe(throwing_sub)
+      assert :ok = Bus.unsubscribe(good_sub)
+    end
+
+    test "security regression: blocking synchronous handler is killed at the callback deadline" do
+      test_pid = self()
+
+      {:ok, blocking_sub} =
+        Bus.subscribe(
+          "activity.sync_timeout_guard",
+          fn _signal ->
+            receive do
+              :never_sent -> :ok
+            end
+          end,
+          async: false
+        )
+
+      {:ok, good_sub} =
+        Bus.subscribe(
+          "activity.sync_timeout_guard",
+          fn _signal ->
+            send(test_pid, :sync_timeout_guard_delivered)
+            :ok
+          end,
+          async: false
+        )
+
+      Bus.publish(Signal.new(:activity, :sync_timeout_guard, %{}))
+
+      assert_receive :sync_timeout_guard_delivered, 1_000
+      assert is_map(Bus.stats())
+      assert {:error, :not_found} = Bus.unsubscribe(blocking_sub)
+      assert :ok = Bus.unsubscribe(good_sub)
+    end
   end
 
   describe "unsubscribe/1" do
@@ -189,14 +333,147 @@ defmodule Arbor.Signals.BusTest do
       Bus.publish(Signal.new(:activity, :unsub_bus_test, %{}))
       refute_receive {:unsub, _}, 100
     end
+
+    test "security regression: another process cannot cancel an owned subscription" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "activity.owner_bound_unsubscribe",
+          fn _signal ->
+            send(test_pid, :owner_bound_delivered)
+            :ok
+          end,
+          async: false
+        )
+
+      assert {:error, :not_found} = Task.async(fn -> Bus.unsubscribe(sub_id) end) |> Task.await()
+
+      Bus.publish(Signal.new(:activity, :owner_bound_unsubscribe, %{}))
+      assert_receive :owner_bound_delivered, 1_000
+      assert :ok = Bus.unsubscribe(sub_id)
+    end
+
+    @tag :security_regression
+    test "security regression: raw calls cannot attach handlers or cancel an opaque handle" do
+      test_pid = self()
+
+      owner_pid =
+        spawn(fn ->
+          {:ok, subscription_handle} =
+            Bus.subscribe(
+              "activity.raw_call_custody",
+              fn signal ->
+                send(test_pid, {:owner_subscription_delivered, signal.type})
+                :ok
+              end,
+              async: false
+            )
+
+          send(test_pid, {:owner_subscription_ready, self(), subscription_handle})
+
+          receive do
+            :release_subscription ->
+              send(test_pid, {:owner_release_result, Bus.unsubscribe(subscription_handle)})
+          end
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(owner_pid), do: Process.exit(owner_pid, :kill)
+      end)
+
+      assert_receive {:owner_subscription_ready, ^owner_pid, subscription_handle}
+      assert is_binary(subscription_handle)
+
+      bus_state = :sys.get_state(Bus)
+      assert :ets.info(bus_state.subscription_custody, :owner) == Process.whereis(Bus)
+      assert :ets.info(bus_state.subscription_custody, :protection) == :private
+      assert :ets.info(bus_state.authenticated_calls, :owner) == Process.whereis(Bus)
+      assert :ets.info(bus_state.authenticated_calls, :protection) == :private
+      refute Map.has_key?(bus_state.subscriptions, subscription_handle)
+      refute inspect(bus_state.subscriptions) =~ subscription_handle
+
+      assert_raise ArgumentError, fn ->
+        :ets.tab2list(bus_state.subscription_custody)
+      end
+
+      attacker_handler = fn _signal ->
+        send(test_pid, :forged_handler_ran)
+        :ok
+      end
+
+      assert {:error, :unauthorized} =
+               forged_call(
+                 Bus,
+                 owner_pid,
+                 {:subscribe, "activity.raw_call_custody", attacker_handler, [async: false]}
+               )
+
+      assert {:error, :not_found} =
+               forged_call(Bus, owner_pid, {:unsubscribe, subscription_handle})
+
+      assert {:error, :not_found} = Bus.unsubscribe(subscription_handle)
+
+      assert {:error, :unauthorized} =
+               forged_call(
+                 Bus,
+                 owner_pid,
+                 {:publish_local, Signal.new(:activity, :raw_call_custody, %{forged: true})}
+               )
+
+      refute_receive {:owner_subscription_delivered, :raw_call_custody}, 100
+
+      assert :ok = Bus.publish(Signal.new(:activity, :raw_call_custody, %{}))
+      assert_receive {:owner_subscription_delivered, :raw_call_custody}
+      refute_receive :forged_handler_ran, 100
+
+      listed = Bus.list_subscriptions()
+      assert Enum.any?(listed, &(&1.pattern == "activity.raw_call_custody"))
+      assert Enum.all?(listed, &(not Map.has_key?(&1, :id)))
+      assert Enum.all?(listed, &(not Map.has_key?(&1, :unsubscribe_digest)))
+
+      send(owner_pid, :release_subscription)
+      assert_receive {:owner_release_result, :ok}
+    end
   end
 
   describe "list_subscriptions/0" do
+    @tag :security_regression
+    test "security regression: ordinary subscriptions survive a supervised bus restart" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "activity.bus_restart_recovery",
+          fn signal ->
+            send(test_pid, {:bus_restart_recovery, signal.type})
+            :ok
+          end,
+          async: false
+        )
+
+      old_bus = Process.whereis(Bus)
+
+      assert {:error, :unauthorized} =
+               forged_call(Arbor.Signals.SubscriptionRegistry, old_bus, :clear)
+
+      assert :ok = Supervisor.terminate_child(Arbor.Signals.Supervisor, Bus)
+      assert {:ok, new_bus} = Supervisor.restart_child(Arbor.Signals.Supervisor, Bus)
+      refute new_bus == old_bus
+
+      assert Enum.any?(Bus.list_subscriptions(), &(&1.pattern == "activity.bus_restart_recovery"))
+      assert :ok = Bus.publish(Signal.new(:activity, :bus_restart_recovery, %{}))
+      assert_receive {:bus_restart_recovery, :bus_restart_recovery}, 1_000
+      assert :ok = Bus.unsubscribe(sub_id)
+    end
+
     test "returns active subscriptions" do
       {:ok, sub_id} = Bus.subscribe("activity.list_test", fn _ -> :ok end)
 
       subs = Bus.list_subscriptions()
-      assert Enum.any?(subs, &(&1.id == sub_id))
+      assert Enum.any?(subs, &(&1.pattern == "activity.list_test"))
+      assert Enum.all?(subs, &(not Map.has_key?(&1, :id)))
+      assert Enum.all?(subs, &(not Map.has_key?(&1, :unsubscribe_digest)))
 
       Bus.unsubscribe(sub_id)
     end
@@ -209,12 +486,14 @@ defmodule Arbor.Signals.BusTest do
         )
 
       subs = Bus.list_subscriptions()
-      sub = Enum.find(subs, &(&1.id == sub_id))
+      sub = Enum.find(subs, &(&1.pattern == "metrics.list_test"))
 
       assert sub.pattern == "metrics.list_test"
       assert sub.async == false
       assert sub.principal_id == "agent_list_test"
       assert %DateTime{} = sub.created_at
+      refute Map.has_key?(sub, :id)
+      refute Map.has_key?(sub, :unsubscribe_digest)
 
       Bus.unsubscribe(sub_id)
     end
@@ -486,6 +765,22 @@ defmodule Arbor.Signals.BusTest do
       {^tag, _, _} -> drain_messages(tag)
     after
       0 -> :ok
+    end
+  end
+
+  defp forged_call(server, asserted_pid, message) do
+    reply = :erlang.alias()
+    tag = [:alias | reply]
+    send(server, {:"$gen_call", {asserted_pid, tag}, message})
+
+    try do
+      receive do
+        {^tag, result} -> result
+      after
+        2_000 -> flunk("forged Bus call did not settle")
+      end
+    after
+      :erlang.unalias(reply)
     end
   end
 

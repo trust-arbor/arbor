@@ -43,7 +43,7 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
     swap_registered_owner!(mode: :durable, root: root, capacity_profile: :operational)
 
     intent = grant_intent("cap_" <> String.duplicate("7", 32), @now)
-    result = AuditJournalOwner.prepare(intent)
+    result = AuditJournalOwner.prepare(AuditJournalOwner, intent)
 
     # Parent 52a2cc3fa: {:error, :capacity_exhausted}. 4096 delivered
     # identities are a lifetime quota there: retained 4097 > 4096 refuses every
@@ -70,7 +70,10 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
     on_exit(fn -> revoke_all(principal) end)
 
     assert {:ok, _cap} =
-             Security.grant(principal: principal, resource: "arbor://memory/read/retirement")
+             Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://memory/read/retirement"
+             )
   end
 
   test "security regression: prepare on a delivered terminal answers :operation_terminal before and after compaction" do
@@ -95,8 +98,8 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
     # identity was answered like a live prepare (the facade then refused the
     # reduction as :audit_unavailable), while the same identity compacted was
     # :operation_terminal.
-    assert {:error, :operation_terminal} = GenServer.call(name, {:prepare, retry})
-    assert {:error, :operation_terminal} = GenServer.call(name, {:prepare, target})
+    assert {:error, :operation_terminal} = AuditJournalOwner.prepare(name, retry)
+    assert {:error, :operation_terminal} = AuditJournalOwner.prepare(name, target)
     assert {:ok, after_refusal} = AuditJournalOwner.status(name)
     assert after_refusal["committed_frames"] == delivered_status["committed_frames"]
 
@@ -109,8 +112,8 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
              fn {id, op} -> id == target["operation_id"] and Map.has_key?(op, "fingerprints") end
            )
 
-    assert {:error, :operation_terminal} = GenServer.call(name, {:prepare, retry})
-    assert {:error, :operation_terminal} = GenServer.call(name, {:prepare, target})
+    assert {:error, :operation_terminal} = AuditJournalOwner.prepare(name, retry)
+    assert {:error, :operation_terminal} = AuditJournalOwner.prepare(name, target)
     assert {:ok, ^compacted} = AuditJournalOwner.status(name) |> drop_refusal()
   end
 
@@ -159,7 +162,7 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
 
     # Parent 52a2cc3fa: {:ok, v2, "prepared"} — no admission floor; the v2
     # identity of a retired operation would be admitted as brand new.
-    assert {:error, :retired_version} = GenServer.call(name, {:prepare, v2})
+    assert {:error, :retired_version} = AuditJournalOwner.prepare(name, v2)
     assert {:ok, after_refusal} = AuditJournalOwner.status(name) |> drop_refusal()
     assert after_refusal == elem(drop_refusal({:ok, before}), 1)
     refute File.exists?(ledger_path(root))
@@ -172,15 +175,19 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
   defp drop_refusal({:ok, status}), do: {:ok, Map.delete(status, "last_refusal")}
 
   defp deliver!(name, intent) do
-    assert {:ok, _, "prepared"} = GenServer.call(name, {:prepare, intent})
-    assert {:ok, :committed} = GenServer.call(name, {:observe, intent["operation_id"], :applied})
-    assert {:ok, batch} = GenServer.call(name, :delivery_batch)
+    assert {:ok, _, "prepared"} = AuditJournalOwner.prepare(name, intent)
+
+    assert {:ok, :committed} =
+             AuditJournalOwner.observe(name, intent["operation_id"], :applied)
+
+    assert {:ok, batch} = AuditJournalOwner.delivery_batch(name)
     item = Enum.find(batch, &(&1["operation_id"] == intent["operation_id"]))
 
     assert {:ok, :committed} =
-             GenServer.call(
+             AuditJournalOwner.acknowledge_delivery(
                name,
-               {:acknowledge_delivery, item["operation_id"], item["intent_sha256"]}
+               item["operation_id"],
+               item["intent_sha256"]
              )
   end
 
@@ -263,8 +270,10 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
     true = Process.unregister(AuditJournalOwner)
     {:ok, journal} = AuditJournalOwner.start_link(opts)
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
 
     on_exit(fn ->
+      :ok = AuditJournalOwner.clear_test_fixture()
       if Process.alive?(journal), do: GenServer.stop(journal)
 
       if Process.whereis(AuditJournalOwner) == nil,
@@ -278,7 +287,12 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
     name = :"audit_retire_consumer_#{System.unique_integer([:positive])}"
     true = Process.register(self(), name)
     previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_name)
+
+    previous_application =
+      Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+
     Application.put_env(:arbor_security, :authority_audit_consumer_name, name)
+    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
 
     on_exit(fn ->
       case previous do
@@ -288,6 +302,14 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
         :error ->
           Application.delete_env(:arbor_security, :authority_audit_consumer_name)
       end
+
+      case previous_application do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
+      end
     end)
 
     name
@@ -295,7 +317,7 @@ defmodule Arbor.Security.AuditRetirementOwnerSecurityRegressionTest do
 
   defp revoke_all(principal) do
     case Security.list_capabilities(principal) do
-      {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+      {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
       _ -> :ok
     end
   end

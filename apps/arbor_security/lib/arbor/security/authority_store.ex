@@ -19,11 +19,48 @@ defmodule Arbor.Security.AuthorityStore do
 
   alias Arbor.Contracts.Persistence.{Record, Revision}
   alias Arbor.Security.Config
+  alias Arbor.Security.PrivateState
   alias Arbor.Security.Store.JSONFile
+  alias Arbor.Security.SupervisedOwner
 
   @default_hydration_limit 10_000
+  @test_env Mix.env() == :test
   @required_callbacks [put: 3, get: 2, delete: 2, list: 1]
   @durability_classes [:volatile, :process_lifetime, :application_restart, :node_restart]
+  @backend_custody_anchor {__MODULE__, :backend_custody}
+  @backend_custody_schema :authority_store_backend_v1
+  if Mix.env() == :test do
+    @test_fixture_anchor {__MODULE__, :test_isolated_fixture}
+  end
+
+  @supervised_mutation_owners [
+    Arbor.Security.CapabilityStore,
+    Arbor.Security.Identity.Registry,
+    Arbor.Security.IssuerRegistry
+  ]
+  @recognized_mutation_owners [
+    Arbor.Security.CapabilityStore,
+    Arbor.Security.Identity.Registry,
+    Arbor.Security.IssuerRegistry,
+    Arbor.Security.SigningKeyStore.Owner
+  ]
+  @storage_integrity_errors [
+    :offline_migration_required,
+    :record_authentication_failed,
+    :record_authentication_unavailable,
+    :revocation_ledger_missing,
+    :revocation_ledger_malformed,
+    :revocation_ledger_insecure_mode,
+    :revocation_ledger_symlink_rejected,
+    :revocation_ledger_hardlink_rejected,
+    :revocation_ledger_not_regular,
+    :revocation_ledger_marker_malformed,
+    :revocation_ledger_marker_insecure_mode,
+    :revocation_ledger_marker_symlink_rejected,
+    :revocation_ledger_marker_hardlink_rejected,
+    :revocation_ledger_marker_not_regular,
+    :revocation_ledger_parent_unavailable
+  ]
 
   @type expected :: :not_found | {:value, Record.t()}
 
@@ -36,8 +73,87 @@ defmodule Arbor.Security.AuthorityStore do
 
   def start_link(_opts), do: {:error, :invalid_options}
 
+  @doc false
+  @spec complete_startup(pid(), atom()) :: :ok | {:error, term()}
+  def complete_startup(supervisor, name) do
+    with {:ok, timeout} <- Config.startup_timeout_ms() do
+      complete_startup(supervisor, name, timeout)
+    end
+  end
+
+  @spec complete_startup(pid(), atom(), timeout()) :: :ok | {:error, term()}
+
+  def complete_startup(supervisor, name, timeout)
+      when is_pid(supervisor) and is_atom(name) and is_integer(timeout) and timeout > 0 do
+    startup_call(supervisor, name, :complete_startup, timeout)
+  end
+
+  def complete_startup(_supervisor, _name, _timeout),
+    do: {:error, :invalid_authority_store_startup}
+
+  @doc false
+  def authoritative_get_from_supervisor(supervisor, key, opts),
+    do: startup_authoritative_call(supervisor, opts, {:authoritative_get, key})
+
+  @doc false
+  def authoritative_entry_from_supervisor(supervisor, key, opts),
+    do: startup_authoritative_call(supervisor, opts, {:authoritative_entry, key})
+
+  @doc false
+  def take_hydrated_entries_from_supervisor(supervisor, opts),
+    do: startup_authoritative_call(supervisor, opts, :take_hydrated_entries)
+
+  @doc false
+  def durability_class_from_supervisor(supervisor, opts),
+    do: startup_authoritative_call(supervisor, opts, :durability_class)
+
+  @doc false
+  def acknowledged_put_from_supervisor(supervisor, key, value, opts),
+    do: startup_mutation_call(supervisor, opts, {:acknowledged_put, key, value})
+
+  @doc false
+  def acknowledged_delete_from_supervisor(supervisor, key, opts),
+    do: startup_mutation_call(supervisor, opts, {:acknowledged_delete, key})
+
+  @doc false
+  def acknowledged_compare_and_swap_from_supervisor(
+        supervisor,
+        key,
+        expected,
+        replacement,
+        opts
+      ),
+      do:
+        startup_mutation_call(
+          supervisor,
+          opts,
+          {:acknowledged_compare_and_swap, key, expected, replacement}
+        )
+
+  @doc false
+  def acknowledged_compare_and_delete_from_supervisor(supervisor, key, expected, opts),
+    do:
+      startup_mutation_call(
+        supervisor,
+        opts,
+        {:acknowledged_compare_and_delete, key, expected}
+      )
+
+  if Mix.env() == :test do
+    @doc false
+    @spec start_test_fixture(keyword()) :: GenServer.on_start()
+    def start_test_fixture(opts) when is_list(opts) do
+      start_link(Keyword.put(opts, :test_isolated_owner, true))
+    end
+  end
+
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
+    # ExUnit starts isolated AuthorityStore fixtures through this child spec.
+    # Mark that path explicitly so test stores can be resolved without the old
+    # registered-name fallback. Production builds never add the marker.
+    opts = test_fixture_child_opts(opts)
+
     # Child id is the registered name, not the module. Several stores run under
     # one supervisor; a module id would collide. Ownership proofs equate
     # Process.whereis(name) with the child pid listed under that same id.
@@ -55,27 +171,27 @@ defmodule Arbor.Security.AuthorityStore do
   @spec authoritative_get(String.t(), keyword()) ::
           {:ok, Record.t()} | {:error, :not_found | atom()}
   def authoritative_get(key, opts),
-    do: GenServer.call(store_name!(opts), {:authoritative_get, key})
+    do: authoritative_call(opts, {:authoritative_get, key})
 
   @doc false
   def authoritative_entry(key, opts),
-    do: GenServer.call(store_name!(opts), {:authoritative_entry, key})
+    do: authoritative_call(opts, {:authoritative_entry, key})
 
   @doc false
   def acknowledged_compare_and_create(key, expected, replacement, opts),
     do:
-      GenServer.call(
-        store_name!(opts),
+      authenticated_mutation_call(
+        opts,
         {:acknowledged_compare_and_create, key, expected, replacement}
       )
 
   @spec authoritative_list(keyword()) :: {:ok, [String.t()]} | {:error, atom()}
   def authoritative_list(opts),
-    do: GenServer.call(store_name!(opts), {:authoritative_list, nil})
+    do: authoritative_call(opts, {:authoritative_list, nil})
 
   @spec authoritative_entries(keyword()) ::
           {:ok, [{String.t(), Record.t()}]} | {:error, atom()}
-  def authoritative_entries(opts), do: GenServer.call(store_name!(opts), :authoritative_entries)
+  def authoritative_entries(opts), do: authoritative_call(opts, :authoritative_entries)
 
   @doc """
   Takes the validated startup entries, or a fresh complete bounded inventory.
@@ -85,50 +201,104 @@ defmodule Arbor.Security.AuthorityStore do
   """
   @spec take_hydrated_entries(keyword()) ::
           {:ok, [{String.t(), Record.t()}]} | {:error, atom()}
-  def take_hydrated_entries(opts), do: GenServer.call(store_name!(opts), :take_hydrated_entries)
+  def take_hydrated_entries(opts), do: authoritative_call(opts, :take_hydrated_entries)
 
   @spec put(String.t(), Record.t(), keyword()) :: :ok | {:error, atom()}
-  def put(key, value, opts), do: GenServer.call(store_name!(opts), {:put, key, value})
+  def put(key, value, opts), do: authenticated_mutation_call(opts, {:put, key, value})
 
   @spec delete(String.t(), keyword()) :: :ok | {:error, atom()}
-  def delete(key, opts), do: GenServer.call(store_name!(opts), {:delete, key})
+  def delete(key, opts), do: authenticated_mutation_call(opts, {:delete, key})
 
   @spec acknowledged_put(String.t(), Record.t(), keyword()) ::
           {:ok, Record.t()} | {:error, atom()}
   def acknowledged_put(key, value, opts),
-    do: GenServer.call(store_name!(opts), {:acknowledged_put, key, value})
+    do: authenticated_mutation_call(opts, {:acknowledged_put, key, value})
 
   @spec acknowledged_delete(String.t(), keyword()) :: :ok | {:error, atom()}
   def acknowledged_delete(key, opts),
-    do: GenServer.call(store_name!(opts), {:acknowledged_delete, key})
+    do: authenticated_mutation_call(opts, {:acknowledged_delete, key})
 
   @spec acknowledged_compare_and_swap(String.t(), expected(), Record.t(), keyword()) ::
           {:ok, Record.t()} | {:error, atom()}
   def acknowledged_compare_and_swap(key, expected, replacement, opts),
     do:
-      GenServer.call(
-        store_name!(opts),
+      authenticated_mutation_call(
+        opts,
         {:acknowledged_compare_and_swap, key, expected, replacement}
       )
 
   @spec acknowledged_compare_and_delete(String.t(), Record.t(), keyword()) ::
           :ok | {:error, atom()}
   def acknowledged_compare_and_delete(key, expected, opts),
-    do: GenServer.call(store_name!(opts), {:acknowledged_compare_and_delete, key, expected})
+    do: authenticated_mutation_call(opts, {:acknowledged_compare_and_delete, key, expected})
 
-  @spec hydration_status(keyword()) :: {:ok, map()}
-  def hydration_status(opts), do: GenServer.call(store_name!(opts), :hydration_status)
+  @spec hydration_status(keyword()) :: {:ok, map()} | {:error, :store_unavailable}
+  def hydration_status(opts), do: authoritative_call(opts, :hydration_status)
 
   @spec durability_class(keyword()) ::
           :volatile | :process_lifetime | :application_restart | :node_restart | :unknown
-  def durability_class(opts), do: GenServer.call(store_name!(opts), :durability_class)
+  def durability_class(opts) do
+    case authoritative_call(opts, :durability_class) do
+      class when class in @durability_classes -> class
+      _ -> :unknown
+    end
+  end
 
   @impl GenServer
   def init(opts) do
-    with {:ok, state} <- build_state(opts) do
-      {:ok, hydrate(state)}
+    Process.flag(:sensitive, true)
+
+    with {:ok, defer_hydration?} <- defer_hydration(opts),
+         {:ok, supervisor_pid} <- maybe_startup_supervisor_pid(defer_hydration?),
+         {:ok, state} <- build_state(opts, supervisor_pid) do
+      :ok = maybe_register_test_fixture(state)
+
+      cond do
+        defer_hydration? and not SupervisedOwner.application_started?(:arbor_security) ->
+          {:ok, %{state | initialization: :pending}}
+
+        defer_hydration? ->
+          {:ok, %{state | initialization: :pending}, {:continue, :hydrate}}
+
+        true ->
+          {:ok, state |> hydrate() |> Map.put(:initialization, :ready)}
+      end
     else
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  @impl GenServer
+  def handle_continue(:hydrate, state) do
+    case finish_hydration(state) do
+      {:ok, hydrated} -> {:noreply, hydrated}
+      {:error, reason, failed} -> {:stop, reason, failed}
+    end
+  end
+
+  @impl GenServer
+  def handle_call({:startup_call, supervisor, :complete_startup}, _from, state) do
+    case {startup_store?(state, supervisor), state.initialization} do
+      {true, :pending} ->
+        case finish_hydration(state) do
+          {:ok, hydrated} -> {:reply, :ok, hydrated}
+          {:error, reason, failed} -> {:stop, reason, {:error, reason}, failed}
+        end
+
+      {true, :ready} ->
+        {:reply, :ok, state}
+
+      _other ->
+        {:reply, {:error, :invalid_authority_store_startup}, state}
+    end
+  end
+
+  def handle_call({:startup_call, supervisor, request}, from, state) do
+    if startup_store?(state, supervisor) and state.initialization == :ready and
+         not mutation_request?(request) do
+      handle_authoritative_call(request, from, state)
+    else
+      {:reply, {:error, :store_unavailable}, state}
     end
   end
 
@@ -144,15 +314,51 @@ defmodule Arbor.Security.AuthorityStore do
   # Hydration diagnostics remain readable after failure, but every authoritative
   # read and mutation below is poison-gated so partial inventory cannot escape.
   def handle_call(request, from, state) do
-    if poisoned?(state) do
-      {:reply, {:error, :hydration_unavailable}, state}
-    else
-      handle_authoritative_call(request, from, state)
+    cond do
+      state.initialization != :ready ->
+        {:reply, {:error, :store_unavailable}, state}
+
+      poisoned?(state) ->
+        {:reply, {:error, :hydration_unavailable}, state}
+
+      mutation_request?(request) ->
+        {:reply, {:error, :store_mutation_unauthorized}, state}
+
+      true ->
+        handle_authoritative_call(request, from, state)
+    end
+  end
+
+  @impl GenServer
+  def handle_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        {reply, state} =
+          case request do
+            {:startup_mutation, supervisor, mutation} ->
+              dispatch_startup_mutation(supervisor, mutation, caller, state)
+
+            _other ->
+              dispatch_authenticated_mutation(request, caller, state)
+          end
+
+        :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+        {:noreply, state}
+
+      result when result in [:pending, :expired, :rejected] ->
+        {:noreply, state}
+
+      :unrecognized ->
+        {:noreply, state}
     end
   end
 
   defp handle_authoritative_call({:authoritative_get, key}, _from, state) do
     {:reply, get_record(state, key), state}
+  end
+
+  defp handle_authoritative_call(:durability_class, _from, state) do
+    {:reply, state.durability_class, state}
   end
 
   defp handle_authoritative_call({:authoritative_entry, key}, _from, state) do
@@ -247,22 +453,36 @@ defmodule Arbor.Security.AuthorityStore do
     end
   end
 
-  defp build_state(opts) do
+  defp build_state(opts, supervisor_pid) do
     with {:ok, name} <- fetch_name(opts),
          {:ok, namespace} <- fetch_namespace(opts, name),
          {:ok, backend} <- fetch_backend(opts),
          :ok <- validate_backend(backend),
          {:ok, backend_opts} <- fetch_backend_opts(opts),
          {:ok, backend_opts} <- inject_jsonfile_root(backend, backend_opts),
+         backend_opts <- put_startup_supervisor(backend_opts, supervisor_pid),
          {:ok, hydration_limit} <- fetch_hydration_limit(opts),
+         {:ok, mutation_owners} <- fetch_mutation_owners(opts),
          {:ok, durability_class} <- resolve_durability(backend, backend_opts, namespace) do
+      backend_custody =
+        PrivateState.new(
+          @backend_custody_anchor,
+          @backend_custody_schema,
+          Keyword.put(backend_opts, :name, namespace)
+        )
+
       {:ok,
        %{
          name: name,
          namespace: namespace,
          backend: backend,
-         backend_opts: Keyword.put(backend_opts, :name, namespace),
+         backend_custody: backend_custody,
          hydration_limit: hydration_limit,
+         mutation_owners: mutation_owners,
+         test_isolated_owner: test_isolated_owner?(opts),
+         security_supervisor_pid: supervisor_pid,
+         authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+         initialization: :pending,
          persistence_mode: if(is_nil(backend), do: :ephemeral, else: :durable),
          durability_class: durability_class,
          entries: %{},
@@ -307,6 +527,65 @@ defmodule Arbor.Security.AuthorityStore do
     _ -> {:error, :invalid_backend_opts}
   end
 
+  defp fetch_mutation_owners(opts) do
+    case Keyword.fetch(opts, :mutation_owners) do
+      :error ->
+        if @test_env, do: {:ok, :test_any}, else: {:error, :mutation_owners_required}
+
+      {:ok, :any} ->
+        if @test_env, do: {:ok, :test_any}, else: {:error, :invalid_mutation_owners}
+
+      {:ok, owners} when is_list(owners) and owners != [] ->
+        if Enum.all?(owners, &(&1 in @recognized_mutation_owners)),
+          do: {:ok, MapSet.new(owners)},
+          else: {:error, :invalid_mutation_owners}
+
+      _invalid ->
+        {:error, :invalid_mutation_owners}
+    end
+  rescue
+    _ -> {:error, :invalid_mutation_owners}
+  end
+
+  defp defer_hydration(opts) when is_list(opts) do
+    case Keyword.get(opts, :defer_hydration, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _invalid -> {:error, :invalid_defer_hydration}
+    end
+  rescue
+    _ -> {:error, :invalid_defer_hydration}
+  end
+
+  defp defer_hydration(_opts), do: {:error, :invalid_defer_hydration}
+
+  defp maybe_startup_supervisor_pid(false), do: {:ok, nil}
+  defp maybe_startup_supervisor_pid(true), do: startup_supervisor_pid()
+
+  defp startup_supervisor_pid do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> linked_supervisor(pid)
+      [name | _] when is_atom(name) -> name |> Process.whereis() |> linked_supervisor()
+      _other -> {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(pid) when is_pid(pid) do
+    case Process.info(self(), :links) do
+      {:links, links} when is_list(links) ->
+        if pid in links, do: {:ok, pid}, else: {:error, :security_supervisor_unavailable}
+
+      _other ->
+        {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(_pid), do: {:error, :security_supervisor_unavailable}
+
+  defp put_startup_supervisor(backend_opts, supervisor) when is_pid(supervisor),
+    do: Keyword.put(backend_opts, :security_supervisor_pid, supervisor)
+
+  defp put_startup_supervisor(backend_opts, _supervisor), do: backend_opts
+
   defp inject_jsonfile_root(nil, backend_opts), do: {:ok, backend_opts}
 
   defp inject_jsonfile_root(backend, backend_opts) when backend != JSONFile,
@@ -336,6 +615,210 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp poisoned?(%{persistence_mode: :durable, hydration_status: %{status: :failed}}), do: true
   defp poisoned?(_state), do: false
+
+  defp mutation_request?({operation, _key, _value})
+       when operation in [:put, :acknowledged_put],
+       do: true
+
+  defp mutation_request?({operation, _key}) when operation in [:delete, :acknowledged_delete],
+    do: true
+
+  defp mutation_request?({:acknowledged_compare_and_create, _key, _expected, _replacement}),
+    do: true
+
+  defp mutation_request?({:acknowledged_compare_and_swap, _key, _expected, _replacement}),
+    do: true
+
+  defp mutation_request?({:acknowledged_compare_and_delete, _key, _expected}), do: true
+  defp mutation_request?(_request), do: false
+
+  defp dispatch_authenticated_mutation(request, caller, state) do
+    cond do
+      state.initialization != :ready ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      poisoned?(state) ->
+        {{:error, :hydration_unavailable}, state}
+
+      not mutation_request?(request) ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      not mutation_authorized?(state, caller) ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      true ->
+        case handle_authoritative_call(request, {caller, :authenticated}, state) do
+          {:reply, reply, state} -> {reply, state}
+        end
+    end
+  end
+
+  defp dispatch_startup_mutation(supervisor, request, caller, state) do
+    cond do
+      not startup_store?(state, supervisor) or state.initialization != :ready ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      poisoned?(state) ->
+        {{:error, :hydration_unavailable}, state}
+
+      not mutation_request?(request) ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      not startup_mutation_authorized?(state, caller, supervisor) ->
+        {{:error, :store_mutation_unauthorized}, state}
+
+      true ->
+        case handle_authoritative_call(request, {caller, :startup_authenticated}, state) do
+          {:reply, reply, state} -> {reply, state}
+        end
+    end
+  end
+
+  if Mix.env() == :test do
+    defp mutation_authorized?(%{mutation_owners: :test_any}, _caller), do: true
+  end
+
+  defp mutation_authorized?(%{mutation_owners: owners}, caller) when is_pid(caller) do
+    Enum.any?(owners, fn
+      Arbor.Security.SigningKeyStore.Owner ->
+        Arbor.Security.SigningKeyStore.Owner.authorized_pid?(caller)
+
+      owner when owner in @supervised_mutation_owners ->
+        SupervisedOwner.authorized?(caller, :arbor_security, [owner])
+
+      _unknown_owner ->
+        false
+    end)
+  end
+
+  defp mutation_authorized?(_state, _caller), do: false
+
+  defp authenticated_mutation_call(opts, request) do
+    Arbor.Common.authenticated_call(authoritative_store_pid(opts), request)
+  end
+
+  defp authoritative_call(opts, request) do
+    case authoritative_store_pid(opts) do
+      pid when is_pid(pid) -> GenServer.call(pid, request)
+      nil -> {:error, :store_unavailable}
+    end
+  end
+
+  defp authoritative_store_pid(opts) do
+    name = store_name!(opts)
+
+    SupervisedOwner.registered_child(name, :arbor_security, [name]) ||
+      test_isolated_store_pid(name)
+  end
+
+  defp startup_authoritative_call(supervisor, opts, request) do
+    with {:ok, timeout} <- Config.startup_timeout_ms() do
+      startup_call(supervisor, store_name!(opts), request, timeout)
+    end
+  end
+
+  defp startup_mutation_call(supervisor, opts, request) do
+    name = store_name!(opts)
+
+    with {:ok, timeout} <- Config.startup_timeout_ms() do
+      case startup_store_pid(supervisor, name) do
+        pid when is_pid(pid) ->
+          Arbor.Common.authenticated_call(
+            pid,
+            {:startup_mutation, supervisor, request},
+            timeout
+          )
+
+        nil ->
+          {:error, :store_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    :exit, _ -> {:error, :store_unavailable}
+  end
+
+  defp startup_call(supervisor, name, request, timeout) do
+    case startup_store_pid(supervisor, name) do
+      pid when is_pid(pid) -> GenServer.call(pid, {:startup_call, supervisor, request}, timeout)
+      nil -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :authority_store_startup_timeout}
+    :exit, _ -> {:error, :store_unavailable}
+  end
+
+  defp startup_store_pid(supervisor, name) when is_pid(supervisor) and is_atom(name),
+    do: SupervisedOwner.child_pid(supervisor, name)
+
+  defp startup_store_pid(_supervisor, _name), do: nil
+
+  defp startup_store?(state, supervisor) do
+    is_pid(supervisor) and supervisor === state.security_supervisor_pid and
+      SupervisedOwner.child_pid(supervisor, state.name) == self()
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  if Mix.env() == :test do
+    defp startup_mutation_authorized?(%{mutation_owners: :test_any}, _caller, _supervisor),
+      do: true
+  end
+
+  defp startup_mutation_authorized?(%{mutation_owners: %MapSet{} = owners}, caller, supervisor)
+       when is_pid(caller) do
+    Enum.any?(owners, fn owner ->
+      SupervisedOwner.child_pid(supervisor, owner) == caller
+    end)
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp startup_mutation_authorized?(_state, _caller, _supervisor), do: false
+
+  if Mix.env() == :test do
+    defp test_fixture_child_opts(opts), do: Keyword.put(opts, :test_isolated_owner, true)
+    defp test_isolated_owner?(opts), do: Keyword.get(opts, :test_isolated_owner, false) == true
+
+    defp maybe_register_test_fixture(%{name: name, test_isolated_owner: true}) do
+      :persistent_term.put({@test_fixture_anchor, name}, self())
+      :ok
+    end
+
+    defp maybe_register_test_fixture(_state), do: :ok
+
+    defp test_isolated_store_pid(name) do
+      case :persistent_term.get({@test_fixture_anchor, name}, nil) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid) and Process.whereis(name) == pid, do: pid, else: nil
+
+        _ ->
+          nil
+      end
+    end
+
+    defp clear_test_fixture(%{name: name, test_isolated_owner: true}) do
+      key = {@test_fixture_anchor, name}
+
+      if :persistent_term.get(key, nil) == self(), do: :persistent_term.erase(key)
+      :ok
+    end
+
+    defp clear_test_fixture(_state), do: :ok
+  else
+    defp test_fixture_child_opts(opts), do: opts
+    defp test_isolated_owner?(_opts), do: false
+    defp maybe_register_test_fixture(_state), do: :ok
+    defp test_isolated_store_pid(_name), do: nil
+    defp clear_test_fixture(_state), do: :ok
+  end
 
   defp fetch_hydration_limit(opts) do
     case Keyword.get(opts, :hydration_limit, @default_hydration_limit) do
@@ -407,6 +890,16 @@ defmodule Arbor.Security.AuthorityStore do
     end
   end
 
+  defp finish_hydration(state) do
+    hydrated = state |> hydrate() |> Map.put(:initialization, :ready)
+
+    case hydrated.hydration_status do
+      %{status: :ready} -> {:ok, hydrated}
+      %{reason: reason} -> {:error, {:authority_store_hydration_failed, reason}, hydrated}
+      _other -> {:error, {:authority_store_hydration_failed, :unknown}, hydrated}
+    end
+  end
+
   defp invalidate_startup_entries(state), do: %{state | startup_entries: :refresh_required}
 
   defp hydration_status(status, loaded_count, limit, reason) do
@@ -428,10 +921,11 @@ defmodule Arbor.Security.AuthorityStore do
   end
 
   defp get_record(state, key) do
-    case guarded_backend(fn -> state.backend.get(key, state.backend_opts) end) do
+    case guarded_backend(fn -> state.backend.get(key, backend_opts!(state)) end) do
       {:returned, {:ok, %Record{} = record}} -> validate_record(key, record)
       {:returned, {:ok, _malformed}} -> {:error, :invalid_backend_response}
       {:returned, {:error, :not_found}} -> {:error, :not_found}
+      {:returned, {:error, reason}} when reason in @storage_integrity_errors -> {:error, reason}
       {:returned, {:error, _reason}} -> {:error, :backend_unavailable}
       {:returned, _malformed} -> {:error, :invalid_backend_response}
       :aborted -> {:error, :backend_unavailable}
@@ -449,8 +943,9 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp get_entry(state, key) do
     if function_exported?(state.backend, :authoritative_entry, 2) do
-      case guarded_backend(fn -> state.backend.authoritative_entry(key, state.backend_opts) end) do
+      case guarded_backend(fn -> state.backend.authoritative_entry(key, backend_opts!(state)) end) do
         {:returned, {:ok, entry}} -> validate_entry(key, entry)
+        {:returned, {:error, reason}} when reason in @storage_integrity_errors -> {:error, reason}
         _ -> {:error, :backend_unavailable}
       end
     else
@@ -501,6 +996,9 @@ defmodule Arbor.Security.AuthorityStore do
       {:returned, {:error, :bounded_inventory_unsupported}} ->
         {:error, :bounded_inventory_unsupported}
 
+      {:returned, {:error, reason}} when reason in @storage_integrity_errors ->
+        {:error, reason}
+
       {:returned, {:error, _reason}} ->
         {:error, :backend_unavailable}
 
@@ -515,11 +1013,11 @@ defmodule Arbor.Security.AuthorityStore do
   defp call_bounded_list(state) do
     cond do
       function_exported?(state.backend, :bounded_list, 2) ->
-        state.backend.bounded_list(state.hydration_limit, state.backend_opts)
+        state.backend.bounded_list(state.hydration_limit, backend_opts!(state))
 
       state.hydration_limit <= @default_hydration_limit ->
         state.backend.list(
-          Keyword.put(state.backend_opts, :authoritative_limit, state.hydration_limit)
+          Keyword.put(backend_opts!(state), :authoritative_limit, state.hydration_limit)
         )
 
       true ->
@@ -599,7 +1097,7 @@ defmodule Arbor.Security.AuthorityStore do
   end
 
   defp durable_put(state, key, value, acknowledged?) do
-    case guarded_backend(fn -> state.backend.put(key, value, state.backend_opts) end) do
+    case guarded_backend(fn -> state.backend.put(key, value, backend_opts!(state)) end) do
       {:returned, :ok} when acknowledged? ->
         case get_record(state, key) do
           {:ok, stored} -> {{:ok, stored}, state}
@@ -640,7 +1138,7 @@ defmodule Arbor.Security.AuthorityStore do
   end
 
   defp do_delete(state, key, acknowledged?) do
-    case guarded_backend(fn -> state.backend.delete(key, state.backend_opts) end) do
+    case guarded_backend(fn -> state.backend.delete(key, backend_opts!(state)) end) do
       {:returned, :ok} -> {:ok, state}
       {:returned, _other} when acknowledged? -> {{:error, :outcome_unknown}, state}
       {:returned, {:error, _reason}} -> {{:error, :backend_unavailable}, state}
@@ -699,7 +1197,7 @@ defmodule Arbor.Security.AuthorityStore do
   defp durable_compare_and_swap(state, key, expected, replacement) do
     if function_exported?(state.backend, :compare_and_swap, 4) do
       case guarded_backend(fn ->
-             state.backend.compare_and_swap(key, expected, replacement, state.backend_opts)
+             state.backend.compare_and_swap(key, expected, replacement, backend_opts!(state))
            end) do
         {:returned, {:ok, %Record{} = stored}} ->
           case validate_record(key, stored) do
@@ -767,7 +1265,7 @@ defmodule Arbor.Security.AuthorityStore do
     if function_exported?(state.backend, :compare_and_create, 4) do
       reply =
         case guarded_backend(fn ->
-               state.backend.compare_and_create(key, expected, replacement, state.backend_opts)
+               state.backend.compare_and_create(key, expected, replacement, backend_opts!(state))
              end) do
           {:returned, {:ok, %Record{} = stored}} -> validate_record(key, stored)
           {:returned, {:error, :conflict}} -> {:error, :conflict}
@@ -815,7 +1313,7 @@ defmodule Arbor.Security.AuthorityStore do
   defp durable_compare_and_delete(state, key, expected) do
     if function_exported?(state.backend, :compare_and_delete, 3) do
       case guarded_backend(fn ->
-             state.backend.compare_and_delete(key, expected, state.backend_opts)
+             state.backend.compare_and_delete(key, expected, backend_opts!(state))
            end) do
         {:returned, :ok} -> {:ok, state}
         {:returned, {:error, :conflict}} -> {{:error, :conflict}, state}
@@ -848,6 +1346,30 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp validate_expected_record(key, _record) when not is_binary(key), do: {:error, :invalid_key}
   defp validate_expected_record(_key, _record), do: {:error, :invalid_expected}
+
+  @impl true
+  def terminate(_reason, state) do
+    clear_test_fixture(state)
+    PrivateState.delete(Map.get(state, :backend_custody), @backend_custody_anchor)
+    :ok
+  end
+
+  defp backend_opts!(%{backend_custody: custody}) do
+    case PrivateState.fetch(
+           custody,
+           @backend_custody_anchor,
+           @backend_custody_schema,
+           &valid_backend_custody?/1
+         ) do
+      {:ok, opts} -> opts
+      {:error, _reason} -> raise "invalid authority store backend custody"
+    end
+  end
+
+  defp backend_opts!(_state), do: raise("invalid authority store backend custody")
+
+  defp valid_backend_custody?(opts) when is_list(opts), do: Keyword.keyword?(opts)
+  defp valid_backend_custody?(_opts), do: false
 
   defp guarded_backend(fun) do
     {:returned, fun.()}

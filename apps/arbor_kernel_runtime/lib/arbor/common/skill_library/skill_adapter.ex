@@ -31,6 +31,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
   """
 
   alias Arbor.Contracts.Skill
+  alias Arbor.Common.SkillLibrary.ScanGuard
 
   @skill_filename "SKILL.md"
 
@@ -57,7 +58,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
   """
   @spec parse(String.t()) :: {:ok, parsed_skill()} | {:error, term()}
   def parse(path) when is_binary(path) do
-    with {:ok, content} <- File.read(path),
+    with {:ok, content} <- ScanGuard.read_regular(path),
          {:ok, frontmatter, body} <- split_frontmatter(content),
          {:ok, fields} <- parse_frontmatter(frontmatter) do
       trimmed_body = String.trim(body)
@@ -97,10 +98,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
   """
   @spec list(String.t()) :: [String.t()]
   def list(dir) when is_binary(dir) do
-    dir
-    |> Path.join("**/" <> @skill_filename)
-    |> Path.wildcard()
-    |> Enum.sort()
+    dir |> ScanGuard.recursive_named_files(@skill_filename) |> Enum.sort()
   end
 
   # --- Frontmatter Parsing ---

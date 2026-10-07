@@ -258,9 +258,10 @@ defmodule Arbor.Security.Escalation do
         {:ok, :pending_approval, proposal_id}
 
       {:error, :duplicate_proposal} ->
-        # A proposal for this resource is already pending — reuse it
-        Logger.info("Escalation: reusing existing pending proposal for #{resource_uri}")
-        {:ok, :pending_approval, "existing"}
+        # The consensus API did not return the existing proposal's identifier.
+        # Treat that as an unresolved submission instead of fabricating an id
+        # that no approval consumer can poll.
+        {:error, {:consensus_submission_failed, :duplicate_proposal}}
 
       {:error, reason} ->
         {:error, {:consensus_submission_failed, reason}}
@@ -346,7 +347,10 @@ defmodule Arbor.Security.Escalation do
       }
       |> compact_map()
 
-    deep_merge(base, supplied)
+    # The approval prompt's security-owned facts come from the operation and
+    # matched capability. Caller context may add detail, but it cannot replace
+    # values the boundary already derived for the approver.
+    deep_merge(supplied, base)
     |> sanitize_context()
     |> Map.put_new(:principal_id, principal_id)
     |> Map.put_new(:resource_uri, resource_uri)

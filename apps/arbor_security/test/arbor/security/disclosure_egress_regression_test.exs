@@ -33,17 +33,40 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
     unique = :erlang.unique_integer([:positive])
-    agent_id = Arbor.Identifiers.generate_agent_id()
+    {:ok, identity} = Identity.generate(name: "disclosure-egress")
+    :ok = Registry.register_fixture(identity)
+    agent_id = identity.agent_id
+
+    {:ok, _mutation_cap} =
+      Arbor.Security.grant_fixture(
+        principal: agent_id,
+        resource: "arbor://security/grant/#{agent_id}"
+      )
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        agent_id,
+        identity.private_key,
+        purpose: :disclosure_egress_regression
+      )
+
+    {:ok, actor_authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, identity.private_key)
 
     # These tests deliberately persist malformed disclosure candidates. They
     # must not poison a later CapabilityStore restart in the shared suite.
-    on_exit(fn -> _ = CapabilityStore.revoke_all(agent_id) end)
+    on_exit(fn ->
+      Arbor.Security.close_signing_authority(actor_authority)
+      _ = CapabilityStore.revoke_all_fixture(agent_id)
+      Arbor.Security.deregister_identity_fixture(agent_id)
+    end)
 
     %{
       agent_id: agent_id,
       session_id: "session_#{unique}",
       task_id: "task_#{unique}",
-      principal_scope: "human_#{unique}"
+      principal_scope: "human_#{unique}",
+      actor_authority: actor_authority
     }
   end
 
@@ -118,21 +141,21 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     @tag spec: "VP-05D2A0"
     test "forged signature is refused", %{base: base} = ctx do
       forged = %{base | issuer_signature: :crypto.strong_rand_bytes(64)}
-      {:ok, :stored} = CapabilityStore.put(forged)
+      {:ok, :stored} = CapabilityStore.put_fixture(forged)
       assert_refused(ctx, forged.id)
     end
 
     @tag spec: "VP-05D2A0"
     test "unsigned is refused", %{base: base} = ctx do
-      {:ok, :stored} = CapabilityStore.put(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(base)
       assert_refused(ctx, base.id)
     end
 
     @tag spec: "VP-05D2A0"
     test "expired is refused", %{base: base} = ctx do
       expired = %{base | expires_at: DateTime.add(DateTime.utc_now(), -10, :second)}
-      {:ok, signed} = SystemAuthority.sign_capability(expired)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
@@ -146,8 +169,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
           expires_at: DateTime.add(granted_at, 300, :second)
       }
 
-      {:ok, signed} = SystemAuthority.sign_capability(future)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(future)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
@@ -155,8 +178,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     test "security regression: non-positive validity window is refused", %{base: base} = ctx do
       expires_at = DateTime.add(DateTime.utc_now(), 300, :second)
       invalid = %{base | granted_at: DateTime.add(expires_at, 1, :second), expires_at: expires_at}
-      {:ok, signed} = SystemAuthority.sign_capability(invalid)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(invalid)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
@@ -168,7 +191,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
           issuer_signature: {:not, :a_binary}
       }
 
-      {:ok, :stored} = CapabilityStore.put(malformed)
+      assert {:error, _reason} = CapabilityStore.put_fixture(malformed)
       assert_refused(ctx, malformed.id)
       assert is_binary(SystemAuthority.agent_id())
     end
@@ -177,14 +200,14 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     test "security regression: a different registered issuer cannot mint disclosure authority",
          %{base: base} = ctx do
       {:ok, other_identity} = Identity.generate()
-      :ok = Registry.register(Identity.public_only(other_identity))
+      :ok = Registry.register_fixture(Identity.public_only(other_identity))
 
       signed =
         base
         |> Map.put(:issuer_id, other_identity.agent_id)
         |> Signer.sign(other_identity.private_key)
 
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
@@ -192,15 +215,15 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     test "security regression: non-exact disclosure resource URI is refused",
          %{base: base} = ctx do
       malformed = %{base | resource_uri: base.resource_uri <> "/extra"}
-      {:ok, signed} = SystemAuthority.sign_capability(malformed)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(malformed)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
     @tag spec: "VP-05D2A0"
     test "wrong principal is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts = full_opts(ctx, signed.id, :untrusted)
 
@@ -214,8 +237,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
 
     @tag spec: "VP-05D2A0"
     test "wrong session is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts =
         Keyword.put(full_opts(ctx, signed.id, :untrusted), :session_id, "session_someone_else")
@@ -226,8 +249,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
 
     @tag spec: "VP-05D2A0"
     test "wrong turn/task is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts = Keyword.put(full_opts(ctx, signed.id, :untrusted), :task_id, "task_someone_else")
 
@@ -237,8 +260,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
 
     @tag spec: "VP-05D2A0"
     test "wrong human is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts =
         Keyword.put(full_opts(ctx, signed.id, :untrusted), :principal_scope, "human_someone_else")
@@ -254,16 +277,16 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
         | parent_capability_id: "cap_parent_#{:erlang.unique_integer([:positive])}"
       }
 
-      {:ok, signed} = SystemAuthority.sign_capability(delegated)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(delegated)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
     @tag spec: "VP-05D2A0"
     test "revoked is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
-      :ok = CapabilityStore.revoke(signed.id)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
+      :ok = CapabilityStore.revoke_fixture(signed.id)
       assert_refused(ctx, signed.id)
     end
 
@@ -274,15 +297,15 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
         | constraints: Map.put(base.constraints, :egress, %{max_tier: :external_provider})
       }
 
-      {:ok, signed} = SystemAuthority.sign_capability(dual)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(dual)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
       assert_refused(ctx, signed.id)
     end
 
     @tag spec: "VP-05D2A0"
     test "wrong route is refused", %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts =
         Keyword.put(
@@ -298,8 +321,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     @tag spec: "VP-05D2A0"
     test "a caller-supplied capability struct (never accepted) is ignored — only an id opt works",
          %{base: base} = ctx do
-      {:ok, signed} = SystemAuthority.sign_capability(base)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       opts = Keyword.put(full_opts(ctx, signed.id, :untrusted), :disclosure_capability_id, signed)
 
@@ -342,8 +365,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
         )
 
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
-      {:ok, signed} = SystemAuthority.sign_capability(expired)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       assert Arbor.Security.authorize_egress(agent_id, :external_provider, egress_taint: :trusted) ==
                {:requires_approval, :egress}
@@ -360,8 +383,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
           constraints: %{egress: %{max_tier: :external_provider}}
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       assert Arbor.Security.authorize_egress(agent_id, :external_provider, egress_taint: :trusted) ==
                :allow
@@ -438,7 +461,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
         principal_scope: ctx.principal_scope,
         destination: "api.anthropic.com",
         provider: "anthropic",
-        runtime: "arbor"
+        runtime: "arbor",
+        actor_authority: ctx.actor_authority
       ]
       |> Keyword.merge(overrides)
       |> Arbor.Security.issue_disclosure_capability()

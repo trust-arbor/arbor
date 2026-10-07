@@ -146,43 +146,16 @@ defmodule Arbor.Security.OIDC.AuthCodeFlowSecurityRegressionTest do
     end
   end
 
-  describe "security regression: same-origin token exchange still succeeds" do
-    test "a valid same-origin provider accepts the empty verifier sentinel and returns the full body" do
-      {issuer_url, server} =
-        Server.start(
-          fn base ->
-            %{
-              "/.well-known/openid-configuration" =>
-                {:respond, 200, [{"content-type", "application/json"}],
-                 Jason.encode!(%{
-                   "issuer" => base,
-                   "authorization_endpoint" => "#{base}/authorize",
-                   "token_endpoint" => "#{base}/token"
-                 })},
-              "/token" =>
-                {:respond, 200, [{"content-type", "application/json"}],
-                 Jason.encode!(%{
-                   "id_token" => "eyJ.header.payload",
-                   "access_token" => "at-123",
-                   "token_type" => "Bearer",
-                   "expires_in" => 3600,
-                   # An undeclared provider field must survive the round trip.
-                   "id_token_expires_in" => 300
-                 })}
-            }
-          end,
-          connections: 2
-        )
+  describe "security regression: token exchange requires PKCE" do
+    test "an empty verifier is rejected before provider discovery" do
+      provider = %{
+        issuer: Server.closed_port_url(),
+        client_id: "arbor-test-client",
+        allow_http: true
+      }
 
-      on_exit(fn -> Server.stop(server) end)
-
-      provider = %{issuer: issuer_url, client_id: "arbor-test-client", allow_http: true}
-
-      assert {:ok, tokens} = AuthCodeFlow.exchange_code(provider, @code, @redirect_uri, "")
-
-      assert tokens["id_token"] == "eyJ.header.payload"
-      assert tokens["expires_in"] == 3600
-      assert tokens["id_token_expires_in"] == 300
+      assert {:error, {:invalid_params, :empty}} =
+               AuthCodeFlow.exchange_code(provider, @code, @redirect_uri, "")
     end
   end
 
@@ -237,6 +210,70 @@ defmodule Arbor.Security.OIDC.AuthCodeFlowSecurityRegressionTest do
   end
 
   describe "loopback request parsing regression" do
+    @tag timeout: 10_000
+    test "security regression: listener survives more than two seconds before the request" do
+      {base, server} =
+        Server.start(%{
+          "/ready" => {:respond, 200, [{"content-type", "text/plain"}], "ready"}
+        })
+
+      monitor = Process.monitor(server.pid)
+      on_exit(fn -> Server.stop(server) end)
+
+      # The old helper interpreted its two-second accept timeout as completion,
+      # closed the listening socket, and made a loaded full-suite caller see
+      # `:econnrefused` even though `start/2` had returned a live URL.
+      Process.sleep(2_100)
+
+      %URI{port: port} = URI.parse(base)
+      assert {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      :ok = :gen_tcp.send(socket, "GET /ready HTTP/1.1\r\nconnection: close\r\n\r\n")
+
+      assert {:ok, response} = :gen_tcp.recv(socket, 0, 500)
+      assert String.starts_with?(response, "HTTP/1.1 200")
+      :ok = :gen_tcp.close(socket)
+
+      report = Server.await(server)
+      assert report.requests == [%{method: "GET", path: "/ready"}]
+      assert_receive {:DOWN, ^monitor, :process, _pid, :normal}, 500
+    end
+
+    test "security regression: listener closes when its test owner exits before await" do
+      test_pid = self()
+
+      owner =
+        spawn(fn ->
+          {base, server} =
+            Server.start(%{
+              "/unused" => {:respond, 200, [{"content-type", "text/plain"}], "unused"}
+            })
+
+          send(test_pid, {:orphan_candidate, base, server})
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive {:orphan_candidate, base, server}, 500
+      owner_monitor = Process.monitor(owner)
+      server_monitor = Process.monitor(server.pid)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        Server.stop(server)
+      end)
+
+      send(owner, :exit)
+      assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :normal}, 500
+      assert_receive {:DOWN, ^server_monitor, :process, _pid, :normal}, 500
+
+      %URI{port: port} = URI.parse(base)
+
+      assert {:error, :econnrefused} =
+               :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+    end
+
     test "coalesced request body is parsed without an artificial body-read timeout" do
       {base, server} =
         Server.start(%{

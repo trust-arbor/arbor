@@ -216,8 +216,11 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
 
   defp grant_session_classify!(agent_id) do
     resource_uri = Arbor.Actions.canonical_uri_for(Arbor.Actions.Session.Classify, %{})
-    assert {:ok, capability} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
-    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+
+    assert {:ok, capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource_uri)
+
+    on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
     capability
   end
 

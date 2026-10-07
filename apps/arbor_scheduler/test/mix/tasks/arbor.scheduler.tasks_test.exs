@@ -15,8 +15,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
 
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.{CapsFile, PipelinePaths}
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
-  alias Arbor.Security.IssuerRegistry
+  alias Arbor.Security
 
   @envelope_uri "arbor://fs/write/reports/**"
 
@@ -25,27 +24,44 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
     on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
 
     {:ok, identity} = Identity.generate()
-    :ok = IdentityRegistry.register(identity)
+    :ok = Security.register_identity_fixture(identity)
+
+    for operation <- [:register, :update] do
+      {:ok, _capability} =
+        Arbor.Security.grant_fixture(
+          principal: identity.agent_id,
+          resource: "arbor://security/issuer/#{operation}"
+        )
+    end
 
     tmp = System.tmp_dir!() |> Path.join("scheduler_tasks_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
+    operator_key_path = Path.join(tmp, "operator.arbor.key")
+    write_key_file(operator_key_path, identity)
 
     restore_env(:pipeline_roots)
     Application.put_env(:arbor_scheduler, :pipeline_roots, %{"test" => tmp})
 
     on_exit(fn ->
-      IssuerRegistry.revoke(identity.agent_id, "test cleanup")
+      Security.revoke_issuer_fixture(identity.agent_id, "test cleanup")
+      Arbor.Security.revoke_all_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(tmp)
     end)
 
-    {:ok, identity: identity, tmp_dir: tmp}
+    {:ok, identity: identity, tmp_dir: tmp, operator_key_path: operator_key_path}
   end
 
   describe "arbor.scheduler.enroll_issuer" do
-    test "enrolls an identity with envelope URI", %{identity: identity} do
+    test "security regression: enrolls through an exact signed key-file proof", %{
+      identity: identity,
+      operator_key_path: operator_key_path
+    } do
       Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
         "--issuer-id",
         identity.agent_id,
+        "--key-file",
+        operator_key_path,
         "--envelope-uri",
         @envelope_uri,
         "--reason",
@@ -55,7 +71,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert_received {:mix_shell, :info, [msg]}
       assert msg == "Enrolled issuer:"
 
-      entries = IssuerRegistry.list()
+      entries = Security.list_issuers_fixture()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
       assert [env] = entry.max_envelope_caps
       assert env.resource_uri == @envelope_uri
@@ -77,17 +93,22 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert msg =~ "envelope_uri"
     end
 
-    test "accepts multiple --envelope-uri flags", %{identity: identity} do
+    test "accepts multiple --envelope-uri flags", %{
+      identity: identity,
+      operator_key_path: operator_key_path
+    } do
       Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
         "--issuer-id",
         identity.agent_id,
+        "--key-file",
+        operator_key_path,
         "--envelope-uri",
         "arbor://fs/read/reports/upstream-deps/**",
         "--envelope-uri",
         "arbor://fs/write/reports/upstream-deps-summary/**"
       ])
 
-      entries = IssuerRegistry.list()
+      entries = Security.list_issuers_fixture()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
       assert length(entry.max_envelope_caps) == 2
 
@@ -96,10 +117,15 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert "arbor://fs/write/reports/upstream-deps-summary/**" in uris
     end
 
-    test "update_issuer_envelopes replaces the envelope list", %{identity: identity} do
+    test "security regression: update uses a separately bound signed key-file proof", %{
+      identity: identity,
+      operator_key_path: operator_key_path
+    } do
       Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
         "--issuer-id",
         identity.agent_id,
+        "--key-file",
+        operator_key_path,
         "--envelope-uri",
         "arbor://fs/write/reports/**"
       ])
@@ -107,6 +133,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes.run([
         "--issuer-id",
         identity.agent_id,
+        "--key-file",
+        operator_key_path,
         "--envelope-uri",
         "arbor://fs/read/code/**",
         "--envelope-uri",
@@ -115,7 +143,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
         "adding code review support"
       ])
 
-      entries = IssuerRegistry.list()
+      entries = Security.list_issuers_fixture()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
       uris = Enum.map(entry.max_envelope_caps, & &1.resource_uri)
       assert length(uris) == 2
@@ -125,13 +153,43 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert entry.status_reason == "adding code review support"
     end
 
-    test "update_issuer_envelopes fails for unenrolled issuer" do
+    test "security regression: a valid key without issuer-mutation authority is refused", %{
+      identity: target,
+      tmp_dir: tmp_dir
+    } do
+      {:ok, attacker} = Identity.generate(name: "unprivileged issuer operator")
+      :ok = Security.register_identity_fixture(attacker)
+      on_exit(fn -> Security.deregister_identity_fixture(attacker.agent_id) end)
+      attacker_key_path = Path.join(tmp_dir, "unprivileged-operator.arbor.key")
+      write_key_file(attacker_key_path, attacker)
+
+      assert catch_exit(
+               Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
+                 "--issuer-id",
+                 target.agent_id,
+                 "--key-file",
+                 attacker_key_path,
+                 "--envelope-uri",
+                 @envelope_uri
+               ])
+             ) == {:shutdown, 1}
+
+      assert_received {:mix_shell, :error, [msg]}
+      assert msg =~ "issuer_mutation_unauthorized"
+      assert {:error, :not_found} = Security.lookup_issuer(target.agent_id)
+    end
+
+    test "update_issuer_envelopes fails for unenrolled issuer", %{
+      operator_key_path: operator_key_path
+    } do
       bogus = "agent_8888888888888888888888888888888888888888888888888888888888888888"
 
       assert catch_exit(
                Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes.run([
                  "--issuer-id",
                  bogus,
+                 "--key-file",
+                 operator_key_path,
                  "--envelope-uri",
                  "arbor://fs/read/x"
                ])
@@ -141,13 +199,15 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert msg =~ "not_found"
     end
 
-    test "fails for unregistered identity" do
+    test "fails for unregistered identity", %{operator_key_path: operator_key_path} do
       bogus_id = "agent_9999999999999999999999999999999999999999999999999999999999999999"
 
       assert catch_exit(
                Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
                  "--issuer-id",
                  bogus_id,
+                 "--key-file",
+                 operator_key_path,
                  "--envelope-uri",
                  @envelope_uri
                ])
@@ -183,7 +243,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       {:ok, envelope} =
         Capability.new(resource_uri: @envelope_uri, principal_id: identity.agent_id)
 
-      :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "sign_caps test")
+      :ok =
+        Security.register_issuer_fixture(identity.agent_id, envelope, reason: "sign_caps test")
 
       Mix.Tasks.Arbor.Scheduler.SignCaps.run([
         "--key-file",
@@ -294,7 +355,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       {:ok, envelope} =
         Capability.new(resource_uri: @envelope_uri, principal_id: identity.agent_id)
 
-      :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "audit test")
+      :ok = Security.register_issuer_fixture(identity.agent_id, envelope, reason: "audit test")
 
       write_signed_caps(
         Path.join(pipelines_dir, "ok.caps.json"),
@@ -305,7 +366,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
 
       # broken.caps.json: signed by a DIFFERENT identity that is NOT enrolled
       {:ok, other_identity} = Identity.generate()
-      :ok = IdentityRegistry.register(other_identity)
+      :ok = Security.register_identity_fixture(other_identity)
 
       write_signed_caps(
         Path.join(pipelines_dir, "broken.caps.json"),
@@ -364,7 +425,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       )
 
     signature =
-      Arbor.Security.Crypto.sign(CapsFile.signing_payload(payload), identity.private_key)
+      Security.sign_ed25519_fixture(CapsFile.signing_payload(payload), identity.private_key)
 
     File.write!(path, payload |> CapsFile.manifest_map(signature) |> Jason.encode!())
   end

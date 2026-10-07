@@ -131,7 +131,7 @@ defmodule Arbor.Security.EgressTaintFailClosedSecurityRegressionTest do
           metadata: %{test: true}
         )
 
-      CapabilityStore.put(cap)
+      CapabilityStore.put_fixture(cap)
       :ok
     end
 

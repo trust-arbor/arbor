@@ -126,6 +126,24 @@ defmodule Arbor.Contracts.Security.CapabilityUriTest do
              )
     end
 
+    @tag spec: "SSEC-015"
+    test "security regression: a single wildcard matches exactly one descendant segment" do
+      assert CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/*",
+               "arbor://fs/read/docs/file.txt"
+             )
+
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/*",
+               "arbor://fs/read/docs/deep/secret.txt"
+             )
+
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/*",
+               "arbor://fs/read/docs"
+             )
+    end
+
     test "root wildcard capability matches any valid arbor URI" do
       assert CapabilityUri.capability_match?("arbor://**", "arbor://action/git/status")
       assert CapabilityUri.capability_match?("arbor://**", "arbor://fs/read/docs")
@@ -171,6 +189,34 @@ defmodule Arbor.Contracts.Security.CapabilityUriTest do
              )
 
       refute CapabilityUri.capability_subset?("not-a-uri", "arbor://fs/write/**")
+    end
+
+    @tag spec: "SSEC-015"
+    test "security regression: single-wildcard delegation cannot widen to deeper descendants" do
+      assert CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/file.txt",
+               "arbor://fs/write/project/*"
+             )
+
+      assert CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/*",
+               "arbor://fs/write/project/*"
+             )
+
+      refute CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/src/file.txt",
+               "arbor://fs/write/project/*"
+             )
+
+      refute CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/src/*",
+               "arbor://fs/write/project/*"
+             )
+
+      refute CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/**",
+               "arbor://fs/write/project/*"
+             )
     end
   end
 end

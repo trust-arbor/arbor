@@ -334,19 +334,19 @@ defmodule Arbor.Orchestrator.EngineEffectOwnerOrderingTest do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
 
-    :ok = Registry.register("l3b_side", SideEffectingProbe)
-    :ok = Registry.register("l3b_key", IdempotentWithKeyProbe)
-    :ok = Registry.register("l3b_read", ReadOnlyProbe)
-    :ok = Registry.register("l3b_idem", IdempotentProbe)
-    :ok = Registry.register("l3b_retry", RetryOnceProbe)
-    :ok = Registry.register("l3b_loop", LoopSideEffectProbe)
-    :ok = Registry.register("l3b_never", PrepareNeverRunsProbe)
-    :ok = Registry.register("l3b_ckpt", CheckpointFailProbe)
+    :ok = Registry.register_fixture("l3b_side", SideEffectingProbe)
+    :ok = Registry.register_fixture("l3b_key", IdempotentWithKeyProbe)
+    :ok = Registry.register_fixture("l3b_read", ReadOnlyProbe)
+    :ok = Registry.register_fixture("l3b_idem", IdempotentProbe)
+    :ok = Registry.register_fixture("l3b_retry", RetryOnceProbe)
+    :ok = Registry.register_fixture("l3b_loop", LoopSideEffectProbe)
+    :ok = Registry.register_fixture("l3b_never", PrepareNeverRunsProbe)
+    :ok = Registry.register_fixture("l3b_ckpt", CheckpointFailProbe)
 
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 

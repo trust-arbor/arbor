@@ -34,14 +34,14 @@ defmodule Arbor.Orchestrator.Conformance412Test do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 
   test "4.12 custom handler can be registered by type string and executed" do
-    :ok = Registry.register("custom.4_12", FirstHandler)
+    :ok = Registry.register_fixture("custom.4_12", FirstHandler)
 
     dot = """
     digraph Flow {
@@ -57,8 +57,8 @@ defmodule Arbor.Orchestrator.Conformance412Test do
   end
 
   test "4.12 register replaces previously registered handler for same type" do
-    :ok = Registry.register("custom.4_12", FirstHandler)
-    :ok = Registry.register("custom.4_12", SecondHandler)
+    :ok = Registry.register_fixture("custom.4_12", FirstHandler)
+    :ok = Registry.register_fixture("custom.4_12", SecondHandler)
 
     dot = """
     digraph Flow {
@@ -74,8 +74,8 @@ defmodule Arbor.Orchestrator.Conformance412Test do
   end
 
   test "4.12 unregister restores fallback resolution for the type" do
-    :ok = Registry.register("custom.4_12", FirstHandler)
-    :ok = Registry.unregister("custom.4_12")
+    :ok = Registry.register_fixture("custom.4_12", FirstHandler)
+    :ok = Registry.unregister_fixture("custom.4_12")
 
     node = %Node{id: "n1", attrs: %{"type" => "custom.4_12"}}
     resolved = Registry.resolve(node)
@@ -84,7 +84,7 @@ defmodule Arbor.Orchestrator.Conformance412Test do
   end
 
   test "4.12 custom handler exceptions are caught and converted to fail outcome" do
-    :ok = Registry.register("custom.4_12.crash", CrashHandler)
+    :ok = Registry.register_fixture("custom.4_12.crash", CrashHandler)
 
     dot = """
     digraph Flow {

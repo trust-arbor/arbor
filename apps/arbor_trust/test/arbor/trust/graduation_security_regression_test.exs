@@ -18,6 +18,7 @@ defmodule Arbor.Trust.GraduationSecurityRegressionTest do
   alias Arbor.Security.TestSupport.ApprovalAnswerFixture, as: Fixture
   alias Arbor.Trust
   alias Arbor.Trust.{ConfirmationTracker, PolicyHost, Store}
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @prefix "arbor://memory/read"
 
@@ -91,7 +92,11 @@ defmodule Arbor.Trust.GraduationSecurityRegressionTest do
     assert :ok = Store.store_profile(%{profile | rules: %{@prefix => :ask}})
     Fixture.grant!(ctx.human_id, "arbor://trust/read/#{ctx.agent_id}")
     cap = Fixture.grant!(ctx.human_id, "arbor://trust/auto_promote/#{ctx.agent_id}")
-    Map.put(ctx, :promotion_cap, cap)
+    {_identity, actor_authority} = actor_authority!()
+
+    ctx
+    |> Map.put(:promotion_cap, cap)
+    |> Map.put(:actor_authority, actor_authority)
   end
 
   test "security regression: legacy acceptance and unverified counters cannot promote", ctx do
@@ -165,7 +170,10 @@ defmodule Arbor.Trust.GraduationSecurityRegressionTest do
                Keyword.put(decision_opts(ctx, pending), :suggestion_id, "forged")
              )
 
-    assert :ok = Security.revoke(ctx.promotion_cap.id)
+    assert :ok =
+             Security.revoke(ctx.promotion_cap.id,
+               actor_authority: ctx.actor_authority
+             )
 
     assert {:error, :graduation_authority_required} =
              Trust.accept_graduation(ctx.agent_id, @prefix, decision_opts(ctx, pending))
@@ -273,7 +281,12 @@ defmodule Arbor.Trust.GraduationSecurityRegressionTest do
         end)
 
       await_store_update(store, 200)
-      assert :ok = Security.revoke(ctx.promotion_cap.id)
+
+      assert :ok =
+               Security.revoke(ctx.promotion_cap.id,
+                 actor_authority: ctx.actor_authority
+               )
+
       :ok = :sys.resume(store)
       assert {:error, :graduation_authority_required} = Task.await(task)
       assert {:ok, ^pending} = Trust.graduation_status(ctx.agent_id, @prefix, read_opts(ctx))

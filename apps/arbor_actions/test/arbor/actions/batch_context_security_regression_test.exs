@@ -18,7 +18,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
 
     unique = System.unique_integer([:positive])
     {:ok, identity} = Arbor.Security.generate_identity(name: "batch-context-#{unique}")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
     principal = identity.agent_id
 
     workspace =
@@ -49,7 +49,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
           @trust_read_resource
         ] do
       assert {:ok, _capability} =
-               Arbor.Security.grant(
+               Arbor.Security.grant_fixture(
                  principal: principal,
                  resource: resource
                )
@@ -57,7 +57,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(principal)
+        Arbor.Security.revoke_all_fixture(principal)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
@@ -65,7 +65,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
       end
 
       if Process.whereis(Arbor.Security.Identity.Registry) do
-        Arbor.Security.deregister_identity(principal)
+        Arbor.Security.deregister_identity_fixture(principal)
       end
 
       File.rm_rf!(workspace)

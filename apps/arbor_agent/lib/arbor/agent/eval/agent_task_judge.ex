@@ -100,14 +100,21 @@ defmodule Arbor.Agent.Eval.AgentTaskJudge do
 
     verdict =
       cond do
-        Regex.match?(~r/VERDICT:\s*PASS/, normalized) -> :pass
-        Regex.match?(~r/VERDICT:\s*FAIL/, normalized) -> :fail
+        Regex.match?(~r/VERDICT:\s*PASS/, normalized) ->
+          :pass
+
+        Regex.match?(~r/VERDICT:\s*FAIL/, normalized) ->
+          :fail
+
         # Fallback if the model didn't follow the format exactly.
         Regex.match?(~r/\bFAIL\b/, normalized) and not Regex.match?(~r/\bPASS\b/, normalized) ->
           :fail
 
-        Regex.match?(~r/\bPASS\b/, normalized) -> :pass
-        true -> :error
+        Regex.match?(~r/\bPASS\b/, normalized) ->
+          :pass
+
+        true ->
+          :error
       end
 
     %{verdict: verdict, reasoning: String.trim(text), score: parse_score(text)}

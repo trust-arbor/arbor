@@ -19,9 +19,11 @@ defmodule Arbor.Security.UriRegistrySignalsTest do
     assert "arbor://signals/subscribe" in UriRegistry.canonical_prefixes()
   end
 
-  test "a concrete signals subscription URI is recognized as registered" do
+  test "security regression: concrete subscription and channel authorization URIs are registered" do
     assert UriRegistry.registered?("arbor://signals/subscribe/security")
     assert UriRegistry.registered?("arbor://signals/subscribe/identity")
+    assert UriRegistry.registered?("arbor://signals/channel/create")
+    assert UriRegistry.registered?("arbor://signals/channel/send/chan_test")
   end
 
   # Security Sentinel URI-inventory triage (2026-06-09): two action-backed /

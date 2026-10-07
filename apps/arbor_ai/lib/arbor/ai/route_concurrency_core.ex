@@ -330,7 +330,8 @@ defmodule Arbor.AI.RouteConcurrencyCore do
     {%{state | leases: leases, by_route: by_route, by_monitor: by_monitor}, []}
   end
 
-  defp normalize_snapshot_entry({{p, r}, fields}) when is_binary(p) and is_binary(r) and is_map(fields) do
+  defp normalize_snapshot_entry({{p, r}, fields})
+       when is_binary(p) and is_binary(r) and is_map(fields) do
     with {:ok, route} <- normalize_route(p, r),
          {:ok, limit} <- fetch_nonneg(fields, :concurrency_limit, "concurrency_limit"),
          {:ok, in_use} <- fetch_nonneg(fields, :concurrency_in_use, "concurrency_in_use"),

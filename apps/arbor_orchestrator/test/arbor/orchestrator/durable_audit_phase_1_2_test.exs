@@ -44,12 +44,12 @@ defmodule Arbor.Orchestrator.DurableAuditPhase12Test do
   end
 
   setup do
-    snapshot = Registry.snapshot_custom_handlers()
-    Registry.register("test.struct_emitter", StructEmittingHandler)
+    snapshot = Registry.snapshot_fixtures()
+    Registry.register_fixture("test.struct_emitter", StructEmittingHandler)
     tmp = Path.join(System.tmp_dir!(), "arbor_audit_test_#{:erlang.unique_integer([:positive])}")
 
     on_exit(fn ->
-      Registry.restore_custom_handlers(snapshot)
+      Registry.restore_fixtures(snapshot)
       File.rm_rf(tmp)
     end)
 

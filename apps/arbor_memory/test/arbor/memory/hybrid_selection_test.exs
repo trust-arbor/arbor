@@ -13,7 +13,7 @@ defmodule Arbor.Memory.HybridSelectionTest do
   setup do
     DurableGraphAuthority.start!()
     agent = "agent_selection_#{System.unique_integer([:positive])}"
-    {:ok, cap} = Arbor.Security.grant(principal: agent, resource: "arbor://memory/search")
+    {:ok, cap} = Arbor.Security.grant_fixture(principal: agent, resource: "arbor://memory/search")
     assert {:ok, nil} = Memory.init_for_agent(agent, index_enabled: false, auto_embed: false)
 
     keys = [
@@ -92,7 +92,7 @@ defmodule Arbor.Memory.HybridSelectionTest do
         {app, key, :error} -> Application.delete_env(app, key)
       end)
 
-      Arbor.Security.revoke(cap.id)
+      Arbor.Security.revoke_fixture(cap.id)
       :ets.delete(:arbor_memory_graphs, agent)
     end)
 
@@ -228,7 +228,7 @@ defmodule Arbor.Memory.HybridSelectionTest do
     Agent.update(ctx.mode, fn _ -> :held end)
     task = Task.async(fn -> search(ctx) end)
     assert_receive {:selector_http, worker, _, _}, 5_000
-    assert :ok = Arbor.Security.revoke(ctx.cap.id)
+    assert :ok = Arbor.Security.revoke_fixture(ctx.cap.id)
     send(worker, :release)
     assert {:error, {:unauthorized, _}} = Task.await(task, 10_000)
   end

@@ -195,9 +195,9 @@ defmodule Arbor.Security.EventsTest do
                persist(:identity_verification_succeeded, %{
                  agent_id: "agent_verified",
                  trace_id: nil,
-                 signature: nil,
+                 signature_hash: nil,
                  payload_hash: nil,
-                 nonce: nil,
+                 nonce_hash: nil,
                  signed_at: nil
                })
              ]
@@ -211,10 +211,46 @@ defmodule Arbor.Security.EventsTest do
                  agent_id: "agent_bad",
                  reason: ":invalid_signature",
                  trace_id: nil,
-                 nonce: nil,
+                 nonce_hash: nil,
                  signed_at: nil
                })
              ]
+    end
+
+    test "security regression: permanent event fields are bounded and request secrets are hashed" do
+      assert :ok =
+               Events.record_approval_answered(
+                 "human_1",
+                 "irq_large",
+                 :interaction,
+                 :approve,
+                 note: String.duplicate("n", 10_000)
+               )
+
+      assert :ok =
+               Events.record_orchestration_task_dispatched(
+                 "human_1",
+                 "task_large",
+                 "agent_1",
+                 task_preview: String.duplicate("p", 20_000),
+                 metadata: %{payload: String.duplicate("m", 20_000)}
+               )
+
+      assert :ok =
+               Events.record_identity_verification_succeeded("agent_verified",
+                 signature: "raw-signature",
+                 nonce: "raw-nonce"
+               )
+
+      [approval, task, verification] = Enum.map(invocations(), &elem(&1, 2))
+      assert byte_size(approval.note) == 2_048
+      assert byte_size(task.task_preview) == 4_096
+      assert task.metadata.truncated == true
+      assert byte_size(task.metadata.sha256) == 64
+      refute Map.has_key?(verification, :signature)
+      refute Map.has_key?(verification, :nonce)
+      assert byte_size(verification.signature_hash) == 64
+      assert byte_size(verification.nonce_hash) == 64
     end
   end
 

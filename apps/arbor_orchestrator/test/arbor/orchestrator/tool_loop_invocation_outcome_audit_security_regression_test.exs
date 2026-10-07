@@ -14,7 +14,6 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
   alias Arbor.Common.ActionRegistry
   alias Arbor.Contracts.Trust.Profile
   alias Arbor.LLM.{Client, ContentPart, Message, Request, Response, ToolLoop}
-  alias Arbor.Security.CapabilityStore
   alias Arbor.Trust.Store, as: TrustStore
 
   @resource "arbor://action/test/tool-audit-outcome-probe"
@@ -122,13 +121,15 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
     agent_id = "agent_tool_audit_outcome_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      CapabilityStore.revoke_all(agent_id)
+      Arbor.Security.revoke_all_fixture(agent_id)
       if Process.whereis(TrustStore), do: TrustStore.delete_profile(agent_id)
     end)
 
     {:ok, profile} = Profile.new(agent_id)
     :ok = TrustStore.store_profile(%{profile | rules: %{@resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: @resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: @resource)
 
     %{agent_id: agent_id}
   end

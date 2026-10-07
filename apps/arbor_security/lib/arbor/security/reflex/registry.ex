@@ -20,6 +20,7 @@ defmodule Arbor.Security.Reflex.Registry do
 
   alias Arbor.Contracts.Security.Reflex
   alias Arbor.Security.Reflex.Builtin
+  alias Arbor.Security.SupervisedOwner
 
   @table_name :arbor_reflex_registry
 
@@ -34,43 +35,20 @@ defmodule Arbor.Security.Reflex.Registry do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc """
-  Register a reflex.
-
-  Returns `:ok` if the reflex was registered, or `{:error, :already_exists}`
-  if a reflex with the same ID already exists (unless `:force` is true).
-
-  ## Options
-
-  - `:force` - If true, overwrite existing reflex with same ID
-  """
-  @spec register(atom(), Reflex.t(), keyword()) :: :ok | {:error, :already_exists}
-  def register(id, %Reflex{} = reflex, opts \\ []) do
-    force = Keyword.get(opts, :force, false)
-
-    if force do
-      :ets.insert(@table_name, {id, reflex})
-      :ok
-    else
-      case :ets.insert_new(@table_name, {id, reflex}) do
-        true -> :ok
-        false -> {:error, :already_exists}
-      end
+  if Mix.env() == :test do
+    @doc false
+    @spec register_fixture(atom(), Reflex.t(), keyword()) :: :ok | {:error, :already_exists}
+    def register_fixture(id, %Reflex{} = reflex, opts \\ []) do
+      owner_call(
+        {:register_fixture, id, reflex, opts},
+        {:error, :reflex_registry_unavailable}
+      )
     end
-  end
 
-  @doc """
-  Unregister a reflex by ID.
-  """
-  @spec unregister(atom()) :: :ok | {:error, :not_found}
-  def unregister(id) do
-    case :ets.member(@table_name, id) do
-      true ->
-        :ets.delete(@table_name, id)
-        :ok
-
-      false ->
-        {:error, :not_found}
+    @doc false
+    @spec unregister_fixture(atom()) :: :ok | {:error, :not_found}
+    def unregister_fixture(id) when is_atom(id) do
+      owner_call({:unregister_fixture, id}, {:error, :reflex_registry_unavailable})
     end
   end
 
@@ -79,10 +57,23 @@ defmodule Arbor.Security.Reflex.Registry do
   """
   @spec get(atom()) :: {:ok, Reflex.t()} | {:error, :not_found}
   def get(id) do
-    case :ets.lookup(@table_name, id) do
+    records =
+      if owned_table?() do
+        :ets.lookup(@table_name, id)
+      else
+        Builtin.all()
+        |> Enum.filter(&(&1.id == Atom.to_string(id)))
+        |> Enum.map(&{id, &1})
+      end
+
+    case records do
       [{^id, reflex}] -> {:ok, reflex}
       [] -> {:error, :not_found}
     end
+  rescue
+    _ -> {:error, :not_found}
+  catch
+    :exit, _ -> {:error, :not_found}
   end
 
   @doc """
@@ -99,9 +90,16 @@ defmodule Arbor.Security.Reflex.Registry do
     sorted = Keyword.get(opts, :sorted, true)
 
     reflexes =
-      @table_name
-      |> :ets.tab2list()
-      |> Enum.map(fn {_id, reflex} -> reflex end)
+      if owned_table?() do
+        @table_name
+        |> :ets.tab2list()
+        |> Enum.map(fn {_id, reflex} -> reflex end)
+      else
+        # Runtime mutation is retired in production, so the immutable built-in
+        # projection is the complete safe fallback. Never trust a replacement
+        # named table whose owner is not the exact supervised Registry child.
+        Builtin.all()
+      end
 
     reflexes =
       if enabled_only do
@@ -115,6 +113,10 @@ defmodule Arbor.Security.Reflex.Registry do
     else
       reflexes
     end
+  rescue
+    _ -> fallback_list(opts)
+  catch
+    :exit, _ -> fallback_list(opts)
   end
 
   @doc """
@@ -133,21 +135,12 @@ defmodule Arbor.Security.Reflex.Registry do
     }
   end
 
-  @doc """
-  Clear all reflexes (for testing).
-  """
-  @spec clear() :: :ok
-  def clear do
-    :ets.delete_all_objects(@table_name)
-    :ok
-  end
-
   # ── GenServer Callbacks ──
 
   @impl GenServer
   def init(opts) do
     # Create the ETS table
-    table_opts = [:set, :named_table, :public, read_concurrency: true]
+    table_opts = [:set, :named_table, :protected, read_concurrency: true]
     :ets.new(@table_name, table_opts)
 
     # Load built-in reflexes unless disabled
@@ -163,6 +156,69 @@ defmodule Arbor.Security.Reflex.Registry do
     {:reply, stats(), state}
   end
 
+  if Mix.env() == :test do
+    def handle_call({:register_fixture, id, %Reflex{} = reflex, opts}, _from, state)
+        when is_atom(id) and is_list(opts) do
+      reply = owner_register(id, reflex, Keyword.get(opts, :force, false) == true)
+      {:reply, reply, state}
+    end
+
+    def handle_call({:unregister_fixture, id}, _from, state) when is_atom(id) do
+      reply =
+        if :ets.member(@table_name, id) do
+          :ets.delete(@table_name, id)
+          :ok
+        else
+          {:error, :not_found}
+        end
+
+      {:reply, reply, state}
+    end
+  end
+
+  def handle_call({operation, _id, _value, _opts}, _from, state)
+      when operation in [:register, :register_fixture],
+      do: {:reply, {:error, :reflex_mutation_unauthorized}, state}
+
+  def handle_call({operation, _id}, _from, state)
+      when operation in [:unregister, :unregister_fixture],
+      do: {:reply, {:error, :reflex_mutation_unauthorized}, state}
+
+  defp owned_table? do
+    case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+      pid when is_pid(pid) -> :ets.info(@table_name, :owner) == pid
+      nil -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp fallback_list(opts) do
+    reflexes =
+      if Keyword.get(opts, :enabled_only, false),
+        do: Enum.filter(Builtin.all(), & &1.enabled),
+        else: Builtin.all()
+
+    if Keyword.get(opts, :sorted, true),
+      do: Enum.sort_by(reflexes, & &1.priority, :desc),
+      else: reflexes
+  end
+
+  if Mix.env() == :test do
+    defp owner_call(request, unavailable) do
+      case SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) do
+        pid when is_pid(pid) -> GenServer.call(pid, request)
+        nil -> unavailable
+      end
+    rescue
+      _ -> unavailable
+    catch
+      :exit, _ -> unavailable
+    end
+  end
+
   # ── Private Functions ──
 
   defp load_builtin_reflexes do
@@ -172,6 +228,19 @@ defmodule Arbor.Security.Reflex.Registry do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       id = String.to_atom(reflex.id)
       :ets.insert(@table_name, {id, reflex})
+    end
+  end
+
+  if Mix.env() == :test do
+    defp owner_register(id, reflex, true) do
+      :ets.insert(@table_name, {id, reflex})
+      :ok
+    end
+
+    defp owner_register(id, reflex, false) do
+      if :ets.insert_new(@table_name, {id, reflex}),
+        do: :ok,
+        else: {:error, :already_exists}
     end
   end
 end

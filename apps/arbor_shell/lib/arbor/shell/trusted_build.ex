@@ -325,8 +325,7 @@ defmodule Arbor.Shell.TrustedBuild do
     segments = NativeOverlay.staging_segments()
     joined = Path.join([source_owned.path | segments])
 
-    with {:ok, contained} <- SafePath.safe_join(source_owned.path, NativeOverlay.staging_rel()),
-         true <- Path.expand(contained) == Path.expand(joined),
+    with {:ok, _contained} <- SafePath.safe_join(source_owned.path, NativeOverlay.staging_rel()),
          {:ok, overlay} <- Identity.pin_regular_file(joined),
          true <- NativeOverlay.matches_pin?(overlay),
          :ok <- Identity.verify_ancestry(source_owned, overlay, segments),

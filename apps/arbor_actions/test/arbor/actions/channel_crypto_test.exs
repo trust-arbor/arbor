@@ -2,6 +2,8 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Actions.Channel
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security
   alias Arbor.Security.Crypto
 
   @moduletag :integration
@@ -9,15 +11,47 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   setup do
     ensure_channel_infra()
 
+    {:ok, identity} = Identity.generate(name: "Channel Action Agent")
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+
+    :ok =
+      Security.store_signing_keypair_fixture(
+        identity.agent_id,
+        identity.private_key,
+        identity.encryption_private_key
+      )
+
+    {:ok, signing_authority} = open_authority(identity)
+    {:ok, send_authority} = Security.issue_channel_authority(signing_authority, :send)
+    {:ok, read_authority} = Security.issue_channel_authority(signing_authority, :read)
+
     {:ok, channel_id} =
       Arbor.Comms.create_channel("crypto_test_channel",
         type: :group,
-        owner_id: "agent_1",
-        members: [%{id: "agent_1", name: "Agent One", type: :agent}],
+        owner_id: identity.agent_id,
+        members: [%{id: identity.agent_id, name: identity.name, type: :agent}],
         rate_limit_ms: 0
       )
 
-    %{channel_id: channel_id}
+    on_exit(fn ->
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    %{
+      channel_id: channel_id,
+      identity: identity,
+      send_context: %{
+        agent_id: "attacker-controlled-id",
+        agent_name: identity.name,
+        channel_authority: send_authority
+      },
+      read_context: %{
+        agent_id: identity.agent_id,
+        agent_name: identity.name,
+        channel_authority: read_authority
+      }
+    }
   end
 
   # ============================================================================
@@ -25,32 +59,49 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   # ============================================================================
 
   describe "Channel.Send signing" do
-    test "sends message without signing key (graceful fallback)", %{channel_id: channel_id} do
+    test "security regression: missing channel authority cannot send an unsigned message", %{
+      channel_id: channel_id
+    } do
       context = %{agent_id: "agent_1", agent_name: "Agent One"}
       params = %{channel_id: channel_id, content: "Unsigned message"}
 
-      assert {:ok, result} = Channel.Send.run(params, context)
-      assert result.status == :sent
-      # No signing key store available in test → sends unsigned
-      assert result.signed == false
+      assert {:error, :channel_authority_required} = Channel.Send.run(params, context)
+      assert {:ok, %{count: 0}} = Channel.Read.run(%{channel_id: channel_id}, %{})
     end
 
-    test "message content preserved through send/read cycle", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1", agent_name: "Agent One"}
+    test "security regression: authority principal signs exact content through send/read", %{
+      channel_id: channel_id,
+      identity: identity,
+      send_context: send_context,
+      read_context: read_context
+    } do
       content = "Round-trip test message"
 
-      {:ok, _} = Channel.Send.run(%{channel_id: channel_id, content: content}, context)
-      {:ok, result} = Channel.Read.run(%{channel_id: channel_id}, context)
+      assert {:ok, %{signed: true}} =
+               Channel.Send.run(%{channel_id: channel_id, content: content}, send_context)
+
+      {:ok, result} = Channel.Read.run(%{channel_id: channel_id}, read_context)
 
       assert result.count == 1
       [msg] = result.messages
       assert msg.content == content
+      assert msg.signed == true
+      assert msg.verified == true
+
+      {:ok, [wire_message]} = Arbor.Comms.channel_history(channel_id)
+      assert wire_message.sender_id == identity.agent_id
     end
   end
 
   describe "Channel.Read verification" do
-    test "unsigned messages show verified: nil", %{channel_id: channel_id} do
-      Arbor.Comms.send_to_channel(channel_id, "agent_1", "Agent One", :agent, "Plain message")
+    test "unsigned messages show verified: nil", %{channel_id: channel_id, identity: identity} do
+      Arbor.Comms.send_to_channel(
+        channel_id,
+        identity.agent_id,
+        identity.name,
+        :agent,
+        "Plain message"
+      )
 
       {:ok, result} = Channel.Read.run(%{channel_id: channel_id}, %{})
       [msg] = result.messages
@@ -58,7 +109,10 @@ defmodule Arbor.Actions.ChannelCryptoTest do
       assert msg.signed == false
     end
 
-    test "manually signed messages show signed: true", %{channel_id: channel_id} do
+    test "legacy content-only signatures fail the channel-bound verifier", %{
+      channel_id: channel_id,
+      identity: identity
+    } do
       {_pub, priv} = Crypto.generate_keypair()
       content = "Signed at action layer"
       signature = Crypto.sign(content, priv)
@@ -66,8 +120,8 @@ defmodule Arbor.Actions.ChannelCryptoTest do
       # Send with signature in metadata (simulating what Channel.Send would do)
       Arbor.Comms.send_to_channel(
         channel_id,
-        "agent_1",
-        "Agent One",
+        identity.agent_id,
+        identity.name,
         :agent,
         content,
         %{signature: signature}
@@ -76,8 +130,7 @@ defmodule Arbor.Actions.ChannelCryptoTest do
       {:ok, result} = Channel.Read.run(%{channel_id: channel_id}, %{})
       msg = List.last(result.messages)
       assert msg.signed == true
-      # verified is nil because Identity Registry isn't running with this agent's key
-      assert msg.verified == nil
+      assert msg.verified == false
     end
   end
 
@@ -86,26 +139,31 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   # ============================================================================
 
   describe "private channel via actions" do
-    setup do
+    setup %{identity: identity} do
       {:ok, priv_id} =
         Arbor.Comms.create_channel("private_test",
           type: :private,
-          owner_id: "agent_1",
-          members: [%{id: "agent_1", name: "Agent One", type: :agent}],
+          owner_id: identity.agent_id,
+          members: [%{id: identity.agent_id, name: identity.name, type: :agent}],
           rate_limit_ms: 0
         )
 
       %{priv_channel_id: priv_id}
     end
 
-    test "can send and read from private channel", %{priv_channel_id: channel_id} do
-      context = %{agent_id: "agent_1", agent_name: "Agent One"}
+    test "can send and read from private channel", %{
+      priv_channel_id: channel_id,
+      send_context: send_context,
+      read_context: read_context
+    } do
       content = "Secret message via action"
 
-      {:ok, send_result} = Channel.Send.run(%{channel_id: channel_id, content: content}, context)
+      {:ok, send_result} =
+        Channel.Send.run(%{channel_id: channel_id, content: content}, send_context)
+
       assert send_result.status == :sent
 
-      {:ok, read_result} = Channel.Read.run(%{channel_id: channel_id}, context)
+      {:ok, read_result} = Channel.Read.run(%{channel_id: channel_id}, read_context)
       assert read_result.count == 1
       [msg] = read_result.messages
       assert msg.content == content
@@ -143,19 +201,17 @@ defmodule Arbor.Actions.ChannelCryptoTest do
       assert info.encryption_type == :double_ratchet
     end
 
-    test "DM messages sent without keychain fall back to plaintext", %{dm_channel_id: dm_id} do
-      # Without SigningKeyStore running, DM encryption falls back to plaintext
+    test "security regression: DM without caller-owned keychain never falls back to plaintext", %{
+      dm_channel_id: dm_id
+    } do
       context = %{agent_id: "agent_1", agent_name: "Agent One"}
       content = "DM without crypto infra"
 
-      {:ok, send_result} = Channel.Send.run(%{channel_id: dm_id, content: content}, context)
-      assert send_result.status == :sent
+      assert {:error, :channel_authority_required} =
+               Channel.Send.run(%{channel_id: dm_id, content: content}, context)
 
       {:ok, read_result} = Channel.Read.run(%{channel_id: dm_id}, context)
-      assert read_result.count == 1
-      [msg] = read_result.messages
-      # Falls back to plaintext since no keychain infrastructure
-      assert msg.content == content
+      assert read_result.count == 0
     end
   end
 
@@ -206,6 +262,18 @@ defmodule Arbor.Actions.ChannelCryptoTest do
          ) do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
+    end
+  end
+
+  defp open_authority(identity) do
+    with {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             identity.agent_id,
+             identity.private_key,
+             purpose: :session,
+             owner: self()
+           ) do
+      Security.open_signing_authority(proof)
     end
   end
 end

@@ -300,7 +300,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerExecutionIdTest do
     agent_id = "agent_exec_transcript_#{System.unique_integer([:positive])}"
 
     assert {:ok, capability} =
-             Arbor.Security.grant(principal: agent_id, resource: "arbor://acp/tool")
+             Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://acp/tool")
 
     assert {:ok, _profile} =
              Arbor.Trust.ensure_trust_profile(agent_id,
@@ -318,7 +318,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerExecutionIdTest do
              )
 
     on_exit(fn ->
-      Arbor.Security.revoke(capability.id)
+      Arbor.Security.revoke_fixture(capability.id)
       Arbor.Trust.delete_trust_profile(agent_id)
     end)
 

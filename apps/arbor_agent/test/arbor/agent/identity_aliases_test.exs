@@ -126,14 +126,16 @@ defmodule Arbor.Agent.IdentityAliasesTest do
   end
 
   defp grant_manage_cap(principal) do
-    assert {:ok, cap} = Arbor.Security.grant(principal: principal, resource: @manage_resource)
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    assert {:ok, cap} =
+             Arbor.Security.grant_fixture(principal: principal, resource: @manage_resource)
+
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     cap
   end
 
   defp registered_principal do
     {:ok, identity} = Arbor.Security.generate_identity()
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
     identity
   end
 
@@ -161,8 +163,8 @@ defmodule Arbor.Agent.IdentityAliasesTest do
       end
     end)
 
-    _ = Arbor.Security.delete_signing_key(identity.agent_id)
-    _ = Arbor.Security.deregister_identity(identity.agent_id)
+    _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+    _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
     :ok
   rescue
     _ -> :ok
@@ -383,7 +385,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
       # the capability, then names the victim WITHOUT a client-produced
       # SignedRequest. A server-signs-for-you implementation would return :ok.
       victim = registered_principal()
-      :ok = Arbor.Security.store_signing_key(victim.agent_id, victim.private_key)
+      :ok = Arbor.Security.store_signing_key_fixture(victim.agent_id, victim.private_key)
       grant_manage_cap(victim.agent_id)
 
       n = System.unique_integer([:positive])
@@ -407,7 +409,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     test "security regression: a proof for a different principal cannot be used as the victim" do
       victim = registered_principal()
       attacker = registered_principal()
-      :ok = Arbor.Security.store_signing_key(victim.agent_id, victim.private_key)
+      :ok = Arbor.Security.store_signing_key_fixture(victim.agent_id, victim.private_key)
       grant_manage_cap(victim.agent_id)
 
       n = System.unique_integer([:positive])

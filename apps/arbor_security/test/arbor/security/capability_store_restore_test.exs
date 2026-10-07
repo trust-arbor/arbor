@@ -106,7 +106,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -115,8 +115,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: 100
       )
 
-    assert {:error, {:capability_restore_failed, :restored_global_quota_exceeded}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:restored_global_quota_exceeded)
 
     assert Process.whereis(CapabilityStore) == nil
     assert_durable_ids!(dir, Enum.map(caps, & &1.id))
@@ -146,7 +145,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -154,8 +153,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :restored_per_principal_quota_exceeded}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:restored_per_principal_quota_exceeded)
 
     assert Process.whereis(CapabilityStore) == nil
     assert_durable_ids!(dir, Enum.map(caps, & &1.id))
@@ -184,7 +182,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -192,8 +190,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :restored_delegation_depth_exceeded}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:restored_delegation_depth_exceeded)
 
     assert Process.whereis(CapabilityStore) == nil
     assert_durable_ids!(dir, [cap.id])
@@ -240,32 +237,24 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "malformed granted_at fails closed without registering" do
     dir = unique_dir("restore-malformed")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
 
-    path =
-      Path.join([dir, "capabilities", "cap_bad.json"])
+    data = %{
+      "id" => "cap_bad",
+      "principal_id" => "agent_restore_bad",
+      "resource_uri" => "arbor://fs/read/restore-bad",
+      "granted_at" => "not-a-datetime",
+      "delegation_depth" => 0,
+      "constraints" => %{},
+      "metadata" => %{},
+      "delegation_chain" => []
+    }
 
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "data" => %{
-          "id" => "cap_bad",
-          "principal_id" => "agent_restore_bad",
-          "resource_uri" => "arbor://fs/read/restore-bad",
-          "granted_at" => "not-a-datetime",
-          "delegation_depth" => 0,
-          "constraints" => %{},
-          "metadata" => %{},
-          "delegation_chain" => []
-        },
-        "metadata" => %{}
-      })
-    )
+    seed_raw_record!(dir, "cap_bad", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -273,42 +262,32 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
   end
 
   test "malformed not_before fails closed without dropping future-use restriction or durable data" do
     dir = unique_dir("restore-malformed-not-before")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
 
-    path =
-      Path.join([dir, "capabilities", "cap_nb_bad.json"])
+    data = %{
+      "id" => "cap_nb_bad",
+      "principal_id" => "agent_restore_nb_bad",
+      "resource_uri" => "arbor://fs/read/restore-nb-bad",
+      "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "not_before" => "not-a-datetime",
+      "delegation_depth" => 0,
+      "constraints" => %{},
+      "metadata" => %{},
+      "delegation_chain" => []
+    }
 
-    durable =
-      %{
-        "data" => %{
-          "id" => "cap_nb_bad",
-          "principal_id" => "agent_restore_nb_bad",
-          "resource_uri" => "arbor://fs/read/restore-nb-bad",
-          "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
-          "not_before" => "not-a-datetime",
-          "delegation_depth" => 0,
-          "constraints" => %{},
-          "metadata" => %{},
-          "delegation_chain" => []
-        },
-        "metadata" => %{}
-      }
-
-    File.write!(path, Jason.encode!(durable))
-    before_bytes = File.read!(path)
+    seed_raw_record!(dir, "cap_nb_bad", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -318,42 +297,35 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
     # Serializer would map malformed not_before to nil; restore must fail-stop
     # instead of admitting an unsigned cap with the restriction removed.
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
-    assert_migrated_durable_payload!(dir, "cap_nb_bad", before_bytes)
+    assert_durable_payload!(dir, "cap_nb_bad", data)
     assert_durable_ids!(dir, ["cap_nb_bad"])
   end
 
   test "security regression: malformed issuer_signature fails closed without dropping signature" do
     dir = unique_dir("restore-malformed-sig")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
-    path = Path.join([dir, "capabilities", "cap_sig_bad.json"])
 
     # Non-nil non-hex signature would be lossily decoded to nil by Serializer.
-    durable = %{
-      "data" => %{
-        "id" => "cap_sig_bad",
-        "principal_id" => "agent_restore_sig_bad",
-        "resource_uri" => "arbor://fs/read/restore-sig-bad",
-        "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
-        "delegation_depth" => 0,
-        "issuer_signature" => "not-valid-hex!!",
-        "constraints" => %{},
-        "metadata" => %{},
-        "delegation_chain" => []
-      },
-      "metadata" => %{}
+    data = %{
+      "id" => "cap_sig_bad",
+      "principal_id" => "agent_restore_sig_bad",
+      "resource_uri" => "arbor://fs/read/restore-sig-bad",
+      "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "delegation_depth" => 0,
+      "issuer_signature" => "not-valid-hex!!",
+      "constraints" => %{},
+      "metadata" => %{},
+      "delegation_chain" => []
     }
 
-    File.write!(path, Jason.encode!(durable))
-    before_bytes = File.read!(path)
+    seed_raw_record!(dir, "cap_sig_bad", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -361,43 +333,36 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
-    assert_migrated_durable_payload!(dir, "cap_sig_bad", before_bytes)
+    assert_durable_payload!(dir, "cap_sig_bad", data)
     assert_durable_ids!(dir, ["cap_sig_bad"])
   end
 
   test "security regression: malformed delegation_chain fails closed without emptying chain" do
     dir = unique_dir("restore-malformed-chain")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
-    path = Path.join([dir, "capabilities", "cap_chain_bad.json"])
 
     # Non-list chain would be lossily coerced to [] by Serializer, stripping
     # delegation history and changing authorization shape after restart.
-    durable = %{
-      "data" => %{
-        "id" => "cap_chain_bad",
-        "principal_id" => "agent_restore_chain_bad",
-        "resource_uri" => "arbor://fs/read/restore-chain-bad",
-        "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
-        "delegation_depth" => 1,
-        "parent_capability_id" => "cap_parent",
-        "delegation_chain" => "not-a-list",
-        "constraints" => %{},
-        "metadata" => %{}
-      },
+    data = %{
+      "id" => "cap_chain_bad",
+      "principal_id" => "agent_restore_chain_bad",
+      "resource_uri" => "arbor://fs/read/restore-chain-bad",
+      "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "delegation_depth" => 1,
+      "parent_capability_id" => "cap_parent",
+      "delegation_chain" => "not-a-list",
+      "constraints" => %{},
       "metadata" => %{}
     }
 
-    File.write!(path, Jason.encode!(durable))
-    before_bytes = File.read!(path)
+    seed_raw_record!(dir, "cap_chain_bad", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -405,40 +370,33 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
-    assert_migrated_durable_payload!(dir, "cap_chain_bad", before_bytes)
+    assert_durable_payload!(dir, "cap_chain_bad", data)
     assert_durable_ids!(dir, ["cap_chain_bad"])
   end
 
   test "security regression: non-map constraints fail closed (Serializer would error/lossy default)" do
     dir = unique_dir("restore-malformed-constraints")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
-    path = Path.join([dir, "capabilities", "cap_constraints_bad.json"])
 
-    durable = %{
-      "data" => %{
-        "id" => "cap_constraints_bad",
-        "principal_id" => "agent_restore_constraints_bad",
-        "resource_uri" => "arbor://fs/read/restore-constraints-bad",
-        "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
-        "delegation_depth" => 0,
-        "constraints" => "not-a-map",
-        "metadata" => %{},
-        "delegation_chain" => []
-      },
-      "metadata" => %{}
+    data = %{
+      "id" => "cap_constraints_bad",
+      "principal_id" => "agent_restore_constraints_bad",
+      "resource_uri" => "arbor://fs/read/restore-constraints-bad",
+      "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "delegation_depth" => 0,
+      "constraints" => "not-a-map",
+      "metadata" => %{},
+      "delegation_chain" => []
     }
 
-    File.write!(path, Jason.encode!(durable))
-    before_bytes = File.read!(path)
+    seed_raw_record!(dir, "cap_constraints_bad", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -446,11 +404,10 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
-    assert_migrated_durable_payload!(dir, "cap_constraints_bad", before_bytes)
+    assert_durable_payload!(dir, "cap_constraints_bad", data)
     assert_durable_ids!(dir, ["cap_constraints_bad"])
   end
 
@@ -478,7 +435,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -486,8 +443,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
     assert_durable_ids!(dir, [cap.id])
@@ -495,31 +451,25 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "security regression: parent without chain fails closed (incoherent delegation)" do
     dir = unique_dir("restore-incoherent-chain")
-    File.mkdir_p!(Path.join(dir, "capabilities"))
-    path = Path.join([dir, "capabilities", "cap_incoherent.json"])
 
-    durable = %{
-      "data" => %{
-        "id" => "cap_incoherent",
-        "principal_id" => "agent_restore_incoherent",
-        "resource_uri" => "arbor://fs/read/restore-incoherent",
-        "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
-        "delegation_depth" => 1,
-        "parent_capability_id" => "cap_parent",
-        "delegation_chain" => [],
-        "constraints" => %{},
-        "metadata" => %{}
-      },
+    data = %{
+      "id" => "cap_incoherent",
+      "principal_id" => "agent_restore_incoherent",
+      "resource_uri" => "arbor://fs/read/restore-incoherent",
+      "granted_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "delegation_depth" => 1,
+      "parent_capability_id" => "cap_parent",
+      "delegation_chain" => [],
+      "constraints" => %{},
       "metadata" => %{}
     }
 
-    File.write!(path, Jason.encode!(durable))
-    before_bytes = File.read!(path)
+    seed_raw_record!(dir, "cap_incoherent", data)
 
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -527,13 +477,14 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:error, {:capability_restore_failed, :invalid_capability_record}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:invalid_capability_record)
 
     assert Process.whereis(CapabilityStore) == nil
-    assert_migrated_durable_payload!(dir, "cap_incoherent", before_bytes)
+    assert_durable_payload!(dir, "cap_incoherent", data)
   end
 
+  @tag :slow
+  @tag timeout: 120_000
   test "failed hydration prevents CapabilityStore startup and grants" do
     dir = unique_dir("restore-hydration-fail")
 
@@ -552,7 +503,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
     # Default hydration_limit 10_000 overflows.
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -562,22 +513,16 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     assert {:ok, %{status: :failed, reason: :hydration_limit_exceeded}} =
              AuthorityStore.hydration_status(name: @capability_store)
 
-    assert {:error, {:capability_restore_failed, :hydration_unavailable}} =
-             CapabilityStore.start_link([])
+    assert_restore_failure!(:hydration_unavailable)
 
     # Availability probes only check whereis — process must not remain registered.
     assert Process.whereis(CapabilityStore) == nil
 
-    assert catch_exit(
-             CapabilityStore.put(
-               build_cap(
-                 "cap_after_fail",
-                 "agent_after_fail",
-                 "arbor://fs/read/after-fail",
-                 0
-               )
+    assert {:error, :capability_store_unavailable} =
+             Arbor.Security.grant_fixture(
+               principal: "agent_after_fail",
+               resource: "arbor://fs/read/after-fail"
              )
-           )
   end
 
   test "CapabilityStore-only restart takes a fresh complete authority handoff" do
@@ -611,7 +556,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              )
 
     stop_named_process(CapabilityStore)
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    assert {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
 
     assert {:ok, %{id: "cap_handoff_first"}} = CapabilityStore.get(first.id)
     assert {:ok, %{id: "cap_handoff_second"}} = CapabilityStore.get(second.id)
@@ -664,7 +609,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
@@ -672,7 +617,14 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
         hydration_limit: Config.max_global_capabilities()
       )
 
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    assert {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
+  end
+
+  defp assert_restore_failure!(reason) do
+    assert {:ok, pid} = CapabilityStore.start_link(test_isolated_owner: true)
+
+    assert_receive {:EXIT, ^pid, {:capability_restore_failed, ^reason}}, 1_000
+    refute Process.alive?(pid)
   end
 
   # Initial detach must use Supervisor.terminate_child so permanent children
@@ -703,23 +655,29 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     assert Enum.sort(keys) == Enum.sort(expected_ids)
   end
 
-  defp assert_migrated_durable_payload!(dir, key, legacy_bytes) do
-    legacy = Jason.decode!(legacy_bytes)
-    legacy_path = Path.join([dir, "capabilities", key <> ".json"])
+  defp assert_durable_payload!(dir, key, expected_data) do
+    assert {:ok, %Record{} = record} =
+             JSONFile.get(key, name: "capabilities", base_dir: dir)
 
-    refute File.exists?(legacy_path)
+    assert record.key == key
+    assert record.data == expected_data
+  end
+
+  defp seed_raw_record!(dir, key, data) do
+    assert :ok =
+             JSONFile.put(
+               key,
+               Record.new(key, data),
+               name: "capabilities",
+               base_dir: dir
+             )
 
     assert {:ok, %Record{} = record} =
              JSONFile.get(key, name: "capabilities", base_dir: dir)
 
-    assert record.id == key
-    assert record.key == key
-    assert record.data == legacy["data"]
-    assert record.metadata == Map.get(legacy, "metadata", %{})
+    assert record.data == data
     assert record.generation == 1
     assert record.revision == 1
-    assert is_nil(record.inserted_at)
-    assert %DateTime{} = record.updated_at
   end
 
   defp unique_dir(label) do

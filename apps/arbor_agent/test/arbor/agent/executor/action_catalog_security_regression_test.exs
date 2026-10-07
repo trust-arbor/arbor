@@ -205,7 +205,7 @@ defmodule Arbor.Agent.Executor.ActionCatalogSecurityRegressionTest do
 
     assert_authorized(agent_id, "arbor://memory/read")
     assert id == proposal.id
-    assert :ok = Security.revoke(write_cap.id)
+    assert :ok = Security.revoke_fixture(write_cap.id)
     assert {:ok, before_graph} = Memory.export_knowledge_graph(agent_id)
 
     percept = execute(agent_id, :memory_accept_suggestion, %{suggestion_id: id})
@@ -235,7 +235,7 @@ defmodule Arbor.Agent.Executor.ActionCatalogSecurityRegressionTest do
                context
              )
 
-    assert :ok = Security.revoke(read_cap.id)
+    assert :ok = Security.revoke_fixture(read_cap.id)
 
     assert {:error, {:unauthorized, :memory_review_suggestions}} =
              ActionDispatch.dispatch(:memory_review_suggestions, %{}, agent_id, context)
@@ -293,8 +293,8 @@ defmodule Arbor.Agent.Executor.ActionCatalogSecurityRegressionTest do
   end
 
   defp grant(agent_id, resource) do
-    assert {:ok, capability} = Security.grant(principal: agent_id, resource: resource)
-    on_exit(fn -> Security.revoke(capability.id) end)
+    assert {:ok, capability} = Security.grant_fixture(principal: agent_id, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(capability.id) end)
     capability
   end
 

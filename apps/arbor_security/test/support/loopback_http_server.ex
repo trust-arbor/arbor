@@ -8,7 +8,11 @@ defmodule Arbor.Security.LoopbackHTTPServer do
   #
   # No DNS, no egress: every byte stays on the loopback interface.
 
-  @accept_timeout 2_000
+  # `accept/2` is also the server's mailbox polling boundary. An idle poll is
+  # not an end-of-service condition: under a loaded suite the caller can be
+  # descheduled for longer than an arbitrary socket timeout after `start/2`
+  # returns. `await/2` explicitly asks an idle server to finish instead.
+  @accept_poll_timeout 50
   @read_timeout 5_000
 
   defmodule Handle do
@@ -40,7 +44,7 @@ defmodule Arbor.Security.LoopbackHTTPServer do
     * `:close` — accept then close without replying
     * `:hang` — accept and never reply
 
-  Returns `{base_url, task}`. `await/1` yields the `Report`.
+  Returns `{base_url, handle}`. `await/1` yields the `Report`.
   """
   def start(routes, opts \\ []) do
     {:ok, listen} =
@@ -63,12 +67,27 @@ defmodule Arbor.Security.LoopbackHTTPServer do
 
     pid =
       spawn(fn ->
-        report = serve(listen, resolved, connections, %Report{})
-        :gen_tcp.close(listen)
-        send(owner, {ref, report})
+        owner_monitor = Process.monitor(owner)
+
+        receive do
+          {:serve, ^listen} ->
+            case serve(listen, resolved, connections, %Report{}, ref, owner_monitor) do
+              {:ok, report} ->
+                :gen_tcp.close(listen)
+                Process.demonitor(owner_monitor, [:flush])
+                send(owner, {ref, report})
+
+              :owner_down ->
+                :gen_tcp.close(listen)
+            end
+
+          {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+            :gen_tcp.close(listen)
+        end
       end)
 
     :ok = :gen_tcp.controlling_process(listen, pid)
+    send(pid, {:serve, listen})
 
     {base_url, %Handle{pid: pid, ref: ref, owner: owner}}
   end
@@ -86,10 +105,13 @@ defmodule Arbor.Security.LoopbackHTTPServer do
   @doc """
   Await the server's report. Must be called from the process that started it.
 
-  The server self-terminates once it has served its expected connections or the
-  accept timeout elapses, so this never hangs indefinitely.
+  The server self-terminates once it has served its expected connections.
+  Calling `await/2` also tells an idle server to stop accepting and return the
+  report accumulated so far, so this never hangs indefinitely.
   """
-  def await(%Handle{ref: ref}, timeout \\ 15_000) do
+  def await(%Handle{pid: pid, ref: ref}, timeout \\ 15_000) do
+    send(pid, {:finish, ref})
+
     receive do
       {^ref, report} -> report
     after
@@ -109,20 +131,29 @@ defmodule Arbor.Security.LoopbackHTTPServer do
 
   # --- Accept loop ---
 
-  defp serve(_listen, _routes, 0, report), do: report
+  defp serve(_listen, _routes, 0, report, _ref, _owner_monitor), do: {:ok, report}
 
-  defp serve(listen, routes, remaining, report) do
-    case :gen_tcp.accept(listen, @accept_timeout) do
-      {:ok, socket} ->
-        report = handle(socket, routes, report)
-        :gen_tcp.close(socket)
-        serve(listen, routes, remaining - 1, report)
+  defp serve(listen, routes, remaining, report, ref, owner_monitor) do
+    receive do
+      {:finish, ^ref} ->
+        {:ok, report}
 
-      {:error, :timeout} ->
-        report
+      {:DOWN, ^owner_monitor, :process, _owner, _reason} ->
+        :owner_down
+    after
+      0 ->
+        case :gen_tcp.accept(listen, @accept_poll_timeout) do
+          {:ok, socket} ->
+            report = handle(socket, routes, report)
+            :gen_tcp.close(socket)
+            serve(listen, routes, remaining - 1, report, ref, owner_monitor)
 
-      {:error, :closed} ->
-        report
+          {:error, :timeout} ->
+            serve(listen, routes, remaining, report, ref, owner_monitor)
+
+          {:error, :closed} ->
+            {:ok, report}
+        end
     end
   end
 

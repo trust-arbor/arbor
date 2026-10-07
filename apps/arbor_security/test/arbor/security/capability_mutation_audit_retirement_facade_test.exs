@@ -67,6 +67,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
 
     on_exit(fn ->
       :telemetry.detach(handler)
+      :ok = Owner.clear_test_fixture()
       current = Process.whereis(Owner)
 
       if current != original do
@@ -75,7 +76,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
       end
 
       case Security.list_capabilities(principal) do
-        {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+        {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
         _ -> :ok
       end
     end)
@@ -107,7 +108,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
 
     # The capability store's retry of the same capability (what Security.grant
     # does with a freshly signed one) continues the v2 operation.
-    assert {:ok, :stored} = CapabilityStore.put(cap)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(cap)
     assert {:ok, stored} = AuthorityStore.authoritative_entry(cap.id, name: @store)
     assert %Record{} = stored
 
@@ -123,12 +124,18 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     assert {:ok, :committed} = Owner.acknowledge_delivery(id, item["intent_sha256"])
 
     assert {:ok, _} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/cutover/1")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/cutover/1"
+             )
 
     assert [] = drain(@retired)
 
     assert {:ok, _} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/cutover/2")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/cutover/2"
+             )
 
     assert [{%{count: 1}, %{trigger: :capacity}}] = drain(@retired)
     status = status!()
@@ -147,7 +154,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     # The authority store never saw the capability; the journal already holds
     # the identical grant as delivered.
     capture_log([level: :warning], fn ->
-      assert {:error, :audit_unavailable} = CapabilityStore.put(cap)
+      assert {:error, :audit_unavailable} = CapabilityStore.put_fixture(cap)
     end)
 
     assert [{%{count: 1}, %{operation: :grant, reason: :identity}}] = drain(@refused)
@@ -165,7 +172,10 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     swap_owner!(unique_root())
 
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/revoked")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/revoked"
+             )
 
     assert {:ok, %Record{} = before} = AuthorityStore.authoritative_entry(cap.id, name: @store)
 
@@ -181,7 +191,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     deliver!(revoke)
     drain(@degraded)
 
-    log = capture_log([level: :warning], fn -> assert :ok = Security.revoke(cap.id) end)
+    log = capture_log([level: :warning], fn -> assert :ok = Security.revoke_fixture(cap.id) end)
 
     assert [{%{count: 1}, %{reason: :identity}}] = drain(@degraded)
     assert {:ok, status} = audit_status()
@@ -199,7 +209,10 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     swap_owner!(unique_root())
 
     assert {:ok, cap} =
-             Security.grant(principal: ctx.principal, resource: "arbor://memory/read/paused")
+             Security.grant_fixture(
+               principal: ctx.principal,
+               resource: "arbor://memory/read/paused"
+             )
 
     # 3585 kept terminals plus 511 delivered ones a healthy ledger would retire.
     root = unique_root()
@@ -209,7 +222,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     log =
       capture_log([level: :warning], fn ->
         swap_owner!(root)
-        assert :ok = Security.revoke(cap.id)
+        assert :ok = Security.revoke_fixture(cap.id)
       end)
 
     assert log =~ "retirement ledger is ahead"
@@ -240,8 +253,8 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
 
   # Drive `intent` to delivered on the registered owner as the consumer.
   defp deliver!(intent) do
-    assert {:ok, _, "prepared"} = Owner.prepare(intent)
-    assert {:ok, :committed} = Owner.observe(intent["operation_id"], :applied)
+    assert {:ok, _, "prepared"} = Owner.prepare(Owner, intent)
+    assert {:ok, :committed} = Owner.observe(Owner, intent["operation_id"], :applied)
     assert {:ok, batch} = Owner.delivery_batch()
     item = Enum.find(batch, &(&1["operation_id"] == intent["operation_id"]))
 
@@ -251,7 +264,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
 
   defp signed_capability(principal, resource) do
     {:ok, cap} = Capability.new(resource_uri: resource, principal_id: principal)
-    {:ok, signed} = SystemAuthority.sign_capability(cap)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
     signed
   end
 
@@ -293,7 +306,12 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
     name = :"cma_retire_consumer_#{System.unique_integer([:positive])}"
     true = Process.register(self(), name)
     previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_name)
+
+    previous_application =
+      Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+
     Application.put_env(:arbor_security, :authority_audit_consumer_name, name)
+    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
 
     on_exit(fn ->
       case previous do
@@ -302,6 +320,14 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
 
         :error ->
           Application.delete_env(:arbor_security, :authority_audit_consumer_name)
+      end
+
+      case previous_application do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
       end
     end)
 
@@ -318,6 +344,7 @@ defmodule Arbor.Security.CapabilityMutationAuditRetirementFacadeTest do
       Owner.start_link(mode: :durable, root: root, capacity_profile: :operational)
 
     Process.unlink(journal)
+    :ok = Owner.install_test_fixture(journal)
 
     on_exit(fn ->
       if Process.alive?(journal), do: GenServer.stop(journal)

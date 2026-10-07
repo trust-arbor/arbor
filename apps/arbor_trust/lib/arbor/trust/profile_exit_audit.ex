@@ -88,16 +88,19 @@ defmodule Arbor.Trust.ProfileExitAudit do
 
     * `:baseline` - `:ask` or `:block` for legacy baselines. Defaults to `:ask`.
     * `:grant_missing` - whether to grant missing explicit rule capabilities.
+    * `:actor_authority` - caller-owned Security signing authority; required
+      when `:grant_missing` is true.
     * `:limit` - maximum profiles to read from the store. Defaults to 10,000.
   """
   @spec migrate(keyword()) :: {:ok, map()} | {:error, term()}
   def migrate(opts \\ []) do
     baseline = migration_baseline(Keyword.get(opts, :baseline, :ask))
     grant_missing? = Keyword.get(opts, :grant_missing, false)
+    actor_authority = Keyword.get(opts, :actor_authority)
 
     with {:ok, before_audit} <- audit(opts) do
       baseline_migrations = migrate_baselines(before_audit.findings, baseline)
-      grants = maybe_grant_missing(before_audit.findings, grant_missing?)
+      grants = maybe_grant_missing(before_audit.findings, grant_missing?, actor_authority)
 
       with {:ok, after_audit} <- audit(opts) do
         {:ok,
@@ -216,16 +219,16 @@ defmodule Arbor.Trust.ProfileExitAudit do
     end)
   end
 
-  defp maybe_grant_missing(_findings, false), do: []
+  defp maybe_grant_missing(_findings, false, _actor_authority), do: []
 
-  defp maybe_grant_missing(findings, true) do
+  defp maybe_grant_missing(findings, true, actor_authority) do
     for finding <- findings,
         rule <- finding.mint_reliant_rules do
-      grant_missing(finding.agent_id, rule)
+      grant_missing(finding.agent_id, rule, actor_authority)
     end
   end
 
-  defp grant_missing(agent_id, rule) do
+  defp grant_missing(agent_id, rule, actor_authority) do
     grant_opts = [
       principal: agent_id,
       resource: rule.suggested_capability,
@@ -234,7 +237,8 @@ defmodule Arbor.Trust.ProfileExitAudit do
         trust_rule_uri: rule.uri,
         trust_rule_mode: rule.mode,
         migrated_at: DateTime.utc_now()
-      }
+      },
+      actor_authority: actor_authority
     ]
 
     case Arbor.Security.grant(grant_opts) do

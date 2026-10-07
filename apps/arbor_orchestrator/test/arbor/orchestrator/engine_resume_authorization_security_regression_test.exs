@@ -232,9 +232,11 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
       Arbor.Contracts.Security.Identity.generate(name: "engine-resume-authority-proof")
 
     :ok =
-      Arbor.Security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity))
+      Arbor.Security.register_identity_fixture(
+        Arbor.Contracts.Security.Identity.public_only(identity)
+      )
 
-    :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
     :ok = TestCapabilities.grant_orchestrator_access(identity.agent_id)
 
     {:ok, proof} =
@@ -253,8 +255,8 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
     on_exit(fn ->
       _ = Arbor.Security.close_signing_authority(authority)
       _ = TestCapabilities.revoke_all(identity.agent_id)
-      _ = Arbor.Security.delete_signing_key(identity.agent_id)
-      _ = Arbor.Security.deregister_identity(identity.agent_id)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf(root)
 
       restore_env(

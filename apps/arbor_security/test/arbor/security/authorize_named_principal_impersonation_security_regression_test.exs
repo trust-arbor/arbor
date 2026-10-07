@@ -22,11 +22,11 @@ defmodule Arbor.Security.AuthorizeNamedPrincipalImpersonationSecurityRegressionT
 
   test "security regression: naming a stored-key principal cannot exercise its capability" do
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: identity.agent_id,
         resource: @manage_resource
       )
@@ -35,9 +35,9 @@ defmodule Arbor.Security.AuthorizeNamedPrincipalImpersonationSecurityRegressionT
       try do
         Security.authorize(identity.agent_id, @manage_resource, :write, verify_identity: true)
       after
-        _ = Security.revoke(cap.id)
-        _ = Security.delete_signing_key(identity.agent_id)
-        _ = Security.deregister_identity(identity.agent_id)
+        _ = Security.revoke_fixture(cap.id)
+        _ = Security.delete_signing_key_fixture(identity.agent_id)
+        _ = Security.deregister_identity_fixture(identity.agent_id)
       end
 
     assert {:error, :missing_signed_request} = result,
@@ -46,11 +46,11 @@ defmodule Arbor.Security.AuthorizeNamedPrincipalImpersonationSecurityRegressionT
 
   test "security regression: a caller-produced SignedRequest still authorizes the stored-key principal" do
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: identity.agent_id,
         resource: @manage_resource
       )
@@ -70,9 +70,9 @@ defmodule Arbor.Security.AuthorizeNamedPrincipalImpersonationSecurityRegressionT
           verify_identity: true
         )
       after
-        _ = Security.revoke(cap.id)
-        _ = Security.delete_signing_key(identity.agent_id)
-        _ = Security.deregister_identity(identity.agent_id)
+        _ = Security.revoke_fixture(cap.id)
+        _ = Security.delete_signing_key_fixture(identity.agent_id)
+        _ = Security.deregister_identity_fixture(identity.agent_id)
       end
 
     assert {:ok, :authorized} = result

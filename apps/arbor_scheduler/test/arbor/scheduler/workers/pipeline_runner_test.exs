@@ -7,8 +7,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
   alias Arbor.Scheduler.{CapsFile, PipelinePaths}
   alias Arbor.Scheduler.Test.WorkdirReplacingOrchestrator
   alias Arbor.Scheduler.Workers.PipelineRunner
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.IssuerRegistry
+  alias Arbor.Security
 
   defmodule OrchestratorStub do
     def run_file_as(path, agent_id, authority, opts) do
@@ -44,7 +43,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
     File.mkdir_p!(outside)
 
     {:ok, issuer} = Identity.generate()
-    :ok = Arbor.Security.register_identity(issuer)
+    :ok = Arbor.Security.register_identity_fixture(issuer)
 
     {:ok, envelope} =
       Capability.new(
@@ -52,7 +51,8 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
         principal_id: issuer.agent_id
       )
 
-    :ok = IssuerRegistry.register(issuer.agent_id, envelope, reason: "pipeline_runner_test")
+    :ok =
+      Security.register_issuer_fixture(issuer.agent_id, envelope, reason: "pipeline_runner_test")
 
     restore_env(:pipeline_roots)
     restore_env(:orchestrator_module)
@@ -65,7 +65,8 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
     Application.put_env(:arbor_scheduler, :pipeline_runner_test_pid, self())
 
     on_exit(fn ->
-      IssuerRegistry.revoke(issuer.agent_id, "test cleanup")
+      Security.revoke_issuer_fixture(issuer.agent_id, "test cleanup")
+      Arbor.Security.deregister_identity_fixture(issuer.agent_id)
       File.rm_rf!(base)
     end)
 
@@ -369,7 +370,9 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
         initial_args: Keyword.get(opts, :initial_args, %{})
       )
 
-    signature = Crypto.sign(CapsFile.signing_payload(payload), issuer.private_key)
+    signature =
+      Security.sign_ed25519_fixture(CapsFile.signing_payload(payload), issuer.private_key)
+
     File.write!(caps_path, payload |> CapsFile.manifest_map(signature) |> Jason.encode!())
   end
 

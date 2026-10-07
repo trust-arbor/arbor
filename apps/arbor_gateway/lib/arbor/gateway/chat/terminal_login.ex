@@ -51,7 +51,7 @@ defmodule Arbor.Gateway.Chat.TerminalLogin do
 
   defp login(conn, "/api/chat/login/start", %{"target" => target} = body)
        when map_size(body) == 1 and is_binary(target) do
-    case security(:begin_terminal_login, [target]) do
+    case security(:begin_terminal_login, [target, admission_source(conn)]) do
       {:ok,
        %{
          handle: handle,
@@ -82,7 +82,7 @@ defmodule Arbor.Gateway.Chat.TerminalLogin do
   defp login(conn, "/api/chat/login/poll", %{"handle" => handle} = body)
        when map_size(body) == 1 do
     if opaque?(handle) do
-      case security(:terminal_login_status, [handle]) do
+      case security(:terminal_login_status, [handle, admission_source(conn)]) do
         {:ok, :pending} ->
           json(conn, 200, %{status: "pending"})
 
@@ -110,9 +110,10 @@ defmodule Arbor.Gateway.Chat.TerminalLogin do
 
   defp login(conn, "/api/chat/login/cancel", %{"handle" => handle} = body)
        when map_size(body) == 1 do
-    if opaque?(handle) and security(:cancel_terminal_login, [handle]) == :ok,
-      do: json(conn, 200, %{status: "closed"}),
-      else: error(conn, 401, "unauthorized")
+    if opaque?(handle) and
+         security(:cancel_terminal_login, [handle, admission_source(conn)]) == :ok,
+       do: json(conn, 200, %{status: "closed"}),
+       else: error(conn, 401, "unauthorized")
   end
 
   defp login(conn, _path, _body), do: error(conn, 400, "login_unavailable")
@@ -211,6 +212,17 @@ defmodule Arbor.Gateway.Chat.TerminalLogin do
   end
 
   defp safe_transport?(_), do: false
+
+  # `remote_ip` is transport metadata populated by the endpoint. Forwarded
+  # headers are deliberately excluded, so an anonymous client cannot rotate a
+  # claimed source to evade the security owner's admission budget.
+  defp admission_source(%{remote_ip: remote_ip}) do
+    :crypto.hash(
+      :sha256,
+      ["arbor.gateway.terminal-login-source.v1\0", :erlang.term_to_binary(remote_ip)]
+    )
+    |> Base.url_encode64(padding: false)
+  end
 
   defp read_object(conn) do
     with [content_type] <- get_req_header(conn, "content-type"),

@@ -1120,13 +1120,13 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
 
   defp grant_git_commit!(agent_id) do
     assert {:ok, cap} =
-             Arbor.Security.grant(
+             Arbor.Security.grant_fixture(
                principal: agent_id,
                resource: "arbor://action/git/commit",
                constraints: %{}
              )
 
-    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    on_exit(fn -> Arbor.Security.revoke_fixture(cap.id) end)
     cap
   end
 

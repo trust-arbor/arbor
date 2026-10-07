@@ -36,15 +36,15 @@ defmodule Arbor.Orchestrator.Conformance117Test do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
     :ok
   end
 
   test "11.7 context is shared across handlers and merges context_updates after each node" do
-    :ok = Registry.register("context.writer", ContextWriterHandler)
-    :ok = Registry.register("context.reader", ContextReaderHandler)
+    :ok = Registry.register_fixture("context.writer", ContextWriterHandler)
+    :ok = Registry.register_fixture("context.reader", ContextReaderHandler)
 
     dot = """
     digraph Flow {

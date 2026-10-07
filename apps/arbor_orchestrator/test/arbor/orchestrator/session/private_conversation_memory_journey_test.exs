@@ -872,8 +872,8 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
           {agent.agent_id, "arbor://orchestrator/execute/transform"},
           {agent.agent_id, "arbor://orchestrator/execute/unknown"}
         ] do
-      assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
-      on_exit(fn -> Security.revoke(cap.id) end)
+      assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
+      on_exit(fn -> Security.revoke_fixture(cap.id) end)
     end
 
     %{agent: agent, human: human}
@@ -881,8 +881,8 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
   defp new_agent! do
     assert {:ok, agent} = Identity.generate()
-    assert :ok = Security.register_identity(Identity.public_only(agent))
-    on_exit(fn -> Security.deregister_identity(agent.agent_id) end)
+    assert :ok = Security.register_identity_fixture(Identity.public_only(agent))
+    on_exit(fn -> Security.deregister_identity_fixture(agent.agent_id) end)
     agent
   end
 
@@ -894,7 +894,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
     on_exit(fn ->
       fixture.cleanup.()
-      Security.deregister_identity(fixture.identity.agent_id)
+      Security.deregister_identity_fixture(fixture.identity.agent_id)
     end)
 
     fixture.identity

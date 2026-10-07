@@ -105,9 +105,13 @@ defmodule Arbor.Actions.Github do
     end
 
     defp build_args(params) do
-      args = ["pr", "create", "--title", params.title]
-      args = if params[:body], do: args ++ ["--body", params[:body]], else: args ++ ["--body", ""]
-      args = if params[:base], do: args ++ ["--base", params[:base]], else: args
+      # Bind caller-controlled option values in the same argv token. Shell
+      # quoting prevents shell-language injection; the `--name=value` form
+      # separately prevents a leading dash in a value from being reinterpreted
+      # as another gh option.
+      args = ["pr", "create", "--title=#{params.title}"]
+      args = args ++ ["--body=#{params[:body] || ""}"]
+      args = if params[:base], do: args ++ ["--base=#{params[:base]}"], else: args
       args = if params[:draft], do: args ++ ["--draft"], else: args
       args
     end
@@ -144,6 +148,7 @@ defmodule Arbor.Actions.Github do
       do: Actions.unauthorized_message(:action_principal_authority_required)
 
     defp format_error({:unauthorized, reason}), do: Actions.unauthorized_message(reason)
+
     defp format_error({:agent_executable_not_allowed, _} = reason),
       do: Actions.unauthorized_message(reason)
 

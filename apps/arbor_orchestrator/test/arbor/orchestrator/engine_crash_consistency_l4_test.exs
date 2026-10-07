@@ -297,17 +297,17 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
   end
 
   setup do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    :ok = Registry.register("l4_side", SideEffectProbe)
-    :ok = Registry.register("l4_multi", MultiStepProbe)
-    :ok = Registry.register("l4_block", CompleteThenBlockProbe)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    :ok = Registry.register_fixture("l4_side", SideEffectProbe)
+    :ok = Registry.register_fixture("l4_multi", MultiStepProbe)
+    :ok = Registry.register_fixture("l4_block", CompleteThenBlockProbe)
 
     suffix = System.unique_integer([:positive, :monotonic])
     counter_name = :"l4_counter_#{suffix}"
     {:ok, _counter} = start_supervised({InvokeCounter, counter_name})
 
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
 
     %{invoke_counter: counter_name}
   end

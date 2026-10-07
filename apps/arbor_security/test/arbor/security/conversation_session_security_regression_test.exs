@@ -66,7 +66,7 @@ defmodule Arbor.Security.ConversationSessionSecurityRegressionTest do
       reflex_checking_enabled: false,
       uri_registry_enforcement: false,
       constraint_enforcement_enabled: true,
-      session_token_secret: "conversation-proof-#{System.unique_integer([:positive])}"
+      session_token_secret: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     ]
 
     before =
@@ -92,7 +92,7 @@ defmodule Arbor.Security.ConversationSessionSecurityRegressionTest do
 
     on_exit(fn ->
       oidc.cleanup.()
-      _ = Security.deregister_identity(caller)
+      _ = Security.deregister_identity_fixture(caller)
     end)
 
     %{
@@ -210,7 +210,7 @@ defmodule Arbor.Security.ConversationSessionSecurityRegressionTest do
   test "security regression: suspended signer cannot exchange a session", c do
     grant(c)
     signed = sign(c)
-    assert :ok = Security.suspend_identity(c.caller)
+    assert :ok = Security.suspend_identity_fixture(c.caller)
 
     assert {:error, :unauthorized} =
              Security.issue_signed_conversation_session(c.caller, c.target, signed)
@@ -219,7 +219,7 @@ defmodule Arbor.Security.ConversationSessionSecurityRegressionTest do
   test "security regression: existing session cannot bypass later capability revocation", c do
     cap = grant(c)
     assert {:ok, token} = Security.issue_signed_conversation_session(c.caller, c.target, sign(c))
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert {:error, _} =
              Security.recheck_conversation_session(c.caller, c.target, c.caller, token)
@@ -255,8 +255,10 @@ defmodule Arbor.Security.ConversationSessionSecurityRegressionTest do
   end
 
   defp grant(c, opts \\ []) do
-    assert {:ok, cap} = Security.grant([principal: c.caller, resource: c.resource] ++ opts)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} =
+             Security.grant_fixture([principal: c.caller, resource: c.resource] ++ opts)
+
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

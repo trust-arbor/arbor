@@ -380,6 +380,29 @@ defmodule Arbor.Actions.Config do
     |> normalize_base_url()
   end
 
+  @doc """
+  Return SSRF policy for an SCM base URL from trusted host configuration.
+
+  Private SCM targets are denied unless their exact origin appears in
+  `:arbor_actions, :scm_private_origins`. Action parameters and execution
+  context cannot widen this policy.
+  """
+  @spec scm_ssrf_options(String.t()) :: keyword()
+  def scm_ssrf_options(base_url) when is_binary(base_url) do
+    configured_origins = Application.get_env(:arbor_actions, :scm_private_origins, [])
+
+    with {:ok, origin} <- scm_origin(base_url),
+         true <- is_list(configured_origins),
+         true <- Enum.any?(configured_origins, &match_scm_origin?(&1, origin)) do
+      {_scheme, _host, port} = origin
+      [allow_private: true, allowed_ports: [port]]
+    else
+      _other -> []
+    end
+  end
+
+  def scm_ssrf_options(_base_url), do: []
+
   @spec scm_token(provider(), map(), map()) :: {:ok, String.t()} | {:error, String.t()}
   def scm_token(provider, params, context) do
     token =
@@ -403,6 +426,22 @@ defmodule Arbor.Actions.Config do
   defp context_token(provider, context) do
     get(context, :scm_token) ||
       get_nested_token(get(context, :scm_tokens, %{}), provider)
+  end
+
+  defp match_scm_origin?(configured, origin) when is_binary(configured),
+    do: scm_origin(configured) == {:ok, origin}
+
+  defp match_scm_origin?(_configured, _origin), do: false
+
+  defp scm_origin(value) do
+    case URI.parse(value) do
+      %URI{scheme: scheme, host: host, port: port}
+      when scheme in ["http", "https"] and is_binary(host) and is_integer(port) ->
+        {:ok, {scheme, host |> String.downcase() |> String.trim_trailing("."), port}}
+
+      _other ->
+        {:error, :invalid_scm_origin}
+    end
   end
 
   defp config_token(provider, _params, _context) do

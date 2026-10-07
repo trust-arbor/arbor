@@ -136,6 +136,12 @@ defmodule Arbor.Common.OAuth.AuthCodeTest do
       assert query["scope"] == "openid email"
     end
 
+    @tag :security_regression
+    test "security regression: refuses the downgradeable plain PKCE method" do
+      assert {:error, {:invalid_params, :invalid_challenge_method}} =
+               AuthCode.build_authorize_url(base_authorize(code_challenge_method: "plain"))
+    end
+
     test "preserves an existing benign query verbatim instead of corrupting it" do
       endpoint = "https://idp.example/authorize?tenant=acme&p=B2C_1_signup"
 
@@ -625,13 +631,14 @@ defmodule Arbor.Common.OAuth.AuthCodeTest do
       assert tokens["provider_specific"] == "kept"
     end
 
-    test "accepts the historical empty code_verifier sentinel" do
+    @tag :security_regression
+    test "security regression: rejects an empty PKCE code verifier" do
       client =
         stub(fn ->
           {:ok, %Response{status: 200, body: Jason.encode!(%{"id_token" => "eyJ.a.b"})}}
         end)
 
-      assert {:ok, %{"id_token" => "eyJ.a.b"}} =
+      assert {:error, {:invalid_params, :empty}} =
                AuthCode.exchange_code(base_exchange(code_verifier: "", http_client: client))
     end
 

@@ -14,7 +14,10 @@ defmodule Arbor.Actions.ModelOutputResultsTest do
     assert {:ok, nil} = Memory.init_for_agent(agent, index_enabled: false, auto_embed: false)
 
     assert {:ok, cap} =
-             Arbor.Security.grant(principal: agent, resource: "arbor://orchestrator/execute")
+             Arbor.Security.grant_fixture(
+               principal: agent,
+               resource: "arbor://orchestrator/execute"
+             )
 
     existing_writers = writer_pids()
 
@@ -24,7 +27,7 @@ defmodule Arbor.Actions.ModelOutputResultsTest do
         assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 5_000
       end
 
-      Arbor.Security.revoke(cap.id)
+      Arbor.Security.revoke_fixture(cap.id)
       Memory.cleanup_for_agent(agent)
     end)
 

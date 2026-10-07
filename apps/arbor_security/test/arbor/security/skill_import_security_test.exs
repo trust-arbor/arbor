@@ -35,15 +35,20 @@ defmodule Arbor.Security.SkillImportSecurityTest do
     assert {:error, :invalid_skill} = Security.validate_imported_skill("nope")
   end
 
-  test "returns reflex_unavailable when Reflex.check cannot run" do
+  test "uses the immutable built-in reflex projection when Registry is unavailable" do
     child_id = Arbor.Security.Reflex.Registry
 
     on_exit(fn -> restore_registry(child_id) end)
 
     assert :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, child_id)
 
-    assert {:error, :reflex_unavailable} =
-             Security.validate_imported_skill(%{name: "ok-skill", body: "hello"})
+    assert :ok = Security.validate_imported_skill(%{name: "ok-skill", body: "hello"})
+
+    assert {:error, :blocked} =
+             Security.validate_imported_skill(%{
+               name: "metadata-probe",
+               body: @metadata_url
+             })
   end
 
   defp restore_registry(child_id) do

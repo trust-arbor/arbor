@@ -215,13 +215,13 @@ defmodule Arbor.Memory.PrivateGoalSecurityRegressionTest do
        ctx do
     assert {:ok, _} = Memory.put_private_goal(ctx.admission, "notebook", goal())
     original = stored!(ctx.owner)
-    assert :ok = Security.revoke(ctx.owner.write_cap.id)
+    assert :ok = Security.revoke_fixture(ctx.owner.write_cap.id)
 
     assert {:error, _} =
              Memory.put_private_goal(ctx.admission, "notebook", goal("must not persist"))
 
     assert stored!(ctx.owner) == original
-    assert :ok = Security.revoke(ctx.owner.read_cap.id)
+    assert :ok = Security.revoke_fixture(ctx.owner.read_cap.id)
     assert {:error, _} = Memory.get_private_active_goals(ctx.admission)
   end
 

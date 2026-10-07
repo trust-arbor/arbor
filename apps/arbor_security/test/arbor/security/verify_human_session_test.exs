@@ -9,7 +9,13 @@ defmodule Arbor.Security.VerifyHumanSessionTest do
   setup do
     keys = [:session_token_secret, :session_token_module]
     previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
-    Application.put_env(:arbor_security, :session_token_secret, "isolated-login-proof-test")
+
+    Application.put_env(
+      :arbor_security,
+      :session_token_secret,
+      "isolated-login-proof-test-at-least-thirty-two-bytes"
+    )
+
     Application.put_env(:arbor_security, :session_token_module, SessionToken)
 
     on_exit(fn ->
@@ -29,7 +35,7 @@ defmodule Arbor.Security.VerifyHumanSessionTest do
   end
 
   test "security regression: expired or malformed session proof is rejected" do
-    {:ok, expired} = SessionToken.generate("human_session_owner", ttl: -1)
+    expired = expired_token("human_session_owner")
 
     for token <- [expired, "malformed", "", nil, String.duplicate("a", 4097)],
         do:
@@ -39,12 +45,33 @@ defmodule Arbor.Security.VerifyHumanSessionTest do
   end
 
   test "security regression: scoped conversation proof cannot become general dashboard login" do
-    {:ok, token} = SessionToken.generate_conversation("human_session_owner", "agent_target")
+    {:ok, token} =
+      SessionToken.generate_conversation_fixture("human_session_owner", "agent_target")
+
     assert {:error, :unauthorized} = Security.verify_human_session("human_session_owner", token)
   end
 
   test "nonhuman token cannot authenticate a human dashboard session" do
     {:ok, token} = SessionToken.generate("agent_caller")
     assert {:error, :unauthorized} = Security.verify_human_session("agent_caller", token)
+  end
+
+  defp expired_token(principal) do
+    {:ok, token} = SessionToken.generate(principal)
+
+    {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+      Base.url_decode64(token, padding: false)
+
+    now = System.os_time(:second)
+
+    payload =
+      bytes
+      |> :erlang.binary_to_term([:safe])
+      |> Map.merge(%{iat: now - 120, exp: now - 60})
+
+    expired_bytes = :erlang.term_to_binary(payload)
+    secret = Application.fetch_env!(:arbor_security, :session_token_secret)
+    signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+    Base.url_encode64(signature <> expired_bytes, padding: false)
   end
 end

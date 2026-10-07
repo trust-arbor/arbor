@@ -59,7 +59,7 @@ defmodule Arbor.Actions.ApprovalContextTest do
     content = "VIP export\ncustomer,value\nA,100\n"
 
     {:ok, _capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: agent_id,
         resource: "arbor://fs/write#{tmp_dir}/**"
       )
@@ -114,7 +114,7 @@ defmodule Arbor.Actions.ApprovalContextTest do
       ~s({"message":"keep","access_token":"tiny","authorization":"Bearer short-token","jwt":"#{jwt}"})
 
     {:ok, _capability} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: agent_id,
         resource: "arbor://fs/write#{tmp_dir}/**"
       )

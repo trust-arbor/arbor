@@ -30,6 +30,7 @@ defmodule Arbor.Persistence do
   alias Arbor.Persistence.{
     AgentTelemetry,
     BufferedStore,
+    ChannelStore,
     ConversationPage,
     Event,
     EventLog,
@@ -43,6 +44,46 @@ defmodule Arbor.Persistence do
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
   alias Arbor.Persistence.SessionStore
+
+  # ---------------------------------------------------------------
+  # Communication channels
+  # ---------------------------------------------------------------
+
+  @doc "Check whether durable channel persistence is available."
+  @spec available?() :: boolean()
+  def available?, do: ChannelStore.available?()
+
+  @doc "Get or create a durable communication channel."
+  @spec ensure_channel(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def ensure_channel(channel_id, opts \\ []), do: ChannelStore.ensure_channel(channel_id, opts)
+
+  @doc "List durable communication channels."
+  @spec list_channels(keyword()) :: [map()]
+  def list_channels(opts \\ []), do: ChannelStore.list_channels(opts)
+
+  @doc "Add a member to a durable communication channel."
+  @spec add_member(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def add_member(channel_id, member), do: ChannelStore.add_member(channel_id, member)
+
+  @doc "Remove a member from a durable communication channel."
+  @spec remove_member(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def remove_member(channel_id, member_id), do: ChannelStore.remove_member(channel_id, member_id)
+
+  @doc "Append a message to a durable communication channel."
+  @spec append_message(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def append_message(channel_id, attrs), do: ChannelStore.append_message(channel_id, attrs)
+
+  @doc "Search durable communication channels."
+  @spec search_channels(keyword()) :: [map()]
+  def search_channels(opts \\ []), do: ChannelStore.search_channels(opts)
+
+  @doc "Update a durable communication channel."
+  @spec update_channel(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def update_channel(channel_id, attrs), do: ChannelStore.update_channel(channel_id, attrs)
+
+  @doc "Delete a durable communication channel and its messages."
+  @spec delete_channel(String.t()) :: :ok | {:error, term()}
+  def delete_channel(channel_id), do: ChannelStore.delete_channel(channel_id)
 
   # ---------------------------------------------------------------
   # Validated vector-store boundary (C3G1A0)

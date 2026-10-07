@@ -30,7 +30,7 @@ defmodule Arbor.Orchestrator.ComposeParentExampleTest do
         metadata: %{test: true}
       )
 
-    Arbor.Security.CapabilityStore.put(cap)
+    Arbor.Security.put_capability_fixture(cap)
     :ok
   end
 

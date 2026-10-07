@@ -13,6 +13,7 @@ defmodule Mix.Tasks.Arbor.Config do
   """
   use Mix.Task
 
+  alias Arbor.Common.LogRedactor
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @impl Mix.Task
@@ -71,13 +72,23 @@ defmodule Mix.Tasks.Arbor.Config do
         env
         |> Enum.sort_by(fn {key, _} -> key end)
         |> Enum.each(fn {key, value} ->
-          formatted = inspect(value, pretty: true, limit: 50, width: 60)
-          Mix.shell().info("  #{key}: #{formatted}")
+          Mix.shell().info(format_entry(key, value))
         end)
     end
   rescue
     ArgumentError ->
       Mix.shell().error("Unknown application: #{app_name}")
       exit({:shutdown, 1})
+  end
+
+  @doc "Format one application environment entry with secrets redacted."
+  @spec format_entry(term(), term()) :: String.t()
+  def format_entry(key, value) do
+    formatted =
+      key
+      |> LogRedactor.redact_value(value)
+      |> inspect(pretty: true, limit: 50, width: 60)
+
+    LogRedactor.redact_binary("  #{key}: #{formatted}")
   end
 end

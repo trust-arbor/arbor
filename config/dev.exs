@@ -6,6 +6,32 @@ config :logger, level: :debug
 # runtime.exs also loads .env, but compile-time config runs first.
 dotenv_path = Path.join(__DIR__, "../.env")
 
+# Keep synchronized with Mix.Tasks.Arbor.Helpers.dotenv_key_allowed?/1. Config
+# evaluation happens before that module is guaranteed to be compiled, so this
+# boundary must remain self-contained.
+dotenv_allowed_exact =
+  MapSet.new(~w(
+    ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    OPENAI_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+    XAI_API_KEY GROK_CODE_XAI_API_KEY ZAI_API_KEY ZAI_CODING_PLAN_API_KEY
+    OLLAMA_API_KEY OLLAMA_BASE_URL LM_STUDIO_BASE_URL
+    BRAVE_API_KEY BRAVE_SEARCH_API_KEY EXA_API_KEY TINYFISH_API_KEY LIMITLESS_API_KEY
+    CURSOR_API_KEY CURSOR_AUTH_TOKEN
+    DATABASE_URL DB_HOST DB_USER DB_PASS DB_SSL
+    DASHBOARD_HOST DASHBOARD_PORT DASHBOARD_USER DASHBOARD_PASS SECRET_KEY_BASE
+    OIDC_ALLOW_HTTP OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES
+    OIDC_DEVICE_FLOW OIDC_DEVICE_CLIENT_ID
+    SIGNAL_FROM SIGNAL_ACCOUNT SIGNAL_TO SIGNAL_CLI_PATH
+    SMTP_USER SMTP_PASS SMTP_HOST SMTP_PORT EMAIL_TO
+    UNIFIED_LLM_DEFAULT_MODEL UNIFIED_LLM_DEFAULT_PROVIDER
+  ))
+
+dotenv_key_allowed? = fn key ->
+  Regex.match?(~r/\A[A-Z][A-Z0-9_]*\z/, key) and
+    (MapSet.member?(dotenv_allowed_exact, key) or
+       String.starts_with?(key, ["ARBOR_", "CONTACT_"]))
+end
+
 if File.exists?(dotenv_path) do
   dotenv_path
   |> File.read!()
@@ -17,7 +43,8 @@ if File.exists?(dotenv_path) do
         key = key |> String.trim() |> String.replace_leading("export ", "")
         value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
         # Only set if not already in environment (env vars take precedence)
-        unless System.get_env(key), do: System.put_env(key, value)
+        if dotenv_key_allowed?.(key) and is_nil(System.get_env(key)),
+          do: System.put_env(key, value)
 
       _ ->
         :skip
@@ -197,8 +224,7 @@ config :arbor_security,
   # the dashboard (ChatLive's approvals panel) and falls back to "queued"
   # when no channel is reachable, so the agent still gets a non-blocking
   # request_id back.
-  use_interaction_router_for_approval: true,
-  session_token_secret: "arbor-dev-session-token-secret-change-in-prod"
+  use_interaction_router_for_approval: true
 
 # OIDC — Human identity authentication for CLI and orchestration.
 # Uncomment and configure for your OIDC provider (Zitadel, Google, GitHub, etc.)

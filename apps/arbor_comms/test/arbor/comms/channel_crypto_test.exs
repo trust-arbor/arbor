@@ -7,13 +7,57 @@ defmodule Arbor.Comms.ChannelCryptoTest do
 
   @moduletag :fast
 
+  defmodule FailingSecurity do
+    def encrypt(_content, _key), do: raise("injected encryption failure")
+    def decrypt(_ciphertext, _key, _iv, _tag), do: {:error, :decryption_failed}
+  end
+
+  defmodule CaptureChannelStore do
+    def available?, do: true
+
+    def ensure_channel(channel_id, attrs) do
+      send(test_pid(), {:ensure_channel, channel_id, attrs})
+      :ok
+    end
+
+    def append_message(channel_id, message) do
+      send(test_pid(), {:append_message, channel_id, message})
+      :ok
+    end
+
+    def add_member(channel_id, member) do
+      send(test_pid(), {:add_member, channel_id, member})
+      :ok
+    end
+
+    def remove_member(channel_id, member_id) do
+      send(test_pid(), {:remove_member, channel_id, member_id})
+      :ok
+    end
+
+    defp test_pid, do: Application.fetch_env!(:arbor_comms, :channel_crypto_test_pid)
+  end
+
   setup do
     unless Process.whereis(Arbor.Comms.ChannelRegistry) do
       start_supervised!({Registry, keys: :unique, name: Arbor.Comms.ChannelRegistry})
     end
 
+    previous_security = Application.fetch_env(:arbor_comms, :channel_security_module)
+    previous_store = Application.fetch_env(:arbor_comms, :channel_store_module)
+    previous_test_pid = Application.fetch_env(:arbor_comms, :channel_crypto_test_pid)
+
+    on_exit(fn ->
+      restore_env(:channel_security_module, previous_security)
+      restore_env(:channel_store_module, previous_store)
+      restore_env(:channel_crypto_test_pid, previous_test_pid)
+    end)
+
     :ok
   end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_comms, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_comms, key)
 
   defp start_channel(opts \\ []) do
     channel_id = Keyword.get(opts, :channel_id, "chan_test_#{System.unique_integer([:positive])}")
@@ -154,10 +198,14 @@ defmodule Arbor.Comms.ChannelCryptoTest do
     end
 
     test "DM channel reports encryption_type: :double_ratchet" do
-      {pid, _} = start_channel(type: :dm, members: [
-        %{id: "user_1", name: "User One", type: :human},
-        %{id: "user_2", name: "User Two", type: :human}
-      ])
+      {pid, _} =
+        start_channel(
+          type: :dm,
+          members: [
+            %{id: "user_1", name: "User One", type: :human},
+            %{id: "user_2", name: "User Two", type: :human}
+          ]
+        )
 
       info = Channel.channel_info(pid)
       assert info.encryption_type == :double_ratchet
@@ -175,17 +223,61 @@ defmodule Arbor.Comms.ChannelCryptoTest do
       assert length(history) == 1
       assert hd(history).content == "Secret message!"
     end
+
+    test "security regression: encryption failure rejects a private message before persistence or delivery" do
+      Application.put_env(:arbor_comms, :channel_security_module, FailingSecurity)
+      Application.put_env(:arbor_comms, :channel_store_module, CaptureChannelStore)
+      Application.put_env(:arbor_comms, :channel_crypto_test_pid, self())
+
+      {pid, channel_id} = start_channel(type: :private)
+      assert_receive {:ensure_channel, ^channel_id, _attrs}
+
+      assert {:error, :private_channel_encryption_unavailable} =
+               Channel.send_message(
+                 pid,
+                 "user_1",
+                 "User One",
+                 :human,
+                 "must-never-be-persisted"
+               )
+
+      assert Channel.get_history(pid) == []
+      refute_receive {:append_message, ^channel_id, _message}, 100
+    end
+
+    test "security regression: private persistence receives ciphertext marked encrypted" do
+      Application.put_env(:arbor_comms, :channel_security_module, Arbor.Security)
+      Application.put_env(:arbor_comms, :channel_store_module, CaptureChannelStore)
+      Application.put_env(:arbor_comms, :channel_crypto_test_pid, self())
+
+      {pid, channel_id} = start_channel(type: :private)
+      assert_receive {:ensure_channel, ^channel_id, _attrs}
+
+      sentinel = "private persistence sentinel"
+
+      assert {:ok, _message} =
+               Channel.send_message(pid, "user_1", "User One", :human, sentinel)
+
+      assert_receive {:append_message, ^channel_id, persisted}
+      refute persisted.content == sentinel
+      assert persisted.metadata.encrypted == true
+
+      assert {:ok, %{"__encrypted__" => true} = envelope} = Jason.decode(persisted.content)
+      encryption_key = :sys.get_state(pid).encryption_key
+      assert Channel.decrypt_content(envelope, encryption_key) == sentinel
+    end
   end
 
   describe "encryption key rotation" do
     test "adding and removing members works for private channels" do
-      {pid, _} = start_channel(
-        type: :private,
-        members: [
-          %{id: "user_1", name: "User One", type: :human},
-          %{id: "user_2", name: "User Two", type: :human}
-        ]
-      )
+      {pid, _} =
+        start_channel(
+          type: :private,
+          members: [
+            %{id: "user_1", name: "User One", type: :human},
+            %{id: "user_2", name: "User Two", type: :human}
+          ]
+        )
 
       # Remove a member (triggers key rotation)
       assert :ok = Channel.remove_member(pid, "user_2")

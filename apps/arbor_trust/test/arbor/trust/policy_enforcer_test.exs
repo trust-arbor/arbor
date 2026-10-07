@@ -3,8 +3,8 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
   @moduletag :fast
 
-  alias Arbor.Security.CapabilityStore
   alias Arbor.Trust.PolicyEnforcer
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   defmodule ActionProfileProvider do
     alias Arbor.Contracts.Security.CapabilityProfile
@@ -43,7 +43,6 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
   setup do
     ensure_started(Arbor.Security.Identity.Registry)
     ensure_started(Arbor.Security.SystemAuthority)
-    ensure_started(CapabilityStore)
 
     prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     prev_security_enforcer = Application.get_env(:arbor_security, :policy_enforcer_enabled)
@@ -60,7 +59,8 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       rebind_trust!()
     end)
 
-    :ok
+    {_identity, actor_authority} = actor_authority!()
+    {:ok, actor_authority: actor_authority}
   end
 
   describe "enabled?/0" do
@@ -82,10 +82,18 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
   end
 
   describe "ensure_capability/3" do
-    test "returns an existing capability without minting" do
+    test "returns an existing capability without minting", %{
+      actor_authority: actor_authority
+    } do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-existing"
-      {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: uri)
+
+      {:ok, cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: uri,
+          actor_authority: actor_authority
+        )
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, BlockPolicy)
@@ -93,21 +101,22 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       assert {:ok, ^cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
     end
 
-    test "mints an explicit capability when policy mode is :auto" do
+    test "security regression: caller-owned mutation authority cannot self-mint", %{
+      actor_authority: actor_authority
+    } do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-auto"
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
 
-      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert cap.principal_id == agent_id
-      assert cap.resource_uri == uri
-      assert cap.metadata[:source] == :trust_policy_enforcer
-      refute cap.constraints[:requires_approval]
+      assert {:error, :unauthorized} =
+               PolicyEnforcer.ensure_capability(agent_id, uri, actor_authority: actor_authority)
+
+      refute capability_authorizing?(agent_id, uri)
     end
 
-    test "mints profile default constraints when a capability profile matches" do
+    test "resolves profile default constraints when a capability profile matches" do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-default-constraints"
 
@@ -120,10 +129,10 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
       rebind_trust!()
 
-      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert cap.constraints == %{rate_limit: 7}
-      assert cap.metadata[:profile_uri] == "arbor://fs/read"
-      assert cap.metadata[:profile_effect_class] == :read
+      assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
+      assert spec.constraints == %{rate_limit: 7}
+      assert spec.profile.uri_prefix == "arbor://fs/read"
+      assert spec.profile.effect_class == :read
     end
 
     test "B6 security regression: high-risk auto standing does not mint a missing capability" do
@@ -134,7 +143,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
 
       assert {:error, :unauthorized} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+      refute capability_authorizing?(agent_id, uri)
     end
 
     test "B6 security regression: unprofiled auto standing does not mint baseline-only capability" do
@@ -145,10 +154,10 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
 
       assert {:error, :unauthorized} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+      refute capability_authorizing?(agent_id, uri)
     end
 
-    test "B2 regression: action namespace profiles feed policy minting" do
+    test "B2 regression: action namespace profiles feed policy grant specs" do
       agent_id = unique_agent()
       uri = "arbor://action/browser/navigate"
       previous_provider = Application.get_env(:arbor_trust, :action_profile_provider)
@@ -159,28 +168,27 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       rebind_trust!()
 
       try do
-        assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-        assert cap.resource_uri == uri
-        assert cap.metadata[:profile_uri] == "arbor://action/browser/navigate"
-        assert cap.metadata[:profile_effect_class] == :read
-        assert cap.metadata[:mode] == :ask
+        assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
+        assert spec.profile.uri_prefix == "arbor://action/browser/navigate"
+        assert spec.profile.effect_class == :read
+        assert spec.mode == :ask
       after
         restore(:arbor_trust, :action_profile_provider, previous_provider)
         rebind_trust!()
       end
     end
 
-    test "mints an explicit trust-stamped capability when policy mode is :ask" do
+    test "resolves an ask-mode grant spec without minting" do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-ask"
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
 
-      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert cap.metadata[:source] == :trust_policy_enforcer
-      assert cap.metadata[:mode] == :ask
-      refute cap.constraints[:requires_approval]
+      assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
+      assert spec.mode == :ask
+      refute spec.constraints[:requires_approval]
+      refute capability_authorizing?(agent_id, uri)
     end
 
     test "denies when policy mode is :block" do
@@ -201,20 +209,35 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     end
   end
 
-  describe "sync_capabilities/1" do
-    test "keeps mode-stamped ask grants while policy still asks" do
+  describe "sync_capabilities/2" do
+    test "keeps mode-stamped ask grants while policy still asks", %{
+      actor_authority: actor_authority
+    } do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-sync-ask"
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
 
-      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert :ok = PolicyEnforcer.sync_capabilities(agent_id)
-      assert {:ok, ^cap} = CapabilityStore.get(cap.id)
+      assert {:ok, cap} =
+               Arbor.Security.grant(
+                 principal: agent_id,
+                 resource: uri,
+                 metadata: %{source: :trust_policy_enforcer, mode: :ask},
+                 actor_authority: actor_authority
+               )
+
+      assert :ok =
+               PolicyEnforcer.sync_capabilities(agent_id,
+                 actor_authority: actor_authority
+               )
+
+      assert capability_present?(agent_id, cap.id)
     end
 
-    test "revokes legacy no-approval trust grants when policy now asks" do
+    test "revokes legacy no-approval trust grants when policy now asks", %{
+      actor_authority: actor_authority
+    } do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-sync-legacy-auto"
 
@@ -222,15 +245,57 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
         Arbor.Security.grant(
           principal: agent_id,
           resource: uri,
-          metadata: %{source: :policy_enforcer}
+          metadata: %{source: :policy_enforcer},
+          actor_authority: actor_authority
         )
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
 
-      assert :ok = PolicyEnforcer.sync_capabilities(agent_id)
-      assert {:error, :not_found} = CapabilityStore.get(cap.id)
+      assert :ok =
+               PolicyEnforcer.sync_capabilities(agent_id,
+                 actor_authority: actor_authority
+               )
+
+      refute capability_present?(agent_id, cap.id)
     end
+
+    test "security regression: revocation failures are returned and not counted as synced", %{
+      actor_authority: actor_authority
+    } do
+      agent_id = unique_agent()
+      uri = "arbor://fs/read/policy-sync-revoke-failure"
+
+      {:ok, cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: uri,
+          metadata: %{source: :policy_enforcer},
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AskPolicy)
+
+      assert {:error, {:capability_revocation_failed, cap_id, _reason}} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: %{})
+
+      assert cap_id == cap.id
+      assert capability_present?(agent_id, cap.id)
+    end
+  end
+
+  defp capability_present?(agent_id, capability_id) do
+    {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
+    Enum.any?(capabilities, &(&1.id == capability_id))
+  end
+
+  defp capability_authorizing?(agent_id, resource_uri) do
+    {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
+
+    Enum.any?(capabilities, fn capability ->
+      Arbor.Security.capability_authorizes?(capability, resource_uri)
+    end)
   end
 
   defp unique_agent, do: "agent_policy_enforcer_#{System.unique_integer([:positive])}"

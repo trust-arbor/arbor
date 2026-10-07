@@ -27,7 +27,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
 
   @requirements ["compile"]
 
-  alias Arbor.Commands.SafeRecoveryArtifact
+  alias Arbor.Commands.{SafeRecoveryArtifact, SourceCoupling}
 
   @mode_keys [:check, :build_verify, :write]
   @bool_keys [:check, :json, :build_verify, :write]
@@ -100,7 +100,10 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
   end
 
   defp run_mode("report", opts), do: SafeRecoveryArtifact.report(opts)
-  defp run_mode("check", opts), do: SafeRecoveryArtifact.check(opts)
+
+  defp run_mode("check", opts) do
+    SourceCoupling.with_direct_runtime(fn -> SafeRecoveryArtifact.check(opts) end)
+  end
 
   defp run_mode("build_verify", opts) do
     with {:ok, _started} <- ensure_live_runtime() do

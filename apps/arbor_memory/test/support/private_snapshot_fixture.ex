@@ -195,8 +195,8 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
 
   defp new_agent! do
     assert {:ok, identity} = Identity.generate()
-    assert :ok = Security.register_identity(identity)
-    on_exit(fn -> Security.deregister_identity(identity.agent_id) end)
+    assert :ok = Security.register_identity_fixture(identity)
+    on_exit(fn -> Security.deregister_identity_fixture(identity.agent_id) end)
     identity
   end
 
@@ -208,15 +208,15 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
 
     on_exit(fn ->
       fixture.cleanup.()
-      Security.deregister_identity(fixture.identity.agent_id)
+      Security.deregister_identity_fixture(fixture.identity.agent_id)
     end)
 
     fixture.identity
   end
 
   defp grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

@@ -252,7 +252,10 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     refute is_binary(status["last_error"]) and String.contains?(status["last_error"], "eio")
   end
 
-  test "torn tail reopens degraded and refuses appends", %{name: name} do
+  test "security regression: torn tail is preserved and recovered without losing committed work",
+       %{
+         name: name
+       } do
     root = unique_root()
     {prepared, applied, _delivered} = grant_lifecycle()
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
@@ -260,19 +263,36 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     :ok = GenServer.stop(pid)
 
     path = Path.join(root, "audit_journal.v1.log")
-    File.write!(path, File.read!(path) <> <<"AJL">>)
+    torn_bytes = File.read!(path) <> <<"AJL">>
+    File.write!(path, torn_bytes)
     File.chmod!(path, 0o600)
 
     assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
     assert {:ok, status} = Owner.status(name)
-    assert status["torn_tail"] == true
-    assert status["availability"] == "degraded"
-    assert status["reason"] == "torn_tail"
-    assert status["last_error"] == "torn_tail"
-    assert status["serving"] == false
-    assert {:error, {:not_committed, :torn_tail}} = Owner.append(name, applied)
+    assert status["torn_tail"] == false
+    assert status["availability"] == "serving"
+    assert status["reason"] == "none"
+    assert status["last_error"] == "none"
+    assert status["serving"] == true
     assert {:ok, pending} = Owner.pending_operations(name)
     assert length(pending) == 1
+    assert {:ok, :committed} = Owner.append(name, applied)
+
+    quarantine = Path.join(root, ".audit-quarantine")
+
+    assert [evidence_name] =
+             quarantine
+             |> File.ls!()
+             |> Enum.filter(&String.starts_with?(&1, "torn-tail-"))
+
+    assert File.read!(Path.join(quarantine, evidence_name)) == torn_bytes
+
+    event_name = "recovery-event-#{evidence_name}.json"
+    event = quarantine |> Path.join(event_name) |> File.read!() |> Jason.decode!()
+    assert event["kind"] == "arbor.security.audit_journal_forensic_rotation.v1"
+    assert event["cause"] == "torn_tail"
+    assert event["evidence"] == evidence_name
+    assert event["action"] == "quarantine_and_replace"
   end
 
   test "not_committed write failure poisons and keeps the outer error", %{name: name} do
@@ -310,7 +330,9 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
              Owner.start_link(mode: :ephemeral, backend: :memory, name: name)
   end
 
-  test "corrupt open fails start and does not serve invented state", %{name: name} do
+  test "security regression: corrupt journal is quarantined and boot remains fail closed", %{
+    name: name
+  } do
     root = unique_root()
     {prepared, _applied, _delivered} = grant_lifecycle()
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
@@ -318,19 +340,28 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     :ok = GenServer.stop(pid)
 
     path = Path.join(root, "audit_journal.v1.log")
-    File.write!(path, flip_byte(File.read!(path), 40))
+    corrupt_bytes = flip_byte(File.read!(path), 40)
+    File.write!(path, corrupt_bytes)
     File.chmod!(path, 0o600)
 
-    previous_trap_exit = Process.flag(:trap_exit, true)
+    assert {:ok, restarted} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, status} = Owner.status(restarted)
+    assert status["availability"] == "degraded"
+    assert status["poisoned"] == true
+    assert status["serving"] == false
+    assert {:error, :journal_poisoned} = Owner.append(restarted, prepared)
 
-    try do
-      assert {:error, {:journal_open_failed, :digest_mismatch}} =
-               Owner.start_link(mode: :durable, root: root, name: name)
-    after
-      Process.flag(:trap_exit, previous_trap_exit)
-    end
+    quarantine = Path.join(root, ".audit-quarantine")
+    files = File.ls!(quarantine)
+    assert "recovery-required.json" in files
+    assert [evidence_name] = Enum.filter(files, &String.starts_with?(&1, "corrupt-"))
+    assert File.read!(Path.join(quarantine, evidence_name)) == corrupt_bytes
 
-    refute Process.whereis(name)
+    :ok = GenServer.stop(restarted)
+    assert {:ok, restarted_again} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, after_restart} = Owner.status(restarted_again)
+    assert after_restart["poisoned"] == true
+    assert after_restart["serving"] == false
   end
 
   test "durable soft-capacity reclaimable terminals publish once and retry", %{name: name} do
@@ -437,25 +468,13 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     refute inspect(status) =~ "eio"
     :ok = GenServer.stop(pid)
 
-    previous_trap_exit = Process.flag(:trap_exit, true)
-
-    try do
-      started = Owner.start_link(mode: :durable, root: root, name: name)
-
-      case started do
-        {:ok, restarted} ->
-          assert {:ok, pending} = Owner.pending_operations(restarted)
-          refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
-          assert {:ok, after_status} = Owner.status(restarted)
-          assert after_status["serving"] == true
-          assert after_status["poisoned"] == false
-
-        {:error, {:journal_open_failed, _reason}} ->
-          refute Process.whereis(name)
-      end
-    after
-      Process.flag(:trap_exit, previous_trap_exit)
-    end
+    assert {:ok, restarted} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, pending} = Owner.pending_operations(restarted)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+    assert {:ok, after_status} = Owner.status(restarted)
+    assert after_status["serving"] == false
+    assert after_status["poisoned"] == true
+    assert {:error, :journal_poisoned} = Owner.append(restarted, extra)
   end
 
   test "publish_uncertain poisons as commit_uncertain", %{name: name} do
@@ -497,7 +516,9 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
   end
 
-  test "retry partial_write after compact poisons; restart is torn without extra", %{name: name} do
+  test "security regression: retry partial write is forensically recovered without extra", %{
+    name: name
+  } do
     root = unique_root()
     extra = prepared(17)
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
@@ -515,8 +536,9 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
 
     assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
     assert {:ok, restarted} = Owner.status(name)
-    assert restarted["torn_tail"] == true
-    assert restarted["serving"] == false
+    assert restarted["torn_tail"] == false
+    assert restarted["serving"] == true
+    assert restarted["poisoned"] == false
     assert {:ok, pending} = Owner.pending_operations(name)
     refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
   end
@@ -572,7 +594,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     assert extra["operation_id"] in Enum.map(after_pending, & &1["operation_id"])
   end
 
-  test "restart after interior corruption of compacted log fails closed", %{name: name} do
+  test "security regression: interior corruption boots degraded after quarantine", %{name: name} do
     root = unique_root()
     extra = prepared(17)
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
@@ -584,16 +606,12 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     File.write!(path, flip_byte(File.read!(path), 40))
     File.chmod!(path, 0o600)
 
-    previous_trap_exit = Process.flag(:trap_exit, true)
-
-    try do
-      assert {:error, {:journal_open_failed, _reason}} =
-               Owner.start_link(mode: :durable, root: root, name: name)
-    after
-      Process.flag(:trap_exit, previous_trap_exit)
-    end
-
-    refute Process.whereis(name)
+    assert {:ok, restarted} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, status} = Owner.status(restarted)
+    assert status["availability"] == "degraded"
+    assert status["poisoned"] == true
+    assert status["serving"] == false
+    assert {:error, :journal_poisoned} = Owner.append(restarted, extra)
   end
 
   test "restart after pre-publication miss does not invent extra", %{name: name} do

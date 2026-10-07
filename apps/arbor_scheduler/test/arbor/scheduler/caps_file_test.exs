@@ -6,21 +6,19 @@ defmodule Arbor.Scheduler.CapsFileTest do
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.CapsFile
   alias Arbor.Scheduler.CapsFile.Attestation
-  alias Arbor.Security.Crypto
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
-  alias Arbor.Security.IssuerRegistry
+  alias Arbor.Security
 
   @envelope_uri "arbor://fs/write/reports/**"
   @dot_source "digraph Signed { start [shape=Mdiamond] }"
 
   setup do
     {:ok, identity} = Identity.generate()
-    :ok = IdentityRegistry.register(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     {:ok, envelope} =
       Capability.new(resource_uri: @envelope_uri, principal_id: identity.agent_id)
 
-    :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "caps_file_test")
+    :ok = Security.register_issuer_fixture(identity.agent_id, envelope, reason: "caps_file_test")
 
     tmp_dir =
       System.tmp_dir!() |> Path.join("caps_file_test_#{System.unique_integer([:positive])}")
@@ -28,7 +26,7 @@ defmodule Arbor.Scheduler.CapsFileTest do
     File.mkdir_p!(tmp_dir)
 
     on_exit(fn ->
-      IssuerRegistry.revoke(identity.agent_id, "test cleanup")
+      Security.revoke_issuer_fixture(identity.agent_id, "test cleanup")
       File.rm_rf!(tmp_dir)
     end)
 
@@ -243,11 +241,11 @@ defmodule Arbor.Scheduler.CapsFileTest do
     test "revoked and unenrolled issuers fail closed", %{identity: identity, tmp_dir: tmp_dir} do
       revoked_path = Path.join(tmp_dir, "revoked.caps.json")
       write_signed(revoked_path, identity, tmp_dir)
-      :ok = IssuerRegistry.revoke(identity.agent_id, "compromised")
+      :ok = Security.revoke_issuer_fixture(identity.agent_id, "compromised")
       assert {:error, :issuer_revoked} = CapsFile.load(revoked_path)
 
       {:ok, other} = Identity.generate()
-      :ok = IdentityRegistry.register(other)
+      :ok = Security.register_identity_fixture(other)
       unenrolled_path = Path.join(tmp_dir, "unenrolled.caps.json")
       write_signed(unenrolled_path, other, tmp_dir)
       assert {:error, :issuer_not_found} = CapsFile.load(unenrolled_path)
@@ -266,7 +264,10 @@ defmodule Arbor.Scheduler.CapsFileTest do
 
     initial_args = Keyword.get(opts, :initial_args, %{})
     {:ok, payload} = CapsFile.build(identity.agent_id, capabilities, attrs(tmp_dir, initial_args))
-    signature = Crypto.sign(CapsFile.signing_payload(payload), identity.private_key)
+
+    signature =
+      Security.sign_ed25519_fixture(CapsFile.signing_payload(payload), identity.private_key)
+
     CapsFile.manifest_map(payload, signature)
   end
 

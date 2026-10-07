@@ -377,7 +377,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
       fn ->
         rpc_call.(
           target,
-          Arbor.Orchestrator,
+          Arbor.Agent,
           :verify_coding_candidate_for_operator,
           [plan, request],
           timeout
@@ -398,7 +398,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
         ) :: term()
   def cancellable_verification_rpc(
         target,
-        Arbor.Orchestrator,
+        Arbor.Agent,
         :verify_coding_candidate_for_operator,
         [plan, request],
         timeout,
@@ -457,7 +457,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     request_id =
       spawn_request.(
         target,
-        Arbor.Orchestrator,
+        Arbor.Agent,
         :verify_coding_candidate_for_operator_rpc,
         [self(), parent, correlation_id, plan, request],
         [:monitor]

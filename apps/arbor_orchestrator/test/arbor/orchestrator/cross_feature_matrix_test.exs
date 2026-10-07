@@ -390,10 +390,10 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
   end
 
   test "matrix: custom handler registration and execution works" do
-    saved = Registry.snapshot_custom_handlers()
-    Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
-    :ok = Registry.register("matrix.custom", MatrixCustomHandler)
+    saved = Registry.snapshot_fixtures()
+    Registry.reset_fixtures()
+    on_exit(fn -> Registry.restore_fixtures(saved) end)
+    :ok = Registry.register_fixture("matrix.custom", MatrixCustomHandler)
 
     dot = """
     digraph Flow {

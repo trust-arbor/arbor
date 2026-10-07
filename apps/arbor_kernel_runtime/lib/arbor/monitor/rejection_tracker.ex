@@ -170,7 +170,7 @@ defmodule Arbor.Monitor.RejectionTracker do
   def init(opts) do
     # Create ETS table if it doesn't exist
     if :ets.whereis(@rejection_table) == :undefined do
-      :ets.new(@rejection_table, [:named_table, :set, :public, read_concurrency: true])
+      :ets.new(@rejection_table, [:named_table, :set, :protected, read_concurrency: true])
     end
 
     config = %{

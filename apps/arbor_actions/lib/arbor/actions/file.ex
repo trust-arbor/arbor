@@ -42,9 +42,61 @@ defmodule Arbor.Actions.File do
       workspace ->
         case SafePath.resolve_within(path, workspace) do
           {:ok, safe_path} -> {:ok, safe_path}
-          {:error, _} -> {:error, "Path traversal denied: #{path}"}
+          {:error, _reason} -> {:error, "Path traversal denied: #{path}"}
         end
     end
+  end
+
+  @doc false
+  def validate_read_path(path, context) do
+    case Map.get(context, :workspace) do
+      nil ->
+        {:ok, path}
+
+      workspace ->
+        with {:ok, canonical_path} <- SafePath.resolve_within(path, workspace),
+             {:ok, execution_path} <-
+               lexical_workspace_path(path, workspace, canonical_path) do
+          {:ok, execution_path}
+        else
+          {:error, _reason} -> {:error, "Path traversal denied: #{path}"}
+        end
+    end
+  end
+
+  # Capability URIs are minted from the workspace spelling owned by the
+  # caller. Preserve that spelling after the real-path containment check so a
+  # platform alias such as macOS `/var` -> `/private/var` does not make the
+  # authorization resource differ from the grant. The descriptor-bound read
+  # resolves the selected capability root and execution path canonically.
+  defp lexical_workspace_path(path, workspace, canonical_path) do
+    lexical_root = SafePath.normalize(workspace)
+
+    lexical_candidate =
+      if SafePath.absolute?(path),
+        do: SafePath.normalize(path),
+        else: SafePath.normalize(Path.join(lexical_root, path))
+
+    if lexically_within?(lexical_candidate, lexical_root) do
+      {:ok, lexical_candidate}
+    else
+      with {:ok, canonical_root} <- SafePath.resolve_within(workspace, "/") do
+        relative = Path.relative_to(canonical_path, canonical_root)
+
+        projected =
+          if relative == ".",
+            do: lexical_root,
+            else: Path.join(lexical_root, relative)
+
+        {:ok, SafePath.normalize(projected)}
+      end
+    end
+  end
+
+  defp lexically_within?(_path, "/"), do: true
+
+  defp lexically_within?(path, root) do
+    path == root or String.starts_with?(path, root <> "/")
   end
 
   @doc """
@@ -68,9 +120,16 @@ defmodule Arbor.Actions.File do
       # If AuthContext is available and identity is verified, we can be explicit
       # about why we skip identity verification. Either way, facade auth never
       # re-verifies identity (that's the action layer's job).
-      case security_module().authorize(context[:agent_id], resource_uri, :execute,
-             file_path: path,
-             verify_identity: false
+      auth_opts =
+        context
+        |> Arbor.Actions.auth_scope()
+        |> Keyword.merge(file_path: path, verify_identity: false)
+
+      case security_module().authorize(
+             context[:agent_id],
+             resource_uri,
+             :execute,
+             auth_opts
            ) do
         {:ok, :authorized, resolved_path} ->
           {:ok, resolved_path}
@@ -95,6 +154,55 @@ defmodule Arbor.Actions.File do
     else
       # No agent_id — system-level call, pass through
       {:ok, path}
+    end
+  end
+
+  @doc false
+  def read_validated_path(path, context) do
+    case Map.get(context, :workspace) do
+      workspace when is_binary(workspace) ->
+        SafePath.read_within(path, workspace)
+
+      _trusted_system_context ->
+        case File.read(path) do
+          {:ok, content} -> {:ok, content, path}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  @doc false
+  def read_authorized_file(context, path) do
+    case Map.get(context, :agent_id) do
+      agent_id when is_binary(agent_id) and agent_id != "" ->
+        security = security_module()
+
+        opts =
+          context
+          |> Arbor.Actions.auth_scope()
+          |> Keyword.put(:verify_identity, false)
+
+        if function_exported?(security, :read_authorized_file, 3) do
+          case security.read_authorized_file(agent_id, path, opts) do
+            {:ok, content, opened_path}
+            when is_binary(content) and is_binary(opened_path) ->
+              {:ok, content, opened_path}
+
+            {:ok, :pending_approval, proposal_id} ->
+              {:error, {:unauthorized, {:requires_approval, proposal_id}}}
+
+            {:error, reason} ->
+              {:error, {:unauthorized, reason}}
+
+            other ->
+              {:error, {:unauthorized, {:unexpected_authz_result, other}}}
+          end
+        else
+          {:error, {:unauthorized, :file_read_boundary_unavailable}}
+        end
+
+      _trusted_system_context ->
+        read_validated_path(path, context)
     end
   end
 
@@ -171,27 +279,35 @@ defmodule Arbor.Actions.File do
       encoding = params[:encoding] || params["encoding"] || :utf8
 
       if is_binary(path) and path != "" do
-        with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
-             {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read) do
-          Actions.emit_started(__MODULE__, params)
+        case Arbor.Actions.File.validate_read_path(path, context) do
+          {:ok, safe_path} ->
+            Actions.emit_started(__MODULE__, params)
 
-          case File.read(safe_path) do
-            {:ok, content} ->
-              content = maybe_decode_content(content, encoding)
+            case Arbor.Actions.File.read_authorized_file(context, safe_path) do
+              {:ok, content, opened_path} ->
+                content = maybe_decode_content(content, encoding)
 
-              result = %{
-                path: safe_path,
-                content: content,
-                size: byte_size(content)
-              }
+                result = %{
+                  path: opened_path,
+                  content: content,
+                  size: byte_size(content)
+                }
 
-              Actions.emit_completed(__MODULE__, %{path: safe_path, size: byte_size(content)})
-              {:ok, result}
+                Actions.emit_completed(__MODULE__, %{
+                  path: opened_path,
+                  size: byte_size(content)
+                })
 
-            {:error, reason} ->
-              Actions.emit_failed(__MODULE__, reason)
-              {:error, "Failed to read file '#{safe_path}': #{format_posix_error(reason)}"}
-          end
+                {:ok, result}
+
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+                {:error, "Failed to read file '#{path}': #{format_posix_error(reason)}"}
+            end
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Failed to read file '#{path}': #{format_posix_error(reason)}"}
         end
       else
         {:error, "File.Read requires a path"}

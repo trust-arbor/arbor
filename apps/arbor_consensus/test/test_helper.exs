@@ -53,7 +53,7 @@ for agent <- ["admin", "admin_1"] do
     metadata: %{test: true}
   }
 
-  Arbor.Security.CapabilityStore.put(cap)
+  Arbor.Security.put_capability_fixture(cap)
 end
 
 ExUnit.start(exclude: [:llm, :llm_local])

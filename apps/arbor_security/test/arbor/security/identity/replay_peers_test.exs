@@ -96,6 +96,26 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
         5_000
       )
 
+    :ok =
+      :erpc.call(
+        peer_node,
+        :application,
+        :set_env,
+        [:arbor_security, :session_token_secret, String.duplicate("r", 32)],
+        5_000
+      )
+
+    {:ok, signing_key_owner_roles} = Arbor.Security.Config.signing_key_owner_roles()
+
+    :ok =
+      :erpc.call(
+        peer_node,
+        :application,
+        :set_env,
+        [:arbor_security, :signing_key_owner_roles, signing_key_owner_roles],
+        5_000
+      )
+
     assert {:ok, _started} =
              :erpc.call(peer_node, :application, :ensure_all_started, [:arbor_security], 10_000)
 

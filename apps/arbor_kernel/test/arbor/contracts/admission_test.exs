@@ -849,13 +849,14 @@ defmodule Arbor.Contracts.AdmissionTest do
     end
 
     @tag spec: "AC-2,AC-3,AC-11"
-    test "live: signing_authority/validator has 7 internals incl api/security and is a2", %{
-      by_path: by_path
-    } do
+    test "live: signing_authority/validator has 7 internals and is shared by security and trust",
+         %{
+           by_path: by_path
+         } do
       e = by_path["lib/arbor/contracts/security/signing_authority/validator.ex"]
       assert e
-      assert "arbor_security" in e.external_consumers
-      assert e.tier == :a2
+      assert Enum.sort(e.external_consumers) == ["arbor_security", "arbor_trust"]
+      assert e.tier == :shared
       assert length(e.internal_consumers) == 7
       # ForgeProjection validates key_id / poster_agent_id with the same
       # principal-id grammar as signed requests (forge packet 1a, 2026-09-04).

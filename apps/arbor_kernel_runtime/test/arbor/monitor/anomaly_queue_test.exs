@@ -14,7 +14,7 @@ defmodule Arbor.Monitor.AnomalyQueueTest do
 
   setup do
     # Start a fresh queue for each test
-    start_supervised!({AnomalyQueue, @test_opts})
+    start_supervised!({AnomalyQueue, Keyword.put(@test_opts, :trusted_enqueue_producer, self())})
     AnomalyQueue.clear_all()
     :ok
   end

@@ -110,8 +110,8 @@ defmodule Arbor.Agent.ProfileNoticeRestartSQLSecurityRegressionTest do
 
   test "security regression: broker restart cannot borrow prewrite SQL mailbox authority" do
     {:ok, identity} = Identity.generate(name: "profile-notice-sql")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     mailbox = %{
       "mailbox_id" => "owner",
@@ -184,8 +184,8 @@ defmodule Arbor.Agent.ProfileNoticeRestartSQLSecurityRegressionTest do
         end
       end
 
-      Security.delete_signing_key(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      Security.delete_signing_key_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end
   end
 

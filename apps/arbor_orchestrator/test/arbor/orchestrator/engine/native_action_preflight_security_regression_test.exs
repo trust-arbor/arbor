@@ -44,12 +44,12 @@ defmodule Arbor.Orchestrator.Engine.NativeActionPreflightSecurityRegressionTest 
     principal = "agent_native_preflight_#{suffix}"
     task_id = "native-preflight-task-#{suffix}"
     session_id = "native-preflight-session-#{suffix}"
-    handlers = Registry.snapshot_custom_handlers()
+    handlers = Registry.snapshot_fixtures()
 
     on_exit(fn ->
-      Registry.restore_custom_handlers(handlers)
-      _ = Security.revoke_by_task(task_id)
-      _ = Security.revoke_by_session(session_id)
+      Registry.restore_fixtures(handlers)
+      _ = Security.revoke_by_task_fixture(task_id)
+      _ = Security.revoke_by_session_fixture(session_id)
     end)
 
     source = %{session_pid: self(), generation: make_ref(), handle: {self(), make_ref()}}
@@ -73,7 +73,7 @@ defmodule Arbor.Orchestrator.Engine.NativeActionPreflightSecurityRegressionTest 
   test "security regression: actual Engine cannot defer admission to a registered custom exec handler",
        c do
     grant(c, constraints: %{requires_approval: true})
-    :ok = Registry.register("exec", CustomExecHandler)
+    :ok = Registry.register_fixture("exec", CustomExecHandler)
 
     # Preparation already rejects a preinstalled custom handler. The supported
     # runtime registry can still change after preparation, before node dispatch.
@@ -139,7 +139,7 @@ defmodule Arbor.Orchestrator.Engine.NativeActionPreflightSecurityRegressionTest 
       assert {:ok, result} = Arbor.Orchestrator.run(@dot, c.opts)
       assert result.final_outcome.status == :fail
       assert result.final_outcome.failure_reason =~ "native_action_preflight_refused"
-      :ok = Security.revoke(cap.id)
+      :ok = Security.revoke_fixture(cap.id)
     end
   end
 
@@ -177,10 +177,10 @@ defmodule Arbor.Orchestrator.Engine.NativeActionPreflightSecurityRegressionTest 
   end
 
   defp run_with_runtime_override(opts) do
-    :ok = Registry.unregister("exec")
+    :ok = Registry.unregister_fixture("exec")
 
     on_event = fn
-      %{type: :pipeline_started} -> Registry.register("exec", CustomExecHandler)
+      %{type: :pipeline_started} -> Registry.register_fixture("exec", CustomExecHandler)
       _event -> :ok
     end
 
@@ -189,7 +189,7 @@ defmodule Arbor.Orchestrator.Engine.NativeActionPreflightSecurityRegressionTest 
 
   defp grant(c, overrides) do
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         Keyword.merge(
           [
             principal: c.principal,

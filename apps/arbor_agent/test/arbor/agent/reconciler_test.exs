@@ -92,7 +92,7 @@ defmodule Arbor.Agent.ReconcilerTest do
   defp live_agent_with_identity(registry_started?) do
     {:ok, identity} = Security.generate_identity()
     agent_id = identity.agent_id
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     {:ok, pid} =
       Arbor.Agent.Supervisor.start_child(
@@ -110,7 +110,7 @@ defmodule Arbor.Agent.ReconcilerTest do
       end
 
       unless registry_started? do
-        Security.deregister_identity(agent_id)
+        Security.deregister_identity_fixture(agent_id)
       end
     end)
 
@@ -131,7 +131,7 @@ defmodule Arbor.Agent.ReconcilerTest do
       assert {:ok, ^pid} = Registry.whereis(agent_id)
 
       # Remove the identity → the agent is now an identity-gone zombie.
-      :ok = Security.deregister_identity(agent_id)
+      :ok = Security.deregister_identity_fixture(agent_id)
       assert {:error, :not_found} = Security.identity_status(agent_id)
 
       intents = Reconciler.reconcile_now(server)

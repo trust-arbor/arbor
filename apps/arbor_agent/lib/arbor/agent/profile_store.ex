@@ -382,7 +382,7 @@ defmodule Arbor.Agent.ProfileStore do
 
   @doc false
   def apply_owned_profile_operation(operation, value) do
-    if self() == Process.whereis(Arbor.Agent.ProfileAuthorityOwner) do
+    if Arbor.Agent.ProfileAuthorityOwner.owner_process?() do
       case {operation, value} do
         {:store, %Profile{} = profile} ->
           owned_store_profile(profile)

@@ -2,6 +2,8 @@ defmodule Arbor.Agent.ExternalRegistrationSecurityTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.ExternalRegistration
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security
 
   @moduletag :fast
 
@@ -17,6 +19,40 @@ defmodule Arbor.Agent.ExternalRegistrationSecurityTest do
                identity_verified: true
              )
 
+    refute Enum.any?(Arbor.Agent.list_agents(), &(&1.display_name == display_name))
+  end
+
+  test "security regression: an authorized caller cannot mint an agent without actor authority" do
+    {:ok, caller} = Identity.generate(name: "external-registration-caller")
+    :ok = Security.register_identity_fixture(caller)
+
+    on_exit(fn -> Security.deregister_identity_fixture(caller.agent_id) end)
+
+    assert {:ok, _capability} =
+             Security.grant_fixture(
+               principal: caller.agent_id,
+               resource: "arbor://agent/lifecycle/create/external/external"
+             )
+
+    display_name = "No deputy #{System.unique_integer([:positive, :monotonic])}"
+
+    result =
+      Arbor.Agent.register_external_agent(
+        caller.agent_id,
+        display_name,
+        "external",
+        identity_verified: true
+      )
+
+    case result do
+      {:ok, profile, _identity} ->
+        on_exit(fn -> Arbor.Agent.destroy_agent(profile.agent_id) end)
+
+      _other ->
+        :ok
+    end
+
+    assert {:error, :capability_mutation_unauthorized} = result
     refute Enum.any?(Arbor.Agent.list_agents(), &(&1.display_name == display_name))
   end
 

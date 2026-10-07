@@ -691,6 +691,39 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     GenServer.call(store_name(opts), {:dispatch, agent_id, task, normalize_opts(opts)})
   end
 
+  @doc false
+  @spec verify_coding_candidate_for_operator(term(), term(), pid(), keyword() | map()) ::
+          {:ok, map()} | {:error, term()}
+  def verify_coding_candidate_for_operator(plan, request, requester, opts \\ [])
+
+  def verify_coding_candidate_for_operator(plan, request, requester, opts)
+      when is_pid(requester) do
+    GenServer.call(
+      store_name(opts),
+      {:verify_coding_candidate_for_operator, plan, request, requester},
+      :infinity
+    )
+  end
+
+  def verify_coding_candidate_for_operator(_plan, _request, _requester, _opts),
+    do: {:error, :invalid_operator_candidate_requester}
+
+  if @test_build do
+    @doc false
+    def authorize_signing_authority_handoff_fixture(
+          principal,
+          purpose,
+          claimant,
+          context,
+          opts \\ []
+        ) do
+      GenServer.call(
+        store_name(opts),
+        {:authorize_signing_authority_handoff_fixture, principal, purpose, claimant, context}
+      )
+    end
+  end
+
   defp recovery_call_timeout(opts) do
     opt = normalize_opts(opts)
 
@@ -928,6 +961,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     runtime_admission_supervisor =
       Keyword.get(opts, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
 
+    coding_authority_executor =
+      case Config.task_executor("coding_change") do
+        {:ok, module} -> module
+        {:error, _reason} -> nil
+      end
+
     store_ref = Keyword.get(opts, :name, @default_name)
 
     state = %{
@@ -1010,6 +1049,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       runner: Keyword.get(opts, :runner, @default_runner),
       # When true, store-level `:runner` overrides kind-based Config selection.
       runner_override: Keyword.has_key?(opts, :runner),
+      # Freeze the sole configured executor allowed to receive an agent signing
+      # authority handoff. Live application-env changes cannot turn an arbitrary
+      # runner into an authority claimant after this owner starts.
+      coding_authority_executor: coding_authority_executor,
       # Trusted cleanup selectors fixed at store start (not per-dispatch).
       # Tests may override; never accepted via dispatch opts/descriptor.
       approval_cleanup_mfa: approval_cleanup_mfa,
@@ -1372,6 +1415,63 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   catch
     :exit, reason ->
       {:reply, {:error, {:dispatch_exit, reason}}, state}
+  end
+
+  def handle_call(
+        {:verify_coding_candidate_for_operator, plan, request, requester},
+        from,
+        state
+      )
+      when is_pid(requester) do
+    with {:ok, principal, context} <- operator_handoff_context(state, plan, request),
+         {:ok, claimant} <-
+           start_operator_verification_claimant(
+             state,
+             from,
+             requester,
+             plan,
+             request
+           ) do
+      case Arbor.Agent.ProfileAuthorityOwner.authorize_signing_authority_handoff(
+             principal,
+             :coding_candidate_operator,
+             claimant,
+             context
+           ) do
+        :ok ->
+          send(claimant, {:coding_authority_handoff_ready, self()})
+          {:noreply, state}
+
+        {:error, reason} ->
+          Process.exit(claimant, :kill)
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  rescue
+    _exception -> {:reply, {:error, :candidate_verification_unavailable}, state}
+  catch
+    _kind, _reason -> {:reply, {:error, :candidate_verification_unavailable}, state}
+  end
+
+  if @test_build do
+    def handle_call(
+          {:authorize_signing_authority_handoff_fixture, principal, purpose, claimant, context},
+          _from,
+          state
+        ) do
+      result =
+        Arbor.Agent.ProfileAuthorityOwner.authorize_signing_authority_handoff(
+          principal,
+          purpose,
+          claimant,
+          context
+        )
+
+      {:reply, result, state}
+    end
   end
 
   def handle_call(
@@ -1742,6 +1842,28 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call(
+        {:runtime_admission_worker_candidate, candidate, target_agent_id},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) and is_pid(candidate) and is_binary(target_agent_id) do
+    state = ensure_runtime_admission_shape(state)
+
+    reply =
+      with true <- fixed_application_child?(caller_pid, Arbor.Agent.ProfileAuthorityOwner),
+           {:ok, target} <- validate_fence_target(target_agent_id),
+           %{worker_pid: ^candidate, phase: phase}
+           when phase in [:worker_running, :settling] <-
+             Map.get(state.runtime_admission_intents, target) do
+        :ok
+      else
+        _ -> {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
         {:settle_runtime_admission, target_agent_id, intent_id, outcome},
         {caller_pid, _tag},
         state
@@ -2095,13 +2217,19 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     with {:ok, lease} <-
            admit_task_control_lease(Keyword.get(opts, :task_control_lease), task_id),
          {:ok, runner, context_mode, dispatch_task, runner_context} <-
-           prepare_dispatch(task, opts, state, task_id) do
+           prepare_dispatch(task, opts, state, task_id),
+         {:ok, task_ref} <-
+           start_runner_task(
+             state,
+             runner,
+             context_mode,
+             agent_id,
+             dispatch_task,
+             runner_context,
+             lease,
+             :run
+           ) do
       now = DateTime.utc_now()
-
-      task_ref =
-        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-          runner.run(agent_id, dispatch_task, runner_context)
-        end)
 
       record = %{
         task_id: task_id,
@@ -2153,6 +2281,245 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         {:error, reason, state}
     end
   end
+
+  defp start_runner_task(
+         state,
+         runner,
+         context_mode,
+         agent_id,
+         task,
+         runner_context,
+         lease,
+         operation
+       ) do
+    if coding_authority_runner?(state, runner, context_mode) do
+      with :ok <- validate_coding_authority_lease(state, lease, runner_context),
+           {:ok, purpose, handoff_context} <-
+             coding_handoff_context(agent_id, task, runner_context, operation) do
+        start_authorized_runner_task(
+          state,
+          runner,
+          agent_id,
+          task,
+          runner_context,
+          purpose,
+          handoff_context
+        )
+      end
+    else
+      {:ok,
+       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+         apply(runner, operation_callback(operation), [agent_id, task, runner_context])
+       end)}
+    end
+  rescue
+    exception -> {:error, {:runner_start_failed, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:runner_start_exit, reason}}
+  end
+
+  defp start_authorized_runner_task(
+         state,
+         runner,
+         agent_id,
+         task,
+         runner_context,
+         purpose,
+         handoff_context
+       ) do
+    store = self()
+
+    task_ref =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        receive do
+          {:coding_authority_handoff_ready, ^store} ->
+            apply(runner, operation_callback(handoff_context.operation), [
+              agent_id,
+              task,
+              runner_context
+            ])
+        after
+          5_000 -> {:error, :signing_authority_handoff_unavailable}
+        end
+      end)
+
+    case Arbor.Agent.ProfileAuthorityOwner.authorize_signing_authority_handoff(
+           agent_id,
+           purpose,
+           task_ref.pid,
+           handoff_context
+         ) do
+      :ok ->
+        send(task_ref.pid, {:coding_authority_handoff_ready, store})
+        {:ok, task_ref}
+
+      {:error, reason} ->
+        _ = Task.shutdown(task_ref, :brutal_kill)
+        {:error, reason}
+    end
+  end
+
+  defp operation_callback(:run), do: :run
+  defp operation_callback(:recover), do: :recover_task
+
+  defp coding_authority_runner?(state, runner, :json_clean) do
+    is_atom(state.coding_authority_executor) and runner == state.coding_authority_executor and
+      fixed_application_child?(self(), __MODULE__)
+  end
+
+  defp coding_authority_runner?(_state, _runner, _context_mode), do: false
+
+  defp validate_coding_authority_lease(state, lease, context) when is_map(lease) do
+    task_id = Map.get(context, "task_id") || Map.get(context, :task_id)
+    caller_id = Map.get(context, "caller_id") || Map.get(context, :caller_id)
+    security = state.task_control_security_module
+
+    with true <- is_binary(task_id) and is_binary(caller_id) and caller_id != "",
+         true <- is_atom(security) and function_exported?(security, :list_capabilities, 2),
+         {:ok, capabilities} <- security.list_capabilities(caller_id, task_id: task_id),
+         {:ok, reconstructed} <- TaskControlLease.from_listed_capabilities(task_id, capabilities),
+         true <- reconstructed == lease do
+      :ok
+    else
+      _ -> {:error, :signing_authority_handoff_unauthorized}
+    end
+  rescue
+    _ -> {:error, :signing_authority_handoff_unauthorized}
+  catch
+    :exit, _ -> {:error, :signing_authority_handoff_unauthorized}
+  end
+
+  defp validate_coding_authority_lease(_state, _lease, _context),
+    do: {:error, :signing_authority_handoff_unauthorized}
+
+  defp coding_handoff_context(agent_id, task, runner_context, operation)
+       when operation in [:run, :recover] do
+    task_id = Map.get(runner_context, "task_id") || Map.get(runner_context, :task_id)
+    caller_id = Map.get(runner_context, "caller_id") || Map.get(runner_context, :caller_id)
+    purpose = if operation == :run, do: :coding_task_executor, else: :coding_task_recovery
+
+    with true <- is_binary(agent_id) and agent_id != "",
+         true <- TaskControlLease.valid_task_id?(task_id),
+         true <- is_binary(caller_id) and caller_id != "",
+         {:ok, encoded_task} <- Jason.encode(task) do
+      {:ok, purpose,
+       %{
+         operation: operation,
+         task_id: task_id,
+         control_principal_id: caller_id,
+         task_digest:
+           encoded_task |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+       }}
+    else
+      _ -> {:error, :invalid_signing_authority_handoff}
+    end
+  end
+
+  defp operator_handoff_context(state, plan, request)
+       when is_map(request) and not is_struct(request) do
+    principal = Map.get(request, "agent_id")
+    task_id = Map.get(request, "task_id")
+    workspace_id = Map.get(request, "workspace_id")
+    record = Map.get(state.tasks, task_id)
+
+    with true <- fixed_application_child?(self(), __MODULE__),
+         true <- is_atom(state.coding_authority_executor),
+         {:ok, ^principal} <- validate_fence_target(principal),
+         true <- TaskControlLease.valid_task_id?(task_id),
+         true <- bounded_handoff_id?(workspace_id),
+         %{agent_id: ^principal, executor: executor} <- record,
+         true <- executor == state.coding_authority_executor,
+         {:ok, encoded_plan} <- Jason.encode(plan) do
+      {:ok, principal,
+       %{
+         operation: :operator_candidate_verification,
+         task_id: task_id,
+         workspace_id: workspace_id,
+         plan_digest:
+           encoded_plan |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+       }}
+    else
+      _ -> {:error, :candidate_verification_handoff_unauthorized}
+    end
+  end
+
+  defp operator_handoff_context(_state, _plan, _request),
+    do: {:error, :candidate_verification_handoff_unauthorized}
+
+  defp bounded_handoff_id?(value) when is_binary(value) do
+    byte_size(value) > 0 and byte_size(value) <= 256 and String.valid?(value) and
+      not String.contains?(value, <<0>>)
+  end
+
+  defp bounded_handoff_id?(_value), do: false
+
+  defp start_operator_verification_claimant(state, from, requester, plan, request) do
+    store = self()
+
+    case Task.Supervisor.start_child(state.task_supervisor, fn ->
+           result =
+             receive do
+               {:coding_authority_handoff_ready, ^store} ->
+                 invoke_operator_verification(requester, plan, request)
+             after
+               5_000 -> {:error, :candidate_verification_handoff_unavailable}
+             end
+
+           GenServer.reply(from, result)
+         end) do
+      {:ok, pid} when is_pid(pid) -> {:ok, pid}
+      {:ok, pid, _info} when is_pid(pid) -> {:ok, pid}
+      {:error, reason} -> {:error, {:candidate_verification_start_failed, reason}}
+    end
+  end
+
+  defp invoke_operator_verification(requester, plan, request) do
+    orchestrator = Module.concat([:Arbor, :Orchestrator])
+    correlation_id = :crypto.strong_rand_bytes(16)
+
+    :ok =
+      apply(orchestrator, :verify_coding_candidate_for_operator_rpc, [
+        requester,
+        self(),
+        correlation_id,
+        plan,
+        request
+      ])
+
+    receive do
+      {:arbor_operator_candidate_verification_rpc_result, ^correlation_id, result} ->
+        result
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, status} ->
+        {:error, {:candidate_verification_cancelled, status}}
+    after
+      86_450_000 -> {:error, :candidate_verification_timeout}
+    end
+  rescue
+    _ -> {:error, :candidate_verification_unavailable}
+  catch
+    _, _ -> {:error, :candidate_verification_unavailable}
+  end
+
+  defp fixed_application_child?(candidate, child_id) when is_pid(candidate) do
+    with master when is_pid(master) <- :application_controller.get_master(:arbor_agent),
+         {root, _module} when is_pid(root) <- :application_master.get_child(master),
+         {^child_id, child, _type, _modules} when is_pid(child) <-
+           Enum.find(Supervisor.which_children(root), fn
+             {^child_id, _pid, _type, _modules} -> true
+             _ -> false
+           end) do
+      child == candidate
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp fixed_application_child?(_candidate, _child_id), do: false
 
   @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
@@ -4806,52 +5173,61 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     now = DateTime.utc_now()
     context = recovered_task_context(task_id, marker)
 
-    task_ref =
-      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        module.recover_task(agent_id, context)
-      end)
+    with {:ok, task_ref} <-
+           start_runner_task(
+             state,
+             module,
+             :json_clean,
+             agent_id,
+             %{"kind" => marker["executor_kind"]},
+             context,
+             lease,
+             :recover
+           ) do
+      record = %{
+        task_id: task_id,
+        agent_id: agent_id,
+        task: %{"kind" => marker["executor_kind"]},
+        state: :running,
+        current_step: "running",
+        waiting_on: nil,
+        result: nil,
+        error: nil,
+        terminal_envelope: nil,
+        terminal_finalized: false,
+        pid: task_ref.pid,
+        ref: task_ref.ref,
+        started_at: now,
+        updated_at: now,
+        completed_at: nil,
+        metadata: %{},
+        executor: module,
+        context_mode: :json_clean,
+        context: context,
+        task_control_lease: lease,
+        recovery_marker?: true,
+        recovery_cas: cas,
+        adoption_destination_ref: nil,
+        adoption_last_error: nil,
+        approval_cleanup_descriptor: TaskRunBindingCore.cleanup_descriptor(marker),
+        controls: [],
+        control_retries: %{},
+        accepted_control_ids: MapSet.new(),
+        confirmation_retries: %{},
+        queued_confirmations: %{},
+        replay_counts: %{},
+        cancel_turn: Map.get(state, :cancel_turn)
+      }
 
-    record = %{
-      task_id: task_id,
-      agent_id: agent_id,
-      task: %{"kind" => marker["executor_kind"]},
-      state: :running,
-      current_step: "running",
-      waiting_on: nil,
-      result: nil,
-      error: nil,
-      terminal_envelope: nil,
-      terminal_finalized: false,
-      pid: task_ref.pid,
-      ref: task_ref.ref,
-      started_at: now,
-      updated_at: now,
-      completed_at: nil,
-      metadata: %{},
-      executor: module,
-      context_mode: :json_clean,
-      context: context,
-      task_control_lease: lease,
-      recovery_marker?: true,
-      recovery_cas: cas,
-      adoption_destination_ref: nil,
-      adoption_last_error: nil,
-      approval_cleanup_descriptor: TaskRunBindingCore.cleanup_descriptor(marker),
-      controls: [],
-      control_retries: %{},
-      accepted_control_ids: MapSet.new(),
-      confirmation_retries: %{},
-      queued_confirmations: %{},
-      replay_counts: %{},
-      cancel_turn: Map.get(state, :cancel_turn)
-    }
+      new_state =
+        state
+        |> put_in([:tasks, task_id], record)
+        |> put_in([:refs, task_ref.ref], task_id)
 
-    new_state =
-      state
-      |> put_in([:tasks, task_id], record)
-      |> put_in([:refs, task_ref.ref], task_id)
-
-    {:admitted, new_state, task_id}
+      {:admitted, new_state, task_id}
+    else
+      {:error, _reason} -> {:unavailable, state}
+    end
   end
 
   defp recovered_task_context(task_id, marker) when is_map(marker) do

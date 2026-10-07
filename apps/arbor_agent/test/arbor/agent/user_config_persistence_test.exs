@@ -6,23 +6,27 @@ defmodule Arbor.Agent.UserConfigPersistenceTest do
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
-  @moduletag :tmp_dir
 
-  setup context do
-    start_store(context.tmp_dir)
-    :ok
+  setup do
+    tmp_dir = scratch_dir!("arbor-user-config-persistence")
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    start_store(tmp_dir)
+    {:ok, tmp_dir: tmp_dir}
   end
 
   test "regression: linked identities remain visible after a cold JSON-store restart", context do
     {:ok, caller} = Arbor.Security.generate_identity()
-    :ok = Arbor.Security.register_identity(caller)
+    :ok = Arbor.Security.register_identity_fixture(caller)
 
     {:ok, cap} =
-      Arbor.Security.grant(principal: caller.agent_id, resource: "arbor://identity/alias/manage")
+      Arbor.Security.grant_fixture(
+        principal: caller.agent_id,
+        resource: "arbor://identity/alias/manage"
+      )
 
     on_exit(fn ->
-      Arbor.Security.revoke(cap.id)
-      Arbor.Security.deregister_identity(caller.agent_id)
+      Arbor.Security.revoke_fixture(cap.id)
+      Arbor.Security.deregister_identity_fixture(caller.agent_id)
     end)
 
     primary = "human_persisted_primary"
@@ -126,5 +130,14 @@ defmodule Arbor.Agent.UserConfigPersistenceTest do
         id: :arbor_user_config_persistence_test
       )
     )
+  end
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    path
   end
 end

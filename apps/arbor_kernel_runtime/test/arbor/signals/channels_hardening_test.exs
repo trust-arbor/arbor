@@ -3,8 +3,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
   @moduletag :fast
 
+  alias Arbor.Signals.AuthorizedChannelsTestClient, as: Channels
   alias Arbor.Signals.Bus
-  alias Arbor.Signals.Channels
 
   # Mock crypto module for testing
   defmodule MockCrypto do
@@ -45,13 +45,81 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
     def lookup(_agent_id), do: {:ok, :crypto.strong_rand_bytes(32)}
   end
 
+  defmodule OwnerObservingAuthorizer do
+    alias Arbor.Contracts.Security.AuthContext
+
+    def authorize_channel_principal(
+          %AuthContext{principal_id: principal_id, identity_verified: true},
+          operation,
+          channel_id
+        ) do
+      send(
+        Arbor.Signals.Config.Testing.get(:channel_authorizer_test_pid),
+        {:channel_authorized_by, self(), operation, channel_id}
+      )
+
+      {:ok, principal_id}
+    end
+
+    def authorize_channel_principal(_context, _operation, _channel_id),
+      do: {:error, :unauthorized}
+  end
+
   setup do
     Arbor.Signals.TestCase.ensure_processes()
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:crypto_module, MockCrypto)
     Arbor.Signals.Config.Testing.put(:identity_registry_module, MockRegistry)
+
+    Arbor.Signals.Config.Testing.put(
+      :channel_principal_authorizer,
+      Arbor.Signals.TestChannelPrincipalAuthorizer
+    )
+
     Arbor.Signals.Config.Testing.put(:channel_rotate_on_leave, true)
     :ok
+  end
+
+  @tag :security_regression
+  test "security regression: raw GenServer calls cannot bypass principal authorization" do
+    Arbor.Signals.Config.Testing.put(
+      :channel_principal_authorizer,
+      OwnerObservingAuthorizer
+    )
+
+    Arbor.Signals.Config.Testing.put(:channel_authorizer_test_pid, self())
+
+    creator_id = "agent_raw_call_creator"
+
+    assert {:error, :unauthorized} =
+             GenServer.call(
+               Arbor.Signals.Channels,
+               {:create, "forged", creator_id, []}
+             )
+
+    {:ok, channel, :server_managed} = Channels.create("owner-authorized", creator_id)
+    owner = Process.whereis(Arbor.Signals.Channels)
+
+    assert_receive {:channel_authorized_by, ^owner, :create, nil}
+
+    raw_calls = [
+      {:send, channel.id, creator_id, :message, %{forged: true}},
+      {:leave, channel.id, creator_id},
+      {:revoke, channel.id, "agent_victim", creator_id},
+      {:rotate_key, channel.id, creator_id},
+      {:schedule_rotation, channel.id, creator_id},
+      {:cancel_scheduled_rotation, channel.id, creator_id},
+      {:decrypt_for_member, channel.id, creator_id, %{}},
+      {:list_channels, creator_id}
+    ]
+
+    for message <- raw_calls do
+      assert {:error, :unauthorized} = GenServer.call(Arbor.Signals.Channels, message)
+    end
+
+    assert Process.alive?(owner)
+    assert {:ok, unchanged} = Channels.get(channel.id)
+    assert unchanged.creator_id == creator_id
   end
 
   describe "leave triggers key rotation" do
@@ -88,15 +156,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           member_keychain
         )
 
-      # Get key before leave
-      {:ok, key_before} = Channels.get_key(channel_id, creator_id)
-
       # Member leaves
       :ok = Channels.leave(channel_id, member_id)
-
-      # Key should have rotated
-      {:ok, key_after} = Channels.get_key(channel_id, creator_id)
-      assert key_after != key_before
 
       # Check key version incremented
       {:ok, channel_after} = Channels.get(channel_id)
@@ -135,12 +196,12 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           member_keychain
         )
 
-      {:ok, key_before} = Channels.get_key(channel_id, creator_id)
+      {:ok, channel_before} = Channels.get(channel_id)
 
       :ok = Channels.leave(channel_id, member_id)
 
-      {:ok, key_after} = Channels.get_key(channel_id, creator_id)
-      assert key_after == key_before
+      {:ok, channel_after} = Channels.get(channel_id)
+      assert channel_after.key_version == channel_before.key_version
     end
   end
 
@@ -257,12 +318,12 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           member_keychain
         )
 
-      {:ok, key_before} = Channels.get_key(channel_id, creator_id)
+      {:ok, channel_before} = Channels.get(channel_id)
 
       :ok = Channels.revoke(channel_id, member_id, creator_id)
 
-      {:ok, key_after} = Channels.get_key(channel_id, creator_id)
-      assert key_after != key_before
+      {:ok, channel_after} = Channels.get(channel_id)
+      assert channel_after.key_version > channel_before.key_version
     end
 
     test "non-creator cannot revoke" do
@@ -344,13 +405,13 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       # Schedule rotation
       :ok = Channels.schedule_rotation(channel_id, creator_id)
 
-      {:ok, key_before} = Channels.get_key(channel_id, creator_id)
+      {:ok, channel_before} = Channels.get(channel_id)
 
       # Wait for rotation
       Process.sleep(100)
 
-      {:ok, key_after} = Channels.get_key(channel_id, creator_id)
-      assert key_after != key_before
+      {:ok, channel_after} = Channels.get(channel_id)
+      assert channel_after.key_version > channel_before.key_version
 
       # Cancel the auto-rescheduled timer to prevent signal leakage into later tests
       :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)
@@ -369,12 +430,12 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       :ok = Channels.schedule_rotation(channel_id, creator_id)
       :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)
 
-      {:ok, key_before} = Channels.get_key(channel_id, creator_id)
+      {:ok, channel_before} = Channels.get(channel_id)
 
       Process.sleep(100)
 
-      {:ok, key_after} = Channels.get_key(channel_id, creator_id)
-      assert key_after == key_before
+      {:ok, channel_after} = Channels.get(channel_id)
+      assert channel_after.key_version == channel_before.key_version
 
       # Clean up channel
       :ok = Channels.leave(channel_id, creator_id)

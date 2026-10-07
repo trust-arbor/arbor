@@ -176,7 +176,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
         name: "code-review-council-test"
       )
 
-    case Arbor.Security.Identity.Registry.register(identity) do
+    case Arbor.Security.register_identity_fixture(identity) do
       :ok -> :ok
       {:error, {:already_registered, _}} -> :ok
     end
@@ -197,7 +197,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
           metadata: %{test: true}
         )
 
-      Arbor.Security.CapabilityStore.put(cap)
+      Arbor.Security.put_capability_fixture(cap)
     end)
   end
 

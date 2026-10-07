@@ -105,6 +105,68 @@ defmodule Arbor.Agent do
   @doc "Start an agent's executor (subscribe to intents, begin processing)."
   defdelegate start_agent(agent_id, opts \\ []), to: Lifecycle, as: :start
 
+  @doc "Issue an opaque, restartable signing-authority bootstrap for an agent-owned consumer."
+  defdelegate issue_signing_authority_bootstrap(agent_id, purpose), to: Lifecycle
+
+  @doc false
+  defdelegate transfer_signing_authority_handoff(agent_id, purpose, claimant, context),
+    to: Lifecycle
+
+  @doc "Verify a retained coding candidate through a TaskStore-owned authority handoff."
+  @spec verify_coding_candidate_for_operator(term(), term()) ::
+          {:ok, map()} | {:error, term()}
+  def verify_coding_candidate_for_operator(plan, request) do
+    Arbor.Agent.Orchestration.TaskStore.verify_coding_candidate_for_operator(
+      plan,
+      request,
+      self()
+    )
+  end
+
+  @doc false
+  @spec verify_coding_candidate_for_operator_rpc(pid(), pid(), binary(), term(), term()) :: :ok
+  def verify_coding_candidate_for_operator_rpc(
+        requester,
+        reply_to,
+        correlation_id,
+        plan,
+        request
+      )
+      when is_pid(requester) and is_pid(reply_to) and is_binary(correlation_id) and
+             byte_size(correlation_id) == 16 do
+    result =
+      Arbor.Agent.Orchestration.TaskStore.verify_coding_candidate_for_operator(
+        plan,
+        request,
+        requester
+      )
+
+    case result do
+      {:error, {:candidate_verification_cancelled, status}} ->
+        send(
+          reply_to,
+          {:arbor_operator_candidate_verification_rpc_cancelled, correlation_id, status}
+        )
+
+      _ ->
+        send(
+          reply_to,
+          {:arbor_operator_candidate_verification_rpc_result, correlation_id, result}
+        )
+    end
+
+    :ok
+  end
+
+  def verify_coding_candidate_for_operator_rpc(
+        _requester,
+        _reply_to,
+        _correlation_id,
+        _plan,
+        _request
+      ),
+      do: :ok
+
   @doc "Stop an agent's executor cleanly."
   defdelegate stop_agent(agent_id), to: Lifecycle, as: :stop
 
@@ -146,6 +208,7 @@ defmodule Arbor.Agent do
 
   @doc "Delete an agent and all its data."
   defdelegate destroy_agent(agent_id), to: Lifecycle, as: :destroy
+  defdelegate destroy_agent(agent_id, opts), to: Lifecycle, as: :destroy
 
   @doc "Load a single agent profile by ID."
   defdelegate load_profile(agent_id), to: ProfileStore
@@ -176,6 +239,7 @@ defmodule Arbor.Agent do
 
   @doc "Set MCP server configuration for an agent."
   defdelegate set_mcp_config(agent_id, servers), to: Arbor.Agent.Manager
+  defdelegate set_mcp_config(agent_id, servers, opts), to: Arbor.Agent.Manager
 
   @doc "Connect to MCP servers configured in an agent's profile."
   defdelegate connect_mcp_servers(agent_id), to: Arbor.Agent.Manager
@@ -807,16 +871,61 @@ defmodule Arbor.Agent do
           | {:error, {:unauthorized, term()} | term()}
   def authorize_create(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/lifecycle/create"
-    # `:signed_request` (if forwarded by the gateway) gates the create; the
-    # remaining opts are creation opts passed through to `create_agent/2`.
     {auth, create_opts} = Keyword.pop(opts, :signed_request)
+    {session_token, create_opts} = Keyword.pop(create_opts, :session_token)
+    {actor_authority, create_opts} = Keyword.pop(create_opts, :actor_authority)
 
-    case authorize(caller_id, resource, :create, signed_request: auth) do
-      :ok -> create_agent(agent_id, create_opts)
-      {:ok, :pending_approval, _proposal_id} = pending -> pending
-      {:error, reason} -> {:error, {:unauthorized, reason}}
+    auth_opts =
+      [signed_request: auth]
+      |> maybe_put_authorization_opt(:session_token, session_token)
+
+    case authorize(caller_id, resource, :create, auth_opts) do
+      :ok ->
+        create_with_actor_authority(
+          caller_id,
+          agent_id,
+          create_opts,
+          actor_authority,
+          session_token
+        )
+
+      {:ok, :pending_approval, _proposal_id} = pending ->
+        pending
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
     end
   end
+
+  defp create_with_actor_authority(caller_id, agent_id, create_opts, authority, _session_token)
+       when not is_nil(authority) do
+    with_matching_authority(caller_id, authority, fn ->
+      create_agent(agent_id, Keyword.put(create_opts, :actor_authority, authority))
+    end)
+  end
+
+  defp create_with_actor_authority(caller_id, agent_id, create_opts, nil, session_token)
+       when is_binary(session_token) do
+    case Arbor.Security.open_agent_lifecycle_authority(session_token) do
+      {:ok, authority} ->
+        try do
+          with_matching_authority(caller_id, authority, fn ->
+            create_agent(agent_id, Keyword.put(create_opts, :actor_authority, authority))
+          end)
+        after
+          Arbor.Security.close_signing_authority(authority)
+        end
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  defp create_with_actor_authority(_caller_id, _agent_id, _create_opts, nil, _session_token),
+    do: {:error, {:unauthorized, :capability_mutation_unauthorized}}
+
+  defp maybe_put_authorization_opt(opts, _key, nil), do: opts
+  defp maybe_put_authorization_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   @doc """
   Destroy an agent with authorization check.
@@ -834,15 +943,8 @@ defmodule Arbor.Agent do
           :ok
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
-  def authorize_destroy(caller_id, agent_id) do
-    resource = "arbor://agent/lifecycle/destroy"
-
-    case authorize(caller_id, resource, :destroy) do
-      :ok -> destroy_agent(agent_id)
-      {:ok, :pending_approval, _proposal_id} = pending -> pending
-      {:error, reason} -> {:error, {:unauthorized, reason}}
-    end
-  end
+  def authorize_destroy(_caller_id, _agent_id),
+    do: {:error, {:unauthorized, :capability_mutation_unauthorized}}
 
   @doc """
   Destroy an exact agent using a general human session proof.
@@ -857,14 +959,67 @@ defmodule Arbor.Agent do
   def authorize_destroy(caller_id, agent_id, opts) when is_binary(agent_id) do
     resource = "arbor://agent/lifecycle/destroy/#{agent_id}"
 
-    case authorize_management_session(caller_id, agent_id, resource, :destroy, opts) do
-      :ok -> destroy_agent(agent_id)
-      {:ok, :pending_approval, _proposal_id} = pending -> pending
-      {:error, reason} -> {:error, {:unauthorized, reason}}
+    if is_list(opts) and Keyword.keyword?(opts) do
+      {actor_authority, auth_opts} = Keyword.pop(opts, :actor_authority)
+      session_token = Keyword.get(auth_opts, :session_token)
+
+      authorization =
+        if is_binary(session_token) do
+          authorize_management_session(caller_id, agent_id, resource, :destroy, auth_opts)
+        else
+          authorize(caller_id, resource, :destroy, auth_opts)
+        end
+
+      case authorization do
+        :ok ->
+          destroy_with_actor_authority(caller_id, agent_id, actor_authority, session_token)
+
+        {:ok, :pending_approval, _proposal_id} = pending ->
+          pending
+
+        {:error, reason} ->
+          {:error, {:unauthorized, reason}}
+      end
+    else
+      {:error, {:unauthorized, :invalid_management_options}}
     end
   end
 
   def authorize_destroy(_, _, _), do: {:error, {:unauthorized, :invalid_management_options}}
+
+  defp destroy_with_actor_authority(caller_id, agent_id, authority, _session_token)
+       when not is_nil(authority) do
+    with_matching_authority(caller_id, authority, fn ->
+      Lifecycle.destroy(agent_id, actor_authority: authority)
+    end)
+  end
+
+  defp destroy_with_actor_authority(caller_id, agent_id, nil, session_token)
+       when is_binary(session_token) do
+    case Arbor.Security.open_agent_lifecycle_authority(session_token) do
+      {:ok, authority} ->
+        try do
+          with_matching_authority(caller_id, authority, fn ->
+            Lifecycle.destroy(agent_id, actor_authority: authority)
+          end)
+        after
+          Arbor.Security.close_signing_authority(authority)
+        end
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  defp destroy_with_actor_authority(_caller_id, _agent_id, nil, _session_token),
+    do: {:error, {:unauthorized, :capability_mutation_unauthorized}}
+
+  defp with_matching_authority(caller_id, authority, callback) when is_function(callback, 0) do
+    case Arbor.Security.signing_authority_principal(authority) do
+      {:ok, ^caller_id} -> callback.()
+      _ -> {:error, {:unauthorized, :capability_mutation_unauthorized}}
+    end
+  end
 
   @doc """
   Restore an agent with authorization check.
@@ -1225,7 +1380,7 @@ defmodule Arbor.Agent do
 
   # Only an affirmative authorization permits a lifecycle effect. Pending
   # approval stays pending; missing security infrastructure is a denial.
-  defp authorize(caller_id, resource, action, opts \\ []) do
+  defp authorize(caller_id, resource, action, opts) do
     if security_available?() do
       case Arbor.Security.authorize(caller_id, resource, action, auth_opts(opts)) do
         {:ok, :authorized} -> :ok
@@ -1285,7 +1440,7 @@ defmodule Arbor.Agent do
   end
 
   defp security_available? do
-    Process.whereis(Arbor.Security.CapabilityStore) != nil
+    Arbor.Security.capability_authorization_available?()
   end
 
   # Extract the action module from an action spec (module or {module, params} tuple)

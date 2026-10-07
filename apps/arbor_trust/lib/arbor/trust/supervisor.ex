@@ -44,6 +44,7 @@ defmodule Arbor.Trust.Supervisor do
 
   alias Arbor.Trust.{
     CapabilitySync,
+    CapabilityGrantOwner,
     CircuitBreaker,
     ConfirmationTracker,
     EventHandler,
@@ -83,7 +84,8 @@ defmodule Arbor.Trust.Supervisor do
           manager: :stopped | {:running, pid()},
           event_handler: :stopped | {:running, pid()},
           circuit_breaker: :stopped | {:running, pid()},
-          capability_sync: :stopped | {:running, pid()}
+          capability_sync: :stopped | {:running, pid()},
+          capability_grant_owner: :stopped | {:running, pid()}
         }
   def status do
     %{
@@ -93,7 +95,8 @@ defmodule Arbor.Trust.Supervisor do
       manager: process_status(Manager),
       event_handler: process_status(EventHandler),
       circuit_breaker: process_status(CircuitBreaker),
-      capability_sync: process_status(CapabilitySync)
+      capability_sync: process_status(CapabilitySync),
+      capability_grant_owner: process_status(CapabilityGrantOwner)
     }
   end
 
@@ -151,7 +154,7 @@ defmodule Arbor.Trust.Supervisor do
     ]
 
     # Confirmation tracker (confirm-then-automate)
-    children = children ++ [{ConfirmationTracker, []}]
+    children = children ++ [{ConfirmationTracker, []}, {CapabilityGrantOwner, []}]
 
     # Optional components
     children =

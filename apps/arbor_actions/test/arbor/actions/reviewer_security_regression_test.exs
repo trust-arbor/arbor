@@ -103,7 +103,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
         | rules: Map.put(profile.rules, resource, :block)
       })
 
-    {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+    {:ok, _capability} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
 
     try do
       assert {:error, :unauthorized} =
@@ -374,6 +374,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     try do
       assert {:error, message} =
                MixPrincipalHelpers.run(MixFormat, %{path: root, files: ["*.ex"]}, %{})
+
       assert message =~ "invalid_format_file"
     after
       File.rm_rf!(root)
@@ -447,7 +448,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
       })
 
     {:ok, _capability} =
-      Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+      Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec/**")
 
     {agent_id, marker, previous}
   end

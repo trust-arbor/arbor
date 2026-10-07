@@ -101,20 +101,33 @@ defmodule Arbor.Common.SensitiveData do
   # Secret Patterns
   # ===========================================================================
 
+  # Prefer the complete block when present so redaction removes its contents;
+  # retain header-only detection for truncated logs and streamed fragments.
+  @private_key_pattern ~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+|ENCRYPTED\s+)?PRIVATE\s+KEY-----(?:.*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+|ENCRYPTED\s+)?PRIVATE\s+KEY-----)?/s
+  @pgp_private_key_pattern ~r/-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----(?:.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----)?/s
+  @openai_key_pattern ~r/sk-(?!ant-)(?:proj-|svcacct-)?[a-zA-Z0-9_-]{20,}/
+  @cookie_argument_pattern ~r/(?:-setcookie|--cookie)\s+[^\s]+/
+
   @doc false
   def secret_patterns do
     [
       ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
       ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
       ~r/sk-ant-[A-Za-z0-9\-_]{20,}/,
-      ~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/,
+      @openai_key_pattern,
+      ~r/xai-[a-zA-Z0-9_-]{20,}/,
+      ~r/ya29\.[a-zA-Z0-9_-]{20,}/,
+      ~r/hf_[a-zA-Z0-9]{20,}/,
+      ~r/gsk_[a-zA-Z0-9]{20,}/,
+      @cookie_argument_pattern,
       ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
       ~r/xox[baprs]-[a-zA-Z0-9-]+/,
       ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
       ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
       ~r/AIza[0-9A-Za-z\-_]{35}/,
       ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
-      ~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/,
+      @private_key_pattern,
+      @pgp_private_key_pattern,
       ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/,
       ~r/glpat-[a-zA-Z0-9\-_]{20,}/,
       ~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/,
@@ -131,14 +144,20 @@ defmodule Arbor.Common.SensitiveData do
       {~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
        "AWS Secret Key"},
       {~r/sk-ant-[A-Za-z0-9\-_]{20,}/, "Anthropic API Key"},
-      {~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/, "OpenAI API Key"},
+      {@openai_key_pattern, "OpenAI API Key"},
+      {~r/xai-[a-zA-Z0-9_-]{20,}/, "xAI API Key"},
+      {~r/ya29\.[a-zA-Z0-9_-]{20,}/, "Google OAuth Token"},
+      {~r/hf_[a-zA-Z0-9]{20,}/, "Hugging Face Token"},
+      {~r/gsk_[a-zA-Z0-9]{20,}/, "Groq API Key"},
+      {@cookie_argument_pattern, "Erlang Distribution Cookie"},
       {~r/gh[pousr]_[a-zA-Z0-9]{36,}/, "GitHub Token"},
       {~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/, "GitHub Fine-Grained PAT"},
       {~r/glpat-[a-zA-Z0-9\-_]{20,}/, "GitLab PAT"},
       {~r/xox[baprs]-[a-zA-Z0-9-]+/, "Slack Token"},
       {~r/AIza[0-9A-Za-z\-_]{35}/, "Google API Key"},
       {~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/, "Stripe Key"},
-      {~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/, "Private Key"},
+      {@private_key_pattern, "Private Key"},
+      {@pgp_private_key_pattern, "PGP Private Key"},
       {~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/, "JWT Token"},
       {~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/, "Database Connection String"},
       {~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/, "Bearer Token"},

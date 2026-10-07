@@ -366,10 +366,10 @@ defmodule Arbor.Common.SafeAtom do
   end
 
   @doc """
-  Safely encode a {category, signal_type} tuple to an atom.
+  Safely encode a `{category, signal_type}` tuple to an existing atom.
 
-  Only creates the atom if both category and signal_type are valid atoms.
-  This is safe because we control the inputs (they must already be atoms).
+  Returns `:unknown` when the combined event atom has not already been loaded.
+  Existing component atoms do not make their Cartesian product safe to intern.
 
   ## Examples
 
@@ -378,9 +378,10 @@ defmodule Arbor.Common.SafeAtom do
   """
   @spec encode_event_type(atom(), atom()) :: atom()
   def encode_event_type(category, signal_type) when is_atom(category) and is_atom(signal_type) do
-    # Safe: both inputs are guaranteed atoms by guard clause, combining existing atoms
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    :"#{category}:#{signal_type}"
+    case to_existing("#{category}:#{signal_type}") do
+      {:ok, event_type} -> event_type
+      {:error, {:unknown_atom, _value}} -> :unknown
+    end
   end
 
   @doc """

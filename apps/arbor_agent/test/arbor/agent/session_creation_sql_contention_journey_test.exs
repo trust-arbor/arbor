@@ -136,14 +136,14 @@ defmodule Arbor.Agent.SessionCreationSQLContentionJourneyTest do
     :ok = Security.register_oidc_identity(fixture.identity, fixture.id_token, fixture.provider)
 
     on_exit(fn ->
-      Security.deregister_identity(fixture.identity.agent_id)
+      Security.deregister_identity_fixture(fixture.identity.agent_id)
       fixture.cleanup.()
     end)
 
     human = fixture.identity
     {:ok, agent} = Identity.generate(name: "Signed Session SQL journey")
-    :ok = Security.register_identity(Identity.public_only(agent))
-    on_exit(fn -> Security.deregister_identity(agent.agent_id) end)
+    :ok = Security.register_identity_fixture(Identity.public_only(agent))
+    on_exit(fn -> Security.deregister_identity_fixture(agent.agent_id) end)
 
     for {principal, uri} <-
           [{human.agent_id, "arbor://chat/agent/" <> agent.agent_id}] ++
@@ -158,8 +158,8 @@ defmodule Arbor.Agent.SessionCreationSQLContentionJourneyTest do
               ],
               &{agent.agent_id, &1}
             ) do
-      {:ok, cap} = Security.grant(principal: principal, resource: uri)
-      on_exit(fn -> Security.revoke(cap.id) end)
+      {:ok, cap} = Security.grant_fixture(principal: principal, resource: uri)
+      on_exit(fn -> Security.revoke_fixture(cap.id) end)
     end
 
     {:ok, token} = SessionToken.generate(human.agent_id)

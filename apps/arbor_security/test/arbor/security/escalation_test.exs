@@ -67,6 +67,11 @@ defmodule Arbor.Security.EscalationTest do
     def healthy?, do: true
   end
 
+  defmodule DuplicateConsensus do
+    def submit(_, _opts \\ []), do: {:error, :duplicate_proposal}
+    def healthy?, do: true
+  end
+
   defmodule CapturingConsensus do
     def submit(proposal, _opts \\ []) do
       send(self(), {:proposal, proposal})
@@ -144,6 +149,15 @@ defmodule Arbor.Security.EscalationTest do
       Application.put_env(:arbor_security, :consensus_module, FailingConsensus)
 
       assert {:error, {:consensus_submission_failed, :test_failure}} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+    end
+
+    test "security regression: duplicate submission never returns a fabricated proposal id",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, DuplicateConsensus)
+
+      assert {:error, {:consensus_submission_failed, :duplicate_proposal}} =
                Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
     end
 
@@ -307,6 +321,55 @@ defmodule Arbor.Security.EscalationTest do
       assert {:ok, interaction2} = FakeInteractionRouter.get(request_id2)
       refute Map.has_key?(interaction2.metadata, :trust)
       refute Map.has_key?(interaction2.metadata.approval_context, :trust)
+    end
+
+    test "security regression: supplied approval context cannot relabel operation facts",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(
+                 cap,
+                 "agent_test",
+                 "arbor://fs/write/sensitive",
+                 approval_action: "file.write",
+                 file_path: "/workspace/real-target.txt",
+                 content: "real destructive payload",
+                 workspace: "/workspace",
+                 operation_taint: :hostile,
+                 gate: :trust_policy,
+                 reason: :policy_gated,
+                 session_id: "real-session",
+                 approval_context: %{
+                   principal_id: "agent_attacker",
+                   resource_uri: "arbor://fs/read/harmless",
+                   capability_id: "cap_forged",
+                   action: "file.read",
+                   target: "/workspace/harmless.txt",
+                   payload_preview: %{preview: "harmless"},
+                   provenance: %{session_id: "forged-session"},
+                   gate: :routine,
+                   reason: :low_risk,
+                   risk_hints: %{operation_taint: :trusted, in_workspace: false}
+                 }
+               )
+
+      assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
+      context = interaction.metadata.approval_context
+
+      assert context.principal_id == "agent_test"
+      assert context.resource_uri == "arbor://fs/write/sensitive"
+      assert context.capability_id == cap.id
+      assert context.action == "file.write"
+      assert context.target == "/workspace/real-target.txt"
+      assert context.payload_preview.preview == "real destructive payload"
+      assert context.provenance.session_id == "real-session"
+      assert context.gate == :trust_policy
+      assert context.reason == :policy_gated
+      assert context.risk_hints.operation_taint == :hostile
+      assert context.risk_hints.in_workspace == true
     end
 
     test "with the feature flag off, the consensus path runs (backward compat)",

@@ -56,7 +56,7 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        Arbor.Security.revoke_all_fixture(agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
@@ -141,10 +141,48 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
     assert calls == []
   end
 
+  test "security regression: Github.PR binds leading-dash values to their exact options",
+       %{agent_id: agent_id} do
+    authorize_agent(agent_id, @github_resource)
+
+    :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, true, [])
+    :erlang.trace(self(), true, [:call])
+
+    try do
+      _result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Github.PR,
+          %{
+            path: "/nonexistent/repo",
+            title: "--repo=attacker/title",
+            body: "--head=attacker/body",
+            base: "--repo=attacker/base"
+          },
+          %{agent_id: agent_id}
+        )
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Shell, :authorize_and_execute, [^agent_id, command, _shell_opts]}}
+
+      assert command =~ "--title=--repo=attacker/title"
+      assert command =~ "--body=--head=attacker/body"
+      assert command =~ "--base=--repo=attacker/base"
+      refute command =~ "--title --repo="
+      refute command =~ "--body --head="
+      refute command =~ "--base --repo="
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, false, [])
+    end
+  end
+
   defp authorize_agent(agent_id, resource) do
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: %{resource => :auto}})
-    assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

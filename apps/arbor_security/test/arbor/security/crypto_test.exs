@@ -244,7 +244,7 @@ defmodule Arbor.Security.CryptoTest do
       plaintext = "hello bob, from alice"
       sealed = Crypto.seal(plaintext, ctx.bob_enc_pub, ctx.alice_sign_priv)
 
-      assert sealed.v == 2
+      assert sealed.v == 3
       assert byte_size(sealed.ephemeral_public) == 32
       assert is_binary(sealed.signature)
 
@@ -281,14 +281,45 @@ defmodule Arbor.Security.CryptoTest do
                Crypto.unseal(tampered, ctx.bob_enc_priv, ctx.alice_sign_pub)
     end
 
-    test "wrong recipient key fails to decrypt (after a valid signature)", ctx do
+    test "security regression: a sealed envelope cannot be redirected to another recipient",
+         ctx do
       {_carol_pub, carol_priv} = Crypto.generate_encryption_keypair()
       sealed = Crypto.seal("secret", ctx.bob_enc_pub, ctx.alice_sign_priv)
 
-      # Signature is valid (it's Alice's), but Carol's key can't derive the
-      # ECDH secret → decryption fails.
-      assert {:error, :decryption_failed} =
+      # The recipient public key is part of the signed context, so redirecting
+      # the intact envelope is rejected before attempting decryption.
+      assert {:error, :bad_signature} =
                Crypto.unseal(sealed, carol_priv, ctx.alice_sign_pub)
+    end
+
+    test "security regression: re-signing a sealed envelope cannot change its sender", ctx do
+      {mallory_pub, mallory_priv} = Crypto.generate_keypair()
+      sealed = Crypto.seal("sender-bound", ctx.bob_enc_pub, ctx.alice_sign_priv)
+
+      # This is the exact substitution that worked against v2: because the
+      # encryption key and AEAD data did not include the sender, an attacker
+      # could replace Alice's signature with a valid signature of their own
+      # and the unchanged ciphertext would decrypt as if Mallory sent it.
+      attacker_payload =
+        case sealed.v do
+          2 ->
+            sealed.ephemeral_public <> sealed.iv <> sealed.tag <> sealed.ciphertext
+
+          3 ->
+            "arbor.security.seal.v3" <>
+              <<0>> <>
+              ctx.bob_enc_pub <>
+              mallory_pub <>
+              sealed.ephemeral_public <>
+              sealed.iv <>
+              sealed.tag <>
+              sealed.ciphertext
+        end
+
+      resigned = %{sealed | signature: Crypto.sign(attacker_payload, mallory_priv)}
+
+      assert {:error, :decryption_failed} =
+               Crypto.unseal(resigned, ctx.bob_enc_priv, mallory_pub)
     end
 
     test "malformed sealed map is rejected", ctx do
@@ -303,7 +334,7 @@ defmodule Arbor.Security.CryptoTest do
       # Ed25519 private key is mistakenly passed as the recipient key, the
       # ECDH silently produced incorrect results instead of failing. The fix
       # is a `byte_size(recipient_private) == 32` guard on unseal/3 — a 64-byte
-      # key must NOT match the v2 clause; it falls through to {:error,
+      # key must NOT match the sealed-message clause; it falls through to {:error,
       # :malformed_sealed} rather than attempting a confused ECDH.
       sealed = Crypto.seal("secret", ctx.bob_enc_pub, ctx.alice_sign_priv)
 

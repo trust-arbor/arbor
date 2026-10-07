@@ -18,9 +18,11 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
   """
 
   @behaviour Arbor.Signals.Behaviours.SubscriptionAuthorizer
+  @behaviour Arbor.Signals.Behaviours.ChannelPrincipalAuthorizer
 
   require Logger
 
+  alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Signals.Config
   alias Arbor.Signals.Provider
 
@@ -61,6 +63,32 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
     :exit, _ -> {:error, :no_capability}
   end
 
+  @impl Arbor.Signals.Behaviours.ChannelPrincipalAuthorizer
+  def authorize_channel_principal(%AuthContext{} = auth_context, operation, channel_id)
+      when is_atom(operation) and (is_binary(channel_id) or is_nil(channel_id)) do
+    with {:ok, principal_id, auth_opts} <- channel_auth_opts(auth_context),
+         {:ok, provider} <- Provider.resolve(Config.security_module(), :authorize, 4),
+         resource_uri = channel_resource_uri(operation, channel_id),
+         {:ok, {:ok, :authorized}} <-
+           Provider.invoke(provider, :authorize, [
+             principal_id,
+             resource_uri,
+             operation,
+             auth_opts
+           ]) do
+      {:ok, principal_id}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  def authorize_channel_principal(_auth_context, _operation, _channel_id),
+    do: {:error, :unauthorized}
+
   defp map_authorize_result({:ok, {:ok, :authorized}}), do: {:ok, :authorized}
 
   defp map_authorize_result({:ok, {:ok, :pending_approval, _id}}),
@@ -83,6 +111,24 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
   end
 
   defp bounded_session_opts(_opts), do: []
+
+  defp channel_auth_opts(%AuthContext{
+         principal_id: principal_id,
+         signed_request: signed_request
+       })
+       when is_binary(principal_id) and principal_id != "" and not is_nil(signed_request) do
+    {:ok, principal_id, [signed_request: signed_request, verify_identity: true]}
+  end
+
+  defp channel_auth_opts(_auth_context), do: {:error, :identity_proof_required}
+
+  defp channel_resource_uri(operation, nil),
+    do: "arbor://signals/channel/#{operation}"
+
+  defp channel_resource_uri(operation, channel_id) do
+    digest = :crypto.hash(:sha256, channel_id) |> Base.encode16(case: :lower)
+    "arbor://signals/channel/#{operation}/#{digest}"
+  end
 
   @doc false
   def security_module, do: Config.security_module()

@@ -32,6 +32,8 @@ defmodule Mix.Tasks.Arbor.Hands.Stop do
       exit({:shutdown, 1})
     end
 
+    validate_name(name)
+
     case Hands.find_hand(name) do
       {:local, %{session: session}} ->
         stop_local(name, session, opts[:force])
@@ -41,6 +43,17 @@ defmodule Mix.Tasks.Arbor.Hands.Stop do
 
       :not_found ->
         Mix.shell().info("Hand '#{name}' is not running.")
+    end
+  end
+
+  defp validate_name(name) do
+    case Hands.validate_name(name) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_hand_name} ->
+        Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
+        exit({:shutdown, 1})
     end
   end
 

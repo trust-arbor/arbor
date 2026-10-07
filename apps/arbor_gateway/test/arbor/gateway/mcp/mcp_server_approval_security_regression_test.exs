@@ -22,11 +22,11 @@ defmodule Arbor.Gateway.MCP.McpServerApprovalSecurityRegressionTest do
   setup do
     start_supervised!(ClientSupervisor)
     {:ok, identity} = Arbor.Security.generate_identity(name: "mcp-approval")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore),
-        do: Arbor.Security.CapabilityStore.revoke_all(identity.agent_id)
+        do: Arbor.Security.revoke_all_fixture(identity.agent_id)
     end)
 
     %{agent_id: identity.agent_id}
@@ -40,7 +40,7 @@ defmodule Arbor.Gateway.MCP.McpServerApprovalSecurityRegressionTest do
 
   defp approve!(agent_id, name, config) do
     {:ok, uri} = Arbor.Security.mcp_server_approval_uri(name, config)
-    {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: uri)
+    {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
   end
 
   test "an unapproved agent-bound server is refused and never started", %{agent_id: agent_id} do

@@ -5,7 +5,9 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Capability, Identity}
+  alias Arbor.Common.SafePath
   alias Arbor.Security.AuthorityStore
+  alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Store.JSONFile
@@ -42,22 +44,30 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   end
 
   setup do
-    base_dir =
-      Path.join(
-        System.tmp_dir!(),
-        "arbor-authority-registry-#{System.unique_integer([:positive, :monotonic])}"
-      )
-
-    File.mkdir_p!(base_dir)
-    {:ok, control} = Agent.start_link(fn -> MapSet.new() end)
+    base_dir = unique_authority_root!()
 
     on_exit(fn ->
-      stop_packet_processes()
-      restore_default_topology()
-      File.rm_rf!(base_dir)
+      try do
+        stop_packet_processes()
+        restore_default_topology()
+      after
+        File.rm_rf!(base_dir)
+      end
     end)
 
-    {:ok, base_dir: base_dir, control: control}
+    {:ok, control} = Agent.start_link(fn -> MapSet.new() end)
+    {:ok, signing_key_owner_roles} = Config.signing_key_owner_roles()
+
+    {:ok,
+     base_dir: base_dir,
+     control: control,
+     registration_token: make_ref(),
+     registration_role_specs:
+       Map.take(signing_key_owner_roles, [
+         :system_authority,
+         :scheduler_owner,
+         :trust_grant_owner
+       ])}
   end
 
   test "security regression: identity write delete and status failures leave hot authority unchanged",
@@ -65,19 +75,24 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
     start_topology(context)
 
     {:ok, existing} = Identity.generate(name: "existing")
-    assert :ok = Registry.register(existing)
+    assert :ok = Registry.register_fixture(existing)
 
     fail_operations(context.control, [:compare_and_swap, :compare_and_delete])
 
     {:ok, rejected} = Identity.generate(name: "rejected")
-    assert {:error, :identity_store_outcome_unknown} = Registry.register(rejected)
+    assert {:error, :identity_store_outcome_unknown} = Registry.register_fixture(rejected)
     refute Registry.registered?(rejected.agent_id)
 
-    assert {:error, :identity_store_outcome_unknown} = Registry.suspend(existing.agent_id)
+    assert {:error, :identity_store_outcome_unknown} =
+             Registry.suspend_fixture(existing.agent_id, "fixture")
+
     assert {:ok, :active} = Registry.identity_status(existing.agent_id)
 
     stats_before = Registry.stats()
-    assert {:error, :identity_store_outcome_unknown} = Registry.deregister(existing.agent_id)
+
+    assert {:error, :identity_store_outcome_unknown} =
+             Registry.deregister_fixture(existing.agent_id)
+
     assert {:ok, existing.public_key} == Registry.lookup(existing.agent_id)
     assert Registry.stats() == stats_before
   end
@@ -113,14 +128,17 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
 
     start_authority(:arbor_security_identities, "identities", context)
 
-    previous_trap_exit = Process.flag(:trap_exit, true)
+    pid = start_registry_child!(context, restart: :temporary, complete_startup?: false)
+    monitor = Process.monitor(pid)
 
-    try do
-      assert {:error, {:identity_authority, :malformed_inventory}} = Registry.start_link()
-      refute Process.whereis(Registry)
-    after
-      Process.flag(:trap_exit, previous_trap_exit)
-    end
+    assert {:error, :registration_unavailable} =
+             Registry.complete_startup(security_supervisor_pid!(), context.registration_token)
+
+    assert_receive {:DOWN, ^monitor, :process, ^pid, {:identity_authority, :malformed_inventory}},
+                   1_000
+
+    refute Process.alive?(pid)
+    refute Process.whereis(Registry)
   end
 
   test "activation-only identity registry is explicitly hot-only while issuers stay unavailable",
@@ -128,15 +146,17 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
     start_topology(context, identity_store?: false, issuer_store?: false)
 
     {:ok, identity} = Identity.generate(name: "activation-only")
-    assert :ok = Registry.register(identity)
+    assert :ok = Registry.register_fixture(identity)
     assert {:ok, :active} = Registry.identity_status(identity.agent_id)
-    assert :ok = Registry.suspend(identity.agent_id)
+    assert :ok = Registry.suspend_fixture(identity.agent_id, "fixture")
     assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
-    assert :ok = Registry.resume(identity.agent_id)
-    assert :ok = Registry.deregister(identity.agent_id)
+    assert :ok = Registry.resume_fixture(identity.agent_id)
+    assert :ok = Registry.deregister_fixture(identity.agent_id)
 
     envelope = envelope_for(identity.agent_id)
-    assert {:error, :store_unavailable} = IssuerRegistry.register(identity.agent_id, [envelope])
+
+    assert {:error, :store_unavailable} =
+             IssuerRegistry.register_fixture(identity.agent_id, [envelope])
   end
 
   test "identity authority round-trips across restart and remote sync reloads the committed record",
@@ -144,9 +164,9 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
     start_topology(context)
 
     {:ok, identity} = Identity.generate(name: "restart-and-sync")
-    assert :ok = Registry.register(identity)
+    assert :ok = Registry.register_fixture(identity)
 
-    restart_registry()
+    restart_registry(context)
     assert {:ok, identity.public_key} == Registry.lookup(identity.agent_id)
 
     assert {:ok, current} =
@@ -154,31 +174,43 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
                name: :arbor_security_identities
              )
 
+    status_changed_at = DateTime.utc_now()
+
     replacement =
       Record.new(identity.agent_id, %{
         current.data
         | "status" => "suspended",
-          "status_changed_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+          "status_changed_at" => DateTime.to_iso8601(status_changed_at),
           "status_reason" => "remote"
       })
 
-    assert {:ok, _stored} =
-             AuthorityStore.acknowledged_compare_and_swap(
+    assert {:ok, stored} =
+             ControlledBackend.compare_and_swap(
                identity.agent_id,
                {:value, current},
                replacement,
-               name: :arbor_security_identities
+               backend_opts(context, "identities")
              )
 
-    send(Registry, {
-      :signal_received,
-      %{
-        type: :identity_suspended,
-        data: %{agent_id: identity.agent_id, origin_node: :remote@packet_3a}
-      }
-    })
+    remote_entry = %{
+      public_key: identity.public_key,
+      encryption_public_key: identity.encryption_public_key,
+      name: identity.name,
+      key_version: identity.key_version,
+      created_at: identity.created_at,
+      metadata: identity.metadata,
+      status: :suspended,
+      status_changed_at: status_changed_at,
+      status_reason: "remote"
+    }
 
-    _ = :sys.get_state(Registry)
+    assert :ok =
+             Registry.reconcile_remote_authority_result_fixture(
+               :identity_suspended,
+               identity.agent_id,
+               {:ok, stored, remote_entry}
+             )
+
     assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
   end
 
@@ -187,17 +219,21 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
     start_topology(context)
 
     {:ok, identity} = Identity.generate(name: "issuer-failure")
-    assert :ok = Registry.register(identity)
+    assert :ok = Registry.register_fixture(identity)
     envelope = envelope_for(identity.agent_id)
 
     fail_operations(context.control, [:get])
-    assert {:error, :store_unavailable} = IssuerRegistry.register(identity.agent_id, [envelope])
+
+    assert {:error, :store_unavailable} =
+             IssuerRegistry.register_fixture(identity.agent_id, [envelope])
 
     fail_operations(context.control, [])
     assert {:error, :not_found} = IssuerRegistry.lookup(identity.agent_id)
 
     fail_operations(context.control, [:compare_and_swap])
-    assert {:error, :outcome_unknown} = IssuerRegistry.register(identity.agent_id, [envelope])
+
+    assert {:error, :outcome_unknown} =
+             IssuerRegistry.register_fixture(identity.agent_id, [envelope])
 
     fail_operations(context.control, [])
     assert {:error, :not_found} = IssuerRegistry.lookup(identity.agent_id)
@@ -207,11 +243,11 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
     start_topology(context)
 
     {:ok, identity} = Identity.generate(name: "issuer-round-trip")
-    assert :ok = Registry.register(identity)
+    assert :ok = Registry.register_fixture(identity)
     envelope = envelope_for(identity.agent_id)
-    assert :ok = IssuerRegistry.register(identity.agent_id, [envelope])
+    assert :ok = IssuerRegistry.register_fixture(identity.agent_id, [envelope])
 
-    restart_issuer_registry()
+    restart_issuer_registry(context)
     assert {:ok, %{public_key: public_key}} = IssuerRegistry.lookup(identity.agent_id)
     assert public_key == identity.public_key
 
@@ -235,8 +271,8 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
       start_authority(:arbor_security_issuers, "issuers", context)
     end
 
-    start_child!({Registry, []}, Registry)
-    start_child!({IssuerRegistry, []}, IssuerRegistry)
+    start_registry_child!(context)
+    start_issuer_registry_child!()
   end
 
   defp start_authority(name, namespace, context) do
@@ -246,11 +282,15 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
          name: name,
          namespace: namespace,
          backend: ControlledBackend,
-         backend_opts: backend_opts(context, namespace)},
+         backend_opts: backend_opts(context, namespace),
+         mutation_owners: authority_mutation_owners(name),
+         defer_hydration: true},
         id: name
       )
 
-    start_child!(spec, name)
+    pid = start_child!(spec, name)
+    :ok = AuthorityStore.complete_startup(security_supervisor_pid!(), name)
+    pid
   end
 
   defp restore_default_topology do
@@ -258,39 +298,89 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   end
 
   defp start_child!(spec, id) do
-    case Supervisor.start_child(Arbor.Security.Supervisor, spec) do
-      {:ok, _pid} ->
-        :ok
+    case Supervisor.start_child(security_supervisor_pid!(), spec) do
+      {:ok, pid} ->
+        pid
 
-      {:error, {:already_started, _pid}} ->
-        :ok
+      {:error, {:already_started, pid}} ->
+        pid
 
       {:error, :already_present} ->
-        :ok = Supervisor.delete_child(Arbor.Security.Supervisor, id)
-        {:ok, _pid} = Supervisor.start_child(Arbor.Security.Supervisor, spec)
-        :ok
+        :ok = Supervisor.delete_child(security_supervisor_pid!(), id)
+        {:ok, pid} = Supervisor.start_child(security_supervisor_pid!(), spec)
+        pid
     end
   end
 
   defp stop_packet_processes do
-    for id <- [IssuerRegistry, Registry, :arbor_security_issuers, :arbor_security_identities] do
-      case Supervisor.terminate_child(Arbor.Security.Supervisor, id) do
-        :ok -> Supervisor.delete_child(Arbor.Security.Supervisor, id)
-        {:error, :not_found} -> :ok
-      end
+    case Process.whereis(Arbor.Security.Supervisor) do
+      supervisor when is_pid(supervisor) ->
+        for id <- [IssuerRegistry, Registry, :arbor_security_issuers, :arbor_security_identities] do
+          case Supervisor.terminate_child(supervisor, id) do
+            :ok -> Supervisor.delete_child(supervisor, id)
+            {:error, :not_found} -> :ok
+          end
+        end
+
+      nil ->
+        :ok
     end
   end
 
-  defp restart_registry do
-    :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, Registry)
-    :ok = Supervisor.delete_child(Arbor.Security.Supervisor, Registry)
-    start_child!({Registry, []}, Registry)
+  defp restart_registry(context) do
+    :ok = Supervisor.terminate_child(security_supervisor_pid!(), Registry)
+    :ok = Supervisor.delete_child(security_supervisor_pid!(), Registry)
+    start_registry_child!(context)
   end
 
-  defp restart_issuer_registry do
-    :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, IssuerRegistry)
-    :ok = Supervisor.delete_child(Arbor.Security.Supervisor, IssuerRegistry)
-    start_child!({IssuerRegistry, []}, IssuerRegistry)
+  defp restart_issuer_registry(_context) do
+    :ok = Supervisor.terminate_child(security_supervisor_pid!(), IssuerRegistry)
+    :ok = Supervisor.delete_child(security_supervisor_pid!(), IssuerRegistry)
+    start_issuer_registry_child!()
+  end
+
+  defp start_registry_child!(context, opts \\ []) do
+    registry_opts = [
+      system_authority_registration_token: context.registration_token,
+      registration_role_specs: context.registration_role_specs,
+      defer_initialization: true
+    ]
+
+    spec =
+      Supervisor.child_spec({Registry, registry_opts},
+        id: Registry,
+        restart: Keyword.get(opts, :restart, :permanent)
+      )
+
+    pid = start_child!(spec, Registry)
+
+    if Keyword.get(opts, :complete_startup?, true) do
+      :ok = Registry.complete_startup(security_supervisor_pid!(), context.registration_token)
+    end
+
+    pid
+  end
+
+  defp start_issuer_registry_child! do
+    spec = Supervisor.child_spec({IssuerRegistry, defer_initialization: true}, id: IssuerRegistry)
+    pid = start_child!(spec, IssuerRegistry)
+    :ok = IssuerRegistry.complete_startup(security_supervisor_pid!())
+    pid
+  end
+
+  defp security_supervisor_pid! do
+    case Process.whereis(Arbor.Security.Supervisor) do
+      pid when is_pid(pid) -> pid
+      nil -> raise "Security.Supervisor is unavailable"
+    end
+  end
+
+  defp unique_authority_root! do
+    {:ok, canonical_tmp} = SafePath.resolve_real(System.tmp_dir!())
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    base_dir = Path.join(canonical_tmp, "arbor-authority-registry-#{suffix}")
+    :ok = File.mkdir!(base_dir)
+    base_dir
   end
 
   defp fail_operations(control, operations) do
@@ -300,6 +390,9 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   defp backend_opts(context, namespace) do
     [base_dir: context.base_dir, name: namespace, control: context.control]
   end
+
+  defp authority_mutation_owners(:arbor_security_identities), do: [Registry]
+  defp authority_mutation_owners(:arbor_security_issuers), do: [IssuerRegistry]
 
   defp identity_payload(identity) do
     %{

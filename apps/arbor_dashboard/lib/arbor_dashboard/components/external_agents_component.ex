@@ -83,7 +83,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   def update_external_agents(socket, "revoke_external_agent", %{"agent_id" => agent_id}) do
     owner = socket.assigns[:current_agent_id]
 
-    case do_revoke(agent_id, owner) do
+    case do_revoke(agent_id, owner, socket.assigns[:session_token]) do
       :ok ->
         reload_state(socket)
 
@@ -369,12 +369,12 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     end
   end
 
-  defp do_revoke(_agent_id, nil), do: {:error, :not_owner}
+  defp do_revoke(_agent_id, nil, _session_token), do: {:error, :not_owner}
 
-  defp do_revoke(agent_id, owner) do
+  defp do_revoke(agent_id, owner, session_token) do
     with {:ok, profile} <- safe_restore(agent_id),
          true <- ExternalAgentsCore.owns?(profile, owner) || {:error, :not_owner},
-         :ok <- safe_revoke_identity(agent_id) do
+         :ok <- safe_revoke_identity(agent_id, session_token) do
       :ok
     else
       {:error, _} = err -> err
@@ -393,13 +393,26 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     :exit, _ -> {:error, :security_unavailable}
   end
 
-  defp safe_revoke_identity(agent_id) do
-    Arbor.Security.revoke_identity(agent_id, reason: "user requested via dashboard")
+  defp safe_revoke_identity(agent_id, session_token)
+       when is_binary(session_token) and session_token != "" do
+    with {:ok, authority} <- Arbor.Security.open_agent_lifecycle_authority(session_token) do
+      try do
+        Arbor.Security.revoke_identity(agent_id,
+          reason: "user requested via dashboard",
+          actor_authority: authority
+        )
+      after
+        Arbor.Security.close_signing_authority(authority)
+      end
+    end
   rescue
     _ -> {:error, :security_unavailable}
   catch
     :exit, _ -> {:error, :security_unavailable}
   end
+
+  defp safe_revoke_identity(_agent_id, _session_token),
+    do: {:error, :identity_status_mutation_unauthorized}
 
   defp do_rename(_agent_id, _new_name, nil), do: {:error, :not_owner}
 

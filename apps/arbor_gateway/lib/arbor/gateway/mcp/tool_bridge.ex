@@ -167,7 +167,7 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
   end
 
   defp security_running?(Arbor.Security),
-    do: Process.whereis(Arbor.Security.CapabilityStore) != nil
+    do: Arbor.Security.capability_authorization_available?()
 
   defp security_running?(_injected), do: true
 end

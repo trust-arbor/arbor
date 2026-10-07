@@ -49,7 +49,7 @@ defmodule Arbor.Monitor.Diagnostics do
   """
   @spec inspect_supervisor(pid()) :: map() | nil
   def inspect_supervisor(pid) when is_pid(pid) do
-    case safe_supervisor_call(pid, :which_children) do
+    case supervisor_process?(pid) && safe_supervisor_call(pid, :which_children) do
       {:ok, children} ->
         child_info =
           Enum.map(children, fn {id, child_pid, type, modules} ->
@@ -65,7 +65,7 @@ defmodule Arbor.Monitor.Diagnostics do
         # Try to get supervisor counts (returns a map)
         counts =
           case safe_supervisor_call(pid, :count_children) do
-            {:ok, c} -> c
+            {:ok, c} -> normalize_child_counts(c)
             _ -> %{}
           end
 
@@ -80,12 +80,16 @@ defmodule Arbor.Monitor.Diagnostics do
           restart_intensity: get_restart_intensity(pid)
         }
 
-      {:error, _} ->
+      _ ->
         nil
     end
   end
 
   def inspect_supervisor(_), do: nil
+
+  defp normalize_child_counts(counts) when is_map(counts), do: counts
+  defp normalize_child_counts(counts) when is_list(counts), do: Map.new(counts)
+  defp normalize_child_counts(_counts), do: %{}
 
   @doc """
   Get top processes by a specific metric.
@@ -270,23 +274,50 @@ defmodule Arbor.Monitor.Diagnostics do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp safe_supervisor_call(pid, action) do
-    result =
-      case action do
-        :which_children -> Supervisor.which_children(pid)
-        :count_children -> Supervisor.count_children(pid)
-      end
-
-    {:ok, result}
+    {:ok, GenServer.call(pid, action, 1_000)}
   catch
     :exit, _ -> {:error, :not_supervisor}
   end
 
+  defp supervisor_process?(pid) do
+    with true <- Process.alive?(pid),
+         {:dictionary, dictionary} <- Process.info(pid, :dictionary),
+         initial_call when not is_nil(initial_call) <-
+           Keyword.get(dictionary, :"$initial_call") do
+      case initial_call do
+        {:supervisor, _module, _arity} -> true
+        {module, :init, 1} when is_atom(module) -> supervisor_module?(module)
+        _ -> false
+      end
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp supervisor_module?(module) do
+    module.module_info(:attributes)
+    |> Keyword.get_values(:behaviour)
+    |> List.flatten()
+    |> Enum.any?(&(&1 in [Supervisor, :supervisor]))
+  rescue
+    _ -> false
+  end
+
   defp get_restart_intensity(pid) do
-    # Try to get supervisor intensity from its state
-    # This is a heuristic - not all supervisors expose this
-    case :sys.get_state(pid) do
-      {:state, _, _, _, _, intensity, _, _, _, _, _, _} -> intensity
-      _ -> 0
+    # OTP supervisors retain recent restart timestamps in element 8 of their
+    # internal state tuple. The configured restart limit is a different field
+    # and must not be reported as evidence that restarts actually occurred.
+    case :sys.get_state(pid, 1_000) do
+      state when is_tuple(state) and tuple_size(state) > 7 ->
+        case elem(state, 7) do
+          restarts when is_list(restarts) -> length(restarts)
+          _ -> 0
+        end
+
+      _ ->
+        0
     end
   rescue
     _ -> 0

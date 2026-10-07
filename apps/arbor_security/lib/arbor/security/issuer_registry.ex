@@ -40,12 +40,18 @@ defmodule Arbor.Security.IssuerRegistry do
   use GenServer
 
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Coding.CanonicalJson
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.CapabilityStore.Serializer
+  alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
+  alias Arbor.Security.SupervisedOwner
+  alias Arbor.Security.SystemAuthority
 
   @store :arbor_security_issuers
+  @owner_directory :arbor_security_issuer_registry_owner_directory
+  @mutation_schema "arbor.security.issuer-mutation.v1"
 
   # ===========================================================================
   # Public API
@@ -58,42 +64,122 @@ defmodule Arbor.Security.IssuerRegistry do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc false
+  def complete_startup(supervisor) do
+    with {:ok, timeout} <- Config.startup_timeout_ms() do
+      complete_startup(supervisor, timeout)
+    end
+  end
+
+  def complete_startup(supervisor, timeout)
+      when is_pid(supervisor) and is_integer(timeout) and timeout > 0 do
+    case SupervisedOwner.child_pid(supervisor, __MODULE__) do
+      issuer_registry when is_pid(issuer_registry) ->
+        GenServer.call(issuer_registry, {:complete_startup, supervisor}, timeout)
+
+      nil ->
+        {:error, :issuer_registry_unavailable}
+    end
+  rescue
+    _ -> {:error, :issuer_registry_unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :issuer_registry_startup_timeout}
+    :exit, _ -> {:error, :issuer_registry_unavailable}
+  end
+
+  def complete_startup(_supervisor, _timeout), do: {:error, :invalid_issuer_registry_startup}
+
   @doc """
-  Enroll an identity as a capability-signing issuer with a set of maximum
-  envelopes.
+  Refuse the retired unauthenticated issuer-enrollment API.
 
-  The identity must already be registered in `Identity.Registry`. Each
-  envelope cap in the list defines a bound on what this issuer may sign:
-  any signed capability must be a `Capability.envelope_subset?/2` of AT
-  LEAST ONE envelope cap.
-
-  Multiple envelope caps are how a single issuer is authorized for
-  multiple non-overlapping resource patterns (e.g. read access to one
-  subtree AND write access to another) without resorting to a coarser
-  pattern that would dilute the bound.
-
-  ## Options
-
-    - `:reason` — human-readable reason for enrollment, recorded for audit
-
-  Returns `:ok` only after the exact insert is acknowledged. Authority lookup
-  and mutation failures return bounded store errors rather than being treated
-  as an unenrolled issuer.
+  Issuer authority is created only through the `Arbor.Security` facade, which
+  obtains an owner-bound, one-shot SystemAuthority attestation and calls
+  `register_authorized/4`.
   """
-  @spec register(String.t(), [Capability.t()], keyword()) ::
+  @spec register(String.t(), Capability.t() | [Capability.t()], keyword()) ::
+          {:error, :issuer_mutation_unauthorized}
+  def register(_issuer_id, _envelope_caps, _opts \\ []),
+    do: {:error, :issuer_mutation_unauthorized}
+
+  @doc false
+  @spec register_authorized(String.t(), [Capability.t()], keyword(), term()) ::
           :ok | {:error, atom() | tuple()}
-  def register(issuer_id, envelope_caps, opts \\ [])
-
-  def register(issuer_id, envelope_caps, opts)
-      when is_binary(issuer_id) and is_list(envelope_caps) do
-    GenServer.call(__MODULE__, {:register, issuer_id, envelope_caps, opts})
+  def register_authorized(issuer_id, envelope_caps, opts, proof)
+      when is_binary(issuer_id) and is_list(envelope_caps) and is_list(opts) do
+    server_call({:register_authorized, issuer_id, envelope_caps, opts, proof})
   end
 
-  def register(issuer_id, %Capability{} = single, opts) when is_binary(issuer_id) do
-    # Backward-compat shim for callers that still pass a single Capability.
-    # Wraps in a one-element list. New callers should pass a list directly.
-    register(issuer_id, [single], opts)
+  def register_authorized(issuer_id, %Capability{} = envelope, opts, proof)
+      when is_binary(issuer_id) and is_list(opts) do
+    register_authorized(issuer_id, [envelope], opts, proof)
   end
+
+  def register_authorized(_issuer_id, _envelopes, _opts, _proof),
+    do: {:error, :issuer_mutation_unauthorized}
+
+  @doc """
+  Compute the exact payload digest bound into an issuer mutation attestation.
+
+  The digest commits to the operation, issuer, complete serialized envelope
+  list, and whether the optional reason was omitted or explicitly replaced.
+  Revocation binds the supplied reason directly.
+  """
+  @spec mutation_payload_digest(
+          :register | :update | :revoke,
+          String.t(),
+          [Capability.t()] | String.t() | nil,
+          keyword()
+        ) :: {:ok, String.t()} | {:error, atom()}
+  def mutation_payload_digest(operation, issuer_id, payload, opts \\ [])
+
+  def mutation_payload_digest(operation, issuer_id, envelope_caps, opts)
+      when operation in [:register, :update] and is_binary(issuer_id) and
+             is_list(envelope_caps) and is_list(opts) do
+    with :ok <- validate_envelopes(envelope_caps),
+         {:ok, reason} <- normalized_reason_opts(opts),
+         {:ok, bytes} <-
+           CanonicalJson.encode(%{
+             "schema" => @mutation_schema,
+             "operation" => Atom.to_string(operation),
+             "issuer_id" => issuer_id,
+             "max_envelope_caps" => Enum.map(envelope_caps, &Serializer.serialize/1),
+             "reason_present" => Keyword.has_key?(opts, :reason),
+             "reason" => reason
+           }) do
+      {:ok, sha256_hex(bytes)}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_issuer_mutation}
+    end
+  rescue
+    _ -> {:error, :invalid_issuer_mutation}
+  catch
+    _, _ -> {:error, :invalid_issuer_mutation}
+  end
+
+  def mutation_payload_digest(:revoke, issuer_id, reason, opts)
+      when is_binary(issuer_id) and is_list(opts) do
+    with true <- opts == [],
+         true <- is_nil(reason) or is_binary(reason),
+         {:ok, bytes} <-
+           CanonicalJson.encode(%{
+             "schema" => @mutation_schema,
+             "operation" => "revoke",
+             "issuer_id" => issuer_id,
+             "reason" => reason
+           }) do
+      {:ok, sha256_hex(bytes)}
+    else
+      _ -> {:error, :invalid_issuer_mutation}
+    end
+  rescue
+    _ -> {:error, :invalid_issuer_mutation}
+  catch
+    _, _ -> {:error, :invalid_issuer_mutation}
+  end
+
+  def mutation_payload_digest(_operation, _issuer_id, _payload, _opts),
+    do: {:error, :invalid_issuer_mutation}
 
   @doc """
   Look up an enrolled issuer's public key + envelope caps.
@@ -106,7 +192,7 @@ defmodule Arbor.Security.IssuerRegistry do
           {:ok, %{public_key: binary(), max_envelope_caps: [Capability.t()]}}
           | {:error, :not_found | :revoked | :identity_unavailable | atom()}
   def lookup(issuer_id) when is_binary(issuer_id) do
-    GenServer.call(__MODULE__, {:lookup, issuer_id})
+    server_call({:lookup, issuer_id})
   end
 
   @doc """
@@ -150,62 +236,57 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @doc """
-  Revoke an issuer. Their signed `.caps.json` files will no longer be honored.
-
-  The underlying identity is NOT affected — only their cap-signing privilege.
-  Captures `reason` for audit.
-
-  Returns `:ok` only after the exact replacement is acknowledged. It may also
-  return `:not_found`, `:conflict`, `:outcome_unknown`, `:store_unavailable`,
-  or `:malformed_authority`.
+  Refuse the retired unauthenticated issuer-revocation API.
   """
-  @spec revoke(String.t(), String.t() | nil) ::
-          :ok
-          | {:error,
-             :not_found
-             | :conflict
-             | :outcome_unknown
-             | :store_unavailable
-             | :malformed_authority}
-  def revoke(issuer_id, reason \\ nil) when is_binary(issuer_id) do
-    GenServer.call(__MODULE__, {:revoke, issuer_id, reason})
+  @spec revoke(String.t(), String.t() | nil) :: {:error, :issuer_mutation_unauthorized}
+  def revoke(_issuer_id, _reason \\ nil), do: {:error, :issuer_mutation_unauthorized}
+
+  @doc false
+  @spec revoke_authorized(String.t(), String.t() | nil, term()) ::
+          :ok | {:error, atom() | tuple()}
+  def revoke_authorized(issuer_id, reason, proof)
+      when is_binary(issuer_id) and (is_binary(reason) or is_nil(reason)) do
+    server_call({:revoke_authorized, issuer_id, reason, proof})
   end
 
+  def revoke_authorized(_issuer_id, _reason, _proof),
+    do: {:error, :issuer_mutation_unauthorized}
+
   @doc """
-  Replace the envelope list for an active issuer.
-
-  Use this when an operator needs to expand or narrow an existing
-  issuer's authority WITHOUT going through revoke + re-register, which
-  would invalidate every `.caps.json` previously signed under the
-  original envelope set even if those files would still fit within the
-  new envelopes.
-
-  Semantics:
-    - Replaces the FULL envelope list (not appends). Callers pass the
-      complete new set; what isn't in the list is dropped.
-    - Issuer must be active. Revoked issuers can't be updated — caller
-      must explicitly re-enroll if they want to bring a revoked issuer
-      back, which is a deliberate friction point (key compromise
-      shouldn't be quietly undone).
-    - Validates the new list is non-empty and contains only `Capability`
-      structs (same as `register/3`).
-    - Commits through the Security-owned authority store before returning.
-
-  ## Options
-
-    - `:reason` — human-readable reason for the update, recorded for audit.
-
-  Returns `:ok` only after the exact replacement is acknowledged. Validation,
-  lookup, conflict, and authority-availability failures are returned as bounded
-  errors.
+  Refuse the retired unauthenticated envelope-update API.
   """
   @spec update_envelopes(String.t(), [Capability.t()], keyword()) ::
-          :ok | {:error, atom() | tuple()}
-  def update_envelopes(issuer_id, envelope_caps, opts \\ [])
+          {:error, :issuer_mutation_unauthorized}
+  def update_envelopes(_issuer_id, _envelope_caps, _opts \\ []),
+    do: {:error, :issuer_mutation_unauthorized}
 
-  def update_envelopes(issuer_id, envelope_caps, opts)
-      when is_binary(issuer_id) and is_list(envelope_caps) do
-    GenServer.call(__MODULE__, {:update_envelopes, issuer_id, envelope_caps, opts})
+  @doc false
+  @spec update_envelopes_authorized(String.t(), [Capability.t()], keyword(), term()) ::
+          :ok | {:error, atom() | tuple()}
+  def update_envelopes_authorized(issuer_id, envelope_caps, opts, proof)
+      when is_binary(issuer_id) and is_list(envelope_caps) and is_list(opts) do
+    server_call({:update_envelopes_authorized, issuer_id, envelope_caps, opts, proof})
+  end
+
+  def update_envelopes_authorized(_issuer_id, _envelope_caps, _opts, _proof),
+    do: {:error, :issuer_mutation_unauthorized}
+
+  if Mix.env() == :test do
+    @doc false
+    def register_fixture(issuer_id, envelope_caps, opts \\ []) do
+      envelopes =
+        if match?(%Capability{}, envelope_caps), do: [envelope_caps], else: envelope_caps
+
+      server_call({:register_fixture, issuer_id, envelopes, opts})
+    end
+
+    @doc false
+    def revoke_fixture(issuer_id, reason \\ nil),
+      do: server_call({:revoke_fixture, issuer_id, reason})
+
+    @doc false
+    def update_envelopes_fixture(issuer_id, envelope_caps, opts \\ []),
+      do: server_call({:update_envelopes_fixture, issuer_id, envelope_caps, opts})
   end
 
   @doc """
@@ -222,7 +303,7 @@ defmodule Arbor.Security.IssuerRegistry do
           }
         ]
   def list do
-    GenServer.call(__MODULE__, :list)
+    server_call(:list)
   end
 
   # ===========================================================================
@@ -230,23 +311,77 @@ defmodule Arbor.Security.IssuerRegistry do
   # ===========================================================================
 
   @impl true
-  def init(_opts) do
-    if Process.whereis(@store) do
-      case take_and_validate_authority() do
-        :ok -> {:ok, %{authority_mode: :durable}}
-        {:error, reason} -> {:stop, {:issuer_authority, reason}}
-      end
+  def init(opts) do
+    Process.flag(:sensitive, true)
+
+    with {:ok, supervisor_pid} <- startup_supervisor_pid(),
+         {:ok, defer_initialization?} <- defer_initialization(opts),
+         :ok <- claim_owner_directory() do
+      state = %{
+        authority_mode: :pending,
+        initialization: :pending,
+        security_supervisor_pid: supervisor_pid
+      }
+
+      if defer_initialization? and not SupervisedOwner.application_started?(:arbor_security),
+        do: {:ok, state},
+        else: {:ok, state, {:continue, :restore_authority}}
     else
-      {:ok, %{authority_mode: :unavailable}}
+      {:error, reason} -> {:stop, reason}
     end
   end
 
   @impl true
-  def handle_call({:register, issuer_id, envelope_caps, opts}, _from, state) do
+  def handle_continue(:restore_authority, state) do
+    if Process.whereis(@store) do
+      case take_and_validate_authority() do
+        :ok -> {:noreply, %{state | authority_mode: :durable, initialization: :ready}}
+        {:error, reason} -> {:stop, {:issuer_authority, reason}, state}
+      end
+    else
+      {:noreply, %{state | authority_mode: :unavailable, initialization: :ready}}
+    end
+  end
+
+  @impl true
+  def handle_call({:complete_startup, supervisor}, _from, state) do
+    cond do
+      supervisor !== state.security_supervisor_pid ->
+        {:reply, {:error, :invalid_issuer_registry_startup}, state}
+
+      state.initialization == :ready ->
+        {:reply, :ok, state}
+
+      state.initialization == :pending and Process.whereis(@store) ->
+        case take_and_validate_authority(supervisor) do
+          :ok ->
+            {:reply, :ok, %{state | authority_mode: :durable, initialization: :ready}}
+
+          {:error, reason} ->
+            {:stop, {:issuer_authority, reason}, {:error, reason}, state}
+        end
+
+      state.initialization == :pending ->
+        {:reply, :ok, %{state | authority_mode: :unavailable, initialization: :ready}}
+
+      true ->
+        {:reply, {:error, :invalid_issuer_registry_startup}, state}
+    end
+  end
+
+  def handle_call(_request, _from, %{initialization: initialization} = state)
+      when initialization != :ready do
+    {:reply, {:error, :issuer_registry_unavailable}, state}
+  end
+
+  def handle_call({:register_authorized, issuer_id, envelope_caps, opts, proof}, _from, state) do
     with :ok <- require_authority(state),
          :ok <- validate_envelopes(envelope_caps),
+         {:ok, _reason} <- normalized_reason_opts(opts),
          {:error, :not_found} <- authoritative_entry(issuer_id),
-         :ok <- require_identity(issuer_id) do
+         :ok <- require_identity(issuer_id),
+         {:ok, digest} <- mutation_payload_digest(:register, issuer_id, envelope_caps, opts),
+         :ok <- consume_mutation_attestation(proof, :register, digest) do
       entry = %{
         max_envelope_caps: envelope_caps,
         status: :active,
@@ -265,6 +400,32 @@ defmodule Arbor.Security.IssuerRegistry do
     end
   end
 
+  if Mix.env() == :test do
+    def handle_call({:register_fixture, issuer_id, envelope_caps, opts}, _from, state) do
+      with :ok <- require_authority(state),
+           :ok <- validate_envelopes(envelope_caps),
+           {:ok, _reason} <- normalized_reason_opts(opts),
+           {:error, :not_found} <- authoritative_entry(issuer_id),
+           :ok <- require_identity(issuer_id) do
+        entry = %{
+          max_envelope_caps: envelope_caps,
+          status: :active,
+          enrolled_at: DateTime.utc_now(),
+          status_changed_at: nil,
+          status_reason: Keyword.get(opts, :reason)
+        }
+
+        case acknowledged_insert(issuer_id, entry) do
+          :ok -> {:reply, :ok, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+      else
+        {:ok, _record, _entry} -> {:reply, {:error, :already_enrolled}, state}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    end
+  end
+
   @impl true
   def handle_call({:lookup, issuer_id}, _from, state) do
     result =
@@ -277,9 +438,11 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @impl true
-  def handle_call({:revoke, issuer_id, reason}, _from, state) do
+  def handle_call({:revoke_authorized, issuer_id, reason, proof}, _from, state) do
     with :ok <- require_authority(state),
-         {:ok, current, entry} <- authoritative_entry(issuer_id) do
+         {:ok, current, entry} <- authoritative_entry(issuer_id),
+         {:ok, digest} <- mutation_payload_digest(:revoke, issuer_id, reason),
+         :ok <- consume_mutation_attestation(proof, :revoke, digest) do
       updated = %{
         entry
         | status: :revoked,
@@ -293,6 +456,27 @@ defmodule Arbor.Security.IssuerRegistry do
       end
     else
       {:error, error} -> {:reply, {:error, error}, state}
+    end
+  end
+
+  if Mix.env() == :test do
+    def handle_call({:revoke_fixture, issuer_id, reason}, _from, state) do
+      with :ok <- require_authority(state),
+           {:ok, current, entry} <- authoritative_entry(issuer_id) do
+        updated = %{
+          entry
+          | status: :revoked,
+            status_changed_at: DateTime.utc_now(),
+            status_reason: reason
+        }
+
+        case acknowledged_replace(issuer_id, current, updated) do
+          :ok -> {:reply, :ok, state}
+          {:error, error} -> {:reply, {:error, error}, state}
+        end
+      else
+        {:error, error} -> {:reply, {:error, error}, state}
+      end
     end
   end
 
@@ -313,11 +497,18 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @impl true
-  def handle_call({:update_envelopes, issuer_id, envelope_caps, opts}, _from, state) do
+  def handle_call(
+        {:update_envelopes_authorized, issuer_id, envelope_caps, opts, proof},
+        _from,
+        state
+      ) do
     with :ok <- require_authority(state),
          :ok <- validate_envelopes(envelope_caps),
+         {:ok, _reason} <- normalized_reason_opts(opts),
          {:ok, current, entry} <- authoritative_entry(issuer_id),
-         :ok <- require_active_issuer(entry) do
+         :ok <- require_active_issuer(entry),
+         {:ok, digest} <- mutation_payload_digest(:update, issuer_id, envelope_caps, opts),
+         :ok <- consume_mutation_attestation(proof, :update, digest) do
       updated = %{
         entry
         | max_envelope_caps: envelope_caps,
@@ -330,6 +521,29 @@ defmodule Arbor.Security.IssuerRegistry do
       end
     else
       {:error, error} -> {:reply, {:error, error}, state}
+    end
+  end
+
+  if Mix.env() == :test do
+    def handle_call({:update_envelopes_fixture, issuer_id, envelope_caps, opts}, _from, state) do
+      with :ok <- require_authority(state),
+           :ok <- validate_envelopes(envelope_caps),
+           {:ok, _reason} <- normalized_reason_opts(opts),
+           {:ok, current, entry} <- authoritative_entry(issuer_id),
+           :ok <- require_active_issuer(entry) do
+        updated = %{
+          entry
+          | max_envelope_caps: envelope_caps,
+            status_reason: Keyword.get(opts, :reason, entry.status_reason)
+        }
+
+        case acknowledged_replace(issuer_id, current, updated) do
+          :ok -> {:reply, :ok, state}
+          {:error, error} -> {:reply, {:error, error}, state}
+        end
+      else
+        {:error, error} -> {:reply, {:error, error}, state}
+      end
     end
   end
 
@@ -375,6 +589,34 @@ defmodule Arbor.Security.IssuerRegistry do
   defp require_active_issuer(%{status: :active}), do: :ok
   defp require_active_issuer(%{status: :revoked}), do: {:error, :revoked}
   defp require_active_issuer(_entry), do: {:error, :malformed_authority}
+
+  defp normalized_reason_opts(opts) do
+    with true <- Keyword.keyword?(opts),
+         keys = Keyword.keys(opts),
+         true <- keys == Enum.uniq(keys),
+         true <- Enum.all?(keys, &(&1 == :reason)),
+         reason = Keyword.get(opts, :reason),
+         true <- is_nil(reason) or is_binary(reason) do
+      {:ok, reason}
+    else
+      _ -> {:error, :invalid_opts}
+    end
+  end
+
+  defp consume_mutation_attestation(proof, operation, digest) do
+    case SystemAuthority.consume_issuer_mutation_attestation(proof, operation, digest) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :issuer_mutation_unauthorized}
+      _ -> {:error, :issuer_mutation_unauthorized}
+    end
+  rescue
+    _ -> {:error, :issuer_mutation_unauthorized}
+  catch
+    _, _ -> {:error, :issuer_mutation_unauthorized}
+  end
+
+  defp sha256_hex(bytes),
+    do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp validate_envelopes([]), do: {:error, :empty_envelopes}
 
@@ -441,6 +683,19 @@ defmodule Arbor.Security.IssuerRegistry do
     else
       {:error, reason} -> {:error, issuer_hydration_error(reason)}
       _ -> {:error, :malformed_inventory}
+    end
+  end
+
+  defp take_and_validate_authority(supervisor) do
+    with {:ok, entries} <-
+           safe_authority_call(fn ->
+             AuthorityStore.take_hydrated_entries_from_supervisor(supervisor, name: @store)
+           end),
+         {:ok, _validated} <- validate_authority_entries(entries) do
+      :ok
+    else
+      {:error, reason} -> {:error, issuer_hydration_error(reason)}
+      _other -> {:error, :malformed_inventory}
     end
   end
 
@@ -715,4 +970,59 @@ defmodule Arbor.Security.IssuerRegistry do
 
   defp deserialize_optional_datetime(nil), do: {:ok, nil}
   defp deserialize_optional_datetime(iso), do: deserialize_datetime(iso)
+
+  defp server_call(message, timeout \\ 5_000) do
+    case server_pid() do
+      pid when is_pid(pid) -> GenServer.call(pid, message, timeout)
+      nil -> exit({:noproc, {GenServer, :call, [__MODULE__, message, timeout]}})
+    end
+  end
+
+  defp server_pid do
+    SupervisedOwner.protected_directory_owner(
+      @owner_directory,
+      :owner,
+      :arbor_security,
+      [__MODULE__]
+    )
+  end
+
+  defp defer_initialization(opts) when is_list(opts) do
+    case Keyword.get(opts, :defer_initialization, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _invalid -> {:error, :invalid_issuer_registry_startup}
+    end
+  rescue
+    _ -> {:error, :invalid_issuer_registry_startup}
+  end
+
+  defp defer_initialization(_opts), do: {:error, :invalid_issuer_registry_startup}
+
+  defp startup_supervisor_pid do
+    case Process.get(:"$ancestors") do
+      [pid | _] when is_pid(pid) -> linked_supervisor(pid)
+      [name | _] when is_atom(name) -> name |> Process.whereis() |> linked_supervisor()
+      _other -> {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(pid) when is_pid(pid) do
+    case Process.info(self(), :links) do
+      {:links, links} when is_list(links) ->
+        if pid in links, do: {:ok, pid}, else: {:error, :security_supervisor_unavailable}
+
+      _other ->
+        {:error, :security_supervisor_unavailable}
+    end
+  end
+
+  defp linked_supervisor(_pid), do: {:error, :security_supervisor_unavailable}
+
+  defp claim_owner_directory do
+    table = :ets.new(@owner_directory, [:named_table, :protected, :set, read_concurrency: true])
+    true = :ets.insert(table, {:owner, self()})
+    :ok
+  rescue
+    _ -> {:error, :issuer_registry_owner_directory_unavailable}
+  end
 end

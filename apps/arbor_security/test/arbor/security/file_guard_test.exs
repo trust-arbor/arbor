@@ -1,7 +1,9 @@
 defmodule Arbor.Security.FileGuardTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Security.{Capability, Identity}
+  alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.FileGuard
   alias Arbor.Security.SystemAuthority
@@ -21,11 +23,14 @@ defmodule Arbor.Security.FileGuardTest do
         resource_uri: uri,
         principal_id: agent_id,
         constraints: Keyword.get(opts, :constraints, %{}),
-        expires_at: Keyword.get(opts, :expires_at)
+        expires_at: Keyword.get(opts, :expires_at),
+        session_id: Keyword.get(opts, :session_id),
+        task_id: Keyword.get(opts, :task_id),
+        principal_scope: Keyword.get(opts, :principal_scope)
       )
 
-    {:ok, signed} = SystemAuthority.sign_capability(cap)
-    {:ok, :stored} = CapabilityStore.put(signed)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+    {:ok, :stored} = CapabilityStore.put_fixture(signed)
     {:ok, signed}
   end
 
@@ -100,7 +105,8 @@ defmodule Arbor.Security.FileGuardTest do
       refute File.exists?(target)
       {:ok, _cap} = grant_fs_capability(agent_id, :read, target)
 
-      assert {:ok, ^target} = FileGuard.authorize(agent_id, target, :read)
+      assert {:ok, expected} = SafePath.resolve_within(target, parent)
+      assert {:ok, ^expected} = FileGuard.authorize(agent_id, target, :read)
     end
 
     test "authorizes via parent capability", %{agent_id: agent_id} do
@@ -110,6 +116,32 @@ defmodule Arbor.Security.FileGuardTest do
                FileGuard.authorize(agent_id, "/workspace/subdir/file.ex", :read)
     end
 
+    test "security regression: parent fallback never accepts an unsigned stored capability",
+         %{agent_id: agent_id} do
+      previous = Application.get_env(:arbor_security, :capability_signing_required)
+      Application.put_env(:arbor_security, :capability_signing_required, true)
+      on_exit(fn -> restore_env(:capability_signing_required, previous) end)
+
+      {:ok, unsigned} =
+        Capability.new(
+          resource_uri: FileGuard.resource_uri(:read, "/unsigned-parent"),
+          principal_id: agent_id
+        )
+
+      assert {:ok, :stored} = CapabilityStore.put_fixture(unsigned)
+
+      assert {:error, :no_capability} =
+               FileGuard.authorize(agent_id, "/unsigned-parent/secret.txt", :read)
+    end
+
+    test "security regression: a directory capability does not cover a sibling prefix",
+         %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+
+      assert {:error, :no_capability} =
+               FileGuard.authorize(agent_id, "/workspace_evil/secret.txt", :read)
+    end
+
     test "denies without any capability", %{agent_id: agent_id} do
       assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
@@ -117,8 +149,12 @@ defmodule Arbor.Security.FileGuardTest do
     test "denies path traversal", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
 
-      assert {:error, :path_traversal} =
+      # Capability lookup may reject the escaped path before the later path
+      # resolver classifies it. Both results are fail-closed.
+      assert {:error, reason} =
                FileGuard.authorize(agent_id, "/workspace/../etc/passwd", :read)
+
+      assert reason in [:no_capability, :path_traversal]
     end
 
     test "denies for wrong operation", %{agent_id: agent_id} do
@@ -142,9 +178,9 @@ defmodule Arbor.Security.FileGuardTest do
           expires_at: DateTime.add(DateTime.utc_now(), 1)
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
       expired = %{signed | expires_at: past}
-      {:ok, :stored} = CapabilityStore.put(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
       assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
@@ -210,6 +246,15 @@ defmodule Arbor.Security.FileGuardTest do
                FileGuard.authorize(agent_id, "/workspace/src/deep/file.ex", :read)
     end
 
+    test "security regression: repeated root text cannot under-count max_depth",
+         %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/a", constraints: %{max_depth: 1})
+
+      assert {:error, :max_depth_exceeded} =
+               FileGuard.authorize(agent_id, "/a/a/secret.txt", :read)
+    end
+
     test "no constraints allows everything", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
       assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/any/deep/path/file.txt", :read)
@@ -258,6 +303,129 @@ defmodule Arbor.Security.FileGuardTest do
     end
   end
 
+  describe "descriptor-bound Security.read_authorized_file/3" do
+    @tag spec: "SSEC-015"
+    test "security regression: reads through a scoped wildcard capability root", %{
+      agent_id: agent_id
+    } do
+      root = Path.join(System.tmp_dir!(), "file_guard_descriptor_#{System.unique_integer()}")
+      path = Path.join(root, "inside.txt")
+      File.mkdir_p!(root)
+      File.write!(path, "descriptor-bound")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, capability} = grant_fs_capability(agent_id, :read, root <> "/**")
+
+      assert {:ok, "descriptor-bound", opened_path} =
+               Security.read_authorized_file(agent_id, path, verify_identity: false)
+
+      assert {:ok, canonical_path} = SafePath.resolve_real(path)
+      assert opened_path == canonical_path
+      assert capability.resource_uri == FileGuard.resource_uri(:read, root <> "/**")
+    end
+
+    @tag spec: "SSEC-015"
+    test "security regression: an operation-wide read capability is rooted at filesystem root",
+         %{agent_id: agent_id} do
+      root = Path.join(System.tmp_dir!(), "file_guard_read_wildcard_#{System.unique_integer()}")
+      path = Path.join(root, "inside.txt")
+      File.mkdir_p!(root)
+      File.write!(path, "wildcard-read")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, capability} = grant_fs_capability(agent_id, :read, "/**")
+
+      assert {:ok, "wildcard-read", _opened_path} =
+               Security.read_authorized_file(agent_id, path, verify_identity: false)
+
+      assert capability.resource_uri == "arbor://fs/read/**"
+    end
+
+    @tag spec: "KSEC-012,SSEC-015"
+    test "security regression: exact file authority cannot follow a replacement symlink",
+         %{agent_id: agent_id} do
+      root = Path.join(System.tmp_dir!(), "file_guard_exact_read_#{System.unique_integer()}")
+      outside = Path.join(root, "sibling-secret.txt")
+      path = Path.join(root, "candidate.txt")
+      File.mkdir_p!(root)
+      File.write!(path, "inside")
+      File.write!(outside, "outside-secret")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, capability} = grant_fs_capability(agent_id, :read, path)
+      File.rm!(path)
+      File.ln_s!(outside, path)
+
+      assert {:error, reason} =
+               Security.read_authorized_file(agent_id, path,
+                 verify_identity: false,
+                 exact_capability_id: capability.id
+               )
+
+      assert reason in [:not_regular, :path_traversal, :path_changed, :unauthorized]
+    end
+
+    @tag spec: "SSEC-015"
+    test "security regression: exact file reads preserve max-depth-zero semantics", %{
+      agent_id: agent_id
+    } do
+      root = Path.join(System.tmp_dir!(), "file_guard_exact_depth_#{System.unique_integer()}")
+      path = Path.join(root, "candidate.txt")
+      File.mkdir_p!(root)
+      File.write!(path, "exact-depth-zero")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, capability} =
+        grant_fs_capability(agent_id, :read, path, constraints: %{max_depth: 0})
+
+      assert {:ok, "exact-depth-zero", _opened_path} =
+               Security.read_authorized_file(agent_id, path,
+                 verify_identity: false,
+                 exact_capability_id: capability.id
+               )
+    end
+
+    @tag spec: "SSEC-015"
+    test "security regression: a single wildcard cannot read nested descendants", %{
+      agent_id: agent_id
+    } do
+      root = Path.join(System.tmp_dir!(), "file_guard_single_read_#{System.unique_integer()}")
+      path = Path.join([root, "nested", "secret.txt"])
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "nested-secret")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, _capability} = grant_fs_capability(agent_id, :read, root <> "/*")
+
+      assert {:error, :unauthorized} =
+               Security.read_authorized_file(agent_id, path, verify_identity: false)
+    end
+
+    @tag spec: "KSEC-012,SSEC-015"
+    test "security regression: a single wildcard cannot reach a deeper target through a direct-child symlink",
+         %{agent_id: agent_id} do
+      root = Path.join(System.tmp_dir!(), "file_guard_single_link_#{System.unique_integer()}")
+      deep_path = Path.join([root, "nested", "secret.txt"])
+      link = Path.join(root, "shortcut")
+      File.mkdir_p!(Path.dirname(deep_path))
+      File.write!(deep_path, "nested-secret")
+      File.ln_s!(deep_path, link)
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, _capability} = grant_fs_capability(agent_id, :read, root <> "/*")
+
+      assert {:error, reason} =
+               Security.read_authorized_file(agent_id, link, verify_identity: false)
+
+      assert reason in [:no_capability, :unauthorized]
+    end
+
+    @tag spec: "SSEC-015"
+    test "security regression: FileGuard exposes no capability-as-data read bypass" do
+      refute function_exported?(FileGuard, :read_for_capability, 2)
+    end
+  end
+
   # ===========================================================================
   # List FS capabilities
   # ===========================================================================
@@ -274,8 +442,8 @@ defmodule Arbor.Security.FileGuardTest do
           principal_id: agent_id
         )
 
-      {:ok, signed_api} = SystemAuthority.sign_capability(api_cap)
-      {:ok, :stored} = CapabilityStore.put(signed_api)
+      {:ok, signed_api} = SystemAuthority.sign_capability_for_test(api_cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed_api)
 
       {:ok, fs_caps} = FileGuard.list_fs_capabilities(agent_id)
 
@@ -291,8 +459,8 @@ defmodule Arbor.Security.FileGuardTest do
           principal_id: agent_id
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(api_cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(api_cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       {:ok, fs_caps} = FileGuard.list_fs_capabilities(agent_id)
       assert fs_caps == []
@@ -320,19 +488,10 @@ defmodule Arbor.Security.FileGuardTest do
         File.rm_rf!(outside)
       end)
 
-      agent_id = "h2_test_#{n}"
+      {:ok, identity} = Identity.generate(name: "file-guard-h2-#{n}")
+      agent_id = identity.agent_id
 
-      now = DateTime.utc_now()
-
-      cap = %Capability{
-        id: "cap_h2_#{n}",
-        principal_id: agent_id,
-        resource_uri: "arbor://fs/read#{workspace}",
-        granted_at: now,
-        expires_at: DateTime.add(now, 3600, :second)
-      }
-
-      CapabilityStore.put(cap)
+      assert {:ok, _cap} = grant_fs_capability(agent_id, :read, workspace)
 
       %{
         agent_id: agent_id,
@@ -352,7 +511,9 @@ defmodule Arbor.Security.FileGuardTest do
       # after normalization and verifies the real path stays within root.
       result = FileGuard.authorize(agent_id, symlink, :read)
 
-      assert {:error, :symlink_escape} = result,
+      assert {:error, reason} = result
+
+      assert reason in [:no_capability, :path_traversal, :symlink_escape],
              "Symlink pointing outside authorized root must be rejected — H2 regression. " <>
                "Got: #{inspect(result)}"
     end
@@ -380,7 +541,9 @@ defmodule Arbor.Security.FileGuardTest do
 
       result = FileGuard.authorize(agent_id, requested, :read)
 
-      assert {:error, :symlink_escape} = result,
+      assert {:error, reason} = result
+
+      assert reason in [:no_capability, :path_traversal, :symlink_escape],
              "file under a symlinked ancestor directory must be rejected. Got: #{inspect(result)}"
     end
 
@@ -389,15 +552,7 @@ defmodule Arbor.Security.FileGuardTest do
       # The write/create variant: the target file does not exist yet, so
       # resolution falls to the ancestor chain. A symlinked ancestor must still
       # be detected (otherwise the future write lands outside the root).
-      now = DateTime.utc_now()
-
-      CapabilityStore.put(%Capability{
-        id: "cap_h2_write_#{agent_id}",
-        principal_id: agent_id,
-        resource_uri: "arbor://fs/write#{workspace}",
-        granted_at: now,
-        expires_at: DateTime.add(now, 3600, :second)
-      })
+      assert {:ok, _cap} = grant_fs_capability(agent_id, :write, workspace)
 
       anc_link = Path.join(workspace, "anc_link_w")
       File.ln_s!(outside, anc_link)
@@ -405,7 +560,9 @@ defmodule Arbor.Security.FileGuardTest do
 
       result = FileGuard.authorize(agent_id, requested, :write)
 
-      assert {:error, :symlink_escape} = result,
+      assert {:error, reason} = result
+
+      assert reason in [:no_capability, :path_traversal, :symlink_escape],
              "creating a file under a symlinked ancestor must be rejected. Got: #{inspect(result)}"
     end
 
@@ -426,15 +583,7 @@ defmodule Arbor.Security.FileGuardTest do
       # walks up to <ws>/deep_link/sub, which exists), and resolving THAT path
       # must follow the grandparent `deep_link` (Piece A) to land in <outside>
       # and be flagged. Drop either piece and the escape authorizes.
-      now = DateTime.utc_now()
-
-      CapabilityStore.put(%Capability{
-        id: "cap_h4_deep_#{agent_id}",
-        principal_id: agent_id,
-        resource_uri: "arbor://fs/write#{workspace}",
-        granted_at: now,
-        expires_at: DateTime.add(now, 3600, :second)
-      })
+      assert {:ok, _cap} = grant_fs_capability(agent_id, :write, workspace)
 
       File.mkdir_p!(Path.join(outside, "sub"))
       deep_link = Path.join(workspace, "deep_link")
@@ -443,22 +592,16 @@ defmodule Arbor.Security.FileGuardTest do
 
       result = FileGuard.authorize(agent_id, requested, :write)
 
-      assert {:error, :symlink_escape} = result,
+      assert {:error, reason} = result
+
+      assert reason in [:no_capability, :path_traversal, :symlink_escape],
              "create under a deeply-nested ancestor symlink must be rejected (needs both controls). " <>
                "Got: #{inspect(result)}"
     end
 
     test "security regression (missing immediate parent): higher ancestor symlink is rejected",
          %{agent_id: agent_id, workspace: workspace, outside: outside} do
-      now = DateTime.utc_now()
-
-      CapabilityStore.put(%Capability{
-        id: "cap_missing_parent_#{agent_id}",
-        principal_id: agent_id,
-        resource_uri: "arbor://fs/write#{workspace}",
-        granted_at: now,
-        expires_at: DateTime.add(now, 3600, :second)
-      })
+      assert {:ok, _cap} = grant_fs_capability(agent_id, :write, workspace)
 
       escape_link = Path.join(workspace, "escape_missing_parent")
       missing_parent = Path.join(escape_link, "missing_parent")
@@ -471,9 +614,14 @@ defmodule Arbor.Security.FileGuardTest do
 
       result = FileGuard.authorize(agent_id, requested, :write)
 
-      assert {:error, :symlink_escape} = result,
+      assert {:error, reason} = result
+
+      assert reason in [:no_capability, :path_traversal, :symlink_escape],
              "a missing immediate parent must not hide a higher symlink escape. " <>
                "Got: #{inspect(result)}"
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
 end

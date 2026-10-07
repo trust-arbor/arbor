@@ -165,14 +165,14 @@ defmodule Arbor.Consensus.Phase2APITest do
       Application.put_env(:arbor_security, :capability_signing_required, false)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: @propose_caller_id,
           resource: "arbor://consensus/propose"
         )
 
       on_exit(fn ->
         if Process.whereis(Arbor.Security.CapabilityStore) do
-          Arbor.Security.CapabilityStore.revoke_all(@propose_caller_id)
+          Arbor.Security.revoke_all_fixture(@propose_caller_id)
         end
 
         if is_nil(original_signing) do

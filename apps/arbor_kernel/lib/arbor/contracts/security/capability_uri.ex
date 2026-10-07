@@ -246,7 +246,12 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
     capability.segments == resource.segments
   end
 
-  defp capability_matches_parsed?(%__MODULE__{} = capability, resource) do
+  defp capability_matches_parsed?(%__MODULE__{wildcard: :single} = capability, resource) do
+    prefix = match_segments(capability)
+    segment_prefix?(prefix, resource.segments) and length(resource.segments) == length(prefix) + 1
+  end
+
+  defp capability_matches_parsed?(%__MODULE__{wildcard: :recursive} = capability, resource) do
     root_wildcard?(capability) or segment_prefix?(match_segments(capability), resource.segments)
   end
 
@@ -264,12 +269,18 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
   end
 
   defp capability_subset_parsed?(%__MODULE__{wildcard: :none} = child, %__MODULE__{} = parent) do
-    segment_prefix?(match_segments(parent), child.segments)
+    capability_matches_parsed?(parent, child)
   end
 
-  defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{wildcard: :single} = parent) do
-    segment_prefix?(match_segments(parent), match_segments(child)) and
-      child.wildcard != :recursive
+  defp capability_subset_parsed?(
+         %__MODULE__{wildcard: :single} = child,
+         %__MODULE__{wildcard: :single} = parent
+       ) do
+    match_segments(child) == match_segments(parent)
+  end
+
+  defp capability_subset_parsed?(%__MODULE__{} = _child, %__MODULE__{wildcard: :single}) do
+    false
   end
 
   defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{wildcard: :none}) do
@@ -278,7 +289,10 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
     child.wildcard == :none
   end
 
-  defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{} = parent) do
+  defp capability_subset_parsed?(
+         %__MODULE__{} = child,
+         %__MODULE__{wildcard: :recursive} = parent
+       ) do
     segment_prefix?(match_segments(parent), match_segments(child))
   end
 

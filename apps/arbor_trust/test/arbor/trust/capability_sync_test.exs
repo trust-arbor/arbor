@@ -4,6 +4,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   alias Arbor.Trust.CapabilitySync
   alias Arbor.Trust.Config
   alias Arbor.Trust.Manager, as: Manager
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @moduletag :fast
 
@@ -140,11 +141,8 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   describe "handle_info/2 - trust events when enabled (without external services)" do
-    # These tests verify that enabled trust events attempt to call external
-    # services (Arbor.Security facade, Manager). Since those services
-    # are not running in unit tests, the handler catches the exits gracefully
-    # and returns {:noreply, state}. This confirms the event dispatch logic
-    # is working correctly and is resilient to missing services.
+    # Trust events are observability-only. They carry no authenticated actor,
+    # so the handler must remain inert even when mutation services are absent.
 
     test "tier_changed event handles missing service gracefully" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
@@ -160,11 +158,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "trust_frozen event handles missing service gracefully" do
+    test "trust_frozen event is observed without revoking" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # trust_frozen calls revoke_modifiable_capabilities
-      # which calls Arbor.Security.list_capabilities (CapabilityStore not running)
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_test", :trust_frozen, %{reason: :security_violation}},
@@ -172,10 +168,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "trust_unfrozen event handles missing service gracefully" do
+    test "trust_unfrozen event is observed without minting" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # trust_unfrozen calls do_sync_capabilities which calls Manager.get_trust_profile
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_test", :trust_unfrozen, %{}},
@@ -183,11 +178,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "profile_created event handles missing service gracefully" do
+    test "profile_created event is observed without minting" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # profile_created calls grant_tier_capabilities(:untrusted)
-      # which calls CapabilityStore.list_capabilities (not running)
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_test", :profile_created, %{tier: :untrusted}},
@@ -195,10 +188,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "unknown event with tier change metadata handles missing service gracefully" do
+    test "unknown event with tier change metadata is inert" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # Unknown event with previous_tier/new_tier triggers handle_tier_change
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_test", :some_other_event,
@@ -247,13 +239,11 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   describe "handle_call/3 - sync_capabilities" do
-    test "sync_capabilities calls Manager (exits without service)" do
+    test "legacy GenServer call cannot use ambient server authority" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # do_sync_capabilities calls Manager.get_trust_profile which is not running
-      assert catch_exit(
+      assert {:reply, {:error, :capability_mutation_unauthorized}, ^state} =
                CapabilitySync.handle_call({:sync_capabilities, "agent_test"}, self(), state)
-             )
     end
   end
 
@@ -342,7 +332,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   describe "handle_info/2 - trust_unfrozen event" do
-    test "trust_unfrozen restores capabilities (catches exit without Manager)" do
+    test "trust_unfrozen does not restore capabilities from an ambient event" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       assert {:noreply, ^state} =
@@ -365,7 +355,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   describe "handle_info/2 - profile_created event" do
-    test "profile_created grants untrusted tier capabilities (catches exit)" do
+    test "profile_created does not grant capabilities from an ambient event" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       assert {:noreply, ^state} =
@@ -386,8 +376,8 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
   end
 
-  describe "handle_info/2 - check_tier_change fallback for unknown events" do
-    test "unknown event with tier promotion triggers handle_tier_change" do
+  describe "handle_info/2 - unknown events with retired tier metadata" do
+    test "unknown event with tier promotion metadata is inert" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       assert {:noreply, ^state} =
@@ -398,7 +388,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "unknown event with tier demotion triggers handle_tier_change" do
+    test "unknown event with tier demotion metadata is inert" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       assert {:noreply, ^state} =
@@ -493,24 +483,22 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   describe "handle_call/3 - sync_capabilities with various agent_ids" do
-    test "sync_capabilities with agent_ prefix calls Manager (exits without service)" do
+    test "sync_capabilities with agent_ prefix is denied at the ambient server boundary" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      assert catch_exit(
+      assert {:reply, {:error, :capability_mutation_unauthorized}, ^state} =
                CapabilitySync.handle_call(
                  {:sync_capabilities, "agent_test_prefix"},
                  self(),
                  state
                )
-             )
     end
 
-    test "sync_capabilities with non-prefixed agent_id calls Manager (exits without service)" do
+    test "sync_capabilities with non-prefixed agent_id is denied at the ambient server boundary" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      assert catch_exit(
+      assert {:reply, {:error, :capability_mutation_unauthorized}, ^state} =
                CapabilitySync.handle_call({:sync_capabilities, "test_no_prefix"}, self(), state)
-             )
     end
   end
 
@@ -550,56 +538,51 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       ensure_event_store_started()
       ensure_manager_started()
       ensure_capability_sync_started()
-      :ok
+      {_identity, actor_authority} = actor_authority!()
+      {:ok, actor_authority: actor_authority}
     end
 
-    test "sync_capabilities for existing agent with prefix" do
+    test "sync_capabilities for existing agent with prefix", %{
+      actor_authority: actor_authority
+    } do
       {:ok, _} = Manager.create_trust_profile("agent_sync_prefix")
 
-      # CapabilitySync calls Manager.get_trust_profile and then grants capabilities
-      # The grant call will try Arbor.Security which may not be running, but
-      # the key code paths (do_sync_capabilities, grant_tier_capabilities, ensure_agent_prefix)
-      # are exercised
-      result = CapabilitySync.sync_capabilities("agent_sync_prefix")
-
-      case result do
-        {:ok, %{granted: _, existing: _, errors: _}} -> assert true
-        {:error, _} -> assert true
-      end
+      assert {:ok, %{granted: _, existing: _, errors: 0}} =
+               CapabilitySync.sync_capabilities("agent_sync_prefix",
+                 actor_authority: actor_authority
+               )
     end
 
-    test "sync_capabilities for existing agent without prefix" do
+    test "sync_capabilities for existing agent without prefix", %{
+      actor_authority: actor_authority
+    } do
       {:ok, _} = Manager.create_trust_profile("no_prefix_sync")
 
-      result = CapabilitySync.sync_capabilities("no_prefix_sync")
-
-      case result do
-        {:ok, %{granted: _, existing: _, errors: _}} -> assert true
-        {:error, _} -> assert true
-      end
+      assert {:ok, %{granted: _, existing: _, errors: 0}} =
+               CapabilitySync.sync_capabilities("no_prefix_sync",
+                 actor_authority: actor_authority
+               )
     end
 
-    test "sync_capabilities for frozen agent" do
+    test "sync_capabilities for frozen agent", %{actor_authority: actor_authority} do
       {:ok, _} = Manager.create_trust_profile("agent_frozen_sync")
       :ok = Manager.freeze_trust("agent_frozen_sync", :test_freeze)
 
-      result = CapabilitySync.sync_capabilities("agent_frozen_sync")
-
-      case result do
-        {:ok, %{granted: _, existing: _, errors: _}} -> assert true
-        {:error, _} -> assert true
-      end
+      assert {:ok, %{granted: _, existing: _, errors: 0}} =
+               CapabilitySync.sync_capabilities("agent_frozen_sync",
+                 actor_authority: actor_authority
+               )
     end
 
-    test "sync_capabilities for non-existent agent creates profile" do
+    test "sync_capabilities for non-existent agent creates profile", %{
+      actor_authority: actor_authority
+    } do
       # Agent does not exist yet; do_sync_capabilities creates it
-      result =
-        CapabilitySync.sync_capabilities("agent_new_sync_#{System.unique_integer([:positive])}")
-
-      case result do
-        {:ok, %{granted: _, existing: _, errors: _}} -> assert true
-        {:error, _} -> assert true
-      end
+      assert {:ok, %{granted: _, existing: _, errors: 0}} =
+               CapabilitySync.sync_capabilities(
+                 "agent_new_sync_#{System.unique_integer([:positive])}",
+                 actor_authority: actor_authority
+               )
     end
 
     test "expected_capabilities for existing agent" do
@@ -627,12 +610,10 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       :ok
     end
 
-    test "trust_unfrozen event with Manager running calls do_sync_capabilities" do
+    test "trust_unfrozen event with Manager running remains non-authoritative" do
       {:ok, _} = Manager.create_trust_profile("agent_unfreeze_full")
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # This will call do_sync_capabilities -> Manager.get_trust_profile (succeeds)
-      # -> grant_tier_capabilities (may fail at Arbor.Security but exercises code paths)
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_unfreeze_full", :trust_unfrozen, %{}},
@@ -640,10 +621,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
                )
     end
 
-    test "profile_created event with Manager running grants capabilities" do
+    test "profile_created event with Manager running remains non-authoritative" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # profile_created calls grant_tier_capabilities(:untrusted)
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_created_full", :profile_created, %{tier: :untrusted}},

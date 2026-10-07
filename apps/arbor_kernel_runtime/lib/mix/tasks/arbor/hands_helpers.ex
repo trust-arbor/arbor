@@ -10,6 +10,9 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
 
   @tmux_prefix "arbor-hand-"
   @docker_prefix "claude-hand-"
+  @name_pattern ~r/\A[a-zA-Z0-9_-]+\z/
+
+  alias Arbor.Common.SafePath
 
   def tmux_prefix, do: @tmux_prefix
   def docker_prefix, do: @docker_prefix
@@ -38,16 +41,60 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
 
   def hands_dir, do: Path.join(File.cwd!(), ".arbor/hands")
 
-  def hand_dir(name), do: Path.join(hands_dir(), name)
+  @doc "Validate the closed grammar shared by every Hands task and path helper."
+  @spec validate_name(term()) :: :ok | {:error, :invalid_hand_name}
+  def validate_name(name) when is_binary(name) do
+    if byte_size(name) in 1..128 and Regex.match?(@name_pattern, name),
+      do: :ok,
+      else: {:error, :invalid_hand_name}
+  end
 
-  def tmux_session_name(name), do: @tmux_prefix <> name
+  def validate_name(_name), do: {:error, :invalid_hand_name}
 
-  def docker_container_name(name), do: @docker_prefix <> name
+  @doc "Return a lexically confined hand directory for a valid name."
+  @spec hand_dir(String.t()) :: String.t()
+  def hand_dir(name) do
+    with :ok <- validate_name(name),
+         {:ok, path} <- SafePath.safe_join(hands_dir(), name) do
+      path
+    else
+      _ -> raise ArgumentError, "invalid Hand name"
+    end
+  end
+
+  @doc "Resolve an existing hand directory and prove its real path remains below the Hands root."
+  @spec resolve_existing_hand_dir(String.t()) ::
+          {:ok, String.t()} | {:error, :invalid_hand_name | :not_found | :path_traversal}
+  def resolve_existing_hand_dir(name) do
+    with :ok <- validate_name(name),
+         {:ok, lexical_path} <- SafePath.safe_join(hands_dir(), name),
+         {:ok, real_root} <- SafePath.resolve_real(hands_dir()),
+         {:ok, real_path} <- SafePath.resolve_real(lexical_path),
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, real_root),
+         true <- real_path != real_root do
+      {:ok, real_path}
+    else
+      {:error, :invalid_hand_name} = error -> error
+      {:error, :not_found} -> {:error, :not_found}
+      _ -> {:error, :path_traversal}
+    end
+  end
+
+  def tmux_session_name(name), do: @tmux_prefix <> validated_name!(name)
+
+  def docker_container_name(name), do: @docker_prefix <> validated_name!(name)
 
   def ensure_hand_dir(name) do
     dir = hand_dir(name)
     File.mkdir_p!(dir)
     dir
+  end
+
+  defp validated_name!(name) do
+    case validate_name(name) do
+      :ok -> name
+      {:error, :invalid_hand_name} -> raise ArgumentError, "invalid Hand name"
+    end
   end
 
   @doc "Find a hand by name. Returns {:local, info} | {:sandbox, info} | :not_found"

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 749,
+  "entry_count": 767,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -1887,7 +1887,7 @@
       "anchor": "applied-learning-process-monitors-do-not-require-trapping-exits",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing the signing-authority broker).",
-      "content_sha256": "1f496de3b513f4e9fe526e698139fe0e3b971c3060b68b943876f022c34b04c7",
+      "content_sha256": "a73d7c4198c9e2cc350b10e6c9ae670ac0b066bfb518f5427a44388debea4550",
       "always_loaded": false
     },
     {
@@ -2091,7 +2091,7 @@
       "anchor": "applied-learning-path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing benchmark artifact IO).",
-      "content_sha256": "89cfd720171edd36e38c2b5604596013e9dfcd3ed42a5afdd0b20b4bed1c0c1f",
+      "content_sha256": "efcff1ddfc3b97b6327a422887b21adc2ca9966e7c4aa0f2f36a79565c81125c",
       "always_loaded": false
     },
     {
@@ -2175,7 +2175,7 @@
       "anchor": "applied-learning-temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 rerunning coding benchmark tests in an isolated worktree).",
-      "content_sha256": "54897e638b9a9e498288df6cdb8e4a6d1f25d53a6da744dcc496683ebe04d65f",
+      "content_sha256": "bc52abcce881403bb43d002ba3513e4ca2a561ea71bbe0eb9c35c0d02e2f9fe1",
       "always_loaded": false
     },
     {
@@ -2571,7 +2571,7 @@
       "anchor": "applied-learning-resource-bounds-belong-at-the-public-facade-not-only-one-adapter",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing the LLM/AI eval boundary).",
-      "content_sha256": "af5a87b39371e6ada33b18b1389d5b2b59f1376d4cd85723a8d243e1031f85ca",
+      "content_sha256": "ec26a9f7b4f93b487e947ef7426fbf62fb728ffda0e84e4b304408949ef2296e",
       "always_loaded": false
     },
     {
@@ -5439,7 +5439,7 @@
       "anchor": "applied-learning-tests-that-mutate-global-application-config-must-not-run-async",
       "source_date": "2026-07-19",
       "source_incident": "found 2026-07-19 when the Comms suite intermittently hid the Signal response channel; reinforced 2026-07-28 when retained-workspace reconciliation tests leaked archive and cleanup callbacks into later tests).",
-      "content_sha256": "797e0e03e145f252e9f1a1668786271dc70eb8b01eb3f2042fd60d9023b6a3ec",
+      "content_sha256": "13e3cb1fbd431d2ac822b880a85298c7475654b44422a767185493b23d721427",
       "always_loaded": false
     },
     {
@@ -5782,7 +5782,7 @@
       "anchor": "applied-learning-serialize-mix-commands-within-each-worktree",
       "source_date": "2026-07-20",
       "source_incident": "found 2026-07-20 during delegated branch-lifecycle validation).",
-      "content_sha256": "26370b273210e523c200324ae3b5df0c5ca832ec3da44068a17c79a47af21955",
+      "content_sha256": "df306e5ddbb2256201969a5584188d58410015154e64e2270b32dbfcdfe1c336",
       "always_loaded": false
     },
     {
@@ -6666,7 +6666,7 @@
       "anchor": "applied-learning-verify-source-escapes-remain-text-after-agent-edits",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 when a Claude ACP edit converted an Elixir invalid-input fixture into a literal NUL).",
-      "content_sha256": "bd3dda4a2f444bfb60cfc63c2204ee6f9cf0d571b8d87f6db9ff3b31724da162",
+      "content_sha256": "8694829cdf85fb4df789725bbe2f822812285290ef87fc0384402dc71e3334db",
       "always_loaded": false
     },
     {
@@ -8578,7 +8578,7 @@
       "source_date": "2026-08-27",
       "source_incident": "found 2026-08-26 in P1B-2A CrossApp batch 17 and verified 2026-08-27",
       "always_loaded": false,
-      "content_sha256": "8e5b1c27d90ef337b73f2249c7fee2404f57771a5ba2ffbc88323e6769da1119"
+      "content_sha256": "33937e1f9f8f095593f184acdedebdfc1968a35dad732ad1d68091a4132e0f1c"
     },
     {
       "source_ordinal": 696,
@@ -9281,8 +9281,242 @@
       "source_incident": "standalone Workflow configured SQL checkpoint cold-consumer qualification,2026-10-06",
       "always_loaded": false,
       "content_sha256": "908c56d9b4ae83b9939e8eb7e9a4fac1e20e9e3a27b692dcde1b3b74f5ec6e11"
+    },
+    {
+      "source_ordinal": 755,
+      "source_kind": "post-migration",
+      "slug": "put-ripgrep-filters-before-the-option-terminator",
+      "title": "Put ripgrep filters before the option terminator.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-put-ripgrep-filters-before-the-option-terminator",
+      "source_date": "2026-10-06",
+      "source_incident": "found 2026-10-06 while tracing distribution-cookie exposure",
+      "always_loaded": false,
+      "content_sha256": "39f3592002470ecce968142b0f60fd37fcb9d2f9c4ad2f2c7d767dfc75813c78"
+    },
+    {
+      "source_ordinal": 756,
+      "source_kind": "post-migration",
+      "slug": "validate-transitive-otp-services-from-the-umbrella-root",
+      "title": "Validate transitive OTP services from the umbrella root.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-validate-transitive-otp-services-from-the-umbrella-root",
+      "source_date": "2026-10-06",
+      "source_incident": "found 2026-10-06 while validating kernel-runtime diagnostics that use os_mon",
+      "always_loaded": false,
+      "content_sha256": "be91cb27ab65dfa82ae025c1f81f841d66cccc585ef7b82595c6bfd80042807a"
+    },
+    {
+      "source_ordinal": 757,
+      "source_kind": "post-migration",
+      "slug": "trace-the-exact-reviewed-symbol-before-closing-a-finding",
+      "title": "Trace the exact reviewed symbol before closing a finding.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-trace-the-exact-reviewed-symbol-before-closing-a-finding",
+      "source_date": "2026-10-06",
+      "source_incident": "found 2026-10-06 while closing the reviewed pagination fail-open path",
+      "always_loaded": false,
+      "content_sha256": "5ce9e159a3b9d9620f95d8817682c4d996278c8b385008eaa47bd230467179ac"
+    },
+    {
+      "source_ordinal": 758,
+      "source_kind": "post-migration",
+      "slug": "never-downgrade-protected-content-to-plaintext-when-key-authority-is-unavailable",
+      "title": "Never downgrade protected content to plaintext when key authority is unavailable.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-never-downgrade-protected-content-to-plaintext-when-key-authority-is-unavailable",
+      "source_date": "2026-10-06",
+      "source_incident": "found 2026-10-06 while closing the channel raw-private-key deputy",
+      "always_loaded": false,
+      "content_sha256": "ff5dd0936721eea5344aa329985587e24b0b9091de87d68e6e25412d0d1a16f8"
+    },
+    {
+      "source_ordinal": 759,
+      "source_kind": "post-migration",
+      "slug": "remember-that-the-elixir-pipe-inserts-the-first-argument",
+      "title": "Remember that the Elixir pipe inserts the first argument.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-remember-that-the-elixir-pipe-inserts-the-first-argument",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while reviewing a durable capability rollback regression",
+      "always_loaded": false,
+      "content_sha256": "3b11362f890ac6e2ea19a31f633130c97ed2b625ddd06abd651e8c38a28081e0"
+    },
+    {
+      "source_ordinal": 760,
+      "source_kind": "post-migration",
+      "slug": "defer-ancestry-queries-until-child-startup-has-acknowledged",
+      "title": "Defer ancestry queries until child startup has acknowledged.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-defer-ancestry-queries-until-child-startup-has-acknowledged",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while qualifying the kernel-runtime and Security review fixes",
+      "always_loaded": false,
+      "content_sha256": "36a9b3f5ab1f2e7777665b591136a5ef707f2c79567956b91e250aa13e3fea2e"
+    },
+    {
+      "source_ordinal": 761,
+      "source_kind": "post-migration",
+      "slug": "treat-genserver-from-as-untrusted-protocol-data",
+      "title": "Treat GenServer `from` as untrusted protocol data when mutation authority matters.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-treat-genserver-from-as-untrusted-protocol-data",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while closing Relay, Bus, and AuditJournal deputies",
+      "always_loaded": false,
+      "content_sha256": "43862018b73d4104520074ed66ee026d96dc6bd30eacb2cfc4f5d7855c256a1f"
+    },
+    {
+      "source_ordinal": 762,
+      "source_kind": "post-migration",
+      "slug": "retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape",
+      "title": "Retire positive tests for an unauthenticated mailbox shape when that shape is retired.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while hardening distributed nonce propagation",
+      "always_loaded": false,
+      "content_sha256": "49a460ecd8f02430649c8cd2573b0ec8c3524fe9316f04c3f5f60e1c7b150600"
+    },
+    {
+      "source_ordinal": 763,
+      "source_kind": "post-migration",
+      "slug": "verify-named-ets-authority-owners-against-real-supervision",
+      "title": "Verify named ETS authority owners against the real supervision tree.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-verify-named-ets-authority-owners-against-real-supervision",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while testing Security owner-directory restart takeover",
+      "always_loaded": false,
+      "content_sha256": "604f7fb949bd43cd8e51dfcc3f392bfe4089049599cdf135d30c286050af20fa"
+    },
+    {
+      "source_ordinal": 764,
+      "source_kind": "post-migration",
+      "slug": "proof-custody-must-protect-read-secrecy-as-well-as-write-authority",
+      "title": "Proof custody must protect read secrecy as well as write authority.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-proof-custody-must-protect-read-secrecy-as-well-as-write-authority",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 hardening Arbor.Common.AuthenticatedCall",
+      "always_loaded": false,
+      "content_sha256": "14f47a69ea3e86cc9beba5f5e1b23a2add581223bc57e78295b3acee0e1231ec"
+    },
+    {
+      "source_ordinal": 765,
+      "source_kind": "post-migration",
+      "slug": "isolate-bounded-admission-budgets-between-test-cases",
+      "title": "Isolate bounded admission budgets between test cases.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-isolate-bounded-admission-budgets-between-test-cases",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while qualifying TerminalLogin source binding",
+      "always_loaded": false,
+      "content_sha256": "3d1dfcab7ce9fd258b782a32a4b16ce07c7d5f59129e300dadc597567aced5aa"
+    },
+    {
+      "source_ordinal": 766,
+      "source_kind": "post-migration",
+      "slug": "refresh-isolated-snapshots-from-an-absolute-source",
+      "title": "Refresh isolated snapshots from an absolute source path.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-refresh-isolated-snapshots-from-an-absolute-source",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while rerunning the full Security suite",
+      "always_loaded": false,
+      "content_sha256": "798226b3c292be690c0680bad36a22d80f1b36c3bebb03e03be9b6dd5a2fcc51"
+    },
+    {
+      "source_ordinal": 767,
+      "source_kind": "post-migration",
+      "slug": "canonical-runtime-fixtures-should-restore-rather-than-release-global-children",
+      "title": "Canonical runtime fixtures should restore rather than release global children.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-canonical-runtime-fixtures-should-restore-rather-than-release-global-children",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while migrating Security signal-sync fixtures to the public Signals facade",
+      "always_loaded": false,
+      "content_sha256": "4e79dafef8fd803c8b589648e6381d7ec3a0501f9557b3cf8e0563924130ee0f"
+    },
+    {
+      "source_ordinal": 768,
+      "source_kind": "post-migration",
+      "slug": "authoritative-signal-mutations-must-deny-ambiguous-publisher-config",
+      "title": "Authoritative signal mutations must deny ambiguous publisher configuration.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-authoritative-signal-mutations-must-deny-ambiguous-publisher-config",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while reviewing distributed security-sync admission",
+      "always_loaded": false,
+      "content_sha256": "efd4c393f72b538ce164dab542107a5e0a3abee00a549cb696c42e9eb685a67c"
+    },
+    {
+      "source_ordinal": 769,
+      "source_kind": "post-migration",
+      "slug": "make-loopback-listener-lifetime-explicit",
+      "title": "Make loopback listener lifetime explicit.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-make-loopback-listener-lifetime-explicit",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while stabilizing OIDC loopback security regressions",
+      "always_loaded": false,
+      "content_sha256": "93c6ade1b39dd05c16e0c3ccf4a55af8a2a376bbb692e20f8f49ba3aedf0443e"
+    },
+    {
+      "source_ordinal": 770,
+      "source_kind": "post-migration",
+      "slug": "durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity",
+      "title": "Durable security fences must align encoding, locking, and bootstrap with declared capacity.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while closing SSEC-010 rollback replay",
+      "always_loaded": false,
+      "content_sha256": "885019000b338df252fcc93e4c542a05594605405e6aa5597b34ee5d5e4e4880"
+    },
+    {
+      "source_ordinal": 771,
+      "source_kind": "post-migration",
+      "slug": "isolate-the-git-index-for-snapshot-checks",
+      "title": "Isolate the Git index for snapshot checks.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-isolate-the-git-index-for-snapshot-checks",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 while running umbrella fast tests for security review remediation",
+      "always_loaded": false,
+      "content_sha256": "f35d43e253d51c9c5153075c5fa7954a6ba7430faec76add1ea9a0f73c5a7ede"
+    },
+    {
+      "source_ordinal": 772,
+      "source_kind": "post-migration",
+      "slug": "validate-security-scanner-bounds-against-the-production-corpus",
+      "title": "Validate security scanner bounds against the production corpus.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-validate-security-scanner-bounds-against-the-production-corpus",
+      "source_date": "2026-10-07",
+      "source_incident": "found 2026-10-07 when the PII scan's new 10,000-line cap rejected two existing libraries and its locationless overflow finding crashed the pre-commit reporter",
+      "always_loaded": false,
+      "content_sha256": "535ab1bfa29982a65615bbe08ded1bd69261321d640f39c649a0cde75ee0052c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 288
+  "post_migration_entry_count": 306
 }

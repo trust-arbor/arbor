@@ -110,6 +110,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
     model = Keyword.get(opts, :model, @default_model)
     provider = Keyword.get(opts, :provider, @default_provider)
     council? = Keyword.get(opts, :council, false)
+    actor_authority = Keyword.get(opts, :actor_authority)
 
     dot_path = resolve_dot_path(variant)
     directive = build_directive(bug, worktree_path)
@@ -121,8 +122,11 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
     try do
       # Start a real diagnostician agent with variant DOT
-      {:ok, agent_id, _pid} = start_eval_agent(model, provider, dot_path, directive)
+      {:ok, agent_id, _pid} =
+        start_eval_agent(model, provider, dot_path, directive, actor_authority)
+
       Process.put(:eval_agent_id, agent_id)
+      Process.put(:eval_actor_authority, actor_authority)
       Logger.info("[TaskEval] Agent #{agent_id} started for variant #{variant}")
 
       register_eval_zen_probes!(agent_id, model, provider)
@@ -130,7 +134,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
       # Diagnostician has no fs/read. The glob bug lives in the eval worktree;
       # without a path-scoped grant, file.read is unauthorized even after the
       # JSON-params execute_batch fix.
-      grant_eval_worktree_access!(agent_id, worktree_path)
+      grant_eval_worktree_access!(agent_id, worktree_path, actor_authority)
 
       # Diagnostician baseline is :ask. Heartbeat exec nodes (prune_stale_intents)
       # then wait 60s for a human and the beat is counted as a failure.
@@ -159,10 +163,11 @@ defmodule Arbor.Agent.Eval.TaskEval do
       cleanup_id = Process.get(:eval_agent_id)
 
       if cleanup_id do
-        cleanup_eval_principal(cleanup_id)
+        cleanup_eval_principal(cleanup_id, Process.get(:eval_actor_authority))
       end
 
       Process.delete(:eval_agent_id)
+      Process.delete(:eval_actor_authority)
     end
   rescue
     e ->
@@ -380,7 +385,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   # -- Agent Lifecycle --
 
-  defp start_eval_agent(model, provider, dot_path, directive) do
+  defp start_eval_agent(model, provider, dot_path, directive, actor_authority) do
     model_config = %{
       id: model,
       provider: provider,
@@ -395,7 +400,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
       system_prompt: directive,
       model: model,
       provider: provider,
-      start_heartbeat: true
+      start_heartbeat: true,
+      actor_authority: actor_authority
     ]
 
     Manager.start_agent(model_config, opts)
@@ -426,9 +432,14 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   @doc false
   def cleanup_eval_principal(agent_id) when is_binary(agent_id) do
+    cleanup_eval_principal(agent_id, nil)
+  end
+
+  @doc false
+  def cleanup_eval_principal(agent_id, actor_authority) when is_binary(agent_id) do
     _ = OpenCodeZen.unregister_eval_probes(agent_id)
-    revoke_eval_grants()
-    destroy_eval_agent(agent_id)
+    revoke_eval_grants(actor_authority)
+    destroy_eval_agent(agent_id, actor_authority)
     safe_cleanup_memory(agent_id)
     :ok
   end
@@ -443,10 +454,14 @@ defmodule Arbor.Agent.Eval.TaskEval do
     ]
   end
 
-  defp grant_eval_worktree_access!(agent_id, worktree_path) do
+  defp grant_eval_worktree_access!(agent_id, worktree_path, actor_authority) do
     ids =
       Enum.flat_map(worktree_fs_resources(worktree_path), fn resource ->
-        case Arbor.Security.grant_capability_id(principal: agent_id, resource: resource) do
+        case Arbor.Security.grant_capability_id(
+               principal: agent_id,
+               resource: resource,
+               actor_authority: actor_authority
+             ) do
           {:ok, id} ->
             [id]
 
@@ -460,9 +475,9 @@ defmodule Arbor.Agent.Eval.TaskEval do
     :ok
   end
 
-  defp revoke_eval_grants do
+  defp revoke_eval_grants(actor_authority) do
     for id <- List.wrap(Process.get(:eval_grant_ids, [])) do
-      _ = Arbor.Security.revoke(id)
+      _ = Arbor.Security.revoke(id, actor_authority: actor_authority)
     end
 
     Process.delete(:eval_grant_ids)
@@ -855,8 +870,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
     :exit, _ -> nil
   end
 
-  defp destroy_eval_agent(agent_id) do
-    Lifecycle.destroy(agent_id)
+  defp destroy_eval_agent(agent_id, actor_authority) do
+    Lifecycle.destroy(agent_id, actor_authority: actor_authority)
   rescue
     _ -> :ok
   catch

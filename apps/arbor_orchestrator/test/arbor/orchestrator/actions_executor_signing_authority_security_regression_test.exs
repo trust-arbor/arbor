@@ -7,20 +7,17 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
   @moduletag :fast
   @moduletag :security_regression
+  @task_timeout 15_000
+  @trace_timeout 2_000
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Security
-  alias Arbor.Security.SigningAuthorityBroker
 
   setup do
     ensure_authority_stack!()
-    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+    assert :ok = Arbor.Trust.restore_runtime_fixture()
     {:ok, _} = Application.ensure_all_started(:arbor_shell)
-
-    unless Process.whereis(Arbor.Trust.Store) do
-      start_supervised!({Arbor.Trust.Store, []})
-    end
 
     previous = %{
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
@@ -44,22 +41,33 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
     {:ok, identity} = Identity.generate(name: "actions-executor-authority")
     public_identity = Identity.public_only(identity)
-    :ok = Security.register_identity(public_identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(public_identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
-    :ok =
-      Arbor.Orchestrator.TestCapabilities.grant_capability(
-        identity.agent_id,
-        "arbor://shell/exec/**"
-      )
+    tmp_root = Path.join(System.tmp_dir!(), "actions-authority-#{System.unique_integer()}")
+    File.mkdir_p!(tmp_root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(tmp_root)
 
-    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(identity.agent_id)
+    assert {:ok, _shell_capability} =
+             Security.grant_fixture(
+               principal: identity.agent_id,
+               resource: "arbor://shell/exec/**"
+             )
 
-    :ok =
-      Arbor.Trust.Store.store_profile(%{
-        profile
-        | rules: Map.put(profile.rules, "arbor://shell/exec/**", :auto)
-      })
+    assert {:ok, _workdir_capability} =
+             Security.grant_fixture(
+               principal: identity.agent_id,
+               resource: "arbor://fs/read#{root}/**"
+             )
+
+    assert {:ok, _profile} =
+             Arbor.Trust.ensure_trust_profile(identity.agent_id,
+               baseline: :block,
+               rules: %{
+                 "arbor://shell/exec/**" => :auto,
+                 "arbor://fs/read/**" => :auto
+               }
+             )
 
     {:ok, proof} =
       Security.build_signing_authority_acquisition_proof(
@@ -70,19 +78,14 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
       )
 
     {:ok, authority} = Security.open_signing_authority(proof)
-    root = Path.join(System.tmp_dir!(), "actions-authority-#{System.unique_integer()}")
-    File.mkdir_p!(root)
 
     on_exit(fn ->
       _ = Security.close_signing_authority(authority)
       _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
+      _ = Arbor.Trust.delete_trust_profile(identity.agent_id)
 
-      if Process.whereis(Arbor.Trust.Store) do
-        _ = Arbor.Trust.Store.delete_profile(identity.agent_id)
-      end
-
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf(root)
       restore_env(:arbor_security, :identity_verification, previous.identity_verification)
       restore_env(:arbor_security, :capability_signing_required, previous.capability_signing)
@@ -113,6 +116,64 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
              )
 
     assert output =~ "authority-signed"
+  end
+
+  test "security regression: session-signed JIT grant reaches an action without agent mutation authority",
+       ctx do
+    :ok = Arbor.Orchestrator.TestCapabilities.revoke_all(ctx.agent_id)
+
+    {:ok, _profile} =
+      Arbor.Trust.ensure_trust_profile(ctx.agent_id,
+        baseline: :block,
+        rules: %{
+          "arbor://shell/exec/**" => :auto,
+          "arbor://fs/read/**" => :auto
+        }
+      )
+
+    %{principal_id: owner_id, required_capability: required_capability} =
+      Arbor.Trust.capability_grant_owner_status()
+
+    assert is_binary(owner_id)
+
+    assert {:ok, owner_capability} =
+             Security.grant_fixture(
+               principal: owner_id,
+               resource: required_capability,
+               delegation_depth: 0
+             )
+
+    on_exit(fn ->
+      _ = Security.revoke_fixture(owner_capability.id)
+      _ = restart_grant_owner!()
+    end)
+
+    assert %{state: :ready} = restart_grant_owner!()
+    assert {:ok, capabilities_before} = Security.list_capabilities(ctx.agent_id)
+    assert capabilities_before == []
+
+    session_id = "jit-action-#{System.unique_integer([:positive])}"
+    path = Path.join(ctx.root, "session-jit.txt")
+    File.write!(path, "session-jit-authorized")
+
+    assert {:ok, output} =
+             ActionsExecutor.execute(
+               "file.read",
+               %{"path" => path},
+               ctx.root,
+               agent_id: ctx.agent_id,
+               session_id: session_id,
+               signing_authority: ctx.authority
+             )
+
+    assert output =~ "session-jit-authorized"
+    assert {:ok, capabilities_after} = Security.list_capabilities(ctx.agent_id)
+
+    assert Enum.any?(capabilities_after, fn capability ->
+             capability.session_id == session_id and
+               String.starts_with?(capability.resource_uri, "arbor://fs/read/") and
+               capability.metadata[:source] == :trust_policy_enforcer
+           end)
   end
 
   test "security regression: authority plus signer key is rejected by presence", ctx do
@@ -235,11 +296,12 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
                  signing_authority: ctx.authority
                )
              end)
-             |> Task.await()
+             |> Task.await(@task_timeout)
 
     assert_receive {:trace, _pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
-                     [_agent_id, Arbor.Actions.Shell.Execute, _params, context]}}
+                     [_agent_id, Arbor.Actions.Shell.Execute, _params, context]}},
+                   @trace_timeout
 
     refute Map.has_key?(context, :signing_authority)
 
@@ -276,7 +338,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
     assert_receive {:trace, _pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
-                     [_agent_id, Arbor.Actions.Council.ReviewChange, _params, context]}}
+                     [_agent_id, Arbor.Actions.Council.ReviewChange, _params, context]}},
+                   @trace_timeout
 
     nested = context.nested_engine_opts
     refute Keyword.has_key?(nested, :signing_authority)
@@ -285,7 +348,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     assert is_function(signer, 1)
     assert is_function(authorizer, 2)
 
-    _result = Task.await(task)
+    _result = Task.await(task, @task_timeout)
 
     assert {:error, :signing_boundary_unavailable} = signer.("arbor://shell/exec/retained")
 
@@ -327,7 +390,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
                        Arbor.Actions.Coding.ReviewedValidation,
                        _params,
                        context
-                     ]}}
+                     ]}},
+                   @trace_timeout
 
     nested = context.nested_engine_opts
     refute Keyword.has_key?(nested, :signing_authority)
@@ -336,7 +400,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     assert is_function(signer, 1)
     assert is_function(authorizer, 2)
 
-    _result = Task.await(task)
+    _result = Task.await(task, @task_timeout)
 
     assert {:error, :signing_boundary_unavailable} = signer.("arbor://action/mix/compile")
 
@@ -366,15 +430,20 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
                  max_depth: 3
                )
              end)
-             |> Task.await()
+             |> Task.await(@task_timeout)
 
     assert_receive {:trace, _pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
-                     [_agent_id, Arbor.Actions.Shell.Execute, _params, context]}}
+                     [_agent_id, Arbor.Actions.Shell.Execute, _params, context]}},
+                   @trace_timeout
 
     nested = context.nested_engine_opts
     refute Keyword.has_key?(nested, :signer)
     refute Keyword.has_key?(nested, :authorizer)
+  end
+
+  defp restart_grant_owner! do
+    Arbor.Trust.restart_capability_grant_owner_fixture()
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

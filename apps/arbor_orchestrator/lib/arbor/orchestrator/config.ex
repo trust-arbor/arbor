@@ -191,18 +191,17 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   @doc """
-  Runtime check: is the security subsystem (CapabilityStore process) available
+  Runtime check: is the capability authorization service available
   right now? Respects `security_available_override/0` for tests.
 
-  arbor_security is a hard dep so the module is always loaded; this is a pure
-  process-liveness check on the CapabilityStore (the subsystem can be down even
-  when the code is present — e.g. standalone slices or boot ordering).
+  arbor_security is a hard dependency, and its facade owns the implementation
+  detail of how availability is determined.
   """
   @spec security_available?() :: boolean()
   def security_available? do
     case security_available_override() do
       nil ->
-        Process.whereis(Arbor.Security.CapabilityStore) != nil
+        Arbor.Security.capability_authorization_available?()
 
       bool when is_boolean(bool) ->
         bool
@@ -218,6 +217,16 @@ defmodule Arbor.Orchestrator.Config do
   @spec security_module() :: module()
   def security_module do
     Application.get_env(@app, :security_module, Arbor.Security)
+  end
+
+  @doc "Runtime provider that issues agent-owned opaque signing-authority bootstraps."
+  @spec coding_authority_provider() :: module()
+  def coding_authority_provider do
+    Application.get_env(
+      @app,
+      :coding_authority_provider,
+      Module.concat(["Arbor", "Agent"])
+    )
   end
 
   # ===========================================================================

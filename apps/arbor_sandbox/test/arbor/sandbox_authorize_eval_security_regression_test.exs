@@ -42,7 +42,7 @@ defmodule Arbor.SandboxAuthorizeEvalSecurityRegressionTest do
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(caller_id)
+        Arbor.Security.revoke_all_fixture(caller_id)
       end
     end)
 
@@ -64,7 +64,7 @@ defmodule Arbor.SandboxAuthorizeEvalSecurityRegressionTest do
   test "security regression: authorized authorize_eval/4 evaluates through ExecSession",
        %{caller_id: caller_id, session: session} do
     assert {:ok, _capability} =
-             Arbor.Security.grant(principal: caller_id, resource: @eval_resource)
+             Arbor.Security.grant_fixture(principal: caller_id, resource: @eval_resource)
 
     assert {:ok, "1"} = Sandbox.authorize_eval(caller_id, session, "x = 1")
     assert {:ok, "1"} = Sandbox.eval_code(session, "x")

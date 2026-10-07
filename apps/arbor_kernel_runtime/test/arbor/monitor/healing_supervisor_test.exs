@@ -16,8 +16,18 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     Testing.put(:start_ops_room, false)
     Testing.delete(:channel_bridge_module)
     Testing.delete(:agent_directory_module)
+    Testing.put(:healing_worker_modules, [Agent])
 
-    start_supervised!(HealingSupervisor)
+    start_supervised!(
+      {HealingSupervisor,
+       healing: [
+         anomaly_queue: [trusted_enqueue_producer: self()],
+         cascade_detector: [
+           trusted_anomaly_producer: self(),
+           trusted_polling_producer: self()
+         ]
+       ]}
+    )
 
     :ok
   end
@@ -63,6 +73,13 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
   end
 
   describe "worker management" do
+    @tag :fast
+    @tag :security_regression
+    test "security regression: arbitrary modules cannot be started as healing workers" do
+      assert {:error, :worker_module_not_allowed} =
+               HealingSupervisor.start_worker(Task, fn -> :attacker_code end)
+    end
+
     @tag :fast
     test "worker_count/0 returns count of workers" do
       count = HealingSupervisor.worker_count()

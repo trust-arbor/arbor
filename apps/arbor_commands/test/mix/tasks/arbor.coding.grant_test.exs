@@ -10,6 +10,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   @caller "agent_operator_grant"
   @agent_id "agent_coordinator_grant"
   @target :arbor_grant@localhost
+  @key_file Path.expand("~/.arbor/identity.key")
+  @actor_proof :actor_proof
   @uri_a "arbor://fs/read/tmp"
   @uri_b "arbor://agent/dispatch"
 
@@ -75,7 +77,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
       case function do
         :coding_dispatch_readiness -> {:ok, report}
-        :grant -> {:ok, %{id: "cap_test"}}
+        :submit_signed_capability_grant -> {:ok, %{id: "cap_test"}}
       end
     end
 
@@ -95,7 +97,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     readiness =
       Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :coding_dispatch_readiness end)
 
-    grants = Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :grant end)
+    grants =
+      Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :submit_signed_capability_grant end)
 
     assert length(readiness) == 2
     assert length(grants) == 2
@@ -118,7 +121,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
       case function do
         :coding_dispatch_readiness -> {:ok, report}
-        :grant -> flunk("dry-run must not grant")
+        :submit_signed_capability_grant -> flunk("dry-run must not grant")
       end
     end
 
@@ -172,6 +175,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
         assert cli.key_file == Path.expand("~/.arbor/identity.key")
         {:ok, @caller}
       end,
+      capability_grant_builder: &grant_builder/2,
       ensure_distribution: fn ->
         send(test_pid, :discovered_dist)
         :ok
@@ -197,7 +201,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
               {:ok, missing_report([])}
             end
 
-          :grant ->
+          :submit_signed_capability_grant ->
             {:ok, %{id: "cap_granted"}}
         end
       end
@@ -223,7 +227,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
              {@target, Arbor.Agent, :coding_dispatch_readiness,
               [@caller, @agent_id, %{"kind" => "coding_change", "task" => "grant-loop"}, []],
               60_000},
-             {@target, Arbor.Security, :grant, [[principal: @caller, resource: @uri_a]], 15_000},
+             {@target, Arbor.Security, :submit_signed_capability_grant,
+              [%{principal: @caller, resource: @uri_a}, @actor_proof], 15_000},
              {@target, Arbor.Agent, :coding_dispatch_readiness,
               [@caller, @agent_id, %{"kind" => "coding_change", "task" => "grant-loop"}, []],
               60_000}
@@ -251,7 +256,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
               {:badrpc, :timeout}
             end
 
-          :grant ->
+          :submit_signed_capability_grant ->
             {:ok, %{id: "cap_granted"}}
         end
       end)
@@ -263,7 +268,10 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     assert result.failed == []
 
     rpcs = collect_rpcs([])
-    grants = Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :grant end)
+
+    grants =
+      Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :submit_signed_capability_grant end)
+
     assert length(grants) == 1
   end
 
@@ -302,8 +310,11 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     opts =
       runtime_opts(fn _node, _mod, function, _args, _timeout ->
         case function do
-          :coding_dispatch_readiness -> {:ok, report}
-          :grant -> flunk("malformed sibling must not produce a grant RPC")
+          :coding_dispatch_readiness ->
+            {:ok, report}
+
+          :submit_signed_capability_grant ->
+            flunk("malformed sibling must not produce a grant RPC")
         end
       end)
 
@@ -320,7 +331,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
       runtime_opts(fn _node, _mod, fun, _args, _timeout ->
         case fun do
           :coding_dispatch_readiness -> {:ok, missing_report([@uri_a])}
-          :grant -> {:ok, %{}}
+          :submit_signed_capability_grant -> {:ok, %{}}
         end
       end)
 
@@ -355,7 +366,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
               {:ok, exec_missing_report_empty(@agent_id)}
             end
 
-          :grant ->
+          :submit_signed_capability_grant ->
             {:ok, %{id: "cap_exec"}}
         end
       end)
@@ -368,7 +379,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     rpcs = collect_rpcs([])
 
     assert Enum.any?(rpcs, fn
-             {_n, Arbor.Security, :grant, [[principal: @agent_id, resource: ^exec_uri]], 15_000} ->
+             {_n, Arbor.Security, :submit_signed_capability_grant,
+              [%{principal: @agent_id, resource: ^exec_uri}, @actor_proof], 15_000} ->
                true
 
              _other ->
@@ -376,7 +388,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
            end)
 
     refute Enum.any?(rpcs, fn
-             {_n, Arbor.Security, :grant, [[principal: @caller, resource: ^exec_uri]], _t} ->
+             {_n, Arbor.Security, :submit_signed_capability_grant,
+              [%{principal: @caller, resource: ^exec_uri}, @actor_proof], _t} ->
                true
 
              _other ->
@@ -402,7 +415,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
               {:ok, exec_missing_report_empty(@agent_id)}
             end
 
-          :grant ->
+          :submit_signed_capability_grant ->
             {:ok, %{id: "cap_exec"}}
         end
       end)
@@ -425,7 +438,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
       runtime_opts(fn _node, _mod, function, _args, _timeout ->
         case function do
           :coding_dispatch_readiness -> {:ok, exec_missing_report(exec_uri, other)}
-          :grant -> flunk("must not grant to an unnamed principal")
+          :submit_signed_capability_grant -> flunk("must not grant to an unnamed principal")
         end
       end)
 
@@ -467,7 +480,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
           {Arbor.Trust, :set_rule} ->
             {:ok, %{}}
 
-          {_mod, :grant} ->
+          {_mod, :submit_signed_capability_grant} ->
             flunk("already-granted converging report must not grant")
         end
       end)
@@ -562,7 +575,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
           {Arbor.Trust, :set_rule} ->
             flunk("dry-run must not set_rule")
 
-          {_mod, :grant} ->
+          {_mod, :submit_signed_capability_grant} ->
             flunk("dry-run must not grant")
         end
       end)
@@ -573,7 +586,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
     rpcs = collect_rpcs([])
     refute Enum.any?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :set_rule end)
-    refute Enum.any?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :grant end)
+    refute Enum.any?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :submit_signed_capability_grant end)
 
     assert Enum.any?(rpcs, fn
              {_n, Arbor.Trust, :explain, _a, _t} -> true
@@ -660,7 +673,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
           {Arbor.Trust, :set_rule} ->
             flunk("invalid_input must not set_rule")
 
-          {_mod, :grant} ->
+          {_mod, :submit_signed_capability_grant} ->
             flunk("already-granted converging report must not grant")
         end
       end)
@@ -685,11 +698,16 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   defp runtime_opts(rpc) do
     [
       caller_resolver: fn _cli -> {:ok, @caller} end,
+      capability_grant_builder: &grant_builder/2,
       ensure_distribution: fn -> :ok end,
       server_running?: fn -> true end,
       target_node: fn -> @target end,
       rpc_call: rpc
     ]
+  end
+
+  defp grant_builder(_key_file, opts) do
+    {:ok, Map.new(opts), @actor_proof}
   end
 
   defp caller_target(uri, principal_id \\ @caller) do

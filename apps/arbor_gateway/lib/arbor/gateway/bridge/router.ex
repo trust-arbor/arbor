@@ -8,7 +8,7 @@ defmodule Arbor.Gateway.Bridge.Router do
 
   use Plug.Router
 
-  alias Arbor.Gateway.Bridge.ClaudeSession
+  alias Arbor.Gateway.Bridge.{ClaudeSession, RegistrationAuthority}
   alias Arbor.Gateway.Schemas
 
   require Logger
@@ -27,7 +27,13 @@ defmodule Arbor.Gateway.Bridge.Router do
         cwd = validated["cwd"] || "."
 
         result =
-          authorize_tool_call(validated["session_id"], validated["tool_name"], tool_input, cwd)
+          authorize_tool_call(
+            conn.assigns[:agent_id],
+            validated["session_id"],
+            validated["tool_name"],
+            tool_input,
+            cwd
+          )
 
         # Emit signal for observability
         emit_bridge_signal(validated["session_id"], validated["tool_name"], result)
@@ -47,8 +53,14 @@ defmodule Arbor.Gateway.Bridge.Router do
     send_resp(conn, 404, "Not found")
   end
 
-  defp authorize_tool_call(session_id, tool_name, tool_input, cwd) do
-    case ClaudeSession.authorize_tool(session_id, tool_name, tool_input, cwd) do
+  defp authorize_tool_call(actor_id, session_id, tool_name, tool_input, cwd) do
+    case RegistrationAuthority.authorize_tool(
+           actor_id,
+           session_id,
+           tool_name,
+           tool_input,
+           cwd
+         ) do
       {:ok, :authorized} ->
         Logger.debug("Bridge authorized", tool: tool_name, session: session_id)
         %{decision: "allow"}

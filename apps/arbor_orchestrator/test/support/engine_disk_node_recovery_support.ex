@@ -371,8 +371,8 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
   end
 
   defp authority!(identity, disk_root) do
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     file_resource =
       Security.authorization_resource_uri("arbor://fs/write",
@@ -384,7 +384,7 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
           "arbor://orchestrator/execute/**",
           file_resource
         ] do
-      {:ok, _} = Security.grant(principal: identity.agent_id, resource: resource)
+      {:ok, _} = Security.grant_fixture(principal: identity.agent_id, resource: resource)
     end
 
     {:ok, proof} =

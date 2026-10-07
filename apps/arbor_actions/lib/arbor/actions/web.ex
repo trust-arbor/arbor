@@ -2,9 +2,9 @@ defmodule Arbor.Actions.Web do
   @moduledoc """
   Session-free web browsing and search operations as Jido actions.
 
-  Wraps `jido_browser` self-contained actions with Arbor security integration
+  Wraps session-free web operations with Arbor security integration
   (capability authorization, taint tracking, signal observability, SSRF prevention).
-  Each action manages its own browser session lifecycle automatically.
+  Arbitrary page fetches use Req through a connect-time DNS pin.
 
   For interactive browser automation with persistent sessions (navigate, click, type,
   screenshot, etc.), see `Arbor.Actions.Browser`.
@@ -39,15 +39,14 @@ defmodule Arbor.Actions.Web do
   are blocked by default.
   """
 
-  # Blocked URL patterns for SSRF prevention
-  @blocked_hosts ~w(
-    localhost
-    127.0.0.1
-    0.0.0.0
-    [::1]
-    169.254.169.254
-    metadata.google.internal
-  )
+  alias Arbor.Common.Sanitizers
+
+  @max_redirects 5
+  @test_options_enabled Application.compile_env(
+                          :arbor_kernel_runtime,
+                          :expose_test_fixtures,
+                          false
+                        )
 
   @doc """
   Validate a URL is safe to fetch (no SSRF).
@@ -56,39 +55,190 @@ defmodule Arbor.Actions.Web do
   - Private/loopback addresses (127.x, 10.x, 172.16-31.x, 192.168.x)
   - Cloud metadata endpoints (169.254.169.254)
   - Non-HTTP schemes (file://, ftp://, data:, javascript:)
+
+  DNS names are accepted only through the Req pinning path used by
+  `fetch_page/3`. Interactive browser navigation uses
+  `validate_browser_url/1`, which remains fail-closed because that external
+  transport cannot preserve a validated IP together with Host/SNI authority.
   """
-  @spec validate_url(String.t()) :: :ok | {:error, String.t()}
-  def validate_url(url) when is_binary(url) do
-    uri = URI.parse(url)
+  @spec validate_url(String.t(), map()) :: :ok | {:error, String.t()}
+  def validate_url(url, context \\ %{})
 
-    cond do
-      uri.scheme not in ["http", "https"] ->
-        {:error, "Blocked scheme: #{uri.scheme || "none"}. Only http/https allowed."}
-
-      uri.host in @blocked_hosts ->
-        {:error, "Blocked host: #{uri.host} (SSRF prevention)"}
-
-      private_ip?(uri.host) ->
-        {:error, "Blocked private IP: #{uri.host} (SSRF prevention)"}
-
-      true ->
-        :ok
+  def validate_url(url, context) when is_binary(url) and is_map(context) do
+    case Sanitizers.ssrf_req_options(url, [], ssrf_options(context)) do
+      {:ok, _options} -> :ok
+      {:error, reason} -> {:error, format_ssrf_error(url, reason)}
     end
   end
 
-  def validate_url(_), do: {:error, "URL must be a string"}
+  def validate_url(_url, _context), do: {:error, "URL must be a string"}
 
-  defp private_ip?(nil), do: false
+  @doc false
+  @spec validate_browser_url(String.t()) :: :ok | {:error, String.t()}
+  def validate_browser_url(url) when is_binary(url) do
+    taint = %Arbor.Contracts.Security.Taint{level: :untrusted}
 
-  defp private_ip?(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, {10, _, _, _}} -> true
-      {:ok, {172, b, _, _}} when b >= 16 and b <= 31 -> true
-      {:ok, {192, 168, _, _}} -> true
-      {:ok, {127, _, _, _}} -> true
-      {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
-      _ -> false
+    case Sanitizers.sanitize(:ssrf, url, taint) do
+      {:ok, ^url, _taint} ->
+        {:error, "Blocked URL (SSRF prevention): browser transport cannot preserve redirect pins"}
+
+      {:error, reason} ->
+        {:error, format_ssrf_error(url, reason)}
     end
+  end
+
+  def validate_browser_url(_url), do: {:error, "URL must be a string"}
+
+  @doc false
+  @spec fetch_page(String.t(), keyword(), map()) ::
+          {:ok, %{url: String.t(), status: non_neg_integer(), body: binary()}}
+          | {:error, term()}
+  def fetch_page(url, request_opts \\ [], context \\ %{})
+
+  def fetch_page(url, request_opts, context)
+      when is_binary(url) and is_list(request_opts) and is_map(context) do
+    with {:ok, deadline} <- Sanitizers.ssrf_request_deadline(request_opts) do
+      do_fetch_page(url, request_opts, context, @max_redirects, deadline)
+    end
+  end
+
+  def fetch_page(_url, _request_opts, _context), do: {:error, :invalid_web_request}
+
+  @doc false
+  def page_content(body, :html) when is_binary(body), do: body
+  def page_content(body, format) when is_binary(body) and format in [:markdown, :text], do: body
+
+  @doc false
+  def snapshot_result(url, body, params) when is_binary(body) do
+    max_length = Map.get(params, :max_content_length, 50_000)
+
+    content =
+      if is_integer(max_length) and max_length > 0,
+        do: String.slice(body, 0, max_length),
+        else: ""
+
+    %{
+      url: url,
+      title: nil,
+      content: content,
+      links: if(Map.get(params, :include_links, true), do: [], else: nil),
+      forms: if(Map.get(params, :include_forms, true), do: [], else: nil),
+      headings: if(Map.get(params, :include_headings, true), do: [], else: nil),
+      meta: %{},
+      status: "success"
+    }
+  end
+
+  defp do_fetch_page(_url, _request_opts, _context, redirects_left, _deadline)
+       when redirects_left < 0,
+       do: {:error, :too_many_redirects}
+
+  defp do_fetch_page(url, request_opts, context, redirects_left, deadline) do
+    with {:ok, safe_options} <-
+           Sanitizers.ssrf_req_options(url, request_opts, ssrf_options(context), deadline),
+         {:ok, %Req.Response{} = response} <- Req.get(url, safe_options) do
+      handle_page_response(url, request_opts, context, redirects_left, deadline, response)
+    else
+      {:error, %Req.TransportError{reason: {:response_bytes_exceeded, maximum}}}
+      when is_integer(maximum) and maximum > 0 ->
+        {:error, {:response_bytes_exceeded, maximum}}
+
+      {:error, %Req.TransportError{reason: {:invalid_response, reason}}} ->
+        {:error, {:invalid_response, reason}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    exception -> {:error, exception}
+  end
+
+  defp handle_page_response(url, _request_opts, _context, _redirects_left, _deadline, response)
+       when response.status in 200..299 and is_binary(response.body) do
+    if String.valid?(response.body) do
+      {:ok, %{url: url, status: response.status, body: response.body}}
+    else
+      {:error, {:invalid_response, :invalid_utf8}}
+    end
+  end
+
+  defp handle_page_response(url, request_opts, context, redirects_left, deadline, response)
+       when response.status in 300..399 do
+    case Req.Response.get_header(response, "location") do
+      [location | _] when is_binary(location) and location != "" ->
+        with {:ok, next_url} <- merge_redirect(url, location),
+             :ok <- require_same_origin(url, next_url) do
+          do_fetch_page(next_url, request_opts, context, redirects_left - 1, deadline)
+        end
+
+      _other ->
+        {:error, {:redirect_without_location, response.status}}
+    end
+  end
+
+  defp handle_page_response(_url, _request_opts, _context, _redirects_left, _deadline, response),
+    do: {:error, {:http_status, response.status}}
+
+  defp merge_redirect(url, location) do
+    {:ok, url |> URI.merge(location) |> URI.to_string()}
+  rescue
+    _exception -> {:error, :invalid_redirect_location}
+  end
+
+  defp require_same_origin(current_url, next_url) do
+    current = URI.parse(current_url)
+    next = URI.parse(next_url)
+
+    if origin(current) == origin(next),
+      do: :ok,
+      else: {:error, {:cross_origin_redirect, next_url}}
+  end
+
+  defp origin(uri) do
+    scheme = if is_binary(uri.scheme), do: String.downcase(uri.scheme), else: uri.scheme
+
+    host =
+      if is_binary(uri.host),
+        do: uri.host |> String.downcase() |> String.trim_trailing("."),
+        else: uri.host
+
+    port = uri.port || if(scheme == "https", do: 443, else: 80)
+    {scheme, host, port}
+  end
+
+  defp format_ssrf_error(_url, {:blocked_scheme, scheme}) do
+    "Blocked scheme: #{scheme || "none"}. Only http/https allowed. " <>
+      "(SSRF prevention: blocked_scheme)"
+  end
+
+  defp format_ssrf_error(_url, {:metadata_endpoint, host}) do
+    "Blocked host: #{host} (SSRF prevention: metadata_endpoint)"
+  end
+
+  defp format_ssrf_error(url, {:private_ip, _address} = reason) do
+    case URI.parse(url).host do
+      host when host in ["localhost", "metadata.google.internal", "metadata.google.com"] ->
+        "Blocked host: #{host} (SSRF prevention: #{inspect(reason)})"
+
+      host ->
+        "Blocked private IP: #{host || "unknown"} (SSRF prevention: #{inspect(reason)})"
+    end
+  end
+
+  defp format_ssrf_error(_url, reason),
+    do: "Blocked URL (SSRF prevention): #{inspect(reason)}"
+
+  if @test_options_enabled do
+    defp ssrf_options(context) do
+      []
+      |> maybe_put_option(:resolver, Map.get(context, :ssrf_resolver))
+      |> maybe_put_option(:finch_request, Map.get(context, :ssrf_finch_request))
+    end
+
+    defp maybe_put_option(options, _key, nil), do: options
+    defp maybe_put_option(options, key, value), do: Keyword.put(options, key, value)
+  else
+    defp ssrf_options(_context), do: []
   end
 
   # ============================================================================
@@ -99,14 +249,14 @@ defmodule Arbor.Actions.Web do
     @moduledoc """
     Read a web page and return its content as markdown, text, or HTML.
 
-    Manages browser session lifecycle automatically. Uses jido_browser's
-    ReadPage action under the hood with Arbor security and observability.
+    Fetches through Req with a connect-time DNS pin, then returns the response
+    body in the requested representation.
 
     Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
     the facade-issued envelope fails closed and does not call `jido_browser`
     or `Req`. The authorized path is `Arbor.Actions.authorize_and_execute/4`,
-    then the existing ReadPage implementation. This surface never falls back
-    to `Arbor.Shell.authorize_and_execute/3`.
+    then the pinned Req fetch. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
 
     ## Parameters
 
@@ -149,8 +299,6 @@ defmodule Arbor.Actions.Web do
     alias Arbor.Actions
     alias Arbor.Actions.Web
     alias Arbor.Common.SafeAtom
-    alias JidoBrowser.Actions.ReadPage
-
     @allowed_formats [:markdown, :text, :html]
 
     @doc false
@@ -184,20 +332,17 @@ defmodule Arbor.Actions.Web do
     def run(%{url: url} = params, context) do
       case Actions.authorized_principal(context, __MODULE__) do
         {:ok, _principal_id} ->
-          with :ok <- Web.validate_url(url),
-               {:ok, format} <- normalize_format(params[:format]) do
+          with {:ok, format} <- normalize_format(params[:format]) do
             Actions.emit_started(__MODULE__, %{url: url})
 
-            selector = Map.get(params, :selector, "body")
+            case Web.fetch_page(url, [receive_timeout: 60_000], context) do
+              {:ok, page} ->
+                content = Web.page_content(page.body, format)
+                result = %{url: page.url, content: content, format: format}
 
-            case ReadPage.run(
-                   %{url: url, selector: selector, format: format},
-                   %{}
-                 ) do
-              {:ok, result} ->
                 Actions.emit_completed(__MODULE__, %{
-                  url: url,
-                  content_length: String.length(result[:content] || "")
+                  url: page.url,
+                  content_length: String.length(content)
                 })
 
                 {:ok, result}
@@ -734,8 +879,6 @@ defmodule Arbor.Actions.Web do
 
     alias Arbor.Actions
     alias Arbor.Actions.Web
-    alias JidoBrowser.Actions.SnapshotUrl
-
     @doc false
     def taint_roles do
       %{
@@ -773,30 +916,25 @@ defmodule Arbor.Actions.Web do
     def run(%{url: url} = params, context) do
       case Actions.authorized_principal(context, __MODULE__) do
         {:ok, _principal_id} ->
-          with :ok <- Web.validate_url(url) do
-            Actions.emit_started(__MODULE__, %{url: url})
+          Actions.emit_started(__MODULE__, %{url: url})
 
-            case SnapshotUrl.run(params, %{}) do
-              {:ok, result} ->
-                content_length =
-                  case result do
-                    %{content: c} when is_binary(c) -> String.length(c)
-                    _ -> 0
-                  end
+          case Web.fetch_page(url, [receive_timeout: 60_000], context) do
+            {:ok, page} ->
+              result = Web.snapshot_result(page.url, page.body, params)
+              content_length = String.length(result.content)
 
-                Actions.emit_completed(__MODULE__, %{
-                  url: url,
-                  content_length: content_length,
-                  has_links: is_list(result[:links]),
-                  has_forms: is_list(result[:forms])
-                })
+              Actions.emit_completed(__MODULE__, %{
+                url: page.url,
+                content_length: content_length,
+                has_links: is_list(result[:links]),
+                has_forms: is_list(result[:forms])
+              })
 
-                {:ok, result}
+              {:ok, result}
 
-              {:error, reason} ->
-                Actions.emit_failed(__MODULE__, reason)
-                {:error, format_error(reason)}
-            end
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, format_error(reason)}
           end
 
         {:error, reason} ->

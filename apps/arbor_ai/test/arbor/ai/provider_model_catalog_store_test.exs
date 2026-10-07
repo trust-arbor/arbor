@@ -44,6 +44,7 @@ defmodule Arbor.AI.ProviderModelCatalogStoreTest do
   test "last-good preservation: rejected and malformed puts leave prior catalog" do
     assert {:ok, good} = catalog("openai_oauth", "openai", ["keep-me"], 3)
     assert :ok = ProviderModelCatalogStore.put_sync(good)
+
     assert {:ok, %ProviderModelCatalog{model_ids: ["keep-me"]}} =
              ProviderModelCatalogStore.fetch_sync("openai_oauth")
 

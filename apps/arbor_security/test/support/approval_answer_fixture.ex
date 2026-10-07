@@ -18,7 +18,7 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
       capability_signing_required: true,
       uri_registry_enforcement: false,
       session_token_module: SessionToken,
-      session_token_secret: "approval-answer-test-secret-#{System.unique_integer([:positive])}"
+      session_token_secret: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     ]
 
     previous =
@@ -48,7 +48,7 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
     assert :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
 
     on_exit(fn ->
-      assert :ok = Security.deregister_identity(oidc.identity.agent_id)
+      assert :ok = Security.deregister_identity_fixture(oidc.identity.agent_id)
       oidc.cleanup.()
     end)
 
@@ -56,8 +56,8 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
   end
 
   def grant!(principal, resource, opts \\ []) do
-    assert {:ok, cap} = Security.grant([principal: principal, resource: resource] ++ opts)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} = Security.grant_fixture([principal: principal, resource: resource] ++ opts)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 end

@@ -72,7 +72,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
     on_exit(fn ->
       if pid = Process.whereis(Arbor.Historian.AuthorityAuditPuller), do: GenServer.stop(pid)
       {:ok, caps} = Security.list_capabilities(principal)
-      Enum.each(caps, &Security.revoke(&1.id))
+      Enum.each(caps, &Security.revoke_fixture(&1.id))
       pid = Process.whereis(AuditJournalOwner)
       if is_pid(pid) and pid != original, do: GenServer.stop(pid)
       unless Process.whereis(AuditJournalOwner), do: Process.register(original, AuditJournalOwner)
@@ -91,7 +91,10 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
     Process.unlink(journal)
     install_journal_outage_store(ctx, root)
     Application.put_env(:arbor_historian, :durable_event_log_target, target(EctoEventLog))
-    {:ok, cap} = Security.grant(principal: principal, resource: "arbor://memory/read/delivery")
+
+    {:ok, cap} =
+      Security.grant_fixture(principal: principal, resource: "arbor://memory/read/delivery")
+
     {:ok, [pending]} = Security.audit_journal_pending_operations()
     %{id: pending["operation_id"], cap: cap, journal: journal, root: root}
   end

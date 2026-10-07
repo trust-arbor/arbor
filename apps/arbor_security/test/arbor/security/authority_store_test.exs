@@ -627,7 +627,8 @@ defmodule Arbor.Security.AuthorityStoreTest do
     assert state.name == name
     assert state.namespace == "frozen-namespace"
     assert state.backend == nil
-    assert state.backend_opts == [name: "frozen-namespace", marker: :original]
+    refute Map.has_key?(state, :backend_opts)
+    assert %{private_state: _custody} = state.backend_custody
     assert state.hydration_limit == 3
     assert state.persistence_mode == :ephemeral
   end

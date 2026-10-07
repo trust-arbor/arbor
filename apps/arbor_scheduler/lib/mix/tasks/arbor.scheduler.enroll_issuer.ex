@@ -14,6 +14,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
 
       mix arbor.scheduler.enroll_issuer \\
         --issuer-id agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e \\
+        --key-file ~/.arbor/operator.key \\
         --envelope-uri "arbor://fs/read/Users/azmaveth/.arbor/reports/**" \\
         --envelope-uri "arbor://fs/write/Users/azmaveth/.arbor/reports/**" \\
         --reason "primary author for scheduler-internal pipelines"
@@ -21,6 +22,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
   ## Options
 
     * `--issuer-id <id>` (required) — agent_id of the identity to enroll
+    * `--key-file <path>` — private operator key used to authenticate the
+      registry mutation (default `~/.arbor/operator.key`)
     * `--envelope-uri <uri>` (required, repeatable) — resource_uri pattern
       bounding what caps this issuer can sign. Pass `--envelope-uri`
       multiple times to authorize the issuer for several non-overlapping
@@ -47,24 +50,43 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
   use Mix.Task
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.IssuerRegistry
+
+  @default_key_path "~/.arbor/operator.key"
 
   @impl true
   def run(args) do
-    Mix.Task.run("app.start")
-
     {opts, _positional, _} =
       OptionParser.parse(args,
         # `keep` lets `--envelope-uri` appear multiple times, returning
         # one keyword entry per occurrence
-        strict: [issuer_id: :string, envelope_uri: :keep, reason: :string],
-        aliases: [i: :issuer_id, e: :envelope_uri, r: :reason]
+        strict: [issuer_id: :string, envelope_uri: :keep, reason: :string, key_file: :string],
+        aliases: [i: :issuer_id, e: :envelope_uri, r: :reason, k: :key_file]
       )
 
     with {:ok, issuer_id} <- fetch_required(opts, :issuer_id),
          {:ok, envelope_uris} <- fetch_envelope_uris(opts),
          {:ok, envelopes} <- build_envelopes(issuer_id, envelope_uris),
-         :ok <- enroll(issuer_id, envelopes, opts[:reason]) do
+         registry_opts <- registry_opts(opts[:reason]),
+         {:ok, payload_digest} <-
+           Arbor.Security.issuer_mutation_payload_digest(
+             :register,
+             issuer_id,
+             envelopes,
+             registry_opts
+           ),
+         {:ok, _actor_id, actor_proof} <-
+           prepare_key_file_issuer_mutation(
+             Path.expand(opts[:key_file] || @default_key_path),
+             :register,
+             payload_digest
+           ),
+         :ok <- start_application(),
+         :ok <-
+           Arbor.Security.register_issuer(
+             issuer_id,
+             envelopes,
+             Keyword.put(registry_opts, :actor_proof, actor_proof)
+           ) do
       Mix.shell().info("Enrolled issuer:")
       Mix.shell().info("  issuer_id:     #{issuer_id}")
       Mix.shell().info("  envelopes:")
@@ -72,6 +94,20 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
       Mix.shell().info("  reason:        #{opts[:reason] || "(none)"}")
     else
       {:error, reason} -> abort(reason)
+    end
+  end
+
+  defp prepare_key_file_issuer_mutation(path, operation, payload_digest) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          Arbor.Security.prepare_key_file_issuer_mutation(io_device, operation, payload_digest)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
     end
   end
 
@@ -107,9 +143,19 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
     end
   end
 
-  defp enroll(issuer_id, envelopes, reason) do
-    opts = if reason, do: [reason: reason], else: []
-    IssuerRegistry.register(issuer_id, envelopes, opts)
+  defp registry_opts(nil), do: []
+  defp registry_opts(reason), do: [reason: reason]
+
+  # The key-file proof must be prepared before application startup. Production
+  # deliberately disables offline private-key access once the supervised
+  # security boundary is live.
+  defp start_application do
+    Mix.Task.run("app.start")
+    :ok
+  rescue
+    exception -> {:error, {:application_start_failed, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:application_start_failed, reason}}
   end
 
   defp abort(reason) do

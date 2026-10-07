@@ -29,13 +29,13 @@ defmodule Arbor.Historian.SelfScopedQueryAuthorizationTest do
       # started them; only clean up when a longer-lived store is present.
       if Process.whereis(Arbor.Security.CapabilityStore) do
         case Arbor.Security.list_capabilities(agent) do
-          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke(&1.id))
+          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke_fixture(&1.id))
           _ -> :ok
         end
       end
     end)
 
-    {:ok, _} = Arbor.Security.grant(principal: agent, resource: "arbor://historian/query")
+    {:ok, _} = Arbor.Security.grant_fixture(principal: agent, resource: "arbor://historian/query")
     {:ok, agent: agent}
   end
 
@@ -64,7 +64,7 @@ defmodule Arbor.Historian.SelfScopedQueryAuthorizationTest do
     own = StreamIds.for_agent(agent)
 
     {:ok, _} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: agent,
         resource: "arbor://historian/query",
         session_id: "sess_forwarded"

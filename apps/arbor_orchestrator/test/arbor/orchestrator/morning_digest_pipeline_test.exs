@@ -22,7 +22,7 @@ defmodule Arbor.Orchestrator.MorningDigestPipelineTest do
 
     {:ok, workdir} = SafePath.resolve_real(temporary)
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     resources = [
       "arbor://orchestrator/execute",
@@ -34,13 +34,13 @@ defmodule Arbor.Orchestrator.MorningDigestPipelineTest do
 
     caps =
       for uri <- resources do
-        {:ok, cap} = Security.grant(principal: identity.agent_id, resource: uri)
+        {:ok, cap} = Security.grant_fixture(principal: identity.agent_id, resource: uri)
         cap
       end
 
     on_exit(fn ->
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(temporary)
     end)
 
@@ -58,7 +58,7 @@ defmodule Arbor.Orchestrator.MorningDigestPipelineTest do
   end
 
   test "security regression: actual Engine failure is an unsuccessful result envelope", fixture do
-    Security.revoke(List.last(fixture.caps).id)
+    Security.revoke_fixture(List.last(fixture.caps).id)
     assert {:ok, result} = run(fixture)
     assert {:error, {:pipeline_outcome, :fail}} = Orchestrator.classify_run_result(result)
     output = Path.join([fixture.workdir, "reports/morning-digest", "#{Date.utc_today()}.md"])

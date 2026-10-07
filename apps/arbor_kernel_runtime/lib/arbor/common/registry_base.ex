@@ -1,4 +1,10 @@
 defmodule Arbor.Common.RegistryBase do
+  @allow_test_mutations Application.compile_env(
+                          :arbor_kernel_runtime,
+                          :expose_test_fixtures,
+                          false
+                        )
+
   @moduledoc """
   Standard registry foundation for Arbor.
 
@@ -58,6 +64,13 @@ defmodule Arbor.Common.RegistryBase do
   - `:require_behaviour` — module that registered modules must implement (optional)
   - `:allow_overwrite` — whether re-registration overwrites (default `false`)
   - `:max_failures` — circuit breaker threshold (default `5`)
+
+  A registry started with `:core_registration_authority` also exposes the
+  custody-bearing `register_core/4` and `lock_core/2` boot APIs. While such a
+  registry is unlocked, ordinary registration and locking fail closed. The
+  authority is described by an application supervision path, a registered
+  process name, and a protected ETS directory containing only the digest of
+  its owner-private custody value.
   """
   defmacro __using__(opts) do
     table_name = Keyword.fetch!(opts, :table_name)
@@ -65,8 +78,16 @@ defmodule Arbor.Common.RegistryBase do
     allow_overwrite = Keyword.get(opts, :allow_overwrite, false)
     max_failures = Keyword.get(opts, :max_failures, 5)
 
+    allow_test_mutations =
+      Keyword.get(
+        opts,
+        :allow_test_mutations,
+        @allow_test_mutations
+      )
+
     quote location: :keep do
       use GenServer
+      require Logger
 
       @behaviour Arbor.Contracts.Handler.Registry
 
@@ -74,8 +95,8 @@ defmodule Arbor.Common.RegistryBase do
       @require_behaviour unquote(require_behaviour)
       @allow_overwrite unquote(allow_overwrite)
       @max_failures unquote(max_failures)
+      @allow_test_mutations unquote(allow_test_mutations)
       @heir_name Module.concat(__MODULE__, Heir)
-      @pt_key {__MODULE__, :core_snapshot}
       @pg_scope :arbor_registry
       @pg_group {:registry, unquote(table_name)}
       @remote_cache_ttl_ms 30_000
@@ -112,6 +133,13 @@ defmodule Arbor.Common.RegistryBase do
         GenServer.call(__MODULE__, {:register, name, module, metadata})
       end
 
+      @doc false
+      def register_core(name, module, metadata, custody)
+          when is_binary(name) and is_atom(module) and is_map(metadata) and
+                 is_binary(custody) do
+        GenServer.call(__MODULE__, {:register_core, name, module, metadata, custody})
+      end
+
       @impl Arbor.Contracts.Handler.Registry
       def deregister(name) when is_binary(name) do
         GenServer.call(__MODULE__, {:deregister, name})
@@ -119,11 +147,7 @@ defmodule Arbor.Common.RegistryBase do
 
       @impl Arbor.Contracts.Handler.Registry
       def resolve(name) when is_binary(name) do
-        # Fast path: persistent_term snapshot (zero-cost for core entries)
-        case pt_lookup(name) do
-          {:ok, _module} = ok -> ok
-          :miss -> ets_resolve(name)
-        end
+        ets_resolve(name)
       end
 
       @doc """
@@ -131,11 +155,13 @@ defmodule Arbor.Common.RegistryBase do
 
       Options:
       - `node: :local` — local-only lookup (default, same as `resolve/1`)
-      - `node: :any` — local first, then remote via `:pg` discovery
-      - `node: node_name` — resolve on a specific remote node
+      - `node: :any` — local first; remote fallback is denied until an
+        authenticated registry transport exists
+      - `node: node_name` — local lookup for the current node; remote nodes are
+        denied until an authenticated registry transport exists
 
-      Remote lookups enforce trust zone rules via `NodeRegistry.can_resolve?/2`.
-      Results from remote nodes are cached with a 30s TTL.
+      Trust-zone policy alone does not authenticate the remote registry or its
+      module assertion, so remote resolution fails closed at this boundary.
       """
       def resolve(name, opts) when is_binary(name) and is_list(opts) do
         case Keyword.get(opts, :node, :local) do
@@ -144,16 +170,25 @@ defmodule Arbor.Common.RegistryBase do
 
           :any ->
             case resolve(name) do
-              {:ok, _module} = ok -> ok
-              {:error, :not_found} -> resolve_remote_any(name)
-              other -> other
+              {:ok, _module} = ok ->
+                ok
+
+              {:error, :not_found} ->
+                with :ok <- authorize_remote_resolution(:any) do
+                  resolve_remote_any(name)
+                end
+
+              other ->
+                other
             end
 
           node_name when is_atom(node_name) ->
             if node_name == node() do
               resolve(name)
             else
-              resolve_on_node(name, node_name)
+              with :ok <- authorize_remote_resolution(node_name) do
+                resolve_on_node(name, node_name)
+              end
             end
         end
       end
@@ -195,18 +230,19 @@ defmodule Arbor.Common.RegistryBase do
         end
       end
 
+      # A trust-zone comparison says whether one node would be allowed to
+      # resolve another; it does not authenticate the peer, registry response,
+      # or asserted module. Keep every remote dispatch path closed until a
+      # transport supplies cryptographic peer and response authentication.
+      defp authorize_remote_resolution(_target_node),
+        do: {:error, :unauthenticated_remote_resolution}
+
       @doc """
       Resolve an entry, but skip unstable entries (failure count >= max_failures).
       Returns `{:error, :unstable}` if the entry exists but is over the failure threshold.
       """
       def resolve_stable(name) when is_binary(name) do
-        # Fast path: persistent_term snapshot only contains healthy core entries.
-        # If an entry has failures recorded, it won't be in the snapshot —
-        # record_failure invalidates the snapshot.
-        case pt_lookup(name) do
-          {:ok, _module} = ok -> ok
-          :miss -> ets_resolve_stable(name)
-        end
+        ets_resolve_stable(name)
       end
 
       defp ets_resolve_stable(name) do
@@ -262,18 +298,23 @@ defmodule Arbor.Common.RegistryBase do
       @doc """
       Lock the core registry, allowing an explicit timeout.
 
-      This runs `pt_snapshot/0`, which calls `Code.ensure_loaded?/1` for every
-      registered entry — that can load BEAM files from disk, so on slower
-      hardware it legitimately exceeds `GenServer.call/2`'s 5s default. That
-      default was inherited, not chosen: on the `.42` VM it timed out and took
-      `Arbor.Orchestrator.Application.start/2` down with it, which made
-      `mix arbor.eval.task` unrunnable there while working fine on a laptop.
+      Marking a large registry can legitimately exceed `GenServer.call/2`'s 5s
+      default on slower hardware, so this operation has its own timeout.
 
       Configure with `config :arbor_kernel_runtime, registry_lock_core_timeout: ms`.
       """
       @spec lock_core(timeout()) :: :ok | {:error, term()}
       def lock_core(timeout) do
         GenServer.call(__MODULE__, :lock_core, timeout)
+      catch
+        :exit, {:timeout, _} = reason ->
+          {:error, {:lock_core_timeout, reason}}
+      end
+
+      @doc false
+      @spec lock_core(binary(), timeout()) :: :ok | {:error, term()}
+      def lock_core(custody, timeout) when is_binary(custody) do
+        GenServer.call(__MODULE__, {:lock_core, custody}, timeout)
       catch
         :exit, {:timeout, _} = reason ->
           {:error, {:lock_core_timeout, reason}}
@@ -289,7 +330,8 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       @doc """
-      Clear all entries and reset core lock. Primarily for test isolation.
+      Clear all entries and reset core lock. Available only to registries
+      compiled with `allow_test_mutations: true` (the default in test builds).
       """
       def reset do
         GenServer.call(__MODULE__, :reset)
@@ -325,10 +367,52 @@ defmodule Arbor.Common.RegistryBase do
       # --- Server Callbacks ---
 
       @impl GenServer
-      def init(_opts) do
-        case :ets.whereis(@table_name) do
-          :undefined -> init_fresh_table()
-          table_ref -> init_reclaimed_table(table_ref)
+      def init(opts) do
+        with {:ok, authority_table} <- init_core_registration_authority(opts) do
+          if authority_table != nil, do: Process.flag(:sensitive, true)
+
+          result =
+            case :ets.whereis(@table_name) do
+              :undefined -> init_fresh_table()
+              table_ref -> init_reclaimed_table(table_ref)
+            end
+
+          case result do
+            {:ok, state} -> {:ok, Map.put(state, :core_registration_authority, authority_table)}
+            other -> other
+          end
+        end
+      end
+
+      defp init_core_registration_authority(opts) do
+        case Keyword.get(opts, :core_registration_authority) do
+          nil ->
+            {:ok, nil}
+
+          authority when is_list(authority) ->
+            name = Keyword.get(authority, :name)
+            directory = Keyword.get(authority, :directory)
+            application = Keyword.get(authority, :application)
+            child_path = Keyword.get(authority, :child_path)
+
+            if is_atom(name) and not is_nil(name) and is_atom(directory) and
+                 not is_nil(directory) and is_atom(application) and not is_nil(application) and
+                 is_list(child_path) and child_path != [] do
+              table = :ets.new(__MODULE__, [:private, :set])
+
+              true =
+                :ets.insert(
+                  table,
+                  {:authority, name, directory, application, child_path}
+                )
+
+              {:ok, table}
+            else
+              {:stop, :invalid_core_registration_authority}
+            end
+
+          _other ->
+            {:stop, :invalid_core_registration_authority}
         end
       end
 
@@ -341,7 +425,7 @@ defmodule Arbor.Common.RegistryBase do
              :ok <- verify_ownership_and_heir(table_ref, heir_pid) do
           maybe_join_pg()
           maybe_monitor_pg()
-          {:ok, %{core_locked: false, heir_pid: heir_pid}}
+          {:ok, %{core_locked: false, heir_pid: heir_pid, remote_cache: %{}}}
         else
           {:error, reason} ->
             stop_heir(heir_pid)
@@ -353,7 +437,7 @@ defmodule Arbor.Common.RegistryBase do
         :ets.new(@table_name, [
           :set,
           :named_table,
-          :public,
+          :protected,
           {:read_concurrency, true},
           {:heir, heir_pid, @table_name}
         ])
@@ -391,7 +475,15 @@ defmodule Arbor.Common.RegistryBase do
                  :ok <- verify_ownership_and_heir(table_ref, heir_pid) do
               maybe_join_pg()
               maybe_monitor_pg()
-              {:ok, %{core_locked: false, heir_pid: heir_pid}}
+
+              core_locked =
+                :ets.tab2list(@table_name)
+                |> Enum.any?(fn
+                  {_name, _module, _metadata, _failures, true} -> true
+                  _ -> false
+                end)
+
+              {:ok, %{core_locked: core_locked, heir_pid: heir_pid, remote_cache: %{}}}
             else
               {:error, reason} ->
                 stop_heir(heir_pid)
@@ -507,30 +599,29 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       @impl GenServer
-      def handle_call({:resolve_remote, name}, _from, state) do
-        # Remote nodes call this to resolve entries on this node
+      def handle_call({:resolve_remote, _name}, _from, state) do
+        {:reply, {:error, :unauthenticated_remote_resolution}, state}
+      end
+
+      def handle_call({:register, name, module, metadata}, _from, state) do
         result =
-          case :ets.lookup(@table_name, name) do
-            [{^name, module, metadata, failures, _core?}] when failures < @max_failures ->
-              if Code.ensure_loaded?(module) do
-                {:ok, module, metadata}
-              else
-                {:error, :module_not_loaded}
-              end
-
-            [{^name, _module, _metadata, _failures, _core?}] ->
-              {:error, :unstable}
-
-            [] ->
-              {:error, :not_found}
+          if core_registration_pending?(state) do
+            {:error, :core_registration_authority_required}
+          else
+            do_register(name, module, metadata, state)
           end
 
         {:reply, result, state}
       end
 
-      def handle_call({:register, name, module, metadata}, _from, state) do
-        result = do_register(name, module, metadata, state)
-        {:reply, result, state}
+      def handle_call({:register_core, name, module, metadata, custody}, from, state) do
+        case authorize_core_registration(state, from, custody) do
+          {:ok, state} ->
+            {:reply, do_register(name, module, metadata, state), state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
       end
 
       def handle_call({:deregister, name}, _from, state) do
@@ -538,17 +629,38 @@ defmodule Arbor.Common.RegistryBase do
         {:reply, result, state}
       end
 
+      def handle_call({:remote_cache_lookup, name, target_node}, _from, state) do
+        result = remote_cache_lookup_allowed(state, name, target_node)
+        {:reply, result, state}
+      end
+
+      def handle_call({:cache_remote, _name, _module, _metadata, _remote_node}, _from, state) do
+        {:reply, {:error, :unauthenticated_remote_resolution}, state}
+      end
+
       def handle_call(:lock_core, _from, state) do
+        if core_registration_authority_configured?(state) do
+          {:reply, {:error, :core_registration_authority_required}, state}
+        else
+          {:reply, :ok, do_lock_core(state)}
+        end
+      end
+
+      def handle_call({:lock_core, custody}, from, state) do
+        case authorize_core_registration(state, from, custody) do
+          {:ok, state} -> {:reply, :ok, do_lock_core(state)}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+      end
+
+      defp do_lock_core(state) do
         # Mark all current entries as core
         :ets.tab2list(@table_name)
         |> Enum.each(fn {name, module, metadata, failures, _core?} ->
           :ets.insert(@table_name, {name, module, metadata, failures, true})
         end)
 
-        # Snapshot healthy entries to persistent_term for zero-cost reads
-        pt_snapshot()
-
-        {:reply, :ok, %{state | core_locked: true}}
+        %{state | core_locked: true}
       end
 
       def handle_call(:core_locked?, _from, state) do
@@ -556,9 +668,12 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       def handle_call(:reset, _from, state) do
-        :ets.delete_all_objects(@table_name)
-        pt_invalidate()
-        {:reply, :ok, %{state | core_locked: false}}
+        if @allow_test_mutations do
+          :ets.delete_all_objects(@table_name)
+          {:reply, :ok, %{state | core_locked: false, remote_cache: %{}}}
+        else
+          {:reply, {:error, :test_only}, state}
+        end
       end
 
       def handle_call({:record_failure, name}, _from, state) do
@@ -566,8 +681,6 @@ defmodule Arbor.Common.RegistryBase do
           case :ets.lookup(@table_name, name) do
             [{^name, module, metadata, failures, core?}] ->
               :ets.insert(@table_name, {name, module, metadata, failures + 1, core?})
-              # Invalidate snapshot since this entry is now degraded
-              pt_invalidate()
               :ok
 
             [] ->
@@ -582,8 +695,6 @@ defmodule Arbor.Common.RegistryBase do
           case :ets.lookup(@table_name, name) do
             [{^name, module, metadata, _failures, core?}] ->
               :ets.insert(@table_name, {name, module, metadata, 0, core?})
-              # Re-snapshot since entry is healthy again
-              if state.core_locked, do: pt_snapshot()
               :ok
 
             [] ->
@@ -594,16 +705,13 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       def handle_call({:restore, entries, core_locked}, _from, state) do
-        :ets.delete_all_objects(@table_name)
-
-        Enum.each(entries, fn entry ->
-          :ets.insert(@table_name, entry)
-        end)
-
-        # Rebuild snapshot if core was locked
-        if core_locked, do: pt_snapshot(), else: pt_invalidate()
-
-        {:reply, :ok, %{state | core_locked: core_locked}}
+        if @allow_test_mutations and valid_snapshot?(entries, core_locked) do
+          :ets.delete_all_objects(@table_name)
+          Enum.each(entries, &:ets.insert(@table_name, &1))
+          {:reply, :ok, %{state | core_locked: core_locked, remote_cache: %{}}}
+        else
+          {:reply, {:error, :test_only}, state}
+        end
       end
 
       # No handle_info clause for :"ETS-TRANSFER" here by design: the
@@ -618,10 +726,14 @@ defmodule Arbor.Common.RegistryBase do
       @impl GenServer
       def handle_info({:pg_membership, @pg_scope, @pg_group, _joins, leaves}, state)
           when leaves != [] do
-        # Remote registry left — invalidate any cached entries from those nodes
         leaving_nodes = Enum.map(leaves, &node/1) |> Enum.uniq()
-        invalidate_remote_cache_for_nodes(leaving_nodes)
-        {:noreply, state}
+
+        remote_cache =
+          Map.reject(state.remote_cache, fn {_key, {_module, remote_node, _expiry}} ->
+            remote_node in leaving_nodes
+          end)
+
+        {:noreply, %{state | remote_cache: remote_cache}}
       end
 
       def handle_info(_msg, state) do
@@ -630,6 +742,65 @@ defmodule Arbor.Common.RegistryBase do
 
       # --- Internal ---
 
+      defp core_registration_pending?(%{core_locked: false} = state),
+        do: core_registration_authority_configured?(state)
+
+      defp core_registration_pending?(_state), do: false
+
+      defp core_registration_authority_configured?(state) do
+        case Map.get(state, :core_registration_authority) do
+          nil -> false
+          table -> private_authority_table?(table)
+        end
+      end
+
+      defp private_authority_table?(table) do
+        :ets.info(table, :owner) == self() and :ets.info(table, :protection) == :private
+      rescue
+        ArgumentError -> false
+      end
+
+      defp authorize_core_registration(state, {caller_pid, _tag}, custody)
+           when is_pid(caller_pid) and is_binary(custody) do
+        table = Map.get(state, :core_registration_authority)
+
+        with true <- private_authority_table?(table),
+             [{:authority, expected_name, directory, application, child_path}] <-
+               :ets.lookup(table, :authority),
+             ^caller_pid <- Process.whereis(expected_name),
+             {:ok, ^caller_pid} <-
+               Arbor.Common.supervised_registered_child_pid(
+                 application,
+                 child_path,
+                 expected_name,
+                 1_000
+               ),
+             directory_ref when directory_ref != :undefined <- :ets.whereis(directory),
+             ^caller_pid <- :ets.info(directory_ref, :owner),
+             :protected <- :ets.info(directory_ref, :protection),
+             [{:custody_sha256, expected_digest}] when is_binary(expected_digest) <-
+               :ets.lookup(directory_ref, :custody_sha256),
+             supplied_digest <- :crypto.hash(:sha256, custody),
+             true <- secure_digest_equal?(expected_digest, supplied_digest) do
+          {:ok, state}
+        else
+          _other -> {:error, :invalid_core_registration_authority}
+        end
+      rescue
+        _exception -> {:error, :invalid_core_registration_authority}
+      catch
+        _kind, _reason -> {:error, :invalid_core_registration_authority}
+      end
+
+      defp authorize_core_registration(_state, _from, _custody),
+        do: {:error, :invalid_core_registration_authority}
+
+      defp secure_digest_equal?(left, right)
+           when is_binary(left) and is_binary(right) and byte_size(left) == byte_size(right),
+           do: :crypto.hash_equals(left, right)
+
+      defp secure_digest_equal?(_left, _right), do: false
+
       defp do_register(name, module, metadata, state) do
         with :ok <- validate_not_core_locked(name, state),
              :ok <- validate_plugin_namespace(name, state),
@@ -637,8 +808,6 @@ defmodule Arbor.Common.RegistryBase do
              :ok <- validate_behaviour(module),
              :ok <- validate_entry(name, module, metadata) do
           :ets.insert(@table_name, {name, module, metadata, 0, false})
-          # Rebuild snapshot to include new entry
-          if state.core_locked, do: pt_snapshot()
           :ok
         end
       end
@@ -650,8 +819,6 @@ defmodule Arbor.Common.RegistryBase do
 
           [{^name, _module, _metadata, _failures, _core?}] ->
             :ets.delete(@table_name, name)
-            # Rebuild snapshot to remove entry
-            if state.core_locked, do: pt_snapshot()
             :ok
 
           [] ->
@@ -691,6 +858,21 @@ defmodule Arbor.Common.RegistryBase do
           end
         end
       end
+
+      defp valid_snapshot?(entries, core_locked)
+           when is_list(entries) and is_boolean(core_locked) do
+        Enum.all?(entries, fn
+          {name, module, metadata, failures, core?}
+          when is_binary(name) and is_atom(module) and is_map(metadata) and
+                 is_integer(failures) and failures >= 0 and is_boolean(core?) ->
+            true
+
+          _ ->
+            false
+        end)
+      end
+
+      defp valid_snapshot?(_entries, _core_locked), do: false
 
       defp validate_behaviour(module) do
         case @require_behaviour do
@@ -737,23 +919,22 @@ defmodule Arbor.Common.RegistryBase do
       # --- Remote Resolution ---
 
       defp resolve_remote_any(name) do
-        # Check remote cache first
-        case remote_cache_lookup(name) do
-          {:ok, module, remote_node} ->
-            local_zone = safe_local_zone()
-            remote_zone = safe_trust_zone(remote_node)
+        case GenServer.call(__MODULE__, {:remote_cache_lookup, name, :any}) do
+          {:ok, module, _remote_node} ->
+            {:ok, module}
 
-            if safe_can_resolve?(local_zone, remote_zone) do
-              {:ok, module}
-            else
-              {:error, {:zone_violation, local_zone, remote_zone}}
-            end
+          {:error, {:zone_violation, _, _}} = error ->
+            error
 
           :miss ->
             do_resolve_remote_any(name)
         end
       end
 
+      # Network I/O deliberately runs in the caller, never in the registry
+      # owner. Two nodes may resolve each other simultaneously, and a slow
+      # peer must not block local registry mutations behind a GenServer call.
+      # Only validation and cache mutation cross back into the owner.
       defp do_resolve_remote_any(name) do
         members = safe_pg_members()
         local_pid = Process.whereis(__MODULE__)
@@ -767,21 +948,23 @@ defmodule Arbor.Common.RegistryBase do
         # Check trust zone access for each remote node
         local_zone = safe_local_zone()
 
-        Enum.find_value(remote_pids, {:error, :not_found}, fn pid ->
+        Enum.reduce_while(remote_pids, {:error, :not_found}, fn pid, _result ->
           remote_node = node(pid)
           remote_zone = safe_trust_zone(remote_node)
 
           if safe_can_resolve?(local_zone, remote_zone) do
             case safe_remote_call(pid, {:resolve_remote, name}) do
               {:ok, module, metadata} ->
-                remote_cache_store(name, module, remote_node)
-                {:ok, module}
+                case cache_remote(name, module, metadata, remote_node) do
+                  {:ok, _module} = ok -> {:halt, ok}
+                  {:error, _reason} -> {:cont, {:error, :not_found}}
+                end
 
               _ ->
-                nil
+                {:cont, {:error, :not_found}}
             end
           else
-            nil
+            {:cont, {:error, :not_found}}
           end
         end)
       end
@@ -791,9 +974,12 @@ defmodule Arbor.Common.RegistryBase do
         remote_zone = safe_trust_zone(target_node)
 
         if safe_can_resolve?(local_zone, remote_zone) do
-          case remote_cache_lookup(name, target_node) do
+          case GenServer.call(__MODULE__, {:remote_cache_lookup, name, target_node}) do
             {:ok, module, _node} ->
               {:ok, module}
+
+            {:error, {:zone_violation, _, _}} = error ->
+              error
 
             :miss ->
               fetch_from_remote_node(name, target_node)
@@ -812,15 +998,36 @@ defmodule Arbor.Common.RegistryBase do
 
           pid ->
             case safe_remote_call(pid, {:resolve_remote, name}) do
-              {:ok, module, _metadata} ->
-                remote_cache_store(name, module, target_node)
-                {:ok, module}
+              {:ok, module, metadata} ->
+                cache_remote(name, module, metadata, target_node)
 
               error ->
                 error
             end
         end
       end
+
+      defp cache_remote(name, module, metadata, remote_node) do
+        GenServer.call(
+          __MODULE__,
+          {:cache_remote, name, module, metadata, remote_node}
+        )
+      end
+
+      defp validate_remote_entry(name, module, metadata)
+           when is_binary(name) and is_atom(module) and is_map(metadata) do
+        with true <- Code.ensure_loaded?(module),
+             :ok <- validate_behaviour(module),
+             :ok <- validate_entry(name, module, metadata) do
+          :ok
+        else
+          false -> {:error, :module_not_loaded}
+          {:error, _reason} = error -> error
+          _ -> {:error, :invalid_entry}
+        end
+      end
+
+      defp validate_remote_entry(_name, _module, _metadata), do: {:error, :invalid_entry}
 
       defp safe_remote_call(pid, message) do
         GenServer.call(pid, message, 5_000)
@@ -830,41 +1037,59 @@ defmodule Arbor.Common.RegistryBase do
         :exit, _ -> {:error, :remote_unavailable}
       end
 
-      # --- Remote Cache (ETS-based, per-entry TTL) ---
+      # --- Remote Cache (owner state, per-entry TTL) ---
 
-      defp remote_cache_lookup(name) do
+      defp remote_cache_lookup_allowed(state, name, target_node) do
+        lookup =
+          case target_node do
+            :any -> remote_cache_lookup(state, name)
+            node_name -> remote_cache_lookup(state, name, node_name)
+          end
+
+        case lookup do
+          {:ok, _module, remote_node} = cached ->
+            local_zone = safe_local_zone()
+            remote_zone = safe_trust_zone(remote_node)
+
+            if safe_can_resolve?(local_zone, remote_zone) do
+              cached
+            else
+              {:error, {:zone_violation, local_zone, remote_zone}}
+            end
+
+          :miss ->
+            :miss
+        end
+      end
+
+      defp remote_cache_lookup(state, name) do
         now = System.monotonic_time(:millisecond)
 
-        case :ets.lookup(@table_name, {:remote_cache, name}) do
-          [{{:remote_cache, ^name}, module, remote_node, expiry}] when expiry > now ->
+        Enum.find_value(state.remote_cache, :miss, fn
+          {{^name, _node}, {module, remote_node, expiry}} when expiry > now ->
             {:ok, module, remote_node}
 
           _ ->
-            :miss
-        end
-      rescue
-        ArgumentError -> :miss
+            nil
+        end)
       end
 
-      defp remote_cache_lookup(name, target_node) do
+      defp remote_cache_lookup(state, name, target_node) do
         now = System.monotonic_time(:millisecond)
 
-        case :ets.lookup(@table_name, {:remote_cache, name}) do
-          [{{:remote_cache, ^name}, module, ^target_node, expiry}] when expiry > now ->
+        case Map.get(state.remote_cache, {name, target_node}) do
+          {module, ^target_node, expiry} when expiry > now ->
             {:ok, module, target_node}
 
           _ ->
             :miss
         end
-      rescue
-        ArgumentError -> :miss
       end
 
-      defp remote_cache_store(name, module, remote_node) do
+      defp remote_cache_store(state, name, module, remote_node) do
         expiry = System.monotonic_time(:millisecond) + @remote_cache_ttl_ms
-        :ets.insert(@table_name, {{:remote_cache, name}, module, remote_node, expiry})
-      rescue
-        ArgumentError -> :ok
+        cache = Map.put(state.remote_cache, {name, remote_node}, {module, remote_node, expiry})
+        %{state | remote_cache: cache}
       end
 
       # --- Trust Zone Bridges (safe, fail-closed) ---
@@ -918,19 +1143,6 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       # --- pg Integration ---
-
-      defp invalidate_remote_cache_for_nodes(nodes) do
-        :ets.tab2list(@table_name)
-        |> Enum.each(fn
-          {{:remote_cache, _name} = key, _module, remote_node, _expiry} ->
-            if remote_node in nodes, do: :ets.delete(@table_name, key)
-
-          _ ->
-            :ok
-        end)
-      rescue
-        ArgumentError -> :ok
-      end
 
       defp maybe_join_pg do
         :pg.join(@pg_scope, @pg_group, [self()])
@@ -1076,43 +1288,6 @@ defmodule Arbor.Common.RegistryBase do
         :ok
       rescue
         ArgumentError -> {:error, :give_away_failed}
-      end
-
-      # --- persistent_term fast path ---
-
-      # Lookup in persistent_term snapshot. Returns {:ok, module} or :miss.
-      defp pt_lookup(name) do
-        case :persistent_term.get(@pt_key, nil) do
-          nil ->
-            :miss
-
-          map when is_map(map) ->
-            case Map.fetch(map, name) do
-              {:ok, module} -> {:ok, module}
-              :error -> :miss
-            end
-        end
-      end
-
-      # Build persistent_term snapshot from all current ETS entries.
-      # Only entries with 0 failures are included.
-      defp pt_snapshot do
-        map =
-          :ets.tab2list(@table_name)
-          |> Enum.reduce(%{}, fn {name, module, _meta, failures, _core?}, acc ->
-            if failures == 0 and Code.ensure_loaded?(module) do
-              Map.put(acc, name, module)
-            else
-              acc
-            end
-          end)
-
-        :persistent_term.put(@pt_key, map)
-      end
-
-      # Invalidate persistent_term snapshot (e.g., after recording a failure).
-      defp pt_invalidate do
-        :persistent_term.erase(@pt_key)
       end
 
       defoverridable validate_entry: 3

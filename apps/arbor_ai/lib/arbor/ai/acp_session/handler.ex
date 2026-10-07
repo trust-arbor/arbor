@@ -346,13 +346,9 @@ defmodule Arbor.AI.AcpSession.Handler do
   def authorize_file(nil, _path, _operation), do: {:error, :no_agent_identity}
 
   def authorize_file(agent_id, path, operation) do
-    if file_security_available?() do
-      case file_guard_module().authorize(agent_id, path, operation) do
-        {:ok, _resolved} -> :ok
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      {:error, :security_unavailable}
+    case file_guard_module().authorize(agent_id, path, operation) do
+      {:ok, _resolved} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   rescue
     # FAIL CLOSED: a crash while checking file access must DENY, never grant.
@@ -382,7 +378,8 @@ defmodule Arbor.AI.AcpSession.Handler do
   end
 
   # Trust policy integration via runtime bridge (arbor_ai does not depend on arbor_trust).
-  # Falls back to :authorized when Trust.Policy or Trust.Manager is unavailable.
+  # An unavailable trust owner is a denial; a restart must never erase an
+  # earned-autonomy confirmation ceiling.
   #
   # `:gated` means the trust policy says "this resource requires human
   # approval at this agent's tier" — it's the trust system's way of
@@ -421,7 +418,7 @@ defmodule Arbor.AI.AcpSession.Handler do
         end
 
       :unavailable ->
-        :authorized
+        {:denied, "trust policy unavailable"}
 
       {:error, _reason} ->
         {:denied, "trust policy unavailable"}
@@ -560,32 +557,31 @@ defmodule Arbor.AI.AcpSession.Handler do
   # a raising security_module). Production callers reach it via authorize_action.
   @doc false
   def check_security_authorize(agent_id, resource_uri, action, state) do
-    if action_security_available?() do
-      # `verify_identity: false` — the ACP handler is an internal caller.
-      # The `agent_id` was set at `Handler.init/1` time from session opts
-      # (which are locked down via signed caps for pipelines), so the
-      # identity is already established by construction. The signed-
-      # request gate is for external authn — ExMCP's
-      # `session/request_permission` JSON-RPC doesn't carry one and
-      # shouldn't need to, since the agent identity is intrinsic to the
-      # session itself.
-      case security_module().authorize(agent_id, resource_uri, action, verify_identity: false) do
-        {:ok, :authorized} ->
-          :authorized
+    # `verify_identity: false` — the ACP handler is an internal caller.
+    # The `agent_id` was set at `Handler.init/1` time from session opts
+    # (which are locked down via signed caps for pipelines), so the
+    # identity is already established by construction. The signed-
+    # request gate is for external authn — ExMCP's
+    # `session/request_permission` JSON-RPC doesn't carry one and
+    # shouldn't need to, since the agent identity is intrinsic to the
+    # session itself.
+    case security_module().authorize(agent_id, resource_uri, action, verify_identity: false) do
+      {:ok, :authorized} ->
+        :authorized
 
-        {:ok, :pending_approval, request_id} ->
-          # Escalation already fired inside Security.authorize → Escalation
-          # → InteractionRouter. Operator sees the prompt on their active
-          # channel (dashboard, Signal, etc.). Block here until the operator
-          # responds — that's the contract the agent expects from a
-          # synchronous permission_request.
-          await_human_approval(agent_id, request_id, resource_uri, state)
+      {:ok, :pending_approval, request_id} ->
+        # Escalation already fired inside Security.authorize → Escalation
+        # → InteractionRouter. Operator sees the prompt on their active
+        # channel (dashboard, Signal, etc.). Block here until the operator
+        # responds — that's the contract the agent expects from a
+        # synchronous permission_request.
+        await_human_approval(agent_id, request_id, resource_uri, state)
 
-        {:error, reason} ->
-          {:denied, bounded_reason(reason)}
-      end
-    else
-      :authorized
+      {:error, reason} ->
+        {:denied, bounded_reason(reason)}
+
+      _unexpected ->
+        {:denied, "authorization check returned an invalid result"}
     end
   rescue
     # FAIL CLOSED: a crash while consulting security must DENY, never grant.
@@ -631,16 +627,6 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   defp file_guard_module,
     do: Application.get_env(:arbor_ai, :file_guard_module, Arbor.Security.FileGuard)
-
-  defp action_security_available? do
-    Application.get_env(:arbor_ai, :security_module) != nil or
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
-  end
-
-  defp file_security_available? do
-    Application.get_env(:arbor_ai, :file_guard_module) != nil or
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
-  end
 
   @doc false
   # Public for testability — production callers go through

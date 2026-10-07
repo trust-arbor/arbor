@@ -23,8 +23,9 @@ defmodule Arbor.Security.EgressGate do
   3. **Taint conjunct** — hostile data to an external destination is an absolute
      hard block. Untrusted data is also blocked except for one exact, already-
      validated interactive-disclosure capability to an external provider route.
-  4. **Tier semantics** — `:external_peer` is advisory (1.0 ACP deferral);
-     `:on_host`/`:none` allow; `:on_premises` allows unless the on-premises flag.
+  4. **Tier semantics** — `:on_host`/`:none` allow; `:external_peer` and
+     `:external_provider` use policy standing; `:on_premises` allows unless the
+     on-premises flag. Unknown tiers fail closed.
   5. **Policy standing** — caller-supplied `opts[:egress_mode]` for gated tiers
      (`:allow`/`:ask`/`:block`). The security kernel does not consult trust
      policy directly; callers that want trust-profile modulation supply the
@@ -95,6 +96,9 @@ defmodule Arbor.Security.EgressGate do
   @spec decide(String.t(), atom(), keyword(), [map()], Capability.t() | nil) :: decision()
   def decide(agent_id, tier, opts \\ [], caps \\ [], disclosure_cap \\ nil) do
     cond do
+      not valid_tier?(tier) ->
+        {:block, :policy}
+
       # Keyless destinations have no API-key consent signal, so they cannot
       # honor the general dark-launch default. `egress_gate_enforcing` lands
       # false so existing credentialed destinations keep working; OpenCode
@@ -126,6 +130,8 @@ defmodule Arbor.Security.EgressGate do
         end
     end
   end
+
+  defp valid_tier?(tier), do: Map.has_key?(@tier_rank, tier)
 
   # An explicit :block from the caller-supplied egress standing is absolute —
   # no capability (ordinary or disclosure) may override it. Ordinary caps
@@ -185,12 +191,12 @@ defmodule Arbor.Security.EgressGate do
   @spec policy_mode(String.t(), atom(), keyword()) :: :allow | :ask | :block
   defp policy_mode(_agent_id, tier, opts) do
     case tier do
-      :external_peer -> :allow
+      :external_peer -> egress_mode(opts)
       :on_host -> :allow
       :none -> :allow
       :on_premises -> if gate_on_premises?(), do: egress_mode(opts), else: :allow
       :external_provider -> egress_mode(opts)
-      _ -> :allow
+      _ -> :block
     end
   end
 
@@ -199,9 +205,38 @@ defmodule Arbor.Security.EgressGate do
   end
 
   defp keyless_destination?(opts) do
-    dest = Keyword.get(opts, :egress_destination)
-    is_binary(dest) and MapSet.member?(@keyless_destinations, dest)
+    opts
+    |> Keyword.get(:egress_destination)
+    |> canonical_destination()
+    |> then(&MapSet.member?(@keyless_destinations, &1))
   end
+
+  # Provider destinations ultimately describe a DNS host or a stable provider
+  # identifier. DNS names are case-insensitive and permit a terminal root dot;
+  # callers may also pass the resolved provider URL. Compare the canonical host
+  # so spelling differences cannot bypass an always-on destination policy while
+  # the general egress gate is dark.
+  defp canonical_destination(destination) when is_binary(destination) do
+    destination = String.trim(destination)
+
+    host =
+      case URI.parse(destination) do
+        %URI{host: host} when is_binary(host) and host != "" ->
+          host
+
+        _ ->
+          case URI.parse("//" <> destination) do
+            %URI{host: host} when is_binary(host) and host != "" -> host
+            _ -> destination
+          end
+      end
+
+    host
+    |> String.trim_trailing(".")
+    |> String.downcase()
+  end
+
+  defp canonical_destination(_destination), do: nil
 
   # Dev-only carve-out, same shape as `allow_local_human_identity`: default
   # false, set only in dev.exs. Production must set it explicitly if an

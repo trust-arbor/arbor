@@ -68,6 +68,7 @@ defmodule Arbor.Common.ShellEscape do
   """
   @spec escape_arg(String.t() | nil) :: String.t()
   def escape_arg(nil), do: "''"
+  def escape_arg(""), do: "''"
 
   def escape_arg(arg) when is_binary(arg) do
     if needs_escaping?(arg) do
@@ -113,6 +114,21 @@ defmodule Arbor.Common.ShellEscape do
   @spec escape_args([String.t()]) :: String.t()
   def escape_args(args) when is_list(args) do
     Enum.map_join(args, " ", &escape_arg/1)
+  end
+
+  @doc """
+  Escape positional arguments and terminate command option parsing.
+
+  Shell quoting prevents shell-language injection, but quoting alone does not
+  stop a leading `-` from being interpreted as an option by the invoked
+  program. Use this helper after all trusted options have been added.
+
+      iex> Arbor.Common.ShellEscape.escape_positionals(["-danger", "two words"])
+      "-- -danger 'two words'"
+  """
+  @spec escape_positionals([String.t()]) :: String.t()
+  def escape_positionals(args) when is_list(args) do
+    "-- " <> Enum.map_join(args, " ", &escape_arg/1)
   end
 
   @doc """

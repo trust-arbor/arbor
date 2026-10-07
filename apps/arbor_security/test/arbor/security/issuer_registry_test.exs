@@ -26,13 +26,13 @@ defmodule Arbor.Security.IssuerRegistryTest do
 
   setup do
     {:ok, identity} = Identity.generate()
-    :ok = IdentityRegistry.register(identity)
+    :ok = IdentityRegistry.register_fixture(identity)
 
     envelope = build_envelope()
 
     on_exit(fn ->
       # Best-effort cleanup: revoke and forget.
-      IssuerRegistry.revoke(identity.agent_id, "test cleanup")
+      IssuerRegistry.revoke_fixture(identity.agent_id, "test cleanup")
     end)
 
     {:ok, identity: identity, envelope: envelope}
@@ -43,22 +43,22 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      assert :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "test")
+      assert :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope, reason: "test")
     end
 
     test "rejects an unknown identity", %{envelope: envelope} do
       assert {:error, :identity_not_found} =
-               IssuerRegistry.register(
+               IssuerRegistry.register_fixture(
                  "agent_0000000000000000000000000000000000000000000000000000000000000000",
                  envelope
                )
     end
 
     test "rejects duplicate enrollment", %{identity: identity, envelope: envelope} do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       assert {:error, :already_enrolled} =
-               IssuerRegistry.register(identity.agent_id, envelope)
+               IssuerRegistry.register_fixture(identity.agent_id, envelope)
     end
   end
 
@@ -67,7 +67,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       assert {:ok, %{public_key: pk, max_envelope_caps: [env]}} =
                IssuerRegistry.lookup(identity.agent_id)
@@ -84,8 +84,8 @@ defmodule Arbor.Security.IssuerRegistryTest do
     end
 
     test "returns :revoked after revoke/2", %{identity: identity, envelope: envelope} do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
-      :ok = IssuerRegistry.revoke(identity.agent_id, "test revocation")
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
+      :ok = IssuerRegistry.revoke_fixture(identity.agent_id, "test revocation")
 
       assert {:error, :revoked} = IssuerRegistry.lookup(identity.agent_id)
     end
@@ -96,7 +96,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       {:ok, child_cap} =
         Capability.new(
@@ -111,7 +111,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       {:ok, escape_cap} =
         Capability.new(
@@ -139,8 +139,8 @@ defmodule Arbor.Security.IssuerRegistryTest do
     end
 
     test "rejects revoked issuer with :revoked", %{identity: identity, envelope: envelope} do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
-      :ok = IssuerRegistry.revoke(identity.agent_id, "test")
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
+      :ok = IssuerRegistry.revoke_fixture(identity.agent_id, "test")
 
       {:ok, cap} =
         Capability.new(
@@ -162,7 +162,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
       # checking status, a compromised-and-revoked issuer's outputs can keep
       # authorizing. Make sure revoke fails closed independent of whether
       # the cap would otherwise be in-envelope.
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       {:ok, in_envelope_cap} =
         Capability.new(
@@ -172,7 +172,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
 
       assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, in_envelope_cap)
 
-      :ok = IssuerRegistry.revoke(identity.agent_id, "compromise")
+      :ok = IssuerRegistry.revoke_fixture(identity.agent_id, "compromise")
 
       assert {:error, :revoked} =
                IssuerRegistry.verify_envelope(identity.agent_id, in_envelope_cap)
@@ -184,8 +184,8 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
-      :ok = IssuerRegistry.revoke(identity.agent_id, "stolen key")
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
+      :ok = IssuerRegistry.revoke_fixture(identity.agent_id, "stolen key")
 
       entries = IssuerRegistry.list()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
@@ -197,7 +197,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
 
     test "returns :not_found for unknown issuer" do
       assert {:error, :not_found} =
-               IssuerRegistry.revoke(
+               IssuerRegistry.revoke_fixture(
                  "agent_3333333333333333333333333333333333333333333333333333333333333333"
                )
     end
@@ -208,7 +208,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "primary author")
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope, reason: "primary author")
 
       entries = IssuerRegistry.list()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
@@ -241,13 +241,13 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      assert :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+      assert :ok = IssuerRegistry.register_fixture(identity.agent_id, [read_env, write_env])
 
       assert {:ok, %{max_envelope_caps: [_, _]}} = IssuerRegistry.lookup(identity.agent_id)
     end
 
     test "rejects empty envelope list with :empty_envelopes", %{identity: identity} do
-      assert {:error, :empty_envelopes} = IssuerRegistry.register(identity.agent_id, [])
+      assert {:error, :empty_envelopes} = IssuerRegistry.register_fixture(identity.agent_id, [])
     end
 
     test "verify_envelope/2 passes when cap matches at least one envelope", %{
@@ -265,7 +265,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, [read_env, write_env])
 
       {:ok, fits_read} =
         Capability.new(
@@ -298,7 +298,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, [read_env, write_env])
 
       {:ok, escape_cap} =
         Capability.new(
@@ -325,7 +325,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.register(identity.agent_id, [original])
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, [original])
 
       # New, broader set covering both read and write across a different subtree
       {:ok, new_read} =
@@ -340,7 +340,8 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      assert :ok = IssuerRegistry.update_envelopes(identity.agent_id, [new_read, new_write])
+      assert :ok =
+               IssuerRegistry.update_envelopes_fixture(identity.agent_id, [new_read, new_write])
 
       # Lookup returns the new list, not the original
       assert {:ok, %{max_envelope_caps: envelopes}} = IssuerRegistry.lookup(identity.agent_id)
@@ -361,7 +362,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.register(identity.agent_id, [original])
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, [original])
 
       {:ok, originally_fit_cap} =
         Capability.new(
@@ -379,7 +380,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.update_envelopes(identity.agent_id, [narrowed])
+      :ok = IssuerRegistry.update_envelopes_fixture(identity.agent_id, [narrowed])
 
       # The cap that fit the original is now outside the envelope.
       # If verify_envelope short-circuited on a stale cache or used the
@@ -399,7 +400,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.register(identity.agent_id, [original])
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, [original])
 
       {:ok, code_cap} =
         Capability.new(
@@ -418,7 +419,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
           principal_id: identity.agent_id
         )
 
-      :ok = IssuerRegistry.update_envelopes(identity.agent_id, [original, expanded])
+      :ok = IssuerRegistry.update_envelopes_fixture(identity.agent_id, [original, expanded])
 
       # Now the cap passes
       assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, code_cap)
@@ -432,15 +433,15 @@ defmodule Arbor.Security.IssuerRegistryTest do
         )
 
       assert {:error, :not_found} =
-               IssuerRegistry.update_envelopes(
+               IssuerRegistry.update_envelopes_fixture(
                  "agent_5555555555555555555555555555555555555555555555555555555555555555",
                  [envelope]
                )
     end
 
     test "rejects revoked issuer with :revoked", %{identity: identity, envelope: envelope} do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
-      :ok = IssuerRegistry.revoke(identity.agent_id, "test revocation")
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
+      :ok = IssuerRegistry.revoke_fixture(identity.agent_id, "test revocation")
 
       {:ok, new_env} =
         Capability.new(
@@ -449,24 +450,24 @@ defmodule Arbor.Security.IssuerRegistryTest do
         )
 
       assert {:error, :revoked} =
-               IssuerRegistry.update_envelopes(identity.agent_id, [new_env])
+               IssuerRegistry.update_envelopes_fixture(identity.agent_id, [new_env])
     end
 
     test "rejects empty list with :empty_envelopes", %{identity: identity, envelope: envelope} do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       assert {:error, :empty_envelopes} =
-               IssuerRegistry.update_envelopes(identity.agent_id, [])
+               IssuerRegistry.update_envelopes_fixture(identity.agent_id, [])
     end
 
     test "rejects non-Capability entries with :invalid_envelope", %{
       identity: identity,
       envelope: envelope
     } do
-      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.register_fixture(identity.agent_id, envelope)
 
       assert {:error, :invalid_envelope} =
-               IssuerRegistry.update_envelopes(identity.agent_id, [:not_a_cap])
+               IssuerRegistry.update_envelopes_fixture(identity.agent_id, [:not_a_cap])
     end
 
     test "captures reason in status_reason without bumping status_changed_at", %{
@@ -477,7 +478,10 @@ defmodule Arbor.Security.IssuerRegistryTest do
       # etc.), not when envelopes were updated. Bumping it on an
       # envelope-only update would confuse audit consumers using it to
       # detect status transitions.
-      :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "original enrollment")
+      :ok =
+        IssuerRegistry.register_fixture(identity.agent_id, envelope,
+          reason: "original enrollment"
+        )
 
       original_entry = Enum.find(IssuerRegistry.list(), &(&1.issuer_id == identity.agent_id))
       assert original_entry.status_reason == "original enrollment"
@@ -490,7 +494,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
         )
 
       :ok =
-        IssuerRegistry.update_envelopes(
+        IssuerRegistry.update_envelopes_fixture(
           identity.agent_id,
           [new_env],
           reason: "expanding to cover code reviews"

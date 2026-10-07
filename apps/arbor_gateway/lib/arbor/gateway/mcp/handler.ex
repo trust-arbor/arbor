@@ -1478,31 +1478,17 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   # P0-4: Verify agent_id corresponds to a registered, active identity.
-  # When the security processes are running, check identity. When they aren't
-  # (dev/test with start_children: false), allow through with a warning —
-  # identity verification requires a running Registry.
+  # A missing or restarting security subsystem is a denial: JWT-authenticated
+  # callers must not bypass standing checks during an Identity.Registry gap.
   defp verify_agent_identity(agent_id) do
-    # Check if security processes are actually running
-    if security_processes_available?() do
-      case bridge_call(Arbor.Security, :identity_active?, [agent_id]) do
-        {:ok, true} -> :ok
-        {:ok, false} -> {:error, :unknown_or_inactive_identity}
-        {:error, _reason} -> {:error, :identity_check_failed}
-      end
-    else
-      # Security processes not started (dev/test).
-      # Log and allow — identity verification requires running Registry.
-      Logger.debug(
-        "[MCP] Security processes not running, skipping identity verification for #{agent_id}"
-      )
+    security = Application.get_env(:arbor_gateway, :security_module, Arbor.Security)
 
-      :ok
+    case bridge_call(security, :identity_active?, [agent_id]) do
+      {:ok, true} -> :ok
+      {:ok, false} -> {:error, :unknown_or_inactive_identity}
+      {:ok, _unexpected} -> {:error, :identity_check_failed}
+      {:error, _reason} -> {:error, :identity_check_failed}
     end
-  end
-
-  defp security_processes_available? do
-    # Identity.Registry is the process that handles identity_active? queries
-    Process.whereis(Arbor.Security.Identity.Registry) != nil
   end
 
   # C2: Default workspace for file path validation on MCP-originated requests

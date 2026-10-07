@@ -21,10 +21,18 @@ defmodule Mix.Tasks.Arbor.Phone do
     - `--listen-mode` — STT mode: listen, stream_listen, buddie_listen (default: listen)
     - `--listen-seconds` — Recording duration (default: 5)
     - `--voice` — TTS voice index 0-7
+
+  Provisioning loads BEAM binaries and starts closures on the phone node. It
+  is a root administration operation: Erlang distribution cookie possession
+  is the authority boundary, with no lower-level module sandbox.
   """
   use Mix.Task
 
   alias Mix.Tasks.Arbor.Helpers, as: Config
+
+  @doc "Authority granted to a connected Erlang-distribution peer."
+  @spec remote_authority() :: :root
+  def remote_authority, do: :root
 
   @impl Mix.Task
   def run(args) do

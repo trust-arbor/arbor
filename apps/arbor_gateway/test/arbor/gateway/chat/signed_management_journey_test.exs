@@ -72,8 +72,8 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
         do: ManagementSessionFixture.set_env(:arbor_gateway, key, value)
 
     {:ok, identity} = Security.generate_identity()
-    assert :ok = Security.register_identity(identity)
-    on_exit(fn -> Security.deregister_identity(identity.agent_id) end)
+    assert :ok = Security.register_identity_fixture(identity)
+    on_exit(fn -> Security.deregister_identity_fixture(identity.agent_id) end)
     template = "signed-private-#{System.unique_integer([:positive])}"
     Arbor.Agent.TemplateStore.set_templates_dir(Path.join(root, "templates"))
 
@@ -111,7 +111,7 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
     assert request(ctx.identity, "GET", "/api/chat/aliases").status == 200
     assert request(ctx.identity, "DELETE", "/api/chat/aliases/cedar").status == 200
     assert request(ctx.identity, "GET", "/api/chat/agents/resolve/cedar").status == 404
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert Jason.decode!(request(ctx.identity, "GET", "/api/chat/agents").resp_body) == %{
              "agents" => []
@@ -141,7 +141,7 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
     assert denied.status == 403
     assert Jason.decode!(denied.resp_body)["error"] =~ "approval required"
     assert effects == []
-    assert :ok = Security.revoke(pending.id)
+    assert :ok = Security.revoke_fixture(pending.id)
     stop = Grants.grant!(ctx.identity.agent_id, "arbor://agent/stop/" <> a.target)
 
     {wrong, effects} =
@@ -164,9 +164,9 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
     end
 
     Grants.grant!(ctx.human_id, "arbor://agent/stop/" <> a.target)
-    {:ok, chat_token} = Security.SessionToken.generate_conversation(ctx.human_id, a.target)
+    {:ok, chat_token} = Security.issue_conversation_session_fixture(ctx.human_id, a.target)
     assert raw_request("POST", path, "{}", "Conversation " <> chat_token).status == 401
-    assert :ok = Security.revoke(stop.id)
+    assert :ok = Security.revoke_fixture(stop.id)
     {revoked, effects} = observe(fn -> request(ctx.identity, "POST", path, %{}) end)
     assert revoked.status == 403
     assert effects == []
@@ -203,7 +203,7 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
     assert refused.status == 403
     assert Jason.decode!(refused.resp_body)["error"] =~ "approval required"
     assert MapSet.new(Arbor.Agent.Lifecycle.list_agents(), & &1.agent_id) == before
-    assert :ok = Security.revoke(pending.id)
+    assert :ok = Security.revoke_fixture(pending.id)
     Grants.grant!(ctx.identity.agent_id, "arbor://agent/lifecycle/create")
     created = request(ctx.identity, "POST", "/api/chat/agents", body)
     assert created.status == 200, created.resp_body

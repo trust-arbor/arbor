@@ -280,9 +280,11 @@ defmodule Arbor.Security.AuthDecision do
     end
   end
 
-  defp check_identity(%AuthContext{identity_verified: true} = auth) do
-    # Already verified — skip (no-token Gateway-preverified path only)
-    {:ok, auth}
+  defp check_identity(%AuthContext{identity_verified: true, principal_id: pid} = auth) do
+    # Upstream verification proves possession of the identity key, not current
+    # standing. A suspended or revoked principal must stop authorizing even
+    # when the per-request signature was already verified by the Gateway.
+    check_identity_status(auth, pid)
   end
 
   # H5: every principal — human_ or agent_ — goes through the same registry
@@ -689,25 +691,27 @@ defmodule Arbor.Security.AuthDecision do
         function_exported?(config, :delegation_chain_verification_enabled?, 0) and
         apply(config, :delegation_chain_verification_enabled?, [])
 
-    if enabled and Code.ensure_loaded?(signer) and
-         function_exported?(signer, :verify_delegation_chain, 2) do
-      key_lookup_fn = fn agent_id ->
-        if Code.ensure_loaded?(registry) and function_exported?(registry, :lookup, 1) do
-          apply(registry, :lookup, [agent_id])
-        else
-          {:error, :registry_unavailable}
-        end
-      end
+    cond do
+      not enabled ->
+        {:ok, auth}
 
-      case apply(signer, :verify_delegation_chain, [cap, key_lookup_fn]) do
-        :ok -> {:ok, auth}
-        {:error, reason} -> {:error, {:delegation_chain_invalid, reason}, auth}
-      end
-    else
-      # Verification intentionally disabled (or signer absent) — not an
-      # error path; honor the cap. Only an active-verification crash below
-      # fails closed.
-      {:ok, auth}
+      not (Code.ensure_loaded?(signer) and
+               function_exported?(signer, :verify_delegation_chain, 2)) ->
+        {:error, {:delegation_chain_invalid, :verification_unavailable}, auth}
+
+      true ->
+        key_lookup_fn = fn agent_id ->
+          if Code.ensure_loaded?(registry) and function_exported?(registry, :lookup, 1) do
+            apply(registry, :lookup, [agent_id])
+          else
+            {:error, :registry_unavailable}
+          end
+        end
+
+        case apply(signer, :verify_delegation_chain, [cap, key_lookup_fn]) do
+          :ok -> {:ok, auth}
+          {:error, reason} -> {:error, {:delegation_chain_invalid, reason}, auth}
+        end
     end
   rescue
     # M1 review fix (2026-06-09): an exception while verifying delegation
@@ -727,7 +731,7 @@ defmodule Arbor.Security.AuthDecision do
     if Code.ensure_loaded?(config) and function_exported?(config, :delegation_signer_module, 0) do
       apply(config, :delegation_signer_module, [])
     else
-      Arbor.Security.Signer
+      Arbor.Security.Capability.Signer
     end
   end
 
@@ -831,17 +835,7 @@ defmodule Arbor.Security.AuthDecision do
   end
 
   defp approved_invocation?(principal_id, resource_uri, opts) do
-    case Keyword.get(opts, :approved_invocation) do
-      approval when is_map(approval) ->
-        approval_field(approval, :principal_id) == principal_id and
-          approval_field(approval, :resource_uri) == resource_uri and
-          approval_field(approval, :decision) in [:approved, :approve, "approved", "approve"] and
-          is_binary(approval_field(approval, :request_id))
-
-      _ ->
-        false
-    end
+    is_binary(principal_id) and is_binary(resource_uri) and
+      Keyword.get(opts, :approved_invocation) == :security_verified
   end
-
-  defp approval_field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 end

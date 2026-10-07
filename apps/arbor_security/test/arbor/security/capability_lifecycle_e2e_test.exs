@@ -20,9 +20,12 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
     {:ok, identity_b} = Identity.generate(name: "e2e-agent-b")
     {:ok, identity_c} = Identity.generate(name: "e2e-agent-c")
 
-    :ok = Registry.register(identity_a)
-    :ok = Registry.register(identity_b)
-    :ok = Registry.register(identity_c)
+    :ok = Registry.register_fixture(identity_a)
+    :ok = Registry.register_fixture(identity_b)
+    :ok = Registry.register_fixture(identity_c)
+
+    {:ok, authority_a} = open_authority(identity_a)
+    {:ok, authority_b} = open_authority(identity_b)
 
     {:ok,
      agent_a: identity_a.agent_id,
@@ -30,7 +33,9 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
      agent_c: identity_c.agent_id,
      identity_a: identity_a,
      identity_b: identity_b,
-     identity_c: identity_c}
+     identity_c: identity_c,
+     authority_a: authority_a,
+     authority_b: authority_b}
   end
 
   # ===========================================================================
@@ -41,7 +46,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
     test "grant enables authorization, revoke disables it", %{agent_a: agent_a} do
       # Grant a capability
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/cycle"
         )
@@ -53,7 +58,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
                )
 
       # Revoke the capability
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
 
       # Authorization now fails
       assert {:error, :unauthorized} =
@@ -64,7 +69,9 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
     test "revoking returns error for unknown capability" do
       assert {:error, :not_found} =
-               Security.revoke("cap_nonexistent_e2e_#{:erlang.unique_integer([:positive])}")
+               Security.revoke_fixture(
+                 "cap_nonexistent_e2e_#{:erlang.unique_integer([:positive])}"
+               )
     end
   end
 
@@ -75,7 +82,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
   describe "max_uses constraint" do
     test "capability auto-revokes after max_uses authorizations", %{agent_a: agent_a} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/maxuses",
           max_uses: 3
@@ -106,11 +113,12 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
     test "A delegates to B, B can authorize", %{
       agent_a: agent_a,
       agent_b: agent_b,
-      identity_a: identity_a
+      identity_a: identity_a,
+      authority_a: authority_a
     } do
       # Grant to A with delegation_depth: 2
       {:ok, cap_a} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/deleg",
           delegation_depth: 2
@@ -118,7 +126,10 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
+        Security.delegate(cap_a.id, agent_b,
+          actor_authority: authority_a,
+          delegator_private_key: identity_a.private_key
+        )
 
       assert cap_b.principal_id == agent_b
       assert cap_b.parent_capability_id == cap_a.id
@@ -136,11 +147,13 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
       agent_b: agent_b,
       agent_c: agent_c,
       identity_a: identity_a,
-      identity_b: identity_b
+      identity_b: identity_b,
+      authority_a: authority_a,
+      authority_b: authority_b
     } do
       # Grant to A with delegation_depth: 1 (can delegate once, child gets depth 0)
       {:ok, cap_a} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/depth",
           delegation_depth: 1
@@ -148,25 +161,34 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B — B gets depth 0
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
+        Security.delegate(cap_a.id, agent_b,
+          actor_authority: authority_a,
+          delegator_private_key: identity_a.private_key
+        )
 
       assert cap_b.delegation_depth == 0
 
       # B tries to delegate to C — fails because depth is 0
       assert {:error, :delegation_depth_exhausted} =
-               Security.delegate(cap_b.id, agent_c, delegator_private_key: identity_b.private_key)
+               Security.delegate(cap_b.id, agent_c,
+                 actor_authority: authority_b,
+                 delegator_private_key: identity_b.private_key
+               )
     end
 
-    test "multi-hop delegation chain A→B→C preserves depth and chain metadata", %{
-      agent_a: agent_a,
-      agent_b: agent_b,
-      agent_c: agent_c,
-      identity_a: identity_a,
-      identity_b: identity_b
-    } do
+    test "security regression: multi-hop delegation A→B→C verifies every immediate signed link",
+         %{
+           agent_a: agent_a,
+           agent_b: agent_b,
+           agent_c: agent_c,
+           identity_a: identity_a,
+           identity_b: identity_b,
+           authority_a: authority_a,
+           authority_b: authority_b
+         } do
       # Grant to A with delegation_depth: 3
       {:ok, cap_a} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/multihop",
           delegation_depth: 3
@@ -174,7 +196,10 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A → B
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
+        Security.delegate(cap_a.id, agent_b,
+          actor_authority: authority_a,
+          delegator_private_key: identity_a.private_key
+        )
 
       assert cap_b.delegation_depth == 2
       assert cap_b.parent_capability_id == cap_a.id
@@ -182,7 +207,10 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # B → C
       {:ok, cap_c} =
-        Security.delegate(cap_b.id, agent_c, delegator_private_key: identity_b.private_key)
+        Security.delegate(cap_b.id, agent_c,
+          actor_authority: authority_b,
+          delegator_private_key: identity_b.private_key
+        )
 
       assert cap_c.delegation_depth == 1
       assert cap_c.parent_capability_id == cap_b.id
@@ -195,11 +223,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
       assert first_record.delegator_id == agent_a
       assert second_record.delegator_id == agent_b
 
-      # Note: multi-hop authorize fails because CapabilityStore.delegation_chain_valid?
-      # verifies each record's signature against the final capability's payload,
-      # but each record was signed over its immediate child's payload (which differs).
-      # Single-hop delegation authorize works (tested above).
-      assert {:error, :unauthorized} =
+      assert {:ok, :authorized} =
                Security.authorize(agent_c, "arbor://fs/read/e2e/multihop", nil,
                  verify_identity: false
                )
@@ -214,11 +238,12 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
     test "revoking parent's cap also invalidates delegated child", %{
       agent_a: agent_a,
       agent_b: agent_b,
-      identity_a: identity_a
+      identity_a: identity_a,
+      authority_a: authority_a
     } do
       # Grant to A
       {:ok, cap_a} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://fs/read/e2e/cascade",
           delegation_depth: 2
@@ -226,7 +251,10 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B
       {:ok, _cap_b} =
-        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
+        Security.delegate(cap_a.id, agent_b,
+          actor_authority: authority_a,
+          delegator_private_key: identity_a.private_key
+        )
 
       # B can authorize before cascade
       assert {:ok, :authorized} =
@@ -235,7 +263,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
                )
 
       # Cascade-revoke A's capability (takes out B's delegated cap too)
-      assert {:ok, count} = CapabilityStore.cascade_revoke(cap_a.id)
+      assert {:ok, count} = CapabilityStore.cascade_revoke_fixture(cap_a.id)
       assert count >= 2
 
       # A can no longer authorize
@@ -273,7 +301,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
         )
 
       # Store directly (bypassing Security.grant which would sign it fresh)
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       # Authorization should fail — capability is expired
       assert {:error, :unauthorized} =
@@ -290,7 +318,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
   describe "wildcard resource matching" do
     test "glob pattern matches subpaths but not unrelated resources", %{agent_a: agent_a} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://shell/exec/**"
         )
@@ -311,7 +339,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
     test "exact match works without wildcards", %{agent_a: agent_a} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_a,
           resource: "arbor://shell/exec/git"
         )
@@ -329,6 +357,17 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
       # Different resource fails
       assert {:error, :unauthorized} =
                Security.authorize(agent_a, "arbor://shell/exec/rm", nil, verify_identity: false)
+    end
+  end
+
+  defp open_authority(identity) do
+    with {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             identity.agent_id,
+             identity.private_key,
+             purpose: :capability_lifecycle_test
+           ) do
+      Security.open_ephemeral_signing_authority(proof, identity.private_key)
     end
   end
 end

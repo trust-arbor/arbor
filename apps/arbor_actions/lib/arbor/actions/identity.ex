@@ -76,7 +76,7 @@ defmodule Arbor.Actions.Identity do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(params, _context) do
+    def run(params, context) do
       %{agent_id: agent_id} = params
       target = params[:target] || "system_authority"
 
@@ -84,18 +84,18 @@ defmodule Arbor.Actions.Identity do
 
       case target do
         "system_authority" ->
-          request_system_endorsement(agent_id)
+          request_system_endorsement(agent_id, signing_authority(context))
 
         peer_id ->
           request_peer_endorsement(agent_id, peer_id)
       end
     end
 
-    defp request_system_endorsement(agent_id) do
+    defp request_system_endorsement(agent_id, actor_authority) do
       # Look up the agent's full identity from the registry
       with {:ok, public_key} <- Arbor.Security.lookup_public_key(agent_id),
            identity <- build_identity_for_endorsement(agent_id, public_key),
-           {:ok, endorsement} <- Arbor.Security.endorse_agent(identity) do
+           {:ok, endorsement} <- Arbor.Security.endorse_agent(identity, actor_authority) do
         result = %{
           endorsement: endorsement,
           status: "endorsed",
@@ -152,6 +152,12 @@ defmodule Arbor.Actions.Identity do
       }
     end
 
+    defp signing_authority(context) when is_map(context) do
+      Map.get(context, :signing_authority) || Map.get(context, "signing_authority")
+    end
+
+    defp signing_authority(_context), do: nil
+
     defp format_error(:not_found), do: "Agent identity not found in registry"
     defp format_error(reason), do: "Endorsement request failed: #{inspect(reason)}"
   end
@@ -160,10 +166,9 @@ defmodule Arbor.Actions.Identity do
     @moduledoc """
     Sign another agent's public key to create a web-of-trust link.
 
-    The signing agent uses its own Ed25519 private key (from its keychain)
-    to sign the target agent's `public_key <> agent_id`, producing a peer
-    signature. This creates a verifiable assertion: "I, agent_X, vouch for
-    agent_Y's identity."
+    The signing agent uses a caller-owned signing authority. Security binds
+    the authority to the asserted signer and signs a canonical, domain-bound
+    endorsement without exposing private key material to the action context.
 
     The target agent accumulates these peer signatures as trust evidence.
     More signatures from trusted agents = stronger identity assurance.
@@ -193,7 +198,7 @@ defmodule Arbor.Actions.Identity do
         signer_id: [
           type: :string,
           required: true,
-          doc: "The signing agent's ID (must have a keychain with signing keys)"
+          doc: "The signing agent's ID (must match the caller-owned signing authority)"
         ],
         target_id: [
           type: :string,
@@ -208,7 +213,7 @@ defmodule Arbor.Actions.Identity do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Security.Crypto
+    alias Arbor.Security
 
     def taint_roles do
       %{signer_id: :control, target_id: :control, note: :data}
@@ -222,17 +227,16 @@ defmodule Arbor.Actions.Identity do
 
       Actions.emit_started(__MODULE__, %{signer_id: signer_id, target_id: target_id})
 
-      # Get the signer's private key from context (injected by the execution environment)
-      # The agent's keychain holds its signing keypair
-      signer_private_key = Map.get(context, :signer_private_key)
-
       with :ok <- validate_not_self_signing(signer_id, target_id),
-           {:ok, target_public_key} <- Arbor.Security.lookup_public_key(target_id),
-           {:ok, private_key} <- resolve_signing_key(signer_id, signer_private_key) do
-        # Sign: target_public_key <> target_agent_id (same format as system authority)
-        payload = target_public_key <> target_id
-        signature = Crypto.sign(payload, private_key)
-
+           {:ok, signing_authority} <- require_signing_authority(context, signer_id),
+           {:ok, target_public_key} <- Security.lookup_public_key(target_id),
+           {:ok, signature} <-
+             Security.sign_identity_endorsement(
+               signing_authority,
+               signer_id,
+               target_id,
+               target_public_key
+             ) do
         peer_signature = %{
           signer_id: signer_id,
           target_id: target_id,
@@ -270,36 +274,41 @@ defmodule Arbor.Actions.Identity do
     defp validate_not_self_signing(id, id), do: {:error, :cannot_sign_own_key}
     defp validate_not_self_signing(_signer, _target), do: :ok
 
-    defp resolve_signing_key(_signer_id, key) when is_binary(key) and byte_size(key) > 0 do
-      {:ok, key}
-    end
+    defp require_signing_authority(context, signer_id) when is_map(context) do
+      case Map.get(context, :signing_authority) || Map.get(context, "signing_authority") do
+        nil ->
+          {:error, :signing_authority_required}
 
-    defp resolve_signing_key(signer_id, _nil_or_empty) do
-      # Try to get the signing key from the signer's keychain
-      case Arbor.Security.lookup_public_key(signer_id) do
-        {:ok, _} ->
-          # We can verify the signer exists, but we need the private key
-          # from the execution context. The keychain holds it but we can't
-          # extract it through the public API for safety.
-          {:error, :signer_private_key_required}
-
-        {:error, :not_found} ->
-          {:error, :signer_not_found}
+        authority ->
+          case Security.signing_authority_principal(authority) do
+            {:ok, ^signer_id} -> {:ok, authority}
+            {:ok, _other} -> {:error, :signing_authority_principal_mismatch}
+            {:error, _reason} -> {:error, :signing_authority_unauthorized}
+          end
       end
     end
 
+    defp require_signing_authority(_context, _signer_id),
+      do: {:error, :signing_authority_required}
+
     defp format_error(:cannot_sign_own_key),
       do: "Cannot sign your own public key. Provide a different agent's key to sign."
-
-    defp format_error(:signer_not_found), do: "Signing agent not found in the identity registry."
 
     defp format_error(:not_found),
       do:
         "Target agent identity not found in the registry. Ensure the target agent has a registered identity."
 
-    defp format_error(:signer_private_key_required),
-      do:
-        "Signer's private key is required for key signing operations. Provide it in the execution context via :signer_private_key."
+    defp format_error(:signing_authority_required),
+      do: "A caller-owned signing authority is required for key signing operations."
+
+    defp format_error(:signing_authority_principal_mismatch),
+      do: "The signing authority principal does not match signer_id."
+
+    defp format_error(:signing_authority_unauthorized),
+      do: "The signing authority is invalid, closed, or not owned by this process."
+
+    defp format_error(:identity_endorsement_unauthorized),
+      do: "The signing authority is not authorized to endorse this identity."
 
     defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Public key signing failed: #{inspect(reason)}"

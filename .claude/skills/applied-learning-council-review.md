@@ -217,3 +217,12 @@ frozen plan).
 <!-- applied-learning: reviewer-evidence-must-not-truncate-below-admitted-ledger-size -->
 <a id="applied-learning-reviewer-evidence-must-not-truncate-below-admitted-ledger-size"></a>
 **Reviewer evidence must not truncate below admitted ledger size.** If recheck requires every owned active finding, the prompt must expose every admitted id, including minor/nit findings. J0's valid 42,651-byte ledger became a 32,768-byte escaped preview, causing six incomplete-owner abstentions on 2026-09-07. Match admission and rendering bounds, preserve strict update validation, and project bounded known failure tags without report payloads. Regression coverage should construct a valid ledger through its real core, render both reviewer prompts, and close the next cycle from model-visible evidence; prove the parent fails on truncation, not a newly added helper's missing function.
+
+<!-- applied-learning: trace-the-exact-reviewed-symbol-before-closing-a-finding -->
+<a id="applied-learning-trace-the-exact-reviewed-symbol-before-closing-a-finding"></a>
+**Trace the exact reviewed symbol before closing a finding.** Repositories can
+have parallel APIs for the same concept. Anchor remediation and regression to
+the file, module, and public function cited by the review, then search for
+sibling implementations. On 2026-10-06, hardening
+`Arbor.Common.Pagination.filter_after_cursor/3` left the reviewed fail-open path
+in `Arbor.Common.Pagination.Cursor.filter_records/4` unchanged.

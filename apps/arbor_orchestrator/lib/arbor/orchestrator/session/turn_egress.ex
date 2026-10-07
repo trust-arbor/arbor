@@ -480,7 +480,8 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
       destination: route.destination,
       provider: route.provider,
       runtime: route.runtime,
-      model: route.model
+      model: route.model,
+      actor_authority: Map.get(state, :signing_authority)
     ]
 
     case Arbor.Security.issue_disclosure_capability(opts) do
@@ -495,7 +496,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
             {:ok, bound, cap.id}
 
           {:error, _} ->
-            _ = safe_revoke_disclosure(cap.id)
+            _ = safe_revoke_disclosure(cap.id, Map.get(state, :signing_authority))
             {:error, :disclosure_bind_failed}
         end
 
@@ -522,19 +523,32 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
     do: {:error, :invalid_authority}
 
   @doc false
-  @spec safe_revoke_disclosure(String.t() | nil) :: :ok
+  @spec safe_revoke_disclosure(String.t() | nil) ::
+          :ok | {:error, :capability_mutation_unauthorized}
   def safe_revoke_disclosure(nil), do: :ok
 
-  def safe_revoke_disclosure(cap_id) when is_binary(cap_id) do
-    _ = Arbor.Security.revoke(cap_id)
-    :ok
+  def safe_revoke_disclosure(_cap_id),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @spec safe_revoke_disclosure(String.t() | nil, term()) ::
+          :ok | {:error, :capability_mutation_unauthorized}
+  def safe_revoke_disclosure(nil, _actor_authority), do: :ok
+
+  def safe_revoke_disclosure(cap_id, actor_authority)
+      when is_binary(cap_id) and not is_nil(actor_authority) do
+    case Arbor.Security.revoke(cap_id, actor_authority: actor_authority) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :capability_mutation_unauthorized}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
   rescue
-    _ -> :ok
+    _ -> {:error, :capability_mutation_unauthorized}
   catch
-    _, _ -> :ok
+    _, _ -> {:error, :capability_mutation_unauthorized}
   end
 
-  def safe_revoke_disclosure(_), do: :ok
+  def safe_revoke_disclosure(_cap_id, _actor_authority),
+    do: {:error, :capability_mutation_unauthorized}
 
   @doc false
   @spec build_authorizer(map()) :: (term() -> :allow | {:error, term()})

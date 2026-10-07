@@ -10,8 +10,6 @@ defmodule Arbor.Security.Extension.PlatformActivationAuthorization do
   @context_keys [
     :audience_host_id,
     :audience_install_id,
-    :issued_at,
-    :expires_at,
     :nonce
   ]
   @forbidden_keys MapSet.new([
@@ -32,7 +30,9 @@ defmodule Arbor.Security.Extension.PlatformActivationAuthorization do
                     :principal_id,
                     :payload,
                     :schema,
-                    :version
+                    :version,
+                    :issued_at,
+                    :expires_at
                   ])
 
   @spec issue(term(), term(), term()) :: {:ok, map()} | {:error, atom()}
@@ -42,6 +42,14 @@ defmodule Arbor.Security.Extension.PlatformActivationAuthorization do
          {:ok, snapshot} <- fetch_boot_profile(),
          {:ok, transaction} <- validate_transaction(transaction),
          {:ok, digest} <- digest_transaction(transaction),
+         {:ok, window} <-
+           SigningAuthorityBroker.reserve_platform_activation_window(
+             authority,
+             context.nonce,
+             snapshot["valid_from"],
+             snapshot["valid_until"]
+           ),
+         context <- Map.merge(context, window),
          {:ok, built} <-
            Core.build(%{
              snapshot: snapshot,
@@ -52,7 +60,11 @@ defmodule Arbor.Security.Extension.PlatformActivationAuthorization do
              authority_purpose: authority.purpose
            }),
          {:ok, signature} <-
-           SigningAuthorityBroker.sign_detached(authority, built.signing_message),
+           SigningAuthorityBroker.sign_platform_activation(
+             authority,
+             built.unsigned_envelope,
+             context.nonce
+           ),
          {:ok, signature_hex} <- encode_signature(signature),
          {:ok, envelope} <- Core.attach_signature(built, signature_hex),
          {:ok, verified} <-

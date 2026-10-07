@@ -206,7 +206,7 @@ defmodule Arbor.Consensus.AuthorizationTest do
             actions: [:all]
           )
 
-        Arbor.Security.CapabilityStore.put(cap)
+        Arbor.Security.put_capability_fixture(cap)
       end
     end
   end

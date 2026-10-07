@@ -24,10 +24,13 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     File.write!(Path.join(cwd, "fixture"), "synthetic handler input")
     File.write!(Path.join(root, "outside"), "outside handler data")
     {:ok, identity} = Arbor.Security.generate_identity(name: "synthetic handler containment")
-    :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.register_identity_fixture(identity)
 
     {:ok, _} =
-      Arbor.Security.grant(principal: identity.agent_id, resource: "arbor://fs/read#{cwd}/**")
+      Arbor.Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://fs/read#{cwd}/**"
+      )
 
     previous = Application.get_env(:arbor_shell, :agent_authorizer)
     Application.put_env(:arbor_shell, :agent_authorizer, FilesystemAuthorizer)
@@ -40,8 +43,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
         else: Application.put_env(:arbor_shell, :agent_authorizer, previous)
 
       {:ok, caps} = Arbor.Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Arbor.Security.revoke(cap.id)
-      Arbor.Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)
+      Arbor.Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(root)
     end)
 

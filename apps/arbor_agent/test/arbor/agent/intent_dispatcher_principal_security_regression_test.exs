@@ -34,8 +34,8 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     configure_minimal_security()
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "action-cycle-r4")
-    :ok = Arbor.Security.register_identity(identity)
-    :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Arbor.Security.register_identity_fixture(identity)
+    :ok = Arbor.Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
     signer = Arbor.Security.make_signer(identity.agent_id, identity.private_key)
 
     marker =
@@ -50,7 +50,7 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       restore_security_config(previous)
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.revoke_all(identity.agent_id)
+        Arbor.Security.revoke_all_fixture(identity.agent_id)
       end
 
       if Process.whereis(Arbor.Trust.Store) do
@@ -58,10 +58,10 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       end
 
       if Process.whereis(Arbor.Security.Identity.Registry) do
-        Arbor.Security.deregister_identity(identity.agent_id)
+        Arbor.Security.deregister_identity_fixture(identity.agent_id)
       end
 
-      _ = Arbor.Security.delete_signing_key(identity.agent_id)
+      _ = Arbor.Security.delete_signing_key_fixture(identity.agent_id)
 
       File.rm(marker)
     end)
@@ -203,19 +203,22 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
                signing_authority_bootstrap: bootstrap
              )
 
-    authority = :sys.get_state(server).signing_authority
-    assert %Arbor.Contracts.Security.SigningAuthority{} = authority
+    assert :sys.get_state(server).signing_authority == nil
+
+    assert {:error, :authority_already_claimed} =
+             Arbor.Security.claim_signing_authority(bootstrap)
 
     assert :ok = ActionCycleSupervisor.stop_server(identity.agent_id)
     assert eventually(fn -> ActionCycleSupervisor.lookup(identity.agent_id) == :error end)
 
-    assert {:error, :authority_not_found} =
-             Arbor.Security.sign_with_authority(authority, "after-normal-stop")
+    assert {:error, :bootstrap_not_found} =
+             Arbor.Security.claim_signing_authority(bootstrap)
   end
 
-  test "security regression: ActionCycle crash restart reclaims and rotates authority", %{
-    identity: identity
-  } do
+  test "security regression: ActionCycle crash restart reclaims bootstrap without exposing bearer",
+       %{
+         identity: identity
+       } do
     bootstrap = issue_action_cycle_bootstrap!(identity)
 
     assert {:ok, first} =
@@ -223,7 +226,11 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
                signing_authority_bootstrap: bootstrap
              )
 
-    first_authority = :sys.get_state(first).signing_authority
+    assert :sys.get_state(first).signing_authority == nil
+
+    assert {:error, :authority_already_claimed} =
+             Arbor.Security.claim_signing_authority(bootstrap)
+
     ref = Process.monitor(first)
     Process.exit(first, :kill)
     assert_receive {:DOWN, ^ref, :process, ^first, _}, 1_000
@@ -236,13 +243,15 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
            end)
 
     {:ok, second} = ActionCycleSupervisor.lookup(identity.agent_id)
-    second_authority = :sys.get_state(second).signing_authority
-    refute first_authority.token == second_authority.token
+    assert :sys.get_state(second).signing_authority == nil
 
-    assert {:error, :authority_not_found} =
-             Arbor.Security.sign_with_authority(first_authority, "after-crash")
+    assert {:error, :authority_already_claimed} =
+             Arbor.Security.claim_signing_authority(bootstrap)
 
     assert :ok = ActionCycleSupervisor.stop_server(identity.agent_id)
+
+    assert {:error, :bootstrap_not_found} =
+             Arbor.Security.claim_signing_authority(bootstrap)
   end
 
   defp start_cycle_server(agent_id, signer, marker) do
@@ -334,7 +343,8 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
 
     Enum.each(resources, fn resource ->
-      assert {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      assert {:ok, _capability} =
+               Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     end)
   end
 

@@ -165,7 +165,7 @@ defmodule Arbor.Comms.InteractionRouterTest do
              )
 
     assert :not_found = Arbor.Comms.get_answered_approval(id)
-    assert :ok = Arbor.Security.revoke(cap.id)
+    assert :ok = Arbor.Security.revoke_fixture(cap.id)
 
     assert {:error, _} =
              Arbor.Comms.respond_to_interaction_authenticated(
@@ -722,32 +722,7 @@ defmodule Arbor.Comms.InteractionRouterTest do
   end
 
   defp ensure_signals! do
-    Application.ensure_all_started(:arbor_kernel_runtime)
-
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} ->
-          :ok
-
-        {:error, {:already_started, _pid}} ->
-          :ok
-
-        {:error, :already_present} ->
-          {mod, _} = child
-          _ = Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
-          _ = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-          :ok
-
-        {:error, _reason} ->
-          :ok
-      end
-    end
+    :ok = Arbor.Signals.restore_runtime_fixture()
 
     true = Arbor.Signals.healthy?()
   end

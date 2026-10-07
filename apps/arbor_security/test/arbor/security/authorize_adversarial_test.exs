@@ -45,7 +45,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "capability for OTHER principal does NOT help this agent",
          %{agent_id: agent, other_agent: other} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: other,
           resource: "arbor://fs/read/shared"
         )
@@ -56,14 +56,14 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
     test "revoked capability is denied", %{agent_id: agent} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/write/temp_adv"
         )
 
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/write/temp_adv")
 
-      :ok = Security.revoke(cap.id)
+      :ok = Security.revoke_fixture(cap.id)
 
       assert {:error, _} = Security.authorize(agent, "arbor://fs/write/temp_adv")
     end
@@ -78,7 +78,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       past = DateTime.utc_now() |> DateTime.add(-3600, :second)
 
       assert {:error, {:expires_before_granted, _expires, _granted}} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: agent,
                  resource: "arbor://fs/read/expired_test",
                  expires_at: past
@@ -92,7 +92,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "cap for arbor://shell/exec/git grants ONLY git — not subpaths or siblings",
          %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/exec/git"
         )
@@ -115,7 +115,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "concrete cap grants ONLY the exact resource (no subpath, no sibling)",
          %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/doc"
         )
@@ -130,7 +130,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     end
 
     test "an explicit /** grant DOES cover the subtree", %{agent_id: agent} do
-      {:ok, _} = Security.grant(principal: agent, resource: "arbor://fs/read/doc/**")
+      {:ok, _} = Security.grant_fixture(principal: agent, resource: "arbor://fs/read/doc/**")
 
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc/readme.md")
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc/a/b/c")
@@ -142,7 +142,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
   describe "wildcard patterns" do
     test "/** suffix matches any deeper resource", %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/**"
         )
@@ -156,7 +156,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
     test "/** does NOT match a resource whose scheme is wrong", %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/**"
         )
@@ -174,7 +174,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       # Doesn't matter what's granted — an empty resource URI should
       # never authorize anything.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/anywhere"
         )
@@ -184,7 +184,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
     test "garbage resource URI denies", %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/anywhere"
         )
@@ -217,7 +217,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "cap for arbor://fs/read/docs/ does NOT authorize docs/../etc/passwd (security regression)",
          %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/docs/"
         )
@@ -229,7 +229,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "even arbor://fs/** wildcard does NOT authorize traversal (security regression)",
          %{agent_id: agent} do
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/**"
         )
@@ -245,7 +245,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       # identifiers; only `..` as a complete segment between `/` is
       # traversal.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/**"
         )
@@ -318,18 +318,18 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       cap_uri = "arbor://fs/read#{safe_dir}/**"
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: cap_uri
         )
 
       # The URI for the symlink itself contains no `..`. The URI
       # matcher accepts. Before the FileGuard wiring, this would
-      # return {:ok, :authorized}. After the wiring, it returns
-      # {:error, :symlink_escape}.
+      # return {:ok, :authorized}. SafePath now rejects the resolved escape at
+      # the containment boundary as path traversal.
       symlink_uri = "arbor://fs/read#{safe_dir}/escape-link"
 
-      assert {:error, :symlink_escape} = Security.authorize(agent, symlink_uri)
+      assert {:error, :path_traversal} = Security.authorize(agent, symlink_uri)
     end
 
     test "regular file inside authorized root still authorizes (no false positive)",
@@ -337,7 +337,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       cap_uri = "arbor://fs/read#{safe_dir}/**"
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: cap_uri
         )
@@ -359,7 +359,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       cap_uri = "arbor://fs/read#{safe_dir}/**"
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: cap_uri
         )
@@ -376,7 +376,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "non-existent file with intermediate-symlink parent is rejected (write-path defense)",
          %{agent_id: agent, workdir: workdir} do
       # SECURITY REGRESSION TEST (per CLAUDE.md) — fails on HEAD~1
-      # (returns :authorized), passes on HEAD (returns :symlink_escape).
+      # (returns :authorized), passes on HEAD (returns :path_traversal).
       #
       # The write-path attack: agent has `arbor://fs/write/<safe>/`,
       # safe contains a symlink `safe/redirect/` pointing outside.
@@ -396,7 +396,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       cap_uri = "arbor://fs/write#{safe_dir}/**"
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: cap_uri
         )
@@ -406,7 +406,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       # directory IS a symlink escaping safe_dir.
       target_uri = "arbor://fs/write#{safe_dir}/redirect/newfile.txt"
 
-      assert {:error, :symlink_escape} = Security.authorize(agent, target_uri)
+      assert {:error, :path_traversal} = Security.authorize(agent, target_uri)
     end
 
     test "non-existent file in a real subdirectory of root still authorizes (no false positive)",
@@ -420,7 +420,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       cap_uri = "arbor://fs/write#{safe_dir}/**"
 
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: cap_uri
         )
@@ -436,7 +436,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       # Confirm we didn't introduce a regression for shell / api caps.
       # (Shell authorizes by exact command URI; FileGuard never runs for it.)
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://shell/exec/git"
         )
@@ -484,7 +484,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       # Agent holds a read cap covering the path. fs/read isn't on the
       # askable ceiling, so it reaches handle_authorized → file guard.
       {:ok, _} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent,
           resource: "arbor://fs/read/tmp/fgfail/**"
         )

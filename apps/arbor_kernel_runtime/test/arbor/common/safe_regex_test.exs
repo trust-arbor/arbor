@@ -49,6 +49,48 @@ defmodule Arbor.Common.SafeRegexTest do
     end
   end
 
+  describe "replace/4" do
+    test "replaces matches with strings and callbacks" do
+      assert {:ok, "b-n-n-"} = SafeRegex.replace(~r/a/, "banana", "-")
+
+      assert {:ok, "bAnAnA"} =
+               SafeRegex.replace(~r/a/, "banana", fn _match -> "A" end)
+    end
+  end
+
+  describe "bounded execution" do
+    test "rejects an oversized subject before running the regex" do
+      assert {:error, :input_too_large} =
+               SafeRegex.run(~r/a/, "aa", max_bytes: 1)
+    end
+
+    test "contains regex callback failures" do
+      assert {:error, :operation_failed} =
+               SafeRegex.replace(~r/a/, "a", fn _match -> raise "boom" end)
+    end
+
+    test "applies one timeout to a group of operations" do
+      assert {:error, :timeout} =
+               SafeRegex.within_timeout(fn -> Process.sleep(:infinity) end, timeout: 10)
+    end
+
+    test "nested operations execute inside the one bounded worker" do
+      caller = self()
+
+      assert {:ok, {:ok, "A"}} =
+               SafeRegex.within_timeout(fn ->
+                 worker = self()
+
+                 SafeRegex.replace(~r/a/, "a", fn _match ->
+                   send(caller, {:replacement_worker, self(), worker})
+                   "A"
+                 end)
+               end)
+
+      assert_receive {:replacement_worker, worker, worker}
+    end
+  end
+
   describe "timeout protection" do
     @tag :slow
     test "handles pathological input gracefully" do

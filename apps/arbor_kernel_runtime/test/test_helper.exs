@@ -10,6 +10,8 @@ children = [
   {Arbor.Signals.Store, []},
   {Arbor.Signals.TopicKeys, []},
   {Arbor.Signals.Channels, []},
+  {Arbor.Signals.SubscriptionRegistry, []},
+  {Arbor.Signals.TelemetryBridge, []},
   {Arbor.Signals.Bus, []},
   {Arbor.Signals.Relay, []}
 ]
@@ -35,9 +37,28 @@ for child <- children do
   end
 end
 
-# Start required Monitor processes for tests since start_children: false prevents
-# Application startup from adding them to the (empty) Monitor supervisor.
-{:ok, _} = Arbor.Monitor.MetricsStore.start_link([])
-{:ok, _} = Arbor.Monitor.Poller.start_link([])
+# Start required Monitor processes under their real owner. Starting them with
+# start_link/1 here leaves them attached to the transient test bootstrap process;
+# runtime lifecycle tests can then stop them without Monitor.Supervisor restoring
+# their ETS tables, cascading into unrelated monitor tests.
+monitor_children = [
+  {Arbor.Monitor.MetricsStore, []},
+  {Arbor.Monitor.Poller, []}
+]
+
+for child <- monitor_children do
+  case Supervisor.start_child(Arbor.Monitor.Supervisor, child) do
+    {:ok, _pid} ->
+      :ok
+
+    {:error, {:already_started, _pid}} ->
+      :ok
+
+    {:error, :already_present} ->
+      {mod, _opts} = child
+      :ok = Supervisor.delete_child(Arbor.Monitor.Supervisor, mod)
+      {:ok, _pid} = Supervisor.start_child(Arbor.Monitor.Supervisor, child)
+  end
+end
 
 ExUnit.start(exclude: [:llm, :llm_local, :distributed])

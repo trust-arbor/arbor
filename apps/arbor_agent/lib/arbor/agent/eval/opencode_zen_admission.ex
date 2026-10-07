@@ -25,7 +25,8 @@ defmodule Arbor.Agent.Eval.OpenCodeZenAdmission do
   @doc "Tier-2 evidence from a TaskEval trial map."
   @spec tier2_from_trial(map()) :: map()
   def tier2_from_trial(trial) when is_map(trial) do
-    submitted? = Map.get(trial, :proposal_submitted) == true or Map.get(trial, "proposal_submitted") == true
+    submitted? =
+      Map.get(trial, :proposal_submitted) == true or Map.get(trial, "proposal_submitted") == true
 
     %{
       passed: submitted?,

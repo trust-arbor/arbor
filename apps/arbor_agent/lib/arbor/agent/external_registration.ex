@@ -13,7 +13,7 @@ defmodule Arbor.Agent.ExternalRegistration do
   @max_principal_bytes 256
   @max_display_name_bytes 200
   @max_session_token_bytes 4_096
-  @allowed_opts [:identity_verified, :session_token]
+  @allowed_opts [:identity_verified, :session_token, :actor_authority]
 
   @profiles [
     %{
@@ -101,12 +101,14 @@ defmodule Arbor.Agent.ExternalRegistration do
          {:ok, display_name} <- validate_display_name(display_name),
          {:ok, profile} <- fetch_profile(type),
          {:ok, auth_opts} <- validate_auth_opts(opts),
-         :ok <- authorize(caller_id, type, auth_opts) do
-      create(caller_id, display_name, profile)
+         :ok <- authorize(caller_id, type, authorization_opts(auth_opts)) do
+      with_actor_authority(caller_id, auth_opts, fn actor_authority ->
+        create(caller_id, display_name, profile, actor_authority)
+      end)
     end
   end
 
-  defp create(caller_id, display_name, profile) do
+  defp create(caller_id, display_name, profile, actor_authority) do
     tenant_context = TenantContext.new(caller_id)
 
     opts = [
@@ -118,6 +120,7 @@ defmodule Arbor.Agent.ExternalRegistration do
         agent_type: profile.type,
         registered_via: "external_registration"
       },
+      actor_authority: actor_authority,
       return_identity: true
     ]
 
@@ -188,6 +191,7 @@ defmodule Arbor.Agent.ExternalRegistration do
 
     session_token = Keyword.get(opts, :session_token)
     identity_verified = Keyword.get(opts, :identity_verified, false)
+    actor_authority = Keyword.get(opts, :actor_authority)
 
     cond do
       not Keyword.keyword?(opts) ->
@@ -209,7 +213,7 @@ defmodule Arbor.Agent.ExternalRegistration do
         {:error, :invalid_opts}
 
       true ->
-        {:ok, compact_auth_opts(session_token, identity_verified)}
+        {:ok, compact_auth_opts(session_token, identity_verified, actor_authority)}
     end
   rescue
     _ -> {:error, :invalid_opts}
@@ -225,10 +229,39 @@ defmodule Arbor.Agent.ExternalRegistration do
 
   defp valid_session_token?(_token), do: false
 
-  defp compact_auth_opts(session_token, identity_verified) do
+  defp compact_auth_opts(session_token, identity_verified, actor_authority) do
     []
     |> maybe_put(:session_token, session_token, not is_nil(session_token))
     |> maybe_put(:identity_verified, true, identity_verified)
+    |> maybe_put(:actor_authority, actor_authority, not is_nil(actor_authority))
+  end
+
+  defp authorization_opts(opts), do: Keyword.drop(opts, [:actor_authority])
+
+  defp with_actor_authority(caller_id, opts, callback) when is_function(callback, 1) do
+    case Keyword.fetch(opts, :actor_authority) do
+      {:ok, authority} ->
+        with_authority_principal(caller_id, authority, callback)
+
+      :error ->
+        with {:ok, session_token} <- Keyword.fetch(opts, :session_token),
+             {:ok, authority} <- Arbor.Security.open_agent_lifecycle_authority(session_token) do
+          try do
+            with_authority_principal(caller_id, authority, callback)
+          after
+            Arbor.Security.close_signing_authority(authority)
+          end
+        else
+          _ -> {:error, :capability_mutation_unauthorized}
+        end
+    end
+  end
+
+  defp with_authority_principal(caller_id, authority, callback) do
+    case Arbor.Security.signing_authority_principal(authority) do
+      {:ok, ^caller_id} -> callback.(authority)
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
   end
 
   defp maybe_put(opts, key, value, true), do: Keyword.put(opts, key, value)

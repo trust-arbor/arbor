@@ -115,13 +115,13 @@ defmodule Arbor.Orchestrator.Session.SelfKnowledgeChainTest do
             "arbor://memory/write",
             "arbor://action/session_goals/prune_stale_intents"
           ] do
-        assert {:ok, cap} = Arbor.Security.grant(principal: agent, resource: resource)
+        assert {:ok, cap} = Arbor.Security.grant_fixture(principal: agent, resource: resource)
         cap
       end
 
     on_exit(fn ->
       await_writers(existing_writers)
-      Enum.each(grants, &Arbor.Security.revoke(&1.id))
+      Enum.each(grants, &Arbor.Security.revoke_fixture(&1.id))
       clear_projections(agent)
       File.rm_rf!(root)
     end)

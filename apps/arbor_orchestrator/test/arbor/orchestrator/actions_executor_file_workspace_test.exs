@@ -11,19 +11,19 @@ defmodule Arbor.Orchestrator.ActionsExecutorFileWorkspaceTest do
 
     {:ok, identity} = Identity.generate(name: "actions-executor-file-workspace")
     agent_id = identity.agent_id
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     repo_root = repo_root()
     repo_scope = "arbor://fs/read/#{String.trim_leading(repo_root, "/")}/**"
 
-    {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
-    {:ok, _} = Security.grant(principal: agent_id, resource: repo_scope)
+    {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
+    {:ok, _} = Security.grant_fixture(principal: agent_id, resource: repo_scope)
 
     create_profile_with_rules(agent_id, :block, %{"arbor://fs/read" => :allow})
 
     on_exit(fn ->
       case Security.list_capabilities(agent_id) do
-        {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+        {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
         _ -> :ok
       end
 

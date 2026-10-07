@@ -243,7 +243,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   end
 
   defp grant!(agent_id, resource) do
-    {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+    {:ok, cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     cap
   end
 
@@ -285,21 +285,18 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   end
 
   describe "ensure_tool_capabilities/2" do
-    test "returns :ok without crashing even when modules unavailable" do
-      # In test env, Security/Actions may not be running, but it should not crash
-      assert :ok ==
-               ToolDisclosure.ensure_tool_capabilities("test_agent", [
-                 "file_read",
-                 "memory_recall"
-               ])
+    test "security regression: capability grants require a caller-owned authority" do
+      assert {:error, :capability_mutation_unauthorized} ==
+               ToolDisclosure.ensure_tool_capabilities("test_agent", ["file_read"])
     end
 
-    test "handles empty tool list" do
-      assert :ok == ToolDisclosure.ensure_tool_capabilities("test_agent", [])
+    test "legacy empty-list calls cannot be used as an authority-free success oracle" do
+      assert {:error, :capability_mutation_unauthorized} ==
+               ToolDisclosure.ensure_tool_capabilities("test_agent", [])
     end
 
-    test "handles unknown tool names gracefully" do
-      assert :ok ==
+    test "legacy unknown-tool calls fail closed before resolution" do
+      assert {:error, :capability_mutation_unauthorized} ==
                ToolDisclosure.ensure_tool_capabilities("test_agent", ["nonexistent_tool_xyz"])
     end
   end
@@ -325,7 +322,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
         case Arbor.Security.list_capabilities(agent_id) do
-          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke(&1.id))
+          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke_fixture(&1.id))
           _ -> :ok
         end
       end

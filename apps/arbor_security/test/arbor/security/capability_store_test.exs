@@ -19,7 +19,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
   describe "put/1 and get/1" do
     test "stores and retrieves a capability", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/basic")
-      assert {:ok, :stored} = CapabilityStore.put(cap)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap)
       assert {:ok, retrieved} = CapabilityStore.get(cap.id)
       assert retrieved.id == cap.id
       assert retrieved.principal_id == agent_id
@@ -40,7 +40,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
       # Store with future expiry, then manually override
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
-      {:ok, :stored} = CapabilityStore.put(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
       assert {:error, :capability_expired} = CapabilityStore.get(expired.id)
     end
@@ -50,8 +50,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "lists capabilities for a principal", %{agent_id: agent_id} do
       {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/list/1")
       {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/list/2")
-      {:ok, :stored} = CapabilityStore.put(cap1)
-      {:ok, :stored} = CapabilityStore.put(cap2)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap1)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap2)
 
       {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
       ids = Enum.map(caps, & &1.id)
@@ -75,7 +75,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
         )
 
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
-      {:ok, :stored} = CapabilityStore.put(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
       {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
       refute Enum.any?(caps, &(&1.id == expired.id))
@@ -90,7 +90,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
         )
 
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
-      {:ok, :stored} = CapabilityStore.put(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
       {:ok, caps} = CapabilityStore.list_for_principal(agent_id, include_expired: true)
       assert Enum.any?(caps, &(&1.id == expired.id))
@@ -100,7 +100,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
   describe "find_authorizing/2" do
     test "finds capability matching resource URI", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/findable")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       assert {:ok, found} = CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/findable")
       assert found.id == cap.id
@@ -109,7 +109,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "finds capability by /** subtree grant", %{agent_id: agent_id} do
       # C8: subtree access requires an explicit /** wildcard.
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/prefix/**")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       assert {:ok, _} =
                CapabilityStore.find_authorizing(
@@ -121,7 +121,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "C8: a CONCRETE grant does NOT authorize its subtree (only the exact URI)",
          %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/exactonly")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       # Exact resource is authorized.
       assert {:ok, _} = CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/exactonly")
@@ -133,7 +133,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
     test "returns not_found for unmatched resource", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/specific")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       assert {:error, :not_found} =
                CapabilityStore.find_authorizing(agent_id, "arbor://fs/write/specific")
@@ -141,7 +141,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
     test "matches glob wildcard /** patterns", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       # Should match any subpath under fs/read
       assert {:ok, _} =
@@ -157,7 +157,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
     test "glob /** does not match partial path segments", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       # Should match subpaths under arbor://fs/read/
       assert {:ok, _} =
@@ -171,7 +171,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "/** wildcard does not cross segment boundaries", %{agent_id: agent_id} do
       # C8: subtree coverage is via /**, and it must respect segment boundaries.
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/home/**")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       # Should match subpath
       assert {:ok, _} =
@@ -190,7 +190,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       # so the grant uses the wildcard form; the trailing-slash normalization
       # still applies to the wildcard prefix.
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       assert {:ok, _} =
                CapabilityStore.find_authorizing(
@@ -204,15 +204,15 @@ defmodule Arbor.Security.CapabilityStoreTest do
   describe "revoke/1" do
     test "revokes an existing capability", %{agent_id: agent_id} do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/revoke_test")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
-      assert :ok = CapabilityStore.revoke(cap.id)
+      assert :ok = CapabilityStore.revoke_fixture(cap.id)
       assert {:error, :not_found} = CapabilityStore.get(cap.id)
     end
 
     test "returns error for non-existent capability" do
       assert {:error, :not_found} =
-               CapabilityStore.revoke("cap_gone_#{:erlang.unique_integer([:positive])}")
+               CapabilityStore.revoke_fixture("cap_gone_#{:erlang.unique_integer([:positive])}")
     end
   end
 
@@ -220,10 +220,10 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "revokes all capabilities for a principal", %{agent_id: agent_id} do
       {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/revoke_all/1")
       {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/revoke_all/2")
-      {:ok, :stored} = CapabilityStore.put(cap1)
-      {:ok, :stored} = CapabilityStore.put(cap2)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap1)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap2)
 
-      assert {:ok, 2} = CapabilityStore.revoke_all(agent_id)
+      assert {:ok, 2} = CapabilityStore.revoke_all_fixture(agent_id)
 
       {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
       assert caps == []
@@ -257,7 +257,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
       for i <- 1..4 do
         {:ok, cap} = build_capability(agent_id, "arbor://fs/read/test/#{i}")
-        assert {:ok, :stored} = CapabilityStore.put(cap)
+        assert {:ok, :stored} = CapabilityStore.put_fixture(cap)
       end
     end
 
@@ -266,14 +266,14 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
       for i <- 1..3 do
         {:ok, cap} = build_capability(agent_id, "arbor://fs/read/test/#{i}")
-        {:ok, :stored} = CapabilityStore.put(cap)
+        {:ok, :stored} = CapabilityStore.put_fixture(cap)
       end
 
       # 4th should fail
       {:ok, cap4} = build_capability(agent_id, "arbor://fs/read/test/4")
 
       assert {:error, {:quota_exceeded, :per_agent_capability_limit, context}} =
-               CapabilityStore.put(cap4)
+               CapabilityStore.put_fixture(cap4)
 
       assert context.agent_id == agent_id
       assert context.current == 3
@@ -294,19 +294,19 @@ defmodule Arbor.Security.CapabilityStoreTest do
       # Should succeed (1st within limit)
       agent1 = "agent_global_test_#{base}_1"
       {:ok, cap1} = build_capability(agent1, "arbor://fs/read/test/global/#{base}/1")
-      {:ok, :stored} = CapabilityStore.put(cap1)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap1)
 
       # Should succeed (2nd within limit)
       agent2 = "agent_global_test_#{base}_2"
       {:ok, cap2} = build_capability(agent2, "arbor://fs/read/test/global/#{base}/2")
-      {:ok, :stored} = CapabilityStore.put(cap2)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap2)
 
       # 3rd should fail (at limit)
       agent3 = "agent_global_test_#{base}_3"
       {:ok, cap3} = build_capability(agent3, "arbor://fs/read/test/global/#{base}/3")
 
       assert {:error, {:quota_exceeded, :global_capability_limit, context}} =
-               CapabilityStore.put(cap3)
+               CapabilityStore.put_fixture(cap3)
 
       assert is_integer(context.current)
       assert context.limit == limit
@@ -318,7 +318,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/test/deep", delegation_depth: 4)
 
       assert {:error, {:quota_exceeded, :delegation_depth_limit, context}} =
-               CapabilityStore.put(cap)
+               CapabilityStore.put_fixture(cap)
 
       assert context.depth == 4
       assert context.limit == 3
@@ -328,7 +328,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       Application.put_env(:arbor_security, :max_delegation_depth, 3)
 
       {:ok, cap} = build_capability(agent_id, "arbor://fs/read/test/exact", delegation_depth: 3)
-      assert {:ok, :stored} = CapabilityStore.put(cap)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap)
     end
 
     test "fails when delegation_depth is negative", %{agent_id: agent_id} do
@@ -347,7 +347,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       }
 
       assert {:error, {:quota_exceeded, :delegation_depth_limit, context}} =
-               CapabilityStore.put(cap)
+               CapabilityStore.put_fixture(cap)
 
       assert context.depth == -1
       assert context.reason == :negative_depth
@@ -362,36 +362,36 @@ defmodule Arbor.Security.CapabilityStoreTest do
       {:ok, cap1} =
         build_capability(agent_id, "arbor://fs/read/test/no_quota/1", delegation_depth: 10)
 
-      assert {:ok, :stored} = CapabilityStore.put(cap1)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap1)
 
       # Should succeed even with > max_per_agent
       {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/test/no_quota/2")
-      assert {:ok, :stored} = CapabilityStore.put(cap2)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap2)
 
       {:ok, cap3} = build_capability(agent_id, "arbor://fs/read/test/no_quota/3")
-      assert {:ok, :stored} = CapabilityStore.put(cap3)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap3)
     end
 
     test "revoke frees quota space", %{agent_id: agent_id} do
       Application.put_env(:arbor_security, :max_capabilities_per_agent, 2)
 
       {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/test/revoke/1")
-      {:ok, :stored} = CapabilityStore.put(cap1)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap1)
 
       {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/test/revoke/2")
-      {:ok, :stored} = CapabilityStore.put(cap2)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap2)
 
       # At limit
       {:ok, cap3} = build_capability(agent_id, "arbor://fs/read/test/revoke/3")
 
       assert {:error, {:quota_exceeded, :per_agent_capability_limit, _}} =
-               CapabilityStore.put(cap3)
+               CapabilityStore.put_fixture(cap3)
 
       # Revoke one
-      :ok = CapabilityStore.revoke(cap1.id)
+      :ok = CapabilityStore.revoke_fixture(cap1.id)
 
       # Now should succeed
-      assert {:ok, :stored} = CapabilityStore.put(cap3)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(cap3)
     end
   end
 
@@ -426,7 +426,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
         )
 
       expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
-      {:ok, :stored} = CapabilityStore.put(expired)
+      {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
       {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
       refute Enum.any?(caps, &(&1.id == expired.id))
@@ -442,7 +442,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       on_exit(fn -> restore_config(:capability_signing_required, original) end)
 
       {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/vsp_unsigned")
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
       refute Enum.any?(caps, &(&1.id == cap.id))
@@ -459,8 +459,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
           session_id: "session_only_this_one"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       {:ok, caps} =
         CapabilityStore.list_valid_for_principal(agent_id, session_id: "some_other_session")
@@ -478,8 +478,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
       agent_id: agent_id
     } do
       cap = build_disclosure_capability(agent_id)
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       {:ok, caps} =
         CapabilityStore.list_valid_for_principal(agent_id,
@@ -496,8 +496,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
       agent_id: agent_id
     } do
       {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/vsp_valid")
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
       assert Enum.any?(caps, &(&1.id == signed.id))
@@ -516,8 +516,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
       agent_id: agent_id
     } do
       {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/not_disclosure")
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       assert {:error, :not_disclosure_capability} =
                CapabilityStore.get_valid_disclosure(signed.id, agent_id)
@@ -526,8 +526,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
     @tag spec: "VP-05D2A0"
     test "wrong_principal when the id belongs to a different agent", %{agent_id: agent_id} do
       cap = build_disclosure_capability(agent_id)
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       other_agent = "agent_#{:erlang.unique_integer([:positive])}"
 
@@ -544,7 +544,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       on_exit(fn -> restore_config(:capability_signing_required, original) end)
 
       cap = build_disclosure_capability(agent_id)
-      {:ok, :stored} = CapabilityStore.put(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(cap)
 
       scope = [
         session_id: cap.session_id,
@@ -559,8 +559,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
     @tag spec: "VP-05D2A0"
     test "returns a valid signed, scoped disclosure capability", %{agent_id: agent_id} do
       cap = build_disclosure_capability(agent_id)
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       scope = [
         session_id: signed.session_id,
@@ -576,8 +576,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "deterministic: revoke-before-validation denies (sequential, no concurrency needed)",
          %{agent_id: agent_id} do
       cap = build_disclosure_capability(agent_id)
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       scope = [
         session_id: signed.session_id,
@@ -585,7 +585,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
         principal_scope: signed.principal_scope
       ]
 
-      assert :ok = CapabilityStore.revoke(signed.id)
+      assert :ok = CapabilityStore.revoke_fixture(signed.id)
 
       assert {:error, :not_found} =
                CapabilityStore.get_valid_disclosure(signed.id, agent_id, scope)
@@ -595,8 +595,8 @@ defmodule Arbor.Security.CapabilityStoreTest do
     test "deterministic: mailbox order is the linearization point (validation enqueued before revoke)",
          %{agent_id: agent_id} do
       cap = build_disclosure_capability(agent_id)
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
-      {:ok, :stored} = CapabilityStore.put(signed)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(signed)
 
       scope = [
         session_id: signed.session_id,
@@ -612,7 +612,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
       wait_until_queue_len(pid, 1)
 
-      revoke_task = Task.async(fn -> CapabilityStore.revoke(signed.id) end)
+      revoke_task = Task.async(fn -> CapabilityStore.revoke_fixture(signed.id) end)
       wait_until_queue_len(pid, 2)
 
       :sys.resume(pid)

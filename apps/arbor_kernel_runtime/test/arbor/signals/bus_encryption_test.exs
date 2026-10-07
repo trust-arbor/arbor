@@ -3,7 +3,7 @@ defmodule Arbor.Signals.BusEncryptionTest do
 
   @moduletag :fast
 
-  alias Arbor.Signals.Bus
+  alias Arbor.Signals.{Bus, Relay, Store}
   alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Signal
   alias Arbor.Signals.TopicKeys
@@ -18,11 +18,50 @@ defmodule Arbor.Signals.BusEncryptionTest do
     end
   end
 
+  defmodule SecuritySyncPublisher do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, :ok, name: Keyword.fetch!(opts, :name))
+    end
+
+    def subscribe(pid, role, event) do
+      GenServer.call(pid, {:subscribe, role, event})
+    end
+
+    def emit(pid, category, type, data, opts) do
+      GenServer.call(pid, {:emit, category, type, data, opts})
+    end
+
+    @impl true
+    def init(:ok) do
+      Process.flag(:sensitive, true)
+      {:ok, %{}}
+    end
+
+    @impl true
+    def handle_call({:subscribe, role, event}, _from, state) do
+      {:reply, Arbor.Signals.subscribe_security_sync(role, event), state}
+    end
+
+    def handle_call({:emit, category, type, data, opts}, _from, state) do
+      {:reply, Arbor.Signals.emit(category, type, data, opts), state}
+    end
+
+    @impl true
+    def handle_info({:signal_received, _delivery_ref, _signal}, state), do: {:noreply, state}
+  end
+
   setup do
     Arbor.Signals.TestCase.ensure_processes()
 
     Testing.isolate_namespace()
     Testing.put(:authorizer, AllowAllAuthorizer)
+
+    Testing.put(
+      :channel_principal_authorizer,
+      Arbor.Signals.TestChannelPrincipalAuthorizer
+    )
 
     :ok
   end
@@ -133,6 +172,91 @@ defmodule Arbor.Signals.BusEncryptionTest do
 
       Bus.unsubscribe(sub_id)
     end
+
+    test "security regression: revocation sync survives node-local topic key changes" do
+      publisher = start_security_sync_publisher()
+
+      marker = "cap_revocation_#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               SecuritySyncPublisher.emit(
+                 publisher,
+                 :security,
+                 :capability_revoked,
+                 %{capability_ids: [marker], origin_node: node()},
+                 async: false,
+                 scope: :cluster
+               )
+
+      {:ok, [stored | _]} = Store.recent(type: :capability_revoked, limit: 1)
+      assert stored.data.capability_ids == [marker]
+      refute Map.has_key?(stored.data, :__encrypted__)
+
+      # A peer has an independent key. Rotating ours models that mismatch;
+      # portable revocation payloads must not depend on either node's key.
+      {:ok, _rotated} = TopicKeys.rotate(:security)
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "security.capability_revoked",
+          fn signal ->
+            send(test_pid, {:remote_revocation, signal})
+            :ok
+          end,
+          async: false,
+          principal_id: "agent_revocation_sync_regression"
+        )
+
+      assert :ok = Relay.receive_batch_fixture([stored], :peer@host)
+
+      assert_receive {:remote_revocation, delivered}, 1_000
+      assert delivered.data.capability_ids == [marker]
+      assert delivered.data.origin_node == :peer@host
+      refute Map.has_key?(delivered.data, :__decryption_failed__)
+
+      Bus.unsubscribe(sub_id)
+    end
+  end
+
+  defp start_security_sync_publisher do
+    child_id = {SecuritySyncPublisher, System.unique_integer([:positive])}
+
+    child_spec =
+      Supervisor.child_spec(
+        {SecuritySyncPublisher, name: SecuritySyncPublisher},
+        id: child_id
+      )
+
+    {:ok, supervisor} = Supervisor.start_link([child_spec], strategy: :one_for_one)
+    Process.unlink(supervisor)
+    on_exit(fn -> stop_supervisor(supervisor) end)
+    publisher = Process.whereis(SecuritySyncPublisher)
+
+    Testing.put(:security_sync_subscribers, %{
+      capability_store: %{
+        owner: SecuritySyncPublisher,
+        supervisor: supervisor,
+        child_id: child_id,
+        events: [:capability_revoked]
+      }
+    })
+
+    assert {:ok, _subscription_handle, _bus_pid, _delivery_ref} =
+             SecuritySyncPublisher.subscribe(
+               publisher,
+               :capability_store,
+               :capability_revoked
+             )
+
+    publisher
+  end
+
+  defp stop_supervisor(supervisor) do
+    Supervisor.stop(supervisor)
+  catch
+    :exit, :noproc -> :ok
+    :exit, {:noproc, _details} -> :ok
   end
 
   describe "encryption key management" do
@@ -182,7 +306,7 @@ defmodule Arbor.Signals.BusEncryptionTest do
   end
 
   describe "channel-encrypted signals (OQ-7 regression)" do
-    alias Arbor.Signals.Channels
+    alias Arbor.Signals.AuthorizedChannelsTestClient, as: Channels
 
     test "security regression (OQ-7): non-member subscriber cannot decrypt channel-encrypted signal" do
       # OQ-7: pre-fix, Bus.maybe_decrypt_channel_signal called
@@ -190,40 +314,27 @@ defmodule Arbor.Signals.BusEncryptionTest do
       # Anyone subscribed to the topic received decrypted plaintext as long
       # as the SENDER was a member, regardless of whether the SUBSCRIBER was.
       # The fix routes through Channels.decrypt_for_member/3 using the
-      # subscriber's principal_id — non-members get __decryption_failed__,
-      # not plaintext.
+      # subscriber's executor-issued authorization context. Non-members get
+      # __decryption_failed__, not plaintext.
       Bus.reset()
 
       member = "agent_oq7_member_#{System.unique_integer([:positive])}"
       non_member = "agent_oq7_outsider_#{System.unique_integer([:positive])}"
 
-      {:ok, channel, key} =
+      {:ok, channel, :server_managed} =
         Channels.create("oq7_channel_#{System.unique_integer([:positive])}", member)
-
-      plaintext = Jason.encode!(%{"secret" => "oq7_value"})
-      iv = :crypto.strong_rand_bytes(12)
-
-      {ct, tag} =
-        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
-
-      payload = %{ciphertext: ct, iv: iv, tag: tag}
 
       parent = self()
       handler = fn signal -> send(parent, {:oq7_signal, signal.data}) end
 
-      {:ok, sub_id} = Bus.subscribe("oq7.*", handler, principal_id: non_member)
+      {:ok, sub_id} =
+        Bus.subscribe("channel.test", handler,
+          async: false,
+          principal_id: non_member,
+          auth_context: Channels.auth(non_member)
+        )
 
-      signal_a = %{
-        Signal.new(:oq7, :test, %{
-          __channel_encrypted__: true,
-          channel_id: channel.id,
-          sender_id: member,
-          payload: payload
-        })
-        | source: member
-      }
-
-      Bus.publish(signal_a)
+      assert :ok = Channels.send(channel.id, member, :test, %{"secret" => "oq7_value"})
 
       assert_receive {:oq7_signal, delivered_data}, 1000
 
@@ -242,38 +353,53 @@ defmodule Arbor.Signals.BusEncryptionTest do
       Bus.unsubscribe(sub_id)
     end
 
+    @tag :security_regression
+    test "security regression: an asserted subscriber id is not a decryption credential" do
+      Bus.reset()
+
+      member = "agent_oq7_asserted_#{System.unique_integer([:positive])}"
+      {:ok, channel, :server_managed} = Channels.create("asserted identity", member)
+
+      parent = self()
+      handler = fn signal -> send(parent, {:oq7_asserted, signal.data}) end
+
+      {:ok, sub_id} =
+        Bus.subscribe("channel.asserted_identity", handler,
+          async: false,
+          principal_id: member
+        )
+
+      assert :ok =
+               Channels.send(channel.id, member, :asserted_identity, %{"secret" => "forged"})
+
+      assert_receive {:oq7_asserted, delivered_data}, 1000
+      assert delivered_data == %{__decryption_failed__: true}
+
+      Bus.unsubscribe(sub_id)
+    end
+
     test "subscriber who IS a member receives decrypted plaintext" do
       Bus.reset()
 
       member = "agent_oq7_member2_#{System.unique_integer([:positive])}"
 
-      {:ok, channel, key} =
+      {:ok, channel, :server_managed} =
         Channels.create("oq7_channel_pos_#{System.unique_integer([:positive])}", member)
-
-      plaintext = Jason.encode!(%{"secret" => "oq7_member_value"})
-      iv = :crypto.strong_rand_bytes(12)
-
-      {ct, tag} =
-        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
-
-      payload = %{ciphertext: ct, iv: iv, tag: tag}
 
       parent = self()
       handler = fn signal -> send(parent, {:oq7_signal_pos, signal.data}) end
 
-      {:ok, sub_id} = Bus.subscribe("oq7pos.*", handler, principal_id: member)
+      {:ok, sub_id} =
+        Bus.subscribe("channel.member_plaintext", handler,
+          async: false,
+          principal_id: member,
+          auth_context: Channels.auth(member)
+        )
 
-      signal_b = %{
-        Signal.new(:oq7pos, :test, %{
-          __channel_encrypted__: true,
-          channel_id: channel.id,
-          sender_id: member,
-          payload: payload
-        })
-        | source: member
-      }
-
-      Bus.publish(signal_b)
+      assert :ok =
+               Channels.send(channel.id, member, :member_plaintext, %{
+                 "secret" => "oq7_member_value"
+               })
 
       assert_receive {:oq7_signal_pos, delivered_data}, 1000
 

@@ -211,11 +211,11 @@ defmodule Arbor.Orchestrator.PipelineStatusJournalTargetTest do
     end
 
     test "invalid journal_opts fails before a probe handler executes", ctx do
-      saved = Registry.snapshot_custom_handlers()
-      Registry.reset_custom_handlers()
-      on_exit(fn -> Registry.restore_custom_handlers(saved) end)
+      saved = Registry.snapshot_fixtures()
+      Registry.reset_fixtures()
+      on_exit(fn -> Registry.restore_fixtures(saved) end)
 
-      :ok = Registry.register("l3b_probe", ProbeHandler)
+      :ok = Registry.register_fixture("l3b_probe", ProbeHandler)
 
       run_id = ctx.run_id <> "_invalid"
       parent = self()

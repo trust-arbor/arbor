@@ -26,7 +26,7 @@ defmodule Arbor.Common.Sanitizers.LogInjection do
 
   # ANSI escape sequences (colors, cursor movement, etc.)
   @ansi_pattern ~r/\e\[[0-9;]*[A-Za-z]/
-  # Control characters except \t (0x09) and \n (0x0A)
+  # Control characters except \t (0x09). Newlines are normalized separately.
   @control_chars_pattern ~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
 
   @impl true
@@ -38,8 +38,8 @@ defmodule Arbor.Common.Sanitizers.LogInjection do
 
     sanitized =
       value
-      # Strip CRLF sequences (log forging)
-      |> String.replace(~r/\r\n|\r/, " ")
+      # Flatten all line boundaries so one value cannot forge another log entry.
+      |> String.replace(~r/\r\n|\r|\n/, " ")
       # Strip ANSI escape codes
       |> String.replace(@ansi_pattern, "")
       # Strip control characters (except tab and newline)
@@ -60,6 +60,7 @@ defmodule Arbor.Common.Sanitizers.LogInjection do
       [
         {String.contains?(value, "\r\n"), "crlf_injection"},
         {String.contains?(value, "\r"), "cr_injection"},
+        {String.contains?(value, "\n"), "lf_injection"},
         {Regex.match?(@ansi_pattern, value), "ansi_escape"},
         {Regex.match?(@control_chars_pattern, value), "control_characters"},
         {String.contains?(value, <<0>>), "null_byte"},

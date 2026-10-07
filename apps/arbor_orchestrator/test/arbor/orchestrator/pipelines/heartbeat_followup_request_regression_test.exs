@@ -110,12 +110,12 @@ defmodule Arbor.Orchestrator.Pipelines.HeartbeatFollowupRequestRegressionTest do
       # build_followup's action is capability-gated. Assert the grant so a
       # refused grant fails here with its reason, not later as "unauthorized".
       assert {:ok, capability} =
-               Arbor.Security.grant(
+               Arbor.Security.grant_fixture(
                  principal: agent_id,
                  resource: "arbor://orchestrator/execute/**"
                )
 
-      on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+      on_exit(fn -> Arbor.Security.revoke_fixture(capability.id) end)
 
       assert {:ok, result} =
                Arbor.Orchestrator.run(two_iteration_loop(@variant),

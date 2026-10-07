@@ -4,9 +4,8 @@ defmodule Arbor.Common.SkillImporter do
 
   All imported skills receive `taint: :untrusted` by default. The importer
   validates SKILL.md format per the Agent Skills spec and records provenance
-  metadata. When a skill-import security module is configured, names and
-  bodies are screened through that provider. Standalone Common (no provider)
-  admits parsed skills.
+  metadata. A configured skill-import security module must approve the full
+  parsed skill. Imports fail closed when that provider is absent or invalid.
 
   ## Two-Phase Import
 
@@ -36,6 +35,8 @@ defmodule Arbor.Common.SkillImporter do
     :reflex_unavailable
   ]
 
+  @max_security_payload_bytes 524_288
+
   @doc """
   Scan a directory for SKILL.md files and optionally import them.
 
@@ -48,14 +49,17 @@ defmodule Arbor.Common.SkillImporter do
   def import_from_directory(path, opts \\ []) do
     approve = Keyword.get(opts, :approve, false)
 
-    with :ok <- validate_path(path),
-         {:ok, files} <- scan_directory(path) do
+    allowed_root = Keyword.get(opts, :allowed_root, File.cwd!())
+
+    with {:ok, resolved_path} <- validate_path(path, allowed_root),
+         {:ok, provider} <- security_provider(),
+         {:ok, files} <- scan_directory(resolved_path) do
       results =
         files
         |> Enum.map(&parse_and_tag/1)
         |> Enum.filter(&match?({:ok, _}, &1))
         |> Enum.map(fn {:ok, skill} -> skill end)
-        |> Enum.filter(&passes_security_checks?/1)
+        |> Enum.filter(&passes_security_checks?(provider, &1))
 
       if approve do
         registered = register_skills(results, opts)
@@ -85,15 +89,19 @@ defmodule Arbor.Common.SkillImporter do
       System.tmp_dir!() |> Path.join("arbor_skill_import_#{:erlang.unique_integer([:positive])}")
 
     try do
-      case System.cmd("git", ["clone", "--depth", "1", "--branch", branch, repo_url, tmp_dir],
-             stderr_to_stdout: true
-           ) do
-        {_, 0} ->
-          result = import_from_directory(tmp_dir, opts)
-          result
+      with :ok <- validate_git_url(repo_url),
+           :ok <- validate_git_branch(branch) do
+        case System.cmd(
+               "git",
+               ["clone", "--depth", "1", "--branch", branch, "--", repo_url, tmp_dir],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            import_from_directory(tmp_dir, Keyword.put(opts, :allowed_root, tmp_dir))
 
-        {output, _code} ->
-          {:error, {:git_clone_failed, output}}
+          {output, _code} ->
+            {:error, {:git_clone_failed, output}}
+        end
       end
     after
       File.rm_rf(tmp_dir)
@@ -125,31 +133,42 @@ defmodule Arbor.Common.SkillImporter do
 
   # -- Private ----------------------------------------------------------------
 
-  defp validate_path(path) do
-    safe_path_mod = Arbor.Common.SafePath
-
-    if Code.ensure_loaded?(safe_path_mod) and
-         function_exported?(safe_path_mod, :resolve_within, 2) do
-      # Validate the path doesn't escape allowed roots
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(safe_path_mod, :resolve_within, [path, File.cwd!()]) do
-        {:ok, _resolved} -> :ok
-        {:error, _} -> validate_path_basic(path)
-      end
+  defp validate_path(path, allowed_root)
+       when is_binary(path) and is_binary(allowed_root) do
+    with {:ok, resolved} <- Arbor.Common.SafePath.resolve_within(path, allowed_root),
+         true <- File.dir?(resolved) do
+      {:ok, resolved}
     else
-      validate_path_basic(path)
+      false -> {:error, {:not_a_directory, path}}
+      {:error, reason} -> {:error, {reason, path}}
     end
   end
 
-  defp validate_path_basic(path) do
-    expanded = Path.expand(path)
+  defp validate_path(path, _allowed_root), do: {:error, {:invalid_path, path}}
 
-    cond do
-      not File.dir?(expanded) -> {:error, {:not_a_directory, path}}
-      String.contains?(path, "..") -> {:error, {:path_traversal, path}}
-      true -> :ok
+  defp validate_git_url(repo_url) when is_binary(repo_url) do
+    case URI.parse(repo_url) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["https", "ssh"] and is_binary(host) and host != "" ->
+        :ok
+
+      _ ->
+        {:error, :unsupported_git_url}
     end
   end
+
+  defp validate_git_url(_repo_url), do: {:error, :unsupported_git_url}
+
+  defp validate_git_branch(branch) when is_binary(branch) do
+    valid? =
+      Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}\z/, branch) and
+        not String.contains?(branch, ["..", "@{", "//"]) and
+        not String.ends_with?(branch, ["/", ".", ".lock"])
+
+    if valid?, do: :ok, else: {:error, :invalid_git_branch}
+  end
+
+  defp validate_git_branch(_branch), do: {:error, :invalid_git_branch}
 
   defp scan_directory(path) do
     expanded = Path.expand(path)
@@ -176,18 +195,45 @@ defmodule Arbor.Common.SkillImporter do
     end
   end
 
-  defp passes_security_checks?(skill) do
+  defp security_provider do
     case Config.skill_import_security_module() do
       nil ->
-        true
+        {:error, :security_scanner_unavailable}
 
       provider when is_atom(provider) ->
-        check_with_provider(provider, skill)
+        if Code.ensure_loaded?(provider) and
+             function_exported?(provider, :validate_imported_skill, 1),
+           do: {:ok, provider},
+           else: {:error, :security_scanner_unavailable}
 
       _invalid ->
-        log_reject(skill, :invalid_provider)
+        {:error, :security_scanner_unavailable}
+    end
+  end
+
+  defp passes_security_checks?(provider, skill) do
+    case security_view(skill) do
+      {:ok, view} ->
+        check_with_provider(provider, view)
+
+      {:error, reason} ->
+        log_reject(skill, reason)
         false
     end
+  end
+
+  # The current security port accepts one skill map and providers commonly
+  # inspect `:body`. Fold every parsed field into that body so descriptions,
+  # tags, metadata, and adapter-specific fields cannot bypass the screen.
+  defp security_view(skill) do
+    payload =
+      skill
+      |> Map.drop([:provenance, "provenance"])
+      |> inspect(limit: :infinity, printable_limit: :infinity, width: 120)
+
+    if byte_size(payload) <= @max_security_payload_bytes,
+      do: {:ok, Map.put(skill, :body, payload)},
+      else: {:error, :security_payload_too_large}
   end
 
   defp check_with_provider(provider, skill) do
@@ -276,9 +322,15 @@ defmodule Arbor.Common.SkillImporter do
     end
   end
 
-  defp do_register(struct, _skill, lib, true = _overwrite) do
+  defp do_register(struct, skill, lib, true = _overwrite) do
+    # An import may replace only another untrusted runtime entry. Bundled,
+    # operator, or otherwise elevated content cannot be shadowed by an import.
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(lib, :register, [struct]) == :ok
+    case apply(lib, :get, [Map.get(skill, :name)]) do
+      {:error, :not_found} -> apply(lib, :register, [struct]) == :ok
+      {:ok, existing} -> untrusted?(existing) and apply(lib, :register, [struct]) == :ok
+      _ -> false
+    end
   end
 
   defp do_register(struct, skill, lib, false = _overwrite) do
@@ -313,6 +365,11 @@ defmodule Arbor.Common.SkillImporter do
 
   defp maybe_to_map(skill) when is_struct(skill), do: Map.from_struct(skill)
   defp maybe_to_map(skill) when is_map(skill), do: skill
+
+  defp untrusted?(skill) do
+    taint = Map.get(skill, :taint) || Map.get(skill, "taint")
+    taint in [:untrusted, "untrusted"]
+  end
 
   defp compute_hash(skill) do
     body = Map.get(skill, :body) || ""

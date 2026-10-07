@@ -21,16 +21,21 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     },
     Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},
     Arbor.Signals => %{
-      deps: [Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
+      deps: [Arbor.Common, Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
       exports: :all
     },
-    Arbor.Monitor => %{deps: [Arbor.Contracts, Arbor.Signals, Logger], exports: :all}
+    Arbor.Monitor => %{
+      deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Logger],
+      exports: :all
+    }
   }
 
   test "runtime kernel enables strict alias-aware Boundary compilation" do
     source = File.read!(Path.join(umbrella_root(), "apps/arbor_kernel_runtime/mix.exs"))
 
-    assert source =~ ~r/compilers:\s*\[:boundary\]\s*\+\+\s*Mix\.compilers\(\)/
+    assert source =~
+             ~r/compilers:\s*\[:arbor_safe_path_reader,\s*:boundary\]\s*\+\+\s*Mix\.compilers\(\)/
+
     assert source =~ ~r/type:\s*:strict/
     assert source =~ ~r/check:\s*\[aliases:\s*true\]/
     assert source =~ ~r/\{:boundary,\s*"~> 0\.10",\s*runtime:\s*false\}/

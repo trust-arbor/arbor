@@ -46,12 +46,12 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
 
     assert :ok = Security.register_oidc_identity(human.identity, human.id_token, human.provider)
     assert {:ok, agent} = Identity.generate(name: "private-memory-security-test")
-    assert :ok = Security.register_identity(Identity.public_only(agent))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(agent))
 
     on_exit(fn ->
       human.cleanup.()
-      Security.deregister_identity(human.identity.agent_id)
-      Security.deregister_identity(agent.agent_id)
+      Security.deregister_identity_fixture(human.identity.agent_id)
+      Security.deregister_identity_fixture(agent.agent_id)
     end)
 
     resource = "arbor://chat/agent/" <> agent.agent_id
@@ -111,7 +111,7 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
 
     on_exit(fn ->
       owner.cleanup.()
-      Security.deregister_identity(owner.identity.agent_id)
+      Security.deregister_identity_fixture(owner.identity.agent_id)
     end)
 
     Application.put_env(:arbor_security, :private_memory_test_aliases, %{
@@ -140,7 +140,7 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
     })
 
     assert {:ok, ^scope} = Security.authorize_private_memory_turn(admission, :read)
-    assert :ok = Security.revoke(ctx.chat.id)
+    assert :ok = Security.revoke_fixture(ctx.chat.id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)
@@ -248,13 +248,13 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
   test "security regression: current chat and memory revocation each close live use", ctx do
     admission = active!(ctx)
     assert {:ok, _} = Security.authorize_private_memory_turn(admission, :read)
-    Security.revoke(ctx.read.id)
+    Security.revoke_fixture(ctx.read.id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)
 
     assert {:ok, _} = Security.authorize_private_memory_turn(admission, :write)
-    Security.revoke(ctx.chat.id)
+    Security.revoke_fixture(ctx.chat.id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :write)
@@ -265,7 +265,7 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
   test "security regression: suspended human loses a previously active admission", ctx do
     admission = active!(ctx)
     assert {:ok, _} = Security.authorize_private_memory_turn(admission, :read)
-    assert :ok = Security.suspend_identity(ctx.human.agent_id)
+    assert :ok = Security.suspend_identity_fixture(ctx.human.agent_id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)
@@ -275,16 +275,16 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
 
   test "security regression: private memory continuation does not spend the chat rate allowance again",
        ctx do
-    assert :ok = Security.revoke(ctx.chat.id)
+    assert :ok = Security.revoke_fixture(ctx.chat.id)
 
     assert {:ok, chat} =
-             Security.grant(
+             Security.grant_fixture(
                principal: ctx.human.agent_id,
                resource: ctx.resource,
                constraints: %{rate_limit: 1}
              )
 
-    on_exit(fn -> Security.revoke(chat.id) end)
+    on_exit(fn -> Security.revoke_fixture(chat.id) end)
 
     admission = active!(ctx)
 
@@ -305,7 +305,7 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
                expected_resource: ctx.resource
              )
 
-    assert :ok = Security.revoke(chat.id)
+    assert :ok = Security.revoke_fixture(chat.id)
 
     assert {:error, :invalid_memory_admission} =
              Security.authorize_private_memory_turn(admission, :read)
@@ -317,9 +317,10 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
        ctx do
     admission = active!(ctx)
     # Test-owned clock advances the existing owner; public APIs still perform admission.
-    :sys.replace_state(DeliveryReceiptBroker, fn state ->
-      %{state | clock: fn -> System.monotonic_time(:millisecond) + 3_600_001 end}
-    end)
+    assert :ok =
+             DeliveryReceiptBroker.set_clock_fixture(fn ->
+               System.monotonic_time(:millisecond) + 3_600_001
+             end)
 
     on_exit(fn -> restart_broker!() end)
 
@@ -366,8 +367,8 @@ defmodule Arbor.Security.PrivateMemorySecurityRegressionTest do
       )
 
   defp grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

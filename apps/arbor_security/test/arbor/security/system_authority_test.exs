@@ -2,8 +2,12 @@ defmodule Arbor.Security.SystemAuthorityTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, Identity}
+  alias Arbor.Security
+  alias Arbor.Security.Capability.Signer
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.SystemAuthority
 
   describe "lifecycle" do
@@ -34,7 +38,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           principal_id: "agent_test001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
 
       assert signed.issuer_id == SystemAuthority.agent_id()
       assert is_binary(signed.issuer_signature)
@@ -50,7 +54,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           delegation_depth: 5
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
 
       assert signed.id == cap.id
       assert signed.resource_uri == cap.resource_uri
@@ -68,7 +72,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           principal_id: "agent_test001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
       assert :ok = SystemAuthority.verify_capability_signature(signed)
     end
 
@@ -79,7 +83,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           principal_id: "agent_test001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
 
       # Tamper with the resource URI
       tampered = %{signed | resource_uri: "arbor://fs/write/evil"}
@@ -155,7 +159,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           principal_id: "agent_test001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
       forged = %{signed | id: "cap_" <> String.duplicate("f", 32)}
 
       assert {:ok, [valid_id]} =
@@ -164,19 +168,14 @@ defmodule Arbor.Security.SystemAuthorityTest do
       assert valid_id == signed.id
     end
 
-    test "verifies capability signed by a different registered entity" do
-      # Generate a separate identity and register it
-      alias Arbor.Contracts.Security.Identity
-      alias Arbor.Security.Capability.Signer
-
+    test "security regression: a registered identity is not automatically a capability issuer" do
       {:ok, other_identity} = Identity.generate()
-      :ok = Registry.register(Identity.public_only(other_identity))
+      :ok = Registry.register_fixture(Identity.public_only(other_identity))
 
-      # Create and sign a capability with the other identity's key
       {:ok, cap} =
         Capability.new(
           resource_uri: "arbor://fs/read/other_signed",
-          principal_id: "agent_test001"
+          principal_id: other_identity.agent_id
         )
 
       signed =
@@ -184,8 +183,56 @@ defmodule Arbor.Security.SystemAuthorityTest do
         |> Map.put(:issuer_id, other_identity.agent_id)
         |> Signer.sign(other_identity.private_key)
 
-      # SystemAuthority should verify via Registry lookup
-      assert :ok = SystemAuthority.verify_capability_signature(signed)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(signed)
+
+      assert {:error, :invalid_capability_signature} =
+               SystemAuthority.verify_capability_signature(signed)
+
+      # Exercise the public authorization boundary too: merely registering an
+      # identity must not let that identity mint its own root capabilities.
+      assert {:error, :unauthorized} =
+               Security.authorize(
+                 other_identity.agent_id,
+                 signed.resource_uri,
+                 :read,
+                 identity_verified: true
+               )
+    end
+
+    test "an enrolled issuer verifies only capabilities inside its envelope" do
+      {:ok, issuer} = Identity.generate()
+      :ok = Registry.register_fixture(Identity.public_only(issuer))
+
+      {:ok, envelope} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/enrolled-issuer/**",
+          principal_id: issuer.agent_id
+        )
+
+      :ok = IssuerRegistry.register_fixture(issuer.agent_id, [envelope])
+      on_exit(fn -> IssuerRegistry.revoke_fixture(issuer.agent_id, "test cleanup") end)
+
+      {:ok, inside} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/enrolled-issuer/report.txt",
+          principal_id: "agent_test001",
+          issuer_id: issuer.agent_id
+        )
+
+      signed_inside = Signer.sign(inside, issuer.private_key)
+      assert :ok = SystemAuthority.verify_capability_signature(signed_inside)
+
+      {:ok, outside} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/enrolled-issuer/report.txt",
+          principal_id: "agent_test001",
+          issuer_id: issuer.agent_id
+        )
+
+      signed_outside = Signer.sign(outside, issuer.private_key)
+
+      assert {:error, :invalid_capability_signature} =
+               SystemAuthority.verify_capability_signature(signed_outside)
     end
 
     test "rejects capability with unknown issuer_id" do
@@ -219,7 +266,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
       old_public_key = SystemAuthority.public_key()
 
       assert {:ok, %{old_agent_id: ^old_agent_id, new_agent_id: new_agent_id}} =
-               SystemAuthority.rotate()
+               SystemAuthority.rotate_for_test()
 
       assert new_agent_id != old_agent_id,
              "rotate/0 did not change the agent_id — L1 regression"
@@ -242,7 +289,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
       # produce a distinct new issuer_id.
       old_agent_id = SystemAuthority.agent_id()
 
-      {:ok, %{new_agent_id: new_agent_id}} = SystemAuthority.rotate()
+      {:ok, %{new_agent_id: new_agent_id}} = SystemAuthority.rotate_for_test()
       assert new_agent_id != old_agent_id
 
       {:ok, cap} =
@@ -251,7 +298,7 @@ defmodule Arbor.Security.SystemAuthorityTest do
           principal_id: "agent_test001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
 
       assert signed.issuer_id == new_agent_id
       assert :ok = SystemAuthority.verify_capability_signature(signed)

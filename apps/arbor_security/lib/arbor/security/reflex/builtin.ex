@@ -54,9 +54,9 @@ defmodule Arbor.Security.Reflex.Builtin do
   def shell_reflexes do
     [
       # Block rm -rf on root or home directories
-      Reflex.pattern(
+      Reflex.custom(
         "rm_rf_root",
-        ~r/rm\s+(-[rf]+\s+)*[\/~]/,
+        &dangerous_recursive_delete?/1,
         id: "rm_rf_root",
         response: :block,
         message: "Blocked: recursive delete of root or home directory",
@@ -65,7 +65,7 @@ defmodule Arbor.Security.Reflex.Builtin do
       # Block sudo/su commands
       Reflex.pattern(
         "sudo_su",
-        ~r/\b(sudo|su)\s+/,
+        ~r/\b(?:sudo|su|doas|pkexec)(?:\s|$)/,
         id: "sudo_su",
         response: :block,
         message: "Blocked: privilege escalation command",
@@ -118,6 +118,173 @@ defmodule Arbor.Security.Reflex.Builtin do
       )
     ]
   end
+
+  # Tokenize first so quoting and option order do not create holes in a
+  # security-critical command check. This remains deliberately conservative:
+  # recursive deletion of any absolute path or any spelling of the home root
+  # is blocked before capability authorization.
+  defp dangerous_recursive_delete?(%{command: command}) when is_binary(command) do
+    tokens = shell_tokens(command)
+
+    tokens
+    |> Enum.with_index()
+    |> Enum.any?(fn {token, index} ->
+      if rm_executable?(token) do
+        args =
+          tokens
+          |> Enum.drop(index + 1)
+          |> Enum.take_while(&(not shell_control_operator?(&1)))
+
+        Enum.any?(args, &recursive_rm_option?/1) and Enum.any?(args, &dangerous_rm_target?/1)
+      else
+        false
+      end
+    end)
+  end
+
+  defp dangerous_recursive_delete?(_context), do: false
+
+  defp shell_tokens(command) do
+    command
+    |> tokenize_shell(:unquoted, [], [], [])
+    |> finish_shell_tokens()
+  rescue
+    _ -> String.split(command)
+  end
+
+  # A shell-aware lexical pass keeps quoted operator text as data while exposing
+  # real command boundaries. Command substitutions need their own context:
+  # OptionParser.split/1 leaves `$(rm` and `` `rm`` glued to the executable,
+  # including when a substitution appears inside double quotes.
+  defp tokenize_shell(<<>>, _mode, _contexts, current, tokens), do: {current, tokens}
+
+  defp tokenize_shell(<<"\\", next, rest::binary>>, mode, contexts, current, tokens)
+       when mode in [:unquoted, :double_quoted] do
+    tokenize_shell(rest, mode, contexts, [<<next>> | current], tokens)
+  end
+
+  defp tokenize_shell(<<"$(", rest::binary>>, mode, contexts, current, tokens)
+       when mode in [:unquoted, :double_quoted] do
+    {current, tokens} = emit_shell_operator("$(", current, tokens)
+    tokenize_shell(rest, :unquoted, [{:dollar_substitution, mode} | contexts], current, tokens)
+  end
+
+  defp tokenize_shell(
+         <<"`", rest::binary>>,
+         mode,
+         [{:backtick, return_mode} | contexts],
+         current,
+         tokens
+       )
+       when mode in [:unquoted, :double_quoted] do
+    {current, tokens} = emit_shell_operator("`", current, tokens)
+    tokenize_shell(rest, return_mode, contexts, current, tokens)
+  end
+
+  defp tokenize_shell(<<"`", rest::binary>>, mode, contexts, current, tokens)
+       when mode in [:unquoted, :double_quoted] do
+    {current, tokens} = emit_shell_operator("`", current, tokens)
+    tokenize_shell(rest, :unquoted, [{:backtick, mode} | contexts], current, tokens)
+  end
+
+  defp tokenize_shell(<<"'", rest::binary>>, :unquoted, contexts, current, tokens),
+    do: tokenize_shell(rest, :single_quoted, contexts, current, tokens)
+
+  defp tokenize_shell(<<"'", rest::binary>>, :single_quoted, contexts, current, tokens),
+    do: tokenize_shell(rest, :unquoted, contexts, current, tokens)
+
+  defp tokenize_shell(<<"\"", rest::binary>>, :unquoted, contexts, current, tokens),
+    do: tokenize_shell(rest, :double_quoted, contexts, current, tokens)
+
+  defp tokenize_shell(<<"\"", rest::binary>>, :double_quoted, contexts, current, tokens),
+    do: tokenize_shell(rest, :unquoted, contexts, current, tokens)
+
+  defp tokenize_shell(<<"(", rest::binary>>, :unquoted, contexts, current, tokens) do
+    {current, tokens} = emit_shell_operator("(", current, tokens)
+    tokenize_shell(rest, :unquoted, [{:parenthesis, :unquoted} | contexts], current, tokens)
+  end
+
+  defp tokenize_shell(
+         <<")", rest::binary>>,
+         :unquoted,
+         [{kind, return_mode} | contexts],
+         current,
+         tokens
+       )
+       when kind in [:dollar_substitution, :parenthesis] do
+    {current, tokens} = emit_shell_operator(")", current, tokens)
+    tokenize_shell(rest, return_mode, contexts, current, tokens)
+  end
+
+  defp tokenize_shell(<<")", rest::binary>>, :unquoted, contexts, current, tokens) do
+    {current, tokens} = emit_shell_operator(")", current, tokens)
+    tokenize_shell(rest, :unquoted, contexts, current, tokens)
+  end
+
+  defp tokenize_shell(<<space, rest::binary>>, :unquoted, contexts, current, tokens)
+       when space in [?\s, ?\t] do
+    {current, tokens} = emit_shell_token(current, tokens)
+    tokenize_shell(rest, :unquoted, contexts, current, tokens)
+  end
+
+  defp tokenize_shell(<<operator, rest::binary>>, :unquoted, contexts, current, tokens)
+       when operator in [?;, ?|, ?&, ?\n, ?\r] do
+    {current, tokens} = emit_shell_operator(<<operator>>, current, tokens)
+    tokenize_shell(rest, :unquoted, contexts, current, tokens)
+  end
+
+  defp tokenize_shell(<<byte, rest::binary>>, mode, contexts, current, tokens) do
+    tokenize_shell(rest, mode, contexts, [<<byte>> | current], tokens)
+  end
+
+  defp finish_shell_tokens({current, tokens}) do
+    {_current, tokens} = emit_shell_token(current, tokens)
+    Enum.reverse(tokens)
+  end
+
+  defp emit_shell_operator(operator, current, tokens) do
+    {_current, tokens} = emit_shell_token(current, tokens)
+    {[], [operator | tokens]}
+  end
+
+  defp emit_shell_token([], tokens), do: {[], tokens}
+
+  defp emit_shell_token(current, tokens) do
+    {[], [current |> Enum.reverse() |> IO.iodata_to_binary() | tokens]}
+  end
+
+  defp shell_control_operator?(token), do: token in [";", "|", "&", "(", ")", "$(", "`"]
+
+  defp rm_executable?(token) do
+    token
+    |> trim_shell_separator()
+    |> Path.basename()
+    |> Kernel.==("rm")
+  end
+
+  defp recursive_rm_option?("--recursive"), do: true
+  defp recursive_rm_option?("--recursive=" <> _), do: true
+
+  defp recursive_rm_option?(<<"-", next, rest::binary>>) when next != ?- do
+    String.contains?(<<next, rest::binary>>, ["r", "R"])
+  end
+
+  defp recursive_rm_option?(_token), do: false
+
+  defp dangerous_rm_target?(token) do
+    target = trim_shell_separator(token)
+    home = System.user_home!()
+
+    String.starts_with?(target, "/") or
+      target == "~" or String.starts_with?(target, "~/") or
+      target == "$HOME" or String.starts_with?(target, "$HOME/") or
+      target == "${HOME}" or String.starts_with?(target, "${HOME}/") or
+      target == home or String.starts_with?(target, home <> "/")
+  rescue
+    _ -> false
+  end
+
+  defp trim_shell_separator(token), do: String.trim(token, " \t\r\n;|&")
 
   @doc """
   File access dangerous patterns.
@@ -226,7 +393,8 @@ defmodule Arbor.Security.Reflex.Builtin do
       # Block requests to private IP ranges (169.254.x.x for cloud metadata)
       Reflex.pattern(
         "ssrf_metadata",
-        ~r/https?:\/\/169\.254\./,
+        # arbor:allow pii -- decimal cloud-metadata IPv4 literal, not a phone number
+        ~r"https?://(?:169\.254(?:\.\d{1,3}){2}|metadata\.google\.internal|2852039166|\[(?:fe80::a9fe:a9fe|fd00:ec2::254)\])(?:[/:]|$)"i,
         id: "ssrf_metadata",
         response: :block,
         message: "Blocked: request to cloud metadata service",

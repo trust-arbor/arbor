@@ -11,13 +11,16 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
   alias Arbor.Security.Config
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.TestBootstrap
+  alias Arbor.Signals
 
   setup do
     originals = env_snapshot()
+    :ok = Signals.restore_runtime_fixture()
 
     on_exit(fn ->
       Config.restore_authority_root()
       restore_env(originals)
+      :ok = Signals.restore_runtime_fixture()
     end)
 
     :ok
@@ -45,12 +48,38 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
 
   test "second freeze does not adopt a later put_env path" do
     root = unique_abs_root("first")
+    ledger_path = Path.join(unique_abs_root("ledger-first"), "revocations.json")
     Application.put_env(:arbor_security, :authority_state_root, root)
+    Application.put_env(:arbor_security, :revocation_ledger_path, ledger_path)
     assert :ok = Config.freeze_authority_root()
 
     Application.put_env(:arbor_security, :authority_state_root, unique_abs_root("second"))
+
+    Application.put_env(
+      :arbor_security,
+      :revocation_ledger_path,
+      Path.join(unique_abs_root("ledger-second"), "revocations.json")
+    )
+
     assert :ok = Config.freeze_authority_root()
     assert {:ok, ^root} = Config.authority_root()
+    assert {:ok, ^ledger_path} = Config.revocation_ledger_path()
+  end
+
+  test "security regression: revocation ledger path must be absolute and independent" do
+    root = unique_abs_root("ledger-boundary")
+    Application.put_env(:arbor_security, :authority_state_root, root)
+    Application.put_env(:arbor_security, :revocation_ledger_path, "relative/ledger.json")
+
+    assert {:error, :revocation_ledger_path_invalid} = Config.freeze_authority_root()
+
+    Application.put_env(
+      :arbor_security,
+      :revocation_ledger_path,
+      Path.join(root, "rollback-fence.json")
+    )
+
+    assert {:error, :revocation_ledger_not_independent} = Config.freeze_authority_root()
   end
 
   test "winner death after ETS insert cannot unfreeze or replace the snapshot" do
@@ -241,6 +270,26 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
     assert opts[:backend_opts][:marker] == :kept
   end
 
+  test "security regression: capability store receives only the frozen revocation path" do
+    snapshot = %{
+      backend: JSONFile,
+      root: "/frozen/root",
+      revocation_ledger_path: "/frozen-fence/revocations.json"
+    }
+
+    opts =
+      Config.authority_store_start_opts(:arbor_security_capabilities, "capabilities", snapshot,
+        backend_opts: [revocation_ledger_path: "/attacker/ledger.json", marker: :kept]
+      )
+
+    assert opts[:backend_opts][:base_dir] == "/frozen/root"
+
+    assert opts[:backend_opts][:revocation_ledger_path] ==
+             "/frozen-fence/revocations.json"
+
+    assert opts[:backend_opts][:marker] == :kept
+  end
+
   test "authority_store_start_opts does not inject base_dir for a nil backend" do
     snapshot = %{backend: nil, root: "/frozen/root"}
 
@@ -343,6 +392,7 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
   defp env_snapshot do
     %{
       authority_state_root: Application.fetch_env(:arbor_security, :authority_state_root),
+      revocation_ledger_path: Application.fetch_env(:arbor_security, :revocation_ledger_path),
       json_file: Application.fetch_env(:arbor_security, JSONFile),
       storage_backend: Application.fetch_env(:arbor_security, :storage_backend),
       start_children: Application.fetch_env(:arbor_security, :start_children),
@@ -352,6 +402,7 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
 
   defp restore_env(originals) do
     restore_security_env(:authority_state_root, originals.authority_state_root)
+    restore_security_env(:revocation_ledger_path, originals.revocation_ledger_path)
     restore_json_file_env(originals.json_file)
     restore_security_env(:storage_backend, originals.storage_backend)
     restore_security_env(:start_children, originals.start_children)
@@ -385,34 +436,13 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
       :ets.delete(table)
     end
 
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
     ensure_signals_children()
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
     _ = TestBootstrap.start!()
     :ok
   end
 
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
-
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} ->
-          :ok
-
-        {:error, {:already_started, _pid}} ->
-          :ok
-
-        {:error, :already_present} ->
-          {module, _opts} = child
-          :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-          {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-      end
-    end
+    Signals.restore_runtime_fixture()
   end
 end

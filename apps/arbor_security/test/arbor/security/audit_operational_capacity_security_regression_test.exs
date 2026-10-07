@@ -6,10 +6,7 @@ defmodule Arbor.Security.AuditOperationalCapacitySecurityRegressionTest do
 
   test "security regression: operational profile survives cold replay and refuses a small-profile downgrade" do
     Process.flag(:trap_exit, true)
-    root = Path.join(System.tmp_dir!(), "audit-profile-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    {:ok, root} = SafePath.resolve_real(root)
-    File.chmod!(root, 0o700)
+    root = scratch_dir!("audit-profile")
     name = :audit_operational_capacity_test
     opts = [mode: :durable, root: root, name: name, capacity_profile: :operational]
 
@@ -46,12 +43,28 @@ defmodule Arbor.Security.AuditOperationalCapacitySecurityRegressionTest do
     assert {:ok, ^status} = AuditJournalOwner.status(name)
     GenServer.stop(second)
 
-    assert {:error, {:journal_open_failed, :capacity_profile_mismatch}} =
+    assert {:ok, rejected} =
              AuditJournalOwner.start_link(Keyword.put(opts, :capacity_profile, :small))
+
+    Process.unlink(rejected)
+    assert {:ok, rejected_status} = AuditJournalOwner.status(name)
+    assert rejected_status["availability"] == "degraded"
+    assert rejected_status["reason"] == "poisoned"
+    assert rejected_status["admission_open"] == false
   end
 
   test "security regression: unrecognized caller-selected profile is refused" do
     assert {:error, :invalid_opts} =
              AuditJournalOwner.start_link(mode: :ephemeral, capacity_profile: :unbounded)
+  end
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 end

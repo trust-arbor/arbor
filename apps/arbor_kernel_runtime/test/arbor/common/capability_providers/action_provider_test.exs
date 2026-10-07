@@ -2,7 +2,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Common.CapabilityProviders.ActionProvider
-  alias Arbor.Common.ActionRegistry
+  alias Arbor.Common.{ActionRegistry, CapabilityIndex, CapabilityResolver}
   alias Arbor.Contracts.CapabilityDescriptor
 
   @moduletag :fast
@@ -33,6 +33,14 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
 
     def description, do: "Internal graph syscall"
     def tags, do: ["pipeline_internal"]
+  end
+
+  defmodule Actions.Test.Execute do
+    @moduledoc false
+
+    def description, do: "Execute a test action"
+    def tags, do: [:test]
+    def run(input, context), do: {:ok, {input, context}}
   end
 
   setup do
@@ -129,6 +137,49 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
 
     test "returns error for wrong ID prefix" do
       assert {:error, :not_found} = ActionProvider.describe("skill:file.read")
+    end
+  end
+
+  describe "execute/3" do
+    setup do
+      :ok = ActionRegistry.register_action(Actions.Test.Execute, %{category: :test})
+
+      unless Process.whereis(CapabilityIndex) do
+        start_supervised!(CapabilityIndex)
+      end
+
+      {:ok, _count} = CapabilityIndex.sync_provider(ActionProvider)
+
+      on_exit(fn ->
+        if Process.whereis(CapabilityIndex) do
+          CapabilityIndex.remove("action:test.execute")
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression: provider is discovery-only and refuses unauthenticated execution" do
+      assert {:error, :execution_not_supported} =
+               ActionProvider.execute("action:test.execute", %{command: "anything"}, [])
+
+      assert {:error, :execution_not_supported} =
+               ActionProvider.execute("action:test.execute", %{}, context: %{})
+
+      assert {:error, :execution_not_supported} =
+               ActionProvider.execute("action:test.execute", %{}, context: %{agent_id: "victim"})
+    end
+
+    test "security regression: resolver cannot execute an action for a spoofed principal" do
+      assert {:error, :execution_not_supported} =
+               CapabilityResolver.resolve_and_execute(
+                 "execute a test action",
+                 %{command: "anything"},
+                 tier: 1,
+                 kind: :action,
+                 min_score: 0.0,
+                 context: %{agent_id: "victim"}
+               )
     end
   end
 

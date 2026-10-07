@@ -12,6 +12,7 @@ defmodule Arbor.Trust.PolicyTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Trust.Policy
+  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @moduletag :fast
 
@@ -258,7 +259,7 @@ defmodule Arbor.Trust.PolicyTest do
     end
 
     test "Trust.authorize passes profile egress standing into operation authorization",
-         %{agent_id: agent_id} do
+         %{agent_id: agent_id, actor_authority: actor_authority} do
       resource = "arbor://ai/generate"
       create_profile_with_rules(agent_id, :ask, %{resource => :allow})
 
@@ -266,7 +267,13 @@ defmodule Arbor.Trust.PolicyTest do
         %{profile | egress_modes: %{external_provider: :allow}}
       end)
 
-      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      {:ok, _cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: resource,
+          actor_authority: actor_authority
+        )
+
       put_security_env(:egress_gate_enforcing, true)
 
       assert {:ok, :authorized} =
@@ -366,17 +373,26 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
-  describe "grant_base_capabilities/1" do
+  describe "grant_base_capabilities/2" do
     setup :start_infrastructure
 
-    test "grants the universal baseline capabilities", %{agent_id: agent_id} do
+    test "grants the universal baseline capabilities", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
       expected_count = length(Arbor.Trust.Config.base_capabilities())
-      {:ok, granted} = Policy.grant_base_capabilities(agent_id)
+
+      {:ok, granted} =
+        Policy.grant_base_capabilities(agent_id, actor_authority: actor_authority)
+
       assert granted == expected_count
     end
 
-    test "granted capabilities are signed and stored", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_base_capabilities(agent_id)
+    test "granted capabilities are signed and stored", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
+      {:ok, _} = Policy.grant_base_capabilities(agent_id, actor_authority: actor_authority)
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
 
       assert caps != []
@@ -388,8 +404,11 @@ defmodule Arbor.Trust.PolicyTest do
       end
     end
 
-    test "granted capabilities have correct resource URIs with agent_id", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_base_capabilities(agent_id)
+    test "granted capabilities have correct resource URIs with agent_id", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
+      {:ok, _} = Policy.grant_base_capabilities(agent_id, actor_authority: actor_authority)
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
 
       for cap <- caps do
@@ -408,23 +427,31 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
-  describe "revoke_agent_capabilities/1" do
+  describe "revoke_agent_capabilities/2" do
     setup :start_infrastructure
 
-    test "revokes all capabilities", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_base_capabilities(agent_id)
+    test "revokes all capabilities", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
+      {:ok, _} = Policy.grant_base_capabilities(agent_id, actor_authority: actor_authority)
       {:ok, caps_before} = Arbor.Security.list_capabilities(agent_id)
       assert caps_before != []
 
-      {:ok, revoked} = Policy.revoke_agent_capabilities(agent_id)
+      {:ok, revoked} =
+        Policy.revoke_agent_capabilities(agent_id, actor_authority: actor_authority)
+
       assert revoked == Enum.count(caps_before)
 
       {:ok, caps_after} = Arbor.Security.list_capabilities(agent_id)
       assert caps_after == []
     end
 
-    test "revoke on agent with no capabilities returns 0", %{agent_id: agent_id} do
-      {:ok, 0} = Policy.revoke_agent_capabilities(agent_id)
+    test "revoke on agent with no capabilities returns 0", %{
+      agent_id: agent_id,
+      actor_authority: actor_authority
+    } do
+      {:ok, 0} = Policy.revoke_agent_capabilities(agent_id, actor_authority: actor_authority)
     end
   end
 
@@ -498,7 +525,8 @@ defmodule Arbor.Trust.PolicyTest do
     )
 
     agent_id = "agent_policy_test_#{System.unique_integer([:positive])}"
-    {:ok, agent_id: agent_id}
+    {_identity, actor_authority} = actor_authority!()
+    {:ok, agent_id: agent_id, actor_authority: actor_authority}
   end
 
   defp ensure_started(module, opts \\ []) do

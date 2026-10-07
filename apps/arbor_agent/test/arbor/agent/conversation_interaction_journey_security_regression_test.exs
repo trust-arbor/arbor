@@ -169,13 +169,13 @@ defmodule Arbor.Agent.ConversationInteractionJourneySecurityRegressionTest do
     human = %{human_id: oidc.identity.agent_id, token: token, identity: oidc.identity}
 
     on_exit(fn ->
-      Security.deregister_identity(human.human_id)
+      Security.deregister_identity_fixture(human.human_id)
       oidc.cleanup.()
     end)
 
     {:ok, identity} = Identity.generate(name: "Real interaction Engine owner")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    on_exit(fn -> Security.deregister_identity(identity.agent_id) end)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    on_exit(fn -> Security.deregister_identity_fixture(identity.agent_id) end)
     Humans.grant!(human.human_id, "arbor://chat/agent/" <> identity.agent_id)
 
     for uri <- [
@@ -457,7 +457,7 @@ defmodule Arbor.Agent.ConversationInteractionJourneySecurityRegressionTest do
     Humans.grant!(c.human.human_id, "arbor://approval/answer/" <> c.target)
 
     {:ok, chat_token} =
-      Arbor.Security.SessionToken.generate_conversation(c.human.human_id, c.target)
+      Arbor.Security.issue_conversation_session_fixture(c.human.human_id, c.target)
 
     assert {:error, :approval_answer_required} =
              Arbor.Agent.answer_conversation_approval(

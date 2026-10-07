@@ -70,7 +70,8 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   Ensure a Claude session is registered as an Arbor agent.
 
   If the session is already registered, returns the existing agent_id.
-  Otherwise, creates a trust profile and grants default capabilities.
+  Otherwise, creates a trust profile and grants default capabilities only when
+  the caller supplies an authenticated Security actor authority.
 
   ## Parameters
 
@@ -83,6 +84,12 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   """
   @spec ensure_registered(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def ensure_registered(session_id, cwd) do
+    ensure_registered(session_id, cwd, [])
+  end
+
+  @spec ensure_registered(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def ensure_registered(session_id, cwd, opts) when is_list(opts) do
     agent_id = to_agent_id(session_id)
 
     case trust_module().get_trust_profile(agent_id) do
@@ -93,7 +100,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
 
       {:error, :not_found} ->
         # New session, register it
-        register_new_session(agent_id, session_id, cwd)
+        register_new_session(agent_id, session_id, cwd, opts)
     end
   end
 
@@ -118,10 +125,18 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
           | {:ok, :authorized, map()}
           | {:error, :unauthorized, String.t()}
   def authorize_tool(session_id, tool_name, tool_input, cwd) do
+    authorize_tool(session_id, tool_name, tool_input, cwd, [])
+  end
+
+  @spec authorize_tool(String.t(), String.t(), map(), String.t(), keyword()) ::
+          {:ok, :authorized}
+          | {:ok, :authorized, map()}
+          | {:error, :unauthorized, String.t()}
+  def authorize_tool(session_id, tool_name, tool_input, cwd, opts) when is_list(opts) do
     agent_id = to_agent_id(session_id)
 
     # Ensure registered
-    case ensure_registered(session_id, cwd) do
+    case ensure_registered(session_id, cwd, opts) do
       {:ok, ^agent_id} ->
         do_authorize(agent_id, tool_name, tool_input, cwd)
 
@@ -152,40 +167,43 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
 
   # Private functions
 
-  defp register_new_session(agent_id, session_id, cwd) do
+  defp register_new_session(agent_id, session_id, cwd, opts) do
     Logger.info("Registering new Claude session",
       agent_id: agent_id,
       session_id: session_id,
       cwd: cwd
     )
 
-    # Create trust profile
-    case trust_module().create_trust_profile(agent_id) do
-      {:ok, _profile} ->
-        # Grant default capabilities
-        grant_default_capabilities(agent_id, cwd)
-        {:ok, agent_id}
+    with authority when not is_nil(authority) <- Keyword.get(opts, :actor_authority) do
+      case trust_module().create_trust_profile(agent_id) do
+        {:ok, _profile} ->
+          with :ok <- grant_default_capabilities(agent_id, cwd, authority) do
+            {:ok, agent_id}
+          end
 
-      {:error, :already_exists} ->
-        # Race condition, profile was created between check and create
-        {:ok, agent_id}
+        {:error, :already_exists} ->
+          # Race condition, profile was created between check and create
+          {:ok, agent_id}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      nil -> {:error, :capability_mutation_unauthorized}
     end
   end
 
-  defp grant_default_capabilities(agent_id, cwd) do
+  defp grant_default_capabilities(agent_id, cwd, authority) do
     Logger.debug("Granting default capabilities", agent_id: agent_id)
 
-    Enum.each(@default_capabilities, fn template ->
-      # Expand the resource URI with the cwd for file paths
+    Enum.reduce_while(@default_capabilities, :ok, fn template, :ok ->
       resource_uri = expand_resource_uri(template.resource_uri, cwd)
 
       case Arbor.Security.grant(
              principal: agent_id,
              resource: resource_uri,
-             constraints: template.constraints
+             constraints: template.constraints,
+             actor_authority: authority
            ) do
         {:ok, _cap} ->
           Logger.debug("Granted capability",
@@ -193,12 +211,16 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
             resource: resource_uri
           )
 
+          {:cont, :ok}
+
         {:error, reason} ->
           Logger.warning("Failed to grant capability",
             agent_id: agent_id,
             resource: resource_uri,
             reason: inspect(reason)
           )
+
+          {:halt, {:error, reason}}
       end
     end)
   end

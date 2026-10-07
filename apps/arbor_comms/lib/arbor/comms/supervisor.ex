@@ -58,9 +58,8 @@ defmodule Arbor.Comms.Supervisor do
   end
 
   defp restore_channels do
-    if Code.ensure_loaded?(Arbor.Persistence.ChannelStore) and
-         apply(Arbor.Persistence.ChannelStore, :available?, []) do
-      channels = apply(Arbor.Persistence.ChannelStore, :list_channels, [[]])
+    with {:ok, channel_store} <- available_channel_store() do
+      channels = apply(channel_store, :list_channels, [[]])
 
       Enum.each(channels, fn channel ->
         opts = [
@@ -85,11 +84,24 @@ defmodule Arbor.Comms.Supervisor do
             Logger.warning("Failed to restore channel #{channel.channel_id}: #{inspect(reason)}")
         end
       end)
+    else
+      _ -> :ok
     end
   rescue
     e -> Logger.warning("Channel restore failed: #{inspect(e)}")
   catch
     :exit, reason -> Logger.warning("Channel restore exit: #{inspect(reason)}")
+  end
+
+  defp available_channel_store do
+    with {:ok, channel_store} <- Config.channel_store_module(),
+         true <- Code.ensure_loaded?(channel_store),
+         true <- function_exported?(channel_store, :available?, 0),
+         true <- apply(channel_store, :available?, []) do
+      {:ok, channel_store}
+    else
+      _ -> {:error, :channel_store_unavailable}
+    end
   end
 
   defp safe_channel_type("dm"), do: :dm

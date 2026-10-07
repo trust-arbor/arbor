@@ -19,7 +19,7 @@ defmodule Arbor.Security.InvocationReceiptIntegrationTest do
           task_id: "task_001"
         )
 
-      {:ok, signed} = SystemAuthority.sign_receipt(receipt)
+      {:ok, signed} = SystemAuthority.sign_receipt_for_test(receipt)
 
       assert InvocationReceipt.signed?(signed)
       assert signed.issuer_id != nil
@@ -38,7 +38,7 @@ defmodule Arbor.Security.InvocationReceiptIntegrationTest do
           resource_uri: "arbor://shell/exec/ls"
         )
 
-      {:ok, signed} = SystemAuthority.sign_receipt(receipt)
+      {:ok, signed} = SystemAuthority.sign_receipt_for_test(receipt)
       pub_key = SystemAuthority.public_key()
 
       # Tamper
@@ -61,7 +61,7 @@ defmodule Arbor.Security.InvocationReceiptIntegrationTest do
           delegation_chain: chain
         )
 
-      {:ok, signed} = SystemAuthority.sign_receipt(receipt)
+      {:ok, signed} = SystemAuthority.sign_receipt_for_test(receipt)
       assert length(signed.delegation_chain) == 2
 
       # Verify — chain is part of the signed payload

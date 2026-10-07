@@ -23,15 +23,23 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Contracts.Security.{AuthContext, Identity}
+  alias Arbor.Contracts.Security.{AuthContext, Capability, Identity}
   alias Arbor.Security
   alias Arbor.Security.AuthDecision
+  alias Arbor.Security.Capability.Signer
+  alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.SystemAuthority
 
   defmodule RaisingSigner do
     @moduledoc false
     def verify_delegation_chain(_cap, _key_lookup_fn),
       do: raise("simulated delegation-chain verification failure")
+  end
+
+  defmodule UnavailableCapabilityStore do
+    @moduledoc false
   end
 
   setup do
@@ -41,6 +49,7 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
       delegation_enabled:
         Application.get_env(:arbor_security, :delegation_chain_verification_enabled),
       signer: Application.get_env(:arbor_security, :delegation_signer_module),
+      capability_store: Application.get_env(:arbor_security, :capability_store_module),
       signing: Application.get_env(:arbor_security, :capability_signing_required),
       strict: Application.get_env(:arbor_security, :strict_identity_mode),
       reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
@@ -56,6 +65,7 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
     on_exit(fn ->
       restore(:delegation_chain_verification_enabled, prev.delegation_enabled)
       restore(:delegation_signer_module, prev.signer)
+      restore(:capability_store_module, prev.capability_store)
       restore(:capability_signing_required, prev.signing)
       restore(:strict_identity_mode, prev.strict)
       restore(:reflex_checking_enabled, prev.reflex)
@@ -64,8 +74,8 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
 
     {:ok, parent} = Identity.generate(name: "delchain-parent")
     {:ok, agent} = Identity.generate(name: "delchain-agent")
-    :ok = Registry.register(parent)
-    :ok = Registry.register(agent)
+    :ok = Registry.register_fixture(parent)
+    :ok = Registry.register_fixture(agent)
 
     {:ok, parent: parent, agent: agent}
   end
@@ -77,13 +87,12 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
     # Parent holds the resource, then delegates it to the agent. This mints
     # a real, validly-signed delegation chain stored against the agent — the
     # store will accept it on lookup (via the real Signer).
-    {:ok, _parent_cap} =
-      Security.grant(principal: parent.agent_id, resource: uri, delegation_depth: 3)
+    {:ok, parent_cap} =
+      Security.grant_fixture(principal: parent.agent_id, resource: uri, delegation_depth: 3)
 
-    {:ok, [delegated]} =
-      Security.delegate_to_agent(parent.agent_id, agent.agent_id,
-        delegator_private_key: parent.private_key,
-        resources: [uri]
+    {:ok, delegated} =
+      Security.delegate_fixture(parent_cap.id, agent.agent_id,
+        delegator_private_key: parent.private_key
       )
 
     assert length(delegated.delegation_chain) == 1
@@ -103,6 +112,71 @@ defmodule Arbor.Security.DelegationChainFailClosedTest do
 
     assert match?({:error, {:delegation_chain_invalid, _}, _}, result),
            "expected fail-closed delegation_chain_invalid; got #{inspect(result)}"
+  end
+
+  @tag spec: "SSEC-005"
+  test "security regression: shipped delegation verifier exists and invalid preloaded chains deny",
+       %{parent: parent, agent: agent} do
+    Application.delete_env(:arbor_security, :delegation_signer_module)
+
+    assert Config.delegation_signer_module() == Signer
+    assert Code.ensure_loaded?(Config.delegation_signer_module())
+    assert function_exported?(Config.delegation_signer_module(), :verify_delegation_chain, 2)
+
+    uri = "arbor://historian/query/#{System.unique_integer([:positive])}"
+
+    {:ok, forged_chain_cap} =
+      Capability.new(
+        resource_uri: uri,
+        principal_id: agent.agent_id,
+        parent_capability_id: "cap_" <> String.duplicate("a", 32),
+        delegation_chain: [
+          %{
+            delegator_id: parent.agent_id,
+            delegator_signature: :crypto.strong_rand_bytes(64),
+            constraints: %{},
+            delegated_at: DateTime.utc_now()
+          }
+        ]
+      )
+
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(forged_chain_cap)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(signed)
+
+    # Security.authorize/4 still preloads the real store's caps, then the
+    # configured unavailable lookup forces AuthDecision's fallback path.
+    Application.put_env(
+      :arbor_security,
+      :capability_store_module,
+      UnavailableCapabilityStore
+    )
+
+    assert {:error, {:delegation_chain_invalid, :broken_delegation_chain}} =
+             Security.authorize(agent.agent_id, uri, :query, identity_verified: true)
+  end
+
+  test "security regression: delegated capability cannot erase its signed chain",
+       %{agent: agent} do
+    uri = "arbor://historian/query/missing-chain/#{System.unique_integer([:positive])}"
+
+    {:ok, forged_delegated_cap} =
+      Capability.new(
+        resource_uri: uri,
+        principal_id: agent.agent_id,
+        parent_capability_id: "cap_" <> String.duplicate("b", 32),
+        delegation_depth: 1,
+        delegation_chain: []
+      )
+
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(forged_delegated_cap)
+
+    auth =
+      AuthContext.new(agent.agent_id, capabilities: [signed])
+      |> AuthContext.mark_verified()
+
+    # Capability admission rejects the impossible parent-without-chain shape
+    # before delegation verification. The public decision still fails closed.
+    assert {:error, :unauthorized, _auth} = AuthDecision.evaluate(auth, uri, :query)
   end
 
   defp ensure_security_started do

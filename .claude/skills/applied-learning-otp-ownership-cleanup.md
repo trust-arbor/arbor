@@ -103,7 +103,15 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 
 <!-- applied-learning: process-monitors-do-not-require-trapping-exits -->
 <a id="applied-learning-process-monitors-do-not-require-trapping-exits"></a>
-**Process monitors do not require trapping exits.** A GenServer that sets `Process.flag(:trap_exit, true)` only to monitor unrelated owners can convert its supervisor's shutdown signal into an ignored `{:EXIT, ...}` message, delaying termination until the supervisor kills it. Use monitors for owner lifecycle and leave linked supervisor exits at the OTP default unless the process has an explicit linked-exit protocol (found 2026-07-11 reviewing the signing-authority broker).
+**Process monitors do not require trapping exits.** Use monitors for unrelated
+owner lifecycle and enable `trap_exit` only for an explicit linked-worker
+protocol. OTP treats the designated supervisor parent's exit as a system
+termination path even when the child traps exits; it calls `terminate/2`
+directly instead of delivering that parent signal to `handle_info/2`. A parent
+`{:EXIT, ...}` callback clause is therefore unreachable and must not be relied
+on for cleanup or shutdown convergence (corrected 2026-10-07 with a direct OTP
+28.4.1 supervisor probe; originally found 2026-07-11 reviewing the
+signing-authority broker).
 
 <!-- applied-learning: derived-summaries-cannot-replace-independently-recorded-cleanup-evidence -->
 <a id="applied-learning-derived-summaries-cannot-replace-independently-recorded-cleanup-evidence"></a>
@@ -503,3 +511,41 @@ remain after revocation, but it must not force a successful reply or playback.
 Use a nonconsuming continuation check for repeated effects and fresh admission
 for the next turn, so chunk-level checks do not spend additional allowances
 (found 2026-09-27 while binding Voice to the canonical private conversation).
+
+<!-- applied-learning: defer-ancestry-queries-until-child-startup-has-acknowledged -->
+<a id="applied-learning-defer-ancestry-queries-until-child-startup-has-acknowledged"></a>
+**Defer full-tree ancestry queries until the parent supervisor is ready.** A
+supervisor waits for each child's `init/1`, and `handle_continue/2` may run while
+that parent is still constructing later siblings, so either callback can
+deadlock or time out if it calls `Supervisor.which_children/1` on the parent.
+During an application callback, `:application_master.get_child/1` can also
+terminate the master while its child slot is still `:undefined`. Keep the child
+pending, complete cold startup through an explicit post-`Supervisor.start_link/2`
+readiness handshake using the returned supervisor PID and exact child proofs,
+and make the Application wait boundedly for readiness before exposing dependent
+children. On restarts, retry after parent convergence or use a proof that does
+not reenter the starting parent (found 2026-10-07 while qualifying the
+kernel-runtime and Security review fixes). Apply the same rule after startup:
+an authority check that queries a live supervisor must use the subsystem's
+reviewed call bound, because a tiny local timeout can turn scheduler or mailbox
+pressure into a false authorization denial. Regress this deterministically by
+suspending the supervisor beyond the retired bound, proving the public request
+remains pending, then resuming it and requiring success (reinforced 2026-10-07
+while qualifying channel authorization under full-suite load). For bounded
+cold-start hydration, measure the declared maximum inventory on an uncontended
+isolated BEAM, time fixture seeding separately, and size the readiness bound from
+that inventory with an explicit floor and cap. A constant timeout below the
+measured supported workload makes valid durable state indistinguishable from an
+unavailable authority (reinforced 2026-10-07 after 10,001 authenticated
+capability records required 21.3 seconds to hydrate).
+
+<!-- applied-learning: proof-custody-must-protect-read-secrecy-as-well-as-write-authority -->
+<a id="applied-learning-proof-custody-must-protect-read-secrecy-as-well-as-write-authority"></a>
+**Proof custody must protect read secrecy as well as write authority.** An ETS `:protected` table prevents non-owner writes but lets every local process read the challenge, so a polling attacker can copy a legitimate caller’s proof and race an authenticated finish. Keep challenge proofs in caller-owned `:private` ETS and authenticate the VM-enforced ownership transfer to the exact server with an unguessable gift reference; reject raw transfer tuples unless the table is the exact pending proof and is actually server-owned. Never delete a server-owned custody or sentinel table based only on caller-supplied transfer metadata (found 2026-10-07 hardening `Arbor.Common.AuthenticatedCall`).
+
+Owner, `:private`, and schema checks still do not prove that a table is the
+original custody: an attacker can prepopulate a schema-valid private table,
+give it to the server, then use `:sys.replace_state/2` to substitute its TID.
+Anchor the exact original custody identity outside replaceable callback state,
+validate that anchor on every access, and regress a transferred schema-valid
+substitution that would otherwise mint authority.

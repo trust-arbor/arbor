@@ -58,8 +58,6 @@ defmodule Arbor.Security.DisclosureCapability do
   alias Arbor.Identifiers
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
-  alias Arbor.Security.Events
-  alias Arbor.Security.SystemAuthority
 
   @disclosure_uri_prefix "arbor://egress/disclose"
   @kind :interactive_human
@@ -82,7 +80,8 @@ defmodule Arbor.Security.DisclosureCapability do
     :provider,
     :runtime,
     :model,
-    :ttl_seconds
+    :ttl_seconds,
+    :actor_authority
   ]
 
   @known_disclosure_pairs [
@@ -117,13 +116,28 @@ defmodule Arbor.Security.DisclosureCapability do
   there is no opt to override either.
   """
   @spec issue(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
-  def issue(opts) do
+  def issue(opts), do: issue_with(opts, &Arbor.Security.grant/1)
+
+  if Mix.env() == :test do
+    @doc false
+    @spec issue_fixture(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
+    def issue_fixture(opts) when is_list(opts) do
+      opts =
+        if Keyword.keyword?(opts),
+          do: Keyword.put_new(opts, :actor_authority, :fixture),
+          else: opts
+
+      issue_with(opts, &Arbor.Security.grant_fixture/1)
+    end
+
+    def issue_fixture(_opts), do: {:error, :invalid_issue_opts}
+  end
+
+  defp issue_with(opts, grant) when is_function(grant, 1) do
     with :ok <- validate_known_opts(opts),
          {:ok, fields} <- extract_and_validate_fields(opts),
-         {:ok, cap} <- build_capability(fields),
-         {:ok, signed_cap} <- safe_sign(cap),
-         {:ok, :stored} <- safe_put(signed_cap) do
-      Events.record_capability_granted(signed_cap)
+         grant_opts <- build_grant_options(fields),
+         {:ok, signed_cap} <- grant.(grant_opts) do
       {:ok, signed_cap}
     end
   end
@@ -189,7 +203,9 @@ defmodule Arbor.Security.DisclosureCapability do
   end
 
   defp extract_and_validate_fields(opts) do
-    with {:ok, principal_id} <- required_agent_field(opts),
+    with actor_authority when not is_nil(actor_authority) <-
+           Keyword.get(opts, :actor_authority),
+         {:ok, principal_id} <- required_agent_field(opts),
          {:ok, session_id} <- required_field(opts, :session_id, :invalid_binding_field),
          {:ok, task_id} <- required_field(opts, :task_id, :invalid_binding_field),
          {:ok, principal_scope} <- required_human_field(opts),
@@ -209,8 +225,12 @@ defmodule Arbor.Security.DisclosureCapability do
          provider: provider,
          runtime: runtime,
          model: model,
-         ttl_seconds: ttl
+         ttl_seconds: ttl,
+         actor_authority: actor_authority
        }}
+    else
+      nil -> {:error, :capability_mutation_unauthorized}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -292,7 +312,7 @@ defmodule Arbor.Security.DisclosureCapability do
     end
   end
 
-  defp build_capability(fields) do
+  defp build_grant_options(fields) do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     resource_uri = @disclosure_uri_prefix <> "/" <> token
     now = DateTime.utc_now()
@@ -306,43 +326,22 @@ defmodule Arbor.Security.DisclosureCapability do
       }
       |> maybe_put_model(fields.model)
 
-    Capability.new(
-      resource_uri: resource_uri,
-      principal_id: fields.principal_id,
-      granted_at: now,
+    [
+      resource: resource_uri,
+      principal: fields.principal_id,
       session_id: fields.session_id,
       task_id: fields.task_id,
       principal_scope: fields.principal_scope,
       delegation_depth: 0,
       max_uses: nil,
       expires_at: DateTime.add(now, fields.ttl_seconds, :second),
-      constraints: %{disclosure: disclosure_constraints}
-    )
+      constraints: %{disclosure: disclosure_constraints},
+      actor_authority: fields.actor_authority
+    ]
   end
 
   defp maybe_put_model(map, nil), do: map
   defp maybe_put_model(map, model), do: Map.put(map, :model, model)
-
-  # Missing-authority/missing-store containment: neither SystemAuthority.sign_capability/1
-  # nor CapabilityStore.put/1 wraps GenServer.call itself, so a dead/unregistered
-  # target process would otherwise exit past this function and crash the caller.
-  defp safe_sign(cap) do
-    SystemAuthority.sign_capability(cap)
-  rescue
-    _ -> {:error, :system_authority_unavailable}
-  catch
-    :exit, _ -> {:error, :system_authority_unavailable}
-    :throw, _ -> {:error, :system_authority_unavailable}
-  end
-
-  defp safe_put(cap) do
-    CapabilityStore.put(cap)
-  rescue
-    _ -> {:error, :capability_store_unavailable}
-  catch
-    :exit, _ -> {:error, :capability_store_unavailable}
-    :throw, _ -> {:error, :capability_store_unavailable}
-  end
 
   # ===========================================================================
   # Read-time validation

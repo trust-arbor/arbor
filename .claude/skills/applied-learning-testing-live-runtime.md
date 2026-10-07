@@ -682,6 +682,10 @@ Tests that assert an exact launched budget at a deadline boundary must inject th
 <!-- applied-learning: resource-bounds-belong-at-the-public-facade-not-only-one-adapter -->
 <a id="applied-learning-resource-bounds-belong-at-the-public-facade-not-only-one-adapter"></a>
 **Resource bounds belong at the public facade, not only one adapter.** A bounded Finch/SSE implementation does not protect `generate_object`, tool-argument decoding, OAuth transports, or injected adapters that still call `Jason.decode/1`, buffer an enumerable, or use inactivity timeouts directly. Enforce structural decode, aggregate retention, absolute deadline, and owned-stream teardown at every public entry point; adapters may tighten but never bypass the floor (found 2026-07-11 reviewing the LLM/AI eval boundary).
+Trace transport dispatch before relying on a collector: Req invokes an arity-four
+`:finch_request` callback before consulting `request.into`, so a DNS-pinning
+callback must stream and enforce the bound itself (reinforced 2026-10-07 while
+closing KSEC-013 for pinned Web and SCM responses).
 
 <!-- applied-learning: umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app -->
 <a id="applied-learning-umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app"></a>
@@ -993,7 +997,12 @@ the temporary value, so mark the whole module `async: false` whenever it changes
 shared Application env, globally named processes, GenServer state, or shared ETS
 state (found 2026-07-19 when the Comms suite intermittently hid the Signal response
 channel; reinforced 2026-07-28 when retained-workspace reconciliation tests leaked
-archive and cleanup callbacks into later tests).
+archive and cleanup callbacks into later tests). Register restoration immediately
+after capturing the original state and before the first mutation; never place it
+after assertions in the test body. A failed security assertion otherwise strands
+a replacement store or terminated supervisor child and turns every later denial
+into a misleading cascade. Prove teardown by running a clean dependent case after
+the faulting case (reinforced 2026-10-07 while qualifying the Security review).
 
 <!-- applied-learning: elixir-is-list-1-recognizes-cons-cells-including-improper-lists -->
 <a id="applied-learning-elixir-is-list-1-recognizes-cons-cells-including-improper-lists"></a>
@@ -1024,7 +1033,7 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 
 <!-- applied-learning: serialize-mix-commands-within-each-worktree -->
 <a id="applied-learning-serialize-mix-commands-within-each-worktree"></a>
-**Serialize Mix commands within each worktree.** A worktree isolates source and runtime paths from the live checkout, but concurrent `./bin/mix` processes inside that same worktree still share `_build`, deps, compile locks, and application-level resources. Run focused suites one at a time; parallelize by giving each process its own worktree and runtime paths, never by launching concurrent Mix commands in one checkout. Do not run manager-side tests in a retained coding-task worktree while pipeline validation owns it, even with a private `MIX_BUILD_PATH`: ExUnit `@tag :tmp_dir` defaults beneath the application and can invalidate the attested candidate fingerprint. For a tree-bound regression, allocate an exclusive cryptorandom directory under `System.tmp_dir!()`, register cleanup, and keep all scratch bytes there. Verify through a separate worktree or wait until the task is terminal (found 2026-07-20 during delegated branch-lifecycle validation; reinforced 2026-08-15 when an independent E0B2P test made exact validation fail closed as `:dirty_workspace`).
+**Serialize Mix commands within each worktree.** A worktree isolates source and runtime paths from the live checkout, but concurrent `./bin/mix` processes inside that same worktree still share `_build`, deps, compile locks, and application-level resources. Run focused suites one at a time; parallelize by giving each process its own worktree and runtime paths, never by launching concurrent Mix commands in one checkout. Do not run manager-side tests in a retained coding-task worktree while pipeline validation owns it, even with a private `MIX_BUILD_PATH`: ExUnit `@tag :tmp_dir` defaults beneath the application and can invalidate the attested candidate fingerprint. For a tree-bound regression, allocate an exclusive cryptorandom directory under `System.tmp_dir!()`, register cleanup, and keep all scratch bytes there. A source guard scans every tracked test, so introducing it must include migrating all pre-existing literal tmp-dir tags to that explicit scratch-root pattern. Verify through a separate worktree or wait until the task is terminal (found 2026-07-20 during delegated branch-lifecycle validation; reinforced 2026-08-15 when an independent E0B2P test made exact validation fail closed as `:dirty_workspace`, and 2026-10-07 when the new source guard found three existing tags).
 
 <!-- applied-learning: format-only-scoped-paths-in-an-inherited-or-dirty-worktree -->
 <a id="applied-learning-format-only-scoped-paths-in-an-inherited-or-dirty-worktree"></a>
@@ -1836,6 +1845,12 @@ login qualification selected a stale audit-owner tail assertion: the journal
 correctly preceded CapabilityStore and Reflex.Registry, so adjusting only the
 offset for the new child still failed (2026-09-29). Preserve order checks and PID
 equality; express the dependency relation explicitly.
+PID ownership is only an initialization acknowledgement, not readiness: a
+dynamically rebuilt child can return from `start_child` and then fail in
+`handle_continue`, taking its `rest_for_one` tail down after the bootstrap has
+reported success. The canonical bootstrap must run each subsystem's public
+startup barrier in dependency order and assert public readiness before returning
+(found 2026-10-07 when the Security test tree disappeared before ExUnit began).
 
 <!-- applied-learning: sources-only-validation-compiles-need-git-and-a-normal-mix-compile -->
 <a id="applied-learning-sources-only-validation-compiles-need-git-and-a-normal-mix-compile"></a>
@@ -2202,3 +2217,89 @@ SQL roundtrip. Diagnose the value-producing failure before attributing it to a
 nearby database warning; retain the initial failure and fix the owning consumer
 recipe without substituting a volatile store or relaxing durability (found
 2026-10-06 while qualifying the standalone Workflow release consumer).
+
+<!-- applied-learning: validate-transitive-otp-services-from-the-umbrella-root -->
+<a id="applied-learning-validate-transitive-otp-services-from-the-umbrella-root"></a>
+**Validate transitive OTP services from the umbrella root.** A child app may
+compile while its standalone Mix test cannot start an OTP service supplied by a
+sibling's release dependency. Do not add that service to the child's
+`extra_applications` merely to make an artificial standalone lane pass. Use the
+isolated umbrella test lane for the real dependency graph, and keep child-app
+tests to dependencies the child actually declares (found 2026-10-06 while
+validating kernel-runtime diagnostics that use `os_mon`).
+
+<!-- applied-learning: remember-that-the-elixir-pipe-inserts-the-first-argument -->
+<a id="applied-learning-remember-that-the-elixir-pipe-inserts-the-first-argument"></a>
+**Remember that the Elixir pipe inserts the first argument.** This applies to
+Erlang modules too: `value |> :crypto.hash(:sha256)` calls
+`:crypto.hash(value, :sha256)`, while the intended call is
+`:crypto.hash(:sha256, value)`. Prefer an explicit call whenever the data
+argument is not first; both terms can satisfy loose runtime types, so parsing
+alone will not catch the reversal (found 2026-10-07 while reviewing a durable
+capability rollback regression).
+
+<!-- applied-learning: isolate-bounded-admission-budgets-between-test-cases -->
+<a id="applied-learning-isolate-bounded-admission-budgets-between-test-cases"></a>
+**Isolate bounded admission budgets between test cases.** When repeated cases
+share a stable admission identity, use distinct trusted source fixtures for
+independent attempts or explicitly raise only the fixture's bounded budget.
+Earlier valid starts can otherwise exhaust a per-source quota and make a later
+positive assertion fail for the wrong reason (found 2026-10-07 while qualifying
+TerminalLogin source binding).
+
+<!-- applied-learning: refresh-isolated-snapshots-from-an-absolute-source -->
+<a id="applied-learning-refresh-isolated-snapshots-from-an-absolute-source"></a>
+**Refresh isolated snapshots from an absolute source path.** A relative
+`rsync ./ <snapshot>` run with the snapshot as the command's working directory
+copies the snapshot onto itself and silently reruns stale source. Pin both the
+repository source and snapshot destination explicitly, then verify at least one
+expected changed line or hash before accepting the run (found 2026-10-07 while
+rerunning the full Security suite).
+
+<!-- applied-learning: canonical-runtime-fixtures-should-restore-rather-than-release-global-children -->
+<a id="applied-learning-canonical-runtime-fixtures-should-restore-rather-than-release-global-children"></a>
+**Canonical runtime fixtures should restore rather than release global children.**
+An acquire handle that records only child IDs and later re-resolves a registered
+supervisor can delete replacement-runtime children after a restart; overlapping
+handles can also let the first release remove dependencies still used by the
+second. For canonical globally supervised services, expose an idempotent helper
+that pins the supervisor, verifies exact child ownership, rejects registered-name
+squatters, and leaves canonical children running. Call it before the test and in
+cleanup. Use acquire/release only when the handle owns exact PIDs and concurrent
+users are reference-counted (found 2026-10-07 while migrating Security signal-sync
+fixtures to the public Signals facade).
+
+<!-- applied-learning: make-loopback-listener-lifetime-explicit -->
+<a id="applied-learning-make-loopback-listener-lifetime-explicit"></a>
+**Make loopback listener lifetime explicit.** A short
+`:gen_tcp.accept/2` timeout is a polling interval, not evidence that a test is
+finished. Closing after one idle timeout produces `:econnrefused` when suite
+load delays the client. Keep accepting until the expected connection arrives or
+the test explicitly awaits/stops the fixture, and monitor the test owner so a
+failed test cannot orphan the listener. Gate the acceptor on any ownership
+transfer so socket custody is deterministic; passive accept itself is not
+restricted to the controlling process (found 2026-10-07 while stabilizing OIDC
+loopback security regressions).
+
+<!-- applied-learning: isolate-the-git-index-for-snapshot-checks -->
+<a id="applied-learning-isolate-the-git-index-for-snapshot-checks"></a>
+**Isolate the Git index for snapshot checks.** An rsynced copy may retain a
+`.git` file that points at the live worktree index; `git add` in that copy then
+stages the real worktree. Yet `git ls-files` checks omit new candidate files
+unless the index includes them. Inspect the snapshot's Git metadata first. For
+index-aware checks, set `GIT_INDEX_FILE` to a temporary copy of the live index,
+stage the candidate against that private index, and leave the live index alone
+(found 2026-10-07 while running umbrella fast tests for security review
+remediation).
+
+<!-- applied-learning: validate-security-scanner-bounds-against-the-production-corpus -->
+<a id="applied-learning-validate-security-scanner-bounds-against-the-production-corpus"></a>
+**Validate security scanner bounds against the production corpus.** Fail-closed
+limits must accept the largest legitimate input they guard while remaining
+finite. Exercise boundary failures through the public reporting path because
+locationless aggregate violations must preserve the result schema (`line: nil`)
+or diagnostics can crash before showing the denial. Run the scanner against
+current maximum-size sources when changing byte, line, regex, or deadline
+budgets (found 2026-10-07 when the PII scan's new 10,000-line cap rejected two
+existing libraries and its locationless overflow finding crashed the pre-commit
+reporter).

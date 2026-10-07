@@ -104,8 +104,8 @@ defmodule Arbor.Actions.SchedulerTransportFixture do
 
   def identity! do
     {:ok, identity} = Security.generate_identity()
-    :ok = Security.register_identity(identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     caps =
       for module <- [
@@ -115,7 +115,7 @@ defmodule Arbor.Actions.SchedulerTransportFixture do
             Actions.Reports.BuildMorningDigest
           ] do
         {:ok, cap} =
-          Security.grant(
+          Security.grant_fixture(
             principal: identity.agent_id,
             resource: Actions.canonical_uri_for(module, %{})
           )
@@ -135,9 +135,9 @@ defmodule Arbor.Actions.SchedulerTransportFixture do
 
     ExUnit.Callbacks.on_exit(fn ->
       Security.close_signing_authority(authority)
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.delete_signing_key(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.delete_signing_key_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{identity: identity, authority: authority}

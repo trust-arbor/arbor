@@ -34,6 +34,9 @@ defmodule Arbor.Security.Events do
   """
 
   @stream_id "security:events"
+  @max_note_bytes 2_048
+  @max_task_preview_bytes 4_096
+  @max_metadata_bytes 16_384
 
   # ============================================================================
   # Authorization Events
@@ -85,7 +88,7 @@ defmodule Arbor.Security.Events do
       resource_uri: Keyword.get(opts, :resource_uri),
       agent_id: Keyword.get(opts, :agent_id),
       principal_id: Keyword.get(opts, :principal_id),
-      note: Keyword.get(opts, :note),
+      note: bounded_text(Keyword.get(opts, :note), @max_note_bytes),
       trace_id: Keyword.get(opts, :trace_id)
     })
   end
@@ -98,8 +101,8 @@ defmodule Arbor.Security.Events do
       actor_id: actor_id,
       task_id: task_id,
       agent_id: agent_id,
-      task_preview: Keyword.get(opts, :task_preview),
-      metadata: Keyword.get(opts, :metadata),
+      task_preview: bounded_text(Keyword.get(opts, :task_preview), @max_task_preview_bytes),
+      metadata: bounded_metadata(Keyword.get(opts, :metadata)),
       trace_id: Keyword.get(opts, :trace_id)
     })
   end
@@ -163,9 +166,9 @@ defmodule Arbor.Security.Events do
     dual_emit(:identity_verification_succeeded, %{
       agent_id: agent_id,
       trace_id: Keyword.get(opts, :trace_id),
-      signature: Keyword.get(opts, :signature),
+      signature_hash: sensitive_hash(Keyword.get(opts, :signature)),
       payload_hash: Keyword.get(opts, :payload_hash),
-      nonce: Keyword.get(opts, :nonce),
+      nonce_hash: sensitive_hash(Keyword.get(opts, :nonce)),
       signed_at: Keyword.get(opts, :signed_at)
     })
   end
@@ -178,7 +181,7 @@ defmodule Arbor.Security.Events do
       agent_id: agent_id,
       reason: inspect(reason),
       trace_id: Keyword.get(opts, :trace_id),
-      nonce: Keyword.get(opts, :nonce),
+      nonce_hash: sensitive_hash(Keyword.get(opts, :nonce)),
       signed_at: Keyword.get(opts, :signed_at)
     })
   end
@@ -382,6 +385,52 @@ defmodule Arbor.Security.Events do
     else
       :error
     end
+  end
+
+  defp bounded_text(nil, _maximum), do: nil
+
+  defp bounded_text(value, maximum) when is_binary(value) do
+    cond do
+      not String.valid?(value) -> nil
+      byte_size(value) <= maximum -> value
+      true -> valid_binary_prefix(value, maximum)
+    end
+  end
+
+  defp bounded_text(_value, _maximum), do: nil
+
+  defp valid_binary_prefix(value, maximum) do
+    prefix = binary_part(value, 0, maximum)
+
+    if String.valid?(prefix),
+      do: prefix,
+      else: valid_binary_prefix(value, maximum - 1)
+  end
+
+  defp bounded_metadata(nil), do: nil
+
+  defp bounded_metadata(metadata) when is_map(metadata) or is_list(metadata) do
+    case Jason.encode(metadata) do
+      {:ok, encoded} when byte_size(encoded) <= @max_metadata_bytes ->
+        metadata
+
+      {:ok, encoded} ->
+        %{truncated: true, sha256: digest(encoded)}
+
+      {:error, _reason} ->
+        %{truncated: true, invalid: true}
+    end
+  end
+
+  defp bounded_metadata(_metadata), do: %{truncated: true, invalid: true}
+
+  defp sensitive_hash(nil), do: nil
+  defp sensitive_hash(value) when is_binary(value), do: digest(value)
+  defp sensitive_hash(_value), do: nil
+
+  defp digest(value) do
+    :crypto.hash(:sha256, value)
+    |> Base.encode16(case: :lower)
   end
 
   # EventLog data is canonical JSON and therefore uses string keys. Keep the

@@ -31,8 +31,8 @@ defmodule Arbor.Security.ConversationSession do
            ) do
       try do
         with {:ok, owner} <- Security.conversation_receipt_owner(receipt, principal, target),
-             {:ok, ^principal} <- Security.consume_delivery_receipt(receipt, resource, :chat),
-             {:ok, token} <- SessionToken.generate_conversation(principal, target),
+             {:ok, token} <-
+               SessionToken.generate_conversation_authorized(principal, target, receipt),
              {:ok, :authorized} <-
                Security.recheck_conversation_session(principal, target, owner, token) do
           {:ok, token}

@@ -16,7 +16,7 @@ defmodule Arbor.Security.IdentityLifecycleTest do
   setup do
     # Generate and register a test identity
     {:ok, identity} = Identity.generate(name: "lifecycle-test-agent")
-    :ok = Registry.register(identity)
+    :ok = Registry.register_fixture(identity)
 
     {:ok, identity: identity}
   end
@@ -27,62 +27,64 @@ defmodule Arbor.Security.IdentityLifecycleTest do
 
   describe "Registry.suspend/2" do
     test "sets status to :suspended", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id, "Test suspension")
+      :ok = Registry.suspend_fixture(identity.agent_id, "Test suspension")
 
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
     end
 
     test "stores the reason", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id, "Security concern")
+      :ok = Registry.suspend_fixture(identity.agent_id, "Security concern")
 
       # We verify indirectly through status being :suspended
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
     end
 
     test "returns error for unknown agent" do
-      assert {:error, :not_found} = Registry.suspend("agent_unknown")
+      assert {:error, :not_found} = Registry.suspend_fixture("agent_unknown")
     end
 
     test "fails on :revoked identity (terminal)", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id, "Compromised")
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id, "Compromised")
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
 
-      assert {:error, :cannot_suspend_revoked} = Registry.suspend(identity.agent_id, "Attempt")
+      assert {:error, :cannot_suspend_revoked} =
+               Registry.suspend_fixture(identity.agent_id, "Attempt")
+
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
   end
 
   describe "Registry.resume/1" do
     test "sets status back to :active", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id, "Temporary")
+      :ok = Registry.suspend_fixture(identity.agent_id, "Temporary")
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
 
-      :ok = Registry.resume(identity.agent_id)
+      :ok = Registry.resume_fixture(identity.agent_id)
       assert {:ok, :active} = Registry.identity_status(identity.agent_id)
     end
 
     test "fails on :revoked identity (terminal)", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id, "Compromised")
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id, "Compromised")
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
 
-      assert {:error, :cannot_resume_revoked} = Registry.resume(identity.agent_id)
+      assert {:error, :cannot_resume_revoked} = Registry.resume_fixture(identity.agent_id)
     end
 
     test "returns error for unknown agent" do
-      assert {:error, :not_found} = Registry.resume("agent_unknown")
+      assert {:error, :not_found} = Registry.resume_fixture("agent_unknown")
     end
   end
 
   describe "Registry.revoke_identity/2" do
     test "sets status to :revoked and returns revoked count", %{identity: identity} do
-      {:ok, count} = Registry.revoke_identity(identity.agent_id, "Account compromised")
+      {:ok, count} = Registry.revoke_identity_fixture(identity.agent_id, "Account compromised")
 
       assert is_integer(count)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
 
     test "returns error for unknown agent" do
-      assert {:error, :not_found} = Registry.revoke_identity("agent_unknown")
+      assert {:error, :not_found} = Registry.revoke_identity_fixture("agent_unknown")
     end
   end
 
@@ -92,12 +94,12 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     end
 
     test "returns :suspended after suspension", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id)
+      :ok = Registry.suspend_fixture(identity.agent_id)
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
     end
 
     test "returns :revoked after revocation", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
 
@@ -112,12 +114,12 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     end
 
     test "returns false for suspended identity", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id)
+      :ok = Registry.suspend_fixture(identity.agent_id)
       refute Registry.active?(identity.agent_id)
     end
 
     test "returns false for revoked identity", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
       refute Registry.active?(identity.agent_id)
     end
 
@@ -137,13 +139,13 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     end
 
     test "returns error for suspended identity", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id, "Suspicious activity")
+      :ok = Registry.suspend_fixture(identity.agent_id, "Suspicious activity")
 
       assert {:error, :identity_suspended} = Registry.lookup(identity.agent_id)
     end
 
     test "returns error for revoked identity", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id, "Compromised")
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id, "Compromised")
 
       assert {:error, :identity_revoked} = Registry.lookup(identity.agent_id)
     end
@@ -156,13 +158,13 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     end
 
     test "returns error for suspended identity", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id)
+      :ok = Registry.suspend_fixture(identity.agent_id)
 
       assert {:error, :identity_suspended} = Registry.lookup_encryption_key(identity.agent_id)
     end
 
     test "returns error for revoked identity", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
 
       assert {:error, :identity_revoked} = Registry.lookup_encryption_key(identity.agent_id)
     end
@@ -176,33 +178,33 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     test "active -> suspended -> active (valid)", %{identity: identity} do
       assert {:ok, :active} = Registry.identity_status(identity.agent_id)
 
-      :ok = Registry.suspend(identity.agent_id)
+      :ok = Registry.suspend_fixture(identity.agent_id)
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
 
-      :ok = Registry.resume(identity.agent_id)
+      :ok = Registry.resume_fixture(identity.agent_id)
       assert {:ok, :active} = Registry.identity_status(identity.agent_id)
     end
 
     test "active -> revoked (terminal)", %{identity: identity} do
       assert {:ok, :active} = Registry.identity_status(identity.agent_id)
 
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
 
     test "suspended -> revoked (terminal)", %{identity: identity} do
-      :ok = Registry.suspend(identity.agent_id)
+      :ok = Registry.suspend_fixture(identity.agent_id)
       assert {:ok, :suspended} = Registry.identity_status(identity.agent_id)
 
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
 
     test "revoked -> active (invalid)", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id)
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
 
-      assert {:error, :cannot_resume_revoked} = Registry.resume(identity.agent_id)
+      assert {:error, :cannot_resume_revoked} = Registry.resume_fixture(identity.agent_id)
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
     end
   end
@@ -213,7 +215,7 @@ defmodule Arbor.Security.IdentityLifecycleTest do
 
   describe "Security.suspend_identity/2" do
     test "suspends identity via facade", %{identity: identity} do
-      :ok = Security.suspend_identity(identity.agent_id, reason: "Facade test")
+      :ok = Security.suspend_identity_fixture(identity.agent_id, reason: "Facade test")
 
       assert {:ok, :suspended} = Security.identity_status(identity.agent_id)
     end
@@ -221,8 +223,8 @@ defmodule Arbor.Security.IdentityLifecycleTest do
 
   describe "Security.resume_identity/1" do
     test "resumes identity via facade", %{identity: identity} do
-      :ok = Security.suspend_identity(identity.agent_id)
-      :ok = Security.resume_identity(identity.agent_id)
+      :ok = Security.suspend_identity_fixture(identity.agent_id)
+      :ok = Security.resume_identity_fixture(identity.agent_id)
 
       assert {:ok, :active} = Security.identity_status(identity.agent_id)
     end
@@ -230,7 +232,7 @@ defmodule Arbor.Security.IdentityLifecycleTest do
 
   describe "Security.revoke_identity/2" do
     test "revokes identity via facade", %{identity: identity} do
-      :ok = Security.revoke_identity(identity.agent_id, reason: "Facade test")
+      :ok = Security.revoke_identity_fixture(identity.agent_id, reason: "Facade test")
 
       assert {:ok, :revoked} = Security.identity_status(identity.agent_id)
     end
@@ -240,7 +242,7 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     test "returns current status", %{identity: identity} do
       assert {:ok, :active} = Security.identity_status(identity.agent_id)
 
-      :ok = Security.suspend_identity(identity.agent_id)
+      :ok = Security.suspend_identity_fixture(identity.agent_id)
       assert {:ok, :suspended} = Security.identity_status(identity.agent_id)
     end
   end
@@ -249,13 +251,13 @@ defmodule Arbor.Security.IdentityLifecycleTest do
     test "returns correct boolean", %{identity: identity} do
       assert Security.identity_active?(identity.agent_id)
 
-      :ok = Security.suspend_identity(identity.agent_id)
+      :ok = Security.suspend_identity_fixture(identity.agent_id)
       refute Security.identity_active?(identity.agent_id)
 
-      :ok = Security.resume_identity(identity.agent_id)
+      :ok = Security.resume_identity_fixture(identity.agent_id)
       assert Security.identity_active?(identity.agent_id)
 
-      :ok = Security.revoke_identity(identity.agent_id)
+      :ok = Security.revoke_identity_fixture(identity.agent_id)
       refute Security.identity_active?(identity.agent_id)
     end
   end
@@ -266,14 +268,14 @@ defmodule Arbor.Security.IdentityLifecycleTest do
 
   describe "deregister vs revoke" do
     test "deregister removes entry entirely", %{identity: identity} do
-      :ok = Registry.deregister(identity.agent_id)
+      :ok = Registry.deregister_fixture(identity.agent_id)
 
       assert {:error, :not_found} = Registry.lookup(identity.agent_id)
       assert {:error, :not_found} = Registry.identity_status(identity.agent_id)
     end
 
     test "revoke keeps entry for audit trail", %{identity: identity} do
-      {:ok, _} = Registry.revoke_identity(identity.agent_id, "Audit trail test")
+      {:ok, _} = Registry.revoke_identity_fixture(identity.agent_id, "Audit trail test")
 
       # Entry still exists
       assert {:ok, :revoked} = Registry.identity_status(identity.agent_id)
@@ -289,7 +291,7 @@ defmodule Arbor.Security.IdentityLifecycleTest do
   describe "default status on registration" do
     test "new identities start with :active status" do
       {:ok, new_identity} = Identity.generate(name: "fresh-agent")
-      :ok = Registry.register(new_identity)
+      :ok = Registry.register_fixture(new_identity)
 
       assert {:ok, :active} = Registry.identity_status(new_identity.agent_id)
     end

@@ -63,8 +63,8 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     Application.delete_env(:arbor_llm, :pipeline)
     LLM.Client.set_default_client(LLM.Client.new(adapters: %{"lm_studio" => LLM.Adapter.ReqLLM}))
     {:ok, owner} = Identity.generate(name: "synthetic-journey")
-    :ok = Security.register_identity(Identity.public_only(owner))
-    :ok = Security.store_signing_key(owner.agent_id, owner.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(owner))
+    :ok = Security.store_signing_key_fixture(owner.agent_id, owner.private_key)
 
     {:ok, proof} =
       Security.build_signing_authority_acquisition_proof(
@@ -91,7 +91,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       )
 
     {:ok, cap} =
-      Security.grant(
+      Security.grant_fixture(
         principal: owner.agent_id,
         resource: resource,
         delegation_depth: 0,
@@ -99,10 +99,10 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       )
 
     on_exit(fn ->
-      _ = Security.revoke(cap.id)
+      _ = Security.revoke_fixture(cap.id)
       _ = Security.close_signing_authority(authority)
-      _ = Security.delete_signing_key(owner.agent_id)
-      _ = Security.deregister_identity(owner.agent_id)
+      _ = Security.delete_signing_key_fixture(owner.agent_id)
+      _ = Security.deregister_identity_fixture(owner.agent_id)
       File.rm_rf!(directory)
       LLM.Client.set_default_client(old_client)
 
@@ -228,8 +228,8 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       opts: [repo: Repo]
     })
 
-    {:ok, cap} = Security.grant(principal: c.owner.agent_id, resource: "arbor://net/http")
-    on_exit(fn -> Security.revoke(cap.id) end)
+    {:ok, cap} = Security.grant_fixture(principal: c.owner.agent_id, resource: "arbor://net/http")
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     assert {:error, :journey_preflight_failed} = run(c)
   end
 
@@ -325,7 +325,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
   end
 
   test "ordinary standing-policy JIT remains enabled outside the journey", c do
-    assert :ok = Security.revoke(c.cap.id)
+    assert :ok = Security.revoke_fixture(c.cap.id)
     {:ok, signed} = Security.sign_with_authority(c.authority, c.resource)
 
     assert {:ok, :authorized} =

@@ -206,6 +206,20 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
   end
 
   describe "ambiguity and bijection fail closed" do
+    @tag spec: "KSEC-008"
+    test "security regression: duplicate signal ids cannot corrupt privacy deletion" do
+      original = memory_signal(@target, :mem_duplicate_id)
+      duplicate = %{Signal.new(:activity, :duplicate_noise, %{}) | id: original.id}
+
+      assert :ok = Store.put_sync(original)
+      assert {:error, :duplicate_id} = Store.put_sync(duplicate)
+
+      assert {:ok, ^original} = Store.get(original.id)
+      assert {:ok, false} = Signals.memory_agent_content_absent?(@target, timeout_ms: 1_000)
+      assert :ok = Signals.delete_memory_agent_content(@target, timeout_ms: 1_000)
+      assert {:ok, true} = Signals.memory_agent_content_absent?(@target, timeout_ms: 1_000)
+    end
+
     test "missing agent_id, string-key-only, and non-binary agent_id reject without mutation" do
       good = memory_signal(@other, :mem_other)
       Store.put_sync(good)

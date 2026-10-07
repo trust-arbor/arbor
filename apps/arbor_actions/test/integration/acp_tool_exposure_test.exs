@@ -3,7 +3,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
   Integration test for the Phase 4 ACP tool-exposure path. Exercises
   the full chain from capability grant through HTTP MCP boundary:
 
-    Security.grant(agent → arbor://fs/read)
+    Security.grant_fixture(agent → arbor://fs/read)
       └─> Arbor.Actions.tool_modules_for_agent/1 (capability filter)
            └─> AcpPool.ToolServer.start/2 (workspace context)
                 └─> HTTP MCP `tools/list` (exposes only granted action)
@@ -40,7 +40,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
     {:ok, identity} = Identity.generate(name: "acp-tool-exposure-integration")
     agent_id = identity.agent_id
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     workspace =
       System.tmp_dir!() |> Path.join("acp_tool_exposure_#{System.unique_integer([:positive])}")
@@ -49,7 +49,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
     on_exit(fn ->
       case Security.list_capabilities(agent_id) do
-        {:ok, caps} -> Enum.each(caps, &Security.revoke(&1.id))
+        {:ok, caps} -> Enum.each(caps, &Security.revoke_fixture(&1.id))
         _ -> :ok
       end
 
@@ -71,8 +71,10 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       # never really exercised — a false green). Grant both so the call is
       # genuinely authorized end-to-end. NOTE: spawned ACP agents now likewise
       # need a path-scoped fs cap, not just the exposure cap.
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
+
+      {:ok, _} =
+        Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
 
       # Capability filter picks up File.Read but not Shell.Execute
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
@@ -118,7 +120,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       # test is verifying. The bound here is enforced by the action's
       # validate_path, not the cap. (See the success test above re: exposure vs
       # path-scoped caps and the H1 fail-open fix.)
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
 
       # Scope the read cap to the workspace's PARENT (normalized — no trailing
       # slash, unlike System.tmp_dir!/0) so BOTH the workspace and the sibling
@@ -128,7 +130,7 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       tmp_parent = Path.dirname(workspace)
 
       {:ok, _} =
-        Security.grant(principal: agent_id, resource: "arbor://fs/read#{tmp_parent}/**")
+        Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{tmp_parent}/**")
 
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
@@ -167,8 +169,10 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       # so this read ran as clean input under every taint policy.
       Application.put_env(:arbor_actions, :default_taint_policy, :permissive)
 
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
-      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
+      {:ok, _} = Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read")
+
+      {:ok, _} =
+        Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
 
       target = Path.join(workspace, "hello.txt")
       File.write!(target, "hi")

@@ -44,22 +44,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
   end
 
   @impl true
-  def execute(id, input, opts) do
-    case parse_action_id(id) do
-      {:ok, name} ->
-        case ActionRegistry.resolve_by_name(name) do
-          {:ok, module} ->
-            context = Keyword.get(opts, :context, %{})
-            module.run(input, context)
-
-          {:error, _} = err ->
-            err
-        end
-
-      :error ->
-        {:error, :not_found}
-    end
-  end
+  def execute(_id, _input, _opts), do: {:error, :execution_not_supported}
 
   @doc false
   def module_to_descriptor(canonical_name, module, metadata) do

@@ -16,7 +16,7 @@ defmodule Arbor.Security.SessionTokenTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "test-session-secret-#{:rand.uniform(1_000_000)}"
+      "test-session-secret-at-least-thirty-two-bytes-#{:rand.uniform(1_000_000)}"
     )
 
     on_exit(fn ->
@@ -36,12 +36,39 @@ defmodule Arbor.Security.SessionTokenTest do
     end
 
     test "expired token is rejected" do
-      {:ok, token} = SessionToken.generate("human_x", ttl: -1)
-      assert {:error, :token_expired} = SessionToken.verify(token)
+      {:ok, token} = SessionToken.generate("human_x")
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      now = System.os_time(:second)
+
+      payload =
+        bytes
+        |> :erlang.binary_to_term([:safe])
+        |> Map.merge(%{iat: now - 120, exp: now - 60})
+
+      expired_bytes = :erlang.term_to_binary(payload)
+      secret = Application.fetch_env!(:arbor_security, :session_token_secret)
+      signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+      expired = Base.url_encode64(signature <> expired_bytes, padding: false)
+
+      assert {:error, :token_expired} = SessionToken.verify(expired)
+    end
+
+    @tag :security_regression
+    test "security regression: default session lifetime is one hour" do
+      assert {:ok, token} = SessionToken.generate("human_short_lived")
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      payload = :erlang.binary_to_term(bytes, [:safe])
+      assert payload.exp - payload.iat == 3_600
     end
 
     @tag :terminal_session_expiry_cap
-    test "security regression: authenticated expiry caps the actual signed v1 payload" do
+    test "security regression: authenticated expiry caps the actual signed v2 payload" do
       expiry = System.os_time(:second) + 30
       assert {:ok, token} = SessionToken.generate("human_x", ttl: 900, max_expires_at: expiry)
       assert {:ok, "human_x"} = SessionToken.verify(token)
@@ -49,7 +76,7 @@ defmodule Arbor.Security.SessionTokenTest do
       {:ok, <<_signature::binary-size(32), bytes::binary>>} =
         Base.url_decode64(token, padding: false)
 
-      assert %{v: 1, exp: ^expiry} = :erlang.binary_to_term(bytes, [:safe])
+      assert %{v: 2, exp: ^expiry} = :erlang.binary_to_term(bytes, [:safe])
 
       assert {:ok, shorter} = SessionToken.generate("human_x", ttl: 5, max_expires_at: expiry)
 
@@ -68,12 +95,43 @@ defmodule Arbor.Security.SessionTokenTest do
     end
   end
 
+  describe "configuration_status/0" do
+    @tag :security_regression
+    test "security regression: rejects the committed development secret" do
+      Application.put_env(
+        :arbor_security,
+        :session_token_secret,
+        "arbor-dev-session-token-secret-change-in-prod"
+      )
+
+      assert {:error, :insecure_session_token_secret} = SessionToken.configuration_status()
+
+      assert_raise RuntimeError, ~r/session token configuration rejected/, fn ->
+        SessionToken.generate("human_rejected")
+      end
+    end
+
+    @tag :security_regression
+    test "security regression: rejects missing and short secrets" do
+      Application.delete_env(:arbor_security, :session_token_secret)
+      assert {:error, :session_token_secret_missing} = SessionToken.configuration_status()
+
+      Application.put_env(:arbor_security, :session_token_secret, "too-short")
+      assert {:error, :invalid_session_token_secret} = SessionToken.configuration_status()
+    end
+  end
+
   describe "tamper resistance" do
     test "a token signed with a different secret does not verify" do
       {:ok, token} = SessionToken.generate("human_x")
 
       # Re-key: the existing token's HMAC no longer matches.
-      Application.put_env(:arbor_security, :session_token_secret, "a-completely-different-secret")
+      Application.put_env(
+        :arbor_security,
+        :session_token_secret,
+        "a-completely-different-session-secret-at-least-32-bytes"
+      )
+
       assert {:error, :invalid_signature} = SessionToken.verify(token)
     end
 

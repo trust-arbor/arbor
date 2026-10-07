@@ -545,11 +545,19 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
   alias Arbor.Security.TestSupport.RecordingEventLogAdapter
+  alias Arbor.Signals
 
   alias __MODULE__.CASSandbox
 
   @security_supervisor Arbor.Security.Supervisor
   @capability_store :arbor_security_capabilities
+  @capability_sync_events [
+    :capability_granted,
+    :capability_revoked,
+    :capabilities_revoked_all,
+    :capabilities_cascade_revoked,
+    :capabilities_scope_revoked
+  ]
 
   defp acknowledged_available? do
     function_exported?(Arbor.Security, :acknowledged_grant, 1) and
@@ -600,7 +608,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     # granted_at before signing so the signing payload is byte-identical to
     # Arbor.Security.acknowledged_grant/1 (identity-exact across retries).
     cap = %{cap | signed_at: cap.granted_at}
-    {:ok, signed} = SystemAuthority.sign_capability(cap)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
     signed
   end
 
@@ -626,20 +634,22 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     on_exit(fn -> stop_named_process(backend_name) end)
 
     {:ok, _pid} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: CASSandbox,
         namespace: backend_name,
         hydration_limit: 10_000
       )
 
-    {:ok, _pid} = CapabilityStore.start_link([])
+    {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
+    assert_capability_store_ready!()
     backend_name
   end
 
   defp restart_capability_store do
     stop_named_process(CapabilityStore)
-    {:ok, _pid} = CapabilityStore.start_link([])
+    {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
+    assert_capability_store_ready!()
   end
 
   # Real JSONFile dual-process topology (AuthorityStore + CapabilityStore) for
@@ -652,7 +662,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
 
     {:ok, _pid} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: absolute_test_root(backend_dir)],
@@ -660,7 +670,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         hydration_limit: Config.max_global_capabilities()
       )
 
-    {:ok, _pid} = CapabilityStore.start_link([])
+    {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
+    assert_capability_store_ready!()
   end
 
   defp full_restart_capability_stack!(backend_dir) do
@@ -668,7 +679,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     stop_named_process(@capability_store)
 
     {:ok, _pid} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: absolute_test_root(backend_dir)],
@@ -679,7 +690,13 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, %{status: :ready}} =
              AuthorityStore.hydration_status(name: @capability_store)
 
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    assert {:ok, _pid} = CapabilityStore.start_link(test_isolated_owner: true)
+    assert_capability_store_ready!()
+  end
+
+  defp assert_capability_store_ready! do
+    assert {:ok, []} = Security.list_capabilities("agent_template_fixture_readiness_probe")
+    :ok
   end
 
   defp restore_security_children do
@@ -709,20 +726,20 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     resource = "arbor://fs/read/ack-g1"
 
     if acknowledged_available?() do
-      assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, original} = Security.grant_fixture(principal: principal, resource: resource)
       original_id = original.id
 
       assert {:error, :resource_conflict} =
-               Security.acknowledged_grant(det_grant_opts("g1", principal, resource))
+               Security.acknowledged_grant_fixture(det_grant_opts("g1", principal, resource))
 
       assert {:ok, %Capability{id: ^original_id}} = CapabilityStore.get(original_id)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
-      assert {:ok, first} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, first} = Security.grant_fixture(principal: principal, resource: resource)
       first_id = first.id
-      assert {:ok, _second} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _second} = Security.grant_fixture(principal: principal, resource: resource)
       assert {:ok, %Capability{id: ^first_id}} = CapabilityStore.get(first_id)
     end
   end
@@ -740,17 +757,17 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       granted_before = CapabilityStore.stats().total_granted
 
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
 
       assert CapabilityStore.stats().total_granted == granted_before + 1
 
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
     else
-      assert {:ok, first} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, first} = Security.grant_fixture(principal: principal, resource: resource)
       first_id = first.id
-      assert {:ok, second} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, second} = Security.grant_fixture(principal: principal, resource: resource)
       assert second.id == first_id
     end
   end
@@ -772,11 +789,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         resource: resource
       )
 
-    assert {:ok, :stored} = CapabilityStore.put(seeded)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(seeded)
 
     if acknowledged_available?() do
       assert {:error, :id_conflict} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("g3-seed", "agent_ack_g3_other", resource)
                )
 
@@ -791,7 +808,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
           resource: resource
         )
 
-      assert {:ok, :stored} = CapabilityStore.put(replacement)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(replacement)
 
       assert {:ok, %Capability{principal_id: "agent_ack_g3_seed"}} =
                CapabilityStore.get(seeded_id)
@@ -811,7 +828,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     CASSandbox.fail_puts(1)
 
     if acknowledged_available?() do
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(opts)
 
       assert {:error, :not_found} = CapabilityStore.get(opts[:capability_id])
       assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
@@ -820,7 +837,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :unauthorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
-      assert {:ok, %Capability{}} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, %Capability{}} =
+               Security.grant_fixture(principal: principal, resource: resource)
+
       flunk("parent ordinary grant reported success on an ambiguous durable write")
     end
   end
@@ -852,7 +871,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         resource: resource
       ]
 
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(opts)
 
       assert {:error, :not_found} = CapabilityStore.get(target_id)
       assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
@@ -873,7 +892,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       revoked_before = CapabilityStore.stats().total_revoked
 
-      assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke(unknown_id)
+      assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke_fixture(unknown_id)
 
       # Durable-absent revoke evicts a stale live projection WITHOUT stats,
       # signal, or audit: the revoked counter is unchanged.
@@ -883,7 +902,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert unknown_id not in durable_ids
     else
-      assert :ok = Security.revoke(unknown_id)
+      assert :ok = Security.revoke_fixture(unknown_id)
     end
   end
 
@@ -898,15 +917,17 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("g7", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       assert {:error, :not_found} = CapabilityStore.get(id)
       assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert id not in durable_ids
     else
-      assert {:ok, %Capability{id: id}} = Security.grant(principal: principal, resource: resource)
-      assert {:ok, :applied, ^id} = Security.revoke(id)
+      assert {:ok, %Capability{id: id}} =
+               Security.grant_fixture(principal: principal, resource: resource)
+
+      assert {:ok, :applied, ^id} = Security.revoke_fixture(id)
     end
   end
 
@@ -921,8 +942,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("g8", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       restart_capability_store()
 
@@ -933,9 +954,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :unauthorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
-      assert {:ok, %Capability{id: id}} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, %Capability{id: id}} =
+               Security.grant_fixture(principal: principal, resource: resource)
+
       CASSandbox.fail_deletes(1)
-      assert :ok = Security.revoke(id)
+      assert :ok = Security.revoke_fixture(id)
       CASSandbox.clear()
 
       restart_capability_store()
@@ -956,7 +979,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("g9", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
 
       restart_capability_store()
 
@@ -966,7 +989,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
       CASSandbox.fail_puts(1)
-      assert {:ok, %Capability{}} = Security.grant(principal: principal, resource: resource)
+
+      assert {:ok, %Capability{}} =
+               Security.grant_fixture(principal: principal, resource: resource)
+
       CASSandbox.clear()
 
       restart_capability_store()
@@ -987,11 +1013,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("g10", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
 
       CASSandbox.fail_deletes(1)
 
-      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(id)
+      assert {:error, :outcome_unknown} = Security.acknowledged_revoke_fixture(id)
 
       # NOT applied: live NOT evicted (still authorizes).
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
@@ -1000,12 +1026,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                Security.authorize(principal, resource, nil, verify_identity: false)
 
       CASSandbox.clear()
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
       assert {:error, :not_found} = CapabilityStore.get(id)
     else
-      assert {:ok, %Capability{id: id}} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, %Capability{id: id}} =
+               Security.grant_fixture(principal: principal, resource: resource)
+
       CASSandbox.fail_deletes(1)
-      assert {:error, _reason} = Security.revoke(id)
+      assert {:error, _reason} = Security.revoke_fixture(id)
     end
   end
 
@@ -1020,7 +1048,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("g11", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
 
       state = :sys.get_state(CapabilityStore)
 
@@ -1044,7 +1072,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
           resource: resource
         )
 
-      assert {:ok, :stored} = CapabilityStore.put(seeded)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(seeded)
 
       replacement =
         build_signed_cap(
@@ -1054,7 +1082,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
           resource: "arbor://fs/read/ack-g11-other"
         )
 
-      assert {:ok, :stored} = CapabilityStore.put(replacement)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(replacement)
 
       assert {:ok, %Capability{resource_uri: "arbor://fs/read/ack-g11"}} =
                CapabilityStore.get(det_id("g11"))
@@ -1073,13 +1101,13 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     if acknowledged_available?() do
       seeded = build_signed_cap(opts)
-      assert {:ok, :stored} = CapabilityStore.put(seeded)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(seeded)
       :ok = AuthorityStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
 
       granted_before = CapabilityStore.stats().total_granted
       revoked_before = CapabilityStore.stats().total_revoked
 
-      assert {:ok, :idempotent, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, id} = Security.acknowledged_grant_fixture(opts)
       assert id == opts[:capability_id]
 
       assert {:ok, %Record{}} =
@@ -1092,8 +1120,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
       granted_before = CapabilityStore.stats().total_granted
-      assert {:ok, _first} = Security.grant(principal: principal, resource: resource)
-      assert {:ok, _second} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _first} = Security.grant_fixture(principal: principal, resource: resource)
+      assert {:ok, _second} = Security.grant_fixture(principal: principal, resource: resource)
       assert CapabilityStore.stats().total_granted == granted_before
     end
   end
@@ -1118,7 +1146,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       CASSandbox.fail_cas_conflict(1)
 
-      assert {:ok, :idempotent, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, id} = Security.acknowledged_grant_fixture(opts)
       assert id == opts[:capability_id]
 
       # The reobserved record is durable and live; no duplicate grant stat.
@@ -1135,10 +1163,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       CASSandbox.clear()
       CASSandbox.fail_puts(1)
       other = det_grant_opts("g13b", principal, "arbor://fs/read/ack-g13b")
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(other)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(other)
     else
       CASSandbox.fail_puts(1)
-      assert {:error, _reason} = Security.grant(principal: principal, resource: resource)
+      assert {:error, _reason} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1155,23 +1183,27 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       # Unknown / forbidden keys, non-keyword, and duplicate keys are rejected.
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(base ++ [capability_id: det_id("k0"), issuer_id: "x"])
+               Security.acknowledged_grant_fixture(
+                 base ++ [capability_id: det_id("k0"), issuer_id: "x"]
+               )
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(base ++ [capability_id: det_id("k0"), foreign: 1])
+               Security.acknowledged_grant_fixture(
+                 base ++ [capability_id: det_id("k0"), foreign: 1]
+               )
 
       # Missing required key.
-      assert {:error, :invalid_request} = Security.acknowledged_grant(base)
+      assert {:error, :invalid_request} = Security.acknowledged_grant_fixture(base)
 
       # Malformed capability id.
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(base ++ [capability_id: "not-a-cap-id"])
+               Security.acknowledged_grant_fixture(base ++ [capability_id: "not-a-cap-id"])
 
       # Oversized map value, over-deep nesting, and oversized integer are rejected.
       big_binary = String.duplicate("a", 512)
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++
                    [capability_id: det_id("k1"), constraints: %{k: big_binary}]
                )
@@ -1179,22 +1211,24 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       deep = %{n: %{n: %{n: %{n: %{n: %{n: %{n: %{n: 1}}}}}}}}
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(base ++ [capability_id: det_id("k2"), metadata: deep])
+               Security.acknowledged_grant_fixture(
+                 base ++ [capability_id: det_id("k2"), metadata: deep]
+               )
 
       huge_int = Integer.pow(2, 70)
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++ [capability_id: det_id("k3"), constraints: %{n: huge_int}]
                )
 
       # A well-formed minimal grant still succeeds.
       assert {:ok, :applied, _id} =
-               Security.acknowledged_grant(det_grant_opts("g14-ok", principal, resource))
+               Security.acknowledged_grant_fixture(det_grant_opts("g14-ok", principal, resource))
     else
       # PARENT behavioral probe: ordinary grant accepts arbitrary unbounded maps.
       assert {:ok, %Capability{}} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: principal,
                  resource: resource,
                  metadata: %{deep: %{deep: %{deep: %{deep: %{deep: %{deep: %{deep: 1}}}}}}}
@@ -1214,7 +1248,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     fresh_isolated_store()
     principal = "agent_ack_f1"
     resource = "arbor://fs/read/ack-f1"
-    assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, original} = Security.grant_fixture(principal: principal, resource: resource)
     original_id = original.id
 
     # Simulate a stale by_principal: the cap is present in by_id (authoritative)
@@ -1231,7 +1265,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       opts = det_grant_opts("f1", principal, resource)
 
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(opts)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(opts)
 
       # The different capability is never replaced or mutated.
       assert {:ok, %Capability{id: ^original_id, principal_id: ^principal}} =
@@ -1246,7 +1280,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # reads the stale by_principal inside existing_capability_id/2, misses the
       # original, and admits a duplicate, so the 'exactly one in by_id'
       # assertion fails behaviorally.
-      assert {:ok, _dup} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _dup} = Security.grant_fixture(principal: principal, resource: resource)
       assert {:ok, %Capability{id: ^original_id}} = CapabilityStore.get(original_id)
 
       state = :sys.get_state(CapabilityStore)
@@ -1288,7 +1322,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       revoked_before = CapabilityStore.stats().total_revoked
 
-      assert {:ok, :idempotent, ^dangling_id} = Security.acknowledged_revoke(dangling_id)
+      assert {:ok, :idempotent, ^dangling_id} = Security.acknowledged_revoke_fixture(dangling_id)
 
       # No stat side effect (durable absence is idempotent, not an applied delete).
       assert CapabilityStore.stats().total_revoked == revoked_before
@@ -1302,7 +1336,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     else
       # Parent: ordinary revoke of an absent-by_id id returns :not_found and
       # purges nothing, so the dangling ref survives and this fails.
-      assert {:error, :not_found} = Security.revoke(dangling_id)
+      assert {:error, :not_found} = Security.revoke_fixture(dangling_id)
 
       state = :sys.get_state(CapabilityStore)
       assert Enum.member?(Map.get(state.by_principal, "agent_ack_f2", []), dangling_id) == false
@@ -1323,11 +1357,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       # Omission of both keys normalizes to %{} and admits.
       assert {:ok, :applied, _} =
-               Security.acknowledged_grant(det_grant_opts("f3-omit", principal, resource))
+               Security.acknowledged_grant_fixture(det_grant_opts("f3-omit", principal, resource))
 
       # A present empty map also admits.
       assert {:ok, :applied, _} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-empty", principal, "arbor://fs/read/ack-f3-empty")
                  |> Keyword.put(:constraints, %{})
                )
@@ -1348,7 +1382,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
               value
             )
 
-          assert {:error, :invalid_request} = Security.acknowledged_grant(bad)
+          assert {:error, :invalid_request} = Security.acknowledged_grant_fixture(bad)
         end
       end
 
@@ -1373,7 +1407,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
           det_grant_opts("f3-#{suffix}", principal, "arbor://fs/read/ack-f3-#{suffix}")
           |> Keyword.put(field, value)
 
-        assert {:error, :invalid_request} = Security.acknowledged_grant(bad)
+        assert {:error, :invalid_request} = Security.acknowledged_grant_fixture(bad)
       end
 
       # Atom and string keys canonicalize to the same JSON object key. Reject
@@ -1381,7 +1415,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       duplicate_canonical_keys = %{:source => "atom", "source" => "string"}
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-duplicate-key", principal, "arbor://fs/read/ack-f3-dup")
                  |> Keyword.put(:metadata, duplicate_canonical_keys)
                )
@@ -1392,7 +1426,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       big = big_nested_map()
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++
                    [
                      capability_id: det_id("f3-combined"),
@@ -1403,33 +1437,33 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # Each alone still admits (proves the per-tree caps are not what rejects).
       assert {:ok, :applied, _} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-conly", principal, "arbor://fs/read/ack-f3-conly")
                  |> Keyword.put(:constraints, big)
                )
 
       assert {:ok, :applied, _} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-monly", principal, "arbor://fs/read/ack-f3-monly")
                  |> Keyword.put(:metadata, big)
                )
 
       # max_uses is signed-64-bit bounded (1 <= value < 2^63).
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-max", principal, "arbor://fs/read/ack-f3-max")
                  |> Keyword.put(:max_uses, Integer.pow(2, 63))
                )
 
       assert {:ok, :applied, _} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3-maxok", principal, "arbor://fs/read/ack-f3-maxok")
                  |> Keyword.put(:max_uses, Integer.pow(2, 63) - 1)
                )
 
       # Nested invalid-UTF-8 binary value and key.
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++
                    [
                      capability_id: det_id("f3-utf8val"),
@@ -1438,7 +1472,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                )
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++
                    [
                      capability_id: det_id("f3-utf8key"),
@@ -1448,7 +1482,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # Nested non-DateTime struct rejected.
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  base ++
                    [
                      capability_id: det_id("f3-nestedstruct"),
@@ -1459,7 +1493,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # Parent: ordinary grant does not bound max_uses to signed-64-bit. The
       # candidate invariant (reject 2^63) fails behaviorally here.
       assert {:error, _} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: principal,
                  resource: resource,
                  max_uses: Integer.pow(2, 63)
@@ -1492,11 +1526,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
           det_grant_opts("f3b-#{suffix}", principal, "arbor://fs/read/ack-f3b-#{suffix}")
           |> Keyword.put(field, value)
 
-        assert {:error, :invalid_request} = Security.acknowledged_grant(bad)
+        assert {:error, :invalid_request} = Security.acknowledged_grant_fixture(bad)
       end
 
       assert {:error, :invalid_request} =
-               Security.acknowledged_grant(
+               Security.acknowledged_grant_fixture(
                  det_grant_opts("f3b-duplicate-key", principal, resource)
                  |> Keyword.put(:metadata, duplicate_canonical_keys)
                )
@@ -1504,14 +1538,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # Parent ordinary admission accepts both persistence-unstable shapes, so
       # these assertions fail behaviorally before the acknowledged boundary.
       assert {:error, _reason} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: principal,
                  resource: resource,
                  expires_at: noncanonical_datetime
                )
 
       assert {:error, _reason} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: principal,
                  resource: resource,
                  metadata: duplicate_canonical_keys
@@ -1528,10 +1562,6 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       ensure_event_log()
       ensure_signals_children()
 
-      prev = Application.get_env(:arbor_security, :distributed_signals)
-      Application.put_env(:arbor_security, :distributed_signals, true)
-      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
-
       principal = "agent_ack_f4g"
       resource = "arbor://fs/read/ack-f4g"
       opts = det_grant_opts("f4g", principal, resource)
@@ -1542,11 +1572,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       audit_before = count_audit(:capability_granted, id)
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
       # Idempotent retries emit NO additional signal or audit row.
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
 
       grants = collect_signals(ref, :store_grant, 200)
       audit_after = count_audit(:capability_granted, id)
@@ -1562,23 +1592,19 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       ensure_event_log()
       ensure_signals_children()
 
-      prev = Application.get_env(:arbor_security, :distributed_signals)
-      Application.put_env(:arbor_security, :distributed_signals, true)
-      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
-
       principal = "agent_ack_f4r"
       resource = "arbor://fs/read/ack-f4r"
       opts = det_grant_opts("f4r", principal, resource)
       id = opts[:capability_id]
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
       {ref, sub} = subscribe_store_revoke_signal(id)
       on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
 
       audit_before = count_audit(:capability_revoked, id)
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       revokes = collect_signals(ref, :store_revoke, 200)
       audit_after_applied = count_audit(:capability_revoked, id)
@@ -1593,7 +1619,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       absent_audit_before = count_audit(:capability_revoked, unknown_id)
 
-      assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke(unknown_id)
+      assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke_fixture(unknown_id)
 
       absent_revokes = collect_signals(uref, :store_revoke, 200)
       absent_audit_after = count_audit(:capability_revoked, unknown_id)
@@ -1616,14 +1642,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       CASSandbox.fail_post_admission(1)
 
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(opts)
 
       # Live unprojected (incoming state retained) but durable admitted.
       assert {:error, :not_found} = CapabilityStore.get(id)
       assert {:ok, %Record{}} = AuthorityStore.authoritative_get(id, name: @capability_store)
 
       # Retry converges idempotently and projects live.
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
 
       assert {:ok, :authorized} =
@@ -1658,7 +1684,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         resource: "arbor://fs/read/ack-f5b"
       ]
 
-      assert {:error, :id_conflict} = Security.acknowledged_grant(opts)
+      assert {:error, :id_conflict} = Security.acknowledged_grant_fixture(opts)
 
       # Our cap was never projected live.
       assert {:error, :not_found} = CapabilityStore.get(id)
@@ -1694,13 +1720,13 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       CASSandbox.fail_post_admission(1)
 
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(first)
       assert {:error, :not_found} = CapabilityStore.get(first[:capability_id])
 
       assert {:ok, %Record{} = first_record} =
                AuthorityStore.authoritative_get(first[:capability_id], name: @capability_store)
 
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(second)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(second)
 
       assert {:error, :not_found} =
                AuthorityStore.authoritative_get(second[:capability_id], name: @capability_store)
@@ -1708,12 +1734,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, ^first_record} =
                AuthorityStore.authoritative_get(first[:capability_id], name: @capability_store)
 
-      assert {:ok, :idempotent, first_id} = Security.acknowledged_grant(first)
+      assert {:ok, :idempotent, first_id} = Security.acknowledged_grant_fixture(first)
       assert first_id == first[:capability_id]
       assert {:ok, %Capability{id: ^first_id}} = CapabilityStore.get(first_id)
     else
-      assert {:ok, original} = Security.grant(principal: principal, resource: resource)
-      assert {:ok, replacement} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, original} = Security.grant_fixture(principal: principal, resource: resource)
+      assert {:ok, replacement} = Security.grant_fixture(principal: principal, resource: resource)
       assert replacement.id == original.id
     end
   end
@@ -1733,7 +1759,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     if acknowledged_available?() do
       seeded = build_signed_cap(opts)
-      assert {:ok, :stored} = CapabilityStore.put(seeded)
+      assert {:ok, :stored} = CapabilityStore.put_fixture(seeded)
       :ok = AuthorityStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
 
       # JSON persistence normalizes object keys to strings. The signature and
@@ -1746,13 +1772,13 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         put_in(state, [:by_id, seeded.id], normalized)
       end)
 
-      assert {:ok, :idempotent, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, id} = Security.acknowledged_grant_fixture(opts)
       assert id == seeded.id
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
       assert {:ok, %Record{}} = AuthorityStore.authoritative_get(id, name: @capability_store)
     else
-      assert {:ok, original} = Security.grant(principal: principal, resource: resource)
-      assert {:ok, replacement} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, original} = Security.grant_fixture(principal: principal, resource: resource)
+      assert {:ok, replacement} = Security.grant_fixture(principal: principal, resource: resource)
       assert replacement.id == original.id
     end
   end
@@ -1766,7 +1792,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     for i <- 1..12 do
       assert {:ok, _} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: "agent_unrelated_c1_#{i}",
                  resource: "arbor://fs/read/unrelated-c1-#{i}"
                )
@@ -1778,14 +1804,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     if acknowledged_available?() do
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, _id} = Security.acknowledged_grant_fixture(opts)
       assert CASSandbox.inventory_scan_count() == 0
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :idempotent, _id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, _id} = Security.acknowledged_grant_fixture(opts)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1803,19 +1829,19 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       a = det_grant_opts("c2-a", principal, resource)
       b = det_grant_opts("c2-b", principal, resource)
 
-      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(a)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(b)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
 
-      assert :ok = Security.revoke(a[:capability_id])
+      assert :ok = Security.revoke_fixture(a[:capability_id])
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1828,14 +1854,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       a = det_grant_opts("c2c-a", principal, resource)
       b = det_grant_opts("c2c-b", principal, resource)
 
-      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
-      assert {:ok, _count} = CapabilityStore.cascade_revoke(a[:capability_id])
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(a)
+      assert {:ok, _count} = CapabilityStore.cascade_revoke_fixture(a[:capability_id])
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1848,14 +1874,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       a = det_grant_opts("c2r-a", principal, resource)
       b = det_grant_opts("c2r-b", principal, resource)
 
-      assert {:ok, :applied, aid} = Security.acknowledged_grant(a)
-      assert {:ok, :applied, ^aid} = Security.acknowledged_revoke(aid)
+      assert {:ok, :applied, aid} = Security.acknowledged_grant_fixture(a)
+      assert {:ok, :applied, ^aid} = Security.acknowledged_revoke_fixture(aid)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1869,15 +1895,15 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       a = det_grant_opts("c2e-a", principal, resource, expires_at: past)
       b = det_grant_opts("c2e-b", principal, resource)
 
-      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(a)
       send(CapabilityStore, :cleanup)
       _ = :sys.get_state(CapabilityStore)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1894,18 +1920,18 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     if acknowledged_available?() do
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(first)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(second)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(second)
       assert CASSandbox.inventory_scan_count() == 0
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :idempotent, fid} = Security.acknowledged_grant(first)
+      assert {:ok, :idempotent, fid} = Security.acknowledged_grant_fixture(first)
       assert CASSandbox.inventory_scan_count() == 0
       assert {:ok, %Capability{id: ^fid}} = CapabilityStore.get(fid)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -1945,7 +1971,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # 1. X/R1 outcome-unknown: durable admission committed, reobserve crashed.
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(first)
 
       # Live unprojected; durable admitted.
       assert {:error, :not_found} = CapabilityStore.get(x_id)
@@ -1964,7 +1990,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # 2. Even when principal/resource are unchanged, a different signed field
       # is a distinct grant and cannot replace or clear the uncertainty lock.
-      assert {:error, :id_conflict} = Security.acknowledged_grant(same_resource_mismatched)
+      assert {:error, :id_conflict} =
+               Security.acknowledged_grant_fixture(same_resource_mismatched)
 
       assert Map.get(:sys.get_state(CapabilityStore).pending_intents, x_id) ==
                intent_after_unknown
@@ -1974,7 +2001,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # A different-resource same-id retry is rejected on the same full-identity
       # rule, also without touching durable state or entering the finalizer.
-      assert {:error, :id_conflict} = Security.acknowledged_grant(mismatched)
+      assert {:error, :id_conflict} = Security.acknowledged_grant_fixture(mismatched)
 
       assert {:error, :not_found} = CapabilityStore.get(x_id)
 
@@ -1987,7 +2014,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # 3. Alternate Y/R1 is still blocked by the surviving X/R1 occupancy and
       # is never admitted.
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(alternate)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(alternate)
 
       assert {:error, :not_found} = CapabilityStore.get(y_id)
 
@@ -1999,11 +2026,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # 4. The original X/R1 still converges on an exact retry, no inventory scan.
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :idempotent, ^x_id} = Security.acknowledged_grant(first)
+      assert {:ok, :idempotent, ^x_id} = Security.acknowledged_grant_fixture(first)
       assert CASSandbox.inventory_scan_count() == 0
       assert {:ok, %Capability{id: ^x_id}} = CapabilityStore.get(x_id)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: r1)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: r1)
     end
   end
 
@@ -2028,16 +2055,17 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       o2 = det_grant_opts("c4-2", principal, "arbor://fs/read/ack-c4-r2")
       o3 = det_grant_opts("c4-3", principal, "arbor://fs/read/ack-c4-r3")
 
-      assert {:ok, :applied, _} = Security.acknowledged_grant(o1)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(o1)
 
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o2)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(o2)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:error, :quota_exceeded} = Security.acknowledged_grant(o3)
+      assert {:error, :quota_exceeded} = Security.acknowledged_grant_fixture(o3)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: "arbor://fs/read/ack-c4")
+      assert {:ok, _} =
+               Security.grant_fixture(principal: principal, resource: "arbor://fs/read/ack-c4")
     end
   end
 
@@ -2067,24 +2095,25 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       o3 = det_grant_opts("c4b-3", principal, "arbor://fs/read/ack-c4b-r3")
 
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(o1)
 
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o2)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(o2)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:error, :quota_exceeded} = Security.acknowledged_grant(o3)
+      assert {:error, :quota_exceeded} = Security.acknowledged_grant_fixture(o3)
       assert CASSandbox.inventory_scan_count() == 0
 
       # Ordinary grant remains open under disabled enforcement (no live quota
       # smuggled into definitive ordinary operation semantics).
       assert {:ok, _} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: "agent_ack_c4b_ordinary",
                  resource: "arbor://fs/read/ack-c4b-ordinary"
                )
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: "arbor://fs/read/ack-c4b")
+      assert {:ok, _} =
+               Security.grant_fixture(principal: principal, resource: "arbor://fs/read/ack-c4b")
     end
   end
 
@@ -2129,10 +2158,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     if acknowledged_available?() do
       CASSandbox.reset_inventory_scan_count()
-      assert {:ok, :applied, _} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, _} = Security.acknowledged_grant_fixture(opts)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -2182,7 +2211,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                _ -> false
              end)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -2197,7 +2226,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("c5", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, %Capability{} = cap1} = CapabilityStore.get(id)
       assert cap1.signed_at == cap1.granted_at
       assert cap1.signed_at == opts[:granted_at]
@@ -2205,12 +2234,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       Process.sleep(10)
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, %Capability{} = cap2} = CapabilityStore.get(id)
       assert cap2.signed_at == cap2.granted_at
       assert Capability.signing_payload(cap2) == payload1
     else
-      assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
       assert cap.signed_at == cap.granted_at
     end
   end
@@ -2224,10 +2253,6 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       fresh_isolated_store_with_failures()
       ensure_signals_children()
 
-      prev = Application.get_env(:arbor_security, :distributed_signals)
-      Application.put_env(:arbor_security, :distributed_signals, true)
-      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
-
       principal = "agent_ack_c6"
       resource = "arbor://fs/read/ack-c6"
       opts = det_grant_opts("c6", principal, resource)
@@ -2237,18 +2262,21 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
 
       CASSandbox.fail_post_admission(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(opts)
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
       assert collect_signals(ref, :store_grant, 200) == 1
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
       assert collect_signals(ref, :store_grant, 200) == 0
     else
       fresh_isolated_store()
 
       assert {:ok, _} =
-               Security.grant(principal: "agent_ack_c6", resource: "arbor://fs/read/ack-c6")
+               Security.grant_fixture(
+                 principal: "agent_ack_c6",
+                 resource: "arbor://fs/read/ack-c6"
+               )
     end
   end
 
@@ -2261,16 +2289,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       fresh_isolated_store_with_failures()
       ensure_signals_children()
 
-      prev = Application.get_env(:arbor_security, :distributed_signals)
-      Application.put_env(:arbor_security, :distributed_signals, true)
-      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
-
       principal = "agent_ack_c7"
       resource = "arbor://fs/read/ack-c7"
       opts = det_grant_opts("c7", principal, resource)
       id = opts[:capability_id]
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
       {ref, sub} = subscribe_store_revoke_signal(id)
       on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
@@ -2278,18 +2302,21 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       CASSandbox.fail_post_delete(1)
       # The ordered authoritative reread proves the committed tombstone even
       # though the backend's delete acknowledgement was lost.
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id)
       assert collect_signals(ref, :store_revoke, 200) == 1
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id)
       assert collect_signals(ref, :store_revoke, 200) == 0
     else
       fresh_isolated_store()
 
       assert {:ok, _} =
-               Security.grant(principal: "agent_ack_c7", resource: "arbor://fs/read/ack-c7")
+               Security.grant_fixture(
+                 principal: "agent_ack_c7",
+                 resource: "arbor://fs/read/ack-c7"
+               )
     end
   end
 
@@ -2308,7 +2335,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     b = det_grant_opts("c8-b", principal, resource)
 
     if acknowledged_available?() do
-      assert {:ok, :applied, aid} = Security.acknowledged_grant(a)
+      assert {:ok, :applied, aid} = Security.acknowledged_grant_fixture(a)
       assert {:ok, %Capability{id: ^aid}} = CapabilityStore.get(aid)
 
       # Restart rebuilds by_id + by_resource from the restored durable set
@@ -2317,10 +2344,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, %Capability{id: ^aid}} = CapabilityStore.get(aid)
 
       CASSandbox.reset_inventory_scan_count()
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(b)
+      assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(b)
       assert CASSandbox.inventory_scan_count() == 0
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -2339,12 +2366,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     resource_b = "arbor://fs/read/upgrade-g1-b"
 
     assert {:ok, %Capability{id: a_id}} =
-             Security.grant(principal: principal, resource: resource_a)
+             Security.grant_fixture(principal: principal, resource: resource_a)
 
     simulate_pre_c3a_state()
 
-    assert {:ok, %Capability{}} = Security.grant(principal: principal, resource: resource_b)
-    assert :ok = Security.revoke(a_id)
+    assert {:ok, %Capability{}} =
+             Security.grant_fixture(principal: principal, resource: resource_b)
+
+    assert :ok = Security.revoke_fixture(a_id)
 
     assert Process.whereis(CapabilityStore) != nil
     assert {:error, :not_found} = CapabilityStore.get(a_id)
@@ -2356,14 +2385,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     principal = "agent_upgrade_g2"
     resource = "arbor://fs/read/upgrade-g2"
 
-    assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, original} = Security.grant_fixture(principal: principal, resource: resource)
     original_id = original.id
 
     simulate_pre_c3a_state()
 
     opts = det_grant_opts("upgrade-g2-other", principal, resource)
 
-    assert {:error, :resource_conflict} = Security.acknowledged_grant(opts)
+    assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(opts)
     assert {:ok, %Capability{id: ^original_id}} = CapabilityStore.get(original_id)
   end
 
@@ -2373,13 +2402,16 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     principal = "agent_upgrade_g3"
 
     assert {:ok, %Capability{id: keep_id}} =
-             Security.grant(principal: principal, resource: "arbor://fs/read/upgrade-g3-keep")
+             Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://fs/read/upgrade-g3-keep"
+             )
 
     unknown_id = det_id("upgrade-g3-unknown")
 
     simulate_pre_c3a_state()
 
-    assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke(unknown_id)
+    assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke_fixture(unknown_id)
 
     assert Process.whereis(CapabilityStore) != nil
     assert {:ok, %Capability{id: ^keep_id}} = CapabilityStore.get(keep_id)
@@ -2393,7 +2425,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     past = DateTime.add(DateTime.utc_now(), -1, :second)
 
     assert {:ok, %Capability{id: keep_id}} =
-             Security.grant(principal: principal, resource: "arbor://fs/read/upgrade-g4-keep")
+             Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://fs/read/upgrade-g4-keep"
+             )
 
     assert {:ok, expiring} =
              Capability.new(
@@ -2404,7 +2439,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     expired = %{expiring | expires_at: past}
     exp_id = expired.id
-    assert {:ok, :stored} = CapabilityStore.put(expired)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(expired)
 
     simulate_pre_c3a_state()
 
@@ -2451,14 +2486,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     send(CapabilityStore, {:signal_received, add_signal})
     _ = :sys.get_state(CapabilityStore)
 
-    assert {:error, :not_found} = CapabilityStore.get(remote_id)
+    assert {:error, :not_found} = Security.get_capability_fixture(remote_id)
+    assert {:ok, capabilities} = Security.list_capabilities(principal)
+    refute Enum.any?(capabilities, &(&1.id == remote_id))
 
-    refute resource_index_holds?(
-             :sys.get_state(CapabilityStore).by_resource,
-             principal,
-             resource,
-             remote_id
-           )
+    assert {:error, :unauthorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
 
     revoke_signal =
       Arbor.Signals.Signal.new(
@@ -2475,14 +2508,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     send(CapabilityStore, {:signal_received, revoke_signal})
     _ = :sys.get_state(CapabilityStore)
 
-    assert {:error, :not_found} = CapabilityStore.get(remote_id)
+    assert {:error, :not_found} = Security.get_capability_fixture(remote_id)
+    assert {:ok, capabilities} = Security.list_capabilities(principal)
+    refute Enum.any?(capabilities, &(&1.id == remote_id))
 
-    refute resource_index_holds?(
-             :sys.get_state(CapabilityStore).by_resource,
-             principal,
-             resource,
-             remote_id
-           )
+    assert {:error, :unauthorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
   end
 
   test "security regression: code_change normalizes pre-C3A state to the lazy shape and is idempotent" do
@@ -2492,7 +2523,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     resource = "arbor://fs/read/upgrade-cc"
 
     assert {:ok, %Capability{id: cap_id}} =
-             Security.grant(principal: principal, resource: resource)
+             Security.grant_fixture(principal: principal, resource: resource)
 
     simulate_pre_c3a_state()
 
@@ -2504,7 +2535,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert state.pending_intents == %{}
 
     assert {:error, :resource_conflict} =
-             Security.acknowledged_grant(det_grant_opts("upgrade-cc-other", principal, resource))
+             Security.acknowledged_grant_fixture(
+               det_grant_opts("upgrade-cc-other", principal, resource)
+             )
 
     snapshot = :sys.get_state(CapabilityStore)
     change_capability_store_code()
@@ -2530,10 +2563,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     end)
 
     CASSandbox.reset_inventory_scan_count()
-    assert {:error, :resource_conflict} = Security.acknowledged_grant(y_opts)
+    assert {:error, :resource_conflict} = Security.acknowledged_grant_fixture(y_opts)
     assert CASSandbox.inventory_scan_count() == 0
 
-    assert {:error, :id_conflict} = Security.acknowledged_grant(x_opts)
+    assert {:error, :id_conflict} = Security.acknowledged_grant_fixture(x_opts)
 
     intent = Map.get(:sys.get_state(CapabilityStore).pending_intents, x_id)
     assert intent == {principal, canon, :legacy_uncertain_identity}
@@ -2553,7 +2586,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     cap_id = opts[:capability_id]
 
     seeded = build_signed_cap(opts)
-    assert {:ok, :stored} = CapabilityStore.put(seeded)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(seeded)
 
     :sys.replace_state(CapabilityStore, fn state ->
       state
@@ -2561,7 +2594,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert {:ok, :idempotent, ^cap_id} = Security.acknowledged_grant(opts)
+    assert {:ok, :idempotent, ^cap_id} = Security.acknowledged_grant_fixture(opts)
 
     refute Map.has_key?(:sys.get_state(CapabilityStore).pending_intents, cap_id)
     assert {:ok, %Capability{id: ^cap_id}} = CapabilityStore.get(cap_id)
@@ -2579,7 +2612,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
   end
 
   test "security regression: malformed pending_intent entry shape fails closed" do
@@ -2595,7 +2628,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
   end
 
   test "security regression: malformed by_id value fails closed" do
@@ -2610,7 +2643,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
   end
 
   test "security regression: unsupported future state version fails closed" do
@@ -2621,7 +2654,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     :sys.replace_state(CapabilityStore, fn state -> %{state | state_version: 2} end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
   end
 
   test "security regression: present :missing pending_intents value fails closed" do
@@ -2642,7 +2675,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
   end
 
   # ==========================================================================
@@ -2657,7 +2690,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     fresh_isolated_store()
 
     assert {:ok, %Capability{}} =
-             Security.grant(
+             Security.grant_fixture(
                principal: "agent_ack_dv_byres_seed",
                resource: "arbor://fs/read/ack-dv-byres-seed"
              )
@@ -2680,7 +2713,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         "arbor://fs/read/ack-dv-byres-other"
       )
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(unrelated) end)
   end
 
   test "security regression: deep validation rejects a malformed current pending intent" do
@@ -2708,7 +2741,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         "arbor://fs/read/ack-dv-curpi-other"
       )
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(unrelated) end)
   end
 
   test "security regression: legacy migration rejects a malformed three-field intent" do
@@ -2734,7 +2767,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         "arbor://fs/read/ack-dv-legacy3-other"
       )
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(unrelated) end)
   end
 
   test "security regression: explicit nil state_version denies before mutation" do
@@ -2744,7 +2777,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     :sys.replace_state(CapabilityStore, fn state -> %{state | state_version: nil} end)
 
-    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant_fixture(opts) end)
 
     # No mutation occurred: the grant id was never durably admitted.
     assert {:error, :not_found} =
@@ -2946,45 +2979,66 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   defp restore_application_env(key, value),
     do: Application.put_env(:arbor_security, key, value)
 
+  defp restore_application_env(app, key, :error), do: Application.delete_env(app, key)
+
+  defp restore_application_env(app, key, {:ok, value}),
+    do: Application.put_env(app, key, value)
+
   # The arbor_kernel_runtime supervision tree is not started by default in the
   # arbor_security test profile; start it so the store's direct cluster
   # signal is observable on the bus.
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
+    previous_signals = Application.fetch_env(:arbor_kernel, :signals)
+    previous_distributed = Application.fetch_env(:arbor_security, :distributed_signals)
 
-    started =
-      Enum.reduce(
-        [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ],
-        [],
-        fn {module, _opts} = child, started ->
-          case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-            {:ok, _pid} ->
-              [module | started]
+    signals =
+      Application.get_env(:arbor_kernel, :signals, [])
+      |> Keyword.put(:security_sync_subscribers, %{
+        capability_store: %{
+          owner: CapabilityStore,
+          supervisor: {:application, :arbor_security},
+          child_id: CapabilityStore,
+          events: @capability_sync_events
+        }
+      })
 
-            {:error, {:already_started, _pid}} ->
-              started
-
-            {:error, :already_present} ->
-              :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-              {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-              [module | started]
-          end
-        end
-      )
+    Application.put_env(:arbor_kernel, :signals, signals)
+    Application.put_env(:arbor_security, :distributed_signals, true)
 
     on_exit(fn ->
-      Enum.each(started, fn module ->
-        :ok = Supervisor.terminate_child(Arbor.Signals.Supervisor, module)
-        :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-      end)
+      restore_application_env(:arbor_security, :distributed_signals, previous_distributed)
+      restore_application_env(:arbor_kernel, :signals, previous_signals)
+      :ok = Signals.restore_runtime_fixture()
     end)
 
+    :ok = Signals.restore_runtime_fixture()
+
+    # The ordinary isolated-store fixture starts CapabilityStore outside its
+    # supervisor so corruption tests can observe a terminal process. Portable
+    # security-signal publication has a stronger provenance gate: the publisher
+    # must be the exact registered Security-supervisor child. Re-home only these
+    # signal-observation cases after the isolated authority backend is ready.
+    stop_named_process(CapabilityStore)
+    assert {:ok, store_pid} = Supervisor.restart_child(@security_supervisor, CapabilityStore)
+    assert_capability_store_ready!()
+
+    assert Process.whereis(CapabilityStore) == store_pid
+
+    assert Enum.any?(Supervisor.which_children(@security_supervisor), fn
+             {CapabilityStore, ^store_pid, :worker, _modules} -> true
+             _other -> false
+           end)
+
+    assert Signals.security_sync_role_configured?(:capability_store)
+
+    pinned =
+      Signals.list_subscriptions_fixture()
+      |> Enum.filter(fn subscription ->
+        subscription[:principal_id] == {:internal_security_sync, :capability_store}
+      end)
+
+    assert length(pinned) == length(@capability_sync_events)
+    assert Enum.all?(pinned, &(&1[:security_sync_owner] == store_pid))
     :ok
   end
 
@@ -3094,7 +3148,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("fence-apply", principal, resource)
 
     if fenced_revoke_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       revoked_before = CapabilityStore.stats().total_revoked
 
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
@@ -3132,7 +3186,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert byte_size(fence["capability_digest"]) == 64
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, fence["capability_digest"])
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id, fence)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id, fence)
       assert CapabilityStore.stats().total_revoked == revoked_before + 1
       assert {:error, :not_found} = CapabilityStore.get(id)
 
@@ -3142,10 +3196,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :unauthorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
 
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id, fence)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id, fence)
       assert CapabilityStore.stats().total_revoked == revoked_before + 1
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -3158,22 +3212,22 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     resource = "arbor://fs/read/fence-aba"
     opts = det_grant_opts("fence-aba", principal, resource)
 
-    assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+    assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
 
     assert {:ok, %Record{generation: g1}} =
              AuthorityStore.authoritative_get(id, name: @capability_store)
 
     if fenced_revoke_available?() do
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
       assert {:ok, %Record{generation: g2}} =
                AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert g2 > g1
 
-      assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+      assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -3183,9 +3237,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     else
       # Parent: simulate stale occupancy revoke after same-id re-grant via the
       # real legacy public acknowledged_revoke/1 (never UndefinedFunctionError).
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       # Decisive assertion — fails on parent because /1 deleted the replacement.
       assert {:ok, :authorized} =
@@ -3200,15 +3254,15 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("fence-diff", principal, resource)
 
     if fenced_revoke_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       alt =
         det_grant_opts("fence-diff", principal, resource, metadata: %{"variant" => "replacement"})
 
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
-      assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(alt)
+      assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -3216,7 +3270,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, %Capability{metadata: %{"variant" => "replacement"}}} =
                CapabilityStore.get(id)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -3229,7 +3283,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts_old = det_grant_opts("fence-race", principal_old, resource_old)
 
     if fenced_revoke_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts_old)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts_old)
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
       stale_rev = fence["revision"]
 
@@ -3239,7 +3293,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       seed = Record.new(id, Serializer.serialize(replacement_cap))
       CASSandbox.seed_compare_delete_replacement(seed)
 
-      assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+      assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence)
 
       assert {:ok, %Record{} = durable} =
                AuthorityStore.authoritative_get(id, name: @capability_store)
@@ -3257,7 +3311,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :unauthorized} =
                Security.authorize(principal_old, resource_old, nil, verify_identity: false)
     else
-      assert {:ok, _} = Security.grant(principal: principal_old, resource: resource_old)
+      assert {:ok, _} = Security.grant_fixture(principal: principal_old, resource: resource_old)
     end
   end
 
@@ -3271,18 +3325,18 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if fenced_revoke_available?() do
       assert {:error, :not_found} = Security.prepare_acknowledged_revoke(unknown)
 
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
       revoked_before = CapabilityStore.stats().total_revoked
-      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id, fence)
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id, fence)
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       assert {:error, :not_found} =
                AuthorityStore.authoritative_get(id, name: @capability_store)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -3293,7 +3347,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("fence-bad", principal, resource)
 
     if fenced_revoke_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, good} = Security.prepare_acknowledged_revoke(id)
       revoked_before = CapabilityStore.stats().total_revoked
 
@@ -3335,7 +3389,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       ]
 
       for bad <- bad_cases do
-        result = Security.acknowledged_revoke(id, bad)
+        result = Security.acknowledged_revoke_fixture(id, bad)
 
         assert result in [
                  {:error, :invalid_request},
@@ -3355,7 +3409,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # Forged digest against a present matching row is identity_conflict
       # (shape-valid, body mismatch), not applied.
       forged = %{good | "capability_digest" => String.duplicate("b", 64)}
-      assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, forged)
+      assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, forged)
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
 
       # Prepared fence is JSON-encodable (closed v1 JSON-clean contract).
@@ -3368,7 +3422,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       for field <- ["principal_id", "resource_uri", "record_id"] do
         bad_utf8 = %{good | field => invalid_utf8}
-        assert {:error, :invalid_request} = Security.acknowledged_revoke(id, bad_utf8)
+        assert {:error, :invalid_request} = Security.acknowledged_revoke_fixture(id, bad_utf8)
         assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
 
         assert {:ok, %Record{}} =
@@ -3377,7 +3431,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         assert CapabilityStore.stats().total_revoked == revoked_before
       end
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -3388,7 +3442,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     opts = det_grant_opts("fence-wrongkey", principal, resource)
 
     if fenced_revoke_available?() do
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
 
       stats_before = CapabilityStore.stats()
@@ -3399,7 +3453,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       CASSandbox.rewrite_next_get_wrong_key()
-      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(id, fence)
+      assert {:error, :outcome_unknown} = Security.acknowledged_revoke_fixture(id, fence)
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       assert {:ok, %Record{key: ^id} = durable} =
@@ -3411,7 +3465,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
     else
-      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _} = Security.grant_fixture(principal: principal, resource: resource)
     end
   end
 
@@ -3429,14 +3483,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       configure_isolated_json_store(backend_dir)
 
-      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
 
       assert {:ok, %Record{generation: g1}} =
                AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
       assert {:ok, %Record{generation: g2}} =
                AuthorityStore.authoritative_get(id, name: @capability_store)
@@ -3445,7 +3499,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       full_restart_capability_stack!(backend_dir)
 
-      assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+      assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -3456,7 +3510,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       fresh_isolated_store()
 
       assert {:ok, _} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: "agent_fence_json_restart",
                  resource: "arbor://fs/read/fence-json-restart"
                )
@@ -3479,7 +3533,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     resource = "arbor://fs/read/fence-bound"
     opts = det_grant_opts("fence-bound", principal, resource)
 
-    assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+    assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
     assert {:ok, caps} = Security.list_capabilities(principal)
     assert %Capability{} = cap = Enum.find(caps, &(&1.id == id))
 
@@ -3517,8 +3571,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
              AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Same-payload re-grant: bound prepare returns a fresh fence on advanced tokens.
-    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-    assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
     assert {:ok, %Record{generation: g1}} =
              AuthorityStore.authoritative_get(id, name: @capability_store)
@@ -3532,20 +3586,20 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert fence_re["capability_digest"] == fence["capability_digest"]
 
     # Stale earlier fence cannot delete the replacement.
-    assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+    assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence)
 
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
 
     # Different-payload replacement: bound prepare of the old observation conflicts.
-    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
 
     alt =
       det_grant_opts("fence-bound", principal, resource,
         metadata: %{"variant" => "bound-replacement"}
       )
 
-    assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(alt)
 
     assert {:ok, %Capability{} = live_before_conflict} = CapabilityStore.get(id)
 
@@ -3721,15 +3775,15 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     # Stale-fence preservation after fresh bound preparation on the live occupant.
     assert {:ok, fence_a} = Security.prepare_acknowledged_revoke(live)
-    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-    assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(alt)
 
     assert {:ok, caps_b} = Security.list_capabilities(principal)
     assert %Capability{} = live_b = Enum.find(caps_b, &(&1.id == id))
     assert {:ok, fence_b} = Security.prepare_acknowledged_revoke(live_b)
     assert fence_b["generation"] > fence_a["generation"]
 
-    assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence_a)
+    assert {:error, :identity_conflict} = Security.acknowledged_revoke_fixture(id, fence_a)
 
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
@@ -3738,7 +3792,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
              AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Fresh bound fence still applies.
-    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id, fence_b)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id, fence_b)
     assert {:error, :not_found} = CapabilityStore.get(id)
   end
 

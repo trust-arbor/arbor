@@ -49,13 +49,35 @@ defmodule Arbor.Security.OIDC.IdentityStore do
   - `{:ok, identity, :created}` — generated new keypair
   - `{:error, reason}` — failure
   """
-  @spec load_or_create(map()) :: {:ok, Identity.t(), :existing | :created} | {:error, term()}
-  def load_or_create(claims) do
+  @spec load_or_create(String.t(), map()) ::
+          {:ok, Identity.t(), :existing | :created} | {:error, term()}
+  def load_or_create(id_token, provider_config)
+      when is_binary(id_token) and is_map(provider_config) do
+    Arbor.Security.SigningKeyStore.Owner.load_or_create_oidc(id_token, provider_config)
+  end
+
+  def load_or_create(_id_token, _provider_config),
+    do: {:error, :invalid_oidc_identity_request}
+
+  @doc false
+  @spec load_or_create_local(map()) ::
+          {:ok, Identity.t(), :existing | :created} | {:error, term()}
+  def load_or_create_local(claims) when is_map(claims) do
+    Arbor.Security.SigningKeyStore.Owner.load_or_create_local(claims)
+  end
+
+  def load_or_create_local(_claims), do: {:error, :invalid_local_human_claims}
+
+  @doc false
+  def load_or_create_verified(claims) when is_map(claims) do
     agent_id = derive_agent_id(claims)
 
-    case SigningKeyStore.get_keypair(agent_id) do
-      {:ok, keypair} ->
-        load_existing(agent_id, keypair, claims)
+    case SigningKeyStore.load_public_identity_from_owner(agent_id,
+           name: extract_name(claims),
+           metadata: build_metadata(claims)
+         ) do
+      {:ok, identity} ->
+        {:ok, identity, :existing}
 
       {:error, :no_signing_key} ->
         create_new(agent_id, claims)
@@ -68,51 +90,22 @@ defmodule Arbor.Security.OIDC.IdentityStore do
     end
   end
 
-  # --- Private ---
+  def load_or_create_verified(_claims), do: {:error, :invalid_oidc_identity_request}
 
-  defp load_existing(agent_id, keypair, claims) do
-    # Derive public key from the private signing key
-    {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, keypair.signing)
-
-    identity_opts = [
-      public_key: public_key,
-      private_key: keypair.signing,
-      name: extract_name(claims),
-      metadata: build_metadata(claims)
-    ]
-
-    identity_opts =
-      case Map.get(keypair, :encryption) do
-        nil ->
-          identity_opts
-
-        enc_private ->
-          {enc_public, _} = :crypto.generate_key(:ecdh, :x25519, enc_private)
-
-          Keyword.merge(identity_opts,
-            encryption_public_key: enc_public,
-            encryption_private_key: enc_private
-          )
-      end
-
-    # The Identity struct derives agent_id from public_key as "agent_<hash>",
-    # but we need "human_<hash>". Build the struct manually.
-    case Identity.new(identity_opts) do
-      {:ok, identity} ->
-        # Override the auto-derived agent_id with our human_ prefixed one
-        {:ok, %{identity | agent_id: agent_id}, :existing}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+  if Mix.env() == :test do
+    @doc false
+    def load_or_create_fixture(claims) when is_map(claims),
+      do: Arbor.Security.SigningKeyStore.Owner.load_or_create_oidc_fixture(claims)
   end
+
+  # --- Private ---
 
   defp create_new(agent_id, claims) do
     {pub, priv} = Crypto.generate_keypair()
     {enc_pub, enc_priv} = Crypto.generate_encryption_keypair()
 
     # Store encrypted keypair
-    case SigningKeyStore.put_keypair(agent_id, priv, enc_priv) do
+    case SigningKeyStore.put_keypair_from_owner(agent_id, priv, enc_priv) do
       :ok ->
         case Identity.new(
                public_key: pub,
@@ -123,7 +116,7 @@ defmodule Arbor.Security.OIDC.IdentityStore do
                metadata: build_metadata(claims)
              ) do
           {:ok, identity} ->
-            {:ok, %{identity | agent_id: agent_id}, :created}
+            {:ok, identity |> Map.put(:agent_id, agent_id) |> Identity.public_only(), :created}
 
           {:error, reason} ->
             {:error, reason}

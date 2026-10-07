@@ -5,6 +5,7 @@ defmodule Arbor.SecurityTest do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security
+  alias Arbor.Security.ApprovalReceiptBroker
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.SystemAuthority
 
@@ -22,7 +23,7 @@ defmodule Arbor.SecurityTest do
 
     test "returns authorized with valid capability", %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/docs"
         )
@@ -64,7 +65,7 @@ defmodule Arbor.SecurityTest do
       cap_uri = "arbor://fs/read#{tmp_dir}/**"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: cap_uri
         )
@@ -97,7 +98,7 @@ defmodule Arbor.SecurityTest do
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read#{tmp_dir}/**"
         )
@@ -114,7 +115,7 @@ defmodule Arbor.SecurityTest do
     test "regression: bare fs URI normalizes relative file_path aliases before cap lookup",
          %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/secret/**"
         )
@@ -148,7 +149,7 @@ defmodule Arbor.SecurityTest do
       on_exit(fn -> File.rm_rf!(workspace) end)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/secret/**"
         )
@@ -170,7 +171,7 @@ defmodule Arbor.SecurityTest do
     test "security regression: relative file_path cannot escape above its canonical root",
          %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/**"
         )
@@ -190,7 +191,7 @@ defmodule Arbor.SecurityTest do
 
     test "returns ok with valid capability", %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/docs"
         )
@@ -202,7 +203,7 @@ defmodule Arbor.SecurityTest do
   describe "grant/1 and revoke/2" do
     test "grants capability", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/project"
         )
@@ -213,14 +214,14 @@ defmodule Arbor.SecurityTest do
 
     test "revokes capability", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/write/temp"
         )
 
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/write/temp")
 
-      :ok = Security.revoke(cap.id)
+      :ok = Security.revoke_fixture(cap.id)
 
       assert {:error, _} = Security.authorize(agent_id, "arbor://fs/write/temp")
     end
@@ -238,7 +239,7 @@ defmodule Arbor.SecurityTest do
       cap2 = issue_disclosure!(agent_id, session_id, "task_two_#{unique}")
       survivor = issue_disclosure!(agent_id, other_session_id, "task_three_#{unique}")
 
-      assert {:ok, 2} = Security.revoke_by_session(session_id)
+      assert {:ok, 2} = Security.revoke_by_session_fixture(session_id)
       assert {:error, :not_found} = CapabilityStore.get(cap1.id)
       assert {:error, :not_found} = CapabilityStore.get(cap2.id)
       assert {:ok, _cap} = CapabilityStore.get(survivor.id)
@@ -255,7 +256,7 @@ defmodule Arbor.SecurityTest do
       cap2 = issue_disclosure!(agent_id, "session_two_#{unique}", task_id)
       survivor = issue_disclosure!(agent_id, "session_three_#{unique}", other_task_id)
 
-      assert {:ok, 2} = Security.revoke_by_task(task_id)
+      assert {:ok, 2} = Security.revoke_by_task_fixture(task_id)
       assert {:error, :not_found} = CapabilityStore.get(cap1.id)
       assert {:error, :not_found} = CapabilityStore.get(cap2.id)
       assert {:ok, _cap} = CapabilityStore.get(survivor.id)
@@ -265,10 +266,10 @@ defmodule Arbor.SecurityTest do
   describe "list_capabilities/2" do
     test "lists capabilities for agent", %{agent_id: agent_id} do
       {:ok, _} =
-        Security.grant(principal: agent_id, resource: "arbor://fs/read/a")
+        Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read/a")
 
       {:ok, _} =
-        Security.grant(principal: agent_id, resource: "arbor://fs/read/b")
+        Security.grant_fixture(principal: agent_id, resource: "arbor://fs/read/b")
 
       {:ok, caps} = Security.list_capabilities(agent_id)
 
@@ -279,7 +280,7 @@ defmodule Arbor.SecurityTest do
   describe "capability_authorizes?/3" do
     test "checks resource matching and scope without mutating state", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/project/**",
           session_id: "session_1"
@@ -334,7 +335,7 @@ defmodule Arbor.SecurityTest do
   describe "register_identity/1 and lookup_public_key/1" do
     test "round-trip works" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
       assert {:ok, pk} = Security.lookup_public_key(identity.agent_id)
       assert pk == identity.public_key
@@ -345,10 +346,12 @@ defmodule Arbor.SecurityTest do
 
       on_exit(fn ->
         oidc.cleanup.()
-        _ = Security.deregister_identity(oidc.identity.agent_id)
+        _ = Security.deregister_identity_fixture(oidc.identity.agent_id)
       end)
 
-      assert {:error, :oidc_proof_required} = Security.register_identity(oidc.identity)
+      assert {:error, :oidc_proof_required} =
+               Security.register_identity(oidc.identity, :untrusted_actor)
+
       assert {:error, :not_found} = Security.lookup_public_key(oidc.identity.agent_id)
 
       forged_token = Arbor.Security.OIDCTestHelper.tamper_token(oidc.id_token)
@@ -364,9 +367,9 @@ defmodule Arbor.SecurityTest do
     test "returns non-authoritative principal IDs through the public facade" do
       display_name = "scheduler-discovery-#{System.unique_integer([:positive])}"
       {:ok, identity} = Security.generate_identity(name: display_name)
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
-      on_exit(fn -> _ = Security.deregister_identity(identity.agent_id) end)
+      on_exit(fn -> _ = Security.deregister_identity_fixture(identity.agent_id) end)
 
       assert {:ok, ids} = Security.lookup_identity_ids_by_display_name(display_name)
       assert identity.agent_id in ids
@@ -377,7 +380,7 @@ defmodule Arbor.SecurityTest do
   describe "verify_request/1" do
     test "valid request verifies successfully" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
       {:ok, signed} =
         SignedRequest.sign(
@@ -392,10 +395,10 @@ defmodule Arbor.SecurityTest do
 
     test "security regression: hostile request shapes fail closed without raising" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
       {:ok, signed} = SignedRequest.sign("payload", identity.agent_id, identity.private_key)
 
-      on_exit(fn -> _ = Security.deregister_identity(identity.agent_id) end)
+      on_exit(fn -> _ = Security.deregister_identity_fixture(identity.agent_id) end)
 
       hostile_requests = [
         %{},
@@ -412,7 +415,7 @@ defmodule Arbor.SecurityTest do
 
     test "security regression: malformed registered public key returns a typed error" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
       {:ok, signed} = SignedRequest.sign("payload", identity.agent_id, identity.private_key)
 
       registry = Arbor.Security.Identity.Registry
@@ -434,10 +437,10 @@ defmodule Arbor.SecurityTest do
   describe "authorize/4 with identity verification" do
     test "succeeds with valid signed_request for registered agent with capability" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: identity.agent_id,
           resource: "arbor://fs/read/docs"
         )
@@ -458,10 +461,10 @@ defmodule Arbor.SecurityTest do
 
     test "fails with invalid signed_request" do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: identity.agent_id,
           resource: "arbor://fs/read/docs"
         )
@@ -485,7 +488,7 @@ defmodule Arbor.SecurityTest do
 
     test "works without signed_request (backward compatible)", %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/legacy"
         )
@@ -503,7 +506,7 @@ defmodule Arbor.SecurityTest do
   describe "grant/1 signs capabilities" do
     test "granted capabilities have issuer_id and issuer_signature", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/signed"
         )
@@ -516,7 +519,7 @@ defmodule Arbor.SecurityTest do
 
     test "granted capability signature is valid", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/verified"
         )
@@ -529,7 +532,7 @@ defmodule Arbor.SecurityTest do
   describe "find_authorizing returns signed capabilities" do
     test "authorized capability is signed", %{agent_id: agent_id} do
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/found"
         )
@@ -542,16 +545,16 @@ defmodule Arbor.SecurityTest do
   describe "tampered capability signature" do
     test "authorization fails for tampered capability", %{agent_id: agent_id} do
       {:ok, cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: "arbor://fs/read/tamper"
         )
 
       # Tamper with the stored capability by revoking and putting a modified version
-      :ok = Security.revoke(cap.id)
+      :ok = Security.revoke_fixture(cap.id)
 
       tampered = %{cap | resource_uri: "arbor://fs/write/evil"}
-      {:ok, :stored} = CapabilityStore.put(tampered)
+      {:ok, :stored} = CapabilityStore.put_fixture(tampered)
 
       # The tampered capability should fail signature verification
       assert {:error, :unauthorized} =
@@ -562,16 +565,42 @@ defmodule Arbor.SecurityTest do
   describe "delegation through facade" do
     test "produces signed delegation chain", %{agent_id: agent_id} do
       {:ok, identity} = Security.generate_identity()
-      :ok = Security.register_identity(identity)
+      :ok = Security.register_identity_fixture(identity)
+
+      :ok =
+        Security.store_signing_keypair_fixture(
+          identity.agent_id,
+          identity.private_key,
+          identity.encryption_private_key
+        )
+
+      on_exit(fn ->
+        CapabilityStore.revoke_all_fixture(identity.agent_id)
+        Security.delete_signing_key_fixture(identity.agent_id)
+        Security.deregister_identity_fixture(identity.agent_id)
+      end)
 
       {:ok, parent_cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: identity.agent_id,
           resource: "arbor://fs/read/delegated"
         )
 
+      {:ok, authority_proof} =
+        Security.build_signing_authority_acquisition_proof(
+          identity.agent_id,
+          identity.private_key,
+          purpose: :delegation_test,
+          owner: self()
+        )
+
+      {:ok, actor_authority} = Security.open_signing_authority(authority_proof)
+
       {:ok, delegated} =
-        Security.delegate(parent_cap.id, agent_id, delegator_private_key: identity.private_key)
+        Security.delegate(parent_cap.id, agent_id, actor_authority: actor_authority)
+
+      on_exit(fn -> Security.revoke_fixture(delegated.id) end)
+      assert :ok = Security.close_signing_authority(actor_authority)
 
       assert delegated.principal_id == agent_id
       assert delegated.parent_capability_id == parent_cap.id
@@ -591,7 +620,7 @@ defmodule Arbor.SecurityTest do
           principal_id: agent_id
         )
 
-      {:ok, :stored} = CapabilityStore.put(unsigned_cap)
+      {:ok, :stored} = CapabilityStore.put_fixture(unsigned_cap)
 
       # Default config has capability_signing_required: false
       assert {:ok, :authorized} =
@@ -608,7 +637,7 @@ defmodule Arbor.SecurityTest do
       resource = "arbor://fs/read/rate_limited_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{rate_limit: 3}
@@ -628,7 +657,7 @@ defmodule Arbor.SecurityTest do
       resource = "arbor://fs/read/tw_open_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{time_window: %{start_hour: 0, end_hour: 24}}
@@ -644,7 +673,7 @@ defmodule Arbor.SecurityTest do
       bad_end = rem(bad_start + 1, 24)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{time_window: %{start_hour: bad_start, end_hour: bad_end}}
@@ -660,7 +689,7 @@ defmodule Arbor.SecurityTest do
       resource = "arbor://fs/read/no_constraints_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{}
@@ -675,7 +704,7 @@ defmodule Arbor.SecurityTest do
       resource = "arbor://fs/read/can_no_consume_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{rate_limit: 1}
@@ -694,7 +723,7 @@ defmodule Arbor.SecurityTest do
       resource = "arbor://fs/read/toggle_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{rate_limit: 1}
@@ -749,14 +778,20 @@ defmodule Arbor.SecurityTest do
       base = :erlang.unique_integer([:positive])
 
       {:ok, _} =
-        Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/1")
+        Security.grant_fixture(
+          principal: agent_id,
+          resource: "arbor://fs/read/quota_test/#{base}/1"
+        )
 
       {:ok, _} =
-        Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/2")
+        Security.grant_fixture(
+          principal: agent_id,
+          resource: "arbor://fs/read/quota_test/#{base}/2"
+        )
 
       # 3rd should fail
       assert {:error, {:quota_exceeded, :per_agent_capability_limit, context}} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: agent_id,
                  resource: "arbor://fs/read/quota_test/#{base}/3"
                )
@@ -777,7 +812,7 @@ defmodule Arbor.SecurityTest do
       base = :erlang.unique_integer([:positive])
 
       assert {:error, {:quota_exceeded, :delegation_depth_limit, context}} =
-               Security.grant(
+               Security.grant_fixture(
                  principal: agent_id,
                  resource: "arbor://fs/read/quota_depth/#{base}",
                  delegation_depth: 5
@@ -834,7 +869,7 @@ defmodule Arbor.SecurityTest do
       Application.put_env(:arbor_security, :consensus_module, MockConsensus)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{requires_approval: true}
@@ -851,7 +886,7 @@ defmodule Arbor.SecurityTest do
       Application.put_env(:arbor_security, :consensus_module, MockConsensus)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{requires_approval: false}
@@ -866,7 +901,7 @@ defmodule Arbor.SecurityTest do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{requires_approval: true}
@@ -875,7 +910,7 @@ defmodule Arbor.SecurityTest do
       assert {:error, :escalation_disabled} = Security.authorize(agent_id, resource)
     end
 
-    test "security regression: exact approved invocation is one-shot authority", %{
+    test "security regression: unsigned approval maps cannot bypass the gate", %{
       agent_id: agent_id
     } do
       resource = "arbor://code/read/approved_once_#{:erlang.unique_integer([:positive])}"
@@ -883,37 +918,175 @@ defmodule Arbor.SecurityTest do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource,
           constraints: %{requires_approval: true}
         )
 
-      approval = %{
+      forged = %{
         request_id: "irq_approved_once",
         principal_id: agent_id,
         resource_uri: resource,
         decision: :approved
       }
 
-      assert {:ok, :authorized} =
-               Security.authorize(agent_id, resource, :execute, approved_invocation: approval)
-
-      wrong_resource = %{approval | resource_uri: resource <> "/other"}
-
-      assert {:error, :escalation_disabled} =
+      assert {:error, :invalid_approval_receipt} =
                Security.authorize(agent_id, resource, :execute,
-                 approved_invocation: wrong_resource
+                 approved_invocation: forged,
+                 argument_digest: String.duplicate("0", 64)
+               )
+
+      arguments = %{"path" => "/approved/exact"}
+      assert {:ok, digest} = Security.approval_argument_digest(arguments)
+
+      assert {:error, :unauthorized_approval_issuer} =
+               Security.issue_approval_receipt(
+                 agent_id,
+                 resource,
+                 :execute,
+                 "irq_untrusted_issuer",
+                 arguments
+               )
+
+      tracker = Module.concat(["Arbor", "Trust", "ConfirmationTracker"])
+      real_tracker = Process.whereis(tracker)
+      if real_tracker, do: Process.unregister(tracker)
+      assert Process.register(self(), tracker)
+
+      try do
+        assert {:error, :unauthorized_approval_issuer} =
+                 Security.issue_approval_receipt(
+                   agent_id,
+                   resource,
+                   :execute,
+                   "irq_name_takeover",
+                   arguments
+                 )
+      after
+        Process.unregister(tracker)
+
+        if is_pid(real_tracker) and Process.alive?(real_tracker),
+          do: Process.register(real_tracker, tracker)
+      end
+
+      assert {:ok, receipt} =
+               ApprovalReceiptBroker.issue_for_test(
+                 agent_id,
+                 resource,
+                 :execute,
+                 digest,
+                 "irq_approved_once"
+               )
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, resource, :execute,
+                 approved_invocation: receipt,
+                 argument_digest: digest
+               )
+
+      # The signed receipt is exact-argument and one-use.
+      assert {:error, :invalid_approval_receipt} =
+               Security.authorize(agent_id, resource, :execute,
+                 approved_invocation: receipt,
+                 argument_digest: digest
+               )
+
+      assert {:ok, changed_digest} =
+               Security.approval_argument_digest(%{"path" => "/different"})
+
+      assert {:ok, changed_receipt} =
+               ApprovalReceiptBroker.issue_for_test(
+                 agent_id,
+                 resource,
+                 :execute,
+                 digest,
+                 "irq_changed_args"
+               )
+
+      assert {:error, :invalid_approval_receipt} =
+               Security.authorize(agent_id, resource, :execute,
+                 approved_invocation: changed_receipt,
+                 argument_digest: changed_digest
                )
 
       assert {:error, :escalation_disabled} = Security.authorize(agent_id, resource)
+    end
+
+    test "security regression: approval broker name takeover cannot validate a forged receipt", %{
+      agent_id: agent_id
+    } do
+      resource = "arbor://code/read/approval_owner_#{System.unique_integer([:positive])}"
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+
+      {:ok, _cap} =
+        Security.grant_fixture(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{requires_approval: true}
+        )
+
+      {:ok, digest} = Security.approval_argument_digest(%{"path" => "/owner-bound"})
+
+      {:ok, receipt} =
+        ApprovalReceiptBroker.issue_for_test(
+          agent_id,
+          resource,
+          :execute,
+          digest,
+          "irq_owner_bound"
+        )
+
+      real_broker = Process.whereis(ApprovalReceiptBroker)
+      assert is_pid(real_broker)
+      assert Process.unregister(ApprovalReceiptBroker)
+
+      test_pid = self()
+
+      squatter =
+        spawn(fn ->
+          true = Process.register(self(), ApprovalReceiptBroker)
+          send(test_pid, :approval_broker_squatter_ready)
+          fake_approval_broker_loop()
+        end)
+
+      assert_receive :approval_broker_squatter_ready
+
+      try do
+        forged = %{
+          request_id: "irq_forged_owner",
+          principal_id: agent_id,
+          resource_uri: resource,
+          decision: :approved
+        }
+
+        assert {:error, :invalid_approval_receipt} =
+                 Security.authorize(agent_id, resource, :execute,
+                   approved_invocation: forged,
+                   argument_digest: digest
+                 )
+
+        assert {:ok, :authorized} =
+                 Security.authorize(agent_id, resource, :execute,
+                   approved_invocation: receipt,
+                   argument_digest: digest
+                 )
+      after
+        Process.exit(squatter, :kill)
+
+        if Process.whereis(ApprovalReceiptBroker),
+          do: Process.unregister(ApprovalReceiptBroker)
+
+        if Process.alive?(real_broker),
+          do: Process.register(real_broker, ApprovalReceiptBroker)
+      end
     end
 
     test "returns authorized when no constraints", %{agent_id: agent_id} do
       resource = "arbor://fs/read/simple_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        Security.grant(
+        Security.grant_fixture(
           principal: agent_id,
           resource: resource
         )
@@ -922,9 +1095,20 @@ defmodule Arbor.SecurityTest do
     end
   end
 
+  defp fake_approval_broker_loop do
+    receive do
+      {:"$gen_call", {from, tag}, _request} ->
+        send(from, {tag, :ok})
+        fake_approval_broker_loop()
+
+      _other ->
+        fake_approval_broker_loop()
+    end
+  end
+
   defp issue_disclosure!(agent_id, session_id, task_id) do
     {:ok, cap} =
-      Security.issue_disclosure_capability(
+      Security.issue_disclosure_capability_fixture(
         principal_id: agent_id,
         session_id: session_id,
         task_id: task_id,

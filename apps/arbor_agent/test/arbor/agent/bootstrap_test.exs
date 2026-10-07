@@ -3,7 +3,9 @@ defmodule Arbor.Agent.BootstrapTest do
   @moduletag :fast
 
   alias Arbor.Agent.{Bootstrap, Character, Manager, Profile, ProfileStore}
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security
 
   @store_name :arbor_agent_profiles
 
@@ -26,6 +28,45 @@ defmodule Arbor.Agent.BootstrapTest do
     end)
 
     :ok
+  end
+
+  defp mcp_mutation_context! do
+    unique = System.unique_integer([:positive])
+    {:ok, actor} = Identity.generate(name: "mcp-config-actor-#{unique}")
+    {:ok, target} = Identity.generate(name: "mcp-config-target-#{unique}")
+    :ok = Security.register_identity_fixture(Identity.public_only(actor))
+    :ok = Security.register_identity_fixture(Identity.public_only(target))
+
+    mutation_caps =
+      for operation <- [:grant, :revoke] do
+        {:ok, cap} =
+          Security.grant_fixture(
+            principal: actor.agent_id,
+            resource: "arbor://security/#{operation}/#{target.agent_id}"
+          )
+
+        cap
+      end
+
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        actor.agent_id,
+        actor.private_key,
+        purpose: :mcp_config_test,
+        owner: self()
+      )
+
+    {:ok, authority} = Security.open_signing_authority(proof)
+
+    on_exit(fn ->
+      _ = Security.close_signing_authority(authority)
+      _ = Security.revoke_all_fixture(target.agent_id)
+      Enum.each(mutation_caps, &Security.revoke_fixture(&1.id))
+      _ = Security.deregister_identity_fixture(target.agent_id)
+      _ = Security.deregister_identity_fixture(actor.agent_id)
+    end)
+
+    %{agent_id: target.agent_id, authority: authority}
   end
 
   defp make_profile(agent_id, opts) do
@@ -294,9 +335,10 @@ defmodule Arbor.Agent.BootstrapTest do
   # MCP config management
   # ============================================================================
 
-  describe "Manager.set_mcp_config/2" do
+  describe "Manager.set_mcp_config/3" do
     test "stores MCP server config in profile metadata" do
-      profile = make_profile("agent_mcp_config_1", display_name: "MCP Agent", metadata: %{})
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
+      profile = make_profile(agent_id, display_name: "MCP Agent", metadata: %{})
       ProfileStore.store_profile(profile)
 
       servers = [
@@ -304,9 +346,9 @@ defmodule Arbor.Agent.BootstrapTest do
         %{name: "filesystem", transport: :stdio, command: ["npx", "@mcp/server-fs", "/ws"]}
       ]
 
-      assert :ok = Manager.set_mcp_config("agent_mcp_config_1", servers)
+      assert :ok = Manager.set_mcp_config(agent_id, servers, actor_authority: authority)
 
-      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_1")
+      {:ok, loaded} = ProfileStore.load_profile(agent_id)
       assert length(loaded.metadata[:mcp_servers]) == 2
 
       names = Enum.map(loaded.metadata[:mcp_servers], & &1[:name])
@@ -315,8 +357,10 @@ defmodule Arbor.Agent.BootstrapTest do
     end
 
     test "preserves existing metadata when setting MCP config" do
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
+
       profile =
-        make_profile("agent_mcp_config_2",
+        make_profile(agent_id,
           display_name: "MCP Agent 2",
           metadata: %{last_model_config: %{id: "test"}, custom: "value"}
         )
@@ -324,11 +368,13 @@ defmodule Arbor.Agent.BootstrapTest do
       ProfileStore.store_profile(profile)
 
       assert :ok =
-               Manager.set_mcp_config("agent_mcp_config_2", [
-                 %{name: "db", transport: :http, url: "http://localhost:3000"}
-               ])
+               Manager.set_mcp_config(
+                 agent_id,
+                 [%{name: "db", transport: :http, url: "http://localhost:3000"}],
+                 actor_authority: authority
+               )
 
-      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_2")
+      {:ok, loaded} = ProfileStore.load_profile(agent_id)
       # MCP config added
       assert length(loaded.metadata[:mcp_servers]) == 1
       # Existing metadata preserved
@@ -337,22 +383,37 @@ defmodule Arbor.Agent.BootstrapTest do
     end
 
     test "returns error for nonexistent agent" do
-      assert {:error, :not_found} = Manager.set_mcp_config("nonexistent", [])
+      assert {:error, :not_found} =
+               Manager.set_mcp_config("nonexistent", [], actor_authority: make_ref())
     end
 
     test "can set empty config to clear MCP servers" do
+      %{agent_id: agent_id, authority: authority} = mcp_mutation_context!()
+
       profile =
-        make_profile("agent_mcp_config_3",
+        make_profile(agent_id,
           display_name: "MCP Agent 3",
           metadata: %{mcp_servers: [%{name: "old"}]}
         )
 
       ProfileStore.store_profile(profile)
 
-      assert :ok = Manager.set_mcp_config("agent_mcp_config_3", [])
+      assert :ok = Manager.set_mcp_config(agent_id, [], actor_authority: authority)
 
-      {:ok, loaded} = ProfileStore.load_profile("agent_mcp_config_3")
+      {:ok, loaded} = ProfileStore.load_profile(agent_id)
       assert loaded.metadata[:mcp_servers] == []
+    end
+
+    @tag :security_regression
+    test "security regression: the legacy arity cannot mutate MCP configuration" do
+      %{agent_id: agent_id} = mcp_mutation_context!()
+      ProfileStore.store_profile(make_profile(agent_id, metadata: %{}))
+
+      assert {:error, :capability_mutation_unauthorized} =
+               Manager.set_mcp_config(agent_id, [%{name: "forged", transport: :stdio}])
+
+      {:ok, loaded} = ProfileStore.load_profile(agent_id)
+      refute Map.has_key?(loaded.metadata, :mcp_servers)
     end
   end
 

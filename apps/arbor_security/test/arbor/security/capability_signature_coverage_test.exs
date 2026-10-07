@@ -36,7 +36,7 @@ defmodule Arbor.Security.CapabilitySignatureCoverageTest do
         metadata: %{source: "test"}
       )
 
-    {:ok, signed} = SystemAuthority.sign_capability(base)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(base)
     # Sanity: the freshly signed cap verifies.
     assert SystemAuthority.verify_capability_signature(signed) == :ok
 
@@ -89,7 +89,7 @@ defmodule Arbor.Security.CapabilitySignatureCoverageTest do
           metadata: %{provenance: %{source: :caps_file, issuer_id: "agent_issuer"}}
         )
 
-      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
       assert SystemAuthority.verify_capability_signature(signed) == :ok
 
       # allowed_delegatees order must not matter (set semantics).

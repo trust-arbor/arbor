@@ -90,8 +90,16 @@ defmodule Arbor.Security.AuditJournalOwner do
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFile
   alias Arbor.Security.AuditJournalFileCore
+  alias Arbor.Security.AuditJournalRecovery
+  alias Arbor.Security.AuthorityAuditConsumer
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Contracts.AuditJournal
+  alias Arbor.Security.SupervisedOwner
+
+  if Mix.env() == :test do
+    @test_fixture_key :audit_journal_owner_test_fixture
+  end
 
   @allowed_opts if(Mix.env() == :test,
                   do: [:mode, :root, :reason, :name, :capacity_profile, :inject],
@@ -99,7 +107,12 @@ defmodule Arbor.Security.AuditJournalOwner do
                 )
   @disabled_reasons [:disabled, :activation_only]
   @pending_statuses ["prepared", "effect_applied"]
-  @refusals [:soft_capacity_exhausted, :capacity_exhausted, :retired_version]
+  @refusals [
+    :soft_capacity_exhausted,
+    :capacity_exhausted,
+    :principal_capacity_exhausted,
+    :retired_version
+  ]
   @paused_postures [:mismatch, :ahead]
   @publication_backoff_ms 5_000
 
@@ -118,7 +131,9 @@ defmodule Arbor.Security.AuditJournalOwner do
            | :record_too_large
            | :soft_capacity_exhausted
            | :capacity_exhausted
+           | :principal_capacity_exhausted
            | :retired_version
+           | :audit_mutation_unauthorized
            | {:not_committed, term()}
            | {:commit_uncertain, term()}}
 
@@ -134,62 +149,115 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   def start_link(_opts), do: {:error, :invalid_opts}
 
-  @spec append(term()) :: append_ok() | append_error()
-  def append(raw), do: do_append(__MODULE__, raw)
-
   @spec status() :: {:ok, map()} | {:error, :journal_unavailable}
-  def status, do: do_query(__MODULE__, :status)
+  def status, do: owned_call(:status, :query)
 
   @spec pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
-  def pending_operations, do: do_query(__MODULE__, :pending_operations)
+  def pending_operations, do: owned_call(:pending_operations, :query)
 
   @doc false
-  def prepare(intent), do: safe_call(__MODULE__, {:prepare, intent}, :append)
+  def prepare(intent) do
+    proof = CapabilityStore.audit_writer_proof()
+    owned_call({:prepare, proof, intent}, :append)
+  end
 
   @doc false
-  def observe(operation_id, observation),
-    do: safe_call(__MODULE__, {:observe, operation_id, observation}, :append)
+  def observe(operation_id, observation) do
+    proof = CapabilityStore.audit_writer_proof()
+    owned_call({:observe, proof, operation_id, observation}, :append)
+  end
 
   @doc false
-  def pending_intents, do: do_query(__MODULE__, :pending_intents)
+  def pending_intents, do: owned_call(:pending_intents, :query)
 
   @doc false
-  def delivery_batch, do: do_query(__MODULE__, :delivery_batch)
+  @spec pending_intents_from_supervisor(pid()) ::
+          {:ok, [map()]} | {:error, :journal_unavailable}
+  def pending_intents_from_supervisor(supervisor) when is_pid(supervisor),
+    do: supervisor_owned_call(supervisor, :pending_intents, :query)
+
+  def pending_intents_from_supervisor(_supervisor), do: {:error, :journal_unavailable}
+
+  @doc false
+  @spec observe_from_supervisor(pid(), term(), term()) :: append_ok() | append_error()
+  def observe_from_supervisor(supervisor, operation_id, observation)
+      when is_pid(supervisor) do
+    proof = CapabilityStore.audit_writer_proof()
+
+    supervisor_owned_call(
+      supervisor,
+      {:observe, proof, operation_id, observation},
+      :append
+    )
+  end
+
+  def observe_from_supervisor(_supervisor, _operation_id, _observation),
+    do: {:error, :journal_unavailable}
+
+  @doc false
+  def delivery_batch, do: owned_authenticated_consumer_call(:delivery_batch, :query)
 
   @doc false
   def acknowledge_delivery(id, digest),
-    do: safe_call(__MODULE__, {:acknowledge_delivery, id, digest}, :append)
+    do:
+      owned_authenticated_consumer_call(
+        {:acknowledge_delivery, id, digest},
+        :append
+      )
 
   if Mix.env() == :test do
     @doc false
+    def install_test_fixture(pid) when is_pid(pid) do
+      if Process.alive?(pid) and Process.whereis(__MODULE__) == pid do
+        Application.put_env(:arbor_security, @test_fixture_key, pid)
+        :ok
+      else
+        {:error, :invalid_test_fixture}
+      end
+    end
+
+    def install_test_fixture(_pid), do: {:error, :invalid_test_fixture}
+
+    @doc false
+    def clear_test_fixture do
+      Application.delete_env(:arbor_security, @test_fixture_key)
+      :ok
+    end
+
+    @doc false
     @spec append(GenServer.server(), term()) :: append_ok() | append_error()
-    def append(server, raw), do: do_append(server, raw)
+    def append(server, raw), do: safe_call(server, {:append_fixture, raw}, :append)
 
     @doc false
     @spec status(GenServer.server()) :: {:ok, map()} | {:error, :journal_unavailable}
-    def status(server), do: do_query(server, :status)
+    def status(server), do: safe_call(server, :status, :query)
 
     @doc false
     @spec pending_operations(GenServer.server()) ::
             {:ok, [map()]} | {:error, :journal_unavailable}
-    def pending_operations(server), do: do_query(server, :pending_operations)
+    def pending_operations(server), do: safe_call(server, :pending_operations, :query)
 
     @doc false
-    def prepare(server, intent), do: safe_call(server, {:prepare, intent}, :append)
+    def prepare(server, intent), do: safe_call(server, {:prepare_fixture, intent}, :append)
 
     @doc false
     def observe(server, operation_id, observation),
-      do: safe_call(server, {:observe, operation_id, observation}, :append)
+      do: safe_call(server, {:observe_fixture, operation_id, observation}, :append)
 
     @doc false
-    def pending_intents(server), do: do_query(server, :pending_intents)
+    def pending_intents(server), do: safe_call(server, :pending_intents, :query)
 
     @doc false
-    def delivery_batch(server), do: do_query(server, :delivery_batch)
+    def delivery_batch(server), do: authenticated_consumer_call(server, :delivery_batch, :query)
 
     @doc false
     def acknowledge_delivery(server, id, digest),
-      do: safe_call(server, {:acknowledge_delivery, id, digest}, :append)
+      do:
+        authenticated_consumer_call(
+          server,
+          {:acknowledge_delivery, id, digest},
+          :append
+        )
 
     @doc false
     @spec __test_inject__(GenServer.server(), :clear) :: :ok | {:error, :journal_unavailable}
@@ -246,58 +314,145 @@ defmodule Arbor.Security.AuditJournalOwner do
   def init(%{mode: :durable, root: root, capacity_profile: profile} = boot) do
     apply_boot_injects(boot)
 
-    opened =
-      with {:ok, handle} <- AuditJournalFile.open(root: root),
-           do: AuditJournalFile.ensure_capacity_profile(handle, profile)
-
-    case opened do
-      {:ok, handle} ->
-        torn? = handle.torn_tail != nil
-
-        state =
-          owner_state(
-            core: handle.core,
-            handle: handle,
-            committed_frames: handle.frames,
-            torn_tail?: torn?,
-            mode: :durable,
-            durability: :durable,
-            availability: if(torn?, do: :degraded, else: :serving),
-            reason: if(torn?, do: :torn_tail, else: :none),
-            last_error: if(torn?, do: :torn_tail, else: :none),
-            serving: not torn?,
-            ledger_state: ledger_posture(handle)
-          )
-
-        {:ok, state |> note_ledger_posture(:open) |> boot_retirement()}
-
-      {:error, reason} ->
-        {:stop, {:journal_open_failed, reason}}
+    if AuditJournalRecovery.recovery_required?(root) do
+      {:ok, degraded_recovery_state(root, profile, :recovery_required)}
+    else
+      init_durable_journal(root, profile)
     end
   end
 
   def init(_boot), do: {:stop, :invalid_opts}
 
+  defp init_durable_journal(root, profile) do
+    case AuditJournalFile.open(root: root) do
+      {:ok, %{torn_tail: nil} = handle} ->
+        finish_durable_open(handle, profile)
+
+      {:ok, handle} ->
+        case AuditJournalRecovery.recover_torn_tail(handle) do
+          {:ok, recovered} ->
+            Logger.warning(
+              "Security audit journal recovered a torn tail into forensic quarantine"
+            )
+
+            finish_durable_open(recovered, profile)
+
+          {:error, _reason} ->
+            Logger.error(
+              "Security audit journal torn-tail recovery failed; authority increases disabled"
+            )
+
+            {:ok, degraded_from_handle(handle, profile, :torn_tail)}
+        end
+
+      {:error, reason} ->
+        recover_corrupt_journal(root, profile, reason)
+    end
+  end
+
+  defp finish_durable_open(handle, profile) do
+    case AuditJournalFile.ensure_capacity_profile(handle, profile) do
+      {:ok, promoted} ->
+        state = serving_durable_state(promoted)
+        {:ok, state |> note_ledger_posture(:open) |> boot_retirement()}
+
+      {:error, _reason} ->
+        Logger.error(
+          "Security audit journal profile admission failed; authority increases disabled"
+        )
+
+        {:ok, degraded_from_handle(handle, profile, :profile_admission_failed)}
+    end
+  end
+
+  defp recover_corrupt_journal(root, profile, reason) do
+    recovered =
+      case AuditJournalRecovery.quarantine_and_reset(root, reason) do
+        {:ok, handle} ->
+          case AuditJournalFile.ensure_capacity_profile(handle, profile) do
+            {:ok, promoted} -> promoted
+            {:error, _reason} -> nil
+          end
+
+        {:error, _reason} ->
+          nil
+      end
+
+    Logger.error(
+      "Security audit journal quarantined or unavailable; authority increases disabled"
+    )
+
+    {:ok, degraded_state(profile, recovered, :journal_open_failed)}
+  end
+
+  defp degraded_recovery_state(root, profile, reason) do
+    handle =
+      case AuditJournalFile.open(root: root) do
+        {:ok, opened} ->
+          case AuditJournalFile.ensure_capacity_profile(opened, profile) do
+            {:ok, promoted} -> promoted
+            {:error, _reason} -> nil
+          end
+
+        {:error, _reason} ->
+          nil
+      end
+
+    degraded_state(profile, handle, reason)
+  end
+
+  defp serving_durable_state(handle) do
+    owner_state(
+      core: handle.core,
+      handle: handle,
+      committed_frames: handle.frames,
+      torn_tail?: false,
+      mode: :durable,
+      durability: :durable,
+      availability: :serving,
+      reason: :none,
+      last_error: :none,
+      serving: true,
+      ledger_state: ledger_posture(handle)
+    )
+  end
+
+  defp degraded_from_handle(handle, profile, reason) do
+    _ = AuditJournalFile.close(handle)
+    degraded_state(profile, nil, reason, handle.core, handle.frames)
+  end
+
+  defp degraded_state(profile, handle, reason, core \\ nil, frames \\ 0) do
+    core = core || if(handle, do: handle.core, else: elem(AuditJournalCore.new(profile), 1))
+    frames = if(handle, do: handle.frames, else: frames)
+
+    owner_state(
+      core: core,
+      handle: handle,
+      committed_frames: frames,
+      torn_tail?: reason == :torn_tail,
+      poisoned?: true,
+      mode: :durable,
+      durability: :durable,
+      availability: :degraded,
+      reason: :poisoned,
+      last_error: :not_committed,
+      serving: false,
+      ledger_state: if(handle, do: ledger_posture(handle), else: :none)
+    )
+  end
+
   @impl true
-  def handle_call({:append, _raw}, _from, %{mode: :disabled} = state) do
-    {:reply, {:error, :journal_disabled}, state}
+  def handle_call({:append, proof, raw}, from, state) do
+    if authorized_mutator?(from, proof),
+      do: append_request(raw, state),
+      else: {:reply, {:error, :audit_mutation_unauthorized}, state}
   end
 
-  def handle_call({:append, _raw}, _from, %{poisoned?: true} = state) do
-    {:reply, {:error, :journal_poisoned}, state}
-  end
-
-  def handle_call({:append, _raw}, _from, %{torn_tail?: true} = state) do
-    {:reply, {:error, {:not_committed, :torn_tail}}, mark_torn(state)}
-  end
-
-  def handle_call({:append, raw}, _from, %{mode: :durable} = state) do
-    apply_durable_append(state, raw)
-  end
-
-  def handle_call({:append, raw}, _from, %{mode: :ephemeral} = state) do
-    apply_ephemeral_append(state, raw)
-  end
+  # The pre-custody wire shape is permanently denied. `from` is ordinary
+  # protocol data and can be forged in a raw `$gen_call` message.
+  def handle_call({:append, _raw}, _from, state),
+    do: {:reply, {:error, :audit_mutation_unauthorized}, state}
 
   def handle_call(:status, _from, state) do
     {:reply, build_status(state), state}
@@ -311,84 +466,42 @@ defmodule Arbor.Security.AuditJournalOwner do
     {:reply, {:ok, AuditJournalCore.pending_intents(state.core)}, state}
   end
 
-  def handle_call(:delivery_batch, from, state) do
-    reply =
-      if authorized_consumer?(from),
-        do: {:ok, AuditJournalCore.delivery_batch(state.core)},
-        else: {:error, :unauthorized_audit_consumer}
+  # A GenServer `from` tuple is ordinary wire data and can be forged by a raw
+  # `$gen_call`. Consumer-only requests are admitted exclusively through the
+  # challenge-response protocol handled in handle_info/2.
+  def handle_call(:delivery_batch, _from, state),
+    do: {:reply, {:error, :unauthorized_audit_consumer}, state}
 
-    {:reply, reply, state}
+  def handle_call({:acknowledge_delivery, _id, _digest}, _from, state),
+    do: {:reply, {:error, :unauthorized_audit_consumer}, state}
+
+  def handle_call({:prepare, proof, raw}, from, state) do
+    if authorized_mutator?(from, proof),
+      do: prepare_request(raw, state),
+      else: {:reply, {:error, :audit_mutation_unauthorized}, state}
   end
 
-  def handle_call({:acknowledge_delivery, id, digest}, from, state) do
-    cond do
-      not authorized_consumer?(from) ->
-        {:reply, {:error, :unauthorized_audit_consumer}, state}
+  def handle_call({:prepare, _raw}, _from, state),
+    do: {:reply, {:error, :audit_mutation_unauthorized}, state}
 
-      not AuditJournalCore.acknowledgement_matches?(state.core, id, digest) ->
-        {:reply, {:error, :audit_content_conflict}, state}
-
-      true ->
-        case AuditJournalCore.operation(state.core, id) do
-          {:ok, %{"status" => "delivered"}} ->
-            {:reply, {:ok, :idempotent}, state}
-
-          _ ->
-            {:reply, reply, next} =
-              handle_call({:append, mutation_record(id, "delivered", timestamp())}, from, state)
-
-            # T2: the triggering acknowledgement is answered before the
-            # publication; the next mailbox message waits for it.
-            if t2_due?(next),
-              do: {:reply, reply, next, {:continue, :retire}},
-              else: {:reply, reply, next}
-        end
-    end
+  def handle_call({:observe, proof, operation_id, observation}, from, state) do
+    if authorized_mutator?(from, proof),
+      do: observe_request(operation_id, observation, state),
+      else: {:reply, {:error, :audit_mutation_unauthorized}, state}
   end
 
-  def handle_call({:prepare, raw}, from, state) do
-    case AuditJournal.admit_intent(raw) do
-      {:ok, intent} -> prepare_admitted(intent, from, state)
-      _ -> {:reply, {:error, :malformed}, state}
-    end
-  end
-
-  def handle_call({:observe, operation_id, observation}, from, state)
-      when observation == :applied or
-             observation in [
-               {:rejected, "before_mismatch"},
-               {:rejected, "identity_conflict"},
-               {:rejected, "not_found"},
-               {:rejected, "cas_conflict"}
-             ] do
-    case AuditJournalCore.operation(state.core, operation_id) do
-      {:ok, %{"intent" => intent, "status" => "prepared"}} ->
-        {type, data} =
-          case observation do
-            :applied ->
-              {"effect_applied",
-               %{"kind" => "applied", "after_fingerprint" => intent["after_fingerprint"]}}
-
-            {:rejected, reason} ->
-              {"effect_rejected", %{"kind" => "rejected", "reason" => reason}}
-          end
-
-        record = mutation_record(operation_id, type, timestamp()) |> Map.put("observation", data)
-        handle_call({:append, record}, from, state)
-
-      {:ok, %{"status" => status}}
-      when status in ["effect_applied", "delivered"] and observation == :applied ->
-        {:reply, {:ok, :idempotent}, state}
-
-      _ ->
-        {:reply, {:error, :out_of_order}, state}
-    end
-  end
-
-  def handle_call({:observe, _id, _observation}, _from, state),
-    do: {:reply, {:error, :malformed}, state}
+  def handle_call({:observe, _operation_id, _observation}, _from, state),
+    do: {:reply, {:error, :audit_mutation_unauthorized}, state}
 
   if Mix.env() == :test do
+    def handle_call({:append_fixture, raw}, _from, state), do: append_request(raw, state)
+
+    def handle_call({:prepare_fixture, raw}, _from, state),
+      do: prepare_request(raw, state)
+
+    def handle_call({:observe_fixture, operation_id, observation}, _from, state),
+      do: observe_request(operation_id, observation, state)
+
     @impl true
     def handle_call({:__test_inject__, :clear}, _from, state) do
       {:reply, AuditJournalFile.__test_inject__(:clear), state}
@@ -403,6 +516,48 @@ defmodule Arbor.Security.AuditJournalOwner do
     end
   end
 
+  defp handle_authenticated_consumer_request(:delivery_batch, caller, state) do
+    reply =
+      if AuthorityAuditConsumer.authorized?(caller),
+        do: {:ok, AuditJournalCore.delivery_batch(state.core)},
+        else: {:error, :unauthorized_audit_consumer}
+
+    {:reply, reply, state}
+  end
+
+  defp handle_authenticated_consumer_request(
+         {:acknowledge_delivery, id, digest},
+         caller,
+         state
+       ) do
+    cond do
+      not AuthorityAuditConsumer.authorized?(caller) ->
+        {:reply, {:error, :unauthorized_audit_consumer}, state}
+
+      not AuditJournalCore.acknowledgement_matches?(state.core, id, digest) ->
+        {:reply, {:error, :audit_content_conflict}, state}
+
+      true ->
+        case AuditJournalCore.operation(state.core, id) do
+          {:ok, %{"status" => "delivered"}} ->
+            {:reply, {:ok, :idempotent}, state}
+
+          _ ->
+            {:reply, reply, next} =
+              append_request(mutation_record(id, "delivered", timestamp()), state)
+
+            # T2: the triggering acknowledgement is answered before the
+            # publication; the next mailbox message waits for it.
+            if t2_due?(next),
+              do: {:reply, reply, next, {:continue, :retire}},
+              else: {:reply, reply, next}
+        end
+    end
+  end
+
+  defp handle_authenticated_consumer_request(_request, _caller, state),
+    do: {:reply, {:error, :unauthorized_audit_consumer}, state}
+
   @impl true
   def handle_continue(:retire, state) do
     cond do
@@ -413,7 +568,23 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   @impl true
-  def handle_info(_msg, state), do: {:noreply, state}
+  def handle_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        case handle_authenticated_consumer_request(request, caller, state) do
+          {:reply, reply, next_state} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:noreply, next_state}
+
+          {:reply, reply, next_state, {:continue, continuation}} ->
+            :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+            {:noreply, next_state, {:continue, continuation}}
+        end
+
+      result when result in [:pending, :expired, :rejected, :unrecognized] ->
+        {:noreply, state}
+    end
+  end
 
   @impl true
   def terminate(_reason, %{handle: handle}) when not is_nil(handle) do
@@ -445,14 +616,65 @@ defmodule Arbor.Security.AuditJournalOwner do
     finish_durable_append(AuditJournalFile.append(state.handle, raw), state, raw, :first)
   end
 
+  defp append_request(_raw, %{mode: :disabled} = state),
+    do: {:reply, {:error, :journal_disabled}, state}
+
+  defp append_request(_raw, %{poisoned?: true} = state),
+    do: {:reply, {:error, :journal_poisoned}, state}
+
+  defp append_request(_raw, %{torn_tail?: true} = state),
+    do: {:reply, {:error, {:not_committed, :torn_tail}}, mark_torn(state)}
+
+  defp append_request(raw, %{mode: :durable} = state), do: apply_durable_append(state, raw)
+  defp append_request(raw, %{mode: :ephemeral} = state), do: apply_ephemeral_append(state, raw)
+
   defp timestamp, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
-  defp authorized_consumer?({pid, _tag}) do
-    case Config.authority_audit_consumer_name() do
-      name when is_atom(name) and not is_nil(name) -> pid == Process.whereis(name)
-      _ -> false
+  defp authorized_mutator?({pid, _tag}, proof) do
+    CapabilityStore.audit_writer_authorized?(pid, proof)
+  end
+
+  defp prepare_request(raw, state) do
+    case AuditJournal.admit_intent(raw) do
+      {:ok, intent} -> prepare_admitted(intent, state)
+      _ -> {:reply, {:error, :malformed}, state}
     end
   end
+
+  defp observe_request(operation_id, observation, state)
+       when observation == :applied or
+              observation in [
+                {:rejected, "before_mismatch"},
+                {:rejected, "identity_conflict"},
+                {:rejected, "not_found"},
+                {:rejected, "cas_conflict"}
+              ] do
+    case AuditJournalCore.operation(state.core, operation_id) do
+      {:ok, %{"intent" => intent, "status" => "prepared"}} ->
+        {type, data} =
+          case observation do
+            :applied ->
+              {"effect_applied",
+               %{"kind" => "applied", "after_fingerprint" => intent["after_fingerprint"]}}
+
+            {:rejected, reason} ->
+              {"effect_rejected", %{"kind" => "rejected", "reason" => reason}}
+          end
+
+        record = mutation_record(operation_id, type, timestamp()) |> Map.put("observation", data)
+        append_request(record, state)
+
+      {:ok, %{"status" => status}}
+      when status in ["effect_applied", "delivered"] and observation == :applied ->
+        {:reply, {:ok, :idempotent}, state}
+
+      _ ->
+        {:reply, {:error, :out_of_order}, state}
+    end
+  end
+
+  defp observe_request(_operation_id, _observation, state),
+    do: {:reply, {:error, :malformed}, state}
 
   defp mutation_record(operation_id, type, occurred_at) do
     %{
@@ -924,7 +1146,7 @@ defmodule Arbor.Security.AuditJournalOwner do
     }
   end
 
-  defp prepare_admitted(intent, from, state) do
+  defp prepare_admitted(intent, state) do
     case prepare_lookup(state.core, intent) do
       {:pending, original, status} ->
         {:reply, {:ok, original, status}, state}
@@ -933,21 +1155,33 @@ defmodule Arbor.Security.AuditJournalOwner do
         {:reply, {:error, :operation_terminal}, %{state | last_refusal: :operation_terminal}}
 
       :unknown ->
-        prepared = mutation_record(intent["operation_id"], "prepared", intent["prepared_at"])
-
-        {:reply, reply, next} =
-          handle_call({:append, Map.put(prepared, "intent", intent)}, from, state)
-
-        case reply do
-          {:ok, _} ->
-            {:reply, {:ok, intent, "prepared"}, next}
+        case AuditJournalCore.principal_increase_admission(state.core, intent) do
+          :ok ->
+            append_prepared_intent(intent, state)
 
           {:error, reason} when reason in @refusals ->
-            {:reply, reply, %{next | last_refusal: reason}}
+            {:reply, {:error, reason}, %{state | last_refusal: reason}}
 
-          error ->
-            {:reply, error, next}
+          {:error, _reason} ->
+            {:reply, {:error, :malformed}, state}
         end
+    end
+  end
+
+  defp append_prepared_intent(intent, state) do
+    prepared = mutation_record(intent["operation_id"], "prepared", intent["prepared_at"])
+
+    {:reply, reply, next} = append_request(Map.put(prepared, "intent", intent), state)
+
+    case reply do
+      {:ok, _} ->
+        {:reply, {:ok, intent, "prepared"}, next}
+
+      {:error, reason} when reason in @refusals ->
+        {:reply, reply, %{next | last_refusal: reason}}
+
+      error ->
+        {:reply, error, next}
     end
   end
 
@@ -1049,6 +1283,7 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   defp owner_state(fields) do
     Enum.into(fields, %{
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
       handle: nil,
       committed_frames: 0,
       torn_tail?: false,
@@ -1062,12 +1297,48 @@ defmodule Arbor.Security.AuditJournalOwner do
     })
   end
 
-  defp do_append(server, raw) do
-    safe_call(server, {:append, raw}, :append)
+  defp owned_call(request, kind) do
+    case owned_server_pid() do
+      pid when is_pid(pid) -> safe_call(pid, request, kind)
+      nil -> {:error, :journal_unavailable}
+    end
   end
 
-  defp do_query(server, request) do
-    safe_call(server, request, :query)
+  defp supervisor_owned_call(supervisor, request, kind) do
+    case SupervisedOwner.child_pid(supervisor, __MODULE__) do
+      pid when is_pid(pid) -> safe_call(pid, request, kind)
+      nil -> {:error, :journal_unavailable}
+    end
+  rescue
+    _ -> {:error, :journal_unavailable}
+  catch
+    :exit, _ -> {:error, :journal_unavailable}
+  end
+
+  defp owned_authenticated_consumer_call(request, kind) do
+    case owned_server_pid() do
+      pid when is_pid(pid) -> authenticated_consumer_call(pid, request, kind)
+      nil -> {:error, :journal_unavailable}
+    end
+  end
+
+  defp owned_server_pid do
+    SupervisedOwner.registered_child(__MODULE__, :arbor_security, [__MODULE__]) ||
+      test_fixture_pid()
+  end
+
+  if Mix.env() == :test do
+    defp test_fixture_pid do
+      case Application.get_env(:arbor_security, @test_fixture_key) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid) and Process.whereis(__MODULE__) == pid, do: pid, else: nil
+
+        _ ->
+          nil
+      end
+    end
+  else
+    defp test_fixture_pid, do: nil
   end
 
   defp safe_call(server, request, kind) do
@@ -1088,6 +1359,27 @@ defmodule Arbor.Security.AuditJournalOwner do
     :exit, _reason ->
       {:error, :journal_unavailable}
   end
+
+  defp authenticated_consumer_call(server, request, kind) do
+    with pid when is_pid(pid) <- resolve_server_pid(server) do
+      Arbor.Common.authenticated_call(pid, request, Config.audit_journal_call_timeout_ms())
+    else
+      _ -> {:error, :journal_unavailable}
+    end
+  catch
+    :exit, {:timeout, _} when kind == :append ->
+      {:error, {:commit_uncertain, :timeout}}
+
+    :exit, {:timeout, _} ->
+      {:error, :journal_unavailable}
+
+    :exit, _reason ->
+      {:error, :journal_unavailable}
+  end
+
+  defp resolve_server_pid(server) when is_pid(server), do: server
+  defp resolve_server_pid(server) when is_atom(server), do: Process.whereis(server)
+  defp resolve_server_pid(_server), do: nil
 
   defp reject_unknown_opts(opts) do
     unknown = Keyword.keys(opts) -- @allowed_opts

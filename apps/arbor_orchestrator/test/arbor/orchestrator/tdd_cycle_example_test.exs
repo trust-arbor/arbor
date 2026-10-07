@@ -262,7 +262,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
         name: "tdd-cycle-example-test"
       )
 
-    case Arbor.Security.Identity.Registry.register(identity) do
+    case Arbor.Security.register_identity_fixture(identity) do
       :ok -> :ok
       {:error, {:already_registered, _}} -> :ok
     end
@@ -283,7 +283,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
           metadata: %{test: true}
         )
 
-      Arbor.Security.CapabilityStore.put(cap)
+      Arbor.Security.put_capability_fixture(cap)
     end)
   end
 

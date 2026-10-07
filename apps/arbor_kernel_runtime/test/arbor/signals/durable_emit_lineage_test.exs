@@ -14,6 +14,8 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
   setup do
     Testing.isolate_namespace()
     Testing.delete(:durable_sink_module)
+    Testing.put(:restricted_topics, [:security, :identity])
+    Arbor.Signals.Store.clear()
     :ok
   end
 
@@ -80,6 +82,29 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
     refute Keyword.has_key?(opts, :stream_id)
     refute Keyword.has_key?(opts, :async)
     refute Keyword.has_key?(opts, :source)
+  end
+
+  test "security regression: restricted durable events never reach a sink as plaintext" do
+    Testing.put(:durable_sink_test_pid, self())
+    Testing.put(:durable_sink_module, __MODULE__.RecordingSink)
+    type = :credential_observed
+
+    assert {:error, :restricted_durable_encryption_unavailable} =
+             Arbor.Signals.durable_emit(
+               :security,
+               type,
+               %{secret: "never-persist-plaintext"},
+               stream_id: "security:events",
+               async: false
+             )
+
+    refute_receive {:sink, "security:events", :credential_observed, _, _}
+
+    assert {:ok, [signal | _]} = Arbor.Signals.recent(category: :security, type: type, limit: 1)
+    refute Map.has_key?(signal.data, :permanent)
+
+    assert {:ok, checkpoint} = Arbor.Signals.Store.snapshot()
+    refute Map.has_key?(checkpoint.signals, signal.id)
   end
 
   test "invalid, missing, malformed, raising, throwing, and exiting sinks stay :ok" do

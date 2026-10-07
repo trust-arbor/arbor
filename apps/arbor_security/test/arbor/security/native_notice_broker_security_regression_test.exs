@@ -34,8 +34,8 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     previous = Application.fetch_env(:arbor_security, :native_notice_source_authorizer)
     Application.put_env(:arbor_security, :native_notice_source_authorizer, SourceAuthority)
     {:ok, identity} = Identity.generate(name: "native-notice-test")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     {:ok, proof} =
       Security.build_signing_authority_acquisition_proof(
@@ -56,8 +56,8 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
           Application.delete_env(:arbor_security, :native_notice_source_authorizer)
       end
 
-      Security.delete_signing_key(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      Security.delete_signing_key_fixture(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{identity: identity, authority: authority}
@@ -99,6 +99,17 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     assert {:error, :native_notice_source_required} = Task.await(task)
   end
 
+  test "security regression: native source signing is domain specific", c do
+    assert {:ok, source_facts} = SourceAuthority.acquire(c.identity.agent_id, self())
+    payload = Arbor.Security.NativeConversationNotices.acquisition_payload(source_facts)
+
+    assert {:error, :invalid_resource_binding} =
+             Arbor.Security.SigningAuthorityBroker.sign(c.authority, payload)
+
+    assert {:ok, source} = Security.open_native_notice_source(c.authority)
+    assert is_reference(source)
+  end
+
   test "one-use bootstrap is bound to the exact held worker", c do
     {:ok, source} = Security.open_native_notice_source(c.authority)
     worker = worker()
@@ -135,7 +146,10 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     {:ok, source} = Security.open_native_notice_source(c.authority)
     worker = claimed_worker(source)
     {:ok, resource} = request(worker, {:resource, params()})
-    {:ok, cap} = Security.grant(principal: c.identity.agent_id, resource: resource, max_uses: 1)
+
+    {:ok, cap} =
+      Security.grant_fixture(principal: c.identity.agent_id, resource: resource, max_uses: 1)
+
     assert {:error, :unsupported_notice_capability} = request(worker, {:prepare, params()})
     assert {:ok, :authorized} = authorize(c.identity, resource)
     assert {:error, _} = authorize(c.identity, resource)
@@ -146,12 +160,12 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     {:ok, source} = Security.open_native_notice_source(c.authority)
     worker = claimed_worker(source)
     {:ok, resource} = request(worker, {:resource, params()})
-    {:ok, cap} = Security.grant(principal: c.identity.agent_id, resource: resource)
+    {:ok, cap} = Security.grant_fixture(principal: c.identity.agent_id, resource: resource)
     {:ok, %{prepared: token}} = request(worker, {:prepare, params()})
-    assert :ok = Security.revoke(cap.id)
+    assert :ok = Security.revoke_fixture(cap.id)
 
     assert {:ok, _replacement} =
-             Security.grant(principal: c.identity.agent_id, resource: resource)
+             Security.grant_fixture(principal: c.identity.agent_id, resource: resource)
 
     assert {:error, :unauthorized} = request(worker, {:activate, token})
   end
@@ -162,7 +176,7 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     {:ok, resource} = request(worker, {:resource, params()})
 
     {:ok, _} =
-      Security.grant(
+      Security.grant_fixture(
         principal: c.identity.agent_id,
         resource: resource,
         constraints: %{rate_limit: 1}
@@ -187,7 +201,7 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     {:ok, resource} = request(worker, {:resource, params()})
 
     {:ok, _} =
-      Security.grant(
+      Security.grant_fixture(
         principal: c.identity.agent_id,
         resource: resource,
         constraints: %{rate_limit: 1}
@@ -216,7 +230,7 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     {:ok, source} = Security.open_native_notice_source(c.authority)
     worker = claimed_worker(source)
     assert {:ok, resource} = request(worker, {:resource, params()})
-    {:ok, _} = Security.grant(principal: c.identity.agent_id, resource: resource)
+    {:ok, _} = Security.grant_fixture(principal: c.identity.agent_id, resource: resource)
     {:ok, %{prepared: token}} = request(worker, {:prepare, params()})
     assert :ok = request(worker, {:activate, token})
     {:ok, %{scope: scope, value: value}} = request(worker, {:peek, params()})
@@ -267,8 +281,8 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     worker = claimed_worker(source)
     assert {:ok, _} = request(worker, {:resource, params()})
     broker = Process.whereis(Arbor.Security.NativeNoticeBroker)
-    assert %{private: locator} = :sys.get_state(broker)
-    assert Map.keys(:sys.get_state(broker)) == [:private]
+    assert %{private_state: locator} = :sys.get_state(broker)
+    assert Map.keys(:sys.get_state(broker)) == [:private_state]
     assert_raise ArgumentError, fn -> :ets.lookup(locator, :state) end
     status = inspect(:sys.get_status(broker), limit: :infinity)
     refute status =~ "Private native notice"
@@ -276,6 +290,44 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     refute status =~ inspect(source)
     # Ordinary Process.info cannot reveal a sensitive worker's private locator.
     assert {:dictionary, []} = Process.info(worker, :dictionary)
+  end
+
+  test "security regression: transferred replacement custody cannot mint native authority", c do
+    broker = Process.whereis(Arbor.Security.NativeNoticeBroker)
+    original_state = :sys.get_state(broker)
+    fake_authenticated_calls = Arbor.Common.new_authenticated_call_custody()
+    hostile = :ets.new(__MODULE__, [:set, :private])
+
+    true =
+      :ets.insert(
+        hostile,
+        {:native_notice_broker_v1,
+         %{
+           acquisitions: %{},
+           authenticated_calls: fake_authenticated_calls,
+           generations: %{},
+           monitors: %{},
+           mutations: %{},
+           reservations: %{},
+           sources: %{},
+           workers: %{}
+         }}
+      )
+
+    true = :ets.give_away(hostile, broker, :hostile_native_notice_state)
+    assert :ets.info(hostile, :owner) == broker
+    :sys.replace_state(broker, fn _state -> %{private_state: hostile} end)
+
+    assert {:error, :notice_unavailable} =
+             Security.begin_native_notice_profile_mutation(c.identity.agent_id)
+
+    next_broker = wait_for_replacement(Arbor.Security.NativeNoticeBroker, broker)
+    assert next_broker != broker
+    refute Process.alive?(broker)
+
+    assert {:ok, source} = Security.open_native_notice_source(c.authority)
+    assert is_reference(source)
+    refute original_state == :sys.get_state(next_broker)
   end
 
   test "security regression: source-owner private replies are sensitive before acquisition", c do
@@ -353,7 +405,7 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     assert {:ok, _} = request(worker, {:resource, params()})
   end
 
-  defp wait_for_queued_reply(pid, attempts \\ 100)
+  defp wait_for_queued_reply(pid, attempts \\ 400)
   defp wait_for_queued_reply(_pid, 0), do: flunk("private reply was not queued")
 
   defp wait_for_queued_reply(pid, attempts) do
@@ -485,17 +537,32 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
     end
   end
 
-  defp wait_for_native_call(worker, attempts \\ 100)
+  defp wait_for_native_call(worker, attempts \\ 400)
   defp wait_for_native_call(_worker, 0), do: flunk("worker did not enter native commit call")
 
   defp wait_for_native_call(worker, attempts) do
     case Process.info(worker, :current_function) do
-      {:current_function, {:gen, :do_call, _}} ->
+      {:current_function, {Arbor.Common.AuthenticatedCall, function, _arity}}
+      when function in [:await_challenge, :await_reply] ->
         :ok
 
       _ ->
         Process.sleep(5)
         wait_for_native_call(worker, attempts - 1)
+    end
+  end
+
+  defp wait_for_replacement(name, old, attempts \\ 200)
+  defp wait_for_replacement(_name, _old, 0), do: flunk("supervised broker did not restart")
+
+  defp wait_for_replacement(name, old, attempts) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != old ->
+        pid
+
+      _ ->
+        Process.sleep(5)
+        wait_for_replacement(name, old, attempts - 1)
     end
   end
 end

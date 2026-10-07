@@ -4279,7 +4279,13 @@ defmodule Arbor.Actions.Git do
     alias Arbor.Actions
     alias Arbor.Actions.Config
     alias Arbor.Actions.Git
-    alias Arbor.Common.{EgressClassifier, SensitiveData}
+    alias Arbor.Common.{EgressClassifier, Sanitizers, SensitiveData}
+
+    @test_options_enabled Application.compile_env(
+                            :arbor_kernel_runtime,
+                            :expose_test_fixtures,
+                            false
+                          )
 
     def taint_roles do
       %{
@@ -4583,31 +4589,69 @@ defmodule Arbor.Actions.Git do
         retry: false
       ]
 
-      case http_post(url, opts, context) do
-        {:ok, %{status: status, body: response_body}} when status in 200..299 ->
-          {:ok, response_body}
+      with {:ok, safe_opts} <-
+             Sanitizers.ssrf_req_options(url, opts, scm_ssrf_options(url, context)) do
+        case http_post(url, safe_opts, context) do
+          {:ok, %{status: status, body: response_body}} when status in 200..299 ->
+            decode_response_body(response_body)
 
-        {:ok, %{status: status, body: response_body}} ->
-          safe_body =
-            response_body
-            |> inspect()
-            |> SensitiveData.redact()
-            |> redact(token)
+          {:ok, %{status: status, body: response_body}} ->
+            safe_body =
+              response_body
+              |> inspect()
+              |> SensitiveData.redact()
+              |> redact(token)
 
-          {:error, "SCM PR request failed: HTTP #{status}: #{safe_body}"}
+            {:error, "SCM PR request failed: HTTP #{status}: #{safe_body}"}
 
+          {:error, reason} ->
+            {:error, "SCM PR request failed: #{redact(inspect(reason), token)}"}
+        end
+      else
         {:error, reason} ->
-          {:error, "SCM PR request failed: #{redact(inspect(reason), token)}"}
+          {:error, "SCM PR request blocked: #{redact(inspect(reason), token)}"}
       end
     end
 
-    defp http_post(url, opts, context) do
-      case Config.get(context, :http_request) do
-        request when is_function(request, 3) -> request.(:post, url, opts)
-        request when is_function(request, 2) -> request.(url, opts)
-        _ -> Req.post(url, opts)
+    if @test_options_enabled do
+      defp scm_ssrf_options(url, context) do
+        case Config.get(context, :ssrf_resolver) do
+          resolver when is_atom(resolver) ->
+            Keyword.put(Config.scm_ssrf_options(url), :resolver, resolver)
+
+          _other ->
+            Config.scm_ssrf_options(url)
+        end
+      end
+    else
+      defp scm_ssrf_options(url, _context), do: Config.scm_ssrf_options(url)
+    end
+
+    if @test_options_enabled do
+      defp http_post(url, opts, context) do
+        case Config.get(context, :http_request) do
+          request when is_function(request, 3) -> request.(:post, url, opts)
+          request when is_function(request, 2) -> request.(url, opts)
+          _ -> Req.post(url, opts)
+        end
+      end
+    else
+      defp http_post(url, opts, _context), do: Req.post(url, opts)
+    end
+
+    defp decode_response_body(body) when is_map(body), do: {:ok, body}
+
+    defp decode_response_body(body) when is_binary(body) do
+      with true <- String.valid?(body),
+           {:ok, decoded} when is_map(decoded) <- Jason.decode(body) do
+        {:ok, decoded}
+      else
+        _ -> {:error, "SCM PR response was not a valid JSON object"}
       end
     end
+
+    defp decode_response_body(_body),
+      do: {:error, "SCM PR response was not a valid JSON object"}
 
     defp normalize_response(provider, body, params) when is_map(body) do
       number =

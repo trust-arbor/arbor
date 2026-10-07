@@ -10,7 +10,9 @@ defmodule Arbor.Security.Config do
   the test env installs the table but does not auto-freeze.
 
   Durable AuthorityStore identity is a config-owned absolute state root, frozen
-  through an Application-owned ETS claim. `:authority_state_root` is canonical;
+  through an Application-owned ETS claim. The independent capability-revocation
+  ledger path is frozen in the same snapshot, so later configuration changes
+  cannot redirect the rollback fence. `:authority_state_root` is canonical;
   `config :arbor_security, Arbor.Security.Store.JSONFile, base_dir: ...` is a
   legacy alias. Equal canonical paths are one root; unequal paths fail closed.
   Freeze runs only when startup will start durable (non-nil backend) stores.
@@ -19,6 +21,7 @@ defmodule Arbor.Security.Config do
 
       config :arbor_security,
         authority_state_root: "/var/lib/arbor/security", # canonical durable store root
+        revocation_ledger_path: "/var/lib/arbor-revocation/capability_revocations.v1.json",
         identity_verification: true,           # require signed requests for authorization
         nonce_ttl_seconds: 300,                 # nonces expire after 5 minutes
         timestamp_max_drift_seconds: 60,        # accept timestamps within ±60s of now
@@ -26,6 +29,40 @@ defmodule Arbor.Security.Config do
   """
 
   @app :arbor_security
+
+  @doc false
+  @spec signing_key_owner_roles() :: {:ok, map()} | {:error, :invalid_signing_key_owner_roles}
+  def signing_key_owner_roles do
+    case Application.fetch_env(@app, :signing_key_owner_roles) do
+      {:ok, roles} when is_map(roles) and map_size(roles) > 0 ->
+        if Enum.all?(roles, &valid_signing_key_owner_role?/1) do
+          {:ok, roles}
+        else
+          {:error, :invalid_signing_key_owner_roles}
+        end
+
+      _missing_or_invalid ->
+        {:error, :invalid_signing_key_owner_roles}
+    end
+  end
+
+  defp valid_signing_key_owner_role?(
+         {role,
+          %{
+            application: application,
+            path: path,
+            registered_name: registered_name,
+            purposes: purposes
+          }}
+       ) do
+    is_atom(role) and not is_nil(role) and is_atom(application) and not is_nil(application) and
+      is_list(path) and path != [] and Enum.all?(path, &(is_atom(&1) and not is_nil(&1))) and
+      is_atom(registered_name) and not is_nil(registered_name) and is_list(purposes) and
+      Enum.all?(purposes, &(is_atom(&1) and not is_nil(&1))) and
+      length(purposes) == length(Enum.uniq(purposes))
+  end
+
+  defp valid_signing_key_owner_role?(_other), do: false
 
   @doc false
   def terminal_login_options do
@@ -51,6 +88,10 @@ defmodule Arbor.Security.Config do
       reconnect_seconds: bounded.(:reconnect_seconds, 120, 3_600),
       pending_seconds: bounded.(:pending_seconds, 300, 300),
       max_pending: bounded.(:max_pending, 32, 32),
+      max_pending_per_source: bounded.(:max_pending_per_source, 2, 32),
+      max_starts_per_source: bounded.(:max_starts_per_source, 4, 32),
+      max_starts_per_window: bounded.(:max_starts_per_window, 64, 1_024),
+      start_window_seconds: bounded.(:start_window_seconds, 60, 3_600),
       max_active: bounded.(:max_active, 128, 128)
     }
   end
@@ -77,7 +118,6 @@ defmodule Arbor.Security.Config do
   @max_signing_authority_bootstrap_grace_ms 3_600_000
   @default_signing_authority_broker_call_timeout_ms 5_000
   @max_signing_authority_broker_call_timeout_ms 30_000
-
   @doc "Trusted native notice source adapter; absent configuration denies publication."
   def native_notice_source_authorizer,
     do: Application.get_env(:arbor_security, :native_notice_source_authorizer)
@@ -108,10 +148,15 @@ defmodule Arbor.Security.Config do
   @repo_root Path.expand("../../../../..", __DIR__)
   @development_authority_root Path.expand(".arbor/security", @repo_root)
   @authority_root_sources [:configured, :legacy_jsonfile_base_dir, :development_default]
+  @revocation_ledger_filename "capability_revocations.v1.json"
   @audit_journal_modes [:durable, :ephemeral, :disabled]
   @default_audit_journal_mode if(@config_env == :test, do: :ephemeral, else: :durable)
   @default_audit_journal_call_timeout_ms 5_000
   @max_audit_journal_call_timeout_ms 30_000
+  @default_authority_hydration_limit 10_000
+  @startup_timeout_per_record_ms 3
+  @min_startup_timeout_ms 30_000
+  @max_startup_timeout_ms 300_000
   @type startup_inputs :: %{
           start_children: term(),
           start_profile: atom(),
@@ -125,6 +170,7 @@ defmodule Arbor.Security.Config do
           backend: module() | nil,
           capabilities_hydration_limit: pos_integer(),
           root: String.t() | nil,
+          revocation_ledger_path: String.t() | nil,
           journal_mode: :durable | :ephemeral | :disabled,
           journal_reason: :none | :disabled | :activation_only
         }
@@ -140,6 +186,45 @@ defmodule Arbor.Security.Config do
     strict_identity_mode: false,
     distributed_signals: true
   ]
+
+  @doc """
+  Bounded readiness timeout for the Security authority tree.
+
+  Durable AuthorityStore startup reads and authenticates every admitted record,
+  so the default scales with the store's declared hydration bound. The same
+  timeout policy covers the downstream Registry/SystemAuthority/broker barriers;
+  those callers use the 10,000-record floor. Operators may override the result,
+  but the override is clamped to the same finite 30-300 second range. A malformed
+  override fails closed instead of silently changing startup behavior.
+  """
+  @spec startup_timeout_ms(pos_integer()) ::
+          {:ok, pos_integer()} | {:error, :invalid_startup_timeout}
+  def startup_timeout_ms(hydration_limit \\ @default_authority_hydration_limit)
+
+  def startup_timeout_ms(hydration_limit)
+      when is_integer(hydration_limit) and hydration_limit > 0 do
+    default = bounded_startup_timeout(hydration_limit * @startup_timeout_per_record_ms)
+
+    case Application.fetch_env(@app, :startup_timeout_ms) do
+      :error ->
+        {:ok, default}
+
+      {:ok, timeout_ms} when is_integer(timeout_ms) and timeout_ms > 0 ->
+        {:ok, bounded_startup_timeout(timeout_ms)}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_startup_timeout}
+    end
+  end
+
+  def startup_timeout_ms(_invalid_hydration_limit),
+    do: {:error, :invalid_startup_timeout}
+
+  defp bounded_startup_timeout(timeout_ms) do
+    timeout_ms
+    |> max(@min_startup_timeout_ms)
+    |> min(@max_startup_timeout_ms)
+  end
 
   @doc """
   Snapshot the closed fail-open-when-false enforcement toggles.
@@ -593,7 +678,7 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
-  The registration-authorization policy module (C10), or `nil`.
+  The registration-authorization policy module (C10).
 
   When set, `Identity.Registry.register/2` calls
   `policy.authorize_registration(identity, opts) :: :ok | {:error, reason}`
@@ -601,14 +686,29 @@ defmodule Arbor.Security.Config do
   identities once an external registration path exists (e.g. require a signed
   enrollment token or operator approval).
 
-  Default `nil` (allow): every current registration caller is internal
-  (agent lifecycle, scheduler) and trusted. The self-certifying check
-  (`agent_id == hash(pubkey)`) runs regardless of policy and a configured
-  policy that crashes fails closed.
+  The default policy admits self-certifying agent identities and requires OIDC
+  human subjects or verified email domains to appear in the configured
+  provider's allowlist. A configured policy that crashes fails closed.
   """
-  @spec registration_policy() :: module() | nil
+  @spec registration_policy() :: module()
   def registration_policy do
-    Application.get_env(@app, :registration_policy, nil)
+    case Application.get_env(
+           @app,
+           :registration_policy,
+           Arbor.Security.Identity.DefaultRegistrationPolicy
+         ) do
+      nil -> Arbor.Security.Identity.DefaultRegistrationPolicy
+      policy -> policy
+    end
+  end
+
+  @doc "OIDC human-registration mode; the default requires a provider allowlist."
+  @spec oidc_registration_mode() :: :allow | :allowlist
+  def oidc_registration_mode do
+    case Application.get_env(@app, :oidc_registration_mode, :allowlist) do
+      :allow -> :allow
+      _other -> :allowlist
+    end
   end
 
   @doc """
@@ -641,19 +741,25 @@ defmodule Arbor.Security.Config do
   The module used to verify capability delegation-chain signatures.
 
   Must implement `verify_delegation_chain/2`. Defaults to
-  `Arbor.Security.Signer`. Overridable so tests can substitute a stub
+  `Arbor.Security.Capability.Signer`. Overridable so tests can substitute a stub
   (e.g. one that raises, to prove the auth chain fails closed when
   delegation verification crashes).
   """
   @spec delegation_signer_module() :: module()
   def delegation_signer_module do
-    Application.get_env(@app, :delegation_signer_module, Arbor.Security.Signer)
+    Application.get_env(
+      @app,
+      :delegation_signer_module,
+      Arbor.Security.Capability.Signer
+    )
   end
 
   @doc """
   The module used for capability-bound filesystem path checks.
 
-  Must implement `authorize/3` and `normalize_uri_path_for_capability/2`.
+  Must implement `authorize/3`, `normalize_uri_path_for_capability/2`,
+  `prepare_read_for_capability/2`, and
+  `validate_opened_read_for_capability/3`.
   Defaults to `Arbor.Security.FileGuard`. Overridable so tests can
   substitute a stub (e.g. one that raises, to prove the auth chain fails
   closed when path validation is unavailable).
@@ -981,11 +1087,18 @@ defmodule Arbor.Security.Config do
 
       if needs_durable_root?(inputs, context) do
         with :ok <- freeze_authority_root(),
-             {:ok, root} <- authority_root() do
-          {:ok, Map.put(inputs, :root, root)}
+             {:ok, %{root: root, revocation_ledger_path: ledger_path}} <-
+               frozen_authority_paths() do
+          {:ok,
+           inputs
+           |> Map.put(:root, root)
+           |> Map.put(:revocation_ledger_path, ledger_path)}
         end
       else
-        {:ok, Map.put(inputs, :root, nil)}
+        {:ok,
+         inputs
+         |> Map.put(:root, nil)
+         |> Map.put(:revocation_ledger_path, nil)}
       end
     end
   end
@@ -998,6 +1111,30 @@ defmodule Arbor.Security.Config do
     case installed_authority_root_snapshot() do
       {:ok, %{root: root}} when is_binary(root) and byte_size(root) > 0 ->
         {:ok, root}
+
+      _not_frozen ->
+        {:error, :authority_root_not_frozen}
+    end
+  end
+
+  @doc """
+  Frozen absolute capability-revocation ledger path, or an error when the
+  durable authority configuration has not been frozen.
+  """
+  @spec revocation_ledger_path() ::
+          {:ok, String.t()} | {:error, :authority_root_not_frozen}
+  def revocation_ledger_path do
+    case frozen_authority_paths() do
+      {:ok, %{revocation_ledger_path: path}} -> {:ok, path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp frozen_authority_paths do
+    case installed_authority_root_snapshot() do
+      {:ok, %{root: root, revocation_ledger_path: path}}
+      when is_binary(root) and byte_size(root) > 0 and is_binary(path) and byte_size(path) > 0 ->
+        {:ok, %{root: root, revocation_ledger_path: path}}
 
       _not_frozen ->
         {:error, :authority_root_not_frozen}
@@ -1068,6 +1205,13 @@ defmodule Arbor.Security.Config do
         Keyword.put(backend_opts0, :base_dir, snapshot.root)
       end
 
+    backend_opts =
+      if snapshot.backend == @json_file_env and name == :arbor_security_capabilities do
+        Keyword.put(backend_opts, :revocation_ledger_path, snapshot.revocation_ledger_path)
+      else
+        Keyword.delete(backend_opts, :revocation_ledger_path)
+      end
+
     dropped
     |> Keyword.merge(name: name, namespace: namespace, backend: snapshot.backend)
     |> Keyword.put(:backend_opts, backend_opts)
@@ -1125,11 +1269,43 @@ defmodule Arbor.Security.Config do
 
   @doc false
   def authority_audit_consumer_name do
-    Application.get_env(
-      @app,
-      :authority_audit_consumer_name,
-      Arbor.Historian.AuthorityAuditPuller
-    )
+    Application.get_env(@app, :authority_audit_consumer_name)
+  end
+
+  @doc false
+  def authority_audit_consumer_application do
+    Application.get_env(@app, :authority_audit_consumer_application, :arbor_historian)
+  end
+
+  @doc false
+  @spec approval_receipt_issuer_owner() ::
+          {:ok, %{application: atom(), path: [atom()], registered_name: atom()}}
+          | {:error, :invalid_approval_receipt_issuer_owner}
+  def approval_receipt_issuer_owner do
+    case Application.fetch_env(@app, :approval_receipt_issuer_owner) do
+      {:ok, configured} ->
+        validate_approval_receipt_issuer_owner(configured)
+
+      :error ->
+        {:error, :invalid_approval_receipt_issuer_owner}
+    end
+  rescue
+    _ -> {:error, :invalid_approval_receipt_issuer_owner}
+  end
+
+  defp validate_approval_receipt_issuer_owner(configured) do
+    case configured do
+      %{application: application, path: path, registered_name: registered_name}
+      when is_atom(application) and not is_nil(application) and is_list(path) and path != [] and
+             is_atom(registered_name) and not is_nil(registered_name) ->
+        if Enum.all?(path, &(is_atom(&1) and not is_nil(&1))) and
+             List.last(path) == registered_name,
+           do: {:ok, configured},
+           else: {:error, :invalid_approval_receipt_issuer_owner}
+
+      _ ->
+        {:error, :invalid_approval_receipt_issuer_owner}
+    end
   end
 
   defp enforcement_toggle(key, default) do
@@ -1299,10 +1475,58 @@ defmodule Arbor.Security.Config do
 
   defp compute_authority_root_candidate do
     with {:ok, primary} <- fetch_primary_authority_root(),
-         {:ok, legacy} <- fetch_legacy_jsonfile_base_dir() do
-      combine_authority_root_candidates(primary, legacy)
+         {:ok, legacy} <- fetch_legacy_jsonfile_base_dir(),
+         {:ok, snapshot} <- combine_authority_root_candidates(primary, legacy),
+         {:ok, ledger_path} <- compute_revocation_ledger_path(snapshot.root) do
+      {:ok, Map.put(snapshot, :revocation_ledger_path, ledger_path)}
     end
   end
+
+  defp compute_revocation_ledger_path(authority_root) do
+    candidate =
+      case Application.fetch_env(@app, :revocation_ledger_path) do
+        {:ok, configured} -> configured
+        :error -> default_revocation_ledger_path()
+      end
+
+    with {:ok, path} <- canonicalize_revocation_ledger_path(candidate),
+         false <- within_path?(authority_root, path) do
+      {:ok, path}
+    else
+      true -> {:error, :revocation_ledger_not_independent}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp default_revocation_ledger_path do
+    master_key_path =
+      Application.get_env(
+        @app,
+        :master_key_path,
+        Path.join(System.user_home!(), ".arbor/security/master.key")
+      )
+
+    if is_binary(master_key_path) do
+      Path.join(Path.dirname(master_key_path), @revocation_ledger_filename)
+    else
+      master_key_path
+    end
+  end
+
+  defp canonicalize_revocation_ledger_path(path)
+       when is_binary(path) and byte_size(path) > 0 do
+    if Path.type(path) == :absolute,
+      do: {:ok, Path.expand(path)},
+      else: {:error, :revocation_ledger_path_invalid}
+  end
+
+  defp canonicalize_revocation_ledger_path(_invalid),
+    do: {:error, :revocation_ledger_path_invalid}
+
+  defp within_path?("/", _path), do: true
+
+  defp within_path?(root, path),
+    do: path == root or String.starts_with?(path, root <> "/")
 
   defp fetch_primary_authority_root do
     case Application.fetch_env(@app, :authority_state_root) do
@@ -1398,8 +1622,11 @@ defmodule Arbor.Security.Config do
     end
   end
 
-  defp validate_authority_root_snapshot(%{root: root, source: source} = snapshot)
-       when is_binary(root) and byte_size(root) > 0 and source in @authority_root_sources do
+  defp validate_authority_root_snapshot(
+         %{root: root, source: source, revocation_ledger_path: ledger_path} = snapshot
+       )
+       when is_binary(root) and byte_size(root) > 0 and source in @authority_root_sources and
+              is_binary(ledger_path) and byte_size(ledger_path) > 0 do
     {:ok, snapshot}
   end
 

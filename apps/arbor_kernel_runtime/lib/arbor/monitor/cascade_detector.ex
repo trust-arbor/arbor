@@ -54,9 +54,9 @@ defmodule Arbor.Monitor.CascadeDetector do
   @doc """
   Record an anomaly occurrence. Call this when an anomaly is detected.
   """
-  @spec record_anomaly(map()) :: :ok
+  @spec record_anomaly(map()) :: :ok | {:error, :not_running | :unauthorized}
   def record_anomaly(anomaly) do
-    GenServer.cast(__MODULE__, {:record_anomaly, anomaly})
+    authenticated_detector_call({:record_anomaly, anomaly})
   end
 
   @doc """
@@ -110,9 +110,9 @@ defmodule Arbor.Monitor.CascadeDetector do
   @doc """
   Notify that a polling cycle completed (for settling countdown).
   """
-  @spec polling_cycle_completed() :: :ok
+  @spec polling_cycle_completed() :: :ok | {:error, :not_running | :unauthorized}
   def polling_cycle_completed do
-    GenServer.cast(__MODULE__, :polling_cycle_completed)
+    authenticated_detector_call(:polling_cycle_completed)
   end
 
   @doc """
@@ -129,6 +129,8 @@ defmodule Arbor.Monitor.CascadeDetector do
 
   @impl GenServer
   def init(opts) do
+    Process.flag(:sensitive, true)
+
     config = %{
       window_ms: Keyword.get(opts, :window_ms, @default_window_ms),
       cascade_threshold: Keyword.get(opts, :cascade_threshold, @default_cascade_threshold),
@@ -152,7 +154,10 @@ defmodule Arbor.Monitor.CascadeDetector do
       settling_cycles_remaining: 0,
       # Statistics
       cascades_detected: 0,
-      total_anomalies: 0
+      total_anomalies: 0,
+      authenticated_calls: Arbor.Common.new_authenticated_call_custody(),
+      trusted_anomaly_producer: configured_test_producer(opts, :trusted_anomaly_producer),
+      trusted_polling_producer: configured_test_producer(opts, :trusted_polling_producer)
     }
 
     # Schedule periodic cleanup of old timestamps
@@ -162,7 +167,11 @@ defmodule Arbor.Monitor.CascadeDetector do
   end
 
   @impl GenServer
-  def handle_cast({:record_anomaly, anomaly}, state) do
+  # Casts have no authenticated sender. Legacy and hostile messages fail
+  # closed without taking down the detector.
+  def handle_cast(_message, state), do: {:noreply, state}
+
+  defp record_anomaly_state(anomaly, state) do
     now = System.monotonic_time(:millisecond)
 
     # Add to sliding window
@@ -173,24 +182,21 @@ defmodule Arbor.Monitor.CascadeDetector do
     rate = calculate_rate(new_times, now, state.config.window_ms)
     state = update_cascade_state(state, rate, now, anomaly)
 
-    {:noreply, state}
+    state
   end
 
-  def handle_cast(:polling_cycle_completed, state) do
-    state =
-      if state.settling_cycles_remaining > 0 do
-        remaining = state.settling_cycles_remaining - 1
+  defp polling_cycle_completed_state(state) do
+    if state.settling_cycles_remaining > 0 do
+      remaining = state.settling_cycles_remaining - 1
 
-        if remaining == 0 do
-          Logger.info("[CascadeDetector] Settling complete, proposals may resume")
-        end
-
-        %{state | settling_cycles_remaining: remaining}
-      else
-        state
+      if remaining == 0 do
+        Logger.info("[CascadeDetector] Settling complete, proposals may resume")
       end
 
-    {:noreply, state}
+      %{state | settling_cycles_remaining: remaining}
+    else
+      state
+    end
   end
 
   @impl GenServer
@@ -266,9 +272,40 @@ defmodule Arbor.Monitor.CascadeDetector do
     {:noreply, state}
   end
 
+  def handle_info(message, state) do
+    case Arbor.Common.handle_authenticated_call(message, state.authenticated_calls) do
+      {:authenticated, caller, request, reply_to} ->
+        {reply, state} = dispatch_authenticated(request, caller, state)
+        :ok = Arbor.Common.reply_authenticated_call(reply_to, reply)
+        {:noreply, state}
+
+      result when result in [:pending, :expired, :rejected, :unrecognized] ->
+        {:noreply, state}
+    end
+  end
+
   # ============================================================================
   # Internal Functions
   # ============================================================================
+
+  defp dispatch_authenticated({:record_anomaly, anomaly}, caller, state) do
+    if authorized_anomaly_producer?(caller, state) do
+      {:ok, record_anomaly_state(anomaly, state)}
+    else
+      {{:error, :unauthorized}, state}
+    end
+  end
+
+  defp dispatch_authenticated(:polling_cycle_completed, caller, state) do
+    if authorized_polling_producer?(caller, state) do
+      {:ok, polling_cycle_completed_state(state)}
+    else
+      {{:error, :unauthorized}, state}
+    end
+  end
+
+  defp dispatch_authenticated(_request, _caller, state),
+    do: {{:error, :unauthorized}, state}
 
   defp calculate_rate(times, now, window_ms) do
     cutoff = now - window_ms
@@ -333,12 +370,17 @@ defmodule Arbor.Monitor.CascadeDetector do
 
   defp check_cascade_exit(state, now) do
     if state.in_cascade do
-      time_below = now - (state.last_above_threshold_at || now)
+      rate = calculate_rate(state.anomaly_times, now, state.config.window_ms)
 
-      if time_below >= state.config.exit_threshold_ms do
-        exit_cascade(state, now)
-      else
-        state
+      cond do
+        rate >= state.config.cascade_threshold ->
+          %{state | last_above_threshold_at: now}
+
+        now - (state.last_above_threshold_at || now) >= state.config.exit_threshold_ms ->
+          exit_cascade(state, now)
+
+        true ->
+          state
       end
     else
       state
@@ -387,6 +429,8 @@ defmodule Arbor.Monitor.CascadeDetector do
   end
 
   defp emit_signal(state, event, payload) do
+    forward_to_ops_room(event, payload)
+
     case state.config.signal_callback do
       nil ->
         :ok
@@ -401,6 +445,79 @@ defmodule Arbor.Monitor.CascadeDetector do
 
       _ ->
         :ok
+    end
+  end
+
+  defp forward_to_ops_room(event, payload) do
+    Arbor.Monitor.AnomalyForwarder.forward(%{type: event, data: payload})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  if Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false) do
+    defp authenticated_detector_call(request) do
+      case Process.whereis(__MODULE__) do
+        pid when is_pid(pid) -> Arbor.Common.authenticated_call(pid, request)
+        _other -> {:error, :not_running}
+      end
+    catch
+      :exit, _reason -> {:error, :not_running}
+    end
+
+    defp configured_test_producer(opts, key), do: Keyword.get(opts, key)
+
+    defp authorized_anomaly_producer?(caller, state) do
+      caller == state.trusted_anomaly_producer or
+        caller == Process.whereis(Arbor.Monitor.AnomalyQueue)
+    end
+
+    defp authorized_polling_producer?(caller, state) do
+      caller == state.trusted_polling_producer or caller == Process.whereis(Arbor.Monitor.Poller)
+    end
+  else
+    @detector_path [
+      Arbor.Monitor.Application,
+      Arbor.Monitor.HealingSupervisor,
+      __MODULE__
+    ]
+    @queue_path [
+      Arbor.Monitor.Application,
+      Arbor.Monitor.HealingSupervisor,
+      Arbor.Monitor.AnomalyQueue
+    ]
+    @poller_path [Arbor.Monitor.Application, Arbor.Monitor.Poller]
+
+    defp authenticated_detector_call(request) do
+      case Arbor.Common.supervised_registered_child_pid(
+             :arbor_kernel_runtime,
+             @detector_path,
+             __MODULE__
+           ) do
+        {:ok, pid} -> Arbor.Common.authenticated_call(pid, request)
+        {:error, :not_supervised_owner} -> {:error, :not_running}
+      end
+    catch
+      :exit, _reason -> {:error, :not_running}
+    end
+
+    defp configured_test_producer(_opts, _key), do: nil
+
+    defp authorized_anomaly_producer?(caller, _state) do
+      exact_supervised_caller?(caller, @queue_path, Arbor.Monitor.AnomalyQueue)
+    end
+
+    defp authorized_polling_producer?(caller, _state) do
+      exact_supervised_caller?(caller, @poller_path, Arbor.Monitor.Poller)
+    end
+
+    defp exact_supervised_caller?(caller, path, name) do
+      case Arbor.Common.supervised_registered_child_pid(:arbor_kernel_runtime, path, name) do
+        {:ok, ^caller} -> true
+        _other -> false
+      end
     end
   end
 end

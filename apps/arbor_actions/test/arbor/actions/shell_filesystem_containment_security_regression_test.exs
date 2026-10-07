@@ -61,7 +61,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     File.write!(Path.join(cwd, "input"), "permitted-data")
     File.write!(Path.join(root, "outside"), "outside-data")
     {:ok, identity} = Security.generate_identity(name: "synthetic-action-containment")
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
     {:ok, profile} = Profile.new(identity.agent_id)
     :ok = Store.store_profile(profile)
 
@@ -74,15 +74,17 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
       {:ok, _} = Trust.set_rule(identity.agent_id, resource, :auto)
     end
 
-    {:ok, _} = Security.grant(principal: identity.agent_id, resource: "arbor://shell/exec/**")
+    {:ok, _} =
+      Security.grant_fixture(principal: identity.agent_id, resource: "arbor://shell/exec/**")
+
     old = Application.get_env(:arbor_shell, :agent_authorizer)
     Application.put_env(:arbor_shell, :agent_authorizer, Actions.Shell)
 
     on_exit(fn ->
       Application.put_env(:arbor_shell, :agent_authorizer, old)
       {:ok, caps} = Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Security.revoke(cap.id)
-      Security.deregister_identity(identity.agent_id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
+      Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf!(root)
     end)
 
@@ -138,7 +140,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
 
   defp grant(c, operation) do
     {:ok, _} =
-      Security.grant(
+      Security.grant_fixture(
         principal: c.identity.agent_id,
         resource: "arbor://fs/#{operation}#{c.cwd}/**"
       )

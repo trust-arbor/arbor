@@ -97,7 +97,9 @@ defmodule Arbor.Actions.GitBranchTest do
       assert {:ok, _} = run_git(Git.Branch, %{path: repo_path, mode: :create, name: "dup"}, %{})
 
       # Try to create again — git refuses.
-      assert {:error, msg} = run_git(Git.Branch, %{path: repo_path, mode: :create, name: "dup"}, %{})
+      assert {:error, msg} =
+               run_git(Git.Branch, %{path: repo_path, mode: :create, name: "dup"}, %{})
+
       assert msg =~ "Failed to create branch"
     end
   end

@@ -15,12 +15,12 @@ defmodule Arbor.Security.ForgeProjectionSigningTest do
     on_exit(&TestBootstrap.restore_supervised_tree!/0)
 
     {:ok, identity} = Identity.generate(name: "forge-projection-signing-test")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     {:ok,
@@ -103,9 +103,10 @@ defmodule Arbor.Security.ForgeProjectionSigningTest do
     assert {:ok, message} = canonical_message(ctx)
 
     assert {:error, :purpose_mismatch} =
-             SigningAuthorityBroker.sign_detached(
+             SigningAuthorityBroker.sign_platform_activation(
                session,
-               "arbor.extension.activation_authorization.v1"
+               %{},
+               "mismatched-purpose-nonce"
              )
 
     assert {:error, :purpose_mismatch} =
@@ -241,12 +242,12 @@ defmodule Arbor.Security.ForgeProjectionSigningTest do
 
   defp register_other_identity do
     {:ok, identity} = Identity.generate(name: "alternate-forge-signing-key")
-    :ok = Security.register_identity(Identity.public_only(identity))
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{agent_id: identity.agent_id, private_key: identity.private_key}

@@ -27,25 +27,7 @@ defmodule Arbor.Signals.RelayTest do
   # required to pick up new config — only to get clean state. Reset the state in
   # place instead of bouncing a shared supervised process.
   defp reset_relay_state do
-    :sys.replace_state(Relay, fn _old ->
-      %{
-        batch: [],
-        batch_size: 0,
-        rate_buckets: %{},
-        node_counters: %{},
-        stats: %{
-          relayed_out: 0,
-          relayed_in: 0,
-          batches_sent: 0,
-          signals_dropped: 0,
-          signals_rate_limited: 0,
-          signals_rejected: 0,
-          peers_seen: 0
-        }
-      }
-    end)
-
-    :ok
+    Relay.reset_fixture()
   end
 
   setup do
@@ -68,12 +50,12 @@ defmodule Arbor.Signals.RelayTest do
     test "accepts cluster-scoped signals" do
       signal = Signal.new(:agent, :started, %{agent_id: "test"})
       assert signal.scope == :cluster
-      assert :ok = Relay.relay(signal)
+      assert :ok = Relay.relay_fixture(signal)
     end
 
     test "queues signals for batching" do
       signal = Signal.new(:agent, :started, %{agent_id: "test"})
-      Relay.relay(signal)
+      Relay.relay_fixture(signal)
 
       stats = Relay.stats()
       assert stats.batch_pending >= 0
@@ -207,11 +189,11 @@ defmodule Arbor.Signals.RelayTest do
 
       # Fill the batch with agent signals (priority 2)
       for _ <- 1..3 do
-        Relay.relay(Signal.new(:agent, :started, %{}))
+        Relay.relay_fixture(Signal.new(:agent, :started, %{}))
       end
 
       # This should trigger load shedding
-      Relay.relay(Signal.new(:agent, :extra, %{}))
+      Relay.relay_fixture(Signal.new(:agent, :extra, %{}))
 
       stats = Relay.stats()
       assert stats.signals_dropped >= 1
@@ -225,11 +207,11 @@ defmodule Arbor.Signals.RelayTest do
       reset_relay_state()
 
       # Fill with agent signals
-      Relay.relay(Signal.new(:agent, :started, %{}))
-      Relay.relay(Signal.new(:agent, :stopped, %{}))
+      Relay.relay_fixture(Signal.new(:agent, :started, %{}))
+      Relay.relay_fixture(Signal.new(:agent, :stopped, %{}))
 
       # Security signal should replace an agent signal
-      Relay.relay(Signal.new(:security, :breach, %{}))
+      Relay.relay_fixture(Signal.new(:security, :breach, %{}))
 
       stats = Relay.stats()
       assert stats.signals_dropped >= 1
@@ -245,15 +227,11 @@ defmodule Arbor.Signals.RelayTest do
       # supervised Relay (see reset_relay_state/0).
       reset_relay_state()
 
-      Relay.relay(Signal.new(:agent, :started, %{}))
+      Relay.relay_fixture(Signal.new(:agent, :started, %{}))
 
-      # Wait for flush
-      Process.sleep(50)
-
-      stats = Relay.stats()
       # With no peers, signals are "flushed" but not sent anywhere
       # The batch should be empty after flush
-      assert stats.batch_pending == 0
+      assert eventually(fn -> Relay.stats().batch_pending == 0 end)
     end
   end
 
@@ -265,7 +243,7 @@ defmodule Arbor.Signals.RelayTest do
       ]
 
       # Simulate receiving a batch from a peer
-      GenServer.cast(Relay, {:receive_batch, signals, :peer@host})
+      assert :ok = Relay.receive_batch_fixture(signals, :peer@host)
 
       # Give it time to process (CI VMs may be slower)
       Process.sleep(100)
@@ -275,6 +253,52 @@ defmodule Arbor.Signals.RelayTest do
       # observability events are injected; only closed mutation types drop.
       assert stats.relayed_in == 2
       assert stats.signals_rejected == 0
+    end
+
+    test "security regression: remote event identity and attribution are restamped" do
+      test_pid = self()
+
+      forged_emitter =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(forged_emitter, :kill) end)
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "activity.remote_attribution_regression",
+          fn signal ->
+            send(test_pid, {:remote_attribution, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      forged = %{
+        Signal.new(:activity, :remote_attribution_regression, %{
+          origin_node: :forged_data@node
+        })
+        | id: "sig_remote_attacker",
+          timestamp: DateTime.add(DateTime.utc_now(), 86_400, :second),
+          emitter_pid: forged_emitter,
+          origin_node: :forged_struct@node
+      }
+
+      before_ingest = DateTime.utc_now()
+      assert :ok = Relay.receive_batch_fixture([forged], :peer@host)
+
+      assert_receive {:remote_attribution, delivered}, 1_000
+      refute delivered.id == forged.id
+      assert DateTime.compare(delivered.timestamp, before_ingest) in [:eq, :gt]
+      assert delivered.emitter_pid == Process.whereis(Relay)
+      assert delivered.origin_node == :peer@host
+      assert delivered.data.origin_node == :peer@host
+      assert delivered.metadata["remote"]["id"] =~ "sig_remote_attacker"
+
+      Bus.unsubscribe(sub_id)
     end
 
     test "security regression: authority-granting mutations drop; revocations, observability and nonce_seen inject" do
@@ -331,12 +355,11 @@ defmodule Arbor.Signals.RelayTest do
         Signal.new(:agent, :started, %{agent_id: "agent_ok_#{marker}"})
       ]
 
-      GenServer.cast(Relay, {:receive_batch, signals, :peer@host})
+      assert :ok = Relay.receive_batch_fixture(signals, :peer@host)
 
-      # Only the security-sync path JSON-normalizes, so :security and
-      # :identity data arrive with STRING keys while :agent keeps atoms.
-      # The atom-key pattern this test shipped with for :auth_ok could never
-      # match — it was red on main before the directional change.
+      # Ordinary restricted observations are topic-encrypted/JSON-normalized.
+      # Security-sync revocations and nonce events stay in their original map
+      # form because node-local topic keys cannot be decrypted by peers.
       assert_receive {:relay_injected, :agent, :started, %{agent_id: agent_id}}, 500
       assert agent_id == "agent_ok_#{marker}"
 
@@ -344,15 +367,15 @@ defmodule Arbor.Signals.RelayTest do
       assert obs_id == "obs_#{marker}"
 
       assert_receive {:relay_injected, :security, :nonce_seen, nonce_data}, 500
-      assert nonce_data["nonce_hex"] == nonce_hex
+      assert nonce_data.nonce_hex == nonce_hex
 
       # Authority-REDUCING mutations must reach their consumers even with no
       # authenticated transport — dropping them here is what left revoked
       # capabilities live on peer nodes.
       assert_receive {:relay_injected, :security, :capability_revoked, revoked_data}, 500
-      assert revoked_data["capability_ids"] == ["cap_p1b_#{marker}"]
+      assert revoked_data.capability_ids == ["cap_p1b_#{marker}"]
       assert_receive {:relay_injected, :identity, :identity_revoked, id_revoked_data}, 500
-      assert id_revoked_data["agent_id"] == "agent_p1b_#{marker}"
+      assert id_revoked_data.agent_id == "agent_p1b_#{marker}"
 
       # Authority-GRANTING mutations stay dropped: those are the ones a
       # forged signal could use to widen access.
@@ -379,7 +402,7 @@ defmodule Arbor.Signals.RelayTest do
       reset_relay_state()
 
       for _ <- 1..10 do
-        Relay.relay(Signal.new(:agent, :started, %{}))
+        Relay.relay_fixture(Signal.new(:agent, :started, %{}))
       end
 
       stats = Relay.stats()
@@ -398,7 +421,7 @@ defmodule Arbor.Signals.RelayTest do
 
       # Flood with signals from same category
       for _ <- 1..20 do
-        Relay.relay(Signal.new(:agent, :started, %{}))
+        Relay.relay_fixture(Signal.new(:agent, :started, %{}))
       end
 
       stats = Relay.stats()
@@ -415,11 +438,11 @@ defmodule Arbor.Signals.RelayTest do
 
       # Send 3 agent + 3 security — each category gets its own bucket
       for _ <- 1..3 do
-        Relay.relay(Signal.new(:agent, :started, %{}))
+        Relay.relay_fixture(Signal.new(:agent, :started, %{}))
       end
 
       for _ <- 1..3 do
-        Relay.relay(Signal.new(:security, :event, %{}))
+        Relay.relay_fixture(Signal.new(:security, :event, %{}))
       end
 
       stats = Relay.stats()
@@ -439,7 +462,7 @@ defmodule Arbor.Signals.RelayTest do
     test "accepts signals from own node" do
       signals = [Signal.new(:agent, :started, %{})]
 
-      GenServer.cast(Relay, {:receive_batch, signals, node()})
+      assert :ok = Relay.receive_batch_fixture(signals, node())
       Process.sleep(10)
 
       stats = Relay.stats()
@@ -451,7 +474,7 @@ defmodule Arbor.Signals.RelayTest do
       # In test mode we're always nonode@nohost, so all peers are accepted
       signals = [Signal.new(:agent, :started, %{})]
 
-      GenServer.cast(Relay, {:receive_batch, signals, :unknown@host})
+      assert :ok = Relay.receive_batch_fixture(signals, :unknown@host)
       Process.sleep(100)
 
       stats = Relay.stats()
@@ -475,7 +498,7 @@ defmodule Arbor.Signals.RelayTest do
 
       signals = for i <- 1..10, do: Signal.new(:agent, :started, %{i: i})
 
-      GenServer.cast(Relay, {:receive_batch, signals, node()})
+      assert :ok = Relay.receive_batch_fixture(signals, node())
       Process.sleep(10)
 
       stats = Relay.stats()
@@ -493,7 +516,7 @@ defmodule Arbor.Signals.RelayTest do
       # Send 10 signals — only 5 should be accepted
       signals = for i <- 1..10, do: Signal.new(:agent, :started, %{i: i})
 
-      GenServer.cast(Relay, {:receive_batch, signals, node()})
+      assert :ok = Relay.receive_batch_fixture(signals, node())
       Process.sleep(10)
 
       stats = Relay.stats()
@@ -507,7 +530,7 @@ defmodule Arbor.Signals.RelayTest do
       signal = Signal.new(:agent, :started, %{}, metadata: %{agent_id: "test_123"})
       signals = [signal]
 
-      GenServer.cast(Relay, {:receive_batch, signals, node()})
+      assert :ok = Relay.receive_batch_fixture(signals, node())
       Process.sleep(10)
 
       stats = Relay.stats()
@@ -522,11 +545,29 @@ defmodule Arbor.Signals.RelayTest do
 
       signals = [signal]
 
-      GenServer.cast(Relay, {:receive_batch, signals, node()})
+      assert :ok = Relay.receive_batch_fixture(signals, node())
       Process.sleep(10)
 
       stats = Relay.stats()
       assert stats.relayed_in == 1
+    end
+  end
+
+  defp eventually(fun, timeout_ms \\ 500) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(10)
+        do_eventually(fun, deadline)
+      end
     end
   end
 end

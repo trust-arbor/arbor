@@ -12,6 +12,40 @@ defmodule Arbor.Orchestrator.CodingRunRecoverySecurityRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.SigningAuthorityBroker
 
+  defmodule TestAuthorityProvider do
+    def issue_signing_authority_bootstrap(agent_id, purpose) do
+      keys = Application.fetch_env!(:arbor_orchestrator, :coding_recovery_authority_keys)
+
+      with {:ok, private_key} <- Map.fetch(keys, agent_id),
+           {:ok, proof} <-
+             Arbor.Security.build_signing_authority_acquisition_proof(
+               agent_id,
+               private_key,
+               purpose: purpose,
+               owner: self()
+             ) do
+        Arbor.Security.issue_signing_authority_bootstrap(proof)
+      end
+    end
+  end
+
+  setup do
+    previous = Application.get_env(:arbor_orchestrator, :coding_authority_provider)
+    Application.put_env(:arbor_orchestrator, :coding_authority_provider, TestAuthorityProvider)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_orchestrator, :coding_recovery_authority_keys)
+
+      if is_nil(previous) do
+        Application.delete_env(:arbor_orchestrator, :coding_authority_provider)
+      else
+        Application.put_env(:arbor_orchestrator, :coding_authority_provider, previous)
+      end
+    end)
+
+    :ok
+  end
+
   test "task-owned binding skips without opening an authority" do
     logs = Path.join(System.tmp_dir!(), "g3b-skip-#{System.unique_integer([:positive])}")
     File.mkdir_p!(logs)
@@ -118,12 +152,18 @@ defmodule Arbor.Orchestrator.CodingRunRecoverySecurityRegressionTest do
   test "security regression: normal recover close is required and kill still zeros broker handles" do
     {:ok, identity} = Identity.generate(name: "g3b-normal-owner")
     public_identity = Identity.public_only(identity)
-    :ok = Security.register_identity(public_identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(public_identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_recovery_authority_keys,
+      %{identity.agent_id => identity.private_key}
+    )
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     before = broker_authority_count()
@@ -140,12 +180,18 @@ defmodule Arbor.Orchestrator.CodingRunRecoverySecurityRegressionTest do
   test "security regression: killing the recover owner closes the broker handle" do
     {:ok, identity} = Identity.generate(name: "g3b-kill-owner")
     public_identity = Identity.public_only(identity)
-    :ok = Security.register_identity(public_identity)
-    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = Security.register_identity_fixture(public_identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_recovery_authority_keys,
+      %{identity.agent_id => identity.private_key}
+    )
 
     on_exit(fn ->
-      _ = Security.delete_signing_key(identity.agent_id)
-      _ = Security.deregister_identity(identity.agent_id)
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     parent = self()

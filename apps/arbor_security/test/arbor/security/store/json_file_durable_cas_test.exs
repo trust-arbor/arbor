@@ -214,7 +214,7 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
     assert stored.generation == 1
   end
 
-  test "only exact temp filename pattern is ignored; malformed dot-json fails", %{
+  test "only exact temp filename pattern is ignored; foreign json is quarantined", %{
     dir: dir,
     opts: opts
   } do
@@ -229,10 +229,13 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
     assert {:ok, keys} = JSONFile.list(opts)
     assert "live" in keys
 
-    # Malformed leading-dot json is authoritative and must fail closed
-    File.write!(Path.join(ns_dir, ".evil.json"), "{}")
-    assert {:error, reason} = JSONFile.list(opts)
-    assert reason in [:malformed_envelope, :identity_mismatch, :invalid_managed_target]
+    # A non-canonical JSON filename is not an authority record. Preserve it as
+    # evidence without letting it deny availability of the canonical inventory.
+    junk = Path.join(ns_dir, ".evil.json")
+    File.write!(junk, "{}")
+    assert {:ok, ["live"]} = JSONFile.list(opts)
+    refute File.exists?(junk)
+    assert [_quarantined] = File.ls!(Path.join(ns_dir, ".quarantine"))
   end
 
   test "authoritative inventory counts tombstones toward the bound", %{opts: opts} do
@@ -281,6 +284,21 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
     if File.dir?(ns_dir) do
       refute Enum.any?(File.ls!(ns_dir), &String.ends_with?(&1, ".json"))
     end
+  end
+
+  test "security regression: legacy inventory overflow is rejected before record decoding", %{
+    dir: dir,
+    opts: opts
+  } do
+    real_base = resolve_base!(dir)
+    legacy_dir = Path.join(real_base, "capabilities")
+    File.mkdir_p!(legacy_dir)
+
+    File.write!(Path.join(legacy_dir, "malformed_a.json"), "not json")
+    File.write!(Path.join(legacy_dir, "malformed_b.json"), "not json")
+
+    assert {:error, :inventory_limit_exceeded} =
+             JSONFile.list(Keyword.put(opts, :authoritative_limit, 1))
   end
 
   test "filename digest mismatch fails closed", %{dir: dir, opts: opts} do
@@ -525,7 +543,7 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
              JSONFile.put("fsync_bad", Record.new("fsync_bad", %{"b" => 1}), opts)
   end
 
-  test "legacy migration preserves data/metadata and nil inserted_at fence via Revision", %{
+  test "legacy authority records fail closed with an offline migration error", %{
     dir: dir,
     opts: opts
   } do
@@ -541,23 +559,11 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
       })
     )
 
-    assert {:ok, %Record{} = rec} = JSONFile.get("legacy_cap", opts)
-    assert rec.id == "legacy_cap"
-    assert rec.key == "legacy_cap"
-    assert rec.data == %{"id" => "legacy_cap", "payload" => "keep"}
-    assert rec.metadata == %{"source" => "legacy"}
-    assert rec.generation == 1
-    assert rec.revision == 1
-    assert is_nil(rec.inserted_at)
-    assert %DateTime{} = rec.updated_at
+    assert {:error, :offline_migration_required} = JSONFile.get("legacy_cap", opts)
+    assert {:error, :offline_migration_required} = JSONFile.list(opts)
 
-    # Legacy retired after v2 publish
-    refute File.exists?(Path.join(legacy_dir, "legacy_cap.json"))
-
-    # Stateless reread
-    assert {:ok,
-            %Record{generation: 1, revision: 1, inserted_at: nil, data: %{"payload" => "keep"}}} =
-             JSONFile.get("legacy_cap", opts)
+    # Runtime reads never adopt or rewrite unauthenticated bytes.
+    assert File.exists?(Path.join(legacy_dir, "legacy_cap.json"))
   end
 
   test "stateless reread preserves live records and tombstone generation", %{opts: opts} do

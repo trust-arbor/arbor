@@ -45,13 +45,14 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
   @doc """
   Parse the contents of a `.arbor.key` file.
 
-  Delegates to `Arbor.Security.KeyFile.parse/1` — the canonical home for
-  this parsing logic. Kept here as a backward-compat shim because external
-  callers (and `mix arbor.signer`) use this name. New callers should
-  reference `Arbor.Security.KeyFile.parse/1` directly.
+  Delegates through the public `Arbor.Security` facade. Kept here as a
+  backward-compatibility shim because external callers and `mix arbor.signer`
+  use this name.
   """
   @spec parse_key_file(String.t()) :: {:ok, key_material()} | {:error, atom() | tuple()}
-  defdelegate parse_key_file(contents), to: Arbor.Security.KeyFile, as: :parse
+  defdelegate parse_key_file(contents),
+    to: Arbor.Security,
+    as: :parse_operator_key_file_contents
 
   # ===========================================================================
   # Reduce: compute canonical bytes the SignedRequestAuth plug expects

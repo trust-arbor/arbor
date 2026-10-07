@@ -303,15 +303,12 @@ defmodule Arbor.Actions.Eval do
       is_binary(params[:file]) and params[:file] != "" ->
         project_root = File.cwd!()
 
-        case SafePath.resolve_within(params[:file], project_root) do
-          {:ok, safe_path} ->
-            case File.read(safe_path) do
-              {:ok, code} -> {:ok, %{code: code, file: safe_path}}
-              {:error, reason} -> {:error, {:file_read_failed, safe_path, reason}}
-            end
+        case SafePath.read_within(params[:file], project_root) do
+          {:ok, code, safe_path} ->
+            {:ok, %{code: code, file: safe_path}}
 
           {:error, reason} ->
-            {:error, {:invalid_path, params[:file], reason}}
+            {:error, {:file_read_failed, params[:file], reason}}
         end
 
       true ->

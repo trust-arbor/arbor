@@ -82,7 +82,7 @@ defmodule Arbor.Actions.MemoryTest do
       }
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.CapabilityStore.put(cap)
+        Arbor.Security.put_capability_fixture(cap)
       end
     end
   end

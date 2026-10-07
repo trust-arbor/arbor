@@ -181,6 +181,7 @@ defmodule Arbor.Agent.Profile do
     %{
       "agent_id" => identity[:agent_id],
       "public_key" => identity[:public_key],
+      "encryption_public_key" => identity[:encryption_public_key],
       "endorsement" => serialize_endorsement(endorsement)
     }
   end
@@ -203,6 +204,7 @@ defmodule Arbor.Agent.Profile do
     %{
       agent_id: map["agent_id"],
       public_key: map["public_key"],
+      encryption_public_key: map["encryption_public_key"],
       endorsement: deserialize_endorsement(map["endorsement"])
     }
   end

@@ -12,7 +12,6 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
   alias Arbor.Security.SessionToken
   alias Arbor.Signals
   alias Arbor.Signals.Adapters.CapabilityAuthorizer
-  alias Arbor.Signals.Bus
 
   @resource "arbor://signals/subscribe/security"
 
@@ -83,7 +82,7 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "k1f-test-secret-#{System.unique_integer([:positive])}"
+      "k1f-test-secret-at-least-thirty-two-bytes-#{System.unique_integer([:positive])}"
     )
 
     Arbor.Signals.Config.Testing.isolate_namespace()
@@ -119,7 +118,7 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
              )
 
     assert {:ok, _sub_id} =
-             Bus.subscribe("security.*", fn _signal -> :ok end,
+             Signals.subscribe("security.*", fn _signal -> :ok end,
                principal_id: human_id,
                session_token: token
              )
@@ -191,45 +190,26 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
 
     on_exit(fn ->
       oidc.cleanup.()
-      _ = Security.deregister_identity(human_id)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     human_id
   end
 
   defp grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
 
     on_exit(fn ->
-      _ = Security.revoke(cap.id)
+      _ = Security.revoke_fixture(cap.id)
     end)
 
     cap
   end
 
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
-
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} ->
-          :ok
-
-        {:error, {:already_started, _pid}} ->
-          :ok
-
-        {:error, :already_present} ->
-          {module, _opts} = child
-          :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-          {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-      end
-    end
+    :ok = Signals.restore_runtime_fixture()
+    on_exit(fn -> :ok = Signals.restore_runtime_fixture() end)
+    :ok
   end
 
   defp restore_security(key, nil), do: Application.delete_env(:arbor_security, key)

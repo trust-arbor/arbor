@@ -111,7 +111,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     |> Client.set_default_client()
 
     {:ok, identity} = Security.generate_identity(name: "synthetic qualification admission")
-    :ok = Security.register_identity(identity)
+    :ok = Security.register_identity_fixture(identity)
 
     {:ok, _} =
       Trust.ensure_trust_profile(identity.agent_id,
@@ -120,13 +120,16 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
       )
 
     {:ok, _} =
-      Security.grant(principal: identity.agent_id, resource: "arbor://orchestrator/execute/**")
+      Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://orchestrator/execute/**"
+      )
 
     on_exit(fn ->
       {:ok, caps} = Security.list_capabilities(identity.agent_id)
-      for cap <- caps, do: Security.revoke(cap.id)
+      for cap <- caps, do: Security.revoke_fixture(cap.id)
       Trust.delete_trust_profile(identity.agent_id)
-      Security.deregister_identity(identity.agent_id)
+      Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     session_id = "qualification_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
@@ -238,7 +241,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     assert prepared.profile.fingerprint == profile.fingerprint
 
     assert {:ok, cap} =
-             Security.grant(principal: identity.agent_id, resource: prepared.approval_uri)
+             Security.grant_fixture(principal: identity.agent_id, resource: prepared.approval_uri)
 
     assert {:ok, after_approval} = Session.security_qualification_profile(session)
     assert after_approval.fingerprint == profile.fingerprint
@@ -318,7 +321,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     do: send(owner, :qualification_preprocessing_started)
 
   test "security regression: revoking the exact approval refuses before the next turn", c do
-    :ok = Security.revoke(c.cap.id)
+    :ok = Security.revoke_fixture(c.cap.id)
     assert_refused_without_turn(c.session)
   end
 
@@ -356,7 +359,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
 
   test "security regression: widening current capabilities invalidates qualification", c do
     assert {:ok, _} =
-             Security.grant(
+             Security.grant_fixture(
                principal: c.agent_id,
                resource: "arbor://memory/read/#{c.agent_id}"
              )

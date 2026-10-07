@@ -401,6 +401,30 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       assert replayed.pending_needed == []
     end
 
+    test "large pending prefix preserves manifest order through encoding and replay" do
+      records =
+        Enum.flat_map(1..511, fn n ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          [prepared_record(intent), applied_record(intent, @t1)]
+        end)
+
+      {:ok, initial} = AuditJournalCore.new(:operational)
+      assert {:ok, state} = AuditJournalCore.fold(initial, records)
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), length(records), 1)
+      assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert length(pending) == 1_022
+
+      assert {:ok, bytes, encoded} = FileCore.encode_compacted(snapshot, pending)
+      assert encoded.pending_have == pending
+      assert encoded.frames == 1_023
+      assert FileCore.core_match?(encoded.core, compacted)
+
+      assert {:ok, start} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(start, bytes)
+      assert replayed.pending_have == pending
+      assert FileCore.core_match?(replayed.core, compacted)
+    end
+
     test "snapshot plus exact pending then later record matches restore then append" do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
@@ -608,6 +632,43 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {:ok, source} = FileCore.source_binding(empty.digest, empty.frames, empty.offset)
       assert FileCore.source_tip_match?(empty, source)
       refute FileCore.source_tip_match?(empty, Map.put(source, "committed_frames", 1))
+    end
+
+    test "security regression: source binding detects rewrites, truncation, and appends without refolding payloads" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, bytes} = encode_records([prepared, applied])
+      {:ok, empty} = FileCore.new()
+      {:ok, replayed} = FileCore.consume(empty, bytes)
+      {:ok, source} = FileCore.source_binding(replayed.digest, replayed.frames, replayed.offset)
+
+      assert :ok = FileCore.verify_source_binding(bytes, source)
+
+      rewritten_applied = Map.put(applied, "occurred_at", "2026-08-20T12:00:02Z")
+      {:ok, rewritten} = encode_records([prepared, rewritten_applied])
+      assert byte_size(rewritten) == byte_size(bytes)
+      assert {:error, :digest_mismatch} = FileCore.verify_source_binding(rewritten, source)
+
+      truncated = binary_part(bytes, 0, byte_size(bytes) - 1)
+      assert {:error, :size_mismatch} = FileCore.verify_source_binding(truncated, source)
+
+      {:ok, appended_frame, _digest} = encode_one(delivered, replayed.digest)
+
+      assert {:error, :size_mismatch} =
+               FileCore.verify_source_binding(bytes <> appended_frame, source)
+
+      assert {:error, :source_tip_mismatch} =
+               FileCore.verify_source_binding(
+                 bytes,
+                 Map.update!(source, "committed_frames", &(&1 + 1))
+               )
+
+      assert {:error, :source_tip_mismatch} =
+               FileCore.verify_source_binding(
+                 bytes,
+                 Map.put(source, "committed_digest", "not-a-digest")
+               )
+
+      assert {:error, :source_tip_mismatch} = FileCore.verify_source_binding(bytes, %{})
     end
 
     test "candidate_basename is a single hidden compact segment" do

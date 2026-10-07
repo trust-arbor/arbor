@@ -41,7 +41,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
     caps =
       for action <- [:read, :write] do
         {:ok, cap} =
-          Arbor.Security.grant(
+          Arbor.Security.grant_fixture(
             principal: agent_id,
             resource: "arbor://memory/#{action}/#{agent_id}"
           )
@@ -51,7 +51,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
 
     on_exit(fn ->
       Memory.cleanup_for_agent(agent_id)
-      for cap <- caps, do: Arbor.Security.revoke(cap.id)
+      for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)
     end)
 
     {:ok, agent_id: agent_id}
@@ -303,7 +303,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
           expires_at: DateTime.add(now, 3600, :second)
         }
 
-        Arbor.Security.CapabilityStore.put(cap)
+        Arbor.Security.put_capability_fixture(cap)
       end
 
       on_exit(fn ->

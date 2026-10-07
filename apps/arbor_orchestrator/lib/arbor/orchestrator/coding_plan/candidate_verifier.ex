@@ -3,10 +3,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
 
   alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Security.SigningAuthority
+
   alias Arbor.Orchestrator.CodingPlan.{
     CandidateVerificationCore,
     ValidationProgram
   }
+
   alias Arbor.Orchestrator.Config
 
   @inspect_action "coding_workspace_inspect"

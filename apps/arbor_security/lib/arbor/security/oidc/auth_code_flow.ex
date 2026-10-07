@@ -34,6 +34,7 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
   @max_client_secret_bytes 4_096
   @max_redirect_uri_bytes 2_048
   @max_state_bytes 1_024
+  @max_nonce_bytes 1_024
   @max_code_bytes 1_024
   @max_code_verifier_bytes 1_024
   @max_code_challenge_bytes 1_024
@@ -53,6 +54,10 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
   @spec generate_state() :: String.t()
   defdelegate generate_state(), to: AuthCode
 
+  @doc "Generate a cryptographic random nonce for binding an ID token to a browser login."
+  @spec generate_nonce() :: String.t()
+  def generate_nonce, do: AuthCode.generate_state()
+
   @doc """
   Build the OIDC authorization URL with PKCE parameters.
   """
@@ -66,6 +71,12 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
            validate_text(:client_id, provider_get(provider, :client_id), @max_client_id_bytes),
          :ok <- validate_uri_text(:redirect_uri, redirect_uri, @max_redirect_uri_bytes),
          :ok <- validate_text(:state, state, @max_state_bytes),
+         :ok <-
+           validate_optional_text(
+             :nonce,
+             option_get(normalized_opts, :nonce, nil),
+             @max_nonce_bytes
+           ),
          :ok <-
            validate_code_challenge_method(
              option_get(normalized_opts, :code_challenge_method, "S256")
@@ -91,6 +102,8 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
            ),
          {:ok, extra_query} <-
            AuthCode.validate_extra_query(option_get(normalized_opts, :extra_query, [])),
+         {:ok, extra_query} <-
+           add_nonce(extra_query, option_get(normalized_opts, :nonce, nil)),
          {:ok, endpoints} <- discover(provider, :authorize),
          {:ok, endpoint} <-
            require_endpoint(endpoints.authorization_endpoint, :no_authorization_endpoint),
@@ -326,6 +339,8 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
   defp normalize_option_key("code_challenge_method"), do: {:ok, :code_challenge_method}
   defp normalize_option_key(:scopes), do: {:ok, :scopes}
   defp normalize_option_key("scopes"), do: {:ok, :scopes}
+  defp normalize_option_key(:nonce), do: {:ok, :nonce}
+  defp normalize_option_key("nonce"), do: {:ok, :nonce}
   defp normalize_option_key(:extra_query), do: {:ok, :extra_query}
   defp normalize_option_key("extra_query"), do: {:ok, :extra_query}
   defp normalize_option_key(_), do: {:error, :unknown_key}
@@ -370,6 +385,14 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
 
   defp validate_optional_text(_field, nil, _max), do: :ok
   defp validate_optional_text(field, value, max), do: validate_text(field, value, max)
+
+  defp add_nonce(extra_query, nil), do: {:ok, extra_query}
+
+  defp add_nonce(extra_query, nonce) when is_list(extra_query) and is_binary(nonce) do
+    if List.keymember?(extra_query, "nonce", 0),
+      do: {:error, {:invalid_extra_query, {:reserved_key, "nonce"}}},
+      else: {:ok, [{"nonce", nonce} | extra_query]}
+  end
 
   defp validate_numeric_option(_field, nil, _max), do: :ok
 
@@ -434,7 +457,7 @@ defmodule Arbor.Security.OIDC.AuthCodeFlow do
   defp validate_code_challenge_fields(_challenge, _verifier),
     do: {:error, {:invalid_params, :invalid_code_challenge_pair}}
 
-  defp validate_code_verifier(""), do: :ok
+  defp validate_code_verifier(""), do: {:error, {:invalid_params, :empty}}
 
   defp validate_code_verifier(value),
     do: validate_text(:code_verifier, value, @max_code_verifier_bytes)

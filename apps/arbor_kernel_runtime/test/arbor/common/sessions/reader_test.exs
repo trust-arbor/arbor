@@ -11,7 +11,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
   describe "stream/2" do
     test "streams records from a basic JSONL file" do
       path = Path.join(@fixtures_dir, "claude_basic.jsonl")
-      assert {:ok, stream} = Reader.stream(path)
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir)
 
       records = Enum.to_list(stream)
       assert length(records) == 4
@@ -23,7 +23,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
 
     test "streams records with tool use" do
       path = Path.join(@fixtures_dir, "claude_tools.jsonl")
-      assert {:ok, stream} = Reader.stream(path)
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir)
 
       records = Enum.to_list(stream)
       assert length(records) == 8
@@ -41,7 +41,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
 
     test "streams records with thinking blocks" do
       path = Path.join(@fixtures_dir, "claude_thinking.jsonl")
-      assert {:ok, stream} = Reader.stream(path)
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir)
 
       records = Enum.to_list(stream)
 
@@ -58,7 +58,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
 
     test "returns empty stream for empty file" do
       path = Path.join(@fixtures_dir, "claude_empty.jsonl")
-      assert {:ok, stream} = Reader.stream(path)
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir)
 
       records = Enum.to_list(stream)
       assert records == []
@@ -66,7 +66,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
 
     test "skips malformed lines by default" do
       path = Path.join(@fixtures_dir, "claude_malformed.jsonl")
-      assert {:ok, stream} = Reader.stream(path)
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir)
 
       records = Enum.to_list(stream)
       # Should have valid records, skipping invalid ones
@@ -80,27 +80,82 @@ defmodule Arbor.Common.Sessions.ReaderTest do
     end
 
     test "returns error for non-existent file" do
-      assert {:error, :file_not_found} = Reader.stream("/nonexistent/path.jsonl")
+      assert {:error, :file_not_found} =
+               Reader.stream("/nonexistent/path.jsonl", allowed_root: "/")
+    end
+
+    @tag :security_regression
+    test "security regression: requires and enforces a trusted read root" do
+      path = Path.join(@fixtures_dir, "claude_basic.jsonl")
+
+      assert {:error, :allowed_root_required} = Reader.stream(path)
+      assert {:error, :path_traversal} = Reader.stream(path, allowed_root: System.tmp_dir!())
+    end
+
+    @tag :security_regression
+    test "security regression: rejects oversized JSONL records before parsing" do
+      path = Path.join(@fixtures_dir, "claude_basic.jsonl")
+      assert {:ok, stream} = Reader.stream(path, allowed_root: @fixtures_dir, max_line_bytes: 4)
+      assert Enum.to_list(stream) == []
+    end
+
+    @tag :security_regression
+    test "security regression: discards an oversized line in bounded chunks and resumes" do
+      root = tmp_dir("bounded-lines")
+      path = Path.join(root, "session.jsonl")
+
+      valid_line =
+        @fixtures_dir
+        |> Path.join("claude_basic.jsonl")
+        |> File.read!()
+        |> String.split("\n", parts: 2)
+        |> hd()
+
+      File.write!(path, [String.duplicate("x", 256_000), "\n", valid_line, "\n"])
+
+      assert {:ok, stream} = Reader.stream(path, allowed_root: root, max_line_bytes: 512)
+      assert [%Record{}] = Enum.to_list(stream)
+    end
+
+    @tag :security_regression
+    test "security regression: a symlink swap after validation cannot redirect lazy reads" do
+      base = tmp_dir("descriptor-swap")
+      root = Path.join(base, "root")
+      File.mkdir!(root)
+
+      candidate = Path.join(root, "session.jsonl")
+      outside = Path.join(base, "outside.jsonl")
+      fixture = File.read!(Path.join(@fixtures_dir, "claude_basic.jsonl"))
+      File.write!(candidate, fixture)
+      File.write!(outside, fixture)
+
+      assert {:ok, stream} = Reader.stream(candidate, allowed_root: root)
+
+      File.rm!(candidate)
+      File.ln_s!(outside, candidate)
+
+      assert Enum.to_list(stream) == []
     end
   end
 
   describe "read_all/2" do
     test "reads all records from a file" do
       path = Path.join(@fixtures_dir, "claude_basic.jsonl")
-      assert {:ok, records} = Reader.read_all(path)
+      assert {:ok, records} = Reader.read_all(path, allowed_root: @fixtures_dir)
 
       assert is_list(records)
       assert length(records) == 4
     end
 
     test "returns error for non-existent file" do
-      assert {:error, :file_not_found} = Reader.read_all("/nonexistent/path.jsonl")
+      assert {:error, :file_not_found} =
+               Reader.read_all("/nonexistent/path.jsonl", allowed_root: "/")
     end
   end
 
   describe "find_sessions/2" do
     test "finds session files in a directory" do
-      assert {:ok, files} = Reader.find_sessions(@fixtures_dir)
+      assert {:ok, files} = Reader.find_sessions(@fixtures_dir, allowed_root: @fixtures_dir)
 
       assert is_list(files)
       assert files != []
@@ -109,37 +164,39 @@ defmodule Arbor.Common.Sessions.ReaderTest do
 
     test "returns error for non-directory" do
       path = Path.join(@fixtures_dir, "claude_basic.jsonl")
-      assert {:error, :not_a_directory} = Reader.find_sessions(path)
+
+      assert {:error, :not_a_directory} =
+               Reader.find_sessions(path, allowed_root: @fixtures_dir)
     end
 
     test "returns empty list for directory with no sessions" do
-      # Create a temp directory
-      tmp_dir = System.tmp_dir!()
-      test_dir = Path.join(tmp_dir, "empty_sessions_#{:rand.uniform(10000)}")
-      File.mkdir_p!(test_dir)
+      test_dir = tmp_dir("empty-sessions")
 
-      on_exit(fn -> File.rm_rf!(test_dir) end)
-
-      assert {:ok, []} = Reader.find_sessions(test_dir)
+      assert {:ok, []} = Reader.find_sessions(test_dir, allowed_root: test_dir)
     end
   end
 
   describe "latest_session/2" do
     test "returns the most recent session file" do
-      assert {:ok, path} = Reader.latest_session(@fixtures_dir)
+      assert {:ok, path} = Reader.latest_session(@fixtures_dir, allowed_root: @fixtures_dir)
 
       assert String.ends_with?(path, ".jsonl")
       assert File.exists?(path)
     end
 
     test "returns error when no sessions found" do
-      tmp_dir = System.tmp_dir!()
-      test_dir = Path.join(tmp_dir, "empty_sessions_#{:rand.uniform(10000)}")
-      File.mkdir_p!(test_dir)
+      test_dir = tmp_dir("empty-sessions")
 
-      on_exit(fn -> File.rm_rf!(test_dir) end)
+      assert {:error, :no_sessions_found} =
+               Reader.latest_session(test_dir, allowed_root: test_dir)
+    end
+  end
 
-      assert {:error, :no_sessions_found} = Reader.latest_session(test_dir)
+  describe "resolve/1" do
+    @tag :security_regression
+    test "security regression: rejects traversal-shaped session identifiers" do
+      assert {:error, :invalid_identifier} = Reader.resolve("../secrets")
+      assert {:error, :invalid_identifier} = Reader.resolve("name/../../secrets")
     end
   end
 
@@ -163,5 +220,15 @@ defmodule Arbor.Common.Sessions.ReaderTest do
       # Even if a file exists, it should reject non-.jsonl files
       assert {:error, _} = Reader.resolve_within("some_file.txt", @fixtures_dir)
     end
+  end
+
+  defp tmp_dir(label) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "arbor-reader-#{label}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 end

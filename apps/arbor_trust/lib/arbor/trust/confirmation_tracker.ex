@@ -74,6 +74,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
   alias Arbor.Trust.{GraduationCore, PolicyHost, Store}
 
   @table :arbor_confirmation_tracker
+  @owner_table :arbor_trust_confirmation_tracker_owner
   @fallback_threshold 5
 
   # =========================================================================
@@ -90,6 +91,14 @@ defmodule Arbor.Trust.ConfirmationTracker do
   @doc false
   def record_approval_answer(source, request_id, expected) do
     GenServer.call(__MODULE__, {:record_approval_answer, source, request_id, expected})
+  end
+
+  @doc false
+  def issue_approval_receipt(source, request_id, expected, arguments) do
+    GenServer.call(
+      __MODULE__,
+      {:issue_approval_receipt, source, request_id, expected, arguments}
+    )
   end
 
   @doc false
@@ -236,9 +245,26 @@ defmodule Arbor.Trust.ConfirmationTracker do
   # =========================================================================
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    Process.flag(:sensitive, true)
+
     table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    {:ok, %{table: table, answers: ApprovalEvidenceCore.new()}}
+
+    owner_table =
+      :ets.new(@owner_table, [:named_table, :set, :protected, read_concurrency: true])
+
+    issuer_custody = :ets.new(:approval_receipt_issuer_custody, [:private, :set])
+
+    true = :ets.insert(owner_table, {:owner_pid, self()})
+
+    {:ok,
+     %{
+       table: table,
+       owner_table: owner_table,
+       issuer_custody: issuer_custody,
+       test_isolated_owner: test_isolated_owner?(opts),
+       answers: ApprovalEvidenceCore.new()
+     }}
   end
 
   @impl true
@@ -250,6 +276,24 @@ defmodule Arbor.Trust.ConfirmationTracker do
       if disposition == :recorded, do: record_answer_evidence(record)
       {:reply, {:ok, disposition}, %{state | answers: answers}}
     else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:issue_approval_receipt, source, request_id, expected, arguments},
+        _from,
+        state
+      ) do
+    with {:ok, expected} <- ApprovalEvidenceCore.validate_expected(source, request_id, expected),
+         {:ok, record} <- read_answered_approval(source, request_id),
+         :ok <- ApprovalEvidenceCore.validate_record(expected, record),
+         true <- record.decision == :approve,
+         {:ok, receipt, state} <-
+           issue_receipt(state, expected, request_id, arguments) do
+      {:reply, {:ok, receipt}, state}
+    else
+      false -> {:reply, {:error, :approval_not_granted}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -394,6 +438,62 @@ defmodule Arbor.Trust.ConfirmationTracker do
   # =========================================================================
   # Internals
   # =========================================================================
+
+  defp issue_receipt(state, expected, request_id, arguments) do
+    case current_issuer_custody(state) do
+      custody when is_binary(custody) ->
+        case issue_with_custody(custody, expected, request_id, arguments) do
+          {:ok, receipt} ->
+            {:ok, receipt, state}
+
+          {:error, :unauthorized_approval_issuer} ->
+            claim_and_issue(state, expected, request_id, arguments)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      nil ->
+        claim_and_issue(state, expected, request_id, arguments)
+    end
+  end
+
+  defp claim_and_issue(state, expected, request_id, arguments) do
+    opts = if state.test_isolated_owner, do: [test_isolated_owner: true], else: []
+
+    with {:ok, custody} <- Arbor.Security.claim_approval_receipt_issuer(opts),
+         true <- :ets.insert(state.issuer_custody, {:custody, custody}),
+         {:ok, receipt} <- issue_with_custody(custody, expected, request_id, arguments) do
+      {:ok, receipt, state}
+    else
+      false -> {:error, :unauthorized_approval_issuer}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp issue_with_custody(custody, expected, request_id, arguments) do
+    Arbor.Security.issue_approval_receipt(
+      expected.principal_id,
+      expected.resource_uri,
+      :execute,
+      request_id,
+      arguments,
+      custody
+    )
+  end
+
+  defp current_issuer_custody(state) do
+    case :ets.lookup(state.issuer_custody, :custody) do
+      [{:custody, custody}] when is_binary(custody) -> custody
+      _ -> nil
+    end
+  end
+
+  if Mix.env() == :test do
+    defp test_isolated_owner?(opts), do: Keyword.get(opts, :test_isolated_owner, false) == true
+  else
+    defp test_isolated_owner?(_opts), do: false
+  end
 
   defp get_or_create(agent_id, uri_prefix) do
     case :ets.lookup(@table, {agent_id, uri_prefix}) do

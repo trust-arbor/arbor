@@ -118,7 +118,10 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
   @doc "JSON-clean projection of a walk decision."
   @spec show({:ok, decision()} | {:error, error()}) :: map()
   def show({:ok, {:use, id}}), do: %{"decision" => "use", "review_attestation_id" => id}
-  def show({:ok, {:mint_from, id}}), do: %{"decision" => "mint_from", "review_attestation_id" => id}
+
+  def show({:ok, {:mint_from, id}}),
+    do: %{"decision" => "mint_from", "review_attestation_id" => id}
+
   def show({:error, reason}), do: %{"decision" => "deny", "reason" => Atom.to_string(reason)}
 
   @doc "True when stored Actions-owned capacity evidence is the closed marker."
@@ -205,7 +208,16 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
 
       is_binary(child_id) and child_id != "" ->
         with :ok <- ensure_child_pointer(record, child_id, records) do
-          walk_from(child_id, task_id, principal_id, workspace_id, records, states, proof, visited)
+          walk_from(
+            child_id,
+            task_id,
+            principal_id,
+            workspace_id,
+            records,
+            states,
+            proof,
+            visited
+          )
         end
 
       retry_index(record) >= @max_capacity_retry_successors ->

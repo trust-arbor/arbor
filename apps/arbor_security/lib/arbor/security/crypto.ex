@@ -15,10 +15,11 @@ defmodule Arbor.Security.Crypto do
   To send a sealed message to a peer:
 
       1. ECDH:  shared_secret = derive_shared_secret(my_x25519_private, their_x25519_public)
-      2. HKDF:  key = derive_key(shared_secret, "arbor-seal-v1")
-      3. AES:   {ciphertext, iv, tag} = encrypt(plaintext, key)
+      2. Bind:  context = recipient_public || sender_public || ephemeral_public
+      3. HKDF:  key = derive_key(shared_secret, "arbor-seal-v3" || context)
+      4. AES:   {ciphertext, iv, tag} = encrypt(plaintext, key, context)
 
-  The `seal/3` and `unseal/2` functions wrap this flow for convenience.
+  The `seal/3` and `unseal/3` functions wrap this flow for convenience.
   """
 
   # -------------------------------------------------------------------
@@ -188,9 +189,11 @@ defmodule Arbor.Security.Crypto do
   # Sealed Messages — ECDH + HKDF + AES-GCM
   # -------------------------------------------------------------------
 
-  # Bumped v1 -> v2 for the ECIES redesign (C2). The label is HKDF info, so
-  # it domain-separates v2 sealed messages from any v1 material.
-  @seal_info "arbor-seal-v2"
+  # V3 binds both endpoint public keys into the KDF, AEAD and signature. This
+  # prevents a valid ciphertext/signature pair from being redirected to a
+  # different recipient or re-signed under a different sender identity.
+  @seal_info "arbor-seal-v3"
+  @seal_context_domain "arbor.security.seal.v3" <> <<0>>
 
   @doc """
   Seal a message for a recipient using **ECIES** (C2 review redesign).
@@ -224,17 +227,19 @@ defmodule Arbor.Security.Crypto do
       when is_binary(plaintext) and byte_size(recipient_public) == 32 and
              is_binary(sender_sign_private) do
     {ephemeral_public, ephemeral_private} = generate_encryption_keypair()
+    sender_sign_public = signing_public_key(sender_sign_private)
+    context = seal_context(recipient_public, sender_sign_public, ephemeral_public)
     shared_secret = derive_shared_secret(ephemeral_private, recipient_public)
-    key = derive_key(shared_secret, @seal_info)
-    {ciphertext, iv, tag} = encrypt(plaintext, key)
+    key = derive_key(shared_secret, @seal_info <> context)
+    {ciphertext, iv, tag} = encrypt(plaintext, key, context)
 
     # Sign the (non-secret) envelope so the recipient can authenticate the
     # sender. Covers the ephemeral pubkey too, so an attacker can't swap in
     # their own ephemeral key to redirect the ECDH.
-    signature = sign(ephemeral_public <> iv <> tag <> ciphertext, sender_sign_private)
+    signature = sign(context <> iv <> tag <> ciphertext, sender_sign_private)
 
     %{
-      v: 2,
+      v: 3,
       ephemeral_public: ephemeral_public,
       iv: iv,
       tag: tag,
@@ -265,7 +270,7 @@ defmodule Arbor.Security.Crypto do
           | {:error, :bad_signature | :decryption_failed | :malformed_sealed}
   def unseal(
         %{
-          v: 2,
+          v: 3,
           ephemeral_public: ephemeral_public,
           iv: iv,
           tag: tag,
@@ -276,17 +281,38 @@ defmodule Arbor.Security.Crypto do
         sender_sign_public
       )
       when byte_size(recipient_private) == 32 and byte_size(ephemeral_public) == 32 and
-             is_binary(sender_sign_public) do
-    if verify(ephemeral_public <> iv <> tag <> ciphertext, signature, sender_sign_public) do
+             byte_size(sender_sign_public) == 32 do
+    {recipient_public, _private} =
+      :crypto.generate_key(:ecdh, :x25519, recipient_private)
+
+    context = seal_context(recipient_public, sender_sign_public, ephemeral_public)
+
+    if verify(context <> iv <> tag <> ciphertext, signature, sender_sign_public) do
       shared_secret = derive_shared_secret(recipient_private, ephemeral_public)
-      key = derive_key(shared_secret, @seal_info)
-      decrypt(ciphertext, key, iv, tag)
+      key = derive_key(shared_secret, @seal_info <> context)
+      decrypt(ciphertext, key, iv, tag, context)
     else
       {:error, :bad_signature}
     end
+  rescue
+    _ -> {:error, :malformed_sealed}
+  catch
+    _, _ -> {:error, :malformed_sealed}
   end
 
   def unseal(_sealed, _recipient_private, _sender_sign_public), do: {:error, :malformed_sealed}
+
+  defp signing_public_key(private_key) when byte_size(private_key) == 32 do
+    {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519, private_key)
+    public_key
+  end
+
+  defp signing_public_key(<<_seed::binary-size(32), public_key::binary-size(32)>>),
+    do: public_key
+
+  defp seal_context(recipient_public, sender_sign_public, ephemeral_public) do
+    @seal_context_domain <> recipient_public <> sender_sign_public <> ephemeral_public
+  end
 
   # -------------------------------------------------------------------
   # Hashing & ID Derivation

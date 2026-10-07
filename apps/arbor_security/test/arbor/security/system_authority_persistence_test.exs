@@ -124,13 +124,13 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     set_mode(table, :put_mode, :known_failure)
 
     assert {:error, :invalid_store_record} =
-             SigningKeyStore.put("agent_failed_write", private_key)
+             SigningKeyStore.put_fixture("agent_failed_write", private_key)
 
     assert {:error, :not_found} =
              AuthorityStore.authoritative_get("agent_failed_write", name: @store_name)
 
     assert {:error, :invalid_store_record} =
-             SigningKeyStore.put_keypair(
+             SigningKeyStore.put_keypair_fixture(
                "agent_failed_keypair_write",
                private_key,
                :crypto.strong_rand_bytes(32)
@@ -140,10 +140,10 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
              AuthorityStore.authoritative_get("agent_failed_keypair_write", name: @store_name)
 
     set_mode(table, :put_mode, :ok)
-    assert :ok = SigningKeyStore.put("agent_failed_delete", private_key)
+    assert :ok = SigningKeyStore.put_fixture("agent_failed_delete", private_key)
 
     set_mode(table, :delete_mode, :reject)
-    assert {:error, :outcome_unknown} = SigningKeyStore.delete("agent_failed_delete")
+    assert {:error, :outcome_unknown} = SigningKeyStore.delete_fixture("agent_failed_delete")
 
     assert {:ok, %Record{}} =
              AuthorityStore.authoritative_get("agent_failed_delete", name: @store_name)
@@ -151,7 +151,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
   test "security regression: v3 authority bundle is one ciphertext-only record and survives store restart",
        %{identity: identity, table: table} do
-    assert :ok = SystemAuthority.persist_keypair(identity)
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
     assert {:ok, [@authority_signing_id]} = AuthorityStore.authoritative_list(name: @store_name)
 
     assert {:ok, %Record{data: data}} =
@@ -175,13 +175,13 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     restart_signing_store!(table)
 
-    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair()
+    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair_for_test()
     assert loaded.agent_id == identity.agent_id
     assert loaded.private_key == identity.private_key
     assert loaded.encryption_private_key == identity.encryption_private_key
 
     assert {:ok, _stale_metadata} = put_legacy_metadata(identity)
-    assert {:ok, preferred} = SystemAuthority.load_persisted_keypair()
+    assert {:ok, preferred} = SystemAuthority.load_persisted_keypair_for_test()
     assert preferred.agent_id == identity.agent_id
   end
 
@@ -189,7 +189,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
        %{identity: identity} do
     put_legacy_split!(identity, identity)
 
-    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair()
+    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair_for_test()
     assert loaded.agent_id == identity.agent_id
 
     assert {:ok, %Record{data: %{"v" => 3, "format" => "authority_bundle"}}} =
@@ -205,7 +205,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     put_legacy_split!(private_identity, public_identity)
 
     assert {:error, :invalid_persisted_authority} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
 
     assert {:ok, %Record{data: %{"v" => 2, "format" => "keypair"}}} =
              AuthorityStore.authoritative_get(@authority_signing_id, name: @store_name)
@@ -216,13 +216,13 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     assert {:ok, _stored} = put_legacy_metadata(identity)
 
     assert {:error, :metadata_without_keypair} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
 
     clear_authority_records!()
     assert :ok = put_legacy_private(identity)
 
     assert {:error, :keypair_without_metadata} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
 
     clear_authority_records!()
 
@@ -240,10 +240,10 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
              AuthorityStore.acknowledged_put(@authority_signing_id, malformed, name: @store_name)
 
     assert {:error, :invalid_authority_bundle} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
 
     clear_authority_records!()
-    assert :ok = SystemAuthority.persist_keypair(identity)
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
 
     assert {:ok, %Record{data: valid_data} = valid_record} =
              AuthorityStore.authoritative_get(@authority_signing_id, name: @store_name)
@@ -259,7 +259,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
              )
 
     assert {:error, :invalid_authority_bundle} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
 
     clear_authority_records!()
     assert :ok = put_legacy_private(identity)
@@ -280,7 +280,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
              )
 
     assert {:error, :invalid_persisted_authority} =
-             SystemAuthority.load_persisted_keypair()
+             SystemAuthority.load_persisted_keypair_for_test()
   end
 
   test "security regression: pre-v2 plaintext authority records remain cleanup-only" do
@@ -294,7 +294,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
                name: @store_name
              )
 
-    assert :ok = SystemAuthority.cleanup_legacy_plaintext_record()
+    assert :ok = SystemAuthority.cleanup_legacy_plaintext_record_for_test()
 
     assert {:error, :not_found} =
              AuthorityStore.authoritative_get("system_authority_keypair", name: @store_name)
@@ -302,7 +302,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
   test "security regression: persistent rotation preserves the live root and converges unknown outcomes",
        %{identity: identity, table: table} do
-    assert :ok = SystemAuthority.persist_keypair(identity)
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
     previous_mode = Application.get_env(:arbor_security, :system_authority_mode)
     Application.put_env(:arbor_security, :system_authority_mode, :persistent)
     restart_system_authority!()
@@ -316,14 +316,14 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     set_mode(table, :put_mode, :known_failure)
 
-    assert {:error, {:rotation_failed, :invalid_store_record}} = SystemAuthority.rotate()
+    assert {:error, {:rotation_failed, :invalid_store_record}} = SystemAuthority.rotate_for_test()
     assert SystemAuthority.agent_id() == identity.agent_id
 
     set_mode(table, :put_mode, :reject)
     old_pid = Process.whereis(SystemAuthority)
     monitor = Process.monitor(old_pid)
 
-    assert {:error, {:rotation_failed, :outcome_unknown}} = SystemAuthority.rotate()
+    assert {:error, {:rotation_failed, :outcome_unknown}} = SystemAuthority.rotate_for_test()
 
     assert_receive {:DOWN, ^monitor, :process, ^old_pid, :authority_rotation_outcome_unknown},
                    2_000
@@ -336,14 +336,17 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     converging_pid = Process.whereis(SystemAuthority)
     converging_monitor = Process.monitor(converging_pid)
 
-    assert {:error, {:rotation_failed, :outcome_unknown}} = SystemAuthority.rotate()
+    assert {:error, {:rotation_failed, :outcome_unknown}} = SystemAuthority.rotate_for_test()
 
     assert_receive {:DOWN, ^converging_monitor, :process, ^converging_pid,
                     :authority_rotation_outcome_unknown},
                    2_000
 
     assert is_pid(wait_for_new_process(SystemAuthority, converging_pid))
-    assert {:ok, committed_identity} = SigningKeyStore.get_authority_bundle(@authority_signing_id)
+
+    assert {:ok, committed_identity} =
+             SigningKeyStore.get_authority_bundle_for_test(@authority_signing_id)
+
     assert committed_identity.agent_id != identity.agent_id
     assert SystemAuthority.agent_id() == committed_identity.agent_id
   end
@@ -403,7 +406,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     assert :ok = Security.verify_private_memory_record(descriptor, stamp)
 
-    assert {:ok, _} = SystemAuthority.rotate()
+    assert {:ok, _} = SystemAuthority.rotate_for_test()
 
     assert {:error, :invalid_memory_record} =
              Security.verify_private_memory_record(descriptor, stamp)
@@ -421,10 +424,12 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     stop_signing_store!()
 
-    {:ok, store} =
-      AuthorityStore.start_link(name: @store_name, backend: nil, namespace: "signing_keys")
+    start_signing_store_fixture!(
+      name: @store_name,
+      backend: nil,
+      namespace: "signing_keys"
+    )
 
-    Process.unlink(store)
     Application.put_env(:arbor_security, :system_authority_mode, :persistent)
     restart_system_authority!()
     {admission, descriptor, _agent, _human} = private_memory_fixture!()
@@ -441,12 +446,12 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     {admission, descriptor, agent, _human} = private_memory_fixture!()
     assert {:ok, _stamp} = SystemAuthority.attest_private_memory_record(admission, descriptor)
     assert {:ok, caps} = Security.list_capabilities(agent.agent_id)
-    Enum.each(caps, &Security.revoke(&1.id))
+    Enum.each(caps, &Security.revoke_fixture(&1.id))
 
     assert {:error, :invalid_memory_admission} =
              SystemAuthority.attest_private_memory_record(admission, descriptor)
 
-    assert {:error, :invalid_memory_admission} =
+    assert {:error, :system_authority_unauthorized} =
              GenServer.call(
                SystemAuthority,
                {:attest_private_memory_record, admission, descriptor}
@@ -492,7 +497,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
       assert is_binary(authority_id)
       refute Process.alive?(worker)
       send(SystemAuthority, {:private_memory_authorized, reference, worker, :ok})
-      assert :sys.get_state(SystemAuthority).memory_attestations == %{}
+      assert SystemAuthority.memory_attestations_for_test() == %{}
       refute inspect(:sys.get_status(SystemAuthority)) =~ descriptor["human_id"]
     after
       :sys.resume(registry)
@@ -559,7 +564,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
       if victim == :root do
         assert is_pid(wait_for_new_process(SystemAuthority, root))
         assert is_binary(SystemAuthority.agent_id())
-        assert Map.get(:sys.get_state(SystemAuthority), :memory_attestations, %{}) == %{}
+        assert SystemAuthority.memory_attestations_for_test() == %{}
 
         # Root registration precedes rest_for_one recovery of the capability
         # store and receipt broker. Wait for the supervising callback to finish
@@ -632,9 +637,9 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
              |> Task.await()
 
     assert {:ok, caps} = Security.list_capabilities(agent.agent_id)
-    Enum.each(caps, &Security.revoke(&1.id))
+    Enum.each(caps, &Security.revoke_fixture(&1.id))
 
-    assert {:error, :invalid_memory_admission} =
+    assert {:error, :system_authority_unauthorized} =
              GenServer.call(
                SystemAuthority,
                {:attest_private_goal_snapshot, admission, descriptor}
@@ -667,7 +672,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   defp await_memory_job!(0), do: flunk("private memory authorization worker did not start")
 
   defp await_memory_job!(attempts) do
-    case Map.to_list(Map.get(:sys.get_state(SystemAuthority), :memory_attestations, %{})) do
+    case Map.to_list(SystemAuthority.memory_attestations_for_test()) do
       [job] ->
         job
 
@@ -700,7 +705,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     assert :ok = Security.register_oidc_identity(human.identity, human.id_token, human.provider)
     assert {:ok, agent} = Identity.generate(name: "private-memory-root-test")
-    assert :ok = Security.register_identity(Identity.public_only(agent))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(agent))
     resource = "arbor://chat/agent/" <> agent.agent_id
 
     caps =
@@ -708,15 +713,15 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
             {human.identity.agent_id, resource},
             {agent.agent_id, "arbor://memory/write/" <> agent.agent_id}
           ] do
-        assert {:ok, cap} = Security.grant(principal: principal, resource: uri)
+        assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: uri)
         cap
       end
 
     on_exit(fn ->
-      Enum.each(caps, &Security.revoke(&1.id))
+      Enum.each(caps, &Security.revoke_fixture(&1.id))
       human.cleanup.()
-      Security.deregister_identity(human.identity.agent_id)
-      Security.deregister_identity(agent.agent_id)
+      Security.deregister_identity_fixture(human.identity.agent_id)
+      Security.deregister_identity_fixture(agent.agent_id)
 
       Enum.each(previous, fn
         {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
@@ -835,7 +840,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     for cap <- caps,
         String.starts_with?(cap.resource_uri, "arbor://memory/write/"),
-        do: Security.revoke(cap.id)
+        do: Security.revoke_fixture(cap.id)
 
     assert {:error, _} =
              SystemAuthority.attest_private_relationship_snapshot(admission, descriptor)
@@ -935,7 +940,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     for cap <- caps,
         cap.resource_uri == "arbor://memory/write/" <> agent.agent_id do
-      assert :ok = Security.revoke(cap.id)
+      assert :ok = Security.revoke_fixture(cap.id)
     end
 
     assert {:error, _} = SystemAuthority.attest_private_memory_source(admission, source)
@@ -1014,7 +1019,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   end
 
   defp put_legacy_private(identity) do
-    SigningKeyStore.put_keypair(
+    SigningKeyStore.put_keypair_fixture(
       @authority_signing_id,
       identity.private_key,
       identity.encryption_private_key
@@ -1065,20 +1070,13 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   defp replace_signing_store!(table) do
     stop_signing_store!()
 
-    case AuthorityStore.start_link(
-           name: @store_name,
-           backend: ControlledBackend,
-           backend_opts: [table: table],
-           namespace: "signing_keys",
-           hydration_limit: 100
-         ) do
-      {:ok, pid} ->
-        Process.unlink(pid)
-        :ok
-
-      {:error, reason} ->
-        raise "failed to start controlled signing store: #{inspect(reason)}"
-    end
+    start_signing_store_fixture!(
+      name: @store_name,
+      backend: ControlledBackend,
+      backend_opts: [table: table],
+      namespace: "signing_keys",
+      hydration_limit: 100
+    )
   end
 
   defp restart_signing_store!(table), do: replace_signing_store!(table)
@@ -1102,16 +1100,80 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   end
 
   defp restart_system_authority! do
-    case Supervisor.terminate_child(Arbor.Security.Supervisor, SystemAuthority) do
+    supervisor = security_supervisor_pid!()
+
+    registration_token =
+      child_start_opt!(supervisor, SystemAuthority, :system_authority_registration_token)
+
+    case Supervisor.terminate_child(supervisor, SystemAuthority) do
       :ok -> :ok
       {:error, :not_found} -> :ok
     end
 
-    case Supervisor.restart_child(Arbor.Security.Supervisor, SystemAuthority) do
+    case Supervisor.restart_child(supervisor, SystemAuthority) do
       {:ok, _pid} -> :ok
       {:ok, _pid, _info} -> :ok
       {:error, :running} -> :ok
       {:error, reason} -> raise "failed to restart SystemAuthority: #{inspect(reason)}"
+    end
+
+    case SystemAuthority.complete_startup(supervisor, registration_token) do
+      :ok ->
+        :ok
+
+      {:error, :already_initialized} ->
+        true = is_binary(SystemAuthority.agent_id())
+        :ok
+
+      {:error, reason} ->
+        raise "failed to complete SystemAuthority startup: #{inspect(reason)}"
+    end
+  end
+
+  defp start_signing_store_fixture!(opts) do
+    supervisor = security_supervisor_pid!()
+    opts = Keyword.put(opts, :defer_hydration, true)
+    spec = Supervisor.child_spec({AuthorityStore, opts}, id: @store_name)
+
+    case Supervisor.start_child(supervisor, spec) do
+      {:ok, pid} when is_pid(pid) -> :ok
+      {:ok, pid, _info} when is_pid(pid) -> :ok
+      {:error, reason} -> raise "failed to start controlled signing store: #{inspect(reason)}"
+    end
+
+    case AuthorityStore.complete_startup(supervisor, @store_name) do
+      :ok -> :ok
+      {:error, reason} -> raise "failed to complete controlled signing store: #{inspect(reason)}"
+    end
+
+    expected_durability =
+      if Keyword.get(opts, :backend) == nil, do: :process_lifetime, else: :node_restart
+
+    case AuthorityStore.durability_class_from_supervisor(supervisor, name: @store_name) do
+      ^expected_durability ->
+        :ok
+
+      other ->
+        raise "controlled signing store durability mismatch: " <>
+                "expected #{inspect(expected_durability)}, got #{inspect(other)}"
+    end
+  end
+
+  defp child_start_opt!(supervisor, child_id, key) do
+    with {:ok, %{start: {_module, :start_link, [opts]}}} <-
+           :supervisor.get_childspec(supervisor, child_id),
+         true <- is_list(opts),
+         {:ok, value} <- Keyword.fetch(opts, key) do
+      value
+    else
+      _other -> raise "missing #{inspect(key)} in #{inspect(child_id)} child spec"
+    end
+  end
+
+  defp security_supervisor_pid! do
+    case Process.whereis(Arbor.Security.Supervisor) do
+      pid when is_pid(pid) -> pid
+      nil -> raise "Security supervisor is unavailable"
     end
   end
 

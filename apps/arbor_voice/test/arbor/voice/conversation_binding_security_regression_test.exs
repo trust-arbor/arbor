@@ -137,8 +137,8 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
     primary = human!()
     secondary = human!()
     {:ok, agent} = Identity.generate(name: "Real entrypoint convergence journey")
-    :ok = Security.register_identity(Identity.public_only(agent))
-    on_exit(fn -> Security.deregister_identity(agent.agent_id) end)
+    :ok = Security.register_identity_fixture(Identity.public_only(agent))
+    on_exit(fn -> Security.deregister_identity_fixture(agent.agent_id) end)
     resource = "arbor://chat/agent/" <> agent.agent_id
     primary_cap = grant!(primary.agent_id, resource)
     secondary_cap = grant!(secondary.agent_id, resource)
@@ -600,7 +600,7 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
         end)
 
       assert_receive {:voice_recv_barrier, worker}, 5_000
-      assert :ok = Security.revoke(c.secondary_cap.id)
+      assert :ok = Security.revoke_fixture(c.secondary_cap.id)
       send(worker, :release)
       assert {:error, reason} = Task.await(turn, 10_000)
       assert reason in [:turn_failed, :cleanup_pending]
@@ -654,7 +654,7 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
       end)
 
     assert_receive {:at_voice_presentation, session}, 5_000
-    assert :ok = Security.revoke(c.secondary_cap.id)
+    assert :ok = Security.revoke_fixture(c.secondary_cap.id)
     send(session, :release)
     assert {:error, :turn_failed} = Task.await(turn, 10_000)
     refute_receive {:voice_spoken, _}, 50
@@ -737,7 +737,7 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
     assert {:ok, key} = Arbor.Voice.start_session(c.secondary.agent_id, c.target, opts)
     turn = Task.async(fn -> audio_turn(c, "audio-revoked") end)
     assert_receive {:voice_recv_barrier, worker}, 5_000
-    assert :ok = Security.revoke(c.secondary_cap.id)
+    assert :ok = Security.revoke_fixture(c.secondary_cap.id)
     send(worker, :release)
     assert {:error, reason} = Task.await(turn, 10_000)
     assert reason in [:turn_failed, :cleanup_pending]
@@ -847,7 +847,7 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
     :ok = Security.register_oidc_identity(fixture.identity, fixture.id_token, fixture.provider)
 
     on_exit(fn ->
-      Security.deregister_identity(fixture.identity.agent_id)
+      Security.deregister_identity_fixture(fixture.identity.agent_id)
       fixture.cleanup.()
     end)
 
@@ -855,8 +855,8 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
   end
 
   defp grant!(principal, resource) do
-    {:ok, cap} = Security.grant(principal: principal, resource: resource)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 

@@ -153,8 +153,8 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
       assert {:ok, identity} = Identity.generate(name: "Private stream Branch")
       update!(%{identity: identity})
       target = identity.agent_id
-      assert :ok = Security.register_identity(Identity.public_only(identity))
-      assert :ok = Security.store_signing_key(target, identity.private_key)
+      assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
+      assert :ok = Security.store_signing_key_fixture(target, identity.private_key)
       resource = "arbor://chat/agent/" <> target
       grant!(subject, resource)
 
@@ -375,16 +375,16 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
             assert :ok = Arbor.Agent.Registry.unregister(state.target)
           end
 
-          for cap <- state.capabilities, do: assert(:ok = Security.revoke(cap))
+          for cap <- state.capabilities, do: assert(:ok = Security.revoke_fixture(cap))
 
           if state[:identity] do
-            assert :ok = Security.delete_signing_key(state.identity.agent_id)
-            assert :ok = Security.deregister_identity(state.identity.agent_id)
+            assert :ok = Security.delete_signing_key_fixture(state.identity.agent_id)
+            assert :ok = Security.deregister_identity_fixture(state.identity.agent_id)
             assert :ok = Arbor.Trust.delete_trust_profile(state.identity.agent_id)
           end
 
           if state[:oidc] do
-            assert Security.deregister_identity(state.oidc.identity.agent_id) in [
+            assert Security.deregister_identity_fixture(state.oidc.identity.agent_id) in [
                      :ok,
                      {:error, :not_found}
                    ]
@@ -475,7 +475,7 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
   end
 
   defp grant!(principal, resource) do
-    assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+    assert {:ok, cap} = Security.grant_fixture(principal: principal, resource: resource)
     update!(%{capabilities: [cap.id | Process.get(@state_key).capabilities]})
     cap
   end

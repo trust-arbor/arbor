@@ -32,6 +32,8 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     {Arbor.Signals.Store, []},
     {Arbor.Signals.TopicKeys, []},
     {Arbor.Signals.Channels, []},
+    {Arbor.Signals.SubscriptionRegistry, []},
+    {Arbor.Signals.TelemetryBridge, []},
     {Arbor.Signals.Bus, []},
     {Arbor.Signals.Relay, []}
   ]
@@ -363,7 +365,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     :ok
   end
 
-  defp await_true(fun, timeout \\ 1_000) do
+  defp await_true(fun, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     await_true_loop(fun, deadline)
   end

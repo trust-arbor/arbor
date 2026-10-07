@@ -65,7 +65,7 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
     selected = grant!(owner, @parent)
     other = grant!(owner, "arbor://action/**")
     assert {:ok, :authorized} = exercise(owner, selected)
-    assert :ok = Security.revoke(selected.id)
+    assert :ok = Security.revoke_fixture(selected.id)
 
     assert {:ok, :authorized} = exercise(owner, other)
     assert {:error, :unauthorized} = exercise(owner, selected)
@@ -143,16 +143,16 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
     assert {:ok, :authorized} = exercise(owner, cap)
 
     unsigned = %{cap | issuer_signature: nil}
-    assert {:ok, :stored} = CapabilityStore.put(unsigned)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(unsigned)
     assert {:error, :unauthorized} = exercise(owner, unsigned)
 
     tampered = %{cap | metadata: %{tampered: true}}
-    assert {:ok, :stored} = CapabilityStore.put(tampered)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(tampered)
     assert {:error, :unauthorized} = exercise(owner, tampered)
 
     self_signed = Signer.sign(%{cap | issuer_id: owner.agent_id}, owner.private_key)
     assert :ok = Signer.verify(self_signed, owner.public_key)
-    assert {:ok, :stored} = CapabilityStore.put(self_signed)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(self_signed)
     assert {:error, :unauthorized} = exercise(owner, self_signed)
   end
 
@@ -164,11 +164,20 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
     Application.put_env(:arbor_security, :strict_identity_mode, false)
     assert {:ok, :authorized} = exercise(owner, cap)
 
-    assert :ok = Security.suspend_identity(owner.agent_id, reason: "selected-capability fixture")
+    assert :ok =
+             Security.suspend_identity_fixture(owner.agent_id,
+               reason: "selected-capability fixture"
+             )
+
     assert {:error, :unauthorized} = exercise(owner, cap)
-    assert :ok = Security.resume_identity(owner.agent_id)
+    assert :ok = Security.resume_identity_fixture(owner.agent_id)
     assert {:ok, :authorized} = exercise(owner, cap)
-    assert :ok = Security.revoke_identity(owner.agent_id, reason: "selected-capability fixture")
+
+    assert :ok =
+             Security.revoke_identity_fixture(owner.agent_id,
+               reason: "selected-capability fixture"
+             )
+
     assert {:error, :unauthorized} = exercise(owner, cap)
 
     {:ok, unknown} = Identity.generate()
@@ -201,8 +210,7 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
   test "implicit FileGuard still rejects a symlink escaping the selected filesystem grant", %{
     owner: owner
   } do
-    root =
-      Path.join(System.tmp_dir!(), "selected_capability_#{System.unique_integer([:positive])}")
+    root = scratch_dir!("selected-capability")
 
     allowed = Path.join(root, "allowed")
     outside = Path.join(root, "outside.txt")
@@ -253,19 +261,19 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
 
   defp identity! do
     assert {:ok, identity} = Identity.generate()
-    assert :ok = Security.register_identity(Identity.public_only(identity))
+    assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
     identity
   end
 
   defp grant!(owner, resource) do
-    assert {:ok, cap} = Security.grant(principal: owner.agent_id, resource: resource)
-    on_exit(fn -> Security.revoke(cap.id) end)
+    assert {:ok, cap} = Security.grant_fixture(principal: owner.agent_id, resource: resource)
+    on_exit(fn -> Security.revoke_fixture(cap.id) end)
     cap
   end
 
   defp signed_store!(cap) do
-    assert {:ok, signed} = SystemAuthority.sign_capability(cap)
-    assert {:ok, :stored} = CapabilityStore.put(signed)
+    assert {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
+    assert {:ok, :stored} = CapabilityStore.put_fixture(signed)
     signed
   end
 
@@ -281,6 +289,16 @@ defmodule Arbor.Security.SelectedOrdinaryCapabilitySecurityRegressionTest do
 
   defp digest(cap),
     do: :crypto.hash(:sha256, Capability.signing_payload(cap)) |> Base.encode16(case: :lower)
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
 
   defp file_uri(path), do: "arbor://fs/read/" <> String.trim_leading(path, "/")
   defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_security, key, value)

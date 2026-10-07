@@ -405,8 +405,6 @@ defmodule Arbor.Common.OAuth.AuthCode do
     end
   end
 
-  defp validate_code_verifier(""), do: :ok
-
   defp validate_code_verifier(value) do
     case validate_text_value(:code_verifier, value, @max_code_verifier_bytes) do
       :ok -> :ok
@@ -504,7 +502,7 @@ defmodule Arbor.Common.OAuth.AuthCode do
 
   defp validate_scope(_scope), do: {:error, {:invalid_params, :invalid_scopes}}
 
-  defp validate_challenge_method(method) when method in ["S256", "plain"], do: :ok
+  defp validate_challenge_method("S256"), do: :ok
 
   defp validate_challenge_method(_method),
     do: {:error, {:invalid_params, :invalid_challenge_method}}

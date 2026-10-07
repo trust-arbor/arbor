@@ -37,17 +37,8 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.Identities do
     }
 
     assert {:ok, id_token} = Joken.Signer.sign(claims, signer)
-    jwks_table = :arbor_oidc_jwks_cache
-
-    if :ets.whereis(jwks_table) == :undefined do
-      :ets.new(jwks_table, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    true =
-      :ets.insert(
-        jwks_table,
-        {issuer, %{"keys" => [public_map]}, System.monotonic_time(:millisecond) + 60_000}
-      )
+    provider = %{issuer: issuer, client_id: client_id}
+    :ok = Security.put_oidc_jwks_fixture(provider, %{"keys" => [public_map]})
 
     assert {:ok, identity} = Identity.generate(name: claims["name"])
 
@@ -69,15 +60,11 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.Identities do
         }
     }
 
-    assert :ok =
-             Security.register_oidc_identity(human_identity, id_token, %{
-               issuer: issuer,
-               client_id: client_id
-             })
+    assert :ok = Security.register_oidc_identity(human_identity, id_token, provider)
 
     on_exit(fn ->
-      if :ets.whereis(jwks_table) != :undefined, do: :ets.delete(jwks_table, issuer)
-      _ = Security.deregister_identity(human_id)
+      :ok = Security.delete_oidc_jwks_fixture(provider)
+      _ = Security.deregister_identity_fixture(human_id)
     end)
 
     %{id: human_id, identity: human_identity, issuer: issuer, subject: subject}
@@ -85,7 +72,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.Identities do
 
   def grant!(principal, resource) do
     assert {:ok, capability} =
-             Security.grant(principal: principal, resource: resource, constraints: %{})
+             Security.grant_fixture(principal: principal, resource: resource, constraints: %{})
 
     capability
   end

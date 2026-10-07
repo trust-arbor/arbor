@@ -189,7 +189,8 @@ defmodule Arbor.Security.ConversationNoticeCore do
   defp identifier?(value, pattern, maximum \\ 256)
 
   defp identifier?(value, pattern, maximum) when is_binary(value),
-    do: byte_size(value) in 1..maximum and String.valid?(value) and Regex.match?(pattern, value)
+    do:
+      byte_size(value) in 1..maximum//1 and String.valid?(value) and Regex.match?(pattern, value)
 
   defp identifier?(_, _, _), do: false
 

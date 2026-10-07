@@ -7,6 +7,7 @@ defmodule Arbor.Common.SkillLibraryTest do
   alias Arbor.Contracts.Skill
 
   @fixtures_dir Path.expand("../../fixtures/skills", __DIR__)
+  @fixture_skill_count 4
 
   # We need a unique table name per test run to avoid conflicts.
   # The SkillLibrary uses a named ETS table, so we start/stop it per test.
@@ -15,8 +16,6 @@ defmodule Arbor.Common.SkillLibraryTest do
     # Ensure the GenServer is not running from a previous test
     if Process.whereis(SkillLibrary) do
       GenServer.stop(SkillLibrary)
-      # Brief pause to ensure cleanup
-      Process.sleep(10)
     end
 
     # Clean up the ETS table if it exists from a previous run
@@ -40,8 +39,7 @@ defmodule Arbor.Common.SkillLibraryTest do
       assert {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
       assert Process.alive?(pid)
 
-      # Give it a moment to process the async scan_dirs message
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       # Should have indexed some skills
       assert SkillLibrary.count() > 0
@@ -53,7 +51,7 @@ defmodule Arbor.Common.SkillLibraryTest do
   describe "get/1" do
     test "returns skill when found in ETS" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       assert {:ok, skill} = SkillLibrary.get("security-perspective")
       assert Map.get(skill, :name) == "security-perspective"
@@ -79,7 +77,7 @@ defmodule Arbor.Common.SkillLibraryTest do
   describe "list/1" do
     test "returns all skills when no filters" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       skills = SkillLibrary.list()
       assert is_list(skills)
@@ -90,7 +88,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "filters by category" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       advisory_skills = SkillLibrary.list(category: "advisory")
       assert is_list(advisory_skills)
@@ -101,7 +99,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "filters by tags" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       tagged_skills = SkillLibrary.list(tags: ["security"])
       assert is_list(tagged_skills)
@@ -116,7 +114,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "filters by source" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       fabric_skills = SkillLibrary.list(source: :fabric)
       assert is_list(fabric_skills)
@@ -127,7 +125,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "returns empty list when no skills match filter" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       result = SkillLibrary.list(category: "nonexistent-category")
       assert result == []
@@ -144,7 +142,7 @@ defmodule Arbor.Common.SkillLibraryTest do
   describe "search/2" do
     test "finds skills matching query in name" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       results = SkillLibrary.search("security")
       assert is_list(results)
@@ -159,7 +157,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "finds skills matching query in description" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       results = SkillLibrary.search("defensive")
       assert is_list(results)
@@ -170,7 +168,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "returns empty list for no matches" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       results = SkillLibrary.search("zzzznonexistentzzzz")
       assert results == []
@@ -180,7 +178,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "respects limit option" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       # Search for something broad that matches multiple skills
       results = SkillLibrary.search("a", limit: 1)
@@ -191,7 +189,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "respects category filter" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       results = SkillLibrary.search("overview", category: "advisory")
       assert is_list(results)
@@ -219,6 +217,36 @@ defmodule Arbor.Common.SkillLibraryTest do
       assert {:ok, retrieved} = SkillLibrary.get("test-skill")
       assert Map.get(retrieved, :name) == "test-skill"
 
+      GenServer.stop(pid)
+    end
+
+    test "security regression: public registration cannot mint trusted provenance" do
+      {:ok, pid} = SkillLibrary.start_link(dirs: [])
+
+      assert :ok =
+               SkillLibrary.register(%{
+                 name: "claimed-trusted",
+                 description: "Caller supplied",
+                 body: "instructions",
+                 taint: :trusted,
+                 provenance: %{origin: "operator"}
+               })
+
+      assert {:ok, skill} = SkillLibrary.get("claimed-trusted")
+      assert skill.taint == :untrusted
+      assert skill.provenance == %{origin: "runtime_registration"}
+
+      GenServer.stop(pid)
+    end
+
+    test "security regression: non-owner processes cannot poison the skill cache" do
+      {:ok, pid} = SkillLibrary.start_link(dirs: [])
+
+      assert_raise ArgumentError, fn ->
+        :ets.insert(:arbor_skill_library, {"poison", %{taint: :trusted}})
+      end
+
+      assert {:error, :not_found} = SkillLibrary.get("poison")
       GenServer.stop(pid)
     end
 
@@ -288,7 +316,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
     test "returns correct count after indexing" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+      assert eventually(&fixture_scan_complete?/0)
 
       count = SkillLibrary.count()
       assert count > 0
@@ -300,7 +328,8 @@ defmodule Arbor.Common.SkillLibraryTest do
   describe "reload/0" do
     test "clears and re-indexes all skills" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@fixtures_dir])
-      Process.sleep(50)
+
+      assert eventually(&fixture_scan_complete?/0)
 
       initial_count = SkillLibrary.count()
       assert initial_count > 0
@@ -313,6 +342,105 @@ defmodule Arbor.Common.SkillLibraryTest do
       assert new_count > 0
 
       GenServer.stop(pid)
+    end
+  end
+
+  describe "security review source admission" do
+    test "security regression: project skills are untrusted and cannot shadow bundled skills" do
+      tmp = scratch_dir!("skill-source")
+      project_skills = Path.join([tmp, ".agents", "skills"])
+      collision_path = Path.join([project_skills, "collision", "SKILL.md"])
+      unique_path = Path.join([project_skills, "project-only", "SKILL.md"])
+
+      write_skill(collision_path, "security-perspective", "PROJECT POISON")
+      write_skill(unique_path, "project-only", "project content")
+
+      try do
+        File.cd!(tmp, fn ->
+          project_root = File.cwd!()
+          bundled = Application.app_dir(:arbor_kernel_runtime, "priv/library/skills")
+          project = Path.expand(".agents/skills")
+
+          ordered =
+            SkillLibrary.default_skill_dirs()
+            |> Enum.filter(&(&1 in [bundled, project]))
+
+          assert ordered == [bundled, project]
+          assert {:ok, pid} = SkillLibrary.start_link(dirs: [])
+          assert {:ok, 2} = SkillLibrary.index(project)
+          assert {:ok, bundled_count} = SkillLibrary.index(bundled)
+          assert bundled_count > 0
+
+          # Even an explicit overwrite request cannot let the lower-trust
+          # project definition replace the bundled definition.
+          assert {:ok, 1} = SkillLibrary.index(project, overwrite: true)
+
+          assert {:ok, bundled_skill} = SkillLibrary.get("security-perspective")
+          refute bundled_skill.body =~ "PROJECT POISON"
+          assert bundled_skill.taint == :trusted
+          assert bundled_skill.provenance.origin == "bundled"
+
+          assert {:ok, project_skill} = SkillLibrary.get("project-only")
+          assert project_skill.taint == :untrusted
+          assert project_skill.provenance.origin == "project:#{project_root}"
+
+          GenServer.stop(pid)
+        end)
+      after
+        File.rm_rf!(tmp)
+      end
+    end
+
+    test "security regression: scan ignores symlinks and invalid skill names" do
+      tmp = scratch_dir!("skill-scan")
+      root = Path.join(tmp, "skills")
+      outside = Path.join(tmp, "outside")
+
+      write_skill(Path.join([root, "valid", "SKILL.md"]), "valid-skill", "valid")
+      write_skill(Path.join([root, "invalid", "SKILL.md"]), "../../invalid", "invalid")
+      write_skill(Path.join([outside, "linked", "SKILL.md"]), "linked-poison", "poison")
+      File.ln_s!(Path.join(outside, "linked"), Path.join(root, "linked"))
+
+      try do
+        assert {:ok, pid} = SkillLibrary.start_link(dirs: [])
+        assert {:ok, 1} = SkillLibrary.index(root)
+
+        assert {:ok, valid} = SkillLibrary.get("valid-skill")
+        assert valid.taint == :untrusted
+        assert valid.provenance.origin == "configured:#{root}"
+        assert {:error, :not_found} = SkillLibrary.get("linked-poison")
+        assert {:error, :not_found} = SkillLibrary.get("../../invalid")
+
+        GenServer.stop(pid)
+      after
+        File.rm_rf!(tmp)
+      end
+    end
+
+    test "security regression: public scan refuses an oversized SKILL.md" do
+      tmp = scratch_dir!("skill-size")
+      root = Path.join(tmp, "skills")
+      oversized = Path.join([root, "oversized", "SKILL.md"])
+      File.mkdir_p!(Path.dirname(oversized))
+
+      File.write!(
+        oversized,
+        "---\nname: oversized-skill\ndescription: oversized fixture\n---\n" <>
+          :binary.copy("x", 2 * 1024 * 1024)
+      )
+
+      try do
+        assert {:ok, %File.Stat{size: size}} = File.stat(oversized)
+        assert size > 2 * 1024 * 1024
+        assert {:ok, pid} = SkillLibrary.start_link(dirs: [])
+
+        assert {:ok, 0} = SkillLibrary.index(root)
+        assert {:error, :not_found} = SkillLibrary.get("oversized-skill")
+
+        GenServer.stop(pid)
+      after
+        File.rm_rf!(tmp)
+      end
     end
   end
 
@@ -372,6 +500,52 @@ defmodule Arbor.Common.SkillLibraryTest do
       assert spec.type == :worker
       assert spec.restart == :permanent
       assert {SkillLibrary, :start_link, [[]]} = spec.start
+    end
+  end
+
+  defp write_skill(path, name, body) do
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    ---
+    name: #{name}
+    description: Security regression fixture
+    ---
+
+    #{body}
+    """)
+  end
+
+  defp scratch_dir!(prefix) do
+    {:ok, system_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(system_tmp, "#{prefix}-#{token}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
+  defp eventually(predicate, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    eventually_until(predicate, deadline)
+  end
+
+  defp fixture_scan_complete?, do: SkillLibrary.count() == @fixture_skill_count
+
+  defp eventually_until(predicate, deadline) do
+    cond do
+      predicate.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        receive do
+        after
+          10 -> eventually_until(predicate, deadline)
+        end
     end
   end
 end

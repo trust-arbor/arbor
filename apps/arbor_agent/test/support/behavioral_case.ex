@@ -32,7 +32,6 @@ defmodule Arbor.Test.BehavioralCase do
 
   alias Arbor.Consensus.TopicRegistry
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.CapabilityStore
 
   using do
     quote do
@@ -210,7 +209,7 @@ defmodule Arbor.Test.BehavioralCase do
         metadata: %{test: true, behavioral: true}
       }
 
-      CapabilityStore.put(cap)
+      Arbor.Security.put_capability_fixture(cap)
     end
   end
 end

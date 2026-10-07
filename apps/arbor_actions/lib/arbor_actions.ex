@@ -1739,7 +1739,11 @@ defmodule Arbor.Actions do
     # Extract signing data for action-level auth, but keep it in context
     # so facade-level auth (e.g., File.authorize_file_op) can also use it.
     signed_request = Map.get(context, :signed_request)
-    clean_context = context
+    capability_grant_request = Map.get(context, :capability_grant_request)
+
+    # The JIT request is consumed only by this admission boundary. Action code
+    # receives neither the session authority nor the one-use request envelope.
+    clean_context = Map.delete(context, :capability_grant_request)
 
     # P0-1: Inject default taint policy from config if not already set in context.
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
@@ -1811,8 +1815,15 @@ defmodule Arbor.Actions do
     egress_destination = Egress.egress_destination_for(action_module, params, clean_context)
     operation_taint = Map.get(clean_context, :taint)
 
+    approval_argument_digest =
+      case Arbor.Security.approval_argument_digest(params) do
+        {:ok, digest} -> digest
+        _ -> nil
+      end
+
     auth_opts =
       auth_opts
+      |> maybe_put_auth_scope(:capability_grant_request, capability_grant_request)
       |> Keyword.put(:effect_class, effect_class)
       |> Keyword.put(:operation_taint, operation_taint)
       |> Keyword.put(:egress_tier, egress_tier)
@@ -1820,6 +1831,8 @@ defmodule Arbor.Actions do
       |> Keyword.put(:egress_destination, egress_destination)
       |> maybe_put_auth_scope(:task_id, context_value(clean_context, :task_id))
       |> maybe_put_auth_scope(:session_id, context_value(clean_context, :session_id))
+      |> maybe_put_auth_scope(:argument_digest, approval_argument_digest)
+      |> Keyword.put(:approval_action, :execute)
       |> maybe_put_conversation_source()
       |> maybe_put_approved_invocation(clean_context)
       |> Keyword.put(
@@ -2349,6 +2362,12 @@ defmodule Arbor.Actions do
   end
 
   def runtime_descriptor(_action_module), do: {:error, :invalid_action_module}
+
+  @doc "Return the channel operation whose authority boundary an action needs."
+  @spec channel_authority_operation(module()) :: {:ok, :read | :send} | :error
+  def channel_authority_operation(Arbor.Actions.Channel.Send), do: {:ok, :send}
+  def channel_authority_operation(Arbor.Actions.Channel.Read), do: {:ok, :read}
+  def channel_authority_operation(_action_module), do: :error
 
   @doc "Capture action enforcement configuration and loaded implementation for qualification."
   def execution_policy_snapshot do
@@ -3745,7 +3764,7 @@ defmodule Arbor.Actions do
   defp trust_authorization_available? do
     Code.ensure_loaded?(Arbor.Trust) and
       function_exported?(Arbor.Trust, :authorize, 4) and
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
+      Arbor.Security.capability_authorization_available?()
   end
 
   defp auth_opts_from_context(context) when is_map(context) do
@@ -4203,6 +4222,14 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Return the fixed runtime URI projection consumed by the Security-owned URI
+  registry. Registration admits this projection only when `Arbor.Actions` is a
+  configured provider; callers cannot supply prefix bytes.
+  """
+  @spec capability_uri_prefixes() :: [String.t()]
+  def capability_uri_prefixes, do: action_namespace_uri_prefixes()
+
+  @doc """
   Return conservative inline capability profiles for generated action URIs.
 
   Facade-backed actions inherit profiles from their facade URI. This projection
@@ -4233,15 +4260,15 @@ defmodule Arbor.Actions do
   narrow tests or tooling that start applications manually can make the generated
   registry projection explicit.
   """
-  @spec register_action_uri_prefixes() :: :ok
+  @spec register_action_uri_prefixes() :: :ok | {:error, term()}
   def register_action_uri_prefixes do
     with {:ok, _started} <- Application.ensure_all_started(:arbor_security),
          true <- Code.ensure_loaded?(Arbor.Security) do
-      action_namespace_uri_prefixes()
-      |> Enum.each(&Arbor.Security.register_uri_prefix/1)
+      Arbor.Security.register_uri_provider(__MODULE__)
+    else
+      false -> {:error, :security_unavailable}
+      {:error, _reason} = error -> error
     end
-
-    :ok
   end
 
   defp default_action_uri_for(action_module) do

@@ -89,6 +89,22 @@ defmodule Arbor.Common.OAuth.DeviceCodeTest do
       assert StubClient.called_count() == 0
     end
 
+    @tag :security_regression
+    test "security regression: rejects endpoint userinfo before any request" do
+      setup_stub([
+        response(200, %{"device_code" => "dev", "interval" => 5, "expires_in" => 300})
+      ])
+
+      assert {:error, {:invalid_params, :invalid_endpoint}} =
+               DeviceCode.start(
+                 device_authorization_endpoint: "https://attacker@idp.example/device",
+                 client_id: "client-id",
+                 http_client: StubClient
+               )
+
+      assert StubClient.called_count() == 0
+    end
+
     test "rejects out-of-range request bytes before IO" do
       setup_stub([response(200, %{"device_code" => "dev", "interval" => 5, "expires_in" => 300})])
 

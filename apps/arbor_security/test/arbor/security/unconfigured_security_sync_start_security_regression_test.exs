@@ -7,6 +7,8 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Identity.NonceCache
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.TestBootstrap
+  alias Arbor.Signals
   alias Arbor.Signals.Config
 
   @stores [Registry, NonceCache, CapabilityStore]
@@ -23,12 +25,14 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
     original_distributed_signals = Application.get_env(:arbor_security, :distributed_signals)
     signals_snapshot = Config.Testing.snapshot_namespace()
 
+    :ok = Signals.restore_runtime_fixture()
     Application.put_env(:arbor_security, :distributed_signals, true)
 
     on_exit(fn ->
       Config.Testing.restore_namespace(signals_snapshot)
       restore_env(:distributed_signals, original_distributed_signals)
-      restart_security_stores()
+      :ok = Signals.restore_runtime_fixture()
+      TestBootstrap.restore_supervised_tree!()
     end)
 
     :ok
@@ -58,7 +62,7 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
       principal = "agent_local_sync_#{System.unique_integer([:positive])}"
       resource = "arbor://test/unconfigured_sync/#{System.unique_integer([:positive])}"
 
-      assert {:ok, _capability} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, _capability} = Security.grant_fixture(principal: principal, resource: resource)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -66,8 +70,6 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
   end
 
   test "security regression: configured sync still fails closed when the owner cannot subscribe" do
-    ensure_signals_bus()
-
     Config.Testing.put(:security_sync_subscribers, %{
       identity_registry: %{
         owner: :arbor_security_sync_impostor,
@@ -81,33 +83,42 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
     refute Arbor.Signals.authenticated_security_sync_transport?()
     assert Arbor.Security.Config.distributed_signals_enabled?()
 
-    :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, Registry)
+    registration_token = Registry.test_system_authority_registration_token()
+    {:ok, role_specs} = Arbor.Security.Config.signing_key_owner_roles()
 
-    assert {:error,
-            {:security_sync_subscription_failed, {:subscription_failed, _, :unauthorized}}} =
-             Supervisor.restart_child(Arbor.Security.Supervisor, Registry)
-  end
+    supervisor = Process.whereis(Arbor.Security.Supervisor)
+    assert is_pid(supervisor)
+    :ok = Supervisor.terminate_child(supervisor, Registry)
+    :ok = Supervisor.delete_child(supervisor, Registry)
 
-  defp ensure_signals_bus do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
+    registry_opts = [
+      system_authority_registration_token: registration_token,
+      registration_role_specs:
+        Map.take(role_specs, [:system_authority, :scheduler_owner, :trust_grant_owner]),
+      defer_initialization: true
+    ]
 
-    case Process.whereis(Arbor.Signals.Bus) do
-      pid when is_pid(pid) ->
-        :ok
+    spec =
+      Supervisor.child_spec({Registry, registry_opts},
+        id: Registry,
+        restart: :temporary
+      )
 
-      nil ->
-        case Supervisor.start_child(Arbor.Signals.Supervisor, {Arbor.Signals.Bus, []}) do
-          {:ok, _pid} ->
-            :ok
+    assert {:ok, registry} =
+             Supervisor.start_child(supervisor, spec)
 
-          {:error, {:already_started, _pid}} ->
-            :ok
+    monitor = Process.monitor(registry)
 
-          {:error, :already_present} ->
-            {:ok, _} = Supervisor.restart_child(Arbor.Signals.Supervisor, Arbor.Signals.Bus)
-            :ok
-        end
-    end
+    assert {:error, :registration_unavailable} =
+             Registry.complete_startup(supervisor, registration_token)
+
+    assert_receive {:DOWN, ^monitor, :process, ^registry,
+                    {:security_sync_subscription_failed,
+                     {:subscription_failed, _topic, :unauthorized}}},
+                   1_000
+
+    refute Process.alive?(registry)
+    assert Process.whereis(Registry) == nil
   end
 
   defp restart_security_stores do

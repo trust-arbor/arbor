@@ -610,20 +610,6 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
   end
 
   defp ensure_signal_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
-
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-        {:error, :already_present} -> :ok
-      end
-    end
+    :ok = Arbor.Signals.restore_runtime_fixture()
   end
 end

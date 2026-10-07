@@ -25,9 +25,17 @@ for child <- [
   end
 end
 
+scheduler_mutation_token = make_ref()
+
+Application.put_env(
+  :arbor_scheduler,
+  :test_scheduler_mutation_token,
+  scheduler_mutation_token
+)
+
 case Supervisor.start_child(
        Arbor.Scheduler.Supervisor,
-       Arbor.Scheduler.RunLeaseSupervisor
+       {Arbor.Scheduler.RunLeaseSupervisor, scheduler_mutation_token: scheduler_mutation_token}
      ) do
   {:ok, _pid} -> :ok
   {:error, {:already_started, _pid}} -> :ok

@@ -6,6 +6,96 @@ defmodule Arbor.Actions.GitPRTest do
 
   @token "test_scm_token"
 
+  defmodule PublicResolver do
+    def resolve_all(_host), do: {:ok, [{8, 8, 8, 8}]}
+  end
+
+  defmodule JSONServer do
+    def start(response_body) do
+      {:ok, listen} =
+        :gen_tcp.listen(0, [
+          :binary,
+          ip: {127, 0, 0, 1},
+          active: false,
+          reuseaddr: true,
+          packet: :raw
+        ])
+
+      {:ok, port} = :inet.port(listen)
+      owner = self()
+      ref = make_ref()
+
+      pid =
+        spawn(fn ->
+          receive do
+            {:serve, ^listen} ->
+              report = serve(listen, response_body)
+              :gen_tcp.close(listen)
+              send(owner, {ref, report})
+          end
+        end)
+
+      :ok = :gen_tcp.controlling_process(listen, pid)
+      send(pid, {:serve, listen})
+      {port, %{pid: pid, ref: ref}}
+    end
+
+    def await(%{ref: ref}) do
+      receive do
+        {^ref, report} -> report
+      after
+        5_000 -> raise "SCM loopback server timed out"
+      end
+    end
+
+    def stop(%{pid: pid}) do
+      if Process.alive?(pid), do: Process.exit(pid, :kill)
+      :ok
+    end
+
+    defp serve(listen, response_body) do
+      with {:ok, socket} <- :gen_tcp.accept(listen, 5_000),
+           {:ok, request} <- read_request(socket, ""),
+           :ok <-
+             :gen_tcp.send(
+               socket,
+               "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\n" <>
+                 "content-length: #{byte_size(response_body)}\r\nconnection: close\r\n\r\n" <>
+                 response_body
+             ) do
+        :gen_tcp.close(socket)
+        {:ok, request}
+      end
+    end
+
+    defp read_request(socket, acc) do
+      case String.split(acc, "\r\n\r\n", parts: 2) do
+        [head, body] ->
+          content_length =
+            case Regex.run(~r/content-length:\s*(\d+)/i, head, capture: :all_but_first) do
+              [length] -> String.to_integer(length)
+              _ -> 0
+            end
+
+          if byte_size(body) >= content_length do
+            {:ok, acc}
+          else
+            receive_more(socket, acc)
+          end
+
+        [_partial] ->
+          receive_more(socket, acc)
+      end
+    end
+
+    defp receive_more(socket, acc) do
+      case :gen_tcp.recv(socket, 0, 5_000) do
+        {:ok, data} -> read_request(socket, acc <> data)
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   setup_all do
     case Process.whereis(Arbor.Shell.ExecutionRegistry) do
       nil -> {:ok, _} = Application.ensure_all_started(:arbor_shell)
@@ -26,11 +116,15 @@ defmodule Arbor.Actions.GitPRTest do
   end
 
   defp run_git(module, params, context \\ %{}) do
+    context = Map.put_new(context, :ssrf_resolver, PublicResolver)
     Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
   end
 
   describe "PR.run/2" do
-    test "opens a draft GitHub pull request from the selected remote", %{repo_path: repo_path} do
+    @tag :security_regression
+    test "security regression: SCM request uses the connect-time DNS pin", %{
+      repo_path: repo_path
+    } do
       add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
       parent = self()
 
@@ -67,6 +161,57 @@ defmodule Arbor.Actions.GitPRTest do
       assert opts[:json]["base"] == "main"
       assert opts[:json]["draft"] == true
       assert {"authorization", "Bearer #{@token}"} in opts[:headers]
+      assert opts[:redirect] == false
+      assert opts[:connect_options] == nil
+      assert opts[:finch] == Arbor.Common.Sanitizers.SSRF.FinchPool.req_name()
+      assert is_function(opts[:finch_request], 4)
+    end
+
+    @tag :security_regression
+    @tag spec: "KSEC-013"
+    test "security regression: real bounded Req transport decodes an SCM JSON response", %{
+      repo_path: repo_path
+    } do
+      add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
+
+      response_body =
+        Jason.encode!(%{
+          "number" => 73,
+          "html_url" => "http://127.0.0.1/acme/widgets/pulls/73"
+        })
+
+      {port, server} = JSONServer.start(response_body)
+      on_exit(fn -> JSONServer.stop(server) end)
+      previous_origins = Application.get_env(:arbor_actions, :scm_private_origins)
+
+      Application.put_env(
+        :arbor_actions,
+        :scm_private_origins,
+        ["http://127.0.0.1:#{port}"]
+      )
+
+      on_exit(fn -> restore_app_env(:scm_private_origins, previous_origins) end)
+
+      assert {:ok, result} =
+               run_git(
+                 Git.PR,
+                 %{
+                   path: repo_path,
+                   branch: "feature/real-transport",
+                   title: "Real transport",
+                   provider: :gitea,
+                   scm_base_url: "http://127.0.0.1:#{port}",
+                   owner: "acme",
+                   repo: "widgets"
+                 },
+                 %{scm_token: @token}
+               )
+
+      assert result.number == 73
+      assert result.url == "http://127.0.0.1/acme/widgets/pulls/73"
+      assert {:ok, request} = JSONServer.await(server)
+      assert request =~ "POST /api/v1/repos/acme/widgets/pulls HTTP/1.1"
+      assert request =~ "feature/real-transport"
     end
 
     test "opens a Forgejo/Gitea pull request from an on-prem remote override", %{
@@ -74,6 +219,15 @@ defmodule Arbor.Actions.GitPRTest do
     } do
       add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
       add_remote(repo_path, "forgejo", "http://10.42.42.6:3000/hysun/arbor.git")
+      previous_origins = Application.get_env(:arbor_actions, :scm_private_origins)
+
+      Application.put_env(
+        :arbor_actions,
+        :scm_private_origins,
+        ["http://10.42.42.6:3000"]
+      )
+
+      on_exit(fn -> restore_app_env(:scm_private_origins, previous_origins) end)
       parent = self()
 
       http = fn :post, url, opts ->
@@ -111,6 +265,35 @@ defmodule Arbor.Actions.GitPRTest do
 
       assert Git.PR.egress_tier(%{path: repo_path, remote: "forgejo"}, %{}) == :on_premises
       assert Git.PR.egress_destination(%{path: repo_path, remote: "forgejo"}, %{}) == "10.42.42.6"
+    end
+
+    @tag :security_regression
+    test "security regression: an unconfigured private SCM origin is refused before HTTP", %{
+      repo_path: repo_path
+    } do
+      add_remote(repo_path, "origin", "http://10.42.42.7/hysun/arbor.git")
+      previous_origins = Application.get_env(:arbor_actions, :scm_private_origins)
+      Application.delete_env(:arbor_actions, :scm_private_origins)
+      on_exit(fn -> restore_app_env(:scm_private_origins, previous_origins) end)
+
+      http = fn :post, _url, _opts ->
+        send(self(), :unexpected_http)
+        {:error, :unexpected}
+      end
+
+      assert {:error, reason} =
+               run_git(
+                 Git.PR,
+                 %{
+                   path: repo_path,
+                   branch: "feature/private-origin",
+                   title: "Private target"
+                 },
+                 %{scm_token: @token, http_request: http}
+               )
+
+      assert reason =~ "private_ip"
+      refute_received :unexpected_http
     end
 
     test "opens a GitLab merge request with GitLab field names", %{repo_path: repo_path} do

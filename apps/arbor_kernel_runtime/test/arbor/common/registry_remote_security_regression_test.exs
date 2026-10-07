@@ -59,7 +59,7 @@ defmodule Arbor.Common.RegistryRemoteSecurityRegressionTest do
     :ok
   end
 
-  test "security regression: missing remote policy denies before discovery while local lookup works" do
+  test "security regression: remote resolution fails closed while local lookup works" do
     for policy <- [
           nil,
           "not a module",
@@ -70,64 +70,68 @@ defmodule Arbor.Common.RegistryRemoteSecurityRegressionTest do
       put_policy(policy)
       assert {:ok, String} = ExampleRegistry.resolve("example.local")
 
-      assert {:error, {:zone_violation, _, _}} =
+      assert {:error, :unauthenticated_remote_resolution} =
                ExampleRegistry.resolve("example.local", node: :remote@not_connected)
     end
   end
 
-  test "security regression: unavailable and nonboolean remote decisions fail closed" do
+  test "security regression: remote denial does not depend on policy behavior" do
     put_policy(BrokenPolicy)
 
     for decision <- [:raise, :exit, :throw, :allow, 1, nil] do
       Application.put_env(:arbor_kernel, :registry_regression_decision, decision)
       assert {:ok, String} = ExampleRegistry.resolve("example.local")
 
-      assert {:error, {:zone_violation, 2, 0}} =
+      assert {:error, :unauthenticated_remote_resolution} =
                ExampleRegistry.resolve("example.local", node: :remote@not_connected)
     end
   end
 
-  test "security regression: cached remote lookup rechecks the current policy for both routes" do
+  test "security regression: cached remote assertions cannot bypass authentication" do
     put_policy(AllowPolicy)
     seed_remote_cache()
-    assert {:ok, String} = ExampleRegistry.resolve("cached.remote", node: :any)
 
-    assert {:ok, String} =
+    assert {:error, :unauthenticated_remote_resolution} =
+             ExampleRegistry.resolve("cached.remote", node: :any)
+
+    assert {:error, :unauthenticated_remote_resolution} =
              ExampleRegistry.resolve("cached.remote", node: :remote@not_connected)
 
     for policy <- [DenyPolicy, nil, MissingDecisionPolicy] do
       put_policy(policy)
 
-      assert {:error, {:zone_violation, _, _}} =
+      assert {:error, :unauthenticated_remote_resolution} =
                ExampleRegistry.resolve("cached.remote", node: :any)
 
-      assert {:error, {:zone_violation, _, _}} =
+      assert {:error, :unauthenticated_remote_resolution} =
                ExampleRegistry.resolve("cached.remote", node: :remote@not_connected)
     end
   end
 
-  test "security regression: invalid zone evidence cannot be approved by a permissive policy" do
+  test "security regression: permissive policy cannot approve remote module assertions" do
     put_policy(InvalidZonePolicy)
     seed_remote_cache()
 
     for zone <- [:unavailable, -1, 3, %{}] do
       Application.put_env(:arbor_kernel, :registry_regression_decision, zone)
 
-      assert {:error, {:zone_violation, :unavailable, 0}} =
+      assert {:error, :unauthenticated_remote_resolution} =
                ExampleRegistry.resolve("cached.remote", node: :any)
     end
   end
 
-  test "default policy preserves the NodeRegistry facade and local decisions" do
+  test "default policy preserves local decisions and denies remote assertions" do
     Application.put_env(:arbor_kernel, :common, trust_zones: :disabled)
     assert {:ok, String} = ExampleRegistry.resolve("example.local", node: :local)
     assert {:ok, String} = ExampleRegistry.resolve("example.local", node: node())
 
     seed_remote_cache()
-    assert {:ok, String} = ExampleRegistry.resolve("cached.remote", node: :any)
+
+    assert {:error, :unauthenticated_remote_resolution} =
+             ExampleRegistry.resolve("cached.remote", node: :any)
   end
 
-  test "security regression: default NodeRegistry zone changes apply to cached remote lookup" do
+  test "security regression: zone changes cannot open cached remote lookup" do
     Application.put_env(:arbor_kernel, :common,
       trust_zones: %{
         node() => %{zone: 2, apps: []},
@@ -137,13 +141,16 @@ defmodule Arbor.Common.RegistryRemoteSecurityRegressionTest do
 
     start_supervised!(Arbor.Common.NodeRegistry)
     seed_remote_cache()
-    assert {:ok, String} = ExampleRegistry.resolve("cached.remote", node: :any)
-    :ok = Arbor.Common.NodeRegistry.register_node(node(), %{zone: 0, apps: []})
 
-    assert {:error, {:zone_violation, 0, 1}} =
+    assert {:error, :unauthenticated_remote_resolution} =
              ExampleRegistry.resolve("cached.remote", node: :any)
 
-    assert {:error, {:zone_violation, 0, 1}} =
+    :ok = Arbor.Common.NodeRegistry.register_node(node(), %{zone: 0, apps: []})
+
+    assert {:error, :unauthenticated_remote_resolution} =
+             ExampleRegistry.resolve("cached.remote", node: :any)
+
+    assert {:error, :unauthenticated_remote_resolution} =
              ExampleRegistry.resolve("cached.remote", node: :remote@not_connected)
 
     assert {:ok, String} = ExampleRegistry.resolve("example.local")
@@ -155,11 +162,15 @@ defmodule Arbor.Common.RegistryRemoteSecurityRegressionTest do
 
   defp seed_remote_cache do
     # Fixture for a previously discovered entry; no distributed node is started.
-    :ets.insert(
-      :arbor_registry_remote_security_regression,
-      {{:remote_cache, "cached.remote"}, String, :remote@not_connected,
-       System.monotonic_time(:millisecond) + 30_000}
-    )
+    expiry = System.monotonic_time(:millisecond) + 30_000
+
+    :sys.replace_state(ExampleRegistry, fn state ->
+      put_in(
+        state,
+        [:remote_cache, {"cached.remote", :remote@not_connected}],
+        {String, :remote@not_connected, expiry}
+      )
+    end)
   end
 
   defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_kernel, key, value)

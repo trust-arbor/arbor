@@ -2,9 +2,11 @@ defmodule Arbor.Gateway.JwtAuth do
   @moduledoc """
   JWT bearer token authentication plug for the Gateway.
 
-  Tries to verify an `Authorization: Bearer <token>` as a JWT signed by
-  a configured OIDC provider. On success, derives an `agent_id` from the
-  token claims and assigns it to `conn.assigns.agent_id`.
+  Tries to authenticate an `Authorization: Bearer <token>` through the
+  `Arbor.Security` OIDC boundary. The Security facade verifies the token,
+  applies registration policy, and binds it to a registered identity. This
+  plug additionally requires that identity to remain active before assigning
+  it to `conn.assigns.agent_id`.
 
   On failure (not a JWT, expired, wrong issuer, etc.), passes through
   without modification — letting the existing `Arbor.Gateway.Auth` API
@@ -16,9 +18,7 @@ defmodule Arbor.Gateway.JwtAuth do
 
   import Plug.Conn
 
-  alias Arbor.Security.OIDC.{Config, IdentityStore, TokenVerifier}
-
-  require Logger
+  alias Arbor.Security
 
   @behaviour Plug
 
@@ -26,12 +26,11 @@ defmodule Arbor.Gateway.JwtAuth do
   def init(opts), do: opts
 
   @impl true
-  def call(conn, _opts) do
-    with {:ok, token} <- extract_bearer_token(conn),
-         {:ok, provider} <- find_matching_provider(token),
-         {:ok, claims} <- TokenVerifier.verify(token, provider) do
-      agent_id = IdentityStore.derive_agent_id(claims)
+  def call(conn, opts) do
+    security = Keyword.get(opts, :security_facade, Security)
 
+    with {:ok, token} <- extract_bearer_token(conn),
+         {:ok, agent_id} <- authenticate_registered_principal(token, security) do
       conn
       |> assign(:agent_id, agent_id)
       |> assign(:jwt_authenticated, true)
@@ -60,24 +59,51 @@ defmodule Arbor.Gateway.JwtAuth do
     end
   end
 
-  defp find_matching_provider(token) do
-    providers = Config.providers()
+  defp authenticate_registered_principal(token, security) do
+    case safe_authenticate_token(security, token) do
+      {:ok, agent_id, authority} ->
+        admission = active_registered_identity(security, agent_id)
+        closure = close_temporary_authority(security, authority)
 
-    if providers == [] do
-      :no_providers
-    else
-      # Try to match token's issuer to a configured provider
-      case TokenVerifier.decode_unverified(token) do
-        {:ok, %{"iss" => iss}} ->
-          case Enum.find(providers, fn p -> Map.get(p, :issuer) == iss end) do
-            nil -> :no_matching_provider
-            provider -> {:ok, provider}
-          end
+        case {admission, closure} do
+          {:ok, :ok} -> {:ok, agent_id}
+          _ -> {:error, :oidc_principal_unauthorized}
+        end
 
-        _ ->
-          # Can't decode — try first provider as fallback
-          {:ok, List.first(providers)}
-      end
+      _ ->
+        {:error, :oidc_principal_unauthorized}
     end
+  end
+
+  defp safe_authenticate_token(security, token) do
+    security.authenticate_oidc_token(token)
+  rescue
+    _ -> {:error, :oidc_authentication_unavailable}
+  catch
+    _, _ -> {:error, :oidc_authentication_unavailable}
+  end
+
+  defp active_registered_identity(security, agent_id) when is_binary(agent_id) do
+    if security.identity_active?(agent_id),
+      do: :ok,
+      else: {:error, :oidc_identity_not_active}
+  rescue
+    _ -> {:error, :identity_registry_unavailable}
+  catch
+    _, _ -> {:error, :identity_registry_unavailable}
+  end
+
+  defp active_registered_identity(_security, _agent_id),
+    do: {:error, :invalid_oidc_principal}
+
+  defp close_temporary_authority(security, authority) do
+    case security.close_signing_authority(authority) do
+      :ok -> :ok
+      _ -> {:error, :oidc_authority_close_failed}
+    end
+  rescue
+    _ -> {:error, :oidc_authority_close_failed}
+  catch
+    _, _ -> {:error, :oidc_authority_close_failed}
   end
 end

@@ -60,6 +60,34 @@ defmodule Arbor.Security.CapabilityStore.SerializerTest do
     assert Map.has_key?(serialized, "issuer_signature")
   end
 
+  test "security regression: malformed persisted security fields fail closed" do
+    {:ok, cap} =
+      Capability.new(
+        resource_uri: "arbor://fs/read/serializer-strict",
+        principal_id: "agent_serializer_strict"
+      )
+
+    serialized = Serializer.serialize(cap)
+
+    for malformed <- [
+          Map.put(serialized, "granted_at", nil),
+          Map.put(serialized, "granted_at", "not-a-date"),
+          Map.put(serialized, "expires_at", "not-a-date"),
+          Map.put(serialized, "delegation_depth", nil),
+          Map.put(serialized, "delegation_depth", 99),
+          Map.put(serialized, "issuer_signature", "not-hex"),
+          Map.put(serialized, "delegation_chain", [
+            %{
+              "delegator_id" => "agent_bad",
+              "delegator_signature" => "not-hex",
+              "delegated_at" => "not-a-date"
+            }
+          ])
+        ] do
+      assert {:error, :invalid_capability_record} = Serializer.deserialize(malformed)
+    end
+  end
+
   test "legacy JSON carrying a signature key still deserializes (ignored)" do
     # Shape a pre-C11 persisted record: every current key PLUS the dead
     # "signature" field. Deserialization must ignore the extra key.
@@ -95,7 +123,7 @@ defmodule Arbor.Security.CapabilityStore.SerializerTest do
         metadata: %{provenance: %{source: :caps_file}}
       )
 
-    {:ok, signed} = SystemAuthority.sign_capability(cap)
+    {:ok, signed} = SystemAuthority.sign_capability_for_test(cap)
     assert SystemAuthority.verify_capability_signature(signed) == :ok
 
     {:ok, restored} = Serializer.deserialize(Serializer.serialize(signed))

@@ -39,7 +39,9 @@ defmodule Arbor.Contracts.Skill do
     field(:allowed_tools, [String.t()], default: [])
     field(:content_hash, String.t() | nil)
     field(:provenance, map() | nil)
-    field(:taint, atom(), default: :trusted)
+    # Content is untrusted until a library boundary proves an operator-owned
+    # provenance.  A data constructor cannot make that security decision.
+    field(:taint, atom(), default: :untrusted)
     field(:version, String.t() | nil)
     field(:template_vars, [String.t()], default: [])
   end
@@ -79,7 +81,7 @@ defmodule Arbor.Contracts.Skill do
         allowed_tools: Map.get(attrs, :allowed_tools, []),
         content_hash: Map.get(attrs, :content_hash),
         provenance: Map.get(attrs, :provenance),
-        taint: Map.get(attrs, :taint, :trusted),
+        taint: Map.get(attrs, :taint, :untrusted),
         version: Map.get(attrs, :version),
         template_vars: Map.get(attrs, :template_vars, [])
       }

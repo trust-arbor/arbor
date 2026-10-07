@@ -79,7 +79,7 @@ defmodule Arbor.Memory.AuthorizationTest do
   # facade checks.
   defp grant_memory_cap(caller_id) do
     {:ok, _cap} =
-      Arbor.Security.grant(
+      Arbor.Security.grant_fixture(
         principal: caller_id,
         resource: "arbor://memory/**"
       )

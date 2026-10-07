@@ -138,7 +138,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
 
     # Only dispatch authority — no permanent task/read, approval/read, etc.
     assert {:ok, _} =
-             Security.grant(
+             Security.grant_fixture(
                principal: caller,
                resource: "arbor://agent/dispatch/#{agent}",
                constraints: %{},

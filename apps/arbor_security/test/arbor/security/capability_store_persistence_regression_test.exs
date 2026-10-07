@@ -57,6 +57,8 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJ
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
 
   defdelegate authoritative_entry(key, opts), to: JSONFile
+
+  @impl true
   defdelegate durability_class(opts), to: JSONFile
 
   def compare_and_create(key, expected, value, opts),
@@ -65,12 +67,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJ
         JSONFile.compare_and_create(key, expected, value, opts)
       end)
 
+  @impl true
   def compare_and_swap(key, expected, value, opts),
     do:
       with_failure(@put_failures_key, :injected_put_failure, fn ->
         JSONFile.compare_and_swap(key, expected, value, opts)
       end)
 
+  @impl true
   def compare_and_delete(key, expected, opts),
     do:
       with_failure(@delete_failures_key, :injected_delete_failure, fn ->
@@ -137,6 +141,8 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
+  alias Arbor.Common.SafePath
+  alias Arbor.Signals
 
   @tag :fast
   test "security regression: replacement removes the superseded JSON record" do
@@ -147,9 +153,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     configure_isolated_json_store(backend_dir)
 
-    assert {:ok, original} = Security.grant(principal: principal_id, resource: resource_uri)
+    assert {:ok, original} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
 
-    assert {:ok, 1} = CapabilityStore.increment_usage(original.id)
+    assert {:ok, 1} = CapabilityStore.increment_usage_fixture(original.id)
 
     assert {:ok, :authorized} =
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
@@ -157,7 +164,9 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, %Record{}} =
              AuthorityStore.authoritative_get(original.id, name: @capability_store)
 
-    assert {:ok, replacement} = Security.grant(principal: principal_id, resource: resource_uri)
+    assert {:ok, replacement} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
+
     assert original.id != replacement.id
 
     state = :sys.get_state(CapabilityStore)
@@ -201,13 +210,15 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
 
-    assert {:ok, original} = Security.grant(principal: principal_id, resource: resource_uri)
+    assert {:ok, original} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
+
     original_id = original.id
 
     DeleteFailingJSONFile.fail_deletes(1)
 
     assert {:error, {:capability_replacement_failed, :conflict}} =
-             Security.grant(principal: principal_id, resource: resource_uri)
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
 
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
 
@@ -224,17 +235,19 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
 
-    assert {:ok, original} = Security.grant(principal: principal_id, resource: resource_uri)
+    assert {:ok, original} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
+
     original_id = original.id
     DeleteFailingJSONFile.fail_puts(1)
 
     # An unchanged record is now correctly idempotent; change the signed body
     # so this fixture still reaches the exact replacement CAS.
     changed = %{original | metadata: %{replacement_fixture: true}}
-    {:ok, changed} = SystemAuthority.sign_capability(changed)
+    {:ok, changed} = SystemAuthority.sign_capability_for_test(changed)
 
     assert {:error, {:capability_replacement_failed, :conflict}} =
-             CapabilityStore.put(changed)
+             CapabilityStore.put_fixture(changed)
 
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
 
@@ -251,12 +264,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
 
-    assert {:ok, original} = Security.grant(principal: principal_id, resource: resource_uri)
+    assert {:ok, original} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
+
     original_id = original.id
 
     DeleteFailingJSONFile.fail_deletes(2)
 
-    result = Security.grant(principal: principal_id, resource: resource_uri)
+    result = Security.grant_fixture(principal: principal_id, resource: resource_uri)
     assert {:error, {:capability_replacement_outcome_unknown, details}} = result
     assert details.original == :conflict
 
@@ -271,27 +286,40 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     resource_uri = "arbor://fs/read/capability-store-remote-revoke-regression"
     backend_dir = unique_tmp_dir("capability-store-remote-revoke")
 
+    previous_distributed_signals =
+      Application.get_env(:arbor_security, :distributed_signals)
+
+    Application.put_env(:arbor_security, :distributed_signals, true)
+    ensure_signals_children!()
+
     configure_isolated_json_store(backend_dir)
 
-    assert {:ok, original} = Security.grant(principal: principal_id, resource: resource_uri)
+    # Register after the store cleanup so the canonical CapabilityStore is
+    # restored with the suite's original distributed-signals configuration.
+    on_exit(fn ->
+      restore_security_env(:distributed_signals, previous_distributed_signals)
+    end)
+
+    assert {:ok, original} =
+             Security.grant_fixture(principal: principal_id, resource: resource_uri)
 
     assert {:ok, :authorized} =
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
 
-    send(
-      CapabilityStore,
-      {:signal_received,
-       %{
-         type: :capability_revoked,
-         data: %{
-           capability_ids: [original.id],
-           principal_id: principal_id,
-           origin_node: "remote-capability-store-test@localhost"
-         }
-       }}
-    )
+    signal =
+      Signals.build_signal_fixture(:security, :capability_revoked, %{
+        capability_ids: [original.id],
+        principal_id: principal_id,
+        origin_node: :remote_capability_store_test@localhost
+      })
 
-    :sys.get_state(CapabilityStore)
+    assert :ok =
+             Signals.receive_relay_batch_fixture(
+               [signal],
+               :remote_capability_store_test@localhost
+             )
+
+    assert eventually(fn -> Security.list_capabilities(principal_id) == {:ok, []} end)
 
     assert {:ok, []} = Security.list_capabilities(principal_id)
 
@@ -317,18 +345,21 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     {:ok, parent} = Identity.generate(name: "restart-delegator")
     {:ok, worker} = Identity.generate(name: "restart-delegatee")
-    :ok = Registry.register(parent)
-    :ok = Registry.register(worker)
+    :ok = Registry.register_fixture(parent)
+    :ok = Registry.register_fixture(worker)
 
     resource = "arbor://fs/read/delegation-restart-regression"
 
-    assert {:ok, _parent_cap} =
-             Security.grant(principal: parent.agent_id, resource: resource, delegation_depth: 3)
+    assert {:ok, parent_cap} =
+             Security.grant_fixture(
+               principal: parent.agent_id,
+               resource: resource,
+               delegation_depth: 3
+             )
 
-    assert {:ok, [delegated]} =
-             Security.delegate_to_agent(parent.agent_id, worker.agent_id,
-               delegator_private_key: parent.private_key,
-               resources: [resource]
+    assert {:ok, delegated} =
+             Security.delegate_fixture(parent_cap.id, worker.agent_id,
+               delegator_private_key: parent.private_key
              )
 
     assert is_binary(hd(delegated.delegation_chain).delegator_signature)
@@ -351,7 +382,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     configure_isolated_json_store(backend_dir)
 
     assert {:ok, _cap} =
-             Security.grant(principal: principal_id, resource: resource_uri, max_uses: 3)
+             Security.grant_fixture(principal: principal_id, resource: resource_uri, max_uses: 3)
 
     assert {:ok, :authorized} =
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
@@ -386,12 +417,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     seed_count = 10_001
     seed_durable_capabilities!(backend_dir, target_cap, seed_count)
 
-    # Detach permanent supervisor children first (do not GenServer.stop them).
-    :ok = Supervisor.terminate_child(@security_supervisor, CapabilityStore)
-    :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
+    # Replace the canonical children under the same supervisor so startup
+    # authority, authenticated mutations, and security-sync provenance remain
+    # identical to production while the backend root stays test-isolated.
+    remove_security_child!(CapabilityStore)
+    remove_security_child!(@capability_store)
 
     start_capability_authority_store!(backend_dir)
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    start_capability_store!()
 
     assert {:ok, :authorized} =
              Security.authorize(target_principal, target_resource, nil, verify_identity: false)
@@ -407,8 +440,8 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert limit >= seed_count
 
     # Full recreate of both test-owned processes so parent cannot pass via residual ETS.
-    stop_named_process(CapabilityStore)
-    stop_named_process(@capability_store)
+    remove_security_child!(CapabilityStore)
+    remove_security_child!(@capability_store)
 
     start_capability_authority_store!(backend_dir)
 
@@ -417,7 +450,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     assert loaded_after == seed_count
 
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    start_capability_store!()
 
     assert {:ok, :authorized} =
              Security.authorize(target_principal, target_resource, nil, verify_identity: false)
@@ -448,7 +481,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
         resource: resource
       ]
 
-      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant_fixture(opts)
       assert {:error, :not_found} = CapabilityStore.get(det_id)
 
       # No durable mutation either: the CAS-unsupported backend never admitted.
@@ -458,12 +491,12 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       # Both public creation lanes require exact mutation support. Seed a
       # historical signed record through the real JSON backend, then reload it
       # under the deliberately unsupported adapter to exercise the revoke gate.
-      assert {:error, _} = Security.grant(principal: principal, resource: resource)
+      assert {:error, _} = Security.grant_fixture(principal: principal, resource: resource)
       {:ok, seeded} = Capability.new(principal_id: principal, resource_uri: resource)
-      {:ok, seeded} = SystemAuthority.sign_capability(seeded)
+      {:ok, seeded} = SystemAuthority.sign_capability_for_test(seeded)
       seed_durable_capabilities!(backend_dir, seeded, 1)
       restart_capability_store()
-      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(seeded.id)
+      assert {:error, :outcome_unknown} = Security.acknowledged_revoke_fixture(seeded.id)
 
       assert {:ok, :authorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -502,9 +535,9 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     configure_isolated_json_store(backend_dir)
 
     # Phase A — public grant + idempotency + authorize
-    assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+    assert {:ok, :applied, id} = Security.acknowledged_grant_fixture(opts)
     assert id == cap_id
-    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
 
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
@@ -521,14 +554,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
 
-    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
 
     assert {:ok, %Record{generation: ^g1, revision: ^r1}} =
              AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Phase C — public revoke + idempotency + no live auth
-    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
-    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke_fixture(id)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id)
 
     assert {:error, :unauthorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
@@ -547,10 +580,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:error, :not_found} =
              AuthorityStore.authoritative_get(id, name: @capability_store)
 
-    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke_fixture(id)
 
     # Phase E — same-id re-grant advances durable generation
-    assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant_fixture(opts)
 
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
@@ -587,54 +620,67 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, :authorized} =
              Security.authorize(principal, resource, nil, verify_identity: false)
 
-    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant_fixture(opts)
   end
 
   defp configure_isolated_json_store(tmp_dir, backend \\ JSONFile) do
     on_exit(&restore_security_children/0)
 
-    :ok = Supervisor.terminate_child(@security_supervisor, CapabilityStore)
-    :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
-
-    {:ok, _pid} =
-      AuthorityStore.start_link(
-        name: @capability_store,
-        backend: backend,
-        backend_opts: [base_dir: absolute_test_root(tmp_dir)],
-        namespace: "capabilities",
-        hydration_limit: Config.max_global_capabilities()
-      )
-
-    {:ok, _pid} = CapabilityStore.start_link([])
+    remove_security_child!(CapabilityStore)
+    remove_security_child!(@capability_store)
+    start_capability_authority_store!(tmp_dir, backend)
+    start_capability_store!()
   end
 
   defp restart_capability_store do
-    stop_named_process(CapabilityStore)
-    {:ok, _pid} = CapabilityStore.start_link([])
+    remove_security_child!(CapabilityStore)
+    start_capability_store!()
   end
 
   # Full recreate of both test-owned processes so residual ETS cannot pass a
   # durability assertion. Same isolated JSON directory is re-attached.
   defp full_restart_capability_stack!(backend_dir) do
-    stop_named_process(CapabilityStore)
-    stop_named_process(@capability_store)
+    remove_security_child!(CapabilityStore)
+    remove_security_child!(@capability_store)
     start_capability_authority_store!(backend_dir)
 
     assert {:ok, %{status: :ready}} =
              AuthorityStore.hydration_status(name: @capability_store)
 
-    assert {:ok, _pid} = CapabilityStore.start_link([])
+    start_capability_store!()
   end
 
-  defp start_capability_authority_store!(backend_dir) do
-    {:ok, _pid} =
-      AuthorityStore.start_link(
-        name: @capability_store,
-        backend: JSONFile,
-        backend_opts: [base_dir: absolute_test_root(backend_dir)],
-        namespace: "capabilities",
-        hydration_limit: Config.max_global_capabilities()
+  defp start_capability_authority_store!(backend_dir, backend \\ JSONFile) do
+    spec =
+      Supervisor.child_spec(
+        {AuthorityStore,
+         name: @capability_store,
+         backend: backend,
+         backend_opts: [base_dir: absolute_test_root(backend_dir)],
+         namespace: "capabilities",
+         hydration_limit: Config.max_global_capabilities(),
+         mutation_owners: [CapabilityStore],
+         defer_hydration: true},
+        id: @capability_store
       )
+
+    {:ok, pid} = Supervisor.start_child(@security_supervisor, spec)
+    {:ok, timeout} = Config.startup_timeout_ms(Config.max_global_capabilities())
+
+    :ok =
+      AuthorityStore.complete_startup(
+        security_supervisor_pid!(),
+        @capability_store,
+        timeout
+      )
+
+    pid
+  end
+
+  defp start_capability_store! do
+    {:ok, pid} = Supervisor.start_child(@security_supervisor, {CapabilityStore, []})
+    :ok = CapabilityStore.complete_startup(security_supervisor_pid!())
+    pid
   end
 
   defp absolute_test_root(dir) when is_binary(dir) do
@@ -642,8 +688,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   end
 
   defp unique_tmp_dir(label) do
-    dir = Path.join(System.tmp_dir!(), "#{label}-#{unique_integer()}")
-    File.mkdir_p!(dir)
+    {:ok, canonical_tmp} = SafePath.resolve_real(System.tmp_dir!())
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    dir = Path.join(canonical_tmp, "#{label}-#{suffix}")
+    :ok = File.mkdir!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
     dir
   end
@@ -687,18 +735,59 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   # Isolation tests occupy supervisor-owned names. Restore through TestBootstrap
   # so success requires supervisor pid equality, not name occupancy.
   defp restore_security_children do
-    TestBootstrap.restore_supervised_tree!()
-  end
-
-  defp stop_named_process(name) do
-    case Process.whereis(name) do
-      nil ->
-        :ok
-
-      pid ->
-        if Process.alive?(pid), do: GenServer.stop(pid)
+    try do
+      remove_security_child!(CapabilityStore)
+      remove_security_child!(@capability_store)
+    after
+      TestBootstrap.restore_supervised_tree!()
     end
   end
 
-  defp unique_integer, do: :erlang.unique_integer([:positive])
+  defp remove_security_child!(id) do
+    supervisor = security_supervisor_pid!()
+
+    case Supervisor.terminate_child(supervisor, id) do
+      :ok ->
+        :ok = Supervisor.delete_child(supervisor, id)
+
+      {:error, :not_found} ->
+        :ok
+    end
+
+    case Process.whereis(id) do
+      pid when is_pid(pid) -> GenServer.stop(pid)
+      nil -> :ok
+    end
+  end
+
+  defp security_supervisor_pid! do
+    case Process.whereis(@security_supervisor) do
+      pid when is_pid(pid) -> pid
+      nil -> raise "Security.Supervisor is unavailable"
+    end
+  end
+
+  defp ensure_signals_children! do
+    :ok = Signals.restore_runtime_fixture()
+    on_exit(fn -> :ok = Signals.restore_runtime_fixture() end)
+    :ok
+  end
+
+  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
+
+  defp restore_security_env(key, value),
+    do: Application.put_env(:arbor_security, key, value)
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when is_function(fun, 0) and attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 end

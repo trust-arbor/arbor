@@ -34,6 +34,19 @@ defmodule Arbor.Historian.AuthorityAuditTestHelpers do
   end
 
   def start_manual_puller! do
+    previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
+      end
+    end)
+
+    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
     pid = start_supervised!({AuthorityAuditPuller, poll_interval_ms: 60_000})
     %{timer: timer} = :sys.get_state(pid)
 

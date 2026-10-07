@@ -13,7 +13,7 @@ defmodule Arbor.Actions.CanonicalUriTest do
       start_supervised!({UriRegistry, []})
     end
 
-    Actions.register_action_uri_prefixes()
+    :ok = Actions.register_action_uri_prefixes()
     :ok
   end
 
