@@ -2,7 +2,18 @@ defmodule Arbor.Agent.LifecycleTest do
   use ExUnit.Case
   @moduletag :fast
 
+  # Lifecycle.create/2 and destroy/2 need an actor authority since ddf05e470.
+  # One actor for the module: every grant spends the run's audit journal budget
+  # (see Arbor.Agent.LifecycleActorFixture). creation_topology/1 reopens it.
+  setup_all do
+    {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
+    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
+
+    {:ok, lifecycle_principal: principal}
+  end
+
   alias Arbor.Agent.{Character, Lifecycle, Profile}
+  alias Arbor.Agent.Test.TrustTopology
 
   @agents_dir Path.join(System.tmp_dir!(), "arbor_lifecycle_test_agents")
 
@@ -70,6 +81,8 @@ defmodule Arbor.Agent.LifecycleTest do
   describe "template_source provenance (Phase B1)" do
     alias Arbor.Agent.TemplateStore
 
+    setup :creation_topology
+
     setup do
       tmp =
         Path.join(
@@ -98,31 +111,22 @@ defmodule Arbor.Agent.LifecycleTest do
       assert String.ends_with?(source["path"], "scout.md")
     end
 
-    test "creating an agent from a template lands template_source on profile.metadata" do
-      # Full create needs the security/memory subsystems, which the isolated
-      # arbor_agent test env does not start. Where it succeeds (e.g. the full
-      # integration suite) we assert the provenance landed; otherwise the
-      # downstream :noproc/:exit is acceptable and the resolve-level test above
-      # provides the deterministic coverage of the same data.
-      result =
-        try do
-          Lifecycle.create("Scout", template: "scout")
-        rescue
-          ArgumentError -> {:error, :ets_not_started}
-        catch
-          :exit, _ -> {:error, :security_not_started}
-        end
+    test "creating an agent from a template lands template_source on profile.metadata", %{
+      lifecycle_actor: actor
+    } do
+      # This used to accept any downstream error because a full create could not
+      # run in the isolated arbor_agent env (and since ddf05e470 it passed on the
+      # authority denial alone). The describe now provides trust, the profiles
+      # store and a caller-owned actor, so the provenance assertion always runs.
+      assert {:ok, profile} =
+               Lifecycle.create("Scout", template: "scout", actor_authority: actor.authority)
 
-      case result do
-        {:ok, profile} ->
-          source = profile.metadata["template_source"]
-          assert source["name"] == "scout"
-          assert source["layer"] == "shipped"
-          assert String.ends_with?(source["path"], "scout.md")
+      source = profile.metadata["template_source"]
+      assert source["name"] == "scout"
+      assert source["layer"] == "shipped"
+      assert String.ends_with?(source["path"], "scout.md")
 
-        {:error, _downstream} ->
-          :ok
-      end
+      assert :ok = Lifecycle.destroy(profile.agent_id, actor_authority: actor.authority)
     end
 
     test "template_source survives JSON profile persistence round-trip" do
@@ -142,5 +146,27 @@ defmodule Arbor.Agent.LifecycleTest do
 
       assert restored.metadata["template_source"] == source
     end
+  end
+
+  # A full create needs trust (presets), the profiles store, and since
+  # ddf05e470 a caller-owned actor authority opened in this test process.
+  # Scoped to the describe that creates, so list_agents/0 tests are unaffected.
+  defp creation_topology(%{lifecycle_principal: principal}) do
+    TrustTopology.ensure_owned!()
+
+    if Process.whereis(:arbor_agent_profiles) == nil do
+      start_supervised!(
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: :arbor_agent_profiles, backend: nil, write_mode: :sync},
+          id: :arbor_agent_profiles
+        )
+      )
+    end
+
+    # The actor's authority must be owned by the test process that creates.
+    {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+
+    {:ok, lifecycle_actor: actor}
   end
 end

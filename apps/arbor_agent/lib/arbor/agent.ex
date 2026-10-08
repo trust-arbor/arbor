@@ -1462,7 +1462,16 @@ defmodule Arbor.Agent do
     def open_lifecycle_actor_fixture(opts \\ []), do: LifecycleActorFixture.open(opts)
 
     @doc false
+    @spec reopen_lifecycle_actor_fixture(map()) :: {:ok, map()} | {:error, term()}
+    def reopen_lifecycle_actor_fixture(fixture), do: LifecycleActorFixture.reopen(fixture)
+
+    @doc false
     @spec close_lifecycle_actor_fixture(map()) :: :ok
     def close_lifecycle_actor_fixture(fixture), do: LifecycleActorFixture.close(fixture)
+
+    @doc false
+    @spec destroy_agent_fixture(String.t(), map()) :: :ok | {:error, term()}
+    def destroy_agent_fixture(agent_id, fixture),
+      do: LifecycleActorFixture.destroy_agent(agent_id, fixture)
   end
 end

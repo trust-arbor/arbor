@@ -1,15 +1,27 @@
 defmodule Arbor.Agent.LifecycleActorFixtureTest do
   @moduledoc """
-  The shared test actor for `Lifecycle.create/2` (required `:actor_authority`
-  since ddf05e470). Also the usage example for suites that create agents.
+  The shared test actor for `Lifecycle.create/2` and `Lifecycle.destroy/2`
+  (both require `:actor_authority` since ddf05e470). Also the usage example for
+  suites that create agents.
   """
 
   use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias Arbor.Agent.Lifecycle
   alias Arbor.Agent.Test.TrustTopology
 
   @moduletag :fast
+
+  # One actor for the module: every grant spends the run's audit journal budget
+  # (see Arbor.Agent.LifecycleActorFixture). Tests reopen it in their process.
+  setup_all do
+    {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
+    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
+
+    {:ok, lifecycle_principal: principal}
+  end
 
   # The test_agent template applies a trust preset (needs Arbor.Trust.Store),
   # and creation persists the profile (needs the profiles BufferedStore).
@@ -36,24 +48,58 @@ defmodule Arbor.Agent.LifecycleActorFixtureTest do
              )
   end
 
-  test "an opened lifecycle actor can create an agent" do
-    assert {:ok, actor} = Arbor.Agent.open_lifecycle_actor_fixture()
-    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(actor) end)
+  test "an actor reopened in the test process can create and completely destroy an agent",
+       %{lifecycle_principal: principal} do
+    assert {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+    agent_id = create!(actor)
 
-    assert {:ok, profile} =
-             Lifecycle.create("Fixture Probe #{System.unique_integer([:positive])}",
-               template: "test_agent",
-               actor_authority: actor.authority
-             )
+    log =
+      capture_log(fn ->
+        assert :ok = Lifecycle.destroy(agent_id, actor_authority: actor.authority)
+      end)
 
-    assert is_binary(profile.agent_id)
-
-    # The authority is owned by this test process, so tear down here, not in
-    # on_exit (which runs after this process has exited).
-    assert :ok = Lifecycle.destroy(profile.agent_id, actor_authority: actor.authority)
+    # destroy/2 returns :ok even when cleanup is incomplete; assert it was not.
+    refute log =~ "destroy cleanup was incomplete"
+    assert_destroyed!(agent_id)
   end
 
-  test "close/1 removes the actor's creation rights" do
+  test "reopening records no security mutation", %{lifecycle_principal: principal} do
+    # Test runs never retire journal operations, so every grant spends a budget
+    # the whole run shares. Reopening must not spend any of it, or sharing one
+    # actor per module saves nothing.
+    before = retained_operations()
+
+    assert {:ok, actor} =
+             in_other_process(fn -> Arbor.Agent.reopen_lifecycle_actor_fixture(principal) end)
+
+    assert retained_operations() == before
+    assert actor.actor_id == principal.actor_id
+  end
+
+  test "destroy_agent_fixture/2 destroys from another process and keeps the shared actor",
+       %{lifecycle_principal: principal} do
+    assert {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+    agent_id = create!(actor)
+
+    # Stands in for an on_exit callback, which runs after the test process (and
+    # its authority) is gone.
+    {result, log} =
+      with_log(fn ->
+        in_other_process(fn -> Arbor.Agent.destroy_agent_fixture(agent_id, actor) end)
+      end)
+
+    assert result == :ok
+    refute log =~ "destroy cleanup was incomplete"
+    assert_destroyed!(agent_id)
+
+    # Closing a reopened handle, there or here, leaves the actor's rights.
+    assert :ok = Arbor.Agent.close_lifecycle_actor_fixture(actor)
+    assert {:ok, caps} = Arbor.Security.list_capabilities(principal.actor_id)
+    assert length(caps) == length(principal.capability_ids)
+    assert {:ok, _actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+  end
+
+  test "close/1 on an opened actor removes its rights" do
     assert {:ok, actor} = Arbor.Agent.open_lifecycle_actor_fixture()
     assert {:ok, caps} = Arbor.Security.list_capabilities(actor.actor_id)
     assert length(caps) == length(actor.capability_ids)
@@ -61,5 +107,27 @@ defmodule Arbor.Agent.LifecycleActorFixtureTest do
     assert :ok = Arbor.Agent.close_lifecycle_actor_fixture(actor)
 
     assert {:ok, []} = Arbor.Security.list_capabilities(actor.actor_id)
+  end
+
+  defp create!(actor) do
+    assert {:ok, profile} =
+             Lifecycle.create("Fixture Probe #{System.unique_integer([:positive])}",
+               template: "test_agent",
+               actor_authority: actor.authority
+             )
+
+    profile.agent_id
+  end
+
+  defp in_other_process(fun), do: fun |> Task.async() |> Task.await(10_000)
+
+  defp retained_operations do
+    assert {:ok, status} = Arbor.Security.audit_journal_status()
+    status["capacity"]["retained_operation_count"]
+  end
+
+  defp assert_destroyed!(agent_id) do
+    assert {:error, _} = Arbor.Security.lookup_public_key(agent_id)
+    assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
   end
 end

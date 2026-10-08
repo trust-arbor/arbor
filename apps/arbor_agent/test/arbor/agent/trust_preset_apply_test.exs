@@ -68,11 +68,41 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end)
 
     trust_supervisor = TrustTopology.ensure_owned!()
+    start_security_topology()
 
-    {:ok, trust_supervisor: trust_supervisor}
+    # Lifecycle.create/2 and destroy/2 need an actor authority since ddf05e470.
+    # Mint one actor for the module: every grant spends the run's audit journal
+    # budget (see Arbor.Agent.LifecycleActorFixture). Each test reopens it.
+    {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
+    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
+
+    {:ok, trust_supervisor: trust_supervisor, lifecycle_principal: principal}
   end
 
-  setup do
+  setup %{lifecycle_principal: principal} do
+    start_security_topology()
+
+    # --- Agent profile store: create/2 persists the Profile here (persist_profile).
+    if Process.whereis(@profiles_store) == nil do
+      start_supervised!(
+        Supervisor.child_spec(
+          {BufferedStore, name: @profiles_store, backend: nil, write_mode: :sync},
+          id: @profiles_store
+        )
+      )
+    end
+
+    # Own ready RA supervisor / Task.Supervisor / TaskStore per test so
+    # Lifecycle.start exercises ordinary-start admission without ambient globals.
+    topology = RuntimeAdmissionTopology.start_owned!()
+
+    # The actor's authority must be owned by the test process that uses it.
+    {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+
+    Map.put(topology, :lifecycle_actor, actor)
+  end
+
+  defp start_security_topology do
     # --- Security: the identity ceremony + signing-key persistence create/2 runs.
     # BufferedStores back the identity / signing-key / capability stores; the
     # GenServers below do the work. Added under the already-running (empty)
@@ -110,27 +140,15 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         ] do
       start_security_child(child)
     end
-
-    # --- Agent profile store: create/2 persists the Profile here (persist_profile).
-    if Process.whereis(@profiles_store) == nil do
-      start_supervised!(
-        Supervisor.child_spec(
-          {BufferedStore, name: @profiles_store, backend: nil, write_mode: :sync},
-          id: @profiles_store
-        )
-      )
-    end
-
-    # Own ready RA supervisor / Task.Supervisor / TaskStore per test so
-    # Lifecycle.start exercises ordinary-start admission without ambient globals.
-    RuntimeAdmissionTopology.start_owned!()
   end
 
   describe "trust_preset applied at create time (security regression, commit 7721f506)" do
-    test "a data-first template's declarative trust_preset lands on the agent's trust profile" do
-      assert {:ok, profile} = Lifecycle.create("Test Agent Probe", template: "test_agent")
+    test "a data-first template's declarative trust_preset lands on the agent's trust profile", %{
+      lifecycle_actor: actor
+    } do
+      assert {:ok, profile} = create_agent(actor, "Test Agent Probe", template: "test_agent")
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert {:ok, tp} = TrustStore.get_profile(agent_id)
 
@@ -146,10 +164,12 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert tp.rules["arbor://orchestrator/execute"] == :allow
     end
 
-    test "template orchestrator grant covers mandatory per-node middleware checks" do
-      assert {:ok, profile} = Lifecycle.create("Middleware Gate Probe", template: "test_agent")
+    test "template orchestrator grant covers mandatory per-node middleware checks", %{
+      lifecycle_actor: actor
+    } do
+      assert {:ok, profile} = create_agent(actor, "Middleware Gate Probe", template: "test_agent")
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert {:ok, :authorized} =
                Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :execute)
@@ -158,10 +178,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute/exec", :execute)
     end
 
-    test "an agent is authorized on its OWN memory at create time" do
-      assert {:ok, profile} = Lifecycle.create("Self Memory Probe", template: "test_agent")
+    test "an agent is authorized on its OWN memory at create time", %{lifecycle_actor: actor} do
+      assert {:ok, profile} = create_agent(actor, "Self Memory Probe", template: "test_agent")
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       # `Arbor.Memory`'s facade gates each op on `arbor://memory/<op>/<agent_id>`,
       # a DIFFERENT and finer gate than the action-layer URIs a template declares
@@ -181,11 +201,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end
 
-    test "the self-memory grant does not reach another agent's memory" do
-      assert {:ok, mine} = Lifecycle.create("Self Memory Owner", template: "test_agent")
-      assert {:ok, theirs} = Lifecycle.create("Self Memory Stranger", template: "test_agent")
-      cleanup(mine.agent_id)
-      cleanup(theirs.agent_id)
+    test "the self-memory grant does not reach another agent's memory", %{lifecycle_actor: actor} do
+      assert {:ok, mine} = create_agent(actor, "Self Memory Owner", template: "test_agent")
+      assert {:ok, theirs} = create_agent(actor, "Self Memory Stranger", template: "test_agent")
+      cleanup(mine.agent_id, actor)
+      cleanup(theirs.agent_id, actor)
 
       # The scoped URI is the boundary between reading MY memory and reading
       # ANOTHER agent's. Granting the baseline must not widen it into a blanket
@@ -199,12 +219,14 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                )
     end
 
-    test "security regression: coding template authorizes every canonical graph action" do
+    test "security regression: coding template authorizes every canonical graph action", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Coding Graph Gate Probe", template: "coding_agent")
+               create_agent(actor, "Coding Graph Gate Probe", template: "coding_agent")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       # Outer reviewed-commit gate is orchestration control (:auto). Exact git
       # commit remains human-gated (:ask) — capability is present either way.
@@ -289,10 +311,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              ) == :block
     end
 
-    test "template repo file grants mint concrete FileGuard scopes" do
-      assert {:ok, profile} = Lifecycle.create("Repo File Tool Probe", template: "test_agent")
+    test "template repo file grants mint concrete FileGuard scopes", %{lifecycle_actor: actor} do
+      assert {:ok, profile} = create_agent(actor, "Repo File Tool Probe", template: "test_agent")
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       repo_root =
         repo_root()
@@ -309,17 +331,19 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute "arbor://fs/list/**" in uris
     end
 
-    test "security regression: repo write shorthand mints only concrete repository scope" do
+    test "security regression: repo write shorthand mints only concrete repository scope", %{
+      lifecycle_actor: actor
+    } do
       character = Character.new(name: "Scoped Writer", tone: "external")
 
       assert {:ok, profile} =
-               Lifecycle.create("Scoped Repo Writer",
+               create_agent(actor, "Scoped Repo Writer",
                  character: character,
                  capabilities: [%{resource: "arbor://fs/write/repo"}]
                )
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       repo_root = repo_root() |> String.trim_leading("/")
 
@@ -331,8 +355,12 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute "arbor://fs/write/**" in uris
     end
 
-    test "authorized external registrar creates only the reviewed repo-scoped profile" do
-      caller_id = "human_registrar_#{System.unique_integer([:positive])}"
+    test "authorized external registrar creates only the reviewed repo-scoped profile", %{
+      lifecycle_actor: actor
+    } do
+      # Since ddf05e470 registration runs under the CALLER's own authority (its
+      # principal must equal caller_id), so the registrar is the fixture actor.
+      caller_id = actor.actor_id
 
       assert {:ok, _capabilities} =
                Arbor.Security.assign_role_fixture(caller_id, :external_agent_registrar)
@@ -342,10 +370,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  caller_id,
                  "Scoped External Agent",
                  "external",
-                 identity_verified: true
+                 identity_verified: true,
+                 actor_authority: actor.authority
                )
 
-      cleanup(profile.agent_id)
+      cleanup(profile.agent_id, actor)
 
       assert identity.agent_id == profile.agent_id
       assert profile.metadata.created_by == caller_id
@@ -362,7 +391,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute "arbor://fs/write/**" in uris
     end
 
-    test "security regression: read-only specialized templates with tenant_context do not receive workspace write grants" do
+    test "security regression: read-only specialized templates with tenant_context do not receive workspace write grants",
+         %{lifecycle_actor: actor} do
       for template <- ["test_agent", "security_auditor"] do
         workspace_root = tmp_workspace(template)
         File.mkdir_p!(workspace_root)
@@ -372,13 +402,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
           TenantContext.new("human_#{template}", workspace_root: workspace_root)
 
         assert {:ok, profile} =
-                 Lifecycle.create("Tenant #{template} Probe",
+                 create_agent(actor, "Tenant #{template} Probe",
                    template: template,
                    tenant_context: tenant_context
                  )
 
         agent_id = profile.agent_id
-        cleanup(agent_id)
+        cleanup(agent_id, actor)
 
         workspace_uri_root = String.trim_leading(workspace_root, "/")
 
@@ -406,16 +436,17 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              else: "needs arbor_orchestrator loaded — run from the umbrella root"
            )
     test "pipeline architect runtime restrictions are load-bearing through Session config", %{
+      lifecycle_actor: actor,
       store: store
     } do
       assert {:ok, profile} =
-               Lifecycle.create("Pipeline Architect Runtime Probe",
+               create_agent(actor, "Pipeline Architect Runtime Probe",
                  template: "pipeline_architect",
                  sandbox_level: :none
                )
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert profile.sandbox_level == :strict
 
@@ -433,7 +464,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       on_exit(fn -> File.cd!(original_cwd) end)
       File.cd!(Path.join(umbrella_root, "apps"))
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} =
+               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
+
       File.cd!(original_cwd)
 
       assert {:ok, _supervisor} =
@@ -482,13 +515,15 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert restored_state.config["llm_model"] == "gpt-5.5"
     end
 
-    test "pipeline architect capabilities and trust rules deny execution authority" do
+    test "pipeline architect capabilities and trust rules deny execution authority", %{
+      lifecycle_actor: actor
+    } do
       workspace_root = tmp_workspace("pipeline_architect_exact")
       File.mkdir_p!(workspace_root)
       on_exit(fn -> File.rm_rf(workspace_root) end)
 
       assert {:ok, profile} =
-               Lifecycle.create("Pipeline Architect Authority Probe",
+               create_agent(actor, "Pipeline Architect Authority Probe",
                  template: "pipeline_architect",
                  tenant_context:
                    TenantContext.new("human_pipeline_architect", workspace_root: workspace_root),
@@ -504,7 +539,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                )
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert profile.initial_capabilities
              |> Enum.map(&(&1[:resource] || &1["resource"]))
@@ -593,12 +628,12 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "security regression: malformed exact policy stops an already-running architect and revokes authority",
-         %{store: store} do
+         %{lifecycle_actor: actor, store: store} do
       assert {:ok, profile} =
-               Lifecycle.create("Corrupt Policy Probe", template: "pipeline_architect")
+               create_agent(actor, "Corrupt Policy Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
@@ -620,27 +655,33 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
-    test "legacy Pipeline Architect profiles migrate to an exact snapshot before activation" do
+    test "legacy Pipeline Architect profiles migrate to an exact snapshot before activation", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Legacy Architect Probe", template: "pipeline_architect")
+               create_agent(actor, "Legacy Architect Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       legacy = %{profile | metadata: Map.delete(profile.metadata, "exact_template_policy")}
       assert :ok = Arbor.Agent.ProfileStore.store_profile(legacy)
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} =
+               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
+
       assert {:ok, migrated} = Lifecycle.restore(agent_id)
       assert %{} = migrated.metadata["exact_template_policy"]
     end
 
-    test "security regression: a missing exact template fails closed and removes authority" do
+    test "security regression: a missing exact template fails closed and removes authority", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Missing Template Probe", template: "pipeline_architect")
+               create_agent(actor, "Missing Template Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert :ok =
                Arbor.Agent.ProfileStore.store_profile(%{
@@ -648,17 +689,21 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  | template: "missing_pipeline_architect"
                })
 
-      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:error, _reason} =
+               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
+
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
-    test "security regression: a changed exact template fails closed and removes authority" do
+    test "security regression: a changed exact template fails closed and removes authority", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Changed Template Probe", template: "pipeline_architect")
+               create_agent(actor, "Changed Template Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       override_dir = tmp_workspace("changed_pipeline_template")
       File.mkdir_p!(override_dir)
@@ -679,28 +724,33 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         File.rm_rf(override_dir)
       end)
 
-      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:error, _reason} =
+               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
+
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
-    test "security regression: exact reconciliation revokes capabilities widened after creation" do
+    test "security regression: exact reconciliation revokes capabilities widened after creation",
+         %{lifecycle_actor: actor} do
       assert {:ok, profile} =
-               Lifecycle.create("Widened Capability Probe", template: "pipeline_architect")
+               create_agent(actor, "Widened Capability Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert {:ok, _capability} =
                Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec")
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} =
+               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
+
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       refute "arbor://shell/exec" in Enum.map(caps, & &1.resource_uri)
     end
 
     test "security regression: creation fails when a declared trust preset cannot be stored",
-         %{trust_supervisor: trust_supervisor} do
+         %{lifecycle_actor: actor, trust_supervisor: trust_supervisor} do
       before_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
 
       stop_trust_child(trust_supervisor, Arbor.Trust.Manager)
@@ -708,7 +758,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       result =
         try do
-          Lifecycle.create("Unstored Restrictive Template Probe",
+          create_agent(actor, "Unstored Restrictive Template Probe",
             template: "pipeline_architect"
           )
         after
@@ -722,12 +772,14 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert after_ids == before_ids
     end
 
-    test "a template WITHOUT a trust_preset is not forced to :block by this path" do
+    test "a template WITHOUT a trust_preset is not forced to :block by this path", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Plain Agent Probe", template: "conversationalist")
+               create_agent(actor, "Plain Agent Probe", template: "conversationalist")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert {:ok, tp} = TrustStore.get_profile(agent_id)
 
@@ -737,7 +789,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute tp.baseline == :block
     end
 
-    test "non-exact template creation does not require an umbrella cwd" do
+    test "non-exact template creation does not require an umbrella cwd", %{lifecycle_actor: actor} do
       original_cwd = File.cwd!()
       isolated_cwd = tmp_workspace("non_exact_cwd")
       File.mkdir_p!(isolated_cwd)
@@ -750,21 +802,22 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       File.cd!(isolated_cwd)
 
       assert {:ok, profile} =
-               Lifecycle.create("Non-exact CWD Probe", template: "conversationalist")
+               create_agent(actor, "Non-exact CWD Probe", template: "conversationalist")
 
-      cleanup(profile.agent_id)
+      cleanup(profile.agent_id, actor)
     end
   end
 
   describe "concurrent lifecycle start security regression" do
     test "coalesced concurrent starts share one intent, one bootstrap, and one branch pid", %{
+      lifecycle_actor: actor,
       store: store
     } do
       assert {:ok, profile} =
-               Lifecycle.create("Concurrent Bootstrap Probe", template: "test_agent")
+               create_agent(actor, "Concurrent Bootstrap Probe", template: "test_agent")
 
       agent_id = profile.agent_id
-      cleanup(agent_id)
+      cleanup(agent_id, actor)
 
       assert principal_bootstraps(agent_id) == []
 
@@ -819,9 +872,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
   describe "destroy tears down leftover principal authority" do
     @tag :security_regression
-    test "destroy removes trust profile, capabilities, identity, and signing key" do
+    test "destroy removes trust profile, capabilities, identity, and signing key", %{
+      lifecycle_actor: actor
+    } do
       assert {:ok, profile} =
-               Lifecycle.create("Destroy Authority Probe", template: "test_agent")
+               create_agent(actor, "Destroy Authority Probe", template: "test_agent")
 
       agent_id = profile.agent_id
 
@@ -835,7 +890,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, :active} = Arbor.Security.identity_status(agent_id)
       assert {:ok, _pub} = Arbor.Security.lookup_public_key(agent_id)
 
-      assert :ok = Lifecycle.destroy(agent_id)
+      assert :ok = Lifecycle.destroy(agent_id, actor_authority: actor.authority)
 
       assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
       assert {:error, :not_found} = Arbor.Security.identity_status(agent_id)
@@ -960,13 +1015,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     )
   end
 
-  defp cleanup(agent_id) do
-    on_exit(fn ->
-      try do
-        Lifecycle.destroy(agent_id)
-      catch
-        _, _ -> :ok
-      end
-    end)
+  defp create_agent(actor, name, opts) do
+    Lifecycle.create(name, Keyword.put(opts, :actor_authority, actor.authority))
+  end
+
+  # on_exit runs after the test process exits, when the test's authority is
+  # gone; destroy_agent_fixture/2 reopens the shared actor in the callback.
+  defp cleanup(agent_id, actor) do
+    on_exit(fn -> Arbor.Agent.destroy_agent_fixture(agent_id, actor) end)
   end
 end

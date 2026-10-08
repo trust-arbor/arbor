@@ -8,8 +8,19 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.{Character, Lifecycle, Profile}
+  alias Arbor.Agent.Test.TrustTopology
 
   @moduletag :fast
+
+  # Lifecycle.create/2 and destroy/2 need an actor authority since ddf05e470.
+  # One actor for the module: every grant spends the run's audit journal budget
+  # (see Arbor.Agent.LifecycleActorFixture). creation_topology/1 reopens it.
+  setup_all do
+    {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
+    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
+
+    {:ok, lifecycle_principal: principal}
+  end
 
   setup do
     agents_dir =
@@ -30,11 +41,36 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
     {:ok, agents_dir: agents_dir}
   end
 
+  # A full create needs trust (presets), the profiles store, and since
+  # ddf05e470 a caller-owned actor authority opened in this test process. Scoped
+  # to the describes that create: a running profiles store changes what
+  # list_agents/0 reads, which the legacy-directory tests below rely on.
+  defp creation_topology(%{lifecycle_principal: principal}) do
+    TrustTopology.ensure_owned!()
+
+    if Process.whereis(:arbor_agent_profiles) == nil do
+      start_supervised!(
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: :arbor_agent_profiles, backend: nil, write_mode: :sync},
+          id: :arbor_agent_profiles
+        )
+      )
+    end
+
+    # The actor's authority must be owned by the test process that creates.
+    {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+
+    {:ok, lifecycle_actor: actor}
+  end
+
   # ============================================================================
   # Template resolution edge cases
   # ============================================================================
 
   describe "create/2 template resolution" do
+    setup :creation_topology
+
     test "returns error when neither character nor template provided" do
       assert {:error, :missing_character_or_template} = Lifecycle.create("test", [])
     end
@@ -43,87 +79,55 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       assert {:error, :missing_character_or_template} = Lifecycle.create("test")
     end
 
-    test "accepts a character directly and passes template resolution" do
+    # These used to accept any {:error, _} because a full create could not run in
+    # the isolated arbor_agent env, and since ddf05e470 they were passing on the
+    # authority denial without exercising the shape they assert. Setup now
+    # provides the topology and the actor, so creation must succeed.
+    test "accepts a character directly and passes template resolution", %{
+      lifecycle_actor: actor
+    } do
       character = Character.new(name: "Direct", tone: "formal")
 
-      # This will proceed past template resolution. Downstream it may fail
-      # because security services are not started in this test env.
-      # We catch the exit to verify template resolution itself passed.
-      result =
-        try do
-          Lifecycle.create("Direct Agent", character: character)
-        rescue
-          ArgumentError -> {:error, :ets_not_started}
-        catch
-          :exit, {:noproc, _} -> {:error, :security_not_started}
-          :exit, _ -> {:error, :downstream_exit}
-        end
+      assert {:ok, profile} =
+               Lifecycle.create("Direct Agent",
+                 character: character,
+                 actor_authority: actor.authority
+               )
 
-      case result do
-        {:ok, _profile} ->
-          :ok
-
-        {:error, :missing_character_or_template} ->
-          flunk("Should not fail with missing_character_or_template when character is provided")
-
-        {:error, _other_reason} ->
-          # Acceptable: downstream failures (security, memory, etc.) are fine
-          :ok
-      end
+      destroy!(profile.agent_id, actor)
     end
 
-    test "return_identity: true returns 3-tuple including freshly-generated identity" do
+    test "return_identity: true returns 3-tuple including freshly-generated identity", %{
+      lifecycle_actor: actor
+    } do
       character = Character.new(name: "ExternalRegistration", tone: "formal")
 
-      result =
-        try do
-          Lifecycle.create("External Agent", character: character, return_identity: true)
-        rescue
-          ArgumentError -> {:error, :ets_not_started}
-        catch
-          :exit, {:noproc, _} -> {:error, :security_not_started}
-          :exit, _ -> {:error, :downstream_exit}
-        end
+      assert {:ok, profile, identity} =
+               Lifecycle.create("External Agent",
+                 character: character,
+                 return_identity: true,
+                 actor_authority: actor.authority
+               )
 
-      case result do
-        {:ok, profile, identity} ->
-          assert profile.agent_id == identity.agent_id
-          assert is_binary(identity.private_key)
-          assert byte_size(identity.private_key) in [32, 64]
-          assert is_binary(identity.public_key)
-          assert byte_size(identity.public_key) == 32
+      assert profile.agent_id == identity.agent_id
+      assert is_binary(identity.private_key)
+      assert byte_size(identity.private_key) in [32, 64]
+      assert is_binary(identity.public_key)
+      assert byte_size(identity.public_key) == 32
 
-        {:ok, _profile} ->
-          flunk("return_identity: true should return {:ok, profile, identity}, got 2-tuple")
-
-        {:error, _other_reason} ->
-          :ok
-      end
+      destroy!(profile.agent_id, actor)
     end
 
-    test "return_identity defaults to false (returns 2-tuple)" do
+    test "return_identity defaults to false (returns 2-tuple)", %{lifecycle_actor: actor} do
       character = Character.new(name: "DefaultShape", tone: "formal")
 
-      result =
-        try do
-          Lifecycle.create("Default Agent", character: character)
-        rescue
-          ArgumentError -> {:error, :ets_not_started}
-        catch
-          :exit, {:noproc, _} -> {:error, :security_not_started}
-          :exit, _ -> {:error, :downstream_exit}
-        end
+      assert {:ok, %Profile{} = profile} =
+               Lifecycle.create("Default Agent",
+                 character: character,
+                 actor_authority: actor.authority
+               )
 
-      case result do
-        {:ok, _profile} ->
-          :ok
-
-        {:ok, _profile, _identity} ->
-          flunk("Default create/2 should return {:ok, profile}, not the 3-tuple shape")
-
-        {:error, _other_reason} ->
-          :ok
-      end
+      destroy!(profile.agent_id, actor)
     end
   end
 
@@ -408,6 +412,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
   # ============================================================================
 
   describe "partial failure in create pipeline" do
+    setup :creation_topology
+
     test "create raises or errors when character is invalid type" do
       # Passing something that is not a Character struct triggers a CaseClauseError
       # in resolve_template because the Keyword.fetch matches {:ok, value}
@@ -425,29 +431,22 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       assert {:error, _reason} = result
     end
 
-    test "create with nil display_name passes template resolution" do
+    test "create with nil display_name passes template resolution", %{lifecycle_actor: actor} do
       character = Character.new(name: "NilDisplay")
 
-      # May fail downstream because security services are not started
-      result =
-        try do
-          Lifecycle.create(nil, character: character)
-        rescue
-          ArgumentError -> {:error, :ets_not_started}
-        catch
-          :exit, {:noproc, _} -> {:error, :security_not_started}
-          :exit, _ -> {:error, :downstream_exit}
-        end
+      # Setup provides the full creation topology, so a downstream failure is no
+      # longer an acceptable outcome; the profile must come back.
+      assert {:ok, profile} =
+               Lifecycle.create(nil, character: character, actor_authority: actor.authority)
 
-      case result do
-        {:ok, profile} ->
-          assert profile.character.name == "NilDisplay"
-
-        {:error, _reason} ->
-          # Acceptable: downstream failures (security, memory, etc.) are fine
-          :ok
-      end
+      assert profile.character.name == "NilDisplay"
+      destroy!(profile.agent_id, actor)
     end
+  end
+
+  # The setup actor is owned by this test process, so destroy in the test body.
+  defp destroy!(agent_id, actor) do
+    assert :ok = Lifecycle.destroy(agent_id, actor_authority: actor.authority)
   end
 
   defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)

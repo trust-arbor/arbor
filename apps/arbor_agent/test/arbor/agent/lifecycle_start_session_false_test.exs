@@ -95,23 +95,38 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
       )
     end
 
-    :ok
+    # Lifecycle.create/2 needs an actor authority since ddf05e470. One actor for
+    # the module: every grant spends the run's audit journal budget (see
+    # Arbor.Agent.LifecycleActorFixture). Each test reopens it.
+    {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
+    on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
+
+    {:ok, lifecycle_principal: principal}
   end
 
   # Own unique RA supervisor / Task.Supervisor / TaskStore per test so
   # Lifecycle.start does not poll a global TaskStore left by order (or absent).
-  setup do
-    RuntimeAdmissionTopology.start_owned!()
+  setup %{lifecycle_principal: principal} do
+    topology = RuntimeAdmissionTopology.start_owned!()
+
+    # The actor's authority must be owned by the test process that creates.
+    {:ok, actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(principal)
+
+    Map.put(topology, :lifecycle_actor, actor)
   end
 
   test "start_session: false starts host/executor without Session or HeartbeatService", %{
+    lifecycle_actor: actor,
     store: store
   } do
     assert {:ok, profile} =
-             Lifecycle.create("Start Session False Probe", template: "test_agent")
+             Lifecycle.create("Start Session False Probe",
+               template: "test_agent",
+               actor_authority: actor.authority
+             )
 
     agent_id = profile.agent_id
-    cleanup(agent_id)
+    cleanup(agent_id, actor)
 
     assert principal_bootstraps(agent_id) == []
 
@@ -158,13 +173,17 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
            else: "needs arbor_orchestrator loaded — run from the umbrella root"
          )
   test "start_session: true with start_heartbeat: false still starts Session only", %{
+    lifecycle_actor: actor,
     store: store
   } do
     assert {:ok, profile} =
-             Lifecycle.create("Start Heartbeat False Probe", template: "test_agent")
+             Lifecycle.create("Start Heartbeat False Probe",
+               template: "test_agent",
+               actor_authority: actor.authority
+             )
 
     agent_id = profile.agent_id
-    cleanup(agent_id)
+    cleanup(agent_id, actor)
 
     assert {:ok, sup_pid} =
              Lifecycle.start(agent_id,
@@ -208,13 +227,9 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     :exit, _ -> :ok
   end
 
-  defp cleanup(agent_id) do
-    on_exit(fn ->
-      try do
-        Lifecycle.destroy(agent_id)
-      catch
-        _, _ -> :ok
-      end
-    end)
+  # on_exit runs after the test process exits, when the test's authority is
+  # gone; destroy_agent_fixture/2 reopens the shared actor in the callback.
+  defp cleanup(agent_id, actor) do
+    on_exit(fn -> Arbor.Agent.destroy_agent_fixture(agent_id, actor) end)
   end
 end
