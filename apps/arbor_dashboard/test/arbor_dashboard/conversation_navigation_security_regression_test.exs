@@ -183,6 +183,10 @@ defmodule Arbor.Dashboard.ConversationNavigationSecurityRegressionTest do
   end
 
   defp configure_oidc! do
+    # Session tokens need the security runtime (session registry). Start it
+    # here rather than relying on an earlier test module to have done so.
+    :ok = Arbor.Security.restore_runtime_fixture()
+
     settings = [
       {:arbor_security, :oidc,
        [providers: [%{issuer: "https://navigation.fixture", client_id: "dashboard"}]]},

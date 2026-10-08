@@ -221,7 +221,7 @@ config :arbor_security,
   consensus_escalation_enabled: true,
   # HITL Router Phase 1b validation: route approvals via InteractionRouter
   # rather than the legacy ConsensusManager.escalate path. The router targets
-  # the dashboard (ChatLive's approvals panel) and falls back to "queued"
+  # the dashboard interaction channel and falls back to "queued"
   # when no channel is reachable, so the agent still gets a non-blocking
   # request_id back.
   use_interaction_router_for_approval: true

@@ -28,6 +28,10 @@ real test session token; it does not exercise a real identity-provider redirect.
 | Real terminal transport | Production WSClient signs upgrade/frames, reconnects a closed Mint socket, retries original ID, and detaches on revocation |
 | Terminal rendering | Actual App reducer and `App.view/1` contain both messages; no PTY run |
 
+This table records the 2026-09-27 run against ChatLive. ChatLive was removed on
+2026-10-08: the journey's browser side now drives ConversationLive's Surface, and
+the opt-in transport fixture opens `/conversation/:agent_id`.
+
 The final transport run completed with four tests and zero failures in 67.2
 seconds (the three callback tests also run), and the separate terminal probe
 exited successfully. The standalone TUI suite passed 100 tests, including a real

@@ -387,7 +387,7 @@ defmodule Arbor.Agent.Claude do
     case Dispatch.dispatch(request, policy: %{runtime: :acp}) do
       {:ok, llm_response} ->
         # Convert the struct response back to the legacy map shape that
-        # downstream callers (handle_query, ChatLive) read via dot access
+        # downstream callers (handle_query) read via dot access
         # and extend with `Map.put(response, :recalled_memories, ...)`.
         # A struct can't take arbitrary keys via Map.put, so we flatten
         # here at the runtime boundary.

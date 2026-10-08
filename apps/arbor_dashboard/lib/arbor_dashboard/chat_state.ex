@@ -1,6 +1,8 @@
 defmodule Arbor.Dashboard.ChatState do
   @moduledoc """
-  ETS-backed state storage for ChatLive.
+  ETS-backed per-agent dashboard state, originally owned by the retired
+  ChatLive (removed 2026-10-08). MemoryLive still reads the recent-agents list;
+  since ChatLive's removal nothing records recent agents.
 
   Stores per-agent state that survives page refreshes but not server restarts:
   - Token counts (input, output, cached, call count, last duration)

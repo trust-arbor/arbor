@@ -827,7 +827,7 @@ defmodule Arbor.Comms do
 
   # -- Voice/dashboard engagement transcript (VP-04A) --
   #
-  # Canonical public path for a transport (dashboard ChatLive, voice) to resolve
+  # Canonical public path for a transport (dashboard conversation, voice) to resolve
   # a human's private, user-scoped engagement and atomically append/load
   # engagement-stamped transcript entries — without importing
   # Arbor.Comms.EngagementStore or Arbor.Persistence.SessionStore directly.
@@ -1047,8 +1047,8 @@ defmodule Arbor.Comms do
   end
 
   @doc """
-  Load the display-ready transcript for one engagement, the same maps ChatLive
-  consumes, via the public `Arbor.Persistence` facade with the engagement
+  Load the display-ready transcript maps for one engagement via the public
+  `Arbor.Persistence` facade with the engagement
   filter applied. Returns an explicit `{:error, reason}` for invalid ids or
   opts rather than an empty list. `opts` accepts only `:limit`,
   `:before_timestamp`, and `:persistence` (the test seam); any other key is

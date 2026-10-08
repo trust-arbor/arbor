@@ -34,8 +34,14 @@ defmodule Arbor.Dashboard.Live.ConversationLive do
   def handle_event("home:" <> _ = event, params, socket),
     do: {:noreply, Home.event(socket, event, params)}
 
+  # The voice desk re-checks conversation authority through the Surface's
+  # synchronous access check before any audio-admitting action.
   def handle_event("voice:" <> action, params, socket),
-    do: {:noreply, socket |> VoiceDeskComponent.event(action, params) |> Home.sync()}
+    do:
+      {:noreply,
+       socket
+       |> VoiceDeskComponent.event(action, params, &Surface.refresh_access/1)
+       |> Home.sync()}
 
   def handle_event(event, params, socket),
     do: {:noreply, socket |> Surface.event(event, params) |> Home.sync()}

@@ -31,7 +31,6 @@ defmodule Arbor.Dashboard.LiveViewLoggingSecurityRegressionTest do
 
   test "production router includes the authenticated chat and agents views" do
     assert Arbor.Dashboard.Live.ConversationLive in @views
-    refute Arbor.Dashboard.Live.ChatLive in @views
     assert Arbor.Dashboard.Live.AgentsLive in @views
   end
 

@@ -2,8 +2,9 @@ defmodule Arbor.Common.CommandIntake do
   @moduledoc """
   Centralized entry point for slash command handling.
 
-  Every interface that takes user input from a human (dashboard ChatLive,
-  arbor_comms.MessageHandler, ACP server, CLI, future Signal/Telegram bots)
+  Every interface that takes user input from a human and supports runtime
+  slash commands (arbor_comms.MessageHandler, ACP server, CLI, future
+  Signal/Telegram bots)
   should funnel input through `handle/3` instead of routing directly to
   Session/Manager/etc.
 

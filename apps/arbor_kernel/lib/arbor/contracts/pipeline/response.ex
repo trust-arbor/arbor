@@ -20,7 +20,7 @@ defmodule Arbor.Contracts.Pipeline.Response do
       # At the source (ToolLoop, LlmHandler)
       response = Response.normalize(raw_output)
 
-      # In consumers (ChatLive, APIAgent)
+      # In consumers (APIAgent)
       %Response{content: text} = response
 
       # Safe rendering in templates

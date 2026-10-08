@@ -25,5 +25,5 @@ of these routes, and the selected conversation still requires its existing
 session proof and host authorization. `/home` and existing engagement and agent
 deep links remain available.
 
-Retained ChatLive behavior and security tests use an explicitly test-only
-endpoint. Production `/chat` never mounts that legacy interface.
+The legacy ChatLive interface was removed on 2026-10-08. Production `/chat`
+only redirects a valid legacy link to its `/conversation/:agent_id` route.

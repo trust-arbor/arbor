@@ -27,7 +27,7 @@ defmodule Arbor.Dashboard.OidcAuth do
 
   @behaviour Plug
 
-  # Reuse ChatLive's existing no-OIDC principal. The `human_` prefix is
+  # Reuse the dashboard's existing no-OIDC principal. The `human_` prefix is
   # load-bearing for AuthDecision identity checks; do not invent a second id.
   #
   # The literal now lives in `Arbor.Contracts.Security.Identity` (L0) because

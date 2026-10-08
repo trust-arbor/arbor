@@ -448,7 +448,7 @@ defmodule Arbor.Orchestrator.SessionCore do
   arbor_orchestrator can't depend on arbor_agent (Level 2 → Level 2 horizontal
   dep would violate the hierarchy). So we accept `model_config` as an
   `opts` parameter — the caller (which DOES have access to the registry,
-  e.g. ChatLive in the dashboard or MessageHandler in arbor_comms) looks
+  e.g. MessageHandler in arbor_comms) looks
   it up and passes the resolved metadata in.
 
   When `model_config` is passed, it provides the canonical model/provider.

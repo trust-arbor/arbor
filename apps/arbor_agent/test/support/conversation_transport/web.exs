@@ -28,7 +28,7 @@ defmodule Arbor.Agent.Test.ConversationTransportWeb do
         |> put_session("agent_id", fixture.primary.agent_id)
         |> put_session("session_token", fixture.token)
         |> put_session("user_display_name", "Isolated conversation journey")
-        |> put_resp_header("location", "/chat?agent_id=" <> fixture.target)
+        |> put_resp_header("location", "/conversation/" <> fixture.target)
         |> send_resp(302, "")
 
       path when path == prefix <> "/revoke" ->

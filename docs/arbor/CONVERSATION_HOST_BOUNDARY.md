@@ -179,8 +179,8 @@ the full prefix. It currently costs O(total command-journal history); production
 scale indexing, snapshots and retention are follow-up work. Command identities
 must not be evicted merely to bound an in-memory deduplication cache.
 
-The existing Dashboard ChatLive and Gateway/TUI private chat routes use these
-methods. The Dashboard uses its verified OIDC session proof; a static local-dev
+The Dashboard ConversationLive (through `ConversationKit.Arbor`) and the
+Gateway/TUI private chat routes use these methods. The Dashboard uses its verified OIDC session proof; a static local-dev
 operator ID alone cannot open private chat. Gateway requires a fresh signature
 on every WebSocket operation, independently of the upgrade signature. Both
 surfaces read bounded durable pages with separate transcript and journal

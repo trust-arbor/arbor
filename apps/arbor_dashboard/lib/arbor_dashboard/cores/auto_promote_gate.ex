@@ -8,10 +8,10 @@ defmodule Arbor.Dashboard.Cores.AutoPromoteGate do
   escalate any agent's trust on any resource. The H13 fix gates the mutation
   behind the `arbor://trust/auto_promote/<target_agent_id>` capability.
 
-  This module is the single source of truth for the gate. It is used by both
-  `ChatLive` (the user-facing approval surface) and was previously inlined in
-  `ConsensusLive`. Extracted so the gate fires on every code path that can
-  trigger always-allow.
+  This module is the single source of truth for the gate. `ConsensusLive`
+  delegates to it (the gate was previously inlined there; the retired ChatLive
+  approval surface also used it). Extracted so the gate fires on every code
+  path that can trigger always-allow.
 
   ## Shape
 

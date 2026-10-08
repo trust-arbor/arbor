@@ -315,7 +315,7 @@ defmodule Arbor.Dashboard.Live.ConversationLive.Home do
   defp reset_surface(socket, target \\ nil) do
     socket =
       if socket.assigns[:voice_operation],
-        do: VoiceDeskComponent.event(socket, "cancel", %{}),
+        do: VoiceDeskComponent.cancel(socket),
         else: socket
 
     Surface.close(socket)

@@ -7,14 +7,12 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
 
   alias Arbor.Agent.{IdentityAliases, IdentityAliasProof, SessionManager}
   alias Arbor.Contracts.Security.{Identity, SignedRequest}
-  alias Arbor.Dashboard.Live.ChatLive
-  alias Arbor.Dashboard.Live.ChatLive.Conversation
+  alias Arbor.Dashboard.Live.ConversationLive.Surface
   alias Arbor.Gateway.Chat.Socket, as: GatewaySocket
   alias Arbor.Orchestrator.Session
   alias Arbor.Persistence.Repo
   alias Arbor.Security
   alias Arbor.Security.{OIDCTestHelper, SessionToken}
-  import Phoenix.Component, only: [assign: 2]
 
   @moduletag :integration
   @moduletag :database
@@ -690,11 +688,17 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
 
   test "web token and linked signed terminal share durable history and the next real model context",
        c do
-    web = web_socket(c) |> Conversation.connect()
+    web = web_connect(c)
     assert web.assigns.conversation_authorized
     engagement = web.assigns.conversation_engagement_id
-    web = Conversation.submit(web, "web sentinel LARCH-217", "web-first")
-    assert web.assigns.conversation_status in [:admitted, :dispatch_started, :completed]
+    web = web_send(web, "web sentinel LARCH-217", "web-first")
+
+    assert web.assigns.conversation_snapshot.receipt["status"] in [
+             "admitted",
+             "dispatch_started",
+             "completed"
+           ]
+
     assert %{status: :completed} = completed!(c, "web-first")
     assert_receive {:actual_model_request, first_prompt, _}, 5_000
     assert inspect(first_prompt) =~ "LARCH-217"
@@ -711,10 +715,14 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     assert inspect(second_prompt) =~ "LARCH-217"
     assert inspect(second_prompt) =~ "CEDAR-842"
 
-    web = Conversation.refresh(web)
-    assert web.assigns.conversation_history_cursor == 4
-    assert web.assigns.conversation_journal_cursor == 6
-    assert inspect(web.assigns.streams.messages.inserts) =~ "CEDAR-842"
+    web =
+      web
+      |> Surface.event("conversation:refresh", %{})
+      |> await_web(&(web_text(&1) =~ "CEDAR-842"))
+
+    assert web.assigns.conversation_engagement_id == engagement
+    assert web.assigns.conversation_snapshot.window.last == 4
+    assert length(web.assigns.conversation_snapshot.projection["messages"]) == 4
     before = Agent.get(c.counter, & &1)
     {retry, _} = frame(c, terminal, :submit, input, expected_engagement_id: engagement)
     assert retry["data"]["status"] == "completed"
@@ -959,14 +967,14 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
 
   test "security regression: unlink and revocation prevent old-content release or pending redirection",
        c do
-    web =
-      web_socket(c)
-      |> Conversation.connect()
-      |> Conversation.submit("private prior owner", "prior-owner")
-
+    web = c |> web_connect() |> web_send("private prior owner", "prior-owner")
     completed!(c, "prior-owner")
-    web = Conversation.refresh(web)
-    assert inspect(web.assigns.streams.messages.inserts) =~ "private prior owner"
+
+    web =
+      web
+      |> Surface.event("conversation:refresh", %{})
+      |> await_web(&(web_text(&1) =~ "private prior owner"))
+
     assert_receive {:actual_model_request, _, _}, 5_000
     {:ok, terminal} = GatewaySocket.init(%{principal: c.secondary.agent_id})
     {history, terminal} = frame(c, terminal, :history, nil)
@@ -1015,10 +1023,14 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
 
     refute_receive {:actual_model_request, _, _}, 100
     assert :ok = Security.revoke_fixture(c.primary_cap.id)
-    cleared = Conversation.refresh(web)
+    # The browser's synchronous access check (the same one that admits voice)
+    # clears every private projection once authority is gone.
+    cleared = Surface.refresh_access(web)
     refute cleared.assigns.conversation_authorized
-    assert cleared.assigns.streams.messages.inserts == []
-    assert cleared.assigns.streams.messages.reset?
+    assert cleared.assigns.conversation_rebind_required
+    assert cleared.assigns.conversation_snapshot.projection["messages"] == []
+    assert cleared.assigns.input == ""
+    refute web_text(cleared) =~ "private prior owner"
 
     assert {:error, :unauthorized} =
              Arbor.Agent.conversation_history(c.primary.agent_id, c.target,
@@ -1140,7 +1152,10 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
       Arbor.Security.DeliveryReceiptBroker,
       Arbor.Orchestrator.Session,
       Arbor.Gateway.Chat.Socket,
-      Arbor.Dashboard.Live.ChatLive.Conversation
+      Arbor.Dashboard.Live.ConversationLive,
+      Arbor.Dashboard.Live.ConversationLive.Surface,
+      ConversationKit.Arbor,
+      ConversationKit.Arbor.Connection
     ]
 
     beams =
@@ -1179,7 +1194,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
       durable_appends: 2,
       actual_second_context_includes_both: true,
       revoked_history_denied: true,
-      browser: "production ChatLive",
+      browser: "production ConversationLive",
       terminal: "production WSClient + App reducer"
     }
 
@@ -1389,17 +1404,56 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     end
   end
 
-  defp web_socket(c) do
-    socket = %Phoenix.LiveView.Socket{
+  # The production browser path: ConversationLive's Surface performs the
+  # synchronous access check and owns a private ConversationKit connection to
+  # the public Arbor.Agent conversation facade. This test process stands in for
+  # the LiveView process and applies each connection snapshot exactly as
+  # ConversationLive.handle_info/2 does.
+  defp web_connect(c) do
+    %Phoenix.LiveView.Socket{
       endpoint: Arbor.Dashboard.Endpoint,
-      view: ChatLive,
+      view: Arbor.Dashboard.Live.ConversationLive,
       private: %{live_temp: %{}, lifecycle: %Phoenix.LiveView.Lifecycle{}},
       assigns: %{__changed__: %{}, current_agent_id: c.primary.agent_id, session_token: c.token}
     }
-
-    {:ok, socket} = ChatLive.mount(%{}, %{}, socket)
-    assign(socket, agent_id: c.target, agent_host_pid: c.session, input: "")
+    |> Surface.mount(c.target)
+    |> Surface.connect()
   end
+
+  defp web_send(socket, text, id) do
+    socket = await_web(socket, & &1.assigns.conversation_snapshot.send_allowed)
+
+    # Admission is durable before the browser shows its receipt for this ID.
+    socket
+    |> Surface.event("update-input", %{"message" => text})
+    |> Surface.event("send-message", %{"message" => text, "command_id" => id})
+    |> await_web(&(&1.assigns.conversation_snapshot.receipt["id"] == id))
+  end
+
+  defp await_web(socket, predicate, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 10_000
+
+    if predicate.(socket) do
+      socket
+    else
+      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      receive do
+        {:conversation_updated, pid, snapshot} ->
+          socket |> Surface.update(pid, snapshot) |> await_web(predicate, deadline)
+      after
+        remaining -> flunk("browser conversation did not reach the expected state")
+      end
+    end
+  end
+
+  defp web_text(socket),
+    do:
+      Enum.map_join(
+        socket.assigns.conversation_snapshot.projection["messages"],
+        "\n",
+        & &1["text"]
+      )
 
   defp set_env(app, key, value) do
     previous = Application.fetch_env(app, key)

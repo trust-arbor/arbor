@@ -1,8 +1,17 @@
 defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
-  @moduledoc false
+  @moduledoc """
+  Socket-first local voice desk (host microphone and speaker) for a private
+  conversation.
+
+  The owning LiveView supplies `refresh_access`, its synchronous and bounded
+  conversation-access check (`socket -> socket`), to `event/4`. Every action
+  that can open the microphone, request device permission or commit a
+  recording runs that check first, so an earlier authorized display can never
+  admit audio. The component itself never reaches into the LiveView's
+  conversation transport.
+  """
   use Phoenix.Component
   alias Arbor.Dashboard.Config
-  alias Arbor.Dashboard.Live.ChatLive.Conversation
 
   def mount(socket, peer, uri, headers) do
     recording = recording_options()
@@ -24,7 +33,13 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     validate_duration(socket, recording, socket.assigns.voice_duration_text)
   end
 
-  def event(socket, "duration", %{"seconds" => value}) do
+  @doc """
+  Handles a `"voice:" <> action` event. `refresh_access` must re-check current
+  conversation authority; it runs before every audio-admitting action.
+  """
+  def event(socket, action, params, refresh_access)
+
+  def event(socket, "duration", %{"seconds" => value}, _refresh_access) do
     if is_nil(socket.assigns.voice_operation) do
       validate_duration(socket, recording_options(), value)
     else
@@ -32,8 +47,9 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     end
   end
 
-  def event(socket, action, _params) when action in ["loopback", "talk"] do
-    socket = Conversation.refresh(socket)
+  def event(socket, action, _params, refresh_access)
+      when action in ["loopback", "talk"] and is_function(refresh_access, 1) do
+    socket = refresh_access.(socket)
 
     if allowed?(socket) and is_nil(socket.assigns.voice_operation) do
       socket = validate_duration(socket, recording_options(), socket.assigns.voice_duration_text)
@@ -48,8 +64,8 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     end
   end
 
-  def event(socket, "finish", _params) do
-    socket = Conversation.refresh(socket)
+  def event(socket, "finish", _params, refresh_access) when is_function(refresh_access, 1) do
+    socket = refresh_access.(socket)
 
     case socket.assigns.voice_operation do
       %{id: id, can_finish: true} = op ->
@@ -77,19 +93,11 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     end
   end
 
-  def event(socket, "cancel", _params) do
-    case socket.assigns.voice_operation do
-      %{id: id} ->
-        safe_call(Config.voice_api(), :cancel_desk_turn, [id])
-        assign(socket, voice_message: "Stopping and closing audio…", voice_error: false)
+  def event(socket, "cancel", _params, _refresh_access), do: cancel(socket)
 
-      nil ->
-        socket
-    end
-  end
-
-  def event(socket, action, _params) when action in ["permission", "request-permission"] do
-    socket = Conversation.refresh(socket)
+  def event(socket, action, _params, refresh_access)
+      when action in ["permission", "request-permission"] and is_function(refresh_access, 1) do
+    socket = refresh_access.(socket)
 
     if allowed?(socket) and is_nil(socket.assigns.voice_operation) do
       function =
@@ -125,7 +133,22 @@ defmodule Arbor.Dashboard.Components.VoiceDeskComponent do
     end
   end
 
-  def event(socket, _, _), do: socket
+  def event(socket, _, _, _), do: socket
+
+  @doc """
+  Requests cancellation of the current desk operation. Cancellation only ever
+  closes audio, so it needs no fresh conversation authority.
+  """
+  def cancel(socket) do
+    case socket.assigns[:voice_operation] do
+      %{id: id} ->
+        safe_call(Config.voice_api(), :cancel_desk_turn, [id])
+        assign(socket, voice_message: "Stopping and closing audio…", voice_error: false)
+
+      _ ->
+        socket
+    end
+  end
 
   defp start_recording(socket, action) do
     mode = if action == "loopback", do: :loopback, else: :conversation

@@ -80,14 +80,15 @@ defmodule Arbor.Contracts.Commands.Result do
   Recognized effects (extend as commands add new ones):
 
   - `{:runtime_changed, atom()}` — emitted by `/runtime` and `/model X
-    runtime=Y` after a successful Session mutation. ChatLive uses it to
-    update its status row assign; Discord can ignore it.
+    runtime=Y` after a successful Session mutation. An interface with a
+    runtime status display can use it to refresh that display; Discord can
+    ignore it.
   - `{:model_changed, String.t()}` — emitted by `/model` after a
     successful Session mutation. Same shape as above.
   - `{:agent_started, %{agent_id: String.t(), pid: pid(),
     metadata: map()}}` — the data a chat interface needs to bind the
-    conversation to a newly started agent — ChatLive's `reconnect_to_agent`,
-    Discord's `bind_channel_to_agent`, etc. `/start` no longer emits it (it
+    conversation to a newly started agent — e.g. Discord's
+    `bind_channel_to_agent`. `/start` no longer emits it (it
     returns the `{:start_agent, ...}` action instead); an interface that
     performs that action may reuse this shape. The implementation varies
     wildly per interface; the data is shared.

@@ -38,8 +38,7 @@ defmodule Arbor.LLM.Request do
             # dispatches to the corresponding adapter module. Defaults to
             # :arbor so existing call sites continue to flow through the
             # BEAM-native path unchanged. New consumers (Dispatch.dispatch,
-            # the /runtime slash command, ChatLive after the dropdown
-            # removal) set this explicitly. See .arbor/decisions/
+            # the /runtime slash command) set this explicitly. See .arbor/decisions/
             # 2026-06-04-slash-commands-for-runtime-config.md for context.
             runtime: :arbor
 end

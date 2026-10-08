@@ -23,7 +23,7 @@ persistence, comms, llm, ai, orchestrator, agent), is the engagement-substrate
 consumer for voice — the headless sibling of `arbor_dashboard`. `Arbor.Voice.Session`
 owns a realtime backend session (xAI Realtime first, behind
 `Arbor.Voice.RealtimeBackend`), resolves the canonical owner's private `:user`-scoped
-engagement shared with ChatLive, mirrors completed voice turns into its durable
+engagement shared with the dashboard conversation, mirrors completed voice turns into its durable
 transcript, and renders speech through `Arbor.Voice.Speakable`. The default
 `PrivateConversation` catalog exposes only `consult_agent`; explicit `FrontDesk`
 retains managed dispatch outside the bounded private-continuity qualification.
@@ -51,8 +51,8 @@ transport — raw audio never leaves the phone.
   spoken/assistant text, including delegation summaries) MUST be durably recorded as
   session entries carrying `metadata["engagement_id"]`, in the same public
   session-entry shape the existing orchestrator path writes, through owner-library
-  facades, so ChatLive's restore-on-switch renders the voice conversation without
-  voice-specific code.
+  facades, so the dashboard conversation renders the voice conversation from the same
+  durable transcript without voice-specific code.
 
 - **VOICE-4** (SHOULD, planned): Each completed voice turn SHOULD emit an Arbor signal
   (`voice.turn.completed`) carrying engagement_id, turn duration, and backend, so open

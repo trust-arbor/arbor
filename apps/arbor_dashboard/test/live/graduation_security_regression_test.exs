@@ -10,12 +10,6 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
   """
   use Arbor.Dashboard.ConnCase, async: false
 
-  # Retained ChatLive behavior uses a test-only endpoint; production /chat redirects.
-  @endpoint Arbor.Dashboard.Test.LegacyChatEndpoint
-  setup do
-    Arbor.Dashboard.Test.LegacyChatFixture.start!()
-  end
-
   alias Arbor.Agent.Orchestration
   alias Arbor.Comms
   alias Arbor.Comms.InteractionRegistry
@@ -60,9 +54,12 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     if :ets.whereis(:arbor_agent_registry) == :undefined,
       do: :ets.new(:arbor_agent_registry, [:named_table, :set, :public])
 
-    for module <- [PolicyHost, Arbor.Signals.Store, Arbor.Signals.Bus] do
-      if Process.whereis(module) == nil, do: start_supervised!(module)
-    end
+    if Process.whereis(PolicyHost) == nil, do: start_supervised!(PolicyHost)
+
+    # Signals only serve the bus supervised by arbor_kernel_runtime; a bus
+    # started under this test's supervisor refuses every subscription, so the
+    # LiveView would never observe trust signals.
+    :ok = Arbor.Signals.restore_runtime_fixture()
 
     if Process.whereis(Comms.PubSub) == nil,
       do: start_supervised!({Phoenix.PubSub, name: Comms.PubSub})
@@ -77,8 +74,7 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
 
     for {app, key, value} <- [
           {:arbor_trust, :approval_evidence_provider, Arbor.Agent.ApprovalEvidence},
-          {:arbor_trust, :graduation_thresholds, %{}},
-          {:arbor_dashboard, :chat_orchestration, Orchestration}
+          {:arbor_trust, :graduation_thresholds, %{}}
         ] do
       previous = Application.fetch_env(app, key)
       Application.put_env(app, key, value)
@@ -200,45 +196,6 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     html = view |> element("[phx-click='graduation:accept']") |> render_click()
     assert html =~ "The automatic-execution rule was saved"
     assert_mode(ctx, :auto)
-  end
-
-  test "security regression: retained ChatLive refuses approval answers even with a valid human proof",
-       ctx do
-    request = request!(ctx)
-    {:ok, view, _} = live(authenticated_conn(ctx), "/chat")
-
-    html =
-      render_click(view, "approve-tool", %{
-        "id" => request.request_id,
-        "caller_id" => "human_forged"
-      })
-
-    assert html =~ "Approvals are unavailable in this private conversation"
-    assert :not_found = Comms.get_answered_approval(request.request_id)
-    assert Enum.any?(Comms.pending_interactions(), &(&1.request_id == request.request_id))
-    assert {:ok, status} = Trust.graduation_status(ctx.agent_id, @prefix, proof(ctx))
-    assert status.verified_human_approvals == 0
-    assert status.unknown_approvals == 0
-    refute status.pending
-  end
-
-  test "security regression: ChatLive cannot downgrade a missing socket token into a legacy answer",
-       ctx do
-    request = request!(ctx)
-    conn = init_test_session(ctx.conn, %{"agent_id" => ctx.human_id})
-    {:ok, view, _} = live(conn, "/chat")
-
-    render_click(view, "approve-tool", %{
-      "id" => request.request_id,
-      "session_token" => ctx.token,
-      "caller_id" => ctx.human_id
-    })
-
-    assert :not_found = Comms.get_answered_approval(request.request_id)
-    assert Enum.any?(Comms.pending_interactions(), &(&1.request_id == request.request_id))
-    assert {:ok, status} = Trust.graduation_status(ctx.agent_id, @prefix, proof(ctx))
-    assert status.verified_human_approvals == 0
-    assert status.unknown_approvals == 0
   end
 
   defp request!(ctx) do
