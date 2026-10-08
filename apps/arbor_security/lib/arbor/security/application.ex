@@ -472,11 +472,10 @@ defmodule Arbor.Security.Application do
        system_authority_registration_token: system_authority_registration_token,
        defer_initialization: true,
        registration_role_specs:
-         Map.take(signing_key_owner_roles, [
-           :system_authority,
-           :scheduler_owner,
-           :trust_grant_owner
-         ])},
+         Map.take(
+           signing_key_owner_roles,
+           Arbor.Security.Config.identity_registration_roles()
+         )},
       {Arbor.Security.IssuerRegistry, defer_initialization: true},
       {Arbor.Security.Identity.NonceCache, []},
       # Session ids are live server state. Registry loss invalidates every

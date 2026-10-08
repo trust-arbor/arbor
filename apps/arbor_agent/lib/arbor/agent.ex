@@ -231,8 +231,16 @@ defmodule Arbor.Agent do
   @spec find_agent_for_principal(String.t()) :: {:ok, String.t(), pid(), map()} | :not_found
   defdelegate find_agent_for_principal(principal_id), to: Arbor.Agent.Manager
 
-  @doc "Set auto_start flag on an agent's persisted profile."
+  @doc """
+  Set the auto_start flag on an agent's persisted profile.
+
+  Requires the human's `:actor_authority`: enabling delegates the per-agent
+  start rights to the system lifecycle principal, disabling revokes them (see
+  `Arbor.Agent.Manager.set_auto_start/3`). The two-argument form fails closed
+  with `{:error, :capability_mutation_unauthorized}`.
+  """
   defdelegate set_auto_start(agent_id, enabled), to: Arbor.Agent.Manager
+  defdelegate set_auto_start(agent_id, enabled, opts), to: Arbor.Agent.Manager
 
   @doc "Update an agent's display name."
   defdelegate set_display_name(agent_id, name), to: Arbor.Agent.Manager

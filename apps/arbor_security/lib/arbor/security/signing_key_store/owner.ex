@@ -14,6 +14,8 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
   @directory :arbor_security_signing_key_store_owner_directory
   @role_custody_anchor {__MODULE__, :role_custody}
   @role_custody_schema :signing_key_owner_role_custody_v1
+  # Roles whose key operations are bound to the first principal they name.
+  @principal_bound_roles [:trust_grant_owner, :system_lifecycle_owner]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: @name)
@@ -452,7 +454,7 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
             {:ok, state}
 
           {:error, _reason} ->
-            admit_role_principal(state, :trust_grant_owner, caller, principal_id)
+            admit_principal_bound_owner(state, caller, principal_id)
         end
     end
   end
@@ -468,13 +470,20 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
             {:ok, state}
 
           {:error, _reason} ->
-            admit_role_principal(
-              state,
-              :trust_grant_owner,
-              caller,
-              Map.get(identity, :agent_id)
-            )
+            admit_principal_bound_owner(state, caller, Map.get(identity, :agent_id))
         end
+    end
+  end
+
+  # Owners bound to exactly one principal (their own): the first key operation
+  # binds it, and every later key operation must name the same principal.
+  defp admit_principal_bound_owner(state, caller, principal_id) do
+    case admit_role_principal(state, :trust_grant_owner, caller, principal_id) do
+      {:ok, state} ->
+        {:ok, state}
+
+      {:error, _reason} ->
+        admit_role_principal(state, :system_lifecycle_owner, caller, principal_id)
     end
   end
 
@@ -486,7 +495,16 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
         {:ok, state}
 
       {:error, _reason} ->
-        admit_role_principal(state, :trust_grant_owner, caller, principal_id)
+        case admit_role_principal(state, :trust_grant_owner, caller, principal_id) do
+          {:ok, state} ->
+            {:ok, state}
+
+          # Public-key derivation only. The system lifecycle owner scans named
+          # candidates at restart, so this read must not bind its principal;
+          # key-material operations (store, proofs) still do.
+          {:error, _reason} ->
+            admit_role(state, :system_lifecycle_owner, caller)
+        end
     end
   end
 
@@ -573,12 +591,12 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
     end
   end
 
-  defp bind_role_principal(state, :trust_grant_owner, principal_id)
-       when is_binary(principal_id) do
+  defp bind_role_principal(state, role, principal_id)
+       when role in @principal_bound_roles and is_binary(principal_id) do
     with {:ok, custody} <- role_custody(state) do
-      case Map.get(custody.role_principals, :trust_grant_owner) do
+      case Map.get(custody.role_principals, role) do
         nil ->
-          next = put_in(custody, [:role_principals, :trust_grant_owner], principal_id)
+          next = put_in(custody, [:role_principals, role], principal_id)
 
           case put_role_custody(state, next) do
             :ok -> {:ok, state}
@@ -596,7 +614,7 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
     end
   end
 
-  defp bind_role_principal(_state, :trust_grant_owner, _principal_id),
+  defp bind_role_principal(_state, role, _principal_id) when role in @principal_bound_roles,
     do: {:error, :unauthorized_key_owner}
 
   defp bind_role_principal(state, _role, _principal_id), do: {:ok, state}
@@ -686,7 +704,7 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
       Enum.all?(bindings, fn {role, pid} -> Map.has_key?(role_specs, role) and is_pid(pid) end) and
       is_map(role_principals) and
       Enum.all?(role_principals, fn
-        {:trust_grant_owner, principal_id} -> is_binary(principal_id)
+        {role, principal_id} when role in @principal_bound_roles -> is_binary(principal_id)
         _other -> false
       end) and valid_role_specs?(role_specs)
   end

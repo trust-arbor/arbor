@@ -56,6 +56,11 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
       {:ok, agent_id, nil}
     end
 
+    # The Reconciler's G1 start goes through the system lifecycle principal
+    # (`SystemLifecycleAuthority.start_agent/3`, decision D4). This double stands
+    # in for it and records the start as the resume these tests observe.
+    def start_agent(agent_id, opts, _system_lifecycle_token), do: resume_agent(agent_id, opts)
+
     # Reap path: Reconciler applies a :reap intent via stop_agent/1 by agent id.
     def stop_agent(agent_id) do
       record(:stop_agent, agent_id)
@@ -1421,7 +1426,15 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
     extra = if identity = opts[:identity], do: [identity: identity], else: []
 
     child_opts =
-      [name: name, enabled: false, g1_policy: :start, task_store: ts, registry: reg, manager: mgr] ++
+      [
+        name: name,
+        enabled: false,
+        g1_policy: :start,
+        task_store: ts,
+        registry: reg,
+        manager: mgr,
+        lifecycle_authority: mgr
+      ] ++
         extra
 
     pid = start_supervised!({Reconciler, child_opts}, id: unique(:reconciler_id))

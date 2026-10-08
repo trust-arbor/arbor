@@ -1,14 +1,23 @@
 defmodule Arbor.Agent.Bootstrap do
   @moduledoc """
-  Auto-starts agents on application boot.
+  Auto-starts existing agents on application boot.
+
+  No human is present at boot, so every start runs as the system lifecycle
+  principal (`Arbor.Agent.SystemLifecycleAuthority`, decision D4). That
+  principal never creates agents and starts only agents a human opted into
+  auto_start with `Manager.set_auto_start/3`, which delegated it the per-agent
+  rights the start needs.
 
   Two sources:
 
-  1. **Config seeds** — infrastructure agents defined in application config
-     (e.g., diagnostician). Always started.
+  1. **Persisted profiles** — agents with `auto_start: true` in their profile.
 
-  2. **Persisted profiles** — agents with `auto_start: true` in their profile.
-     Set via `Manager.set_auto_start/2`.
+  2. **Config seeds** — infrastructure agents named in application config
+     (e.g., diagnostician). A seed only selects an existing profile (by
+     `display_name` and `template`) and overrides its `model_config`. A seed
+     with no profile is skipped with a warning: an operator must create it
+     (`mix arbor.agent start`) and enable auto_start. A seed whose profile is not
+     opted in is refused by the principal and skipped with a warning.
 
   Seeds override `model_config` for matching agents (by `display_name`).
   Non-matching persisted agents pass through as-is.
@@ -20,24 +29,38 @@ defmodule Arbor.Agent.Bootstrap do
           display_name: "diagnostician",
           module: Arbor.Agent.APIAgent,
           template: "diagnostician",
-          model_config: %{id: "model-id", provider: :openrouter, runtime: :arbor},
-          start_host: true
+          model_config: %{id: "model-id", provider: :openrouter, runtime: :arbor}
         }
       ]
 
       # Disable entirely (e.g., in tests):
       config :arbor_agent, bootstrap_enabled: false
+
+  `start_link/1` takes `:system_lifecycle_token`, the startup token
+  `Arbor.Agent.Application` shares with the principal. Test builds also accept
+  `:start_opts` (extra resume options for every start).
   """
 
   use GenServer
 
   require Logger
 
-  alias Arbor.Agent.{Manager, ProfileStore}
+  alias Arbor.Agent.{Manager, ProfileStore, SystemLifecycleAuthority}
 
   @boot_delay 3_000
   @max_retries 3
   @retry_delays [5_000, 15_000, 45_000]
+  @test_seams_enabled Mix.env() == :test
+
+  # Refusals a retry cannot fix: only a human (or an operator) can.
+  @not_retriable [
+    :auto_start_not_enabled,
+    :auto_start_not_delegated,
+    :not_found,
+    :invalid_start_request,
+    :system_lifecycle_unauthorized,
+    :seed_profile_missing
+  ]
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -65,7 +88,14 @@ defmodule Arbor.Agent.Bootstrap do
       Process.send_after(self(), :bootstrap, delay)
     end
 
-    {:ok, %{agents: [], status: :waiting, attempts: %{}}}
+    {:ok,
+     %{
+       agents: [],
+       status: :waiting,
+       attempts: %{},
+       system_lifecycle_token: Keyword.get(opts, :system_lifecycle_token),
+       start_opts: start_opts(opts)
+     }}
   end
 
   @impl true
@@ -98,7 +128,7 @@ defmodule Arbor.Agent.Bootstrap do
 
       {:noreply, state}
     else
-      case start_single_agent(config) do
+      case start_single_agent(config, state) do
         {:ok, result} ->
           Logger.info("[Bootstrap] Retry #{attempt} succeeded for #{agent_key}")
 
@@ -109,6 +139,10 @@ defmodule Arbor.Agent.Bootstrap do
           })
 
           {:noreply, %{state | agents: [result | state.agents]}}
+
+        {:error, reason} when reason in @not_retriable ->
+          log_refusal(config, reason)
+          {:noreply, state}
 
         {:error, reason} ->
           Logger.warning(
@@ -129,9 +163,13 @@ defmodule Arbor.Agent.Bootstrap do
 
   defp start_agents(configs, state) do
     Enum.reduce(configs, {[], state}, fn config, {started, acc_state} ->
-      case start_single_agent(config) do
+      case start_single_agent(config, acc_state) do
         {:ok, result} ->
           {[result | started], acc_state}
+
+        {:error, reason} when reason in @not_retriable ->
+          log_refusal(config, reason)
+          {started, acc_state}
 
         {:error, reason} ->
           Logger.warning("[Bootstrap] Failed to start #{config.display_name}: #{inspect(reason)}")
@@ -142,22 +180,19 @@ defmodule Arbor.Agent.Bootstrap do
     end)
   end
 
-  defp start_single_agent(config) do
-    module = config[:module] || Arbor.Agent.APIAgent
-    display_name = config.display_name
+  defp start_single_agent(config, state) do
+    with {:ok, agent_id} <- resolve_agent_id(config) do
+      case SystemLifecycleAuthority.start_agent(
+             agent_id,
+             resume_opts(config) ++ state.start_opts,
+             state.system_lifecycle_token
+           ) do
+        {:ok, agent_id, _pid} ->
+          {:ok, %{agent_id: agent_id, display_name: config.display_name}}
 
-    opts =
-      [display_name: display_name] ++
-        if(config[:template], do: [template: config.template], else: []) ++
-        if(config[:model_config], do: [model_config: config.model_config], else: []) ++
-        if(config[:start_host], do: [start_host: true], else: [])
-
-    case Manager.start_or_resume(module, display_name, opts) do
-      {:ok, agent_id, _pid} ->
-        {:ok, %{agent_id: agent_id, display_name: display_name}}
-
-      {:error, _} = error ->
-        error
+        {:error, _} = error ->
+          error
+      end
     end
   rescue
     error ->
@@ -165,6 +200,44 @@ defmodule Arbor.Agent.Bootstrap do
   catch
     :exit, reason ->
       {:error, {:exit, reason}}
+  end
+
+  # Persisted profiles carry their agent id. A seed only selects an existing
+  # profile: the system principal never creates agents.
+  defp resolve_agent_id(%{agent_id: agent_id}) when is_binary(agent_id), do: {:ok, agent_id}
+
+  defp resolve_agent_id(config) do
+    case Manager.find_existing_profile(config.display_name, config[:template]) do
+      {:ok, agent_id} -> {:ok, agent_id}
+      :not_found -> {:error, :seed_profile_missing}
+    end
+  end
+
+  defp resume_opts(config) do
+    case config[:model_config] do
+      model_config when is_map(model_config) ->
+        module = config[:module] || Arbor.Agent.APIAgent
+        [model_config: Map.put(model_config, :module, module)]
+
+      _ ->
+        []
+    end
+  end
+
+  defp log_refusal(config, :seed_profile_missing) do
+    Logger.warning(
+      "[Bootstrap] Skipping seed #{config.display_name}: no existing profile. " <>
+        "The system lifecycle principal never creates agents; an operator must " <>
+        "create it and enable auto_start."
+    )
+  end
+
+  defp log_refusal(config, reason) do
+    Logger.warning(
+      "[Bootstrap] Skipping #{config.display_name}: the system lifecycle principal " <>
+        "refused the start (#{inspect(reason)}). A human must enable auto_start " <>
+        "with Manager.set_auto_start/3 to delegate it."
+    )
   end
 
   defp schedule_retry(config, attempt, state) do
@@ -192,6 +265,7 @@ defmodule Arbor.Agent.Bootstrap do
         get_in(profile.metadata, ["last_model_config"])
 
     %{
+      agent_id: profile.agent_id,
       display_name: profile.display_name || profile.agent_id,
       module: resolve_module(model_config),
       template: profile.template,
@@ -223,6 +297,17 @@ defmodule Arbor.Agent.Bootstrap do
     :exit, reason ->
       Logger.warning("[Bootstrap] auto-start profile listing exited: #{inspect(reason)}")
       []
+  end
+
+  if @test_seams_enabled do
+    defp start_opts(opts) do
+      case Keyword.get(opts, :start_opts, []) do
+        start_opts when is_list(start_opts) -> start_opts
+        _ -> []
+      end
+    end
+  else
+    defp start_opts(_opts), do: []
   end
 
   defp safe_emit(type, data) do

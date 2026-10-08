@@ -3445,6 +3445,28 @@ defmodule Arbor.Security do
     do: {:error, :identity_registration_unauthorized}
 
   @doc false
+  # Self-registration for the D4 system lifecycle principal. The Registry admits
+  # only the configured `:system_lifecycle_owner` process and a possession proof
+  # for the identity's own key; it confers no capabilities.
+  @spec register_system_lifecycle_identity(Identity.t(), binary()) :: :ok | {:error, term()}
+  def register_system_lifecycle_identity(%Identity{} = identity, possession_proof)
+      when is_binary(possession_proof) do
+    public_identity = Identity.public_only(identity)
+
+    case Registry.register_system_lifecycle_identity(public_identity, possession_proof) do
+      :ok ->
+        Events.record_identity_registered(public_identity.agent_id)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def register_system_lifecycle_identity(_identity, _possession_proof),
+    do: {:error, :identity_registration_unauthorized}
+
+  @doc false
   @spec build_stored_identity_registration_proof(Identity.t()) ::
           {:ok, binary()} | {:error, term()}
   def build_stored_identity_registration_proof(%Identity{} = identity) do

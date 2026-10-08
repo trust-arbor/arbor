@@ -63,11 +63,7 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
      control: control,
      registration_token: make_ref(),
      registration_role_specs:
-       Map.take(signing_key_owner_roles, [
-         :system_authority,
-         :scheduler_owner,
-         :trust_grant_owner
-       ])}
+       Map.take(signing_key_owner_roles, Config.identity_registration_roles())}
   end
 
   test "security regression: identity write delete and status failures leave hot authority unchanged",

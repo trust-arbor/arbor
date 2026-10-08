@@ -276,8 +276,7 @@ defmodule Mix.Tasks.Arbor.Agent do
             Mix.shell().info("Started agent '#{display_name}' (#{agent_id})")
 
             if opts[:auto_start] do
-              remote(Arbor.Agent.Manager, :set_auto_start, [agent_id, true])
-              Mix.shell().info("Auto-start enabled.")
+              auto_start_unavailable!(display_name)
             end
 
           {:error, reason} ->
@@ -579,20 +578,30 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case find_profile(ref) do
       {:ok, profile} ->
-        new_value = !profile.auto_start
-
-        case remote(Arbor.Agent.Manager, :set_auto_start, [profile.agent_id, new_value]) do
-          :ok ->
-            state = if new_value, do: "enabled", else: "disabled"
-            Mix.shell().info("Auto-start #{state} for '#{profile.display_name}'.")
-
-          {:error, reason} ->
-            Mix.shell().error("Failed to toggle auto-start: #{inspect(reason)}")
-        end
+        auto_start_unavailable!(profile.display_name)
 
       :not_found ->
         Mix.shell().error("Agent '#{ref}' not found.")
     end
+  end
+
+  # `Manager.set_auto_start/3` needs the operator's owner-process-bound
+  # `:actor_authority`: enabling delegates per-agent start rights to the system
+  # lifecycle principal with it, and disabling revokes them. An authority cannot
+  # cross the RPC boundary, and no key-file proof path exists for this mutation
+  # yet (only single capability grants have one), so this CLI fails closed
+  # rather than calling the authority-less arity, which would only be refused.
+  defp auto_start_unavailable!(display_name) do
+    Mix.shell().error("""
+    Auto-start was not changed for '#{display_name}'.
+    Changing auto-start delegates (or revokes) the agent's start rights for the
+    system lifecycle principal, which needs your signing authority in the server
+    process. This CLI has no signed key-file path for that mutation yet. Use an
+    authenticated in-server caller of Arbor.Agent.set_auto_start/3 (with
+    actor_authority:) instead.
+    """)
+
+    exit({:shutdown, 1})
   end
 
   # ── Shared Plumbing ──────────────────────────────────────────────────

@@ -414,11 +414,7 @@ defmodule Arbor.Security.TestBootstrap do
            system_authority_registration_token: system_authority_registration_token,
            defer_initialization: true,
            registration_role_specs:
-             Map.take(role_specs, [
-               :system_authority,
-               :scheduler_owner,
-               :trust_grant_owner
-             ])},
+             Map.take(role_specs, Arbor.Security.Config.identity_registration_roles())},
           {Arbor.Security.IssuerRegistry, defer_initialization: true},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SessionRegistry, []},

@@ -94,7 +94,7 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
     registry_opts = [
       system_authority_registration_token: registration_token,
       registration_role_specs:
-        Map.take(role_specs, [:system_authority, :scheduler_owner, :trust_grant_owner]),
+        Map.take(role_specs, Arbor.Security.Config.identity_registration_roles()),
       defer_initialization: true
     ]
 

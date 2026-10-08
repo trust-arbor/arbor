@@ -34,6 +34,15 @@ config :arbor_security,
       registered_name: Arbor.Trust.CapabilityGrantOwner,
       purposes: [:trust_capability_grant]
     },
+    # D4 (2026-10-08): the system lifecycle principal that starts auto_start
+    # agents for Bootstrap and the Reconciler. Bound to one principal; holds
+    # only per-agent rights a human delegated by enabling auto_start.
+    system_lifecycle_owner: %{
+      application: :arbor_agent,
+      path: [Arbor.Agent.SystemLifecycleAuthority],
+      registered_name: Arbor.Agent.SystemLifecycleAuthority,
+      purposes: [:system_lifecycle]
+    },
     gateway_bridge_owner: %{
       application: :arbor_gateway,
       path: [Arbor.Gateway.Bridge.RegistrationAuthority],

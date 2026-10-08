@@ -24,8 +24,13 @@ defmodule Arbor.Security.Identity.RegistryTest do
   end
 
   describe "register/1 validation" do
-    test "security regression: replaceable bound-role fields cannot authorize scheduler or trust registration" do
-      role_pid_keys = [:scheduler_identity_pid, :trust_capability_grant_owner_pid]
+    test "security regression: replaceable bound-role fields cannot authorize scheduler, trust or system lifecycle registration" do
+      role_pid_keys = [
+        :scheduler_identity_pid,
+        :trust_capability_grant_owner_pid,
+        :system_lifecycle_owner_pid
+      ]
+
       original_role_fields = Registry |> :sys.get_state() |> Map.take(role_pid_keys)
 
       on_exit(fn ->
@@ -39,7 +44,8 @@ defmodule Arbor.Security.Identity.RegistryTest do
       for {pid_key, register} <- [
             {:scheduler_identity_pid, &Registry.register_scheduler_identity/2},
             {:trust_capability_grant_owner_pid,
-             &Registry.register_trust_capability_grant_identity/2}
+             &Registry.register_trust_capability_grant_identity/2},
+            {:system_lifecycle_owner_pid, &Registry.register_system_lifecycle_identity/2}
           ] do
         attacker = self()
         :sys.replace_state(Registry, &Map.put(&1, pid_key, attacker))

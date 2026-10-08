@@ -220,6 +220,22 @@ defmodule Arbor.Security.Identity.Registry do
   def register_trust_capability_grant_identity(_identity, _possession_proof),
     do: {:error, :identity_registration_unauthorized}
 
+  @doc false
+  # D4 system lifecycle principal. Admitted only from the configured
+  # `:system_lifecycle_owner` process (exact supervised path + registered name)
+  # with a possession proof for the identity's own key. Like the scheduler and
+  # trust-grant paths, it needs no `arbor://security/identity/register` right.
+  @spec register_system_lifecycle_identity(Identity.t(), binary()) :: :ok | {:error, term()}
+  def register_system_lifecycle_identity(%Identity{} = identity, possession_proof)
+      when is_binary(possession_proof) do
+    server_call(
+      {:register_system_lifecycle_identity, Identity.public_only(identity), possession_proof}
+    )
+  end
+
+  def register_system_lifecycle_identity(_identity, _possession_proof),
+    do: {:error, :identity_registration_unauthorized}
+
   if Mix.env() == :test do
     @doc false
     def test_system_authority_registration_token do
@@ -572,7 +588,8 @@ defmodule Arbor.Security.Identity.Registry do
           role_specs: registration_role_specs,
           system_authority_pid: nil,
           scheduler_identity_pid: nil,
-          trust_capability_grant_owner_pid: nil
+          trust_capability_grant_owner_pid: nil,
+          system_lifecycle_owner_pid: nil
         }
       )
 
@@ -775,6 +792,27 @@ defmodule Arbor.Security.Identity.Registry do
          :ok <- verify_registration_proof(identity, proof),
          true <- identity.agent_id == expected_id do
       register_validated_identity(state, identity, trust_capability_grant_owner_bootstrap: true)
+    else
+      false -> {:reply, {:error, :identity_registration_unauthorized}, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :identity_registration_unauthorized}, state}
+  catch
+    _, _ -> {:reply, {:error, :identity_registration_unauthorized}, state}
+  end
+
+  defp dispatch_call(
+         {:register_system_lifecycle_identity, %Identity{} = identity, proof},
+         {caller, _tag},
+         state
+       ) do
+    expected_id = Crypto.derive_agent_id(identity.public_key)
+
+    with {:ok, state} <- admit_system_lifecycle_identity_registration(state, caller),
+         :ok <- verify_registration_proof(identity, proof),
+         true <- identity.agent_id == expected_id do
+      register_validated_identity(state, identity, system_lifecycle_identity_bootstrap: true)
     else
       false -> {:reply, {:error, :identity_registration_unauthorized}, state}
       {:error, _reason} = error -> {:reply, error, state}
@@ -1344,6 +1382,9 @@ defmodule Arbor.Security.Identity.Registry do
   defp registration_role_pid_key(:trust_grant_owner),
     do: {:ok, :trust_capability_grant_owner_pid}
 
+  defp registration_role_pid_key(:system_lifecycle_owner),
+    do: {:ok, :system_lifecycle_owner_pid}
+
   defp registration_role_pid_key(_role), do: {:error, :invalid_role}
 
   defp registration_custody(%{registration_custody: custody}) do
@@ -1376,7 +1417,8 @@ defmodule Arbor.Security.Identity.Registry do
            role_specs: role_specs,
            system_authority_pid: authority_pid,
            scheduler_identity_pid: scheduler_pid,
-           trust_capability_grant_owner_pid: trust_pid
+           trust_capability_grant_owner_pid: trust_pid,
+           system_lifecycle_owner_pid: lifecycle_pid
          } = custody
        ) do
     Map.keys(custody) |> Enum.sort() ==
@@ -1386,11 +1428,15 @@ defmodule Arbor.Security.Identity.Registry do
         :scheduler_identity_pid,
         :security_supervisor_pid,
         :system_authority_pid,
+        :system_lifecycle_owner_pid,
         :trust_capability_grant_owner_pid
       ] and
       is_reference(token) and is_pid(supervisor_pid) and
       valid_registration_role_specs?(role_specs) and
-      Enum.all?([authority_pid, scheduler_pid, trust_pid], &(is_nil(&1) or is_pid(&1)))
+      Enum.all?(
+        [authority_pid, scheduler_pid, trust_pid, lifecycle_pid],
+        &(is_nil(&1) or is_pid(&1))
+      )
   end
 
   defp valid_registration_custody?(_custody), do: false
@@ -1419,6 +1465,19 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp admit_trust_capability_grant_identity_registration(_state, _caller),
+    do: {:error, :identity_registration_unauthorized}
+
+  defp admit_system_lifecycle_identity_registration(state, caller) when is_pid(caller) do
+    with {:ok, custody} <- registration_custody(state),
+         {:ok, next_custody} <- admit_registered_role(custody, :system_lifecycle_owner, caller),
+         :ok <- put_registration_custody(state, next_custody) do
+      {:ok, state}
+    else
+      _ -> {:error, :identity_registration_unauthorized}
+    end
+  end
+
+  defp admit_system_lifecycle_identity_registration(_state, _caller),
     do: {:error, :identity_registration_unauthorized}
 
   defp legitimate_registration_owner?(caller, spec) do
@@ -1469,7 +1528,7 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp valid_registration_role_specs?(specs) when is_map(specs) do
-    Map.keys(specs) |> Enum.sort() == [:scheduler_owner, :system_authority, :trust_grant_owner] and
+    Map.keys(specs) |> Enum.sort() == Enum.sort(Config.identity_registration_roles()) and
       Enum.all?(specs, fn {_role, spec} -> valid_registration_role_spec?(spec) end)
   end
 
@@ -1752,7 +1811,7 @@ defmodule Arbor.Security.Identity.Registry do
 
       nil when @test_env ->
         with {:ok, roles} <- Config.signing_key_owner_roles(),
-             specs <- Map.take(roles, [:system_authority, :scheduler_owner, :trust_grant_owner]),
+             specs <- Map.take(roles, Config.identity_registration_roles()),
              true <- valid_registration_role_specs?(specs) do
           {:ok, specs}
         else

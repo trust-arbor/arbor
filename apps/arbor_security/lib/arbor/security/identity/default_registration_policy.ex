@@ -17,6 +17,7 @@ defmodule Arbor.Security.Identity.DefaultRegistrationPolicy do
          Keyword.get(opts, :system_authority_bootstrap, false) == true or
          Keyword.get(opts, :scheduler_identity_bootstrap, false) == true or
          Keyword.get(opts, :trust_capability_grant_owner_bootstrap, false) == true or
+         Keyword.get(opts, :system_lifecycle_identity_bootstrap, false) == true or
          test_fixture_registration?(opts) do
       :ok
     else

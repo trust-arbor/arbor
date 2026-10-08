@@ -2668,17 +2668,17 @@ defmodule Arbor.Agent.Lifecycle do
             created_at: profile.created_at || DateTime.utc_now()
           }
 
+          # Already registered with this exact key: nothing to mutate, so the
+          # start needs no global `arbor://security/identity/register` right
+          # (decision D4: the system lifecycle principal holds per-agent rights
+          # only). A different or missing key still takes the registration path.
           registration_result =
-            with {:ok, possession_proof} <-
-                   ProfileAuthorityOwner.build_stored_identity_registration_proof(
-                     identity,
-                     actor_authority
-                   ) do
-              Arbor.Security.register_stored_identity(
-                identity,
-                actor_authority,
-                possession_proof
-              )
+            case Arbor.Security.lookup_public_key(agent_id) do
+              {:ok, ^pub_key} ->
+                :ok
+
+              _not_registered_with_this_key ->
+                register_stored_profile_identity(identity, actor_authority)
             end
 
           case registration_result do
@@ -2701,6 +2701,16 @@ defmodule Arbor.Agent.Lifecycle do
 
       _ ->
         identity_registration_failure(mode, agent_id, :identity_metadata_missing)
+    end
+  end
+
+  defp register_stored_profile_identity(identity, actor_authority) do
+    with {:ok, possession_proof} <-
+           ProfileAuthorityOwner.build_stored_identity_registration_proof(
+             identity,
+             actor_authority
+           ) do
+      Arbor.Security.register_stored_identity(identity, actor_authority, possession_proof)
     end
   end
 

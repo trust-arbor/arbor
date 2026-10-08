@@ -20,6 +20,9 @@ defmodule Arbor.Agent.Application do
       Arbor.Agent.IdentityAliasResolver
     )
 
+    # Shared only with the system lifecycle principal's permitted callers.
+    system_lifecycle_token = make_ref()
+
     children =
       if Application.get_env(:arbor_agent, :start_children, true) do
         profile_backend = profile_backend()
@@ -103,12 +106,16 @@ defmodule Arbor.Agent.Application do
           # Agent supervisors (global + per-user)
           Arbor.Agent.Supervisor,
           Arbor.Agent.UserSupervisor,
+          # System lifecycle principal (decision D4): starts opted-in auto_start
+          # agents for Bootstrap and the Reconciler, which share its startup
+          # token. Must precede both.
+          {Arbor.Agent.SystemLifecycleAuthority, system_lifecycle_token: system_lifecycle_token},
           # Bootstrap (self-defers via Process.send_after, must be after Supervisor)
-          Arbor.Agent.Bootstrap,
+          {Arbor.Agent.Bootstrap, system_lifecycle_token: system_lifecycle_token},
           # Reconciler — Bootstrap's continuous generalization (periodic
           # desired-vs-actual reconcile: reap identity-gone zombies, restart
           # absent auto_start agents). Self-defers via Process.send_after.
-          Arbor.Agent.Reconciler
+          {Arbor.Agent.Reconciler, system_lifecycle_token: system_lifecycle_token}
         ]
       else
         []

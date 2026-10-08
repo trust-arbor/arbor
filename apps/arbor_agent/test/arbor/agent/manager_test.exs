@@ -752,48 +752,38 @@ defmodule Arbor.Agent.ManagerTest do
   # 9. Profile & MCP configuration
   # ============================================================================
 
-  describe "set_auto_start/2" do
+  # The authorized round trip (a human delegating to the system lifecycle
+  # principal) is covered by SystemLifecycleAuthoritySecurityRegressionTest.
+  describe "set_auto_start without a human authority" do
     @describetag :fast
 
-    test "enables auto_start on stored profile" do
-      agent_id = "autostart-#{System.unique_integer([:positive])}"
-      profile = make_profile(agent_id, auto_start: false)
-      ProfileStore.store_profile(profile)
+    test "the legacy arity fails closed and leaves the flag unchanged" do
+      for initial <- [false, true] do
+        agent_id = "autostart-#{System.unique_integer([:positive])}"
+        ProfileStore.store_profile(make_profile(agent_id, auto_start: initial))
 
-      assert :ok = Manager.set_auto_start(agent_id, true)
+        assert {:error, :capability_mutation_unauthorized} =
+                 Manager.set_auto_start(agent_id, not initial)
 
-      {:ok, updated} = ProfileStore.load_profile(agent_id)
-      assert updated.auto_start == true
+        {:ok, loaded} = ProfileStore.load_profile(agent_id)
+        assert loaded.auto_start == initial
+      end
     end
 
-    test "disables auto_start on stored profile" do
-      agent_id = "autostart-off-#{System.unique_integer([:positive])}"
-      profile = make_profile(agent_id, auto_start: true)
-      ProfileStore.store_profile(profile)
+    test "opts without an actor authority fail closed and leave the flag unchanged" do
+      agent_id = "autostart-noauth-#{System.unique_integer([:positive])}"
+      ProfileStore.store_profile(make_profile(agent_id, auto_start: false))
 
-      assert :ok = Manager.set_auto_start(agent_id, false)
+      assert {:error, :capability_mutation_unauthorized} =
+               Manager.set_auto_start(agent_id, true, [])
 
-      {:ok, updated} = ProfileStore.load_profile(agent_id)
-      assert updated.auto_start == false
+      {:ok, loaded} = ProfileStore.load_profile(agent_id)
+      assert loaded.auto_start == false
     end
 
     test "returns error for non-existent profile" do
       result = Manager.set_auto_start("nonexistent-autostart-#{System.unique_integer()}", true)
       assert {:error, _} = result
-    end
-
-    test "toggle auto_start on and off" do
-      agent_id = "autostart-toggle-#{System.unique_integer([:positive])}"
-      profile = make_profile(agent_id, auto_start: false)
-      ProfileStore.store_profile(profile)
-
-      assert :ok = Manager.set_auto_start(agent_id, true)
-      {:ok, p1} = ProfileStore.load_profile(agent_id)
-      assert p1.auto_start == true
-
-      assert :ok = Manager.set_auto_start(agent_id, false)
-      {:ok, p2} = ProfileStore.load_profile(agent_id)
-      assert p2.auto_start == false
     end
   end
 

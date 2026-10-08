@@ -274,29 +274,24 @@ defmodule Arbor.Agent.BootstrapTest do
   # set_auto_start round-trip
   # ============================================================================
 
+  # Enabling now delegates start rights to the system lifecycle principal with
+  # the human's authority; the authorized round trip is covered by
+  # SystemLifecycleAuthoritySecurityRegressionTest.
   describe "Manager.set_auto_start/2" do
-    test "persists auto_start flag and is readable" do
+    test "fails closed without a human authority and leaves the flag unchanged" do
       profile = make_profile("set-auto-1", display_name: "Setter", auto_start: false)
       ProfileStore.store_profile(profile)
 
-      assert :ok = Manager.set_auto_start("set-auto-1", true)
+      assert {:error, :capability_mutation_unauthorized} =
+               Manager.set_auto_start("set-auto-1", true)
 
       {:ok, loaded} = ProfileStore.load_profile("set-auto-1")
-      assert loaded.auto_start == true
-    end
-
-    test "can disable auto_start" do
-      profile = make_profile("set-auto-2", display_name: "Disabler", auto_start: true)
-      ProfileStore.store_profile(profile)
-
-      assert :ok = Manager.set_auto_start("set-auto-2", false)
-
-      {:ok, loaded} = ProfileStore.load_profile("set-auto-2")
       assert loaded.auto_start == false
     end
 
     test "returns error for nonexistent agent" do
-      assert {:error, :not_found} = Manager.set_auto_start("nonexistent", true)
+      assert {:error, :not_found} =
+               Manager.set_auto_start("nonexistent", true, actor_authority: make_ref())
     end
   end
 

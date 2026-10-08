@@ -64,6 +64,20 @@ defmodule Arbor.Security.Config do
 
   defp valid_signing_key_owner_role?(_other), do: false
 
+  @identity_registration_roles [
+    :system_authority,
+    :scheduler_owner,
+    :trust_grant_owner,
+    :system_lifecycle_owner
+  ]
+
+  @doc false
+  @spec identity_registration_roles() :: [atom()]
+  # The closed set of signing-key owner roles that may also register their own
+  # identity through a dedicated Identity.Registry path. Every caller that pins
+  # `registration_role_specs` takes exactly these roles.
+  def identity_registration_roles, do: @identity_registration_roles
+
   @doc false
   def terminal_login_options do
     options = Application.get_env(@app, :terminal_login, [])

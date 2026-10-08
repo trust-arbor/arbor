@@ -19,7 +19,7 @@ defmodule Arbor.Agent.Manager do
   `Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")`.
   """
 
-  alias Arbor.Agent.{APIAgent, Claude, Lifecycle, ProfileStore}
+  alias Arbor.Agent.{APIAgent, Claude, Lifecycle, ProfileStore, SystemLifecycleAuthority}
   alias Arbor.Contracts.Security.CapabilityUri
 
   require Logger
@@ -303,22 +303,145 @@ defmodule Arbor.Agent.Manager do
   end
 
   @doc """
-  Set auto_start flag on an agent's persisted profile.
+  Set the auto_start flag on an agent's persisted profile.
 
-  When `enabled` is `true`, the agent will be automatically started by
-  `Arbor.Agent.Bootstrap` on application boot.
+  Auto-start agents are started with no human present, by
+  `Arbor.Agent.Bootstrap` on boot and by `Arbor.Agent.Reconciler` when absent,
+  through the system lifecycle principal (`Arbor.Agent.SystemLifecycleAuthority`).
+  That principal holds no rights of its own: this call is the human's
+  delegation. It requires the human's `:actor_authority`; the legacy arity
+  fails closed with `{:error, :capability_mutation_unauthorized}`.
+
+  Enabling first checks that the human holds every
+  `SystemLifecycleAuthority.delegated_resources/1` right over the agent (so only
+  a human who holds them can delegate them), grants the missing ones to the
+  principal with the human's authority, and only then persists
+  `auto_start: true`. If a grant or the write fails, the grants made by this
+  call are revoked and the flag stays unchanged.
+
+  Disabling revokes the principal's delegated capabilities for the agent, then
+  persists `auto_start: false`. If a revocation fails, the flag stays unchanged
+  and the call can be retried.
 
   Returns `:ok` or `{:error, reason}`.
   """
-  @spec set_auto_start(String.t(), boolean()) :: :ok | {:error, term()}
-  def set_auto_start(agent_id, enabled) when is_binary(agent_id) and is_boolean(enabled) do
-    case ProfileStore.load_profile(agent_id) do
-      {:ok, profile} ->
-        updated = %{profile | auto_start: enabled}
-        ProfileStore.store_profile(updated)
+  @spec set_auto_start(String.t(), boolean()) :: {:error, :capability_mutation_unauthorized}
+  def set_auto_start(_agent_id, _enabled), do: {:error, :capability_mutation_unauthorized}
 
-      {:error, _} = error ->
-        error
+  @spec set_auto_start(String.t(), boolean(), keyword()) :: :ok | {:error, term()}
+  def set_auto_start(agent_id, enabled, opts)
+      when is_binary(agent_id) and is_boolean(enabled) and is_list(opts) do
+    with {:ok, actor_authority} <- auto_start_actor_authority(opts),
+         {:ok, profile} <- ProfileStore.load_profile(agent_id),
+         {:ok, principal_id} <- SystemLifecycleAuthority.principal_id() do
+      resources = SystemLifecycleAuthority.delegated_resources(agent_id)
+
+      if enabled,
+        do: enable_auto_start(profile, principal_id, resources, actor_authority),
+        else: disable_auto_start(profile, principal_id, resources, actor_authority)
+    end
+  end
+
+  def set_auto_start(_agent_id, _enabled, _opts), do: {:error, :invalid_args}
+
+  defp auto_start_actor_authority(opts) do
+    case Keyword.get(opts, :actor_authority) do
+      nil -> {:error, :capability_mutation_unauthorized}
+      authority -> {:ok, authority}
+    end
+  end
+
+  defp enable_auto_start(profile, principal_id, resources, actor_authority) do
+    with {:ok, actor_id} <- auto_start_actor_id(actor_authority),
+         :ok <- require_actor_holds(actor_id, resources),
+         {:ok, held} <- delegated_capabilities(principal_id, resources),
+         held_uris =
+           held
+           |> Enum.filter(&Arbor.Security.capability_authorizes?(&1, &1.resource_uri))
+           |> MapSet.new(& &1.resource_uri),
+         missing = Enum.reject(resources, &MapSet.member?(held_uris, &1)),
+         {:ok, granted} <- grant_delegations(principal_id, missing, actor_authority) do
+      case store_auto_start(profile, true) do
+        :ok ->
+          :ok
+
+        {:error, _} = error ->
+          _ = revoke_delegations(granted, actor_authority)
+          error
+      end
+    end
+  end
+
+  defp disable_auto_start(profile, principal_id, resources, actor_authority) do
+    with {:ok, held} <- delegated_capabilities(principal_id, resources),
+         :ok <- revoke_delegations(Enum.map(held, & &1.id), actor_authority) do
+      store_auto_start(profile, false)
+    end
+  end
+
+  defp auto_start_actor_id(actor_authority) do
+    case Arbor.Security.signing_authority_principal(actor_authority) do
+      {:ok, actor_id} -> {:ok, actor_id}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  rescue
+    _ -> {:error, :capability_mutation_unauthorized}
+  catch
+    _, _ -> {:error, :capability_mutation_unauthorized}
+  end
+
+  # Delegation may not exceed what the human holds over the agent.
+  defp require_actor_holds(actor_id, resources) do
+    with {:ok, capabilities} <- Arbor.Security.list_capabilities(actor_id),
+         true <-
+           Enum.all?(resources, fn resource ->
+             Enum.any?(capabilities, &Arbor.Security.capability_authorizes?(&1, resource))
+           end) do
+      :ok
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  defp delegated_capabilities(principal_id, resources) do
+    case Arbor.Security.list_capabilities(principal_id) do
+      {:ok, capabilities} -> {:ok, Enum.filter(capabilities, &(&1.resource_uri in resources))}
+      {:error, reason} -> {:error, {:auto_start_delegation_lookup_failed, reason}}
+    end
+  end
+
+  defp grant_delegations(principal_id, resources, actor_authority) do
+    Enum.reduce_while(resources, {:ok, []}, fn resource, {:ok, granted} ->
+      case Arbor.Security.grant(
+             principal: principal_id,
+             resource: resource,
+             actor_authority: actor_authority
+           ) do
+        {:ok, capability} ->
+          {:cont, {:ok, [capability.id | granted]}}
+
+        {:error, reason} ->
+          _ = revoke_delegations(granted, actor_authority)
+          {:halt, {:error, {:auto_start_delegation_failed, reason}}}
+      end
+    end)
+  end
+
+  defp revoke_delegations(capability_ids, actor_authority) do
+    Enum.reduce_while(capability_ids, :ok, fn capability_id, :ok ->
+      case Arbor.Security.revoke(capability_id, actor_authority: actor_authority) do
+        :ok -> {:cont, :ok}
+        {:error, :not_found} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:auto_start_revocation_failed, reason}}}
+      end
+    end)
+  end
+
+  defp store_auto_start(profile, enabled) do
+    case ProfileStore.store_profile(%{profile | auto_start: enabled}) do
+      :ok -> :ok
+      {:error, _} = error -> error
+      other -> {:error, {:auto_start_store_failed, other}}
     end
   end
 
@@ -996,7 +1119,10 @@ defmodule Arbor.Agent.Manager do
     end
   end
 
-  defp find_existing_profile(display_name, template) do
+  @doc false
+  # Shared with Bootstrap, which resolves config seeds to existing profiles.
+  @spec find_existing_profile(String.t(), term()) :: {:ok, String.t()} | :not_found
+  def find_existing_profile(display_name, template) do
     normalized_template = normalize_template_ref(template)
 
     case Lifecycle.list_agents() do

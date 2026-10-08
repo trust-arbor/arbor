@@ -18,7 +18,10 @@ defmodule Arbor.Agent.Reconciler do
   classes it closes (see `LifecycleCore`):
 
     * **G1 — desired-running but absent** (`auto_start` profile with no live
-      process) → `:start` via `Manager.resume_agent/2`, **rate-limited** to at most
+      process) → `:start` through the system lifecycle principal
+      (`Arbor.Agent.SystemLifecycleAuthority.start_agent/3`, decision D4), which
+      runs `Manager.resume_agent/2` with its own authority only for agents a
+      human opted in, **rate-limited** to at most
       #{3} starts per agent per 10 minutes so a crash-looping agent can't be
       restarted forever. **Fence-gated (C2B):** immediately before each resume the
       fixed production TaskStore `target_fenced?/1` projection must return
@@ -97,6 +100,7 @@ defmodule Arbor.Agent.Reconciler do
   @default_manager Arbor.Agent.Manager
   @default_registry Arbor.Agent.Registry
   @default_identity Arbor.Security
+  @default_lifecycle_authority Arbor.Agent.SystemLifecycleAuthority
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -109,9 +113,13 @@ defmodule Arbor.Agent.Reconciler do
     * `:enabled` — schedule periodic ticks (default from config, then `true`)
     * `:interval_ms` — tick interval (default from config, then #{@default_interval_ms})
     * `:g1_policy` — `:start` | `:leave_alone` (default from config, then `:start`)
+    * `:system_lifecycle_token` — the startup token `Arbor.Agent.Application`
+      shares with `Arbor.Agent.SystemLifecycleAuthority`. Without it every G1
+      start is refused by the principal.
 
   Test-build-only collaborator overrides (unavailable in production):
-  `:task_store`, `:manager`, `:registry`, `:identity`.
+  `:task_store`, `:manager`, `:registry`, `:identity`, `:lifecycle_authority`,
+  and `:start_opts` (resume options for G1 starts; `[]` in production).
   """
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -169,7 +177,11 @@ defmodule Arbor.Agent.Reconciler do
       task_store: resolve_collaborator(opts, :task_store, @default_task_store),
       manager: resolve_collaborator(opts, :manager, @default_manager),
       registry: resolve_collaborator(opts, :registry, @default_registry),
-      identity: resolve_collaborator(opts, :identity, @default_identity)
+      identity: resolve_collaborator(opts, :identity, @default_identity),
+      lifecycle_authority:
+        resolve_collaborator(opts, :lifecycle_authority, @default_lifecycle_authority),
+      start_opts: resolve_collaborator(opts, :start_opts, []),
+      system_lifecycle_token: Keyword.get(opts, :system_lifecycle_token)
     }
 
     state = if enabled, do: schedule_tick(state), else: state
@@ -346,7 +358,9 @@ defmodule Arbor.Agent.Reconciler do
         recent = recent_attempts(state, agent_id, now)
 
         if length(recent) < @start_limit_max do
-          safe_manager(fn -> state.manager.resume_agent(agent_id, []) end)
+          # D4: no human is present, so the start runs as the system lifecycle
+          # principal, which refuses agents a human did not opt in.
+          safe_manager(fn -> start_as_system_principal(agent_id, state) end)
           emit(:agent_restarted, %{agent_id: agent_id, reason: reason})
           {:applied, record_attempt(state, agent_id, [now | recent])}
         else
@@ -371,6 +385,21 @@ defmodule Arbor.Agent.Reconciler do
   end
 
   defp apply_intent(_other, state), do: {:not_applied, state}
+
+  defp start_as_system_principal(agent_id, state) do
+    case state.lifecycle_authority.start_agent(
+           agent_id,
+           state.start_opts,
+           state.system_lifecycle_token
+         ) do
+      {:ok, _agent_id, _pid} = ok ->
+        ok
+
+      {:error, reason} = error ->
+        Logger.warning("[Reconciler] start of #{agent_id} refused or failed: #{inspect(reason)}")
+        error
+    end
+  end
 
   # C2B fence gate: ONLY {:ok, false} admits resume. A fence, fence-not-ready
   # result, TaskStore exit/timeout, malformed reply, or any exception suppresses.
