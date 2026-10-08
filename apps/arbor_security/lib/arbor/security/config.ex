@@ -981,6 +981,30 @@ defmodule Arbor.Security.Config do
   @spec oidc_enabled?() :: boolean()
   defdelegate oidc_enabled?, to: Arbor.Security.OIDC.Config, as: :enabled?
 
+  @doc """
+  Admission gate shared by every local-operator path: local human identity
+  creation and first-run local genesis.
+
+  Open only when `config :arbor_security, :allow_local_human_identity` is
+  exactly `true` (default `false`, set only in `dev.exs`) and no OIDC provider
+  or device flow is configured. Each boundary that relies on it re-checks it
+  rather than trusting its caller to have done so.
+  """
+  @spec admit_local_human_identity() ::
+          :ok | {:error, :local_human_identity_disabled | :oidc_configured}
+  def admit_local_human_identity do
+    cond do
+      Application.get_env(@app, :allow_local_human_identity, false) != true ->
+        {:error, :local_human_identity_disabled}
+
+      oidc_enabled?() ->
+        {:error, :oidc_configured}
+
+      true ->
+        :ok
+    end
+  end
+
   # ===========================================================================
   # Interactive Disclosure Capability (VP-05D2A0)
   # ===========================================================================

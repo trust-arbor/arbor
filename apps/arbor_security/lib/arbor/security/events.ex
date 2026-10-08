@@ -20,6 +20,7 @@ defmodule Arbor.Security.Events do
   | `:orchestration_task_dispatched` | Human/operator dispatched an async agent task |
   | `:capability_granted` | Capability token granted to agent |
   | `:capability_revoked` | Capability token revoked |
+  | `:local_genesis_completed` | First-run local genesis granted the install's first admin |
   | `:identity_registered` | Agent identity registered in registry |
   | `:identity_verification_succeeded` | Agent identity verification passed |
   | `:identity_verification_failed` | Agent identity verification failed |
@@ -118,6 +119,17 @@ defmodule Arbor.Security.Events do
       capability_id: cap.id,
       principal_id: cap.principal_id,
       resource_uri: cap.resource_uri
+    })
+  end
+
+  @doc "Record the first-run local genesis grant (the install's first admin)."
+  @spec record_local_genesis_completed(map()) :: :ok | {:error, term()}
+  def record_local_genesis_completed(cap) do
+    dual_emit(:local_genesis_completed, %{
+      capability_id: cap.id,
+      principal_id: cap.principal_id,
+      resource_uri: cap.resource_uri,
+      genesis: true
     })
   end
 

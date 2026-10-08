@@ -39,6 +39,25 @@ defmodule Mix.Tasks.Arbor.User.Init do
 
   Default path: `~/.arbor/operator.key`. Override with `--key-file PATH`.
 
+  ## First-run genesis
+
+  Every capability and identity mutation requires an actor that already holds
+  a matching capability, so a fresh install cannot grant anything until it has
+  a first administrator. After writing (or finding) the key file, this task
+  signs a genesis request with it and submits only that proof to
+  `Arbor.Security.complete_local_genesis/1`. The server re-checks the same
+  gates, verifies the signature against the registered identity, and — only
+  while no administrator exists yet — grants this identity `arbor://**`. That
+  covers `arbor://identity/alias/manage`, so no separate grant is needed.
+
+  The outcome is reported as one of:
+
+    * **granted** — this identity is the install's first administrator;
+    * **closed** — an administrator already exists (on a re-run, usually this
+      identity from the first run). Nothing is granted; alias management then
+      needs a grant from that administrator;
+    * **failure** — the task exits non-zero; re-run it to retry.
+
   It is your PRIMARY account. Later OIDC logins derive their own id and are
   folded onto this one:
 
@@ -53,6 +72,7 @@ defmodule Mix.Tasks.Arbor.User.Init do
   @shortdoc "Create the local operator's human identity (dev only)"
 
   @manage_resource "arbor://identity/alias/manage"
+  @genesis_resource "arbor://**"
 
   @switches [key_file: :string]
 
@@ -91,9 +111,15 @@ defmodule Mix.Tasks.Arbor.User.Init do
 
         case export_key_file(identity, key_path) do
           :ok ->
-            grant_alias_management(identity.agent_id)
+            genesis = complete_genesis(identity.agent_id, key_path)
+            if genesis != :granted, do: report_alias_grant_needs_admin(identity.agent_id)
             verify_usable(identity.agent_id, key_path)
             next_steps(identity.agent_id, key_path)
+
+            if genesis == :failed do
+              Mix.shell().error("Genesis did not complete. Re-run mix arbor.user.init to retry.")
+              exit({:shutdown, 1})
+            end
 
           {:error, reason} ->
             Mix.shell().error("""
@@ -163,25 +189,78 @@ defmodule Mix.Tasks.Arbor.User.Init do
 
   defp export_key_file(_identity, _path), do: {:error, :missing_private_key}
 
-  # Without this the operator cannot run `mix arbor.user.link`, which is the
-  # whole point of having a primary account. It is deliberately narrow: ONE
-  # resource, granted to the identity this task just created, on a dev-only
-  # path that has already passed all three gates.
-  defp grant_alias_management(agent_id) do
-    # `grant_capability_id/1`, not `grant/1`: the facade asks cross-library
-    # consumers to use it so Capability structs stay private to arbor_security.
-    case rpc(Arbor.Security, :grant_capability_id, [
-           [principal: agent_id, resource: @manage_resource]
-         ]) do
-      {:ok, _capability_id} ->
-        Mix.shell().info("  Granted #{@manage_resource} (needed by mix arbor.user.link)")
+  # First-run genesis. The proof is built HERE, from the key file this task
+  # just wrote or found; only the signed request crosses to the server, which
+  # never opens a caller-nominated path. A key file that belongs to another
+  # principal is refused before anything is submitted.
+  defp complete_genesis(agent_id, key_path) do
+    case prepare_genesis_proof(key_path) do
+      {:ok, ^agent_id, proof} ->
+        submit_genesis(agent_id, proof)
+
+      {:ok, other_id, _proof} ->
+        Mix.shell().error(
+          "  Genesis not attempted: #{format_key_file_error({:principal_mismatch, agent_id, other_id})}"
+        )
+
+        :failed
 
       {:error, reason} ->
-        Mix.shell().error("""
-          Could not grant #{@manage_resource}: #{inspect(reason)}
-          mix arbor.user.link will not work until this is granted.
-        """)
+        Mix.shell().error(
+          "  Genesis not attempted: could not sign from #{key_path}: #{format_key_file_error(reason)}"
+        )
+
+        :failed
     end
+  end
+
+  defp prepare_genesis_proof(key_path) do
+    case :file.open(String.to_charlist(key_path), [:read, :raw, :binary]) do
+      {:ok, io_device} ->
+        try do
+          Arbor.Security.prepare_key_file_local_genesis(io_device)
+        after
+          :file.close(io_device)
+        end
+
+      {:error, reason} ->
+        {:error, {:read_failed, reason}}
+    end
+  end
+
+  defp submit_genesis(agent_id, proof) do
+    case rpc(Arbor.Security, :complete_local_genesis, [proof]) do
+      {:ok, capability_id} ->
+        Mix.shell().info(
+          "  Genesis: granted #{@genesis_resource} to #{agent_id} (#{capability_id})"
+        )
+
+        Mix.shell().info("  This identity is the install's first administrator.")
+        :granted
+
+      {:error, :genesis_closed} ->
+        Mix.shell().info("""
+          Genesis already closed: an administrator already exists, so nothing was granted.
+          (On a re-run this is usually this identity, from the first run.)
+        """)
+
+        :closed
+
+      {:error, reason} ->
+        Mix.shell().error("  Genesis failed: #{inspect(reason)}")
+        :failed
+    end
+  end
+
+  # Granting needs an actor that already holds `arbor://security/grant/...`,
+  # which this task does not have once genesis is closed. Say so instead of
+  # calling a grant that cannot succeed.
+  defp report_alias_grant_needs_admin(agent_id) do
+    Mix.shell().info("""
+      #{@manage_resource} was not granted by this task: granting requires an
+      administrator. Unless #{agent_id} already is one, mix arbor.user.link
+      will not work until an administrator grants it.
+    """)
   end
 
   # Do not claim success we have not verified. Alias management requires both

@@ -175,6 +175,14 @@ Creates your **human** principal — the account agents and grants belong to —
 with a real Ed25519 + X25519 keypair, and writes `~/.arbor/operator.key` so the
 CLI can prove it is you.
 
+On a fresh install it also completes **genesis**: every grant needs an actor
+that already holds a matching capability, so nothing can be granted until a
+first administrator exists. The task signs a genesis request with the key file,
+and while no administrator exists yet the server grants this identity
+`arbor://**`. Later runs report that genesis is already closed and grant
+nothing. Run it before configuring an identity provider — genesis is refused
+once one is configured.
+
 The id is **deterministic**: it is a hash of `arbor://local` plus
 `<os-username>@<hostname>`. Re-running the command loads the same identity
 instead of minting a second one — but that also means a different OS user, a

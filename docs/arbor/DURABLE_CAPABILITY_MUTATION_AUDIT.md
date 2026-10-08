@@ -391,6 +391,14 @@ distributed revocations. Existing signature, issuer, principal, scope and quota
 gates remain independent. Exact store observation does not turn an audit record
 into permission.
 
+First-run local genesis (`Security.complete_local_genesis/1`, 2026-10-08) uses
+the same funnel: CapabilityStore stores the `arbor://**` grant with the ordinary
+put, so the journal records an ordinary `capability_grant` intent. The intent's
+audit data schema is closed (`capability_id`, `principal_id`, `resource_uri`,
+`expires_at`), so the genesis marker lives in the capability's metadata
+(`"genesis" => "local_operator"`), which the intent binds through its capability
+digest; Security also emits a `:local_genesis_completed` event.
+
 Identity Registry changes, IssuerRegistry enrollments/envelope changes,
 SigningKeyStore writes and SystemAuthority key lifecycle are separate owners and
 are not covered by this capability journal packet. Extension execution and

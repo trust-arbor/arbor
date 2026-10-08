@@ -1,6 +1,6 @@
 # OIDC Authentication in Arbor
 
-> Updated: 2026-06-01
+> Updated: 2026-10-08
 > Audience: operators setting up Arbor for the first time, or adding human authentication to an existing install.
 
 This guide explains how Arbor uses OpenID Connect (OIDC) for human identity, how to wire any compliant OIDC provider into Arbor, and what to do after your first login so the dashboard is actually usable.
@@ -14,7 +14,7 @@ Arbor's security model is capability-based: every privileged action in the dashb
 OIDC gives Arbor:
 
 1. **A verified identity per login.** The provider tells Arbor "this request came from `sub=12345` at `iss=https://accounts.google.com`." Arbor doesn't store passwords or trust self-asserted ids.
-2. **A stable `human_<hash>` agent id.** Arbor derives it deterministically as `"human_" <> sha256("#{iss}:#{sub}")[:40]`, so the same person logging in from the same provider always gets the same id. That id is what `Arbor.Security.assign_role/2` and `Arbor.Security.grant/1` target.
+2. **A stable `human_<hash>` agent id.** Arbor derives it deterministically as `"human_" <> sha256("#{iss}:#{sub}")[:40]`, so the same person logging in from the same provider always gets the same id. That id is what `Arbor.Security.assign_role/3` and `Arbor.Security.grant/1` target.
 3. **No shared accounts.** Each human has their own identity, their own capability set, and their own audit trail. Suspending or revoking an identity in Arbor's `Identity.Registry` immediately stops it from authorizing anything.
 4. **Provider neutrality.** Arbor doesn't ship an identity database. You bring whatever OIDC provider you already use (or self-host one — Zitadel is the worked example below).
 
@@ -160,8 +160,9 @@ Once OIDC is configured and Arbor is running:
 5. Arbor exchanges the code for tokens, validates them, and:
    - Derives your `human_id` as `"human_" <> sha256("#{iss}:#{sub}")[:40]`.
    - Registers your identity in `Arbor.Security.Identity.Registry` (or loads it if it already exists).
-   - Calls `Arbor.Security.assign_role(human_id, :viewer)` — the new least-privilege default (M1).
-   - Grants the ambient `arbor://signals/subscribe/security` capability so security signals reach your dashboard.
+   - Grants nothing. Logging in assigns no role and no capability (as of 2026-10; earlier
+     versions assigned `:viewer` and an ambient signal subscription here). Capabilities come
+     from an administrator — see §7.
 6. You're redirected to the dashboard with `current_agent_id` set in your session.
 
 ### Finding your `human_id` after login
@@ -180,18 +181,41 @@ Arbor.Security.Identity.Registry.list()
 
 ## 7. Bootstrap: granting yourself usable capabilities
 
-By default the `:viewer` role you got at login only carries `arbor://signals/subscribe/security`. That's deliberate — it's the least-privilege fallback so a fresh OIDC integration doesn't accidentally hand admin to every user. To actually use the dashboard (approve proposals, run actions, browse memory), you need to be granted more capabilities.
+Logging in grants nothing. That's deliberate — a fresh OIDC integration must not hand capabilities to every user who can log in. To actually use the dashboard (approve proposals, run actions, browse memory), you need to be granted capabilities.
 
-There are three ways to do this:
+**Granting needs an administrator.** Since 2026-10-06 every grant, revoke and
+role assignment requires a caller-owned `actor_authority` whose principal
+already holds `arbor://security/grant/<target>` (see
+`.claude/skills/agent-security-gates.md` §33). A bare
+`Arbor.Security.assign_role(id, :admin)` from `iex` no longer works: it fails
+with `{:error, :capability_mutation_unauthorized}`. Every option below is
+therefore performed *by an existing administrator*, passing
+`actor_authority: authority` opened from that administrator's key.
+
+### Where the first administrator comes from (genesis)
+
+- **Local / development installs (no OIDC provider configured):** run
+  `./bin/mix arbor.user.init` (see `docs/QUICKSTART.md` step 5). While no
+  administrator exists yet, it signs a genesis request with the operator key
+  file and `Arbor.Security.complete_local_genesis/1` grants that local operator
+  identity `arbor://**`. Once any wildcard grant-holder exists, genesis is
+  closed and the task reports it. Do this *before* configuring OIDC: genesis
+  is refused while an OIDC provider is configured. Later OIDC logins can be
+  folded onto the local operator with `mix arbor.user.link`.
+- **OIDC-only installs (production):** there is currently **no supported
+  genesis path**. Local genesis is gated off whenever an OIDC provider is
+  configured (and `allow_local_human_identity` is `false` outside `dev.exs`).
+  How the first administrator of an OIDC-only install is created is an
+  **open item** (decision 2026-10-08, D1).
 
 ### Option A — Full admin (simplest for single-operator deployments)
 
 ```elixir
-# In iex:
-Arbor.Security.assign_role("human_<your_hash>", :admin)
+# As an existing administrator, in iex:
+Arbor.Security.assign_role("human_<your_hash>", :admin, actor_authority: authority)
 ```
 
-The built-in `:admin` role grants `arbor://**` (wildcard), which matches every Arbor capability URI. One call, full access.
+The built-in `:admin` role grants `arbor://**` (wildcard), which matches every Arbor capability URI. One call, full access. On a local install the genesis grant above already gives the local operator exactly this.
 
 ### Option B — Scoped dev_admin (cleaner for multi-developer dev)
 
@@ -204,7 +228,7 @@ config :arbor_security, :enable_dev_admin_role, true
 Then:
 
 ```elixir
-Arbor.Security.assign_role("human_<your_hash>", :dev_admin)
+Arbor.Security.assign_role("human_<your_hash>", :dev_admin, actor_authority: authority)
 ```
 
 The `:dev_admin` role bundles the three capabilities that previously auto-granted on dashboard mount (`arbor://consensus/admin`, `arbor://trust/auto_promote/**`, `arbor://signals/subscribe/security`). It's narrower than `:admin` and never registered in `:prod` regardless of the flag.
@@ -228,13 +252,11 @@ config :arbor_security,
   }
 ```
 
-Then `Arbor.Security.assign_role(human_id, :operator)` etc. Custom roles override built-ins of the same name.
+Then an administrator runs `Arbor.Security.assign_role(human_id, :operator, actor_authority: authority)` etc. Custom roles override built-ins of the same name.
 
-You can also change the default role assigned to new OIDC logins:
-
-```elixir
-config :arbor_security, :default_human_role, :operator
-```
+`config :arbor_security, :default_human_role` is still read by
+`Arbor.Security.Role.default_human_role/0`, but as of 2026-10 no login path
+assigns it, so setting it does not grant anything to new OIDC logins.
 
 ---
 
@@ -260,7 +282,7 @@ rm ~/.arbor/identity/oidc_tokens.enc
 | Dashboard returns **404** at `/auth/login` | OIDC not configured (handler is in the no-OIDC branch) | Same as above. |
 | Dashboard returns **502** with "OIDC issuer uses http://" or logs `{:invalid_issuer, :scheme_not_allowed}` | `OIDC_ISSUER` is `http://…` but `allow_http` is off (production default, or a non-loopback HTTP issuer in dev) | For local Zitadel keep `http://localhost:8080` in non-prod (loopback HTTP is allowed automatically). Otherwise set `OIDC_ALLOW_HTTP=true` and restart. |
 | Provider rejects the redirect with "redirect_uri mismatch" | The provider's configured redirect URI doesn't match `http://localhost:4001/auth/callback` exactly (scheme, host, port, path must match) | Update the provider's app config. |
-| Logged in successfully but every dashboard button fails with "Unauthorized" | Default role is `:viewer` and you haven't run the bootstrap from §7 | Run `Arbor.Security.assign_role(your_human_id, :admin)`. |
+| Logged in successfully but every dashboard button fails with "Unauthorized" | Login grants no capabilities and nobody has run the bootstrap from §7 | Have an administrator assign a role (§7). A bare `assign_role/2` without `actor_authority:` fails with `:capability_mutation_unauthorized`; the first administrator comes from genesis (§7). |
 | Logged in but `current_agent_id` is missing from socket assigns | The OidcAuth plug isn't running for the route (e.g. you removed it from the endpoint, or you're hitting an MCP endpoint that uses signed-request auth instead) | Check `apps/arbor_dashboard/lib/arbor_dashboard/endpoint.ex:7`. |
 | "Authenticated agent" log shows the correct `human_id` but it doesn't match the one I tried to `assign_role` to | Stale typo. Derive deterministically: `human_id = "human_" <> sha256("#{iss}:#{sub}")[:40]`. Re-grep the logs for the exact hash from your most recent login. |
 | Identity gets created but immediately rejected with `:identity_suspended` | Someone (or a previous test) suspended the identity in `Arbor.Security.Identity.Registry`. After H5, suspended identities deny regardless of capability presence. | `Arbor.Security.Identity.Registry.resume(your_human_id)` from iex. |
@@ -273,4 +295,4 @@ rm ~/.arbor/identity/oidc_tokens.enc
 - [`docker/zitadel/README.md`](../docker/zitadel/README.md) — full Zitadel docker-compose walkthrough.
 - [`config/runtime.exs`](../config/runtime.exs) — authoritative source for every OIDC env var Arbor reads.
 - [`docs/arbor-security-design.md`](arbor-security-design.md) — the broader security model (capabilities, trust tiers, authorization pipeline).
-- The `assign_role(:admin)` / `:dev_admin` bootstrap above is the durable home for that operator guidance. It originated as a cheat-sheet in `SECURITY_REMEDIATION_BREAKAGE.md`, which was archived out of the repo root on 2026-06-24 once its `security/p0-h-remediation` branch merged; see git history (or the local `.arbor/security-history/` archive) for the per-fix restoration notes.
+- The genesis and `assign_role(:admin)` / `:dev_admin` bootstrap above is the durable home for that operator guidance. It originated as a cheat-sheet in `SECURITY_REMEDIATION_BREAKAGE.md`, which was archived out of the repo root on 2026-06-24 once its `security/p0-h-remediation` branch merged; see git history (or the local `.arbor/security-history/` archive) for the per-fix restoration notes.

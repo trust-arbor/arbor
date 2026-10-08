@@ -3124,6 +3124,13 @@ defmodule Arbor.Security do
     @doc false
     def revoke_all_fixture(principal_id), do: CapabilityStore.revoke_all_fixture(principal_id)
 
+    # Reopens local genesis for a test by revoking every stored capability that
+    # closes it (wildcard grant-holders left by earlier test modules).
+    @doc false
+    @spec reopen_local_genesis_fixture() :: {:ok, non_neg_integer()} | {:error, term()}
+    def reopen_local_genesis_fixture,
+      do: CapabilityStore.revoke_local_genesis_blockers_fixture()
+
     @doc false
     def revoke_by_session_fixture(session_id),
       do: CapabilityStore.revoke_by_session_fixture(session_id)
@@ -3558,18 +3565,73 @@ defmodule Arbor.Security do
     end
   end
 
-  defp admit_local_human_identity do
-    cond do
-      Application.get_env(:arbor_security, :allow_local_human_identity, false) != true ->
-        {:error, :local_human_identity_disabled}
+  defp admit_local_human_identity, do: Config.admit_local_human_identity()
 
-      oidc_enabled?() ->
-        {:error, :oidc_configured}
+  @doc """
+  Complete first-run local genesis: give the local operator the install's
+  first security-mutation authority.
 
-      true ->
-        :ok
+  Since every capability and identity mutation requires a caller-owned actor
+  authority whose principal already holds a matching capability, a fresh
+  install could grant nothing. Genesis is the trust anchor (decision
+  2026-10-08 D1): the local operator proves possession of their key with a
+  `SignedRequest` over `local_genesis_request_payload/1`, and the system
+  authority issues exactly one `arbor://**` capability to that principal.
+
+  Everything fails closed:
+
+    * gated exactly like `create_local_human_identity/1`
+      (`allow_local_human_identity: true`, no OIDC provider configured),
+      re-checked by the system authority;
+    * the proof is verified by the standard signed-request verifier
+      (timestamp freshness, registered key, signature, single-use nonce), and
+      its principal must be a registered, `:active` `human_` identity;
+    * genesis is **open** only while no stored capability grants
+      `arbor://security/grant/<fresh random probe>`, i.e. no wildcard
+      grant-holder exists. `CapabilityStore`, the single serialized writer of
+      capability state, decides this in the same call that stores the grant,
+      so two concurrent geneses cannot both succeed.
+
+  The capability is signed by the system authority and stored through the
+  normal journaled path, so the security audit journal records it like any
+  grant. Its metadata carries `"genesis" => "local_operator"` (bound by the
+  journal intent's capability digest) and a `:local_genesis_completed` security
+  event is emitted.
+
+  Returns `{:ok, capability_id}`, or `{:error, :genesis_closed}` once any
+  wildcard grant-holder exists. Other refusals: `:local_human_identity_disabled`,
+  `:oidc_configured`, `:genesis_unauthorized` (bad, replayed, stale or
+  non-human proof), or a store/audit error such as `:audit_unavailable`.
+
+  OIDC-only production installs have no genesis path yet (open item).
+  """
+  @spec complete_local_genesis(SignedRequest.t()) :: {:ok, String.t()} | {:error, term()}
+  def complete_local_genesis(%SignedRequest{} = proof) do
+    with :ok <- admit_local_human_identity(),
+         {:ok, cap, receipt} <- SystemAuthority.authorize_local_genesis_proof(proof),
+         {:ok, %Capability{id: capability_id} = signed_cap} <-
+           CapabilityStore.put_local_genesis_authorized(cap, receipt) do
+      Events.record_capability_granted(signed_cap)
+      Events.record_local_genesis_completed(signed_cap)
+      {:ok, capability_id}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :genesis_unauthorized}
     end
+  catch
+    :exit, _ -> {:error, :capability_store_unavailable}
   end
+
+  def complete_local_genesis(_proof), do: {:error, :genesis_unauthorized}
+
+  @doc """
+  Exact payload the local operator signs for `complete_local_genesis/1`.
+
+  Pure; safe to call in an offline CLI process before the application starts.
+  """
+  @spec local_genesis_request_payload(String.t()) ::
+          {:ok, binary()} | {:error, :genesis_unauthorized}
+  defdelegate local_genesis_request_payload(principal_id), to: SystemAuthority
 
   # Stable per host+user so the derived id is idempotent across runs. Not a
   # secret and not a proof of anything — it is a local namespace, which is
@@ -5356,6 +5418,26 @@ defmodule Arbor.Security do
 
   def prepare_key_file_capability_grant(_path, _opts),
     do: {:error, :capability_mutation_unauthorized}
+
+  @doc """
+  Build the local operator's genesis proof in an offline CLI process.
+
+  The caller opens the key file and passes its handle; this facade never opens
+  a caller-nominated path. Returns the principal recorded in the key file and
+  a `SignedRequest` to submit with `complete_local_genesis/1`.
+  """
+  @spec prepare_key_file_local_genesis(term()) ::
+          {:ok, String.t(), SignedRequest.t()} | {:error, term()}
+  def prepare_key_file_local_genesis(io_device) when not is_binary(io_device) do
+    with {:ok, %{agent_id: principal_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
+         {:ok, payload} <- SystemAuthority.local_genesis_request_payload(principal_id),
+         {:ok, proof} <- SignedRequest.sign(payload, principal_id, private_key) do
+      {:ok, principal_id, proof}
+    end
+  end
+
+  def prepare_key_file_local_genesis(_io_device), do: {:error, :genesis_unauthorized}
 
   @doc "Submit a capability and its exact one-use actor proof to the authority boundary."
   @spec submit_signed_capability_grant(Capability.t(), SignedRequest.t()) ::

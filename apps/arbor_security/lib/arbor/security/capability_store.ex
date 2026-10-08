@@ -179,6 +179,16 @@ defmodule Arbor.Security.CapabilityStore do
   def put_authorized(_cap, _operation, _receipt),
     do: {:error, :capability_mutation_unauthorized}
 
+  @doc false
+  @spec put_local_genesis_authorized(Capability.t(), term()) ::
+          {:ok, Capability.t()} | {:error, :genesis_closed | term()}
+  def put_local_genesis_authorized(%Capability{} = cap, receipt) do
+    mutation_call({:put_local_genesis_authorized, cap, receipt})
+  end
+
+  def put_local_genesis_authorized(_cap, _receipt),
+    do: {:error, :capability_mutation_unauthorized}
+
   if Mix.env() == :test do
     @doc false
     @spec put_fixture(Capability.t()) :: {:ok, :stored} | {:error, term()}
@@ -211,6 +221,10 @@ defmodule Arbor.Security.CapabilityStore do
     @doc false
     def increment_usage_fixture(capability_id),
       do: mutation_call({:increment_usage_fixture, capability_id})
+
+    @doc false
+    def revoke_local_genesis_blockers_fixture,
+      do: mutation_call(:revoke_local_genesis_blockers_fixture)
 
     @doc false
     def acknowledged_put_fixture(%Capability{} = cap),
@@ -840,6 +854,11 @@ defmodule Arbor.Security.CapabilityStore do
     {:reply, {:error, :capability_mutation_unauthorized}, state}
   end
 
+  # A genesis receipt is consumable only through the genesis entry below, which
+  # decides "genesis is open" in the same call that stores the capability.
+  defp dispatch_call({:put_authorized, _cap, :genesis, _receipt}, _from, state),
+    do: {:reply, {:error, :capability_mutation_unauthorized}, state}
+
   defp dispatch_call({:put_authorized, cap, operation, receipt}, _from, state) do
     case migrate_state(state) do
       {:ok, state} ->
@@ -850,7 +869,24 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
+  defp dispatch_call({:put_local_genesis_authorized, cap, receipt}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_put_local_genesis_authorized(cap, receipt, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
   if Mix.env() == :test do
+    defp dispatch_call(:revoke_local_genesis_blockers_fixture, _from, state) do
+      case migrate_state(state) do
+        {:ok, state} -> exec_revoke_local_genesis_blockers(state)
+        {:error, reason} -> {:stop, reason, {:error, :capability_store_unavailable}, state}
+      end
+    end
+
     defp dispatch_call({:put_fixture, cap}, _from, state) do
       case migrate_state(state) do
         {:ok, state} -> exec_put(cap, state)
@@ -1170,6 +1206,9 @@ defmodule Arbor.Security.CapabilityStore do
     {:reply, {:error, :capability_mutation_unauthorized}, state}
   end
 
+  defp dispatch_call({:acknowledged_put_authorized, _cap, :genesis, _receipt}, _from, state),
+    do: {:reply, {:error, :capability_mutation_unauthorized}, state}
+
   defp dispatch_call({:acknowledged_put_authorized, cap, operation, receipt}, _from, state) do
     case migrate_state(state) do
       {:ok, state} ->
@@ -1412,6 +1451,83 @@ defmodule Arbor.Security.CapabilityStore do
     else
       {:error, _reason} = error -> {:reply, error, state}
       _ -> {:reply, {:error, :capability_mutation_unauthorized}, state}
+    end
+  end
+
+  # First-run local genesis. This owner is the single serialized writer of
+  # capability state: every grant, fixture, restore and remote hydration
+  # passes through this mailbox. Deciding "genesis is open" and storing the
+  # capability in one call therefore admits at most one genesis, and no other
+  # grant can interleave between the check and the put.
+  defp exec_put_local_genesis_authorized(cap, receipt, state) do
+    with :ok <- consume_capability_mutation(receipt, :genesis, cap),
+         :ok <- admit_local_genesis(state),
+         {:ok, signed_cap} <- sign_capability_from_store(cap) do
+      case exec_put(signed_cap, state) do
+        {:reply, {:ok, :stored}, next} -> {:reply, {:ok, signed_cap}, next}
+        {:reply, {:error, _reason} = error, next} -> {:reply, error, next}
+        other -> other
+      end
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :capability_mutation_unauthorized}, state}
+    end
+  end
+
+  # Genesis is open only while no stored capability grants
+  # `arbor://security/grant/<fresh random probe>`, i.e. no wildcard grant-holder
+  # (`arbor://**`, `arbor://security/**`, `arbor://security/grant/*` ...)
+  # exists for any principal. Deliberately stricter than "currently valid":
+  # a not-yet-valid or unverifiable wildcard grant still closes genesis; only
+  # an expired one does not.
+  defp admit_local_genesis(state) do
+    probe = local_genesis_probe()
+    now = DateTime.utc_now()
+
+    if Enum.any?(state.by_id, fn {_id, cap} -> local_genesis_blocker?(cap, probe, now) end),
+      do: {:error, :genesis_closed},
+      else: :ok
+  rescue
+    _ -> {:error, :genesis_closed}
+  end
+
+  defp local_genesis_probe do
+    "arbor://security/grant/genesis_probe_" <>
+      Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+  end
+
+  defp local_genesis_blocker?(%Capability{} = cap, probe, now) do
+    not_expired? =
+      is_nil(cap.expires_at) or
+        not match?(%DateTime{}, cap.expires_at) or
+        DateTime.compare(cap.expires_at, now) == :gt
+
+    not_expired? and authorizes_resource?(cap, probe)
+  rescue
+    _ -> true
+  end
+
+  defp local_genesis_blocker?(_entry, _probe, _now), do: true
+
+  if Mix.env() == :test do
+    defp exec_revoke_local_genesis_blockers(state) do
+      probe = local_genesis_probe()
+      now = DateTime.utc_now()
+
+      ids =
+        for {id, cap} <- state.by_id, local_genesis_blocker?(cap, probe, now), do: id
+
+      {revoked, failed, next} =
+        Enum.reduce(ids, {0, 0, state}, fn id, {revoked, failed, acc} ->
+          case exec_revoke(id, acc) do
+            {:reply, :ok, next} -> {revoked + 1, failed, next}
+            {:reply, _error, next} -> {revoked, failed + 1, next}
+          end
+        end)
+
+      if failed == 0,
+        do: {:reply, {:ok, revoked}, next},
+        else: {:reply, {:error, {:partial_revocation, revoked, failed}}, next}
     end
   end
 

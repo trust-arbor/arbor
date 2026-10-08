@@ -74,6 +74,15 @@ defmodule Arbor.Security.SystemAuthority do
   @capability_revocation_attestation_ttl_seconds 30
   @capability_revocation_attestation_version "arbor-capability-revocation-attestation-v1"
 
+  # First-run local genesis (decision 2026-10-08 D1). The operator signs this
+  # fixed, principal-bound request; the root issues exactly one `arbor://**`
+  # capability marked by `@local_genesis_metadata_key`.
+  @local_genesis_request_version "arbor-local-genesis-request-v1"
+  @local_genesis_resource "arbor://security/genesis"
+  @local_genesis_capability_resource "arbor://**"
+  @local_genesis_metadata_key "genesis"
+  @local_genesis_metadata_value "local_operator"
+
   # V3 stores the encrypted private keypair and non-secret public metadata in
   # one acknowledged AuthorityStore record under this logical id.
   @authority_signing_id "system_authority"
@@ -547,6 +556,53 @@ defmodule Arbor.Security.SystemAuthority do
   catch
     :exit, _ -> {:error, :capability_mutation_unauthorized}
   end
+
+  @doc """
+  Exact payload a local operator signs to request first-run genesis.
+
+  Pure and usable in an offline CLI process: length-prefixed version, the
+  fixed `arbor://security/genesis` resource, and the requesting principal.
+  The principal is also bound by the `SignedRequest` envelope; repeating it
+  here keeps the request meaningful on its own.
+  """
+  @spec local_genesis_request_payload(String.t()) ::
+          {:ok, binary()} | {:error, :genesis_unauthorized}
+  def local_genesis_request_payload(principal_id) when is_binary(principal_id) do
+    if valid_principal_id?(principal_id) do
+      {:ok,
+       [@local_genesis_request_version, @local_genesis_resource, principal_id]
+       |> Enum.map_join(&issuer_attestation_length_prefix/1)}
+    else
+      {:error, :genesis_unauthorized}
+    end
+  end
+
+  def local_genesis_request_payload(_principal_id), do: {:error, :genesis_unauthorized}
+
+  @doc """
+  Verify a local operator's genesis proof and mint a one-use grant receipt.
+
+  Root-side half of `Arbor.Security.complete_local_genesis/1`. Re-checks the
+  local-operator gate, verifies the `SignedRequest` through the standard
+  verifier (timestamp, registered key, signature, single-use nonce), requires
+  an `:active` registered `human_` principal, and builds the fixed genesis
+  capability itself. Whether genesis is still open is decided by
+  `CapabilityStore` when it consumes the receipt, inside the same serialized
+  call that stores the capability.
+  """
+  @spec authorize_local_genesis_proof(SignedRequest.t()) ::
+          {:ok, Capability.t(), map()}
+          | {:error, :genesis_unauthorized | :local_human_identity_disabled | :oidc_configured}
+  def authorize_local_genesis_proof(%SignedRequest{} = actor_proof) do
+    Arbor.Common.authenticated_call(
+      owner_pid(),
+      {:authorize_local_genesis_proof, actor_proof}
+    )
+  catch
+    :exit, _ -> {:error, :genesis_unauthorized}
+  end
+
+  def authorize_local_genesis_proof(_actor_proof), do: {:error, :genesis_unauthorized}
 
   @doc false
   @spec issue_capability_revocation_attestation(term(), atom(), term()) ::
@@ -1714,6 +1770,49 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
+  # First-run local genesis. The gate is re-checked here, before the proof is
+  # verified, so a disabled install never consumes the operator's nonce.
+  defp handle_authenticated_request(
+         {:authorize_local_genesis_proof, actor_proof},
+         _from,
+         state
+       ) do
+    state = prune_capability_mutation_attestations(state)
+
+    result =
+      with :ok <- Config.admit_local_human_identity(),
+           {:ok, canonical_proof} <- SignedRequest.canonicalize(actor_proof),
+           "human_" <> _ <- canonical_proof.agent_id,
+           {:ok, expected_payload} <- local_genesis_request_payload(canonical_proof.agent_id),
+           true <- canonical_proof.payload == expected_payload,
+           {:ok, actor_id} <- Verifier.verify(canonical_proof),
+           true <- actor_id == canonical_proof.agent_id,
+           {:ok, :active} <- registry_identity_status(state, actor_id),
+           true <-
+             map_size(Map.get(state, :capability_mutation_attestations, %{})) <
+               @max_capability_mutation_attestations,
+           consumer when is_pid(consumer) <-
+             supervised_registered_child_pid(state, CapabilityStore, CapabilityStore),
+           {:ok, cap} <- build_local_genesis_capability(actor_id),
+           :ok <- validate_capability_mutation_request(:genesis, cap) do
+        {signed_proof, next_state} =
+          mint_capability_mutation_attestation(state, actor_id, :genesis, cap, consumer)
+
+        {:ok, cap, signed_proof, next_state}
+      else
+        {:error, reason} when reason in [:local_human_identity_disabled, :oidc_configured] ->
+          {:error, reason}
+
+        _ ->
+          {:error, :genesis_unauthorized}
+      end
+
+    case result do
+      {:ok, cap, proof, next_state} -> {:reply, {:ok, cap, proof}, next_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   defp handle_authenticated_request(
          {:consume_capability_mutation_attestation, proof, operation, cap},
          {consumer, _tag},
@@ -2592,6 +2691,42 @@ defmodule Arbor.Security.SystemAuthority do
 
   defp validate_sha256_digest(_digest), do: {:error, :invalid_digest}
 
+  # The only capability shape a genesis receipt may be minted for or consumed
+  # against: unscoped `arbor://**` for a `human_` principal, self-granted and
+  # marked as genesis, not yet signed.
+  defp local_genesis_capability?(%Capability{
+         resource_uri: @local_genesis_capability_resource,
+         principal_id: "human_" <> _ = principal_id,
+         expires_at: nil,
+         not_before: nil,
+         parent_capability_id: nil,
+         max_uses: nil,
+         allowed_delegatees: nil,
+         session_id: nil,
+         task_id: nil,
+         principal_scope: nil,
+         constraints: constraints,
+         issuer_id: nil,
+         issuer_signature: nil,
+         delegation_chain: [],
+         metadata: metadata
+       })
+       when constraints == %{} do
+    valid_principal_id?(principal_id) and
+      metadata == %{
+        "granter_id" => principal_id,
+        @local_genesis_metadata_key => @local_genesis_metadata_value
+      }
+  end
+
+  defp local_genesis_capability?(_cap), do: false
+
+  defp validate_capability_mutation_request(:genesis, cap) do
+    if local_genesis_capability?(cap),
+      do: :ok,
+      else: {:error, :capability_mutation_unauthorized}
+  end
+
   defp validate_capability_mutation_request(operation, %Capability{} = cap)
        when operation in [:grant, :acknowledged_grant, :delegate] do
     cond do
@@ -2735,6 +2870,51 @@ defmodule Arbor.Security.SystemAuthority do
     |> Base.encode16(case: :lower)
   end
 
+  defp build_local_genesis_capability(principal_id) do
+    Capability.new(
+      resource_uri: @local_genesis_capability_resource,
+      principal_id: principal_id,
+      metadata: %{
+        "granter_id" => principal_id,
+        @local_genesis_metadata_key => @local_genesis_metadata_value
+      }
+    )
+  end
+
+  # One-use receipt consumed by `consumer` (the supervised CapabilityStore),
+  # bound to the exact capability digest and operation.
+  defp mint_capability_mutation_attestation(state, actor_id, operation, cap, consumer) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    expires_at = DateTime.add(now, @capability_mutation_attestation_ttl_seconds, :second)
+    token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+    proof = %{
+      v: 1,
+      token: token,
+      actor_id: actor_id,
+      operation: operation,
+      capability_digest: capability_mutation_digest(cap),
+      authority_fingerprint: authority_fingerprint(state.identity),
+      issued_at: DateTime.to_iso8601(now),
+      expires_at: DateTime.to_iso8601(expires_at)
+    }
+
+    signature =
+      Crypto.sign(capability_mutation_attestation_payload(proof), state.identity.private_key)
+
+    signed_proof = Map.put(proof, :signature, signature)
+
+    entry = %{
+      proof: signed_proof,
+      consumer: consumer,
+      expires_mono:
+        System.monotonic_time(:millisecond) +
+          @capability_mutation_attestation_ttl_seconds * 1_000
+    }
+
+    {signed_proof, put_capability_mutation_attestation(state, token, entry)}
+  end
+
   defp put_capability_mutation_attestation(state, token, entry) do
     attestations =
       state
@@ -2781,7 +2961,7 @@ defmodule Arbor.Security.SystemAuthority do
     do: :invalid_capability_mutation_attestation
 
   defp encode_capability_mutation_operation(operation)
-       when operation in [:grant, :acknowledged_grant, :delegate],
+       when operation in [:grant, :acknowledged_grant, :delegate, :genesis],
        do: Atom.to_string(operation)
 
   defp encode_capability_mutation_operation(_operation), do: ""
