@@ -1451,4 +1451,18 @@ defmodule Arbor.Agent do
   defp extract_action_module(action_module) when is_atom(action_module) do
     action_module
   end
+
+  # Test-only fixtures, absent from non-test builds (same convention as
+  # Arbor.Security.grant_fixture/1). See Arbor.Agent.LifecycleActorFixture.
+  if Mix.env() == :test do
+    alias Arbor.Agent.LifecycleActorFixture
+
+    @doc false
+    @spec open_lifecycle_actor_fixture(keyword()) :: {:ok, map()} | {:error, term()}
+    def open_lifecycle_actor_fixture(opts \\ []), do: LifecycleActorFixture.open(opts)
+
+    @doc false
+    @spec close_lifecycle_actor_fixture(map()) :: :ok
+    def close_lifecycle_actor_fixture(fixture), do: LifecycleActorFixture.close(fixture)
+  end
 end

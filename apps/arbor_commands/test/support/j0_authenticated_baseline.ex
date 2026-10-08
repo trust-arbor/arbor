@@ -245,6 +245,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     bag =
       start_cleanup_owner!(%{
         grants: [],
+        lifecycle_actor: nil,
         conversationalist: nil,
         control: nil,
         hub: nil
@@ -259,9 +260,19 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     conversant = Identities.register_human_identity!("conversant")
     refute owner.id == conversant.id
 
-    conversationalist = create_conversationalist!("J0 Conversationalist", owner.id)
+    # Lifecycle.create/2 requires a caller-owned actor authority since
+    # ddf05e470; it must be opened here, in the test process that creates.
+    assert {:ok, lifecycle_actor} = Arbor.Agent.open_lifecycle_actor_fixture()
+    remember(bag, :lifecycle_actor, lifecycle_actor)
+
+    conversationalist =
+      create_conversationalist!("J0 Conversationalist", owner.id, lifecycle_actor)
+
     remember(bag, :conversationalist, conversationalist)
-    control = create_conversationalist!("J0 Control Conversationalist", owner.id)
+
+    control =
+      create_conversationalist!("J0 Control Conversationalist", owner.id, lifecycle_actor)
+
     remember(bag, :control, control)
     refute conversationalist.agent_id == control.agent_id
 
@@ -518,9 +529,13 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
           stop_case_agent(Map.get(state, :conversationalist))
           stop_case_agent(Map.get(state, :control))
         after
-          Enum.each(List.wrap(Map.get(state, :grants)), fn cap ->
-            _ = Arbor.Security.revoke_fixture(cap.id)
-          end)
+          try do
+            Enum.each(List.wrap(Map.get(state, :grants)), fn cap ->
+              _ = Arbor.Security.revoke_fixture(cap.id)
+            end)
+          after
+            Arbor.Agent.close_lifecycle_actor_fixture(Map.get(state, :lifecycle_actor))
+          end
         end
       end
     end
@@ -854,11 +869,12 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     ConfigurationError -> nil
   end
 
-  defp create_conversationalist!(name, owner_id) do
+  defp create_conversationalist!(name, owner_id, lifecycle_actor) do
     assert {:ok, profile, identity} =
              Lifecycle.create(name,
                template: "conversationalist",
                principal_id: owner_id,
+               actor_authority: lifecycle_actor.authority,
                return_identity: true,
                memory_opts: [index_enabled: true, graph_enabled: true]
              )
@@ -943,10 +959,12 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     Application.put_env(:arbor_security, :approval_guard_enabled, false)
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
+    # Since ddf05e470 the security application refuses to start with a session
+    # secret shorter than 32 bytes (SessionToken.configuration_status/0).
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "j0-authenticated-baseline-#{System.unique_integer([:positive, :monotonic])}"
+      "j0-authenticated-baseline-" <> Base.encode16(:crypto.strong_rand_bytes(32))
     )
   end
 
