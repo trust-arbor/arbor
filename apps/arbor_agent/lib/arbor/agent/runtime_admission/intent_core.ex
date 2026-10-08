@@ -1670,6 +1670,11 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
                       :unexpected_result,
                       :outcome_unknown,
                       :claim_settled_non_applied,
+                      # Lifecycle.start/2's worker verifies the caller's activation:
+                      # a mismatch, and the tag that hands an exact profile's
+                      # failure back to the caller for fail-closed cleanup.
+                      :authority_not_activated,
+                      :exact_start_cleanup_required,
                       :error,
                       :noproc,
                       :normal,

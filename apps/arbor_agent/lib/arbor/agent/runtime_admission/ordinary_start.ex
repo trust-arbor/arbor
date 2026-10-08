@@ -34,6 +34,23 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
     end
   end
 
+  @doc """
+  Validate start opts exactly as `request/2` will, without admitting anything.
+
+  `Lifecycle.start/2` calls this before it activates authority, so a start
+  that admission would refuse on its opts never mutates authority.
+  """
+  @spec validate_opts(keyword()) :: :ok | {:error, term()}
+  def validate_opts(opts) when is_list(opts) do
+    with :ok <- reject_public_name(opts),
+         {:ok, _store_ref} <- resolve_store_ref(opts),
+         {:ok, _projection} <- Opts.project(Keyword.drop(opts, identity_drop_keys())) do
+      :ok
+    end
+  end
+
+  def validate_opts(_opts), do: {:error, :invalid_start_opts}
+
   defp reject_public_name(opts) do
     if Keyword.has_key?(opts, :name), do: {:error, :invalid_start_opts}, else: :ok
   end

@@ -436,9 +436,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              else: "needs arbor_orchestrator loaded — run from the umbrella root"
            )
     test "pipeline architect runtime restrictions are load-bearing through Session config", %{
-      lifecycle_actor: actor,
-      store: store
+      lifecycle_actor: actor
     } do
+      # Starts a Session, whose signing-authority bootstrap is issued only to a
+      # runtime-admission worker bound in the production-named TaskStore
+      # (ProfileAuthorityOwner), so this start cannot use the owned test store.
+      %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
+
       assert {:ok, profile} =
                create_agent(actor, "Pipeline Architect Runtime Probe",
                  template: "pipeline_architect",
@@ -471,6 +475,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
+                 actor_authority: actor.authority,
                  runtime: :acp,
                  provider: :ollama,
                  model: "caller-override-must-not-stick",
@@ -504,6 +509,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
+                 actor_authority: actor.authority,
                  start_heartbeat: false,
                  recover_session: false,
                  task_store: store
@@ -628,7 +634,12 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "security regression: malformed exact policy stops an already-running architect and revokes authority",
-         %{lifecycle_actor: actor, store: store} do
+         %{lifecycle_actor: actor} do
+      # Starts a Session, whose signing-authority bootstrap is issued only to a
+      # runtime-admission worker bound in the production-named TaskStore
+      # (ProfileAuthorityOwner), so this start cannot use the owned test store.
+      %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
+
       assert {:ok, profile} =
                create_agent(actor, "Corrupt Policy Probe", template: "pipeline_architect")
 
@@ -637,6 +648,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
+                 actor_authority: actor.authority,
                  start_heartbeat: false,
                  recover_session: false,
                  task_store: store
@@ -648,7 +660,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert :ok = Arbor.Agent.ProfileStore.store_profile(corrupted)
 
       assert {:error, _reason} =
-               Lifecycle.start(agent_id, start_heartbeat: false, task_store: store)
+               Lifecycle.start(agent_id,
+                 actor_authority: actor.authority,
+                 start_heartbeat: false,
+                 task_store: store
+               )
 
       assert_eventually(fn -> is_nil(BranchSupervisor.whereis(agent_id)) end)
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
@@ -810,9 +826,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
   describe "concurrent lifecycle start security regression" do
     test "coalesced concurrent starts share one intent, one bootstrap, and one branch pid", %{
-      lifecycle_actor: actor,
-      store: store
+      lifecycle_actor: actor
     } do
+      # Starts a Session, whose signing-authority bootstrap is issued only to a
+      # runtime-admission worker bound in the production-named TaskStore
+      # (ProfileAuthorityOwner), so this start cannot use the owned test store.
+      %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
+
       assert {:ok, profile} =
                create_agent(actor, "Concurrent Bootstrap Probe", template: "test_agent")
 
@@ -828,7 +848,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       tasks =
         for _ <- 1..2 do
           Task.async(fn ->
+            # Each caller activates with an authority it owns.
+            {:ok, task_actor} = Arbor.Agent.reopen_lifecycle_actor_fixture(actor)
+
             Lifecycle.start(agent_id,
+              actor_authority: task_actor.authority,
               start_heartbeat: false,
               recover_session: false,
               task_store: store

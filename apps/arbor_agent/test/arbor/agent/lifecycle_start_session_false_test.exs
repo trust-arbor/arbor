@@ -133,6 +133,7 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     # alone is authoritative for suppressing the session-dependent heartbeat.
     assert {:ok, sup_pid} =
              Lifecycle.start(agent_id,
+               actor_authority: actor.authority,
                start_session: false,
                recover_session: false,
                task_store: store
@@ -172,9 +173,13 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
            else: "needs arbor_orchestrator loaded — run from the umbrella root"
          )
   test "start_session: true with start_heartbeat: false still starts Session only", %{
-    lifecycle_actor: actor,
-    store: store
+    lifecycle_actor: actor
   } do
+    # Starts a Session, whose signing-authority bootstrap is issued only to a
+    # runtime-admission worker bound in the production-named TaskStore
+    # (ProfileAuthorityOwner), so this start cannot use the owned test store.
+    %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
+
     assert {:ok, profile} =
              Lifecycle.create("Start Heartbeat False Probe",
                template: "test_agent",
@@ -186,6 +191,7 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
 
     assert {:ok, sup_pid} =
              Lifecycle.start(agent_id,
+               actor_authority: actor.authority,
                start_heartbeat: false,
                recover_session: false,
                task_store: store

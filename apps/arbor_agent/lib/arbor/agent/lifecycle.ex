@@ -41,10 +41,16 @@ defmodule Arbor.Agent.Lifecycle do
     TemplateStore
   }
 
+  alias Arbor.Agent.RuntimeAdmission.OrdinaryStart
+
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
+
+  # Tags an exact profile's start-worker failure so start/2 (the caller, which
+  # holds the authority) runs the fail-closed cleanup. Internal to this module.
+  @exact_start_cleanup :exact_start_cleanup_required
 
   @session_turn_capability_uris [
     "arbor://orchestrator/execute",
@@ -265,15 +271,57 @@ defmodule Arbor.Agent.Lifecycle do
   After the supervisor confirms all children are up, registers the agent in
   Agent.Registry with all child PIDs as metadata.
 
-  Ordinary starts are linearized through the runtime-admission intent primitive
-  (Phase 4C C3C1a0): no early whereis, authority mutation, or direct branch
-  start occurs outside that path. Concurrent exact-fingerprint callers join;
-  incompatible opts conflict.
+  Requires `:actor_authority`, like `create/2` and `destroy/2`. Start opts are
+  validated first (`{:error, :invalid_start_opts}`); then, without an authority,
+  the start fails closed with `{:error, :capability_mutation_unauthorized}`
+  before anything is activated. The authority is owner-process-bound, so activation
+  runs here, in the caller: re-register the identity, ensure the trust profile
+  and capabilities, and resume an exact profile's identity. Activation depends
+  only on the stored profile, never on start opts, and is idempotent, so
+  concurrent callers activate identically.
+
+  The branch start itself is linearized through the runtime-admission intent
+  primitive (Phase 4C C3C1a0): no early whereis or direct branch start occurs
+  outside that path. Concurrent exact-fingerprint callers join; incompatible
+  opts conflict. `:actor_authority` never enters the start fingerprint. The
+  admitted worker holds no authority: it only verifies the activated state
+  (an active identity, plus an exact profile's exact capabilities) and fails
+  closed if it does not match. When an exact profile fails there, this caller
+  runs the same fail-closed cleanup as for a failed activation.
   """
   @spec start(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
-  def start(agent_id, opts \\ []) do
-    Arbor.Agent.RuntimeAdmission.OrdinaryStart.request(agent_id, opts)
+  def start(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    {authority_opts, start_opts} = Keyword.split(opts, [:actor_authority])
+
+    # Opts first: a start that admission would refuse must not activate anything.
+    with :ok <- OrdinaryStart.validate_opts(start_opts),
+         {:ok, _actor_authority} <- mutation_authority(authority_opts),
+         {:ok, profile} <- ProfileStore.load_profile(agent_id) do
+      case prepare_and_activate_authority(profile, authority_opts) do
+        {:ok, prepared_profile, _policy_mode} ->
+          agent_id
+          |> OrdinaryStart.request(start_opts)
+          |> settle_start_result(prepared_profile, authority_opts)
+
+        {:error, _} = error ->
+          handle_authority_failure(profile, error, authority_opts)
+      end
+    end
   end
+
+  # The worker cannot clean up an exact profile (it holds no authority), so it
+  # hands the failure back tagged; every caller that waited on it runs the
+  # (idempotent) cleanup. Admission errors (:conflict, :timeout, ...) are not
+  # tagged and never trigger cleanup. Settlement redacts worker reasons to a
+  # closed atom set (IntentCore.redact_error_reason/1), so the tag arrives bare
+  # and the worker logs the detail.
+  defp settle_start_result({:error, tagged}, profile, authority_opts)
+       when tagged == @exact_start_cleanup or
+              (is_tuple(tagged) and elem(tagged, 0) == @exact_start_cleanup) do
+    handle_authority_failure(profile, {:error, :exact_start_failed}, authority_opts)
+  end
+
+  defp settle_start_result(result, _profile, _authority_opts), do: result
 
   # Closed ordinary-start witness keys (atom + string forms for JSON boundary).
   # store_ref / unknown keys are rejected — never silently ignored.
@@ -292,7 +340,9 @@ defmodule Arbor.Agent.Lifecycle do
   Execute ordinary start effects after TaskStore has bound this caller as worker.
 
   Fixed internal entry for `OrdinaryStartWorker` only (arity-3, no default).
-  Before ANY restore, authority mutation, or branch effect, authenticates the
+  Performs no authority mutation: `start/2` activated the profile in the
+  calling process, and this only verifies that activation (see
+  `start/2`). Before ANY restore, verification, or branch effect, authenticates the
   current process against the fixed production TaskStore's exact bound worker for
   target+intent_id+fingerprint. A map witness alone is not authority — only the
   closed scalar witness contract is accepted for BranchSupervisor registration
@@ -474,24 +524,95 @@ defmodule Arbor.Agent.Lifecycle do
   defp do_ordinary_start_effects(agent_id, opts, branch_witness) do
     case restore(agent_id) do
       {:ok, profile} ->
-        case prepare_and_activate_authority(profile, opts) do
+        case verify_activated_authority(profile) do
           {:ok, prepared_profile, policy_mode} ->
             result = start_activated_profile(prepared_profile, opts, branch_witness)
 
             case {result, policy_mode} do
-              {{:error, _} = error, {:exact, _envelope}} ->
-                handle_authority_failure(prepared_profile, error, opts)
+              {{:error, reason}, {:exact, _envelope}} ->
+                refuse_ordinary_start(agent_id, :exact_start_failed, reason)
+                {:error, {@exact_start_cleanup, reason}}
 
               _ ->
                 result
             end
 
-          {:error, _} = error ->
-            handle_authority_failure(profile, error, opts)
+          {:error, reason} = error ->
+            refuse_ordinary_start(agent_id, :authority_not_activated, reason)
+
+            if ExactTemplatePolicy.managed_profile?(profile),
+              do: {:error, {@exact_start_cleanup, reason}},
+              else: error
         end
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp refuse_ordinary_start(agent_id, kind, reason) do
+    Logger.warning("[Lifecycle] ordinary start refused (#{kind}): #{inspect(reason)}",
+      agent_id: agent_id
+    )
+  end
+
+  # Worker side of start/2: the caller activated this profile's authority.
+  # Check it without mutating anything, and fail closed on a mismatch. An exact
+  # profile must hold exactly its policy's capabilities; legacy grants are
+  # additive and best-effort by design, so only the identity is checked there.
+  defp verify_activated_authority(%Profile{} = profile) do
+    case resolve_activated_exact_policy(profile) do
+      {:ok, prepared_profile, envelope} ->
+        agent_id = prepared_profile.agent_id
+        snapshot = ExactTemplatePolicy.snapshot(envelope)
+
+        with :ok <- verify_identity_active(agent_id),
+             {:ok, desired_specs} <- exact_capability_specs(agent_id, snapshot),
+             :ok <-
+               verify_exact_capabilities(
+                 agent_id,
+                 desired_specs,
+                 ExactTemplatePolicy.digest(envelope)
+               ) do
+          {:ok, prepared_profile, {:exact, envelope}}
+        else
+          {:error, reason} -> {:error, {:authority_not_activated, reason}}
+        end
+
+      :not_exact ->
+        case verify_identity_active(profile.agent_id) do
+          :ok -> {:ok, profile, :legacy}
+          {:error, reason} -> {:error, {:authority_not_activated, reason}}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # Like resolve_exact_profile_policy/1, but never migrates (a write): the
+  # caller's activation migrated a legacy Pipeline Architect profile already.
+  defp resolve_activated_exact_policy(%Profile{} = profile) do
+    case ExactTemplatePolicy.from_metadata(profile.metadata || %{}) do
+      {:ok, _envelope} ->
+        validate_exact_profile_template(profile)
+
+      :not_marked ->
+        if ExactTemplatePolicy.migration_candidate?(profile),
+          do: {:error, {:authority_not_activated, :exact_policy_not_migrated}},
+          else: :not_exact
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp verify_identity_active(agent_id) do
+    case Arbor.Security.identity_status(agent_id) do
+      {:ok, :active} -> :ok
+      {:ok, status} -> {:error, {:identity_not_active, status}}
+      {:error, reason} -> {:error, {:identity_status_failed, reason}}
+      other -> {:error, {:unexpected_identity_status, other}}
     end
   end
 
