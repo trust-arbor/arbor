@@ -15,11 +15,18 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
       `Lifecycle.create/2`, so we pass it the full creation opts (template,
       display_name, model_config, `principal_id:`); `principal_id` makes
       `Lifecycle` grant the principal `arbor://chat/agent/<new>` so they can chat
-      with the new agent immediately. We then `Lifecycle.start/2` it.
-    * start  → `Arbor.Agent.authorize_restore/2` — `arbor://agent/lifecycle/restore`
-      (gates + restores the persisted profile; idempotent), then `Lifecycle.start/2`.
+      with the new agent immediately. We then `Lifecycle.start/2` it with the
+      same authority (the create cap gates both).
+    * start  → `Arbor.Agent.authorize_start/3` —
+      `arbor://agent/lifecycle/start/<id>` (gates + resumes the persisted profile).
     * stop   → `Arbor.Agent.authorize_stop/2` — `arbor://agent/stop/<id>` (gates +
       stops the supervised tree).
+
+  Create and start mutate security state, so they also need the human's
+  `:agent_lifecycle` authority (decision 2026-10-08 D2). `SignedRequestAuth`
+  opens it while verifying the request (`authority_route?/1` marks these two
+  routes) and the router passes it here as `:actor_authority`. Without one the
+  facade refuses with `:capability_mutation_unauthorized` (HTTP 403).
 
   Cross-app reach (Agent / Lifecycle / TemplateStore / LLMDefaults are at/above
   this app's level) goes through the same `bridge_call/3` runtime indirection the
@@ -40,6 +47,24 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   @typedoc "Failure: an HTTP status + a human-readable message."
   @type error :: {:error, pos_integer(), String.t()}
 
+  @doc """
+  Whether `conn` targets a lifecycle route that needs the human's
+  `:agent_lifecycle` authority: `POST /api/chat/agents` (create+start) and
+  `POST /api/chat/agents/:id/start`. Evaluated on the parent router's full
+  `path_info`, before forwarding.
+  """
+  @spec authority_route?(Plug.Conn.t()) :: boolean()
+  def authority_route?(%Plug.Conn{method: "POST", path_info: ["api", "chat", "agents"]}),
+    do: true
+
+  def authority_route?(%Plug.Conn{
+        method: "POST",
+        path_info: ["api", "chat", "agents", _token, "start"]
+      }),
+      do: true
+
+  def authority_route?(_conn), do: false
+
   # ── create+start from a template ───────────────────────────────────────────
 
   @doc """
@@ -54,16 +79,18 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
          {:ok, template_data} <- load_template(template),
          display_name = display_name_for(params, template_data, template),
          model_config = build_model_config(params),
-         create_opts = [
-           template: template,
-           display_name: display_name,
-           model_config: model_config,
-           principal_id: principal,
-           signed_request: Keyword.get(opts, :signed_request)
-         ],
+         authority_opts = authority_opts(opts),
+         create_opts =
+           [
+             template: template,
+             display_name: display_name,
+             model_config: model_config,
+             principal_id: principal,
+             signed_request: Keyword.get(opts, :signed_request)
+           ] ++ authority_opts,
          {:ok, profile} <- do_create(principal, display_name, create_opts),
          agent_id = profile_agent_id(profile),
-         {:ok, _pid} <- do_start(agent_id, principal_id: principal) do
+         {:ok, _pid} <- do_start(agent_id, [principal_id: principal] ++ authority_opts) do
       {:ok, %{"agent_id" => agent_id, "display_name" => display_name, "running" => true}}
     end
   end
@@ -71,8 +98,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   # ── start an existing (stopped) agent ──────────────────────────────────────
 
   @doc """
-  Start an existing, stopped agent `id` after gating on the restore cap.
-  Returns `{:ok, %{"agent_id", "running" => true}}` on success.
+  Start an existing, stopped agent `id` through `Arbor.Agent.authorize_start/3`
+  (`arbor://agent/lifecycle/start/<id>`), with the request's lifecycle
+  authority. Returns `{:ok, %{"agent_id", "running" => true}}` on success.
   """
   @spec start(String.t(), String.t(), keyword()) :: {:ok, ok_result()} | error()
   def start(principal, token, opts \\ []) when is_binary(principal) and is_binary(token) do
@@ -82,15 +110,14 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   end
 
   defp do_start_resolved(principal, id, opts) do
-    case bridge_call(agent_facade(), :authorize_restore, [principal, id, auth_opts(opts)]) do
-      {:ok, {:ok, _profile}} ->
-        case do_start(id, principal_id: principal) do
-          {:ok, _pid} -> {:ok, %{"agent_id" => id, "running" => true}}
-          {:error, status, msg} -> {:error, status, msg}
-        end
+    start_opts = auth_opts(opts) ++ authority_opts(opts) ++ [principal_id: principal]
 
+    case bridge_call(agent_facade(), :authorize_start, [principal, id, start_opts]) do
       {:ok, {:ok, :pending_approval, proposal_id}} ->
         approval_required(proposal_id)
+
+      {:ok, {:ok, _agent_id, pid}} when is_pid(pid) ->
+        {:ok, %{"agent_id" => id, "running" => true}}
 
       {:ok, {:error, {:unauthorized, reason}}} ->
         unauthorized(reason)
@@ -100,6 +127,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
 
       {:ok, {:error, reason}} ->
         {:error, 409, "could not start #{id}: #{inspect(reason)}"}
+
+      {:ok, _unexpected} ->
+        {:error, 409, "could not start #{id}"}
 
       {:error, reason} ->
         {:error, 503, "agent subsystem unavailable: #{inspect(reason)}"}
@@ -285,6 +315,15 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   # lifecycle gates reject as `:missing_signed_request` without it; nil is fine
   # (the wrapper treats absence as "no identity proof to forward").
   defp auth_opts(opts), do: [signed_request: Keyword.get(opts, :signed_request)]
+
+  # The human's `:agent_lifecycle` authority, opened by `SignedRequestAuth` in
+  # this request process. Absent → the facade refuses the mutation.
+  defp authority_opts(opts) do
+    case Keyword.get(opts, :actor_authority) do
+      nil -> []
+      authority -> [actor_authority: authority]
+    end
+  end
 
   # ── bridge + config seams ──────────────────────────────────────────────────
 

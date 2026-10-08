@@ -42,8 +42,13 @@ defmodule Arbor.Contracts.Commands.Result do
   - `{:start_agent, template :: String.t(), opts :: keyword()}` — caller
     should spawn a new agent using the named template and the per-start
     overrides in `opts` (`name:`, `model:`, `runtime:`). Emitted by the
-    `/start` slash command. Mirrors the `mix arbor.agent start <template>`
-    flow.
+    `/start` slash command, which performs no side effect itself. Mirrors the
+    `mix arbor.agent start <template>` flow. Starting an agent mutates
+    security state, so the caller must perform this through the `Arbor.Agent`
+    lifecycle facade with the authenticated human's own proof (decision
+    2026-10-08 D3). A caller holding no human proof must refuse it with a clear
+    message, and no caller may perform it with ambient authority or by
+    handing the proof to an agent's Session.
 
   Future: `{:spawn_agent, template}`, `{:delete_agent, id}`,
   `{:dispatch_action, fully_qualified, args}`, etc.
@@ -80,10 +85,11 @@ defmodule Arbor.Contracts.Commands.Result do
   - `{:model_changed, String.t()}` — emitted by `/model` after a
     successful Session mutation. Same shape as above.
   - `{:agent_started, %{agent_id: String.t(), pid: pid(),
-    metadata: map()}}` — emitted by `/start` after `Manager.start_or_resume`
-    succeeds. Carries the data each chat interface needs to bind the
-    conversation to the new agent — ChatLive's `reconnect_to_agent`,
-    Discord's `bind_channel_to_agent`, etc. The implementation varies
+    metadata: map()}}` — the data a chat interface needs to bind the
+    conversation to a newly started agent — ChatLive's `reconnect_to_agent`,
+    Discord's `bind_channel_to_agent`, etc. `/start` no longer emits it (it
+    returns the `{:start_agent, ...}` action instead); an interface that
+    performs that action may reuse this shape. The implementation varies
     wildly per interface; the data is shared.
 
   Effects are an OPEN map of interface contracts. Unknown effects are

@@ -14,6 +14,7 @@ defmodule Arbor.Gateway.Chat.Router do
 
   alias Arbor.Gateway.Chat.Agents
   alias Arbor.Gateway.Chat.Lifecycle
+  alias Arbor.Gateway.SignedRequestAuth
 
   plug(:match)
   plug(:dispatch)
@@ -94,19 +95,25 @@ defmodule Arbor.Gateway.Chat.Router do
   end
 
   # Signed HTTP POST: create+start a new agent from a template, granting the
-  # principal chat access to it. Gated on `arbor://agent/lifecycle/create`.
+  # principal chat access to it. Gated on `arbor://agent/lifecycle/create`;
+  # both effects use the human's lifecycle authority the parent pipeline
+  # opened while verifying this request.
   # Body: {"template": "...", "name": "..."(opt), "model": "..."(opt)}.
   post "/agents" do
     with_principal(conn, fn principal ->
-      lifecycle_result(conn, Lifecycle.create(principal, conn.body_params || %{}, sr_opts(conn)))
+      with_lifecycle_authority(conn, fn opts ->
+        lifecycle_result(conn, Lifecycle.create(principal, conn.body_params || %{}, opts))
+      end)
     end)
   end
 
   # Signed HTTP POST: start an existing stopped agent. Gated on
-  # `arbor://agent/lifecycle/restore`.
+  # `arbor://agent/lifecycle/start/<id>` through `Arbor.Agent.authorize_start/3`.
   post "/agents/:id/start" do
     with_principal(conn, fn principal ->
-      lifecycle_result(conn, Lifecycle.start(principal, id, sr_opts(conn)))
+      with_lifecycle_authority(conn, fn opts ->
+        lifecycle_result(conn, Lifecycle.start(principal, id, opts))
+      end)
     end)
   end
 
@@ -170,6 +177,25 @@ defmodule Arbor.Gateway.Chat.Router do
   # step (`identity_verification` is config-ON in dev/prod) — without it the
   # gates reject authenticated requests as `:missing_signed_request`.
   defp sr_opts(conn), do: [signed_request: conn.assigns[:signed_request]]
+
+  # Lifecycle mutations also need the human's `:agent_lifecycle` authority,
+  # which `SignedRequestAuth` opened in this request process while verifying
+  # the signature (decision 2026-10-08 D2). It is used for exactly this one
+  # operation and closed afterwards. Without one (JWT/API-key auth, or a
+  # non-human signer) the facade refuses the mutation.
+  defp with_lifecycle_authority(conn, fun) do
+    case SignedRequestAuth.agent_lifecycle_authority(conn) do
+      nil ->
+        fun.(sr_opts(conn))
+
+      authority ->
+        try do
+          fun.(sr_opts(conn) ++ [actor_authority: authority])
+        after
+          SignedRequestAuth.close_agent_lifecycle_authority(conn)
+        end
+    end
+  end
 
   defp json(conn, status, body) do
     conn

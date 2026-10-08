@@ -1022,6 +1022,114 @@ defmodule Arbor.Agent do
   defp destroy_with_actor_authority(_caller_id, _agent_id, nil, _session_token),
     do: {:error, {:unauthorized, :capability_mutation_unauthorized}}
 
+  @start_proof_keys [:session_token, :signed_request, :actor_authority]
+
+  @doc """
+  Start (resume) an existing agent for an authenticated human.
+
+  Requires `arbor://agent/lifecycle/start/{agent_id}` and a lifecycle authority
+  whose principal is `caller_id` (decision 2026-10-08 D3). The start runs
+  `Arbor.Agent.Manager.resume_agent/2` in the calling process with that
+  authority, so the persisted model configuration is honoured as for any
+  resume. Proof options:
+
+    * `:session_token` — a general human session belonging to `caller_id`. The
+      session path is strict (no other proof option may accompany it); the
+      facade opens an `:agent_lifecycle` authority from the session and closes
+      it after the start.
+    * `:actor_authority` — an authority owned by the calling process whose
+      principal is `caller_id`, e.g. the one the Gateway opened with
+      `Arbor.Security.verify_request_and_open_agent_lifecycle_authority/2`. The
+      caller keeps ownership and closes it. The Gateway also forwards the
+      `:signed_request` that authority was opened from, which binds the
+      capability check to the verified identity.
+
+  Every other option is a start option forwarded to `Manager.resume_agent/2`
+  (`:model_config`, `:principal_id`, ...). Without a session or an authority
+  the call fails closed with
+  `{:error, {:unauthorized, :capability_mutation_unauthorized}}` before any
+  authorization or lifecycle effect. Pending approval returns
+  `{:ok, :pending_approval, proposal_id}` without starting anything.
+  """
+  @spec authorize_start(String.t(), String.t(), keyword()) ::
+          {:ok, String.t(), pid()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_start(caller_id, agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    if Keyword.keyword?(opts) do
+      {proof_opts, start_opts} = Keyword.split(opts, @start_proof_keys)
+      {actor_authority, auth_opts} = Keyword.pop(proof_opts, :actor_authority)
+      session_token = Keyword.get(auth_opts, :session_token)
+
+      if is_nil(actor_authority) and not Keyword.has_key?(auth_opts, :session_token) do
+        {:error, {:unauthorized, :capability_mutation_unauthorized}}
+      else
+        resource = "arbor://agent/lifecycle/start/#{agent_id}"
+
+        authorization =
+          if Keyword.has_key?(auth_opts, :session_token) do
+            authorize_management_session(caller_id, agent_id, resource, :start, auth_opts)
+          else
+            authorize(caller_id, resource, :start, auth_opts)
+          end
+
+        case authorization do
+          :ok ->
+            start_with_actor_authority(
+              caller_id,
+              agent_id,
+              start_opts,
+              actor_authority,
+              session_token
+            )
+
+          {:ok, :pending_approval, _proposal_id} = pending ->
+            pending
+
+          {:error, reason} ->
+            {:error, {:unauthorized, reason}}
+        end
+      end
+    else
+      {:error, {:unauthorized, :invalid_management_options}}
+    end
+  end
+
+  def authorize_start(_, _, _), do: {:error, {:unauthorized, :invalid_management_options}}
+
+  defp start_with_actor_authority(caller_id, agent_id, start_opts, authority, _session_token)
+       when not is_nil(authority) do
+    with_matching_authority(caller_id, authority, fn ->
+      Arbor.Agent.Manager.resume_agent(
+        agent_id,
+        Keyword.put(start_opts, :actor_authority, authority)
+      )
+    end)
+  end
+
+  defp start_with_actor_authority(caller_id, agent_id, start_opts, nil, session_token)
+       when is_binary(session_token) do
+    case Arbor.Security.open_agent_lifecycle_authority(session_token) do
+      {:ok, authority} ->
+        try do
+          with_matching_authority(caller_id, authority, fn ->
+            Arbor.Agent.Manager.resume_agent(
+              agent_id,
+              Keyword.put(start_opts, :actor_authority, authority)
+            )
+          end)
+        after
+          Arbor.Security.close_signing_authority(authority)
+        end
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  defp start_with_actor_authority(_caller_id, _agent_id, _start_opts, nil, _session_token),
+    do: {:error, {:unauthorized, :capability_mutation_unauthorized}}
+
   defp with_matching_authority(caller_id, authority, callback) when is_function(callback, 0) do
     case Arbor.Security.signing_authority_principal(authority) do
       {:ok, ^caller_id} -> callback.()

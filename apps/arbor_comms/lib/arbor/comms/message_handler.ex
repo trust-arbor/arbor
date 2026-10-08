@@ -20,6 +20,10 @@ defmodule Arbor.Comms.MessageHandler do
 
   @dedup_table :comms_message_dedup
 
+  @start_agent_refusal "/start was not run: starting an agent needs an authenticated Arbor " <>
+                         "session, and this channel has none. Use the Arbor TUI or ask an " <>
+                         "operator to start it with the Arbor CLI."
+
   # ============================================================================
   # Public API
   # ============================================================================
@@ -146,6 +150,13 @@ defmodule Arbor.Comms.MessageHandler do
       end)
 
     case intake_result do
+      # Starting an agent needs the authenticated human's lifecycle authority
+      # (decision 2026-10-08 D3). A channel sender is not an authenticated Arbor
+      # human, so this ingress has no proof to perform the action with and
+      # refuses it rather than reporting a start that never happened.
+      {:command_result, %Result{action: {:start_agent, _template, _opts}}} ->
+        send_response(msg, @start_agent_refusal)
+
       {:command_result, %Result{text: text}} ->
         send_response(msg, text)
 

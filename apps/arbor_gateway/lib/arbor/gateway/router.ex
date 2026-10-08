@@ -124,8 +124,14 @@ defmodule Arbor.Gateway.Router do
   # dashboard "External Agents" UI.
   defp try_signed_request_auth(%{request_path: "/health"} = conn, _opts), do: conn
 
+  # Agent-lifecycle routes that need a human's lifecycle authority (decision
+  # 2026-10-08 D2) verify their signature through the one-step
+  # verify-and-open operation instead of the plain verifier: verification
+  # consumes the nonce, so the authority cannot be opened afterwards.
   defp try_signed_request_auth(conn, _opts) do
-    Arbor.Gateway.SignedRequestAuth.call(conn, [])
+    Arbor.Gateway.SignedRequestAuth.call(conn,
+      agent_lifecycle_authority: Arbor.Gateway.Chat.Lifecycle.authority_route?(conn)
+    )
   end
 
   # Try JWT bearer token auth before API key auth — non-destructive passthrough

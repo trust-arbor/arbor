@@ -5909,6 +5909,73 @@ defmodule Arbor.Security do
 
   def open_agent_lifecycle_authority(_session_token), do: {:error, :invalid_session_token}
 
+  @doc """
+  Verify one inbound signed lifecycle request and open an `:agent_lifecycle`
+  signing authority for its verified human principal, in a single step.
+
+  This is the signed-request counterpart of `open_agent_lifecycle_authority/1`
+  (decision 2026-10-08 D2). Verification consumes the request's single-use
+  nonce, so it cannot be split from opening the authority: a caller that
+  verified the request first (for example with `verify_request/1`) and then
+  asked for an authority would be replaying it. The signing-authority broker
+  therefore performs both in one call:
+
+    * the request must sign exactly `expected_payload`, the bytes of the one
+      lifecycle request the caller is about to perform (for the Gateway, the
+      `method\\npath\\nbody` it serves), and its claimed principal must be a
+      `human_` principal whose identity is `:active` and whose signing key the
+      server holds. These are checked before the nonce is consumed;
+    * the request is verified by the inbound verifier (cluster replay gate,
+      timestamp freshness, registered key, Ed25519 signature, single-use
+      nonce), and the verified principal must equal the claimed one;
+    * the authority (purpose `:agent_lifecycle`) is bound to the calling
+      process, like every broker authority. The caller closes it with
+      `close_signing_authority/1` after the one lifecycle operation it was
+      opened for; the broker also releases it when the caller exits.
+
+  The authority carries no capability. The capability check for the specific
+  lifecycle resource and action stays with the operation's facade (e.g.
+  `Arbor.Agent.authorize_create/3`, `Arbor.Agent.authorize_start/3`).
+
+  Returns `{:ok, principal_id, authority}`. Errors include
+  `:payload_mismatch`, `:human_principal_required`, `:identity_suspended`,
+  `:identity_revoked`, `:identity_not_found`, `:no_signing_key`,
+  `:replayed_nonce`, `:invalid_signature`, `:expired_timestamp`,
+  `:principal_mismatch`, `:cluster_replay_protection_unavailable` and
+  `:broker_unavailable`.
+  """
+  @spec verify_request_and_open_agent_lifecycle_authority(SignedRequest.t(), binary()) ::
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
+  def verify_request_and_open_agent_lifecycle_authority(
+        %SignedRequest{} = request,
+        expected_payload
+      )
+      when is_binary(expected_payload) and byte_size(expected_payload) > 0 do
+    with {:ok, canonical} <- canonicalize_signed_request(request) do
+      case SigningAuthorityBroker.open_agent_lifecycle_request(canonical, expected_payload) do
+        {:ok, %SigningAuthority{principal_id: principal_id} = authority}
+        when is_binary(principal_id) ->
+          record_verification_success(canonical, principal_id)
+          {:ok, principal_id, authority}
+
+        {:error, reason} = error ->
+          record_verification_failure(canonical, reason)
+          error
+
+        _unexpected ->
+          record_verification_failure(canonical, :broker_unavailable)
+          {:error, :broker_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :verification_failed}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+  end
+
+  def verify_request_and_open_agent_lifecycle_authority(_request, _expected_payload),
+    do: {:error, :invalid_signed_request}
+
   @doc false
   @spec open_signing_authority(term(), term()) :: {:error, :possession_proof_required}
   def open_signing_authority(_agent_id, _opts) do

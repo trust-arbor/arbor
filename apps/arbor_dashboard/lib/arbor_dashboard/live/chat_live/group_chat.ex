@@ -64,10 +64,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     selected_ids = Map.keys(socket.assigns.group_selection)
     group_name = socket.assigns.group_name_input
 
-    if Enum.empty?(selected_ids) do
-      {:noreply, assign(socket, error: "Please select at least one agent")}
-    else
-      ensure_agents_running(selected_ids)
+    with false <- Enum.empty?(selected_ids),
+         :ok <- ensure_agents_running(socket, selected_ids) do
       Process.sleep(100)
 
       participant_specs = build_participant_specs(selected_ids)
@@ -97,6 +95,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
         {:error, reason} ->
           {:noreply, assign(socket, error: "Failed to create channel: #{inspect(reason)}")}
       end
+    else
+      true -> {:noreply, assign(socket, error: "Please select at least one agent")}
+      {:error, message} -> {:noreply, assign(socket, error: message)}
     end
   end
 
@@ -224,12 +225,53 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
 
   # ── Private Helpers ───────────────────────────────────────────────
 
-  defp ensure_agents_running(agent_ids) do
-    Enum.each(agent_ids, fn agent_id ->
-      unless Arbor.Agent.running?(agent_id) do
-        Manager.resume_agent(agent_id)
+  # Starting a stopped agent mutates security state, so it needs the signed-in
+  # human's lifecycle authority (decision 2026-10-08 D3). The actor and proof
+  # come only from the browser session Nav assigned, never from event params,
+  # and there is no ambient fallback: without a session nothing is started.
+  defp ensure_agents_running(socket, agent_ids) do
+    case Enum.reject(agent_ids, &Arbor.Agent.running?/1) do
+      [] ->
+        :ok
+
+      stopped ->
+        actor = socket.assigns[:current_agent_id]
+        token = socket.assigns[:session_token]
+
+        if is_binary(actor) and is_binary(token) and token != "" do
+          start_stopped_agents(stopped, actor, token)
+        else
+          {:error,
+           "Some selected agents are stopped. Sign in to the dashboard to start them, " <>
+             "or ask an operator to start them with the Arbor CLI."}
+        end
+    end
+  end
+
+  defp start_stopped_agents(agent_ids, actor, token) do
+    Enum.reduce_while(agent_ids, :ok, fn agent_id, :ok ->
+      case start_agent(actor, agent_id, token) do
+        :ok -> {:cont, :ok}
+        {:error, message} -> {:halt, {:error, message}}
       end
     end)
+  end
+
+  defp start_agent(actor, agent_id, token) do
+    case Arbor.Agent.authorize_start(actor, agent_id, session_token: token) do
+      {:ok, _agent_id, pid} when is_pid(pid) ->
+        :ok
+
+      {:ok, :pending_approval, _proposal_id} ->
+        {:error, "Starting agent #{agent_id} needs approval."}
+
+      _refused ->
+        {:error, "Starting agent #{agent_id} was refused."}
+    end
+  rescue
+    _ -> {:error, "Starting agent #{agent_id} is unavailable."}
+  catch
+    _, _ -> {:error, "Starting agent #{agent_id} is unavailable."}
   end
 
   defp build_participant_specs(selected_ids) do

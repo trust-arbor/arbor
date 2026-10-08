@@ -29,22 +29,25 @@ defmodule Arbor.Gateway.Chat.LifecycleTest.FakeAgent do
   def authorize_create(_principal, _display_name, _opts),
     do: {:error, {:unauthorized, :no_capability}}
 
-  # authorize_restore/3 — gate for /start. "human_ok" authorized. The arity-3
-  # form mirrors the real Arbor.Agent facade, which takes `opts` (the gateway
-  # forwards the verified `:signed_request` there); we capture opts so a test can
-  # assert the threading.
-  def authorize_restore("human_pending", id, opts) do
-    send(self_pid(), {:pending_authorization, :restore, id, opts})
+  # authorize_start/3 — gate + start for /start. "human_ok" authorized. The
+  # arity-3 form mirrors the real Arbor.Agent facade, which takes `opts` (the
+  # gateway forwards the verified `:signed_request`, the request's lifecycle
+  # `:actor_authority` and the `:principal_id` start option there); we capture
+  # opts so a test can assert the threading.
+  def authorize_start("human_pending", id, opts) do
+    send(self_pid(), {:pending_authorization, :start, id, opts})
     {:ok, :pending_approval, Application.get_env(:arbor_gateway, :lifecycle_pending_id)}
   end
 
-  def authorize_restore("human_ok", id, opts) do
-    send(self_pid(), {:authorize_restore, id, opts})
-    {:ok, %{agent_id: id}}
+  def authorize_start("human_ok", "agent_unstartable", _opts), do: {:error, :boom}
+
+  def authorize_start("human_ok", id, opts) do
+    send(self_pid(), {:authorize_start, id, opts})
+    {:ok, id, self()}
   end
 
-  def authorize_restore("human_missing", _id, _opts), do: {:error, :not_found}
-  def authorize_restore(_principal, _id, _opts), do: {:error, {:unauthorized, :no_capability}}
+  def authorize_start("human_missing", _id, _opts), do: {:error, :not_found}
+  def authorize_start(_principal, _id, _opts), do: {:error, {:unauthorized, :no_capability}}
 
   # authorize_stop/3 — gate + stop for /stop (arity-3 mirrors the real facade).
   def authorize_stop("human_pending", id, opts) do
@@ -146,7 +149,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
   # POST a JSON body with the principal already in assigns (as the parent
   # pipeline leaves it) and the body already parsed (as :conditional_parsers
   # leaves it).
-  defp post_json(path, principal, body) do
+  defp post_json(path, principal, body, lifecycle_authority \\ nil) do
     :post
     |> conn(path, Jason.encode!(body))
     |> put_req_header("content-type", "application/json")
@@ -156,8 +159,14 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     # here; the lifecycle endpoints must forward it to the cap check. We use a
     # sentinel so tests can assert the threading end-to-end.
     |> assign(:signed_request, @sentinel_signed_request)
+    |> maybe_put_lifecycle_authority(lifecycle_authority)
     |> Router.call(@opts)
   end
+
+  defp maybe_put_lifecycle_authority(conn, nil), do: conn
+
+  defp maybe_put_lifecycle_authority(conn, authority),
+    do: put_private(conn, :arbor_agent_lifecycle_authority, authority)
 
   describe "security regression: pending lifecycle authorization" do
     for operation <- [:create, :start, :stop] do
@@ -219,7 +228,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     {gate, target} =
       case operation do
         :create -> {:create, "Rita"}
-        :start -> {:restore, "agent_existing"}
+        :start -> {:start, "agent_existing"}
         :stop -> {:stop, "agent_running"}
       end
 
@@ -230,7 +239,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
 
   defp refute_lifecycle_continuation do
     refute_received {:authorize_create, _, _}
-    refute_received {:authorize_restore, _, _}
+    refute_received {:authorize_start, _, _}
     refute_received {:authorize_stop, _, _}
     refute_received {:lifecycle_start, _, _}
   end
@@ -337,16 +346,18 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
   end
 
   describe "POST /api/chat/agents/:id/start" do
-    test "authorized → 200 and starts with principal_id" do
+    test "authorized → 200 and starts through authorize_start with principal_id" do
       conn = post_json("/agents/agent_existing/start", "human_ok", %{})
 
       assert conn.status == 200
       assert Jason.decode!(conn.resp_body)["agent_id"] == "agent_existing"
-      assert_received {:authorize_restore, "agent_existing", auth_opts}
+      assert_received {:authorize_start, "agent_existing", opts}
       # The gateway forwards the pipeline-verified signed_request into the cap check.
-      assert auth_opts[:signed_request] == @sentinel_signed_request
-      assert_received {:lifecycle_start, "agent_existing", opts}
+      assert opts[:signed_request] == @sentinel_signed_request
       assert opts[:principal_id] == "human_ok"
+      # authorize_start performs the start itself; the gateway no longer calls
+      # Lifecycle.start/2 directly for an existing agent.
+      refute_received {:lifecycle_start, _, _}
     end
 
     test "unauthorized → 403" do
@@ -354,7 +365,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
       assert conn.status == 403
     end
 
-    test "restore gate reports not found → 404" do
+    test "start gate reports not found → 404" do
       conn = post_json("/agents/agent_gone/start", "human_missing", %{})
       assert conn.status == 404
     end
@@ -386,6 +397,51 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     test "not running → 404" do
       conn = post_json("/agents/agent_gone/stop", "human_missing", %{})
       assert conn.status == 404
+    end
+  end
+
+  # The parent pipeline's SignedRequestAuth leaves the human's lifecycle
+  # authority in conn.private (decision 2026-10-08 D2). The routes must hand it
+  # to exactly the lifecycle mutations and nowhere else.
+  describe "request lifecycle authority" do
+    @authority :sentinel_lifecycle_authority
+
+    test "create passes it to authorize_create and to the start of the new agent" do
+      conn = post_json("/agents", "human_ok", %{"template" => "researcher"}, @authority)
+
+      assert conn.status == 200
+      assert_received {:authorize_create, "Rita", opts}
+      assert opts[:actor_authority] == @authority
+      assert_received {:lifecycle_start, "agent_new123", start_opts}
+      assert start_opts[:actor_authority] == @authority
+    end
+
+    test "start passes it to authorize_start" do
+      conn = post_json("/agents/agent_existing/start", "human_ok", %{}, @authority)
+
+      assert conn.status == 200
+      assert_received {:authorize_start, "agent_existing", opts}
+      assert opts[:actor_authority] == @authority
+    end
+
+    test "without one, create and start forward no authority" do
+      assert post_json("/agents", "human_ok", %{"template" => "researcher"}).status == 200
+      assert_received {:authorize_create, _name, opts}
+      refute Keyword.has_key?(opts, :actor_authority)
+      assert_received {:lifecycle_start, _id, start_opts}
+      refute Keyword.has_key?(start_opts, :actor_authority)
+
+      assert post_json("/agents/agent_existing/start", "human_ok", %{}).status == 200
+      assert_received {:authorize_start, _id, start_opts}
+      refute Keyword.has_key?(start_opts, :actor_authority)
+    end
+
+    test "stop never receives it" do
+      conn = post_json("/agents/agent_running/stop", "human_ok", %{}, @authority)
+
+      assert conn.status == 200
+      assert_received {:authorize_stop, "agent_running", opts}
+      refute Keyword.has_key?(opts, :actor_authority)
     end
   end
 end

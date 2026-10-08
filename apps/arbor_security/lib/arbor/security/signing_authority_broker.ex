@@ -440,6 +440,22 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   def open_agent_lifecycle_session(_session_token), do: {:error, :invalid_session_token}
 
+  @doc false
+  # Verify one inbound signed request over exactly `expected_payload`
+  # (consuming its nonce) and open an `:agent_lifecycle` authority for its
+  # verified human principal in the same broker call. Verification runs here,
+  # never in the caller, so no caller can obtain an authority by claiming it
+  # verified a request elsewhere.
+  @spec open_agent_lifecycle_request(SignedRequest.t(), binary()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_agent_lifecycle_request(%SignedRequest{} = request, expected_payload)
+      when is_binary(expected_payload) and byte_size(expected_payload) > 0 do
+    call({:open_agent_lifecycle_request, request, expected_payload})
+  end
+
+  def open_agent_lifecycle_request(_request, _expected_payload),
+    do: {:error, :invalid_signed_request}
+
   @doc """
   Issue an expiring persistent-backed restart slot from a possession proof.
   """
@@ -1092,6 +1108,42 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     else
       {:error, _} = error -> {:reply, error, state}
       _ -> {:reply, {:error, :invalid_session_token}, state}
+    end
+  end
+
+  # Decision 2026-10-08 D2. The checks that need no proof run first (the
+  # request covers exactly the expected payload, a human principal, an active
+  # identity, a server-held key), so an ineligible request is refused without
+  # consuming its nonce. Then the inbound verifier (cluster replay gate,
+  # freshness, registered key, signature, single-use nonce) runs exactly once,
+  # here, and the authority is bound to the calling process.
+  defp handle_authenticated_call(
+         {:open_agent_lifecycle_request, request, expected_payload},
+         caller_pid,
+         state
+       ) do
+    with {:ok, request} <- canonicalize_lifecycle_request(request),
+         :ok <- match_lifecycle_payload(request, expected_payload),
+         :ok <- require_human_principal(request.agent_id),
+         :ok <- ensure_owner_alive(caller_pid),
+         :ok <- ensure_identity_active(request.agent_id),
+         :ok <- ensure_signing_key_present(request.agent_id),
+         {:ok, verified_principal_id} <- verify_inbound_request(request),
+         :ok <- match_claimed_principal(verified_principal_id, request.agent_id),
+         :ok <- ensure_identity_active(verified_principal_id),
+         :ok <- ensure_owner_alive(caller_pid) do
+      bound = %{
+        principal_id: verified_principal_id,
+        purpose: :agent_lifecycle,
+        owner_pid: caller_pid
+      }
+
+      state
+      |> create_authority(bound, caller_pid, :persistent, nil)
+      |> commit_persistent_result()
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_signed_request}, state}
     end
   end
 
@@ -2576,6 +2628,37 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   catch
     :exit, _ -> {:error, :verification_failed}
   end
+
+  # An inbound request (e.g. a Gateway HTTP request) crossed the network, so
+  # it gets the full inbound verifier, including the cluster replay gate.
+  defp verify_inbound_request(request) do
+    Verifier.verify(request)
+  rescue
+    _ -> {:error, :verification_failed}
+  catch
+    :exit, _ -> {:error, :verification_failed}
+  end
+
+  defp canonicalize_lifecycle_request(request) do
+    case SignedRequest.canonicalize(request) do
+      {:ok, %SignedRequest{agent_id: agent_id} = canonical} when is_binary(agent_id) ->
+        {:ok, canonical}
+
+      _ ->
+        {:error, :invalid_signed_request}
+    end
+  rescue
+    _ -> {:error, :invalid_signed_request}
+  end
+
+  defp match_lifecycle_payload(%SignedRequest{payload: payload}, expected_payload)
+       when is_binary(payload) and payload == expected_payload,
+       do: :ok
+
+  defp match_lifecycle_payload(_request, _expected_payload), do: {:error, :payload_mismatch}
+
+  defp require_human_principal("human_" <> rest) when byte_size(rest) > 0, do: :ok
+  defp require_human_principal(_principal_id), do: {:error, :human_principal_required}
 
   defp verify_private_key_matches(principal_id, proof, private_key) do
     with {:ok, public_key} <- lookup_public_key(principal_id),

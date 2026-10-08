@@ -51,6 +51,17 @@ defmodule Arbor.Gateway.SignedRequestAuth do
 
   A captured signature is therefore bound to method+path+body+timestamp+nonce
   and is unusable after the nonce has been consumed.
+
+  ## Agent-lifecycle authority
+
+  With `agent_lifecycle_authority: true` (set by the parent router for the
+  chat create and start routes) a `human_` signer is verified by
+  `Arbor.Security.verify_request_and_open_agent_lifecycle_authority/2`
+  instead, which runs the same checks and, in the same step, opens an
+  `:agent_lifecycle` authority from the human's server-held key, bound to the
+  request process. It is stored in `conn.private` (read it with
+  `agent_lifecycle_authority/1`) and closed before the response is sent. If
+  it cannot be opened, the request is not authenticated.
   """
 
   import Plug.Conn
@@ -65,23 +76,50 @@ defmodule Arbor.Gateway.SignedRequestAuth do
   def init(opts), do: opts
 
   @impl true
-  def call(conn, _opts) do
+  def call(conn, opts) do
     case extract_signature_header(conn) do
       {:ok, encoded} ->
-        attempt_signature_auth(conn, encoded)
+        attempt_signature_auth(conn, encoded, agent_lifecycle_authority?(opts))
 
       :no_signature ->
         conn
     end
   end
 
+  @doc """
+  The agent-lifecycle authority this plug opened for the current request, or
+  `nil`.
+
+  Set only for requests the caller marked with
+  `agent_lifecycle_authority: true` whose verified signer is a `human_`
+  principal. The authority is bound to the request process and closed before
+  the response is sent; the route that consumes it also closes it.
+  """
+  @spec agent_lifecycle_authority(Plug.Conn.t()) :: term() | nil
+  def agent_lifecycle_authority(%Plug.Conn{private: private}),
+    do: Map.get(private, :arbor_agent_lifecycle_authority)
+
+  @doc "Close the request's agent-lifecycle authority, if any. Idempotent."
+  @spec close_agent_lifecycle_authority(Plug.Conn.t()) :: :ok
+  def close_agent_lifecycle_authority(conn) do
+    case agent_lifecycle_authority(conn) do
+      nil -> :ok
+      authority -> close_authority(authority)
+    end
+  end
+
   # --- Pipeline steps ---
 
-  defp attempt_signature_auth(conn, encoded) do
+  defp agent_lifecycle_authority?(opts) when is_list(opts),
+    do: Keyword.get(opts, :agent_lifecycle_authority, false) == true
+
+  defp agent_lifecycle_authority?(_opts), do: false
+
+  defp attempt_signature_auth(conn, encoded, lifecycle_authority?) do
     with {:ok, partial_signed_request} <- decode_signed_request(encoded),
          {:ok, body, conn} <- read_and_cache_body(conn),
          {:ok, signed_request} <- bind_payload(partial_signed_request, conn, body),
-         {:ok, agent_id} <- Arbor.Security.verify_request(signed_request) do
+         {:ok, agent_id, conn} <- verify(conn, signed_request, body, lifecycle_authority?) do
       Logger.debug("[SignedRequestAuth] Authenticated agent #{agent_id}")
 
       # Stash the verified agent_id AND the signed_request struct in the
@@ -115,6 +153,49 @@ defmodule Arbor.Gateway.SignedRequestAuth do
         # operator hunting for a credential they already supplied correctly.
         assign(conn, :signed_request_auth_error, reason)
     end
+  end
+
+  # A human's signed request to an agent-lifecycle route is verified by the
+  # one-step operation that also opens their `:agent_lifecycle` authority:
+  # verification consumes the nonce, so the authority could not be opened from
+  # this request afterwards (decision 2026-10-08 D2). Any other signer, and
+  # every other route, uses the plain verifier and gets no authority; the
+  # lifecycle facade then refuses the mutation for lack of one.
+  defp verify(conn, %SignedRequest{agent_id: "human_" <> _} = signed_request, body, true) do
+    case Arbor.Security.verify_request_and_open_agent_lifecycle_authority(
+           signed_request,
+           request_payload(conn, body)
+         ) do
+      {:ok, agent_id, authority} ->
+        conn =
+          conn
+          |> put_private(:arbor_agent_lifecycle_authority, authority)
+          |> register_before_send(fn conn ->
+            close_authority(authority)
+            conn
+          end)
+
+        {:ok, agent_id, conn}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp verify(conn, signed_request, _body, _lifecycle_authority?) do
+    case Arbor.Security.verify_request(signed_request) do
+      {:ok, agent_id} -> {:ok, agent_id, conn}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp close_authority(authority) do
+    _ = Arbor.Security.close_signing_authority(authority)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # --- Header extraction ---
@@ -191,7 +272,11 @@ defmodule Arbor.Gateway.SignedRequestAuth do
   # `Arbor.Security.verify_request/1` will recompute the canonical signing
   # payload over this corrected struct and verify the Ed25519 signature.
   defp bind_payload(%SignedRequest{} = partial, conn, body) do
-    canonical = IO.iodata_to_binary([conn.method, "\n", conn.request_path, "\n", body])
-    {:ok, %{partial | payload: canonical}}
+    {:ok, %{partial | payload: request_payload(conn, body)}}
   end
+
+  # The exact request this conn will serve. The lifecycle authority is opened
+  # only for a signature over these bytes.
+  defp request_payload(conn, body),
+    do: IO.iodata_to_binary([conn.method, "\n", conn.request_path, "\n", body])
 end
