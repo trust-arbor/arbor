@@ -76,8 +76,10 @@ defmodule Arbor.Security.AuditJournalOwner do
   `prepare` answers `{:error, :operation_terminal}` for every terminal
   identity (compacted or not), continues a pending v2 operation when a v3
   intent of identical facts arrives (only while such an operation is
-  pending), and records the last identity/capacity refusal in status. Pending
-  v1 operations must retry with their original identity.
+  pending), and records the last identity/capacity refusal in status. The first
+  capacity refusal of an episode (until an increase is admitted again) is also
+  logged and emits `[:arbor, :security, :audit_journal, :capacity_refused]`.
+  Pending v1 operations must retry with their original identity.
 
   Not a generic store. CapabilityStore prepares and observes mutations; the
   registered Historian consumer acknowledges exact durable event content.
@@ -113,6 +115,12 @@ defmodule Arbor.Security.AuditJournalOwner do
     :principal_capacity_exhausted,
     :retired_version
   ]
+  @capacity_refusals [
+    :soft_capacity_exhausted,
+    :capacity_exhausted,
+    :principal_capacity_exhausted
+  ]
+  @capacity_refused_event [:arbor, :security, :audit_journal, :capacity_refused]
   @paused_postures [:mismatch, :ahead]
   @publication_backoff_ms 5_000
 
@@ -1160,7 +1168,7 @@ defmodule Arbor.Security.AuditJournalOwner do
             append_prepared_intent(intent, state)
 
           {:error, reason} when reason in @refusals ->
-            {:reply, {:error, reason}, %{state | last_refusal: reason}}
+            {:reply, {:error, reason}, note_refusal(state, reason)}
 
           {:error, _reason} ->
             {:reply, {:error, :malformed}, state}
@@ -1175,14 +1183,67 @@ defmodule Arbor.Security.AuditJournalOwner do
 
     case reply do
       {:ok, _} ->
-        {:reply, {:ok, intent, "prepared"}, next}
+        {:reply, {:ok, intent, "prepared"}, end_refusal_episode(next, intent)}
 
       {:error, reason} when reason in @refusals ->
-        {:reply, reply, %{next | last_refusal: reason}}
+        {:reply, reply, note_refusal(next, reason)}
 
       error ->
         {:reply, error, next}
     end
+  end
+
+  # A refused prepare. Capacity refusals are otherwise silent: callers see only
+  # `:audit_unavailable`, in whatever process asked. So the first one of an
+  # episode (until an increase is admitted again) is logged and telemetered once.
+  defp note_refusal(state, reason) do
+    state = %{state | last_refusal: reason}
+
+    if reason in @capacity_refusals and not state.capacity_refusal_logged? do
+      report_capacity_refusal(state, reason)
+      %{state | capacity_refusal_logged?: true}
+    else
+      state
+    end
+  end
+
+  defp refusal_scope(:principal_capacity_exhausted),
+    do: " (one principal holds the most undelivered increases a principal may)"
+
+  defp refusal_scope(_reason), do: ""
+
+  # Only an admitted increase ends an episode: reductions are admitted against
+  # the reserve while increases are still refused.
+  defp end_refusal_episode(state, %{"effect_class" => "authority_increase"}),
+    do: %{state | capacity_refusal_logged?: false}
+
+  defp end_refusal_episode(state, _intent), do: state
+
+  defp report_capacity_refusal(state, reason) do
+    capacity = AuditJournalCore.capacity(state.core, paused: not status_retirement_live?(state))
+
+    Logger.error(
+      "Security audit journal (#{state.mode}) refused an authority increase: #{reason}" <>
+        refusal_scope(reason) <>
+        ". #{capacity["used_entries"]} entries written + #{capacity["reserved_entries"]} " <>
+        "reserved of the #{capacity["soft_entry_cap"]}-entry soft cap; " <>
+        "#{capacity["retained_operation_count"]} operations retained, " <>
+        "#{capacity["retirable_operation_count"]} retirable. Grants fail with " <>
+        ":audit_unavailable until deliveries are acknowledged and retire: check that " <>
+        "the authority audit consumer is keeping up. Logged once per episode."
+    )
+
+    :telemetry.execute(
+      @capacity_refused_event,
+      %{
+        count: 1,
+        used_entries: capacity["used_entries"],
+        reserved_entries: capacity["reserved_entries"],
+        retained_operations: capacity["retained_operation_count"],
+        retirable_operations: capacity["retirable_operation_count"]
+      },
+      %{reason: reason, mode: state.mode}
+    )
   end
 
   # Status first: every terminal identity (compacted or not) is refused, only
@@ -1291,6 +1352,7 @@ defmodule Arbor.Security.AuditJournalOwner do
       ledger_state: :none,
       ledger_pause_logged?: false,
       last_refusal: :none,
+      capacity_refusal_logged?: false,
       retirement_error: :none,
       t2_armed_at: retire_batch(),
       publication_backoff_until: nil

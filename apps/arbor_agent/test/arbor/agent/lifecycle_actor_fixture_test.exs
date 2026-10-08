@@ -14,8 +14,8 @@ defmodule Arbor.Agent.LifecycleActorFixtureTest do
 
   @moduletag :fast
 
-  # One actor for the module: every grant spends the run's audit journal budget
-  # (see Arbor.Agent.LifecycleActorFixture). Tests reopen it in their process.
+  # One actor for the module (see Arbor.Agent.LifecycleActorFixture); tests
+  # reopen it in their own process.
   setup_all do
     {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
     on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
@@ -64,15 +64,14 @@ defmodule Arbor.Agent.LifecycleActorFixtureTest do
   end
 
   test "reopening records no security mutation", %{lifecycle_principal: principal} do
-    # Test runs never retire journal operations, so every grant spends a budget
-    # the whole run shares. Reopening must not spend any of it, or sharing one
-    # actor per module saves nothing.
-    before = retained_operations()
+    # Every grant is an audit-journal operation. Reopening must not record any,
+    # or sharing one actor per module saves nothing.
+    before = admitted_operations()
 
     assert {:ok, actor} =
              in_other_process(fn -> Arbor.Agent.reopen_lifecycle_actor_fixture(principal) end)
 
-    assert retained_operations() == before
+    assert admitted_operations() == before
     assert actor.actor_id == principal.actor_id
   end
 
@@ -121,9 +120,12 @@ defmodule Arbor.Agent.LifecycleActorFixtureTest do
 
   defp in_other_process(fun), do: fun |> Task.async() |> Task.await(10_000)
 
-  defp retained_operations do
+  # Every operation the journal has admitted: retirement moves operations from
+  # retained to retired, so the sum only grows, by one per operation.
+  defp admitted_operations do
     assert {:ok, status} = Arbor.Security.audit_journal_status()
-    status["capacity"]["retained_operation_count"]
+    capacity = status["capacity"]
+    capacity["retained_operation_count"] + capacity["retired_operation_total"]
   end
 
   defp assert_destroyed!(agent_id) do

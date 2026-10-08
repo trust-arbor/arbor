@@ -71,8 +71,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     start_security_topology()
 
     # Lifecycle.create/2 and destroy/2 need an actor authority since ddf05e470.
-    # Mint one actor for the module: every grant spends the run's audit journal
-    # budget (see Arbor.Agent.LifecycleActorFixture). Each test reopens it.
+    # One actor for the module (see Arbor.Agent.LifecycleActorFixture); each
+    # test reopens it.
     {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
     on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
 

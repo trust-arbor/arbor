@@ -28,17 +28,15 @@ if Mix.env() == :test do
     behind. The wildcards cover only the final segment, which is the agent id that
     does not exist before creation. Callers may add `:extra_resources`.
 
-    ## Audit journal budget
+    ## Share one actor per module
 
-    Every grant and revoke is a Security audit journal operation. Test runs do
-    not start the Historian puller, so no operation is ever delivered: each one
-    stays pending, holding its two written entries plus one reserved for the
-    delivery. Against the ephemeral `:operational` journal's 3072-entry soft
-    cap, that gives each app's test run one fixed budget of about 1020
-    operations. Past it, every grant in the rest of the run fails with
-    `{:error, :audit_unavailable}`, in whichever modules run last. Minting an
+    Every grant and revoke is a Security audit journal operation. Minting an
     actor costs 7 operations and closing it 7 more; creating a `test_agent`
-    costs 10 and destroying it 10. So share one actor per module:
+    costs 10 and destroying it 10. Until 2026-10-07 nothing acknowledged
+    deliveries in test runs, so the journal admitted only about 1023
+    operations per run, and minting an actor per test pushed the `arbor_agent`
+    run over it. `Arbor.Security.TestAuditConsumer` now lets them retire, but
+    an actor per test is still wasted work. So share one actor per module:
 
         setup_all do
           {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()

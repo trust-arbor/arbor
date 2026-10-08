@@ -3,8 +3,8 @@ defmodule Arbor.Agent.LifecycleTest do
   @moduletag :fast
 
   # Lifecycle.create/2 and destroy/2 need an actor authority since ddf05e470.
-  # One actor for the module: every grant spends the run's audit journal budget
-  # (see Arbor.Agent.LifecycleActorFixture). creation_topology/1 reopens it.
+  # One actor for the module (see Arbor.Agent.LifecycleActorFixture);
+  # creation_topology/1 reopens it.
   setup_all do
     {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
     on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)

@@ -38,6 +38,16 @@ defmodule Arbor.Security.TestBootstrap do
   activation-only builds return `:skipped` without starting applications or
   repopulating deliberately omitted stores.
 
+  ## Audit journal delivery
+
+  Test runs do not start the Historian, so nothing acknowledges the Security
+  audit journal's deliveries, and without that its 3072-entry soft cap admits
+  only about 1023 grants and revokes per test run. `start!/1` therefore also
+  starts `Arbor.Security.TestAuditConsumer` (pass `audit_consumer: false` to
+  skip it), and registers one `ExUnit.after_suite/1` report that names the
+  journal when it refused a grant during the run, instead of leaving only
+  `{:error, :audit_unavailable}` failures in whatever modules ran last.
+
   ## Scope
 
   Deliberately omits `Arbor.Security.UriRegistry`. The canonical test-only tree
@@ -47,6 +57,8 @@ defmodule Arbor.Security.TestBootstrap do
 
   if Mix.env() == :test do
     require Logger
+
+    alias Arbor.Security.TestAuditConsumer
 
     @supervisor Arbor.Security.Supervisor
     @restart_attempts 256
@@ -109,17 +121,63 @@ defmodule Arbor.Security.TestBootstrap do
     child pid under that id; name occupancy alone is never success.
     """
     @spec start!(keyword()) :: :ok | :skipped
-    def start!(_opts \\ []) do
+    def start!(opts \\ []) do
       if Arbor.KernelRuntime.Config.start_profile() == :activation_only do
         :skipped
       else
-        start_test_tree!()
+        case start_test_tree!() do
+          :ok ->
+            if Keyword.get(opts, :audit_consumer, true), do: TestAuditConsumer.ensure_started()
+            register_audit_journal_report()
+
+          :skipped ->
+            :skipped
+        end
       end
     end
 
     @doc false
     @spec restore_supervised_tree!() :: :ok | :skipped
     def restore_supervised_tree!, do: start!()
+
+    # Once per test run (start!/1 is called again by restore_supervised_tree!/0).
+    defp register_audit_journal_report do
+      key = {__MODULE__, :audit_journal_report}
+
+      unless :persistent_term.get(key, false) do
+        ExUnit.after_suite(fn _result -> report_audit_journal_refusals() end)
+        :persistent_term.put(key, true)
+      end
+
+      :ok
+    rescue
+      # ExUnit not loaded: not a test run, nothing to report to.
+      _ -> :ok
+    end
+
+    @doc false
+    @spec report_audit_journal_refusals() :: :ok
+    def report_audit_journal_refusals do
+      with {:ok, status} <- Arbor.Security.audit_journal_status(),
+           refusal when refusal in ["soft_capacity_exhausted", "capacity_exhausted"] <-
+             status["last_refusal"] do
+        capacity = status["capacity"]
+
+        IO.puts(:stderr, """
+
+        ==> The Security audit journal refused grants during this test run (#{refusal}).
+            Every later grant failed with {:error, :audit_unavailable}, so failures
+            reporting that are likely this, not the tests that report them.
+            #{status["pending_count"]} operations pending, #{capacity["retained_operation_count"]} retained, \
+        #{capacity["used_entries"]} entries written + #{capacity["reserved_entries"]} reserved of #{capacity["soft_entry_cap"]}.
+            Is Arbor.Security.TestAuditConsumer running and configured as the consumer?
+        """)
+      end
+
+      :ok
+    catch
+      _kind, _reason -> :ok
+    end
 
     @doc false
     @spec canonical_start_ids() :: [atom()]

@@ -280,6 +280,18 @@ and T3 answers the capacity refusal without another attempt. With no consumer
 refuses increases exactly as before, without the relief predicate decoding the
 backlog. Restarting an ephemeral journal loses everything, as before.
 
+Test runs do not start the Historian, so until 2026-10-07 every test run was
+such a no-consumer journal: each grant or revoke stayed pending (two written
+entries plus one reserved), the run admitted about 1023 of them, and every
+later grant failed with `:audit_unavailable` in whatever modules ran last.
+`Arbor.Security.TestBootstrap.start!/1` now also starts
+`Arbor.Security.TestAuditConsumer` (test builds only). It acknowledges each
+delivery through the puller's own calls but writes no EventLog record, which is
+acceptable only because a test journal makes no durability claim. It is
+authorized through the test-build consumer provenance
+(`authority_audit_consumer_application: :test`). Pass `audit_consumer: false`
+to run without it.
+
 ### Status and readiness
 
 `Security.audit_journal_status/0` reports the retirement state: under
@@ -297,6 +309,16 @@ open or adopted publication: after an unpublished attempt that left an orphan
 frame a live owner may report `absent` while a restart over the same bytes
 reports `bound_orphan`; both retire. Two opens of the same bytes report the same
 status except wall-clock ages.
+
+A capacity refusal is otherwise silent: callers only see
+`{:error, :audit_unavailable}`. So the first `soft_capacity_exhausted`,
+`capacity_exhausted` or `principal_capacity_exhausted` refusal of an episode is
+logged at error level and emits `[:arbor, :security, :audit_journal,
+:capacity_refused]` (`%{count: 1, used_entries, reserved_entries,
+retained_operations, retirable_operations}`, metadata `reason` and `mode`). The
+episode ends when an increase is admitted again; admitted reductions do not end
+it. In test runs, `TestBootstrap` also prints an end-of-suite notice when the
+journal refused a grant.
 
 `admission_open` is a readiness signal, never the admission decision: true when
 the journal is serving, the ledger is not paused, and one more increase would

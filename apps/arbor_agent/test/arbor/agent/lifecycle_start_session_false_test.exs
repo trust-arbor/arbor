@@ -96,8 +96,7 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     end
 
     # Lifecycle.create/2 needs an actor authority since ddf05e470. One actor for
-    # the module: every grant spends the run's audit journal budget (see
-    # Arbor.Agent.LifecycleActorFixture). Each test reopens it.
+    # the module (see Arbor.Agent.LifecycleActorFixture); each test reopens it.
     {:ok, principal} = Arbor.Agent.open_lifecycle_actor_fixture()
     on_exit(fn -> Arbor.Agent.close_lifecycle_actor_fixture(principal) end)
 

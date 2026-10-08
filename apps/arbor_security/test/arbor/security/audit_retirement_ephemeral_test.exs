@@ -306,14 +306,15 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
     assert still["retirement"]["last_error"] == "malformed"
   end
 
-  # A no-consumer backlog (the test default and any ephemeral journal whose
-  # sink stalls) refuses every further increase. Nothing is retirable, so T3
+  # A no-consumer backlog (any ephemeral journal whose sink stalls) refuses
+  # every further increase. Nothing is retirable, so T3
   # must decline without re-decoding the retained records: the refusal path
   # runs inside the single-writer owner, and a 5 s caller timeout turns a slow
   # refusal into `{:commit_uncertain, :timeout}` and an unjournaled revoke.
   # Before the count-based filter each refusal re-decoded the whole backlog
   # (~0.8 s for 1024 pending grants).
   test "a capacity refusal with nothing retirable answers without decoding the backlog" do
+    no_consumer!()
     pid = start_registered_ephemeral!()
 
     # Pending effect_applied grants cost 3 entries each (2 written, 1
@@ -663,6 +664,28 @@ defmodule Arbor.Security.AuditRetirementEphemeralTest do
       :ok = Owner.clear_test_fixture()
       if Process.whereis(Owner) == pid, do: Process.unregister(Owner)
       if original && Process.alive?(original), do: Process.register(original, Owner)
+    end)
+  end
+
+  # Test runs' default consumer (TestAuditConsumer, started by TestBootstrap)
+  # would acknowledge the backlog; configure a consumer nobody registers.
+  defp no_consumer! do
+    previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_name)
+
+    Application.put_env(
+      :arbor_security,
+      :authority_audit_consumer_name,
+      :audit_retire_eph_no_consumer
+    )
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :authority_audit_consumer_name, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :authority_audit_consumer_name)
+      end
     end)
   end
 
