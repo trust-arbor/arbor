@@ -125,6 +125,46 @@ defmodule Arbor.Agent.SystemLifecycleAuthoritySecurityRegressionTest do
     assert is_pid(BranchSupervisor.whereis(agent_id))
   end
 
+  test "security regression: the principal cannot mint capabilities: a drifted exact-policy agent fails closed",
+       %{human: human, store: store, token: token, principal_id: principal_id} do
+    # The principal holds no grant/revoke rights (Hysun, 2026-10-08), so an
+    # exact-policy agent whose capabilities drifted is not re-synced on an
+    # unattended start: activation fails closed and suspends it.
+    {:ok, profile} =
+      Lifecycle.create("System Drift Probe #{System.unique_integer([:positive])}",
+        template: "pipeline_architect",
+        actor_authority: human.authority
+      )
+
+    agent_id = profile.agent_id
+    cleanup(agent_id, human)
+
+    refute Enum.any?(
+             principal_caps(principal_id),
+             &String.starts_with?(&1, "arbor://security/grant")
+           )
+
+    refute Enum.any?(
+             principal_caps(principal_id),
+             &String.starts_with?(&1, "arbor://security/revoke")
+           )
+
+    assert :ok = Manager.set_auto_start(agent_id, true, actor_authority: human.authority)
+
+    # Drift: a human removes one of the agent's exact capabilities.
+    assert {:ok, [dropped | _] = before} = Arbor.Security.list_capabilities(agent_id)
+    assert :ok = Arbor.Security.revoke(dropped.id, actor_authority: human.authority)
+
+    SystemLifecycleTopology.start_reconciler!(token, start_opts(store))
+    _ = Reconciler.reconcile_now(Reconciler)
+
+    assert BranchSupervisor.whereis(agent_id) == nil
+    assert {:ok, after_caps} = Arbor.Security.list_capabilities(agent_id)
+    refute Enum.any?(after_caps, &(&1.resource_uri == dropped.resource_uri))
+    assert length(after_caps) == length(before) - 1
+    assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
+  end
+
   test "security regression: after disabling, the principal's delegation is gone and its start fails closed",
        %{human: human, store: store, token: token, principal_id: principal_id} do
     agent_id = create!(human)
@@ -187,7 +227,7 @@ defmodule Arbor.Agent.SystemLifecycleAuthoritySecurityRegressionTest do
 
       assert [_, target] =
                Regex.run(
-                 ~r<^arbor://security/(?:grant|revoke|identity/suspend|identity/resume)/(agent_[0-9a-f]{64})$>,
+                 ~r<^arbor://security/identity/(?:suspend|resume)/(agent_[0-9a-f]{64})$>,
                  uri
                ),
              "non-per-agent capability #{uri}"

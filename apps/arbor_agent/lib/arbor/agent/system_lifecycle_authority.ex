@@ -22,8 +22,9 @@ defmodule Arbor.Agent.SystemLifecycleAuthority do
 
   ## Authority
 
-  It never creates agents and holds no global or wildcard rights. Its rights are
-  per agent, granted by a human: enabling auto_start with
+  It never creates agents, never mints or removes capabilities, and holds no
+  global or wildcard rights. Its rights are per agent (suspend and resume only),
+  granted by a human: enabling auto_start with
   `Arbor.Agent.Manager.set_auto_start/3` grants it `delegated_resources/1` for
   that agent with the human's authority, and disabling revokes them. Before a
   start it requires the profile's `auto_start` flag *and* all of those
@@ -72,13 +73,18 @@ defmodule Arbor.Agent.SystemLifecycleAuthority do
 
   @doc """
   The capability URIs a human delegates to this principal for one agent when
-  enabling auto_start: exactly what start-time activation exercises.
+  enabling auto_start: resume (re-activate a suspended exact-policy identity)
+  and suspend (fail an activation closed).
+
+  Deliberately no `arbor://security/{grant,revoke}/<agent_id>`: the principal
+  never mints or removes an agent's capabilities. An agent whose capabilities
+  already match its profile auto-starts. One whose exact-policy capabilities
+  drifted fails closed (and is suspended) until a human re-syncs it
+  (Hysun, 2026-10-08).
   """
   @spec delegated_resources(String.t()) :: [String.t()]
   def delegated_resources(agent_id) when is_binary(agent_id) do
     [
-      "arbor://security/grant/#{agent_id}",
-      "arbor://security/revoke/#{agent_id}",
       "arbor://security/identity/suspend/#{agent_id}",
       "arbor://security/identity/resume/#{agent_id}"
     ]
