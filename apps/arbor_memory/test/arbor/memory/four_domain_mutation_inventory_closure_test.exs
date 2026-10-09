@@ -219,6 +219,22 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
   @tag :integration
   @tag :database
   test "same-agent drain denies all four public mutations while an independent agent remains writable" do
+    prior_signals = Application.fetch_env(:arbor_kernel, :signals)
+    signals = Application.get_env(:arbor_kernel, :signals, [])
+
+    Application.put_env(
+      :arbor_kernel,
+      :signals,
+      Keyword.put(signals, :durable_sink_module, Arbor.Historian)
+    )
+
+    on_exit(fn ->
+      case prior_signals do
+        {:ok, value} -> Application.put_env(:arbor_kernel, :signals, value)
+        :error -> Application.delete_env(:arbor_kernel, :signals)
+      end
+    end)
+
     ensure_durable_store!()
     ensure_preferences_ets!()
     ensure_self_knowledge_ets!()

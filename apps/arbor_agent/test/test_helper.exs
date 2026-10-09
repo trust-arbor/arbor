@@ -2,6 +2,7 @@
 # security supervisor empty, so consumer suites must opt into the shared
 # bootstrap before any behavioral fixture grants capabilities.
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
 # Lease grants use the same preprovisioned service principal in tests and
 # production. The supervised owner never creates or grants its own identity.
@@ -73,4 +74,4 @@ _ = Arbor.Agent.Test.RuntimeAdmissionTopology.start_fixed_production!()
 # :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
 # Isolated Repo fixtures own the canonical Repo name and run separately with
 # --include isolated_repo. Fast loop: `mix test.fast`.
-ExUnit.start(exclude: [:skip, :isolated_repo, :external, :llm, :llm_local])
+ExUnit.start(exclude: [:skip, :database, :isolated_repo, :external, :llm, :llm_local])

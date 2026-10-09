@@ -153,6 +153,14 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
       agent_id: agent_id,
       execution_principal: agent_id,
       initial_values: initial_values,
+      # These control fields come from the test's compiled plan and owner
+      # fixture. Preserve that provenance across the durable checkpoint;
+      # unlabeled values correctly rehydrate as untrusted.
+      initial_taint:
+        Map.new(
+          ~w(session.task_id session.run_deadline_unix_ms packet_digest plan_fingerprint coding_plan_fingerprint workspace_id worker_session_id worker_provider_session_id design_attempt design_digest),
+          &{&1, :trusted}
+        ),
       actions_executor: ActionsExecutor
     ]
 
@@ -478,6 +486,10 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     )
 
     assert {:ok, result} = Task.await(resume_task, 60_000)
+
+    assert result.final_outcome.status == :success,
+           "resume failed: #{inspect(result.final_outcome.failure_reason)}"
+
     assert result.context["accepted_design_request_id"] == request_id
     assert result.context["accepted_design_evidence"] == evidence
     assert result.context["design_checkpoint.checkpoint_outcome"] == checkpoint_outcome

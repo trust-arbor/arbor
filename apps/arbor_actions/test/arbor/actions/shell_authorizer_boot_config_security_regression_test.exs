@@ -150,8 +150,8 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
     command = "cat input"
     # Shell is approval-locked. A hand-built decision map is not a consumed
     # receipt, so the guarded call denies it. Digest the same %{command: _}
-    # map authorize_command uses when the caller does not pass :params.
-    {:ok, digest} = Security.approval_argument_digest(%{command: command})
+    # map authorize_command builds from the command and working directory.
+    {:ok, digest} = Security.approval_argument_digest(%{command: command, cwd: c.root})
 
     {:ok, receipt} =
       Security.issue_approval_receipt_fixture(

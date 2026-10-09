@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 772,
+  "entry_count": 776,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -9580,8 +9580,60 @@
       "source_incident": "found 2026-10-08 while fixing provenance test registration",
       "always_loaded": false,
       "content_sha256": "c004c635117da1b69b1180d71c921a8754715ff62c7e5d09a9c8f289c54ab1c8"
+    },
+    {
+      "source_ordinal": 778,
+      "source_kind": "post-migration",
+      "slug": "test-durable-authority-with-owned-fixtures-and-real-consumers",
+      "title": "Test durable authority with owned fixtures and real consumers.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-test-durable-authority-with-owned-fixtures-and-real-consumers",
+      "source_date": "2026-10-09",
+      "source_incident": "found 2026-10-09 in nonfast audit tests",
+      "always_loaded": false,
+      "content_sha256": "c1b197773a4136e3c731109aadd27cd053ff39727d1844767fc331c9324583fd"
+    },
+    {
+      "source_ordinal": 779,
+      "source_kind": "post-migration",
+      "slug": "attest-supervised-children-during-application-start-without-get-child",
+      "title": "Attest supervised children during application startup without `get_child/1`.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-attest-supervised-children-during-application-start-without-get-child",
+      "source_date": "2026-10-09",
+      "source_incident": "found 2026-10-09 in the production SQLite probe",
+      "always_loaded": false,
+      "content_sha256": "ec316c806e031652268bc7c00e982b92f47f4104ec3fbcd5ff30936ce460ce84"
+    },
+    {
+      "source_ordinal": 780,
+      "source_kind": "post-migration",
+      "slug": "keep-nested-mix-build-paths-canonical-on-macos",
+      "title": "Keep nested Mix build paths canonical on macOS.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-keep-nested-mix-build-paths-canonical-on-macos",
+      "source_date": "2026-10-09",
+      "source_incident": "found 2026-10-09 building the Persistence cleanup release regression",
+      "always_loaded": false,
+      "content_sha256": "2853b4377ba17490040467ca024ba3425c73bb202251430e47833a09dc033ece"
+    },
+    {
+      "source_ordinal": 781,
+      "source_kind": "post-migration",
+      "slug": "label-trusted-control-fixtures-before-durable-checkpointing",
+      "title": "Label trusted control fixtures before durable checkpointing.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-label-trusted-control-fixtures-before-durable-checkpointing",
+      "source_date": "2026-10-09",
+      "source_incident": "found 2026-10-09 in the design checkpoint BEAM restart test",
+      "always_loaded": false,
+      "content_sha256": "bf72011ccfbce637d251de06501edd0b0ecc9d1475eab9e91e337292f923565c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 311
+  "post_migration_entry_count": 315
 }

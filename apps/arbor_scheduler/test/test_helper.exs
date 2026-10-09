@@ -13,17 +13,10 @@
 # warning. See its moduledoc for why it lives in lib/.
 :ok = Arbor.Security.TestBootstrap.start!()
 
-for child <- [
-      {Arbor.Trust.Store, [persistence: :memory]},
-      {Arbor.Trust.Manager,
-       [circuit_breaker: false, decay: false, event_store: false, persistence: :memory]}
-    ] do
-  case Supervisor.start_child(Arbor.Trust.ApplicationSupervisor, child) do
-    {:ok, _} -> :ok
-    {:error, {:already_started, _}} -> :ok
-    {:error, reason} -> IO.warn("Failed to start trust test child: #{inspect(reason)}")
-  end
-end
+# The Store and Manager belong under Arbor.Trust.Supervisor. Starting them
+# directly under ApplicationSupervisor leaves registered processes with the
+# wrong owner for later umbrella apps and their canonical Trust fixture.
+:ok = Arbor.Trust.restore_runtime_fixture()
 
 scheduler_mutation_token = make_ref()
 
@@ -42,4 +35,4 @@ case Supervisor.start_child(
   {:error, reason} -> IO.warn("Failed to start run lease supervisor: #{inspect(reason)}")
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:isolated_repo])

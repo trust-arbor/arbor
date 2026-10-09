@@ -13,10 +13,14 @@ defmodule Arbor.Persistence.ApplicationTest do
       )
 
     File.mkdir_p!(temp_dir)
+    {:ok, temp_dir} = Arbor.Common.SafePath.resolve_real(temp_dir)
+    File.chmod!(temp_dir, 0o700)
     security_state = Path.join(temp_dir, "security-state")
     revocation_ledger = Path.join(temp_dir, "revocations/capability_revocations.v1.json")
     File.mkdir_p!(security_state)
+    File.chmod!(security_state, 0o700)
     File.mkdir_p!(Path.dirname(revocation_ledger))
+    File.chmod!(Path.dirname(revocation_ledger), 0o700)
     on_exit(fn -> File.rm_rf!(temp_dir) end)
 
     database = Path.join(temp_dir, "arbor_prod.sqlite3")

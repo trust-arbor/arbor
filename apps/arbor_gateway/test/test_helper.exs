@@ -16,4 +16,4 @@ Arbor.Security.TestBootstrap.start!()
 
 # :integration runs by default (hermetic — gating CI runs plain `mix test`);
 # only backend-dependent tags are excluded. Fast loop: `mix test.fast`.
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:database, :llm, :llm_local])

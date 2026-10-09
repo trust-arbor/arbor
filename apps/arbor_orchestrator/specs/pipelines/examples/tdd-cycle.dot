@@ -192,10 +192,11 @@ digraph TDDCycle {
   ]
 
   prep_acceptance_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="acceptance_file_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_acceptance [
@@ -236,10 +237,11 @@ digraph TDDCycle {
 
   // Rename test_file_path → path.
   prep_test_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="test_file_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_test [
@@ -294,10 +296,11 @@ digraph TDDCycle {
   ]
 
   prep_impl_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="impl_file_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_impl [
@@ -320,10 +323,11 @@ digraph TDDCycle {
   // (whose schema is `:path`, not `:workdir`). No `$var` interpolation
   // in attrs — see dot-pipeline-authoring skill.
   prep_test_run_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="workdir",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   // Run BOTH the model's test AND the acceptance test (acceptance was

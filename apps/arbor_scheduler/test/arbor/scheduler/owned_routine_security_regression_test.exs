@@ -10,7 +10,6 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
   alias Arbor.Trust
 
   @moduletag :integration
-  @moduletag :database
   @moduletag :isolated_repo
   @moduletag :security_regression
 

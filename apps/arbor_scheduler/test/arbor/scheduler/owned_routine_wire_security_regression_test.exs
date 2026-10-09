@@ -6,7 +6,6 @@ defmodule Arbor.Scheduler.OwnedRoutineWireSecurityRegressionTest do
   alias Arbor.Scheduler.Test.OwnedRoutineFixture, as: F
 
   @moduletag :integration
-  @moduletag :database
   @moduletag :isolated_repo
   @moduletag :security_regression
 

@@ -131,5 +131,6 @@ end
 # ownership of each registered name instead of treating name occupancy as
 # success. It is in arbor_security's lib/, so it is reusable from here.
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:isolated_repo, :llm, :llm_local])

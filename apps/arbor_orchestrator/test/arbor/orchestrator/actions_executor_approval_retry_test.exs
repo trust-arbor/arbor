@@ -7,7 +7,6 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   alias Arbor.Actions.TestFixtures.SessionClassifyReplacementAction
   alias Arbor.Common.ActionRegistry
   alias Arbor.Contracts.Security.{Identity, SignedRequest}
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security
 
   defmodule GatedPolicy do
@@ -35,41 +34,12 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     ensure_action_registry_started!()
     ensure_session_classify_registered!()
 
-    for {name, collection} <- [
-          {:arbor_security_capabilities, "capabilities"},
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_signing_keys, "signing_keys"}
-        ] do
-      start_security_child(
-        Supervisor.child_spec(
-          {BufferedStore, name: name, backend: nil, write_mode: :sync, collection: collection},
-          id: name
-        )
-      )
-    end
-
-    signing_authority_owner_token = make_ref()
-
-    for child <- [
-          {Arbor.Security.Identity.Registry, []},
-          {Arbor.Security.Identity.NonceCache, []},
-          {Arbor.Security.SystemAuthority, []},
-          {Arbor.Security.SigningAuthorityStateOwner,
-           broker_token: signing_authority_owner_token},
-          {Arbor.Security.SigningAuthorityBroker,
-           state_owner_token: signing_authority_owner_token},
-          {Arbor.Security.Constraint.RateLimiter, []},
-          {Arbor.Security.CapabilityStore, []}
-        ] do
-      start_security_child(child)
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
 
     :ok
   end
 
   setup do
-    start_supervised!(Arbor.Trust.ConfirmationTracker)
-
     previous = %{
       approval_evidence_provider: Application.get_env(:arbor_trust, :approval_evidence_provider),
       graduation_thresholds: Application.get_env(:arbor_trust, :graduation_thresholds),
@@ -541,7 +511,9 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   end
 
   test "security regression: caller task/session capability revocation denies an approved retry" do
-    agent_id = "agent_approval_caller_revocation_#{System.unique_integer([:positive])}"
+    {:ok, identity} = Identity.generate(name: "approval-caller-revocation")
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    agent_id = identity.agent_id
     caller_id = "agent_caller_approval_revocation_#{System.unique_integer([:positive])}"
     task_id = "task_approval_revocation"
     session_id = "session_approval_revocation"
@@ -563,6 +535,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     on_exit(fn ->
       Arbor.Security.revoke_fixture(agent_capability.id)
       Arbor.Security.revoke_fixture(caller_capability.id)
+      :ok = Security.deregister_identity_fixture(agent_id)
     end)
 
     execution =
@@ -575,7 +548,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
             agent_id: agent_id,
             caller_id: caller_id,
             task_id: task_id,
-            session_id: session_id
+            session_id: session_id,
+            signer: fn payload -> SignedRequest.sign(payload, agent_id, identity.private_key) end
           ] ++ binding_opts(binding)
         )
       end)
@@ -722,15 +696,6 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
       request ->
         request
-    end
-  end
-
-  defp start_security_child(child) do
-    case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, :already_present} -> :ok
-      {:error, reason} -> raise "failed to start security child: #{inspect(reason)}"
     end
   end
 

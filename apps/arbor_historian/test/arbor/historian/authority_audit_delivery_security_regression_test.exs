@@ -73,6 +73,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
       if pid = Process.whereis(Arbor.Historian.AuthorityAuditPuller), do: GenServer.stop(pid)
       {:ok, caps} = Security.list_capabilities(principal)
       Enum.each(caps, &Security.revoke_fixture(&1.id))
+      :ok = AuditJournalOwner.clear_test_fixture()
       pid = Process.whereis(AuditJournalOwner)
       if is_pid(pid) and pid != original, do: GenServer.stop(pid)
       unless Process.whereis(AuditJournalOwner), do: Process.register(original, AuditJournalOwner)
@@ -89,6 +90,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
     true = Process.unregister(AuditJournalOwner)
     {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: root)
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
     install_journal_outage_store(ctx, root)
     Application.put_env(:arbor_historian, :durable_event_log_target, target(EctoEventLog))
 
@@ -141,6 +143,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
     GenServer.stop(ctx.journal)
     {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: ctx.root)
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
 
     assert {:ok, [%{"status" => "prepared"}]} = Security.audit_journal_pending_operations()
     start_puller!()
@@ -214,7 +217,7 @@ defmodule Arbor.Historian.AuthorityAuditDeliverySecurityRegressionTest do
     true = Process.unregister(name)
 
     {:ok, store} =
-      AuthorityStore.start_link(
+      AuthorityStore.start_test_fixture(
         name: name,
         namespace: "historian-journal-recovery",
         backend: JournalOutageBackend,

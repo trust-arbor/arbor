@@ -24,7 +24,6 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.RunLifecycle.Record
-  alias Arbor.Security.CapabilityStore
 
   @handler_type "test.l4_cluster_side"
 
@@ -597,6 +596,15 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   end
 
   def configure_orchestrator!(opts) when is_list(opts) do
+    # LocalCluster peers do not load the umbrella Mix config. Load Swoosh's
+    # application first so its defaults cannot overwrite the test API client.
+    case Application.load(:swoosh) do
+      :ok -> :ok
+      {:error, {:already_loaded, :swoosh}} -> :ok
+    end
+
+    Application.put_env(:swoosh, :api_client, false)
+
     controller_name = Keyword.fetch!(opts, :controller_name)
     controller_node = Keyword.fetch!(opts, :controller_node)
     journal_store = Keyword.fetch!(opts, :journal_store)
@@ -696,19 +704,7 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   end
 
   def ensure_capability_store_started! do
-    case CapabilityStore.start_link([]) do
-      {:ok, pid} ->
-        # This setup runs inside a short-lived :erpc worker. Keep the test store
-        # alive after that worker returns so authority survives app restart.
-        Process.unlink(pid)
-        :ok
-
-      {:error, {:already_started, _}} ->
-        :ok
-
-      other ->
-        other
-    end
+    Arbor.Security.TestBootstrap.start!()
   end
 
   def prepare_peer!(opts) when is_list(opts) do

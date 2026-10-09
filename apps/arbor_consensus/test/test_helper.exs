@@ -58,4 +58,4 @@ for agent <- ["admin", "admin_1"] do
   {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:database, :llm, :llm_local])

@@ -38,8 +38,6 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
 
   # Distinct agents so the control test uses a never-populated memory index —
   # no cross-test residue, no index-clearing needed.
-  @agent_id "agent_xsession_mem_test"
-  @control_agent_id "agent_xsession_mem_control"
   @fact "the deploy passphrase is XYZZY-PLUGH-42"
   @fact_marker "XYZZY-PLUGH-42"
 
@@ -81,6 +79,9 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
 
     @impl true
     def complete_single_attempt(request, opts), do: complete(request, opts)
+
+    @impl true
+    def complete_streaming_single_attempt(request, _callback, opts), do: complete(request, opts)
 
     @impl true
     def stream(_request, _opts), do: {:error, :not_supported}
@@ -133,6 +134,11 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
   end
 
   setup do
+    {:ok, identity} = Arbor.Security.generate_identity(name: "xsession-memory")
+    {:ok, control_identity} = Arbor.Security.generate_identity(name: "xsession-memory-control")
+    :ok = Arbor.Security.register_identity_fixture(identity)
+    :ok = Arbor.Security.register_identity_fixture(control_identity)
+
     # ── Hermetic embeddings ────────────────────────────────────────────────
     orig_embed = Application.get_env(@memory, :embedding_service_enabled)
     Application.put_env(@memory, :embedding_service_enabled, false)
@@ -147,8 +153,8 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
     Arbor.LLM.Client.set_default_client(capture_client)
 
     # Grant the mandatory orchestrator capability for both agents.
-    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(@agent_id)
-    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(@control_agent_id)
+    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
+    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(control_identity.agent_id)
 
     # Trivial heartbeat DOT (unused here, but Session.start_link requires a path).
     tmp = Path.join(System.tmp_dir!(), "arbor_xsession_#{:erlang.unique_integer([:positive])}")
@@ -175,20 +181,29 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
 
       Arbor.LLM.Client.set_default_client(prev_client)
       :persistent_term.erase({CaptureAdapter, :pid})
+      :ok = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+      :ok = Arbor.Security.deregister_identity_fixture(control_identity.agent_id)
       File.rm_rf(tmp)
     end)
 
-    %{heartbeat_path: heartbeat_path}
+    %{heartbeat_path: heartbeat_path, identity: identity, control_identity: control_identity}
   end
 
   # Start a FRESH session (new session_id) for `agent_id` on the real turn DOT.
-  defp start_fresh_session(ctx, agent_id) do
+  defp start_fresh_session(ctx, identity) do
     id = "xsession-#{:erlang.unique_integer([:positive])}"
 
     {:ok, pid} =
       Session.start_link(
         session_id: id,
-        agent_id: agent_id,
+        agent_id: identity.agent_id,
+        signer: fn payload ->
+          Arbor.Contracts.Security.SignedRequest.sign(
+            payload,
+            identity.agent_id,
+            identity.private_key
+          )
+        end,
         trust_tier: :established,
         turn_dot: @real_turn_dot,
         heartbeat_dot: ctx.heartbeat_path,
@@ -238,11 +253,11 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
       # Indexing directly is what session_memory.update does at the end of a turn;
       # it survives session restarts (per-agent ETS index), so a fresh session's
       # recall node can retrieve it.
-      Arbor.Memory.init_for_agent(@agent_id, index_enabled: true)
-      assert {:ok, _entry_id} = Arbor.Memory.index(@agent_id, @fact)
+      Arbor.Memory.init_for_agent(ctx.identity.agent_id, index_enabled: true)
+      assert {:ok, _entry_id} = Arbor.Memory.index(ctx.identity.agent_id, @fact)
 
       # SESSION 2: a brand-new session for the same agent asks about the fact.
-      pid = start_fresh_session(ctx, @agent_id)
+      pid = start_fresh_session(ctx, ctx.identity)
       _ = fire_turn(pid, "what is the deploy passphrase?")
 
       captured = drain_captured()
@@ -262,9 +277,9 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
       :persistent_term.put({CaptureAdapter, :pid}, self())
 
       # A distinct agent whose memory index is initialized but never populated.
-      Arbor.Memory.init_for_agent(@control_agent_id, index_enabled: true)
+      Arbor.Memory.init_for_agent(ctx.control_identity.agent_id, index_enabled: true)
 
-      pid = start_fresh_session(ctx, @control_agent_id)
+      pid = start_fresh_session(ctx, ctx.control_identity)
       _ = fire_turn(pid, "what is the deploy passphrase?")
 
       captured = drain_captured()

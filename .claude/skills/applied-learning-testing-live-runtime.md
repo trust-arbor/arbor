@@ -2353,3 +2353,42 @@ action names as letters, digits, and underscores; the locked ActionRegistry
 requires dotted plugin names. Keep the module's `name` valid for Jido and
 register it under a dotted alias, then use that alias in execution bindings
 and DOT fixtures (found 2026-10-08 while fixing provenance test registration).
+
+<!-- applied-learning: test-durable-authority-with-owned-fixtures-and-real-consumers -->
+<a id="applied-learning-test-durable-authority-with-owned-fixtures-and-real-consumers"></a>
+**Test durable authority with owned fixtures and real consumers.** A busy suite
+can fill the Security audit journal if no Historian consumer drains it. Start
+the real durable puller on a private migrated database; never make the journal
+silently retire pending effects for test throughput. When replacing supervised
+Security owners in a test, use their explicit fixture registration seams
+(`AuditJournalOwner.install_test_fixture/1`, `AuthorityStore.start_test_fixture/1`)
+or facade calls correctly fail closed (found 2026-10-09 in nonfast audit tests).
+
+<!-- applied-learning: attest-supervised-children-during-application-start-without-get-child -->
+<a id="applied-learning-attest-supervised-children-during-application-start-without-get-child"></a>
+**Attest supervised children during application startup without `get_child/1`.**
+OTP's application master exists before the callback returns its root, but
+`:application_master.get_child/1` can terminate that master while the root is
+still undefined. Verify the linked master → callback → root chain, application
+ownership, exact child path, and registered PID during startup; use the normal
+root lookup after startup. Exercise the production boot in an isolated process,
+because test config with `start_children: false` hides this ordering bug (found
+2026-10-09 in the production SQLite probe).
+
+<!-- applied-learning: keep-nested-mix-build-paths-canonical-on-macos -->
+<a id="applied-learning-keep-nested-mix-build-paths-canonical-on-macos"></a>
+**Keep nested Mix build paths canonical on macOS.** `/tmp` resolves to
+`/private/tmp`; a Mix dependency include symlink made relative under `/tmp`
+can resolve under `/private/Users` and fail with a missing header. Put
+`MIX_BUILD_PATH` under the canonical checkout for release probes, then place
+only the finished release under temporary storage (found 2026-10-09 building
+the Persistence cleanup release regression).
+
+<!-- applied-learning: label-trusted-control-fixtures-before-durable-checkpointing -->
+<a id="applied-learning-label-trusted-control-fixtures-before-durable-checkpointing"></a>
+**Label trusted control fixtures before durable checkpointing.** An unlabeled
+initial value may pass a legacy action boundary, but the checkpoint correctly
+rehydrates missing provenance as untrusted. A restart test must label only its
+compiler- and owner-proven control fields, then assert the resumed Engine
+`final_outcome.status` before inspecting context; `{:ok, run_result}` alone is
+only an envelope (found 2026-10-09 in the design checkpoint BEAM restart test).

@@ -1,5 +1,7 @@
 defmodule Arbor.Consensus.ConsultationLogTest do
-  use ExUnit.Case, async: true
+  use Arbor.Persistence.DatabaseCase, async: false
+
+  @moduletag :database
 
   alias Arbor.Consensus.ConsultationLog
 
@@ -15,11 +17,16 @@ defmodule Arbor.Consensus.ConsultationLogTest do
     test "accepts optional run_id" do
       eval = mock_eval()
       llm_meta = mock_llm_meta()
+      run_id = ConsultationLog.create_run("test question", [:security])
+      assert is_binary(run_id)
 
       assert :ok =
                ConsultationLog.log_single("test question", :security, eval, llm_meta,
-                 run_id: "existing-run-123"
+                 run_id: run_id
                )
+
+      assert {:ok, %{results: [result]}} = ConsultationLog.get_consultation(run_id)
+      assert result.sample_id == "security"
     end
   end
 

@@ -72,6 +72,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
 
     :ok = File.mkdir(root)
     :ok = File.chmod(root, 0o700)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
     dot_path = Path.join(root, "turn.dot")
 
     {compute_branch, compute_purpose} = optional_compute_branch(context)
@@ -401,9 +402,10 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     :ok = Supervisor.terminate_child(c.journal_supervisor, AuditJournalOwner)
     :ok = Supervisor.delete_child(c.journal_supervisor, AuditJournalOwner)
 
-    assert {:ok, _} =
+    assert {:ok, ephemeral} =
              Supervisor.start_child(c.journal_supervisor, {AuditJournalOwner, mode: :ephemeral})
 
+    :ok = AuditJournalOwner.install_test_fixture(ephemeral)
     assert {:ok, %{"mode" => "ephemeral", "serving" => true}} = Security.audit_journal_status()
     assert_refused_without_turn(c.session)
   end
@@ -460,13 +462,16 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, AuditJournalOwner)
 
     {:ok, supervisor} =
-      Supervisor.start_link([{AuditJournalOwner, mode: :durable, root: root}],
+      Supervisor.start_link(
+        [{AuditJournalOwner, mode: :durable, root: root, capacity_profile: :operational}],
         strategy: :one_for_one
       )
 
     Process.unlink(supervisor)
+    :ok = AuditJournalOwner.install_test_fixture(Process.whereis(AuditJournalOwner))
 
     on_exit(fn ->
+      :ok = AuditJournalOwner.clear_test_fixture()
       if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
       {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, AuditJournalOwner)
     end)

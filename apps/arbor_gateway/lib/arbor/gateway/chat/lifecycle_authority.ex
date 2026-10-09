@@ -48,7 +48,7 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthority do
              ),
            {:ok, authority} <- Arbor.Security.open_signing_authority(proof) do
         try do
-          bridge_call(agent_facade(), :authorize_create, [
+          bridge_call(Arbor.Gateway.Chat.Config.agent_facade(), :authorize_create, [
             principal,
             display_name,
             Keyword.put(opts, :actor_authority, authority)
@@ -65,13 +65,6 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthority do
 
   def handle_call(_request, _from, state) do
     {:reply, {:error, :capability_mutation_unauthorized}, state}
-  end
-
-  if Mix.env() == :test do
-    defp agent_facade,
-      do: Application.get_env(:arbor_gateway, :chat_agent_facade, Arbor.Agent)
-  else
-    defp agent_facade, do: Arbor.Agent
   end
 
   defp bridge_call(module, function, args) do

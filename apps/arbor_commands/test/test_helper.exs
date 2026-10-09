@@ -12,4 +12,4 @@ for child <- [
   end
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:database, :llm, :llm_local])

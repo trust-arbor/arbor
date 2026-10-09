@@ -3293,7 +3293,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.write!(target, "x")
     File.ln_s!(target, link)
 
-    assert {:error, :malformed} = ArtifactStore.archive_adapter_input(root, adapter)
+    assert {:error, :task_terminal_path_escape} =
+             ArtifactStore.archive_adapter_input(root, adapter)
 
     File.rm!(link)
     assert :ok = ArtifactStore.archive_adapter_input(root, adapter)

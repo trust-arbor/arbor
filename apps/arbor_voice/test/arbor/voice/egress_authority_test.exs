@@ -115,6 +115,7 @@ defmodule Arbor.Voice.EgressAuthorityTest do
       session_id: @session_id,
       resource_uri: "arbor://voice/realtime/xai/#{@session_id}",
       route_capability_id: "cap_0123456789abcdef0123456789abcdef",
+      conversation_binding: nil,
       security_module: MalformedCapabilitySecurity,
       trust_module: __MODULE__
     }

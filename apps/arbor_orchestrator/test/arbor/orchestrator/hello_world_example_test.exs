@@ -105,7 +105,10 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
     assert identity.agent_id == agent_id,
            "derived agent_id #{identity.agent_id} doesn't match key file agent_id #{agent_id}"
 
-    :ok = Arbor.Security.register_identity_fixture(identity)
+    case Arbor.Security.register_identity_fixture(identity) do
+      :ok -> :ok
+      {:error, {:already_registered, ^agent_id}} -> :ok
+    end
 
     # Build the per-resource signer the orchestrator middleware expects.
     # Each capability check produces a fresh SignedRequest with its own
