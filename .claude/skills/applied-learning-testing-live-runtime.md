@@ -2392,3 +2392,47 @@ rehydrates missing provenance as untrusted. A restart test must label only its
 compiler- and owner-proven control fields, then assert the resumed Engine
 `final_outcome.status` before inspecting context; `{:ok, run_result}` alone is
 only an envelope (found 2026-10-09 in the design checkpoint BEAM restart test).
+
+<!-- applied-learning: integration-examples-using-mix-test-need-the-validation-test-runtime -->
+<a id="applied-learning-integration-examples-using-mix-test-need-the-validation-test-runtime"></a>
+**Integration examples using Mix.Test need the validation test runtime.** A
+childless Shell test application cannot create owned validation trees, and its
+production Linux materializer and spawn path fail closed. Use the Actions test
+baseline materializer and real-Mix test shell under an isolated registry
+fixture, restore the registry and shell selection after the example, and commit
+an empty `mix.lock` in a dependency-free fixture project. The TDD LM Studio
+example reached its model call but then failed successively at workspace,
+owned-tree, baseline, and lockfile gates before this setup passed on
+2026-10-09.
+
+<!-- applied-learning: make-model-generated-test-edge-semantics-explicit -->
+<a id="applied-learning-make-model-generated-test-edge-semantics-explicit"></a>
+**Make model-generated test edge semantics explicit.** In a TDD pipeline that
+runs both generated and held-out tests, a generated assertion can contradict an
+implicit rule and prevent convergence even when the implementation meets the
+held-out examples. Specify the disputed edge in the prose and held-out cases;
+retain both test sets. When repeated attempts fail on foreign-language syntax,
+put the target language's valid branching form in the implementation prompt
+(found 2026-10-09 with FizzBuzz zero and Python-style `elif` in Elixir). If
+feedback repeats the same invalid library call, give the exact API shape in
+the system prompt; the RLE example converged after specifying that
+`Enum.chunk_by/2` takes a unary key function.
+
+<!-- applied-learning: local-llm-node-timeouts-are-separate-from-exunit-timeouts -->
+<a id="applied-learning-local-llm-node-timeouts-are-separate-from-exunit-timeouts"></a>
+**Local LLM node timeouts are separate from ExUnit timeouts.** A test may allow
+20 minutes while an individual DOT compute node still has a five-minute
+`timeout` and fails first. For slow local reasoning models, use observed call
+latency to set the node timeout as well as the test timeout; keep the model's
+output budget intact unless measured evidence supports lowering it (found
+2026-10-09 when Qwen RLE timed out at 300 seconds despite a prior passing run).
+
+<!-- applied-learning: derive-loop-counters-from-their-prior-control-value -->
+<a id="applied-learning-derive-loop-counters-from-their-prior-control-value"></a>
+**Derive loop counters from their prior control value.** An action that reads
+both a trusted counter and untrusted model or test output gives its whole result
+the combined untrusted provenance. Hoisting its returned counter into the next
+action's control parameter then fails closed on the second retry. Use a pure
+`increment` transform from the prior counter for loop control, while keeping
+the action's model and test feedback as data (found 2026-10-09 in the LM Studio
+TDD RLE example).
