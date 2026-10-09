@@ -41,6 +41,8 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
 
   require Logger
 
+  alias Arbor.Gateway.Chat.LifecycleAuthority
+
   @typedoc "Successful result payload (string-keyed for JSON)."
   @type ok_result :: %{required(String.t()) => String.t() | boolean()}
 
@@ -174,13 +176,32 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   # ── create internals (gate via authorize_create, then start) ───────────────
 
   defp do_create(principal, display_name, create_opts) do
-    case bridge_call(agent_facade(), :authorize_create, [principal, display_name, create_opts]) do
-      {:ok, {:ok, :pending_approval, proposal_id}} -> approval_required(proposal_id)
-      {:ok, {:ok, profile}} -> {:ok, profile}
-      {:ok, {:ok, profile, _identity}} -> {:ok, profile}
-      {:ok, {:error, {:unauthorized, reason}}} -> unauthorized(reason)
-      {:ok, {:error, reason}} -> {:error, 422, "could not create agent: #{inspect(reason)}"}
-      {:error, reason} -> {:error, 503, "agent subsystem unavailable: #{inspect(reason)}"}
+    # The signed request authorizes the capability check only. Create mutates
+    # identity state, so the supervised owner opens the principal's stored key
+    # and passes that authority. The HTTP signature is not reused as a proof.
+    result = lifecycle_authority().authorize_create(principal, display_name, create_opts)
+
+    case result do
+      {:ok, {:ok, :pending_approval, proposal_id}} ->
+        approval_required(proposal_id)
+
+      {:ok, {:ok, profile}} ->
+        {:ok, profile}
+
+      {:ok, {:ok, profile, _identity}} ->
+        {:ok, profile}
+
+      {:ok, {:error, {:unauthorized, reason}}} ->
+        unauthorized(reason)
+
+      {:ok, {:error, reason}} ->
+        {:error, 422, "could not create agent: #{inspect(reason)}"}
+
+      {:error, :capability_mutation_unauthorized} ->
+        unauthorized(:capability_mutation_unauthorized)
+
+      {:error, reason} ->
+        {:error, 503, "agent subsystem unavailable: #{inspect(reason)}"}
     end
   end
 
@@ -343,6 +364,13 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
 
   defp agent_facade,
     do: Application.get_env(:arbor_gateway, :chat_agent_facade, Arbor.Agent)
+
+  if Mix.env() == :test do
+    defp lifecycle_authority,
+      do: Application.get_env(:arbor_gateway, :chat_lifecycle_authority, LifecycleAuthority)
+  else
+    defp lifecycle_authority, do: LifecycleAuthority
+  end
 
   defp lifecycle_mod,
     do: Application.get_env(:arbor_gateway, :chat_lifecycle, Arbor.Agent.Lifecycle)

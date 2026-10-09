@@ -3,7 +3,6 @@ defmodule Arbor.Persistence.EventRecordReadDatabaseTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.{Event, EventLog}
   @moduletag :database
-  @moduletag :fast
 
   test "durable exact records materialize only requested IDs and one pinned head" do
     events =

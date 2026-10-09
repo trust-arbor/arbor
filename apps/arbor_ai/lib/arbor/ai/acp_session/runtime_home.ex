@@ -1065,9 +1065,14 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     expanded_home = Path.expand(grok_home)
     expanded_path = Path.expand(path)
 
+    # resolve_within returns the symlink-resolved path. On macOS a temp home
+    # under /var resolves to /private/var, so containment is checked on the
+    # canonical paths and the original expanded path is what callers pin.
     with true <- Path.dirname(expanded_path) == expanded_home,
          true <- Path.basename(expanded_path) == expected_filename,
-         {:ok, ^expanded_path} <- SafePath.resolve_within(expanded_path, expanded_home) do
+         {:ok, canonical_home} <- SafePath.resolve_real(expanded_home),
+         {:ok, canonical_path} <- SafePath.resolve_within(expanded_path, expanded_home),
+         true <- Path.dirname(canonical_path) == canonical_home do
       {:ok, expanded_path}
     else
       _other -> {:error, :grok_auth_payload_path_mismatch}

@@ -10,6 +10,7 @@ defmodule Arbor.Persistence.ConversationCommandIndex do
   import Ecto.Query
   alias Ecto.{Adapter, Adapters.SQL}
   alias Arbor.Persistence.Config
+  alias Arbor.Persistence.SQLiteBusyTimeout
   alias Arbor.Persistence.Schemas.ConversationCommand, as: Command
   alias Arbor.Persistence.Schemas.ConversationCommandCheckpoint, as: Checkpoint
   alias Arbor.Persistence.Schemas.ConversationCommandPage, as: Page
@@ -29,7 +30,6 @@ defmodule Arbor.Persistence.ConversationCommandIndex do
   @termination [nil, "never_dispatched", "queued_removed", "engine_terminated"]
   @page_timeout_ms 5_000
   @sqlite_busy_slice_ms 5
-  @sqlite_pragma_timeout_ms 25
 
   def project(scope, row, cursor) when is_integer(cursor) and cursor > 0,
     do: project_page(scope, [row], %{from: cursor - 1, to: cursor})
@@ -318,24 +318,19 @@ defmodule Arbor.Persistence.ConversationCommandIndex do
     repo.get_dynamic_repo()
     |> Adapter.lookup_meta()
     |> SQL.checkout(query_options(repo, deadline), fn ->
-      %{rows: [[original_busy_timeout]]} =
-        repo.query!("PRAGMA busy_timeout", [], control_options(repo, deadline))
+      original_busy_timeout = SQLiteBusyTimeout.get(repo)
 
       try do
-        # This pragma is connection-local. Short native acquisition prevents a
-        # disposable projection from occupying a connection inside a long NIF
-        # wait while authoritative journal writers need to finish their commit.
+        # Connection-local. Short native acquisition prevents a disposable
+        # projection from occupying a connection inside a long NIF wait while
+        # authoritative journal writers need to finish their commit.
         busy_timeout = min(@sqlite_busy_slice_ms, remaining_timeout!(repo, deadline))
-
-        repo.query!("PRAGMA busy_timeout = #{busy_timeout}", [], control_options(repo, deadline))
+        SQLiteBusyTimeout.set(repo, busy_timeout)
         bounded_transaction(repo, deadline, fun, mode: :immediate)
       after
         # Restore before check-in; a disconnected connection is discarded by
         # DBConnection and must not turn an already rolled-back page into success.
-        repo.query("PRAGMA busy_timeout = #{original_busy_timeout}", [],
-          timeout: @sqlite_pragma_timeout_ms,
-          queue: false
-        )
+        SQLiteBusyTimeout.restore(repo, original_busy_timeout)
       end
     end)
   end
@@ -356,14 +351,6 @@ defmodule Arbor.Persistence.ConversationCommandIndex do
 
   defp query_options(repo, deadline),
     do: [timeout: remaining_timeout!(repo, deadline), deadline: deadline, queue: false]
-
-  defp control_options(repo, deadline),
-    do:
-      Keyword.update!(
-        query_options(repo, deadline),
-        :timeout,
-        &min(&1, @sqlite_pragma_timeout_ms)
-      )
 
   defp remaining_timeout!(repo, deadline) do
     case deadline - System.monotonic_time(:millisecond) do

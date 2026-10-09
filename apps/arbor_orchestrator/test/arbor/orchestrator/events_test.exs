@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.EventsTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.Events
+  alias Arbor.Orchestrator.TestSupport.SignalsStack
   alias Arbor.Persistence.EventLog.ETS
 
   setup do
@@ -31,6 +32,7 @@ defmodule Arbor.Orchestrator.EventsTest do
 
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
+    :ok = SignalsStack.ensure!()
 
     on_exit(fn ->
       restore_env(:arbor_orchestrator, :event_log_name, originals.event_log_name)
@@ -177,6 +179,23 @@ defmodule Arbor.Orchestrator.EventsTest do
   end
 
   describe "read_run_events/2" do
+    test "regression: reads Historian's durable target even when a Repo is registered" do
+      run_id = "run_test_#{System.unique_integer([:positive])}"
+      assert :ok = Events.dual_emit(%{type: :stage_started, node_id: "target"}, run_id: run_id)
+
+      # The old reader selected Ecto solely from this registered name even
+      # though the durable signal sink wrote to the configured ETS target.
+      registered_here? = Process.whereis(Arbor.Persistence.Repo) == nil
+
+      if registered_here?, do: Process.register(self(), Arbor.Persistence.Repo)
+
+      try do
+        assert {:ok, [%{type: "stage_started"}]} = Events.read_run_events(run_id)
+      after
+        if registered_here?, do: Process.unregister(Arbor.Persistence.Repo)
+      end
+    end
+
     test "returns empty list for unknown run_id" do
       {:ok, events} =
         Events.read_run_events("run_nonexistent_#{System.unique_integer([:positive])}")

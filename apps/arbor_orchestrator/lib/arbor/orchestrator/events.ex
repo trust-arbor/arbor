@@ -17,18 +17,11 @@ defmodule Arbor.Orchestrator.Events do
 
   ## Configuration
 
-      config :arbor_orchestrator,
-        event_log_name: :orchestrator_events,
-        event_log_backend: Arbor.Persistence.EventLog.ETS
+  Historian's `:durable_event_log_target` owns the persistent event target.
   """
-
-  require Logger
 
   alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Persistence.Event, as: PersistenceEvent
-
-  @event_log_name :orchestrator_events
-  @event_log_backend Arbor.Persistence.EventLog.ETS
 
   # --- Public API ---
 
@@ -56,23 +49,13 @@ defmodule Arbor.Orchestrator.Events do
   @doc """
   Query pipeline events for a specific run.
 
-  Reads from the same place `dual_emit` durably writes: when the durable Repo is
-  running, that's the Ecto-backed EventLog (cross-restart, SQLite or Postgres);
-  otherwise it falls back to the configured in-memory backend. This keeps the
-  read aligned with the write (previously the read pointed at a private
-  `:orchestrator_events` log that the durable write never populated).
+  Reads from Historian's configured durable target, the same target used by
+  `dual_emit` through the Signals durable sink.
   """
   @spec read_run_events(String.t(), keyword()) :: {:ok, [PersistenceEvent.t()]} | {:error, term()}
   def read_run_events(run_id, opts \\ []) do
     stream_id = stream_id(run_id)
-    {name, backend} = read_target()
-
-    Arbor.Persistence.read_stream(
-      name,
-      backend,
-      stream_id,
-      opts
-    )
+    Arbor.Historian.read_durable_event_stream(stream_id, opts)
   end
 
   @doc "Returns the stream ID for a given pipeline run."
@@ -92,24 +75,5 @@ defmodule Arbor.Orchestrator.Events do
     event
     |> Map.drop([:timestamp])
     |> JsonSafe.coerce()
-  end
-
-  # Where read_run_events reads from, aligned with where dual_emit writes:
-  # the durable Ecto EventLog when the Repo is up (cross-restart audit), else the
-  # configured in-memory backend (dev/test, or the events_test ETS alignment).
-  defp read_target do
-    if Process.whereis(Arbor.Persistence.Repo) do
-      {nil, Arbor.Persistence.EventLog.Ecto}
-    else
-      {event_log_name(), event_log_backend()}
-    end
-  end
-
-  defp event_log_name do
-    Application.get_env(:arbor_orchestrator, :event_log_name, @event_log_name)
-  end
-
-  defp event_log_backend do
-    Application.get_env(:arbor_orchestrator, :event_log_backend, @event_log_backend)
   end
 end

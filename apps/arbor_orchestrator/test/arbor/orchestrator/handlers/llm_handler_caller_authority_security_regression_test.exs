@@ -1,10 +1,10 @@
 defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressionTest do
   use ExUnit.Case, async: false
 
-  @moduletag :fast
+  @moduletag :isolated_repo
   @moduletag :security_regression
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, SignedRequest}
   alias Arbor.LLM.{Client, ContentPart, Request, Response}
   alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
@@ -71,7 +71,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
 
   test "security regression: scoped LLM tool calls retain caller authority after dispatch" do
     suffix = System.unique_integer([:positive])
-    execution_principal = "agent_tool_executor_#{suffix}"
+    {:ok, executor} = Arbor.Security.generate_identity()
+    :ok = Arbor.Security.register_identity_fixture(executor)
+    execution_principal = executor.agent_id
     caller_id = "human_tool_caller_#{suffix}"
     author_id = "agent_pipeline_author_#{suffix}"
     task_id = "task_tool_scope_#{suffix}"
@@ -86,6 +88,19 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
     on_exit(fn ->
       Arbor.Security.revoke_fixture(execution_capability.id)
       Arbor.Security.revoke_fixture(caller_capability.id)
+      Arbor.Security.deregister_identity_fixture(executor.agent_id)
+    end)
+
+    :ok = ensure_grant_owner!()
+    previous_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+
+    on_exit(fn ->
+      if is_nil(previous_enforcer) do
+        Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
+      else
+        Application.put_env(:arbor_trust, :policy_enforcer_enabled, previous_enforcer)
+      end
     end)
 
     node =
@@ -137,7 +152,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
       authorization: true,
       run_authorization: authority,
       llm_client: client,
-      workdir: File.cwd!()
+      workdir: File.cwd!(),
+      signer: fn payload ->
+        SignedRequest.sign(payload, executor.agent_id, executor.private_key)
+      end
     ]
 
     assert %{status: :success} = LlmHandler.execute(node, context, graph, opts)
@@ -151,6 +169,34 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
     assert_receive {:scoped_tool_result, denied_result}
     assert denied_result =~ "Caller #{caller_id} lacks authority"
     assert denied_result =~ resource
+  end
+
+  defp ensure_grant_owner! do
+    :ok = Arbor.Trust.restore_runtime_fixture()
+    status = Arbor.Trust.CapabilityGrantOwner.status()
+
+    status =
+      cond do
+        status.state == :ready ->
+          status
+
+        is_binary(status.principal_id) ->
+          uri = Arbor.Trust.CapabilityGrantOwner.required_capability_uri()
+
+          {:ok, _cap} =
+            Arbor.Security.grant_fixture(principal: status.principal_id, resource: uri)
+
+          Arbor.Trust.restart_capability_grant_owner_fixture()
+
+        true ->
+          status
+      end
+
+    unless match?(%{state: :ready}, status) do
+      raise "trust grant owner is not ready: #{inspect(status)}"
+    end
+
+    :ok
   end
 
   defp grant_scoped_capability(principal_id, resource_uri, task_id, session_id) do

@@ -404,27 +404,12 @@ defmodule Arbor.AI.UsageStats do
 
   @impl true
   def handle_call(:all_stats, _from, state) do
-    stats =
-      :ets.tab2list(@table)
-      |> Enum.into(%{}, fn {key, s} -> {key, export_stats(s)} end)
-
-    {:reply, stats, state}
+    {:reply, ets_all_stats(), state}
   end
 
   @impl true
   def handle_call(:reliability_ranking, _from, state) do
-    # Get all backends with their aggregated success rates
-    backends =
-      :ets.tab2list(@table)
-      |> Enum.group_by(fn {{backend, _model}, _stats} -> backend end)
-      |> Enum.map(fn {backend, entries} ->
-        stats = entries |> Enum.map(fn {_key, s} -> s end) |> aggregate_stats_internal()
-        rate = calculate_success_rate(stats)
-        {backend, rate}
-      end)
-      |> Enum.sort_by(fn {_backend, rate} -> rate end, :desc)
-
-    {:reply, backends, state}
+    {:reply, ets_reliability_ranking(), state}
   end
 
   @impl true
@@ -593,16 +578,18 @@ defmodule Arbor.AI.UsageStats do
     end
   end
 
+  # The daily timer is handled by this process. Reading through the public
+  # GenServer calls would call self and stop the server.
   defp emit_daily_summary do
     verbosity = signal_verbosity()
 
     if verbosity != :quiet do
-      all = all_stats()
+      all = ets_all_stats()
 
       total_requests = all |> Map.values() |> Enum.map(& &1.requests) |> Enum.sum()
       total_cost = all |> Map.values() |> Enum.map(& &1.total_cost_usd) |> Enum.sum()
 
-      ranking = reliability_ranking()
+      ranking = ets_reliability_ranking()
       top_backend = List.first(ranking)
       least_reliable = List.last(ranking)
 
@@ -633,6 +620,21 @@ defmodule Arbor.AI.UsageStats do
       |> Enum.each(fn {key, _stats} -> :ets.delete(@table, key) end)
 
     Logger.debug("Pruned old usage stats", retention_days: retention, pruned: pruned)
+  end
+
+  defp ets_all_stats do
+    :ets.tab2list(@table)
+    |> Enum.into(%{}, fn {key, stats} -> {key, export_stats(stats)} end)
+  end
+
+  defp ets_reliability_ranking do
+    :ets.tab2list(@table)
+    |> Enum.group_by(fn {{backend, _model}, _stats} -> backend end)
+    |> Enum.map(fn {backend, entries} ->
+      stats = entries |> Enum.map(fn {_key, entry} -> entry end) |> aggregate_stats_internal()
+      {backend, calculate_success_rate(stats)}
+    end)
+    |> Enum.sort_by(fn {_backend, rate} -> rate end, :desc)
   end
 
   defp schedule_prune do

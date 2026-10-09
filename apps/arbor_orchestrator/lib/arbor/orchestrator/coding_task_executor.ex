@@ -3563,10 +3563,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       |> Base.encode16(case: :lower)
 
     with {:ok, base} <- canonical_logs_base(),
-         {:ok, root} <- SafePath.safe_join(base, "task-" <> digest),
+         {:ok, root} <- task_logs_child(base, digest),
          :ok <- ensure_task_logs_directory(root),
          {:ok, canonical_root} <- verify_task_logs_directory(root, base) do
       {:ok, canonical_root}
+    end
+  end
+
+  # safe_join/2 follows a symlink under the logs base and returns
+  # :path_traversal before lstat can name the link. lexical_child/2 keeps
+  # the link path so ensure_task_logs_directory/1 rejects it as an unsafe root.
+  defp task_logs_child(base, digest) do
+    case SafePath.lexical_child(base, "task-" <> digest) do
+      {:ok, root} -> {:ok, root}
+      {:error, _reason} -> {:error, :unsafe_coding_task_logs_root}
     end
   end
 

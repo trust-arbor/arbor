@@ -192,6 +192,13 @@ defmodule Arbor.Agent.ConversationInteractionJourneySecurityRegressionTest do
         do: Humans.grant!(identity.agent_id, uri)
 
     if tags[:native_approval] do
+      # Test config leaves Trust.Supervisor unstarted. The native retry mints
+      # its one-use receipt through ConfirmationTracker, which must be alive
+      # and allowed to claim issuer custody outside that supervisor.
+      if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
+        start_supervised!({Arbor.Trust.ConfirmationTracker, test_isolated_owner: true})
+      end
+
       set_env(:arbor_agent, :conversation_journey_observer, self())
 
       Humans.grant!(identity.agent_id, Arbor.Actions.canonical_uri_for(@native_action, %{}),

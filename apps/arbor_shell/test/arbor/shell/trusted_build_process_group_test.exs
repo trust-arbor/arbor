@@ -48,6 +48,10 @@ defmodule Arbor.Shell.TrustedBuildProcessGroupTest do
   end
 
   test "run_trusted_build_executable is the only ProcessGroup entry that names trusted-build" do
+    # function_exported?/3 is false until the module is loaded. The full shell
+    # suite loads it earlier; this file does not.
+    Code.ensure_loaded!(ProcessGroup)
+
     assert function_exported?(ProcessGroup, :run_trusted_build_executable, 2)
     refute function_exported?(ProcessGroup, :run_trusted_build_executable, 6)
     refute function_exported?(ProcessGroup, :kill_group, 1)

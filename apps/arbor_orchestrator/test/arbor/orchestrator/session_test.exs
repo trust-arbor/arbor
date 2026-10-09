@@ -312,9 +312,10 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert {:ok, graph} = Orchestrator.parse(dot)
 
       # turn.dot defines: start, classify, check_auth, recall, select_mode,
-      # build_prompt, call_llm, format, format_error, update_memory,
-      # done = 11 nodes; Session owns optional checkpoint persistence.
-      assert map_size(graph.nodes) == 11
+      # build_prompt, call_llm, format, format_error, done = 10 nodes.
+      # Session owns transcript commits after the graph; there is no
+      # update_memory node on the ordinary turn.
+      assert map_size(graph.nodes) == 10
 
       # Verify key nodes exist
       assert Map.has_key?(graph.nodes, "start")
@@ -360,9 +361,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert graph.nodes["build_prompt"].attrs["type"] == "exec"
       assert graph.nodes["build_prompt"].attrs["action"] == "session_llm.build_prompt"
 
-      assert graph.nodes["update_memory"].attrs["type"] == "exec"
-      assert graph.nodes["update_memory"].attrs["action"] == "session_memory.update"
-
+      refute Map.has_key?(graph.nodes, "update_memory")
       refute Map.has_key?(graph.nodes, "checkpoint")
     end
 
@@ -417,18 +416,18 @@ defmodule Arbor.Orchestrator.SessionTest do
     end
 
     @tag :spike
-    test "both format paths converge at update_memory" do
+    test "both format paths converge at done" do
       graph = parse!(@turn_dot_path)
 
-      # Both format and format_error should lead to update_memory
-      to_update_memory =
+      # Both response paths finish the turn. Session commits the transcript.
+      to_done =
         graph.edges
-        |> Enum.filter(&(&1.to == "update_memory"))
+        |> Enum.filter(&(&1.to == "done"))
         |> Enum.map(& &1.from)
         |> MapSet.new()
 
-      assert MapSet.member?(to_update_memory, "format")
-      assert MapSet.member?(to_update_memory, "format_error")
+      assert MapSet.member?(to_done, "format")
+      assert MapSet.member?(to_done, "format_error")
     end
   end
 

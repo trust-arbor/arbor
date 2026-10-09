@@ -546,7 +546,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       true ->
         state = signal_cancel(state)
 
-        if children_pending?(state) do
+        # A live port owner or fallback can still prove exhaustion and allow
+        # deletion. Once cleanup must retain the workspace, reply now: a phase
+        # that ignores cancel would otherwise hold this call forever.
+        if release_waits_for_children?(state) do
           {:noreply, %{state | release_from: from}}
         else
           finish_release_call(state)
@@ -1065,6 +1068,22 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     is_pid(state.phase_pid) or is_pid(state.port_owner_pid) or state.fallback_pending == true
   end
 
+  defp release_waits_for_children?(state) do
+    children_pending?(state) and
+      (state.fallback_pending == true or not cleanup_retains_workspace?(state))
+  end
+
+  defp cleanup_retains_workspace?(%{fault: :force_cleanup_failure}), do: true
+
+  defp cleanup_retains_workspace?(%{
+         port_owner_registered: true,
+         port_owner_exhausted: exhausted
+       })
+       when exhausted != true,
+       do: true
+
+  defp cleanup_retains_workspace?(_state), do: false
+
   defp maybe_settle(state) do
     cond do
       children_pending?(state) ->
@@ -1467,12 +1486,18 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   defp phase_call(lease_pid, request) do
     GenServer.call(lease_pid, request, :infinity)
   catch
-    :exit, _ -> {:error, :invalid_lease}
+    :exit, reason -> lease_call_exit(reason)
   end
 
   defp port_owner_call(lease_pid, request) do
     GenServer.call(lease_pid, request, :infinity)
   catch
-    :exit, _ -> {:error, :invalid_lease}
+    :exit, reason -> lease_call_exit(reason)
   end
+
+  # OTP 28 exits immediately when a process calls itself. That pid is not a
+  # lease server, so the launch gate stays unauthorized instead of looking
+  # like a dead lease.
+  defp lease_call_exit({:calling_self, _}), do: {:error, :trusted_build_launch_unauthorized}
+  defp lease_call_exit(_reason), do: {:error, :invalid_lease}
 end

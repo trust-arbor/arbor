@@ -46,15 +46,15 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
   describe "think/2" do
     @tag :llm
     @tag timeout: 10_000
-    test "returns error tuple when AI is unavailable" do
-      # If Arbor.AI is not running/configured, we get :ai_unavailable
-      # This tests the error path without needing a real LLM
+    test "returns a structured error or parsed result from AI" do
+      # An unavailable provider may return a structured exception; a local
+      # provider can also produce a parsed response.
       result = HeartbeatLLM.think(minimal_state())
 
       case result do
         {:error, reason} ->
-          assert is_atom(reason) or is_tuple(reason),
-                 "Expected atom or tuple error reason, got: #{inspect(reason)}"
+          assert is_atom(reason) or is_tuple(reason) or match?(%{__exception__: true}, reason),
+                 "Expected atom, tuple, or exception error reason, got: #{inspect(reason)}"
 
         {:ok, parsed} ->
           # If AI happens to be available, verify the parsed structure

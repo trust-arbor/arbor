@@ -2,12 +2,48 @@
 # security supervisor empty, so consumer suites must opt into the shared
 # bootstrap before any behavioral fixture grants capabilities.
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
+
+# Lease grants use the same preprovisioned service principal in tests and
+# production. The supervised owner never creates or grants its own identity.
+{:ok, lease_grant_identity} = Arbor.Security.generate_identity()
+:ok = Arbor.Security.register_identity_fixture(lease_grant_identity)
+
+:ok =
+  Arbor.Security.store_signing_key_fixture(
+    lease_grant_identity.agent_id,
+    lease_grant_identity.private_key
+  )
+
+for resource <- ["arbor://security/grant/**", "arbor://security/revoke/**"] do
+  {:ok, _} =
+    Arbor.Security.grant_fixture(principal: lease_grant_identity.agent_id, resource: resource)
+end
+
+Application.put_env(:arbor_agent, :lease_grant_principal_id, lease_grant_identity.agent_id)
+
+{:ok, cleanup_identity} = Arbor.Security.generate_identity()
+:ok = Arbor.Security.register_identity_fixture(cleanup_identity)
+
+:ok =
+  Arbor.Security.store_signing_key_fixture(
+    cleanup_identity.agent_id,
+    cleanup_identity.private_key
+  )
+
+for resource <- ["arbor://security/identity/suspend/**", "arbor://security/revoke/**"] do
+  {:ok, _} =
+    Arbor.Security.grant_fixture(principal: cleanup_identity.agent_id, resource: resource)
+end
+
+Application.put_env(:arbor_agent, :activation_failure_principal_id, cleanup_identity.agent_id)
 
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 children = [
   {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
   {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
   Arbor.Agent.ProfileAuthorityOwner,
+  Arbor.Agent.Orchestration.LeaseGrantOwner,
   Arbor.Agent.Registry,
   Arbor.Agent.SessionManager,
   Arbor.Agent.Supervisor
@@ -38,4 +74,4 @@ _ = Arbor.Agent.Test.RuntimeAdmissionTopology.start_fixed_production!()
 # :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
 # Isolated Repo fixtures own the canonical Repo name and run separately with
 # --include isolated_repo. Fast loop: `mix test.fast`.
-ExUnit.start(exclude: [:skip, :isolated_repo, :external, :llm, :llm_local])
+ExUnit.start(exclude: [:skip, :database, :isolated_repo, :external, :llm, :llm_local])

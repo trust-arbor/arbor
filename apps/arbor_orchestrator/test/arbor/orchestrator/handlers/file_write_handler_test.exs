@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Handlers.FileWriteHandler
 
   @test_dir System.tmp_dir!() |> Path.join("arbor_file_write_test_#{:rand.uniform(100_000)}")
@@ -30,7 +31,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
       path = Path.join(@test_dir, "output.txt")
       assert outcome.status == :success
       assert File.read!(path) == "hello world"
-      assert outcome.context_updates["file.written.w1"] == path
+      assert outcome.context_updates["file.written.w1"] == canonical_output("output.txt")
       assert outcome.notes =~ "11 bytes"
     end
 
@@ -243,7 +244,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
 
       assert {:ok, result} = Arbor.Orchestrator.run(dot, workdir: @test_dir)
       path = Path.join(@test_dir, "e2e.txt")
-      assert result.context["file.written.write"] == path
+      assert result.context["file.written.write"] == canonical_output("e2e.txt")
       assert File.read!(path) == "end-to-end works"
     end
 
@@ -276,5 +277,10 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
       assert {:ok, result} = Arbor.Orchestrator.run(dot)
       assert result.context["graph.label"] == "My Pipeline"
     end
+  end
+
+  defp canonical_output(filename) do
+    {:ok, path} = SafePath.resolve_within(filename, Path.expand(@test_dir))
+    path
   end
 end

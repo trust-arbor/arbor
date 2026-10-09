@@ -190,22 +190,6 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert "memory_recall" in tools
     end
 
-    test "the disclosed find_tools is actually executable under an :auto rule (regression: unprofiled)",
-         %{agent_id: agent_id} do
-      set_policy_enforcer_enabled(true)
-      {:ok, uri} = Arbor.Actions.tool_name_to_canonical_uri("tool_find_tools")
-      create_profile_with_rules(agent_id, :ask, %{uri => :auto})
-
-      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
-      assert "tool_find_tools" in tools
-
-      # Disclosure is floor ∪ held, so discovery is the only path to everything
-      # else. It was disclosed but unmintable (:unprofiled) on the live
-      # onboarding node 2026-08-25: the agent called it correctly, was refused,
-      # and the turn failed.
-      assert {:ok, _} = Arbor.Trust.authorize(agent_id, uri, :execute)
-    end
-
     test "discoverable_tools/1 is mintable minus held minus blocked minus floor",
          %{agent_id: agent_id} do
       set_policy_enforcer_enabled(true)
@@ -242,9 +226,78 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     end
   end
 
+  describe "find_tools execution" do
+    @tag :isolated_repo
+    @tag fast: false
+    test "the disclosed find_tools is actually executable under an :auto rule (regression: unprofiled)" do
+      # JIT minting spends a target-signed grant request held by the supervised
+      # grant owner. This describe does not start an ExUnit-owned Store, which
+      # would not be a child of that supervisor.
+      set_policy_enforcer_enabled(true)
+      :ok = ensure_grant_owner!()
+
+      {:ok, identity} = Arbor.Security.generate_identity()
+      :ok = Arbor.Security.register_identity_fixture(identity)
+
+      on_exit(fn -> Arbor.Security.deregister_identity_fixture(identity.agent_id) end)
+
+      {:ok, uri} = Arbor.Actions.tool_name_to_canonical_uri("tool_find_tools")
+      create_profile_with_rules(identity.agent_id, :ask, %{uri => :auto})
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(identity.agent_id)
+      assert "tool_find_tools" in tools
+
+      session_id = "tool-disclosure-" <> Integer.to_string(System.unique_integer([:positive]))
+
+      {:ok, payload} =
+        Arbor.Trust.build_capability_grant_request(identity.agent_id, uri, session_id)
+
+      {:ok, signed} =
+        Arbor.Contracts.Security.SignedRequest.sign(
+          payload,
+          identity.agent_id,
+          identity.private_key
+        )
+
+      assert {:ok, _} =
+               Arbor.Trust.authorize(identity.agent_id, uri, :execute,
+                 session_id: session_id,
+                 capability_grant_request: signed
+               )
+    end
+  end
+
   defp grant!(agent_id, resource) do
     {:ok, cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     cap
+  end
+
+  defp ensure_grant_owner! do
+    :ok = Arbor.Trust.restore_runtime_fixture()
+    status = Arbor.Trust.CapabilityGrantOwner.status()
+
+    status =
+      cond do
+        status.state == :ready ->
+          status
+
+        is_binary(status.principal_id) ->
+          uri = Arbor.Trust.CapabilityGrantOwner.required_capability_uri()
+
+          {:ok, _cap} =
+            Arbor.Security.grant_fixture(principal: status.principal_id, resource: uri)
+
+          Arbor.Trust.restart_capability_grant_owner_fixture()
+
+        true ->
+          status
+      end
+
+    unless match?(%{state: :ready}, status) do
+      raise "trust grant owner is not ready: #{inspect(status)}"
+    end
+
+    :ok
   end
 
   describe "merge_discovered/2" do

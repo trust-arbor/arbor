@@ -1069,13 +1069,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     do: {:error, :reconciliation_scope_mismatch}
 
   defp validate_reconciliation_path(root, path) do
-    with {:ok, _lexical} <- SafePath.resolve_within(path, root),
-         {:ok, real_root} <- SafePath.resolve_real(root),
-         {:ok, real_parent} <- SafePath.resolve_real(Path.dirname(path)),
-         true <- SafePath.within?(real_parent, real_root) do
-      :ok
-    else
-      _ -> {:error, :reconciliation_manifest_path_escape}
+    # resolve_within/2 follows a symlink and reports the escape as
+    # path_traversal. A symlink is a distinct failure: classify it before
+    # the lexical escape check so the immutable writer still names it.
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :reconciliation_manifest_symlink}
+
+      _ ->
+        with {:ok, _lexical} <- SafePath.resolve_within(path, root),
+             {:ok, real_root} <- SafePath.resolve_real(root),
+             {:ok, real_parent} <- SafePath.resolve_real(Path.dirname(path)),
+             true <- SafePath.within?(real_parent, real_root) do
+          :ok
+        else
+          _ -> {:error, :reconciliation_manifest_path_escape}
+        end
     end
   end
 

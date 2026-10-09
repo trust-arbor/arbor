@@ -145,11 +145,10 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
        %{agent_id: agent_id} do
     authorize_agent(agent_id, @github_resource)
 
-    :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, true, [])
-    :erlang.trace(self(), true, [:call])
-
-    try do
-      _result =
+    # OTP 28 does not deliver call traces to the traced process. An external
+    # tracer still observes the admission call and the bound command.
+    {calls, result} =
+      with_authorize_trace(fn ->
         Arbor.Actions.authorize_and_execute(
           agent_id,
           Github.PR,
@@ -161,20 +160,16 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
           },
           %{agent_id: agent_id}
         )
+      end)
 
-      assert_receive {:trace, _pid, :call,
-                      {Arbor.Shell, :authorize_and_execute, [^agent_id, command, _shell_opts]}}
-
-      assert command =~ "--title=--repo=attacker/title"
-      assert command =~ "--body=--head=attacker/body"
-      assert command =~ "--base=--repo=attacker/base"
-      refute command =~ "--title --repo="
-      refute command =~ "--body --head="
-      refute command =~ "--base --repo="
-    after
-      :erlang.trace(self(), false, [:call])
-      :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, false, [])
-    end
+    assert {:error, "Unauthorized: {:agent_executable_not_allowed, \"gh\"}"} = result
+    assert [command] = calls
+    assert command =~ "--title=--repo=attacker/title"
+    assert command =~ "--body=--head=attacker/body"
+    assert command =~ "--base=--repo=attacker/base"
+    refute command =~ "--title --repo="
+    refute command =~ "--body --head="
+    refute command =~ "--base --repo="
   end
 
   defp authorize_agent(agent_id, resource) do
@@ -187,6 +182,46 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
+
+  defp with_authorize_trace(fun) do
+    parent = self()
+
+    tracer =
+      spawn_link(fn ->
+        authorize_tracer_loop(parent, [])
+      end)
+
+    :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      result = fun.()
+      send(tracer, :done)
+
+      receive do
+        {:authorize_calls, calls} -> {calls, result}
+      after
+        1_000 -> flunk("timed out waiting for authorize_and_execute tracer")
+      end
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, false, [])
+    end
+  end
+
+  defp authorize_tracer_loop(parent, acc) do
+    receive do
+      {:trace, _pid, :call, {Arbor.Shell, :authorize_and_execute, [_agent_id, command, _opts]}}
+      when is_binary(command) ->
+        authorize_tracer_loop(parent, [command | acc])
+
+      :done ->
+        send(parent, {:authorize_calls, Enum.reverse(acc)})
+    after
+      1_000 ->
+        send(parent, {:authorize_calls, Enum.reverse(acc)})
+    end
+  end
 
   defp with_host_shell_trace(fun) do
     parent = self()

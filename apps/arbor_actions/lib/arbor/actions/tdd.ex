@@ -85,6 +85,9 @@ defmodule Arbor.Actions.TDD do
       #{params.test_code}
       ```
 
+      Use valid Elixir syntax throughout. Elixir has no `elif`; for multiple
+      branches, use `cond do ... end` or nested `if ... else ... end`.
+
       Output ONLY the module source code, starting with `defmodule`. No
       markdown fences. No prose. No explanation.
       """
@@ -123,7 +126,9 @@ defmodule Arbor.Actions.TDD do
       #{params.last_failure}
       ```
 
-      Fix the implementation. Output ONLY the corrected module source
+      Fix the implementation using valid Elixir syntax. Elixir has no `elif`;
+      for multiple branches, use `cond do ... end` or nested `if ... else ... end`.
+      Output ONLY the corrected module source
       code, starting with `defmodule`. No markdown fences. No prose.
       """
 

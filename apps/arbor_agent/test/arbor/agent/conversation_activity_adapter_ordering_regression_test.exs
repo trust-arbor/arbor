@@ -44,8 +44,29 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
       opts: [repo: Repo]
     })
 
+    set_env(:arbor_security, :authority_audit_consumer_name, Arbor.Historian.AuthorityAuditPuller)
+    set_env(:arbor_security, :authority_audit_consumer_application, :arbor_historian)
+
     assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == nil
-    start_supervised!({Arbor.Historian.AuthorityAuditPuller, poll_interval_ms: 25})
+    # flush_authority_audit/0 only accepts the puller as a direct child of the
+    # application historian supervisor. An ExUnit-supervised puller is not that.
+    supervisor = Process.whereis(Arbor.Historian.Supervisor)
+    assert is_pid(supervisor)
+
+    assert {:ok, puller} =
+             Supervisor.start_child(
+               supervisor,
+               {Arbor.Historian.AuthorityAuditPuller, [poll_interval_ms: 25]}
+             )
+
+    assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == puller
+
+    on_exit(fn ->
+      if Process.alive?(supervisor) do
+        Supervisor.terminate_child(supervisor, Arbor.Historian.AuthorityAuditPuller)
+        Supervisor.delete_child(supervisor, Arbor.Historian.AuthorityAuditPuller)
+      end
+    end)
 
     for {name, child} <- [
           {Arbor.Comms.EngagementStore, Arbor.Comms.EngagementStore},

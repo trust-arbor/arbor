@@ -1,7 +1,7 @@
 defmodule Arbor.Agent.Test.TrustTopology do
   @moduledoc false
 
-  @supervisor Arbor.Trust.ApplicationSupervisor
+  @supervisor Arbor.Trust.Supervisor
   @children [
     {Arbor.Trust.Store, [persistence: :memory]},
     {Arbor.Trust.Manager,
@@ -9,9 +9,11 @@ defmodule Arbor.Agent.Test.TrustTopology do
   ]
 
   def ensure_owned! do
+    :ok = Arbor.Trust.restore_runtime_fixture()
+
     supervisor =
       Process.whereis(@supervisor) ||
-        raise "Arbor.Trust.ApplicationSupervisor is not running"
+        raise "Arbor.Trust.Supervisor is not running"
 
     Enum.each(@children, &ensure_child!(supervisor, &1))
     supervisor

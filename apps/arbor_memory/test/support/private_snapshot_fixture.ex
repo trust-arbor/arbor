@@ -72,6 +72,9 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
 
     on_exit(fn ->
       stop_system_authority!()
+      # Drop the fixture root before restore. A same-id child in canonical
+      # order would classify as owned and leak this disk store into later tests.
+      drop_root_store!()
       if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
       restore_memory_child!(previous_memory)
       restore_env(:identity_alias_resolver, previous_resolver)
@@ -101,7 +104,11 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
       backend: Arbor.Security.Store.JSONFile,
       backend_opts: [base_dir: Path.join(root, "signing")],
       namespace: "signing_keys",
-      hydration_limit: 100
+      hydration_limit: 100,
+      # defer_hydration records the parent supervisor. SystemAuthority accepts
+      # the root only through that supervisor child, and only after startup
+      # hydration reports :node_restart.
+      defer_hydration: true
     ]
 
     store_opts = [
@@ -115,7 +122,7 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
       hydration_limit: 1_000
     ]
 
-    assert {:ok, _} = Supervisor.start_child(supervisor, {AuthorityStore, root_opts})
+    start_supervised_root!(root_opts)
 
     assert {:ok, _} =
              Supervisor.start_child(
@@ -185,11 +192,13 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
     :ok
   end
 
-  def restart_root!(fixture) do
+  def restart_root!(_fixture) do
     stop_system_authority!()
-    assert :ok = Supervisor.terminate_child(fixture.supervisor, @root_name)
-    assert {:ok, _} = Supervisor.restart_child(fixture.supervisor, @root_name)
-    assert {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, SystemAuthority)
+    supervisor = security_supervisor!()
+    assert :ok = Supervisor.terminate_child(supervisor, @root_name)
+    assert {:ok, _} = Supervisor.restart_child(supervisor, @root_name)
+    assert :ok = AuthorityStore.complete_startup(supervisor, @root_name)
+    assert {:ok, _} = Supervisor.restart_child(supervisor, SystemAuthority)
     :ok
   end
 
@@ -259,9 +268,34 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
     end
   end
 
+  defp start_supervised_root!(root_opts) do
+    supervisor = security_supervisor!()
+
+    assert {:ok, _} =
+             Supervisor.start_child(
+               supervisor,
+               Supervisor.child_spec({AuthorityStore, root_opts}, id: @root_name)
+             )
+
+    assert :ok = AuthorityStore.complete_startup(supervisor, @root_name)
+  end
+
+  defp security_supervisor! do
+    case Process.whereis(Arbor.Security.Supervisor) do
+      pid when is_pid(pid) -> pid
+      _other -> flunk("security supervisor is not running")
+    end
+  end
+
   defp remove_root_store! do
     assert :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, @root_name)
     assert :ok = Supervisor.delete_child(Arbor.Security.Supervisor, @root_name)
+  end
+
+  defp drop_root_store! do
+    _ = Supervisor.terminate_child(Arbor.Security.Supervisor, @root_name)
+    _ = Supervisor.delete_child(Arbor.Security.Supervisor, @root_name)
+    :ok
   end
 
   defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_security, key, value)

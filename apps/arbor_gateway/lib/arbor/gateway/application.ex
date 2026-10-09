@@ -49,8 +49,11 @@ defmodule Arbor.Gateway.Application do
     endpoint_children = [{Arbor.Gateway.MCP.EndpointRegistry, []}]
 
     bridge_children = [Arbor.Gateway.Bridge.RegistrationAuthority]
+    lifecycle_children = [Arbor.Gateway.Chat.LifecycleAuthority]
 
-    children = mcp_children ++ endpoint_children ++ bridge_children ++ http_children
+    children =
+      mcp_children ++ endpoint_children ++ bridge_children ++ lifecycle_children ++ http_children
+
     opts = [strategy: :one_for_one, name: Arbor.Gateway.Supervisor]
     Supervisor.start_link(children, opts)
   end

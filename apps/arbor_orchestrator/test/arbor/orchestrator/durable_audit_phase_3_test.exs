@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.{Engine, Event, Events, JsonSafe}
+  alias Arbor.Orchestrator.TestSupport.SignalsStack
   alias Arbor.Persistence.EventLog.ETS
 
   @moduletag :fast
@@ -109,6 +110,7 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
 
       Arbor.Signals.Config.Testing.isolate_namespace()
       Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
+      :ok = SignalsStack.ensure!()
 
       on_exit(fn ->
         restore_env(:arbor_orchestrator, :event_log_name, originals.event_log_name)

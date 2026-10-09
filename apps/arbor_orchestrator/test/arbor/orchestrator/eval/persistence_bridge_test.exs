@@ -2,11 +2,40 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridgeTest do
   @moduledoc """
   Thin delegate tests — logic lives in arbor_persistence.
   """
-  use ExUnit.Case, async: true
-  @moduletag :fast
+  use ExUnit.Case, async: false
+  @moduletag :isolated_repo
 
   alias Arbor.Orchestrator.Eval.PersistenceBridge
   alias Arbor.Persistence
+  alias Arbor.Persistence.Repo
+
+  @migrations Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+
+  setup_all do
+    assert Process.whereis(Repo) == nil,
+           "run PersistenceBridge's real database tests in an isolated checkout"
+
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-persistence-bridge-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    start_supervised!(
+      {Repo,
+       database: Path.join(root, "eval.sqlite3"),
+       pool: DBConnection.ConnectionPool,
+       pool_size: 4,
+       busy_timeout: 5_000,
+       journal_mode: :wal}
+    )
+
+    assert [_ | _] = Ecto.Migrator.run(Repo, @migrations, :up, all: true, log: false)
+    :ok
+  end
 
   describe "deprecated delegate surface" do
     test "available?/0 matches Persistence.eval_database_available?/0" do
@@ -55,16 +84,25 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridgeTest do
     end
 
     test "save_result/1 does not crash" do
-      result =
-        PersistenceBridge.save_result(%{
-          id: "result-test",
-          run_id: "run-test",
-          sample_id: "sample-1",
-          passed: true,
-          scores: %{}
-        })
+      run_id = "result-run-#{System.unique_integer([:positive])}"
 
-      assert result == :ok or match?({:error, _}, result) or match?({:ok, _}, result)
+      assert {:ok, _run} =
+               PersistenceBridge.create_run(%{
+                 id: run_id,
+                 model: "test-model",
+                 domain: "coding",
+                 provider: "test",
+                 dataset: "test.jsonl"
+               })
+
+      assert {:ok, _result} =
+               PersistenceBridge.save_result(%{
+                 id: "result-#{System.unique_integer([:positive])}",
+                 run_id: run_id,
+                 sample_id: "sample-1",
+                 passed: true,
+                 scores: %{}
+               })
     end
   end
 end

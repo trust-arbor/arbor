@@ -43,7 +43,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     assert source =~
              ~r/\{:llm_db,\s*"~> 2026\.1",\s*optional:\s*true,\s*runtime:\s*false\}/
 
-    assert source =~ ~r/\{:finch,\s*"~> 0\.21\.0",\s*runtime:\s*false\}/
+    assert source =~ ~r/\{:finch,\s*"~> 0\.24",\s*runtime:\s*false\}/
     assert source =~ ~r/\{:req,\s*"~> 0\.5",\s*runtime:\s*false\}/
     assert source =~ ~r/\{:recon,\s*"~> 2\.5",\s*runtime:\s*false\}/
     assert source =~ ~r/override:\s*true,\s*runtime:\s*false\}/

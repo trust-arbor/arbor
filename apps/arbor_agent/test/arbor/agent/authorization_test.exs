@@ -16,7 +16,7 @@ defmodule Arbor.Agent.AuthorizationTest do
   @effects [
     {Lifecycle, :create, 2},
     {Lifecycle, :stop, 1},
-    {Lifecycle, :destroy, 1},
+    {Lifecycle, :destroy, 2},
     {Lifecycle, :restore, 1}
   ]
   @security_settings [
@@ -79,8 +79,10 @@ defmodule Arbor.Agent.AuthorizationTest do
     Application.put_env(:arbor_agent, :legacy_agents_dir, dir)
     {:ok, identity} = Security.generate_identity()
     :ok = Security.register_identity_fixture(identity)
+    :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
 
     on_exit(fn ->
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
       _ = Security.deregister_identity_fixture(identity.agent_id)
       Enum.each(old, fn {app, key, previous} -> restore_env(app, key, previous) end)
       restore_env(:arbor_agent, :legacy_agents_dir, legacy)
@@ -96,7 +98,7 @@ defmodule Arbor.Agent.AuthorizationTest do
       fixture = fixture(operation, ctx)
       grant(ctx.caller, resource(operation, fixture.target), true)
 
-      {result, effects, decisions} = observe(fn -> invoke(operation, ctx.caller, fixture) end)
+      {result, effects, decisions} = observe(fn -> invoke(operation, ctx, fixture) end)
       track_created(result)
 
       assert {:ok, :pending_approval, "lifecycle-pending-fixture"} = result
@@ -119,7 +121,7 @@ defmodule Arbor.Agent.AuthorizationTest do
 
       {result, effects, decisions} =
         without_capability_registration(fn ->
-          observe(fn -> invoke(operation, ctx.caller, fixture) end)
+          observe(fn -> invoke(operation, ctx, fixture) end)
         end)
 
       assert {:error, {:unauthorized, :security_unavailable}} = result
@@ -132,7 +134,12 @@ defmodule Arbor.Agent.AuthorizationTest do
       operation = unquote(operation)
       fixture = fixture(operation, ctx)
       grant(ctx.caller, resource(operation, fixture.target), false)
-      {result, effects, decisions} = observe(fn -> invoke(operation, ctx.caller, fixture) end)
+
+      if operation == :create do
+        grant_creation_mutations(ctx.caller)
+      end
+
+      {result, effects, decisions} = observe(fn -> invoke(operation, ctx, fixture) end)
       track_created(result)
 
       assert {:ok, :authorized} in decisions
@@ -165,7 +172,7 @@ defmodule Arbor.Agent.AuthorizationTest do
     fixture = fixture(:restore, ctx)
     grant(ctx.caller, resource(:restore, fixture.target), false)
     Application.put_env(:arbor_security, :identity_verification, true)
-    {result, effects, _} = observe(fn -> invoke(:restore, ctx.caller, fixture) end)
+    {result, effects, _} = observe(fn -> invoke(:restore, ctx, fixture) end)
     assert {:error, {:unauthorized, :missing_signed_request}} = result
     assert effects == []
     assert_preserved(:restore, fixture)
@@ -173,7 +180,7 @@ defmodule Arbor.Agent.AuthorizationTest do
 
   test "security regression: an ungranted caller cannot delete an existing profile", ctx do
     fixture = fixture(:destroy, ctx)
-    {result, effects, _} = observe(fn -> invoke(:destroy, ctx.caller, fixture) end)
+    {result, effects, _} = observe(fn -> invoke(:destroy, ctx, fixture) end)
     assert {:error, {:unauthorized, _}} = result
     assert effects == []
     assert_preserved(:destroy, fixture)
@@ -267,19 +274,70 @@ defmodule Arbor.Agent.AuthorizationTest do
     capability
   end
 
+  # Creating an agent registers and endorses a new identity. The lifecycle
+  # capability alone does not authorize those security mutations.
+  defp grant_creation_mutations(caller) do
+    for resource <- [
+          "arbor://security/identity/register",
+          "arbor://security/identity/endorse/**",
+          "arbor://security/grant/**",
+          "arbor://security/revoke/**",
+          "arbor://security/identity/deregister/**"
+        ] do
+      grant(caller, resource, false)
+    end
+  end
+
   defp resource(:stop, target), do: "arbor://agent/stop/" <> target
+  defp resource(:destroy, target), do: "arbor://agent/lifecycle/destroy/" <> target
   defp resource(operation, _target), do: "arbor://agent/lifecycle/" <> Atom.to_string(operation)
   defp unavailable_fixture(:create, fixture), do: %{fixture | opts: []}
   defp unavailable_fixture(_operation, fixture), do: fixture
   defp lifecycle_effect(:create), do: {Lifecycle, :create, 2}
+  defp lifecycle_effect(:destroy), do: {Lifecycle, :destroy, 2}
   defp lifecycle_effect(operation), do: {Lifecycle, operation, 1}
 
-  defp invoke(:create, caller, fixture),
-    do: Agents.authorize_create(caller, fixture.target, fixture.opts)
+  # Create and destroy mutate capabilities. The two-argument destroy facade
+  # stays fail-closed; these calls carry an owner-bound lifecycle authority
+  # opened on the worker that performs the operation.
+  defp invoke(:create, ctx, fixture) do
+    with_lifecycle_authority(ctx, fn authority ->
+      Agents.authorize_create(
+        ctx.caller,
+        fixture.target,
+        Keyword.put(fixture.opts, :actor_authority, authority)
+      )
+    end)
+  end
 
-  defp invoke(:stop, caller, fixture), do: Agents.authorize_stop(caller, fixture.target)
-  defp invoke(:destroy, caller, fixture), do: Agents.authorize_destroy(caller, fixture.target)
-  defp invoke(:restore, caller, fixture), do: Agents.authorize_restore(caller, fixture.target)
+  defp invoke(:stop, ctx, fixture), do: Agents.authorize_stop(ctx.caller, fixture.target)
+
+  defp invoke(:destroy, ctx, fixture) do
+    with_lifecycle_authority(ctx, fn authority ->
+      Agents.authorize_destroy(ctx.caller, fixture.target, actor_authority: authority)
+    end)
+  end
+
+  defp invoke(:restore, ctx, fixture),
+    do: Agents.authorize_restore(ctx.caller, fixture.target)
+
+  defp with_lifecycle_authority(ctx, fun) do
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(
+        ctx.caller,
+        ctx.identity.private_key,
+        purpose: :agent_lifecycle,
+        owner: self()
+      )
+
+    {:ok, authority} = Security.open_signing_authority(proof)
+
+    try do
+      fun.(authority)
+    after
+      _ = Security.close_signing_authority(authority)
+    end
+  end
 
   defp assert_preserved(:create, fixture) do
     refute Enum.any?(Agents.list_agents(), &(&1.display_name == fixture.target))

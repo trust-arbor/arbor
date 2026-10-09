@@ -351,7 +351,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
                provider: "lm_studio",
                model: "bounded-test",
                prompt: "hello",
-               stream_read_timeout_ms: 50,
+               # This key is the absolute deadline. 500ms still ends the stream
+               # well before 200 chunks at 10ms, and leaves room for more than
+               # one event when the socket is slow to start.
+               stream_read_timeout_ms: 500,
                client_opts: transport_opts(url) ++ [receive_timeout: 5_000]
              )
 
@@ -365,7 +368,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
 
     elapsed = System.monotonic_time(:millisecond) - started
     assert :atomics.get(active_events, 1) > 1
-    assert elapsed < 1_000
+    assert elapsed < 1_500
 
     assert %{sent: sent, closed?: true} = Task.await(server, 2_000)
     assert sent > 1

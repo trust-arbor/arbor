@@ -1000,15 +1000,18 @@ defmodule Arbor.Signals.Bus do
   end
 
   defp find_supervised_registered_child_pid(supervisor_root, child_path, registered_name) do
-    with root_pid when is_pid(root_pid) <- resolve_supervisor_root(supervisor_root),
-         true <- Process.alive?(root_pid),
-         child_pid when is_pid(child_pid) <- supervised_descendant_pid(root_pid, child_path),
-         true <- Process.alive?(child_pid),
-         ^child_pid <- Process.whereis(registered_name) do
-      child_pid
-    else
-      _other -> nil
-    end
+    supervisor_root
+    |> resolve_supervisor_roots()
+    |> Enum.find_value(fn root_pid ->
+      with true <- Process.alive?(root_pid),
+           child_pid when is_pid(child_pid) <- supervised_descendant_pid(root_pid, child_path),
+           true <- Process.alive?(child_pid),
+           ^child_pid <- Process.whereis(registered_name) do
+        child_pid
+      else
+        _other -> nil
+      end
+    end)
   catch
     :exit, _reason -> nil
   end
@@ -1029,28 +1032,47 @@ defmodule Arbor.Signals.Bus do
     end)
   end
 
-  defp resolve_supervisor_root({:application, application}) when is_atom(application) do
-    # application_master.get_child/1 assumes the application callback has
-    # already returned a child pid. Calling it from a child continuation while
-    # the application is still starting passes :undefined into the OTP master
-    # and terminates the application master. Security provenance checks are
-    # therefore admitted only after the controller publishes the application
-    # as running; startup callers fail closed and retry from their owners.
-    with true <- application_running?(application),
-         master when is_pid(master) <- :application_controller.get_master(application),
-         {root_pid, _application_module} when is_pid(root_pid) <-
-           :application_master.get_child(master),
-         true <- Process.alive?(root_pid) do
-      root_pid
+  defp resolve_supervisor_roots({:application, application}) when is_atom(application) do
+    with master when is_pid(master) <- :application_controller.get_master(application) do
+      if application_running?(application) do
+        case :application_master.get_child(master) do
+          {root_pid, _application_module} when is_pid(root_pid) -> [root_pid]
+          _other -> []
+        end
+      else
+        # Before start/2 returns, get_child/1 has no root and can terminate
+        # the OTP application master. Its linked callback process already owns
+        # the root, though. Admit only a root linked to that callback, assigned
+        # to this application, and containing the exact registered child.
+        startup_supervisor_roots(master, application)
+      end
     else
-      _other -> nil
+      _other -> []
     end
   catch
-    :exit, _reason -> nil
+    :exit, _reason -> []
   end
 
-  defp resolve_supervisor_root(pid) when is_pid(pid), do: pid
-  defp resolve_supervisor_root(_other), do: nil
+  defp resolve_supervisor_roots(pid) when is_pid(pid), do: [pid]
+  defp resolve_supervisor_roots(_other), do: []
+
+  defp startup_supervisor_roots(master, application) do
+    case Process.info(master, :links) do
+      {:links, master_links} ->
+        for starter <- master_links,
+            {:links, starter_links} <- [Process.info(starter, :links)],
+            master in starter_links,
+            root <- starter_links,
+            root != master,
+            {:links, root_links} <- [Process.info(root, :links)],
+            starter in root_links,
+            :application.get_application(root) == {:ok, application},
+            do: root
+
+      _other ->
+        []
+    end
+  end
 
   defp application_running?(application) do
     Enum.any?(Application.started_applications(), fn

@@ -19,9 +19,11 @@ defmodule Arbor.Orchestrator.EngineSQLiteWholeBeamRecoveryTest do
 
     File.mkdir_p!(disk_root)
     File.chmod!(disk_root, 0o700)
+    {:ok, disk_root} = Arbor.Common.SafePath.resolve_real(disk_root)
 
     on_exit(fn ->
-      assert Path.dirname(disk_root) == Path.expand(System.tmp_dir!())
+      {:ok, tmp_root} = Arbor.Common.SafePath.resolve_real(Path.expand(System.tmp_dir!()))
+      assert Path.dirname(disk_root) == tmp_root
       assert String.starts_with?(Path.basename(disk_root), "arbor_engine_disk_")
 
       # Test-process exit closes its Ports and delivers EOF to each child. Do

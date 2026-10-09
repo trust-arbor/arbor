@@ -109,16 +109,25 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
   end
 
   defp join_within(root, rel) do
-    case SafePath.safe_join(root, rel) do
-      {:ok, lexical} ->
-        if SafePath.within?(lexical, root), do: {:ok, lexical}, else: {:error, :path_escape}
+    # Containment here is lexical. Resolving the leaf would follow a symlink
+    # and report path_escape before lstat can return the symlink-specific error.
+    expanded_root = Path.expand(root)
 
-      {:error, :path_traversal} ->
-        {:error, :path_escape}
+    if absolute_path?(rel) do
+      {:error, :path_escape}
+    else
+      candidate = Path.expand(Path.join(expanded_root, rel))
 
-      error ->
-        error
+      if lexical_within?(candidate, expanded_root),
+        do: {:ok, candidate},
+        else: {:error, :path_escape}
     end
+  end
+
+  defp absolute_path?(path), do: String.starts_with?(path, "/") or String.starts_with?(path, "\\")
+
+  defp lexical_within?(path, root) do
+    path == root or String.starts_with?(path, root <> "/")
   end
 
   defp lstat_destination(path, prefix) do
@@ -316,7 +325,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
   end
 
   defp require_within(path, root) do
-    if SafePath.within?(path, root), do: :ok, else: {:error, :destination_path_escape}
+    if lexical_within?(Path.expand(path), Path.expand(root)),
+      do: :ok,
+      else: {:error, :destination_path_escape}
   end
 
   defp require_parent_unredirected(parent, root) do

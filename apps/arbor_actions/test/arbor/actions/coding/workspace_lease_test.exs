@@ -2130,13 +2130,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
         assert map_size(:sys.get_state(server).retained_by_id) == 1
       end)
 
-      assert_eventually(
-        fn ->
-          refute File.dir?(expected_path)
-          assert map_size(:sys.get_state(server).retained_by_id) == 0
-        end,
-        300
-      )
+      # Expiry archives the branch, then revalidates git storage before every
+      # command on the registry process. The directory disappears only after
+      # that synchronous callback reaches worktree removal.
+      assert_eventually(fn -> refute File.dir?(expected_path) end, 3_000)
+
+      assert map_size(:sys.get_state(server, 30_000).retained_by_id) == 0
 
       assert is_pid(registry_pid)
       assert Process.alive?(registry_pid)

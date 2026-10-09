@@ -2,7 +2,6 @@ defmodule Arbor.Persistence.ConversationCommandActivityOrderingRegressionTest do
   use Arbor.Persistence.DatabaseCase, async: false
   alias Arbor.Persistence
   @moduletag :database
-  @moduletag :fast
 
   test "security regression latest active page and older cutoff survive newer admissions and live updates" do
     scope = scope("latest")

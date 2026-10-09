@@ -95,23 +95,21 @@ defmodule Arbor.Voice.EgressAuthority do
          true <- safe_apply(security, :uri_registered?, [resource_uri]),
          {:ok, expires_at} <- route_expiry(reserved_ms),
          {:ok, capability_id} <-
-           safe_apply(security, :grant_capability_id, [
-             [
-               principal: config.agent_id,
-               resource: resource_uri,
-               expires_at: expires_at,
-               delegation_depth: 0,
-               session_id: session_id,
-               task_id: nil,
-               principal_scope: config.user_id,
-               constraints: %{
-                 egress: %{
-                   max_tier: :external_provider,
-                   destinations: [route.destination]
-                 }
+           grant_route_capability(security, Map.get(config, :conversation_binding),
+             principal: config.agent_id,
+             resource: resource_uri,
+             expires_at: expires_at,
+             delegation_depth: 0,
+             session_id: session_id,
+             task_id: nil,
+             principal_scope: config.user_id,
+             constraints: %{
+               egress: %{
+                 max_tier: :external_provider,
+                 destinations: [route.destination]
                }
-             ]
-           ]),
+             }
+           ),
          {:ok, capability_id} <- admit_capability_id(capability_id) do
       {:ok,
        %{
@@ -176,7 +174,11 @@ defmodule Arbor.Voice.EgressAuthority do
       model: route.model
     ]
 
-    case safe_apply(authority.security_module, :issue_disclosure_capability_id, [issue_opts]) do
+    case issue_route_disclosure(
+           authority.security_module,
+           issue_opts,
+           authority.conversation_binding
+         ) do
       {:ok, capability_id} when is_binary(capability_id) ->
         case canonical_capability_id?(capability_id) do
           true ->
@@ -665,6 +667,35 @@ defmodule Arbor.Voice.EgressAuthority do
 
   defp capability_cleanup(security, capability_id) do
     fn -> revoke_capability(security, capability_id) end
+  end
+
+  # Real Security refuses a grant, disclosure, or revoke that has no actor.
+  # The supervised owner holds the mutation capability and spends it in-process.
+  # Test doubles keep the direct call so their traces stay in the caller.
+  defp grant_route_capability(Arbor.Security, binding, opts) do
+    Arbor.Voice.EgressGrantOwner.grant_route(opts, binding)
+  end
+
+  defp grant_route_capability(security, _binding, opts) do
+    safe_apply(security, :grant_capability_id, [opts])
+  end
+
+  defp issue_route_disclosure(Arbor.Security, opts, binding) do
+    Arbor.Voice.EgressGrantOwner.issue_disclosure(opts, binding)
+  end
+
+  defp issue_route_disclosure(security, opts, _binding) do
+    safe_apply(security, :issue_disclosure_capability_id, [opts])
+  end
+
+  defp revoke_capability(Arbor.Security, capability_id) do
+    result = Arbor.Voice.EgressGrantOwner.revoke(capability_id)
+
+    case result do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+      _ -> {:error, :capability_revoke_failed}
+    end
   end
 
   defp revoke_capability(security, capability_id) do

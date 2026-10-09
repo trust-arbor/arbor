@@ -141,7 +141,10 @@ defmodule Arbor.Actions.Reports.BuildMorningDigest do
   end
 
   defp authorized_path(relative, workdir, context, operation) do
-    with {:ok, path} <- SafePath.resolve_within(relative, workdir),
+    # `resolve_within/2` follows a symlink before `lstat`, so a link inside the
+    # grant would be checked as its target. The lexical path keeps the link
+    # visible to the directory and regular-file refusals below.
+    with {:ok, path} <- SafePath.lexical_child(workdir, relative),
          :ok <- canonical_parent(path, workdir),
          :ok <- regular_or_absent(path),
          {:ok, ^path} <- FileActions.authorize_file_op(context, path, operation),

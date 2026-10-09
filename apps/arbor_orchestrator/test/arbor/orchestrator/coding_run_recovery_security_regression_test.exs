@@ -243,13 +243,11 @@ defmodule Arbor.Orchestrator.CodingRunRecoverySecurityRegressionTest do
   end
 
   defp broker_authority_count do
-    case Process.whereis(SigningAuthorityBroker) do
-      pid when is_pid(pid) ->
-        state = :sys.get_state(pid)
-        map_size(Map.get(state, :authorities, %{}))
-
-      _ ->
-        0
+    # Live authorities sit in process-private state. :sys.get_state/1 returns
+    # only the custody token, so the count is the broker's redacted snapshot.
+    case SigningAuthorityBroker.debug_state() do
+      %{authority_count: count} when is_integer(count) -> count
+      _ -> 0
     end
   end
 

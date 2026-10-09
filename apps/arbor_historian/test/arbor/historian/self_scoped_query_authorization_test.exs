@@ -12,15 +12,9 @@ defmodule Arbor.Historian.SelfScopedQueryAuthorizationTest do
   # minted the parent, and was refused on its own history.
 
   setup do
-    for mod <- [
-          Arbor.Security.Identity.Registry,
-          Arbor.Security.SystemAuthority,
-          Arbor.Security.CapabilityStore,
-          Arbor.Security.Reflex.Registry,
-          Arbor.Security.Constraint.RateLimiter
-        ] do
-      unless Process.whereis(mod), do: start_supervised!(mod)
-    end
+    # CapabilityStore refuses to hydrate unless the audit journal is already
+    # up. Starting the store by itself crash-loops the security supervisor.
+    :ok = Arbor.Security.TestBootstrap.start!()
 
     agent = "agent_hist_#{:erlang.unique_integer([:positive])}"
 

@@ -193,18 +193,48 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
           boot_profile: fixture_boot_profile()
         ]
       ],
-      arbor_security: [
-        start_children: true,
-        storage_backend: Arbor.Security.Store.JSONFile,
-        audit_journal_mode: :ephemeral,
-        distributed_signals: false
-      ]
+      # The peer VM loads only this sys.config. Carry the parent's plain
+      # security settings (owner roles, receipt issuer, and the rest of the
+      # boot table) and override the keys this fixture must isolate.
+      arbor_security:
+        parent_security_config()
+        |> Keyword.merge(
+          start_children: true,
+          storage_backend: Arbor.Security.Store.JSONFile,
+          audit_journal_mode: :ephemeral,
+          distributed_signals: false,
+          session_token_secret:
+            "e0b3-peer-" <> Base.encode64(:crypto.strong_rand_bytes(32), padding: false)
+        )
     ]
 
     encoded_sys_config = :io_lib.format(~c"~tp.~n", [sys_config])
     File.write!(Path.join(release_dir, "sys.config"), encoded_sys_config)
 
     root
+  end
+
+  # Paths and the parent secret stay out of the fixture file. The probe
+  # installs its own ephemeral authority root after sys.config is applied.
+  defp parent_security_config do
+    dropped = [:authority_state_root, :revocation_ledger_path, :session_token_secret]
+
+    :arbor_security
+    |> Application.get_all_env()
+    |> Enum.filter(fn {key, value} -> key not in dropped and consultable?(value) end)
+  end
+
+  defp consultable?(term) do
+    text = :erlang.iolist_to_binary(:io_lib.format(~c"~tp.~n", [term]))
+
+    with {:ok, tokens, _} <- :erl_scan.string(String.to_charlist(text)),
+         {:ok, parsed} <- :erl_parse.parse_term(tokens) do
+      parsed == term
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp fixture_boot_profile do

@@ -116,6 +116,16 @@ defmodule Arbor.Memory.Events.ContentCore do
   end
 
   @spec apply_verify_result(report(), authority(), :absent | :present | :uncertain) :: report()
+  # Historian's read-only absence proof covers its durable source only. A
+  # failed delete may have left the hot projection resident, so durable
+  # absence cannot turn that partial cleanup into a successful result.
+  def apply_verify_result(report, :historian, :absent) do
+    case Map.fetch!(report, :historian) do
+      :delete_succeeded_unverified -> put_status(report, :historian, :absent)
+      _other -> report
+    end
+  end
+
   def apply_verify_result(report, key, :absent) when key in @authority_order do
     put_status(report, key, :absent)
   end

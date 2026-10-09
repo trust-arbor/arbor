@@ -10,6 +10,23 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Trust
 
+  defmodule Registration do
+    @moduledoc false
+
+    # The lease calls this facade directly, without the scheduler actor
+    # authority. The one-argument production mutations are fail-closed, so the
+    # stub uses the test-only fixture mutations.
+    def register(identity), do: Security.register_identity_fixture(identity)
+
+    def grant(opts) when is_list(opts), do: Security.grant_fixture(opts)
+
+    def revoke(capability_id) when is_binary(capability_id),
+      do: Security.revoke_fixture(capability_id)
+
+    def deregister(agent_id) when is_binary(agent_id),
+      do: Security.deregister_identity_fixture(agent_id)
+  end
+
   @envelope_uri "arbor://fs/write/reports/**"
   @lobby_uri "arbor://orchestrator/execute"
   @per_node_resources [
@@ -41,8 +58,14 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
   defmodule CleanupSecurityStub do
     defdelegate generate_identity(opts), to: Arbor.Security
-    defdelegate register_identity(identity), to: Arbor.Security
-    defdelegate grant(opts), to: Arbor.Security
+
+    defdelegate register_identity(identity),
+      to: Arbor.Scheduler.RunIdentityTest.Registration,
+      as: :register
+
+    defdelegate grant(opts),
+      to: Arbor.Scheduler.RunIdentityTest.Registration,
+      as: :grant
 
     defdelegate build_signing_authority_acquisition_proof(agent_id, private_key, opts),
       to: Arbor.Security
@@ -54,11 +77,15 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end
 
     def revoke(cap_id) do
-      maybe_fail(:capability, fn -> Arbor.Security.revoke(cap_id) end)
+      maybe_fail(:capability, fn ->
+        Arbor.Scheduler.RunIdentityTest.Registration.revoke(cap_id)
+      end)
     end
 
     def deregister_identity(agent_id) do
-      maybe_fail(:identity, fn -> Arbor.Security.deregister_identity(agent_id) end)
+      maybe_fail(:identity, fn ->
+        Arbor.Scheduler.RunIdentityTest.Registration.deregister(agent_id)
+      end)
     end
 
     defp maybe_fail(operation, fallback) do
@@ -91,21 +118,28 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
   defmodule ProvisionRaceSecurityStub do
     defdelegate generate_identity(opts), to: Arbor.Security
-    defdelegate revoke(cap_id), to: Arbor.Security
-    defdelegate deregister_identity(agent_id), to: Arbor.Security
+
+    defdelegate revoke(cap_id),
+      to: Arbor.Scheduler.RunIdentityTest.Registration,
+      as: :revoke
+
+    defdelegate deregister_identity(agent_id),
+      to: Arbor.Scheduler.RunIdentityTest.Registration,
+      as: :deregister
+
     defdelegate close_signing_authority(authority), to: Arbor.Security
 
     defdelegate build_signing_authority_acquisition_proof(agent_id, private_key, opts),
       to: Arbor.Security
 
     def register_identity(identity) do
-      result = Arbor.Security.register_identity(identity)
+      result = Arbor.Scheduler.RunIdentityTest.Registration.register(identity)
       if result == :ok, do: send(test_pid(), {:race_agent, identity.agent_id})
       maybe_pause_identity(result, identity.agent_id)
     end
 
     def grant(opts) do
-      Arbor.Security.grant(opts)
+      Arbor.Scheduler.RunIdentityTest.Registration.grant(opts)
       |> maybe_pause(:grant)
     end
 
@@ -585,7 +619,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       assert {:ok, _signed_request} =
                Security.sign_with_authority(
                  handle.signing_authority,
-                 "survived-#{target}-restart"
+                 "arbor://test/signing/survived-#{target}-restart"
                )
 
       assert :ok = RunIdentity.revoke(handle)
@@ -697,13 +731,10 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end)
 
     # The scheduler test application starts with runtime children disabled.
-    assert {:ok, _supervisor} =
-             Supervisor.start_child(
-               Arbor.Scheduler.Supervisor,
-               {Arbor.Scheduler.RunLeaseSupervisor,
-                scheduler_mutation_token:
-                  Application.fetch_env!(:arbor_scheduler, :test_scheduler_mutation_token)}
-             )
+    # Reaping is authenticated through Scheduler.Identity, so that process and
+    # the lease reconciler have to be back before the lost namespace is reaped.
+    :ok = RunLeaseIdentityFixture.ensure_started!()
+    assert is_pid(Process.whereis(Arbor.Scheduler.RunLeaseSupervisor))
 
     assert_eventually(fn -> run_state_removed?(handle) end)
     assert is_nil(safe_lease_whereis(handle.lease))
@@ -1004,19 +1035,18 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       deregister_identity: :ok
     }
 
-    failures = [
+    # Lookup, capability listing, and trust deletion still go through the
+    # injected facades. Revoke and deregister are authenticated through
+    # Scheduler.Identity, so a failing facade cannot force those boundaries.
+    facade_failures = [
       {:lookup, {:error, :lookup_down}, {:identity_lookup_failed, :lookup_down}},
       {:list_capabilities, {:error, :cap_store_down},
        {"agent_stale", {:capability_lookup_failed, :cap_store_down}}},
-      {:revoke, {:error, :revoke_down},
-       {"agent_stale", {:capability_revoke_failed, :revoke_down}}},
       {:delete_trust_profile, {:error, :trust_down},
-       {"agent_stale", {:trust_profile_delete_failed, :trust_down}}},
-      {:deregister_identity, {:error, :registry_down},
-       {"agent_stale", {:identity_deregister_failed, :registry_down}}}
+       {"agent_stale", {:trust_profile_delete_failed, :trust_down}}}
     ]
 
-    for {operation, response, expected} <- failures do
+    for {operation, response, expected} <- facade_failures do
       Application.put_env(
         :arbor_scheduler,
         :run_identity_reaper_responses,
@@ -1031,6 +1061,35 @@ defmodule Arbor.Scheduler.RunIdentityTest do
                  identity_name: "scheduler-run:stable-runtime"
                )
     end
+
+    for operation <- [:revoke, :deregister_identity] do
+      Application.put_env(
+        :arbor_scheduler,
+        :run_identity_reaper_responses,
+        Map.put(base, operation, {:error, :forced_facade_failure})
+      )
+
+      assert :ok =
+               run_reconciliation(
+                 security_facade: ReaperFacadeStub,
+                 trust_facade: ReaperFacadeStub,
+                 active_agent_ids: MapSet.new(),
+                 identity_name: "scheduler-run:stable-runtime"
+               )
+    end
+
+    Application.put_env(:arbor_scheduler, :run_identity_reaper_responses, base)
+
+    assert {:error,
+            {:run_identity_reconciliation_failed,
+             {"agent_stale", {:capability_revoke_failed, :scheduler_mutation_unauthorized}}}} =
+             run_reconciliation(
+               security_facade: ReaperFacadeStub,
+               trust_facade: ReaperFacadeStub,
+               active_agent_ids: MapSet.new(),
+               identity_name: "scheduler-run:stable-runtime",
+               scheduler_mutation_token: make_ref()
+             )
   end
 
   test "reaper child fails scheduler startup closed on reconciliation error" do

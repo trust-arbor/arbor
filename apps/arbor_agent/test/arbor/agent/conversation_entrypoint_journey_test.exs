@@ -110,10 +110,16 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
       opts: [repo: Repo]
     })
 
+    set_env(:arbor_security, :authority_audit_consumer_name, Arbor.Historian.AuthorityAuditPuller)
+    set_env(:arbor_security, :authority_audit_consumer_application, :arbor_historian)
+
     assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == nil,
            "Run this journey alone with its own authority audit consumer."
 
-    start_supervised!({Arbor.Historian.AuthorityAuditPuller, poll_interval_ms: 25})
+    # The consumer gate admits only the Historian application's child. An
+    # ExUnit-supervised puller is registered, then flush returns
+    # :audit_source_unavailable.
+    start_authority_audit_puller!()
 
     for {name, child} <- [
           {Arbor.Orchestrator.EventRegistry,
@@ -1454,6 +1460,26 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
         "\n",
         & &1["text"]
       )
+
+  defp start_authority_audit_puller! do
+    supervisor = Process.whereis(Arbor.Historian.Supervisor)
+    assert is_pid(supervisor), "historian supervisor is not running"
+
+    assert {:ok, puller} =
+             Supervisor.start_child(
+               supervisor,
+               {Arbor.Historian.AuthorityAuditPuller, [poll_interval_ms: 25]}
+             )
+
+    assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == puller
+
+    on_exit(fn ->
+      if is_pid(supervisor) and Process.alive?(supervisor) do
+        Supervisor.terminate_child(supervisor, Arbor.Historian.AuthorityAuditPuller)
+        Supervisor.delete_child(supervisor, Arbor.Historian.AuthorityAuditPuller)
+      end
+    end)
+  end
 
   defp set_env(app, key, value) do
     previous = Application.fetch_env(app, key)

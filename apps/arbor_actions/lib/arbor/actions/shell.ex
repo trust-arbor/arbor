@@ -97,23 +97,29 @@ defmodule Arbor.Actions.Shell do
   defp authorize_prepared(agent_id, command, prepared, opts) do
     resource = "arbor://shell/exec/#{prepared.command_name}"
 
-    auth_opts =
-      [
-        command: command,
-        path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
-        verify_identity: false
-      ]
-      |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
-      |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
-      |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
-      |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
-      |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
+    with {:ok, params} <- bound_shell_params(command, opts),
+         {:ok, digest} <- shell_argument_digest(opts, params) do
+      auth_opts =
+        [
+          command: command,
+          path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
+          verify_identity: false
+        ]
+        |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
+        |> maybe_add_opt(:argument_digest, digest)
+        |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
+        |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
+        |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
+        |> maybe_add_opt(:params, params)
 
-    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} -> {:ok, :authorized}
-      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-      {:error, _reason} -> {:error, :unauthorized}
-      _other -> {:error, :unauthorized}
+      case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
+        {:ok, :authorized} -> {:ok, :authorized}
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, _reason} -> {:error, :unauthorized}
+        _other -> {:error, :unauthorized}
+      end
+    else
+      _ -> {:error, :unauthorized}
     end
   end
 
@@ -137,6 +143,7 @@ defmodule Arbor.Actions.Shell do
         :allowlist,
         :gate_command,
         :approved_invocation,
+        :argument_digest,
         :approval_context,
         :task_id,
         :session_id,
@@ -150,6 +157,55 @@ defmodule Arbor.Actions.Shell do
 
   defp maybe_add_opt(opts, _key, nil), do: opts
   defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # A caller may supply the full action parameters only when the values that
+  # select the shell effect match this invocation. In particular, a receipt
+  # for one command or working directory cannot authorize another.
+  defp bound_shell_params(command, opts) do
+    actual =
+      %{command: command}
+      |> maybe_put_param(:cwd, Keyword.get(opts, :cwd))
+      |> maybe_put_param(:sandbox, Keyword.get(opts, :sandbox))
+
+    case Keyword.get(opts, :params) do
+      nil ->
+        {:ok, actual}
+
+      %{} = params ->
+        if Enum.all?([:command, :cwd, :sandbox], fn key ->
+             actual_value = Map.get(actual, key)
+             string_key = Atom.to_string(key)
+             atom_present? = Map.has_key?(params, key)
+             string_present? = Map.has_key?(params, string_key)
+
+             (actual_value == nil or atom_present? or string_present?) and
+               (not atom_present? or Map.get(params, key) == actual_value) and
+               (not string_present? or Map.get(params, string_key) == actual_value)
+           end) do
+          {:ok, params}
+        else
+          {:error, :argument_mismatch}
+        end
+
+      _ ->
+        {:error, :argument_mismatch}
+    end
+  end
+
+  defp maybe_put_param(params, _key, nil), do: params
+  defp maybe_put_param(params, key, value), do: Map.put(params, key, value)
+
+  # Never trust an explicit digest without comparing it with the checked
+  # parameters. Security's receipt broker sees only this digest, not command.
+  defp shell_argument_digest(opts, params) do
+    with {:ok, digest} <- Arbor.Security.approval_argument_digest(params) do
+      case Keyword.get(opts, :argument_digest) do
+        nil -> {:ok, digest}
+        ^digest -> {:ok, digest}
+        _ -> {:error, :argument_mismatch}
+      end
+    end
+  end
 
   defmodule Execute do
     @moduledoc """

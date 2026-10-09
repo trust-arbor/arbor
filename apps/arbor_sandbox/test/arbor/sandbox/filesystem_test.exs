@@ -1,6 +1,7 @@
 defmodule Arbor.Sandbox.FilesystemTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Common.SafePath
   alias Arbor.Sandbox.Filesystem
 
   setup do
@@ -67,7 +68,9 @@ defmodule Arbor.Sandbox.FilesystemTest do
     test "resolves relative paths", %{base_path: base_path} do
       {:ok, fs} = Filesystem.create("agent_test_6", :limited, base_path: base_path)
       assert {:ok, path} = Filesystem.resolve_path(fs, "/subdir/file.txt")
-      assert String.starts_with?(path, fs.base_path)
+      # resolve_path returns the canonical path. On macOS tmp is /var -> /private/var.
+      assert {:ok, canonical_base} = SafePath.resolve_real(fs.base_path)
+      assert String.starts_with?(path, canonical_base)
       assert String.ends_with?(path, "/subdir/file.txt")
     end
 

@@ -133,9 +133,23 @@ defmodule Arbor.Commands.PlatformInventory do
   end
 
   defp resolve_review_path(root, path) do
-    case SafePath.resolve_within(path, root) do
-      {:ok, resolved} -> {:ok, resolved}
-      {:error, _reason} -> {:error, :review_path_escape}
+    with {:ok, lexical} <- SafePath.lexical_child(root, path) do
+      case SafePath.resolve_real(lexical) do
+        {:ok, ^lexical} ->
+          {:ok, lexical}
+
+        {:ok, real} ->
+          if SafePath.within?(real, root) do
+            {:error, :review_symlink_redirection}
+          else
+            {:error, :review_path_escape}
+          end
+
+        {:error, :not_found} ->
+          {:ok, lexical}
+      end
+    else
+      _error -> {:error, :review_path_escape}
     end
   end
 

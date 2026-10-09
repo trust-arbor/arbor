@@ -10,6 +10,11 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
   @moduletag timeout: 60_000
 
   setup_all do
+    case Application.load(:swoosh) do
+      :ok -> :ok
+      {:error, {:already_loaded, :swoosh}} -> :ok
+    end
+
     cond do
       not Code.ensure_loaded?(LocalCluster) ->
         {:skip, "LocalCluster is unavailable"}
@@ -31,16 +36,12 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
     assert {:ok, cluster} =
              LocalCluster.start_link(2,
                prefix: prefix,
-               applications: [
-                 :arbor_kernel,
-                 :arbor_kernel_runtime,
-                 :arbor_security,
-                 :arbor_shell,
-                 :arbor_comms
-               ]
+               environment: [swoosh: [api_client: false]],
+               applications: []
              )
 
     assert {:ok, [origin_node, peer_node]} = LocalCluster.nodes(cluster)
+    assert_peer_authority_started([origin_node, peer_node])
 
     request_id = "irq_cluster_#{System.unique_integer([:positive])}"
 
@@ -93,16 +94,12 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
     assert {:ok, cluster} =
              LocalCluster.start_link(2,
                prefix: prefix,
-               applications: [
-                 :arbor_kernel,
-                 :arbor_kernel_runtime,
-                 :arbor_security,
-                 :arbor_shell,
-                 :arbor_comms
-               ]
+               environment: [swoosh: [api_client: false]],
+               applications: []
              )
 
     assert {:ok, [origin_node, peer_node]} = LocalCluster.nodes(cluster)
+    assert_peer_authority_started([origin_node, peer_node])
     request_id = "irq_deadline_#{System.unique_integer([:positive])}"
 
     assert {:ok, interaction} =
@@ -147,6 +144,22 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
              ])
 
     assert :ok = LocalCluster.stop(cluster)
+  end
+
+  defp assert_peer_authority_started(nodes) do
+    for node <- nodes do
+      assert :erpc.call(node, Application, :load, [:swoosh]) in [
+               :ok,
+               {:error, {:already_loaded, :swoosh}}
+             ]
+
+      assert :ok = :erpc.call(node, Application, :put_env, [:swoosh, :api_client, false])
+      assert {:ok, _} = :erpc.call(node, Application, :ensure_all_started, [:arbor_comms])
+
+      assert is_pid(
+               :erpc.call(node, Process, :whereis, [Arbor.Comms.InteractionRegistry.Authority])
+             )
+    end
   end
 
   defp assert_eventually(fun, attempts \\ 200)

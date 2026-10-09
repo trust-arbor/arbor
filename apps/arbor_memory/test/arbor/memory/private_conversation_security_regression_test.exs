@@ -785,26 +785,50 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
       File.rm_rf!(root)
     end)
 
+    assert {:ok, identity} = Arbor.Security.SystemAuthority.identity_for_test()
     Application.put_env(:arbor_security, :system_authority_mode, :persistent)
     Application.put_env(:arbor_security, :master_key_path, Path.join(root, "master.key"))
     replace_root_store!(root)
+    # Keep the ephemeral root that already signed this test's admissions. A new
+    # key would make those grants fail closed as an invalid admission.
+    assert :ok = Arbor.Security.SystemAuthority.persist_keypair_for_test(identity)
     restart_root!()
     root
   end
 
   defp replace_root_store!(root) do
     stop_root_store!()
+    supervisor = security_supervisor!()
 
-    assert {:ok, pid} =
-             Arbor.Security.AuthorityStore.start_link(
-               name: :arbor_security_signing_keys,
-               backend: Arbor.Security.Store.JSONFile,
-               backend_opts: [base_dir: Path.join(root, "store")],
-               namespace: "signing_keys",
-               hydration_limit: 100
+    assert {:ok, _pid} =
+             Supervisor.start_child(
+               supervisor,
+               Supervisor.child_spec(
+                 {Arbor.Security.AuthorityStore,
+                  [
+                    name: :arbor_security_signing_keys,
+                    backend: Arbor.Security.Store.JSONFile,
+                    backend_opts: [base_dir: Path.join(root, "store")],
+                    namespace: "signing_keys",
+                    hydration_limit: 100,
+                    defer_hydration: true
+                  ]},
+                 id: :arbor_security_signing_keys
+               )
              )
 
-    Process.unlink(pid)
+    assert :ok =
+             Arbor.Security.AuthorityStore.complete_startup(
+               supervisor,
+               :arbor_security_signing_keys
+             )
+  end
+
+  defp security_supervisor! do
+    case Process.whereis(Arbor.Security.Supervisor) do
+      pid when is_pid(pid) -> pid
+      _other -> flunk("security supervisor is not running")
+    end
   end
 
   defp stop_root_store! do

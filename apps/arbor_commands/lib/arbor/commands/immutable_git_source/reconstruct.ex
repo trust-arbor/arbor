@@ -176,13 +176,17 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
   defp admit_relative_dest(_relative_dest), do: {:error, "invalid_reconstruct_request"}
 
   defp resolve_relative_dest(parent, relative_dest) when is_binary(relative_dest) do
-    with :ok <- admit_relative_dest(relative_dest) do
-      dest = Path.join(parent, hd(Path.split(relative_dest)))
-
-      case SafePath.resolve_within(dest, parent) do
-        {:ok, ^dest} -> {:ok, dest}
-        _other -> {:error, "invalid_reconstruct_request"}
-      end
+    # `resolve_within/2` canonicalizes ancestors, so a macOS tmp parent under
+    # `/var` does not byte-match `Path.join/2`. `lexical_child/2` keeps the
+    # child lexical after that ancestor resolution; a symlink at the child
+    # still disagrees with `resolve_within/2` and is rejected.
+    with :ok <- admit_relative_dest(relative_dest),
+         {:ok, lexical} <- SafePath.lexical_child(parent, relative_dest),
+         {:ok, resolved} <- SafePath.resolve_within(lexical, parent),
+         true <- resolved == lexical do
+      {:ok, lexical}
+    else
+      _ -> {:error, "invalid_reconstruct_request"}
     end
   end
 

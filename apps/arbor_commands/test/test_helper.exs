@@ -14,4 +14,4 @@ end
 
 # :benchmark — measurement harnesses (e.g. the mind/body phase-gate chat
 # overhead baseline); run explicitly with --include benchmark.
-ExUnit.start(exclude: [:llm, :llm_local, :benchmark])
+ExUnit.start(exclude: [:database, :llm, :llm_local, :benchmark])

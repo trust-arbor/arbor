@@ -709,21 +709,32 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   defp release(server, workspace_id, mode),
     do: WorkspaceLeaseRegistry.release(workspace_id, mode, %{server: server})
 
+  # Expiry holds the registry across contained git (~100ms each, measured
+  # 2026-10-08; an observe-plus-archive chain was ~5s idle). :sys.get_state/1
+  # times out at 5s while that handler is still running. 30s is the
+  # archive-settlement budget these tests already wait on for the directory.
   defp retained_state(server) do
-    state = :sys.get_state(server_pid(server))
+    state = :sys.get_state(server_pid(server), @owner_operation_timeout)
     {Map.keys(state.retained_by_id), Map.keys(state.retained_by_target)}
   end
 
-  defp retained_count(server), do: map_size(:sys.get_state(server_pid(server)).retained_by_id)
-  defp active_count(server), do: map_size(:sys.get_state(server_pid(server)).leases)
+  defp retained_count(server),
+    do: map_size(:sys.get_state(server_pid(server), @owner_operation_timeout).retained_by_id)
+
+  defp active_count(server),
+    do: map_size(:sys.get_state(server_pid(server), @owner_operation_timeout).leases)
 
   defp retained_record(server) do
-    [{_id, retained}] = Map.to_list(:sys.get_state(server_pid(server)).retained_by_id)
+    [{_id, retained}] =
+      Map.to_list(:sys.get_state(server_pid(server), @owner_operation_timeout).retained_by_id)
+
     retained
   end
 
   defp retained_target_and_generation(server) do
-    [{target, retained}] = Map.to_list(:sys.get_state(server_pid(server)).retained_by_target)
+    [{target, retained}] =
+      Map.to_list(:sys.get_state(server_pid(server), @owner_operation_timeout).retained_by_target)
+
     {target, retained.expiry_generation}
   end
 

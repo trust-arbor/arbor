@@ -24,6 +24,8 @@ defmodule Arbor.Voice.Application do
       ),
       Arbor.Voice.ResourceSupervisor,
       Arbor.Voice.SessionSupervisor,
+      Arbor.Voice.EgressGrantLedger,
+      Arbor.Voice.EgressGrantOwner,
       Supervisor.child_spec(
         {DynamicSupervisor, strategy: :one_for_one, name: Arbor.Voice.DeskWorkerSupervisor},
         id: Arbor.Voice.DeskWorkerSupervisor

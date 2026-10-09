@@ -83,6 +83,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       Path.join(System.tmp_dir!(), "security-journey-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(directory)
+    {:ok, directory} = Arbor.Common.SafePath.resolve_within(directory, directory)
     fixture = Arbor.Agent.security_qualification_fixture()
     path = Path.join(directory, fixture["filename"])
     File.write!(path, fixture["content"])
@@ -102,8 +103,15 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
         constraints: %{}
       )
 
+    {:ok, revoke_cap} =
+      Security.grant_fixture(
+        principal: owner.agent_id,
+        resource: "arbor://security/revoke/#{owner.agent_id}"
+      )
+
     on_exit(fn ->
       _ = Security.revoke_fixture(cap.id)
+      _ = Security.revoke_fixture(revoke_cap.id)
       _ = Security.close_signing_authority(authority)
       _ = Security.delete_signing_key_fixture(owner.agent_id)
       _ = Security.deregister_identity_fixture(owner.agent_id)
@@ -328,16 +336,16 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     assert {:ok, _} = Security.sign_with_authority(c.authority, "arbor://fs/read")
   end
 
-  test "ordinary standing-policy JIT remains enabled outside the journey", c do
+  test "standing policy cannot mint without a signed grant request outside the journey", c do
     assert :ok = Security.revoke_fixture(c.cap.id)
     {:ok, signed} = Security.sign_with_authority(c.authority, c.resource)
 
-    assert {:ok, :authorized} =
+    assert {:error, :unauthorized} =
              Trust.authorize(c.owner.agent_id, c.resource, :read, signed_request: signed)
 
     {:ok, caps} = Security.list_capabilities(c.owner.agent_id)
 
-    assert Enum.any?(
+    refute Enum.any?(
              caps,
              &(&1.id != c.cap.id and Security.capability_authorizes?(&1, c.resource))
            )

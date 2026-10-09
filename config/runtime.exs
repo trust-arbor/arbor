@@ -67,6 +67,28 @@ if session_token_secret = System.get_env("ARBOR_SESSION_TOKEN_SECRET") do
   end
 end
 
+# These service principals must have stored signing keys and their exact
+# mutation capabilities provisioned by the operator before they are used.
+if config_env() != :test do
+  for {env, app, key} <- [
+        {"ARBOR_ACTIVATION_FAILURE_PRINCIPAL_ID", :arbor_agent, :activation_failure_principal_id},
+        {"ARBOR_LEASE_GRANT_PRINCIPAL_ID", :arbor_agent, :lease_grant_principal_id},
+        {"ARBOR_VOICE_EGRESS_GRANT_PRINCIPAL_ID", :arbor_voice, :egress_grant_principal_id}
+      ] do
+    case System.get_env(env) do
+      nil ->
+        :ok
+
+      principal when is_binary(principal) ->
+        if Regex.match?(~r/\Aagent_[0-9a-f]{64}\z/, principal) do
+          config app, key, principal
+        else
+          raise "#{env} must be a canonical agent ID"
+        end
+    end
+  end
+end
+
 # Native audio is an explicit host opt-in while physical qualification is pending.
 # Selecting the driver never enumerates devices or asks for microphone access.
 # Tests use their own injected drivers and ignore ambient host preferences.

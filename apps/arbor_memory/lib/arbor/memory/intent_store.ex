@@ -648,7 +648,7 @@ defmodule Arbor.Memory.IntentStore do
             do_record_prepared(state, domain, agent_id, prepared)
 
           next_state = finish_public_root(next_state, agent_id, lease, disposition)
-          emit_record_signals(signal)
+          schedule_record_signals(signal)
           {:reply, reply, next_state}
         rescue
           _ ->
@@ -2355,6 +2355,14 @@ defmodule Arbor.Memory.IntentStore do
     _, _ -> :ok
   end
 
+  # Subscriber delivery is synchronous. Emitting on this process deadlocks a
+  # handler that reads the store back, and the callback timeout then drops the
+  # signal. Detach only after the caller returns and the finished state is installed.
+  defp schedule_record_signals(signal) do
+    spawn(fn -> emit_record_signals(signal) end)
+    :ok
+  end
+
   defp emit_record_signals({:recorded, :intent, agent_id, prepared}) do
     Signals.emit_intent_formed(agent_id, prepared.value)
     Logger.debug("Intent recorded")
@@ -3971,8 +3979,8 @@ defmodule Arbor.Memory.IntentStore do
         {reply, next_state, disposition, signal} =
           do_record_prepared(state, :intent, xfer.agent_id, prepared, xfer.deadline_ms)
 
-        emit_record_signals(signal)
         next_state = finish_public_root(next_state, xfer.agent_id, xfer.lease, disposition)
+        schedule_record_signals(signal)
         {intent_transfer_outcome(reply, Map.get(plan, :domain_id)), next_state}
 
       {:error, reason} ->

@@ -141,6 +141,37 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
   defmodule FakeSecurity do
     @moduledoc false
 
+    alias Arbor.Contracts.Security.{SigningAuthority, SigningAuthorityBootstrap}
+
+    # CodingTaskExecutor.security_facade/0 admits a module only when it exports
+    # the claim/bootstrap pair. CodingAuthority.acquire/3 then asks the injected
+    # provider for a bootstrap and claims it back through this same module.
+    def issue_signing_authority_bootstrap(agent_id, purpose) do
+      SigningAuthorityBootstrap.new(
+        token: :crypto.hash(:sha256, "g3b-bootstrap-" <> agent_id),
+        principal_id: agent_id,
+        purpose: purpose
+      )
+    end
+
+    def claim_signing_authority(%SigningAuthorityBootstrap{
+          principal_id: agent_id,
+          purpose: purpose
+        }) do
+      SigningAuthority.new(
+        token: :crypto.hash(:sha256, "g3b-authority-" <> agent_id),
+        principal_id: agent_id,
+        purpose: purpose
+      )
+    end
+
+    def claim_signing_authority(_bootstrap), do: {:error, :invalid_signing_authority_bootstrap}
+
+    def close_signing_authority_bootstrap(%SigningAuthorityBootstrap{}), do: :ok
+
+    def close_signing_authority_bootstrap(_),
+      do: {:error, :invalid_signing_authority_bootstrap}
+
     def load_signing_key(agent_id),
       do: {:ok, :crypto.hash(:sha256, "g3b-key-" <> agent_id)}
 
@@ -386,6 +417,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
       repos: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
       worktrees: Application.get_env(:arbor_orchestrator, :coding_worktree_roots),
       security: Application.get_env(:arbor_orchestrator, :security_module),
+      authority_provider: Application.get_env(:arbor_orchestrator, :coding_authority_provider),
       available: Application.get_env(:arbor_orchestrator, :security_available_override),
       status: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
       path: Application.get_env(:arbor_orchestrator, :coding_pipeline_path),
@@ -424,6 +456,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     Application.put_env(:arbor_orchestrator, :coding_repo_roots, [repo_scope])
     Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [worktrees])
     Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
+    Application.put_env(:arbor_orchestrator, :coding_authority_provider, FakeSecurity)
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
     Application.put_env(:arbor_orchestrator, :pipeline_status_module, PipelineStatusETS)
 
@@ -459,6 +492,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
       restore(:arbor_orchestrator, :coding_repo_roots, originals.repos)
       restore(:arbor_orchestrator, :coding_worktree_roots, originals.worktrees)
       restore(:arbor_orchestrator, :security_module, originals.security)
+      restore(:arbor_orchestrator, :coding_authority_provider, originals.authority_provider)
       restore(:arbor_orchestrator, :security_available_override, originals.available)
       restore(:arbor_orchestrator, :pipeline_status_module, originals.status)
       restore(:arbor_orchestrator, :coding_pipeline_path, originals.path)

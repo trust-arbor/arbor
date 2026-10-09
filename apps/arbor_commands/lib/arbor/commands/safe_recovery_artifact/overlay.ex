@@ -77,8 +77,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Overlay do
   end
 
   defp resolve_overlay_path(root) do
-    with {:ok, lexical} <- SafePath.safe_join(root, logical_path()),
-         true <- SafePath.within?(lexical, root),
+    # safe_join/2 follows an ancestor symlink and then reports the missing
+    # target. Keep the lexical path so lstat can reject that ancestor.
+    with {:ok, lexical} <- SafePath.lexical_child(root, logical_path()),
          :ok <- verify_ancestors(root, lexical),
          {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(lexical) do
       {:ok, lexical}
@@ -94,9 +95,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Overlay do
 
       {:ok, %File.Stat{}} ->
         {:error, :overlay_not_regular}
-
-      false ->
-        {:error, :overlay_missing}
 
       {:error, :not_found} ->
         {:error, :overlay_missing}

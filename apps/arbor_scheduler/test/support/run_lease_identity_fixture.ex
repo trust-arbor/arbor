@@ -14,8 +14,29 @@ defmodule Arbor.Scheduler.RunLeaseIdentityFixture do
         pid when is_pid(pid) -> await_ready!(pid)
         nil -> bootstrap_identity!()
       end
+
+      ensure_run_lease_supervisor!()
     else
       :ok
+    end
+  end
+
+  defp ensure_run_lease_supervisor! do
+    case Process.whereis(Arbor.Scheduler.RunLeaseSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        token = Application.fetch_env!(:arbor_scheduler, :test_scheduler_mutation_token)
+
+        case Supervisor.start_child(
+               Arbor.Scheduler.Supervisor,
+               {Arbor.Scheduler.RunLeaseSupervisor, scheduler_mutation_token: token}
+             ) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "failed to start run lease supervisor: #{inspect(reason)}"
+        end
     end
   end
 

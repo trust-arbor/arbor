@@ -43,6 +43,7 @@ defmodule Arbor.Historian do
 
   alias Arbor.Historian.{
     AuthorityAuditPuller,
+    Config,
     DurableSignalSink,
     QueryEngine,
     StreamContent,
@@ -785,6 +786,20 @@ defmodule Arbor.Historian do
           :ok | {:error, :persist_failed}
   def persist_durable_event(stream_id, event_type, data, opts \\ []),
     do: DurableSignalSink.persist(stream_id, event_type, data, opts)
+
+  @doc "Read raw events from the same configured durable target used by durable signals."
+  @spec read_durable_event_stream(String.t(), keyword()) ::
+          {:ok, [Arbor.Persistence.Event.t()]} | {:error, term()}
+  def read_durable_event_stream(stream_id, opts \\ []) when is_binary(stream_id) do
+    with {:ok, target} <- Config.durable_event_log_target() do
+      Arbor.Persistence.read_stream(
+        target.name,
+        target.backend,
+        stream_id,
+        Keyword.merge(opts, target.opts)
+      )
+    end
+  end
 
   @doc "Persist a bounded source-owned invocation event; acknowledge only exact durable content."
   def persist_security_invocation(event),

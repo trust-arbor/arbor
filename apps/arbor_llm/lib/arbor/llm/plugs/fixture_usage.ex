@@ -21,6 +21,24 @@ defmodule Arbor.LLM.Plugs.FixtureUsage do
   defp schema(:image_usage),
     do: {:map, %{generated: {:map, %{count: :count, size_class: :label}, [:count]}}, []}
 
+  defp schema(:usage_reported) do
+    {:map, %{input: :boolean, output: :boolean}, [:input, :output]}
+  end
+
+  defp schema(:cache_write_tokens_by_ttl) do
+    {:map,
+     %{
+       :"5m" => :count,
+       :"1h" => :count,
+       ephemeral_5m_input_tokens: :count,
+       ephemeral_1h_input_tokens: :count
+     }, []}
+  end
+
+  defp schema(:pricing) do
+    {:map, %{status: {:enum, [:unknown, :priced]}, currency: :label, total: :cost}, [:status]}
+  end
+
   defp schema(:cost) do
     item =
       {:map,
@@ -70,6 +88,8 @@ defmodule Arbor.LLM.Plugs.FixtureUsage do
        when is_binary(value) and byte_size(value) <= @max_label_bytes do
     if String.valid?(value), do: {:ok, value}, else: :error
   end
+
+  defp transform(value, :boolean, _mode) when is_boolean(value), do: {:ok, value}
 
   defp transform(value, {:enum, allowed}, :encode) when is_atom(value) do
     if value in allowed,

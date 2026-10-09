@@ -1520,7 +1520,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
           assert {:ok, d} = Persistence.get(store_pre, backend_pre, key_pre)
           assert (Map.get(d, :retry_count) || Map.get(d, "retry_count")) == 1
         end,
-        50
+        @archive_settlement_attempts
       )
 
       stop_supervised(server_pre)
@@ -1925,7 +1925,12 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
       {target, generation} = retained_target_and_generation(server)
       send(Process.whereis(server), {:retained_expire, target, generation})
 
-      assert_receive {:tip_race_archive, {:error, :branch_ref_oid_mismatch}}, 2_000
+      # The callback runs after the registry's observe-plus-archive git chain.
+      # Measured 2026-10-08: ~100ms per contained git, and this mismatch arrived
+      # at about 5s while the machine was otherwise idle. The old 2s receive
+      # closed first. 30s is this file's existing settlement budget.
+      assert_receive {:tip_race_archive, {:error, :branch_ref_oid_mismatch}},
+                     @archive_callback_timeout
 
       assert_eventually(
         fn ->
@@ -2001,12 +2006,12 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
         fn ->
           refute File.dir?(lease.worktree_path)
           refute branch_exists?(repo, branch)
-          assert :sys.get_state(server2).retained_by_id == %{}
+          assert :sys.get_state(server2, @archive_callback_timeout).retained_by_id == %{}
 
           assert {:ok, key} = Core.record_key(lease.workspace_id)
           assert {:error, :not_found} = Persistence.get(store_name, backend, key)
         end,
-        300
+        @archive_settlement_attempts
       )
 
       assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
@@ -2226,8 +2231,12 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
     "refs/arbor/evidence/#{workspace_digest}/#{task_digest}"
   end
 
+  # Same measurement as the tip-race receive: the handler stays inside
+  # contained git longer than :sys.get_state/1's 5s default.
   defp retained_record(server) do
-    [{_workspace_id, retained}] = Map.to_list(:sys.get_state(server).retained_by_id)
+    [{_workspace_id, retained}] =
+      Map.to_list(:sys.get_state(server, @archive_callback_timeout).retained_by_id)
+
     retained
   end
 
@@ -2238,7 +2247,9 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
   end
 
   defp retained_target_and_generation(server) do
-    [{target, retained}] = Map.to_list(:sys.get_state(server).retained_by_target)
+    [{target, retained}] =
+      Map.to_list(:sys.get_state(server, @archive_callback_timeout).retained_by_target)
+
     {target, retained.expiry_generation}
   end
 

@@ -255,11 +255,13 @@ defmodule Arbor.Trust.PolicyEnforcer do
 
   defp grant_decision_for_profile(profile, :ask), do: {:grant, profile, :ask}
 
+  # A profile :auto/:allow rule on a high-risk capability must not mint an
+  # unattended cap. Clamp it to :ask so ApprovalGuard escalates instead.
   defp grant_decision_for_profile(profile, mode) when mode in [:auto, :allow] do
     if auto_grantable_profile?(profile) do
       {:grant, profile, mode}
     else
-      {:deny, {:unsafe_auto_grant, profile.uri_prefix}}
+      {:grant, profile, :ask}
     end
   end
 

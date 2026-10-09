@@ -35,7 +35,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
       Fixture.grant!(ctx.human_id, operation, target.target)
       other = Humans.human!()
       {:ok, mismatch} = Security.SessionToken.generate(other)
-      {:ok, expired} = Security.SessionToken.generate(ctx.human_id, ttl: -1)
+      {:ok, expired} = Security.SessionToken.generate_expired_fixture(ctx.human_id)
       {:ok, chat} = Security.issue_conversation_session_fixture(ctx.human_id, target.target)
 
       for token <- [nil, "", "forged", mismatch, expired, chat] do
@@ -150,7 +150,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
     Fixture.preserved!(target)
   end
 
-  test "Gateway-preverified signed stop and two-argument legacy destroy retain existing semantics",
+  test "Gateway-preverified signed stop remains exact and two-argument destroy stays fail-closed",
        ctx do
     target = Fixture.target!()
     {:ok, caller} = Security.generate_identity()
@@ -172,8 +172,11 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
     destroy = Fixture.target!()
     Humans.grant!(ctx.human_id, "arbor://agent/lifecycle/destroy")
     Fixture.set_env(:arbor_security, :identity_verification, false)
-    assert :ok = Agents.authorize_destroy(ctx.human_id, destroy.target)
-    assert {:error, :not_found} = Agents.load_profile(destroy.target)
+
+    assert {:error, {:unauthorized, :capability_mutation_unauthorized}} =
+             Agents.authorize_destroy(ctx.human_id, destroy.target)
+
+    Fixture.preserved!(destroy)
   end
 
   test "security regression: session destroy does not inherit legacy global destroy grant", ctx do

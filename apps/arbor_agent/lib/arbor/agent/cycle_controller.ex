@@ -272,7 +272,7 @@ defmodule Arbor.Agent.CycleController do
 
     case Capabilities.resolve(cap, op) do
       {:ok, {:action, _module}} ->
-        {:ok, Intent.capability_intent(cap, op, target, reasoning: reason)}
+        {:ok, Intent.capability_intent(cap, op, target, capability_intent_opts(reason, data))}
 
       {:ok, {:mental, _}} ->
         :continue
@@ -285,6 +285,25 @@ defmodule Arbor.Agent.CycleController do
         :continue
     end
   end
+
+  # Shell containment admits only an explicit canonical workdir. A model may
+  # name that directory; the grant check still rejects one the agent does not hold.
+  defp capability_intent_opts(reason, data) do
+    [reasoning: reason]
+    |> maybe_put_cwd(intent_cwd(data))
+  end
+
+  defp maybe_put_cwd(opts, cwd) when is_binary(cwd),
+    do: Keyword.put(opts, :params, %{cwd: cwd})
+
+  defp maybe_put_cwd(opts, _cwd), do: opts
+
+  defp intent_cwd(data) when is_map(data) do
+    params = Map.get(data, "params") || Map.get(data, :params) || %{}
+    Map.get(params, "cwd") || Map.get(params, :cwd)
+  end
+
+  defp intent_cwd(_data), do: nil
 
   # ── Mental Action Execution ───────────────────────────────────────────
 

@@ -9,6 +9,47 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
 
   @authenticated_call_protocol :"$arbor_authenticated_call"
 
+  defmodule StartupSyncOwner do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid, name: __MODULE__)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid, {:continue, :subscribe}}
+
+    @impl true
+    def handle_continue(:subscribe, test_pid) do
+      send(
+        test_pid,
+        {:startup_sync_subscription, self(),
+         Signals.subscribe_security_sync(:nonce_cache, :nonce_seen)}
+      )
+
+      {:noreply, test_pid}
+    end
+  end
+
+  defmodule StartupSyncApplication do
+    use Application
+
+    @impl true
+    def start(_type, test_pid) do
+      {:ok, root} =
+        Supervisor.start_link([{StartupSyncOwner, test_pid}],
+          strategy: :one_for_one,
+          name: __MODULE__.Supervisor
+        )
+
+      send(test_pid, {:startup_sync_root, self(), root})
+
+      receive do
+        :finish_start -> {:ok, root}
+      after
+        5_000 -> {:error, :startup_callback_timeout}
+      end
+    end
+  end
+
   @roles [
     nonce_cache: {
       :"Elixir.Arbor.Security.Identity.NonceCache",
@@ -55,6 +96,46 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
     )
 
     :ok
+  end
+
+  test "security regression: a verified app child subscribes while its application callback is starting" do
+    app = :arbor_signals_startup_sync_proof
+
+    Arbor.Signals.Config.Testing.put(:security_sync_subscribers, %{
+      nonce_cache: %{
+        owner: StartupSyncOwner,
+        supervisor: {:application, app},
+        child_id: StartupSyncOwner,
+        events: [:nonce_seen]
+      }
+    })
+
+    :ok =
+      :application.load(
+        {:application, app,
+         [
+           description: ~c"security sync startup proof",
+           vsn: ~c"1",
+           modules: [StartupSyncApplication, StartupSyncOwner],
+           registered: [],
+           applications: [:kernel, :stdlib],
+           mod: {StartupSyncApplication, self()}
+         ]}
+      )
+
+    on_exit(fn ->
+      _ = Application.stop(app)
+      _ = Application.unload(app)
+    end)
+
+    Task.start(fn -> Application.ensure_all_started(app) end)
+
+    assert_receive {:startup_sync_root, callback, root}, 2_000
+    assert Process.alive?(root)
+    assert {:error, :unauthorized} = Signals.subscribe_security_sync(:nonce_cache, :nonce_seen)
+    assert_receive {:startup_sync_subscription, owner, {:ok, _, _, _}}, 2_000
+    assert Process.whereis(StartupSyncOwner) == owner
+    send(callback, :finish_start)
   end
 
   test "security regression: rejects unauthorized callers and non-allowlisted role events" do

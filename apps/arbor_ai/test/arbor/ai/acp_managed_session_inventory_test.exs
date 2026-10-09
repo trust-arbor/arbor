@@ -20,6 +20,11 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
       _ = Application.stop(:arbor_kernel_runtime)
       Arbor.Signals.Config.Testing.restore_namespace(previous_signals)
       Application.put_env(:arbor_security, :start_children, previous_start_children)
+
+      # Mix had already started these apps. Later tests expect the empty
+      # signals supervisor to be running again after this module's stop.
+      {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+      {:ok, _} = Application.ensure_all_started(:arbor_security)
     end)
 
     {:ok, _started_signals} = Application.ensure_all_started(:arbor_kernel_runtime)

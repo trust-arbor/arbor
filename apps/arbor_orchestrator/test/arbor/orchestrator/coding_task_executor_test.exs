@@ -7085,11 +7085,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "reconciles generated action URI prefixes before runner execution" do
       alias Arbor.Security.UriRegistry
 
-      original_runtime = GenServer.call(UriRegistry, :list_runtime)
+      original = :sys.get_state(UriRegistry)
 
       try do
         :sys.replace_state(UriRegistry, fn state ->
-          %{state | runtime_prefixes: MapSet.new()}
+          %{state | provider_prefixes: %{}}
         end)
 
         refute Arbor.Security.uri_registered?(@known_cross_app_prefix)
@@ -7133,7 +7133,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         refute Arbor.Security.uri_registered?(@unknown_action_prefix)
       after
         :sys.replace_state(UriRegistry, fn state ->
-          %{state | runtime_prefixes: MapSet.new(original_runtime)}
+          %{state | provider_prefixes: original.provider_prefixes}
         end)
       end
     end

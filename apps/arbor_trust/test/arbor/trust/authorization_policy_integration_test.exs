@@ -16,7 +16,15 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   alias Arbor.Trust
   alias Arbor.Trust.EventStore
   alias Arbor.Trust.PolicyEnforcer
-  import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
+
+  import Arbor.Trust.TestHelpers,
+    only: [
+      actor_authority!: 0,
+      ensure_provisioned_grant_owner!: 0,
+      authorize_opts_with_grant!: 3
+    ]
+
+  alias Arbor.Contracts.Security.Identity
 
   defmodule RaisingPolicy do
     def effective_mode(_principal, _uri, _opts), do: :ask
@@ -30,6 +38,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   setup do
     ensure_security_started()
+    :ok = ensure_provisioned_grant_owner!()
     ensure_trust_started()
 
     prev = %{
@@ -71,11 +80,18 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
       restore_trust(:allow_permissive_baseline, prev.allow_permissive_baseline)
     end)
 
-    agent_id = "agent_policy_auth_#{:erlang.unique_integer([:positive])}"
+    {:ok, agent_identity} = Identity.generate(name: "trust-policy-auth")
+    :ok = Arbor.Security.register_identity_fixture(agent_identity)
+
+    on_exit(fn ->
+      _ = Arbor.Security.deregister_identity_fixture(agent_identity.agent_id)
+    end)
+
+    agent_id = agent_identity.agent_id
     {:ok, _profile} = Trust.create_trust_profile(agent_id)
     {_identity, actor_authority} = actor_authority!()
 
-    {:ok, agent_id: agent_id, actor_authority: actor_authority}
+    {:ok, agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority}
   end
 
   test "security regression: trust-gated shell cap does not auto-authorize", %{
@@ -124,15 +140,19 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   test "B6 security regression: low-risk read auto-grants with profile constraints", %{
     agent_id: agent_id,
+    agent_identity: agent_identity,
     actor_authority: actor_authority
   } do
     uri = "arbor://fs/read/b6/note.txt"
     set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
 
     assert {:ok, :authorized} =
-             Trust.authorize(agent_id, uri, :read,
-               verify_identity: false,
-               actor_authority: actor_authority
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
              )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
@@ -145,15 +165,19 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   test "B6 security regression: irreversible profile-backed actions escalate instead of auto-run",
        %{
          agent_id: agent_id,
+         agent_identity: agent_identity,
          actor_authority: actor_authority
        } do
     uri = "arbor://agent/create"
     set_profile_rules(agent_id, %{uri => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
 
     assert {:error, :escalation_disabled} =
-             Trust.authorize(agent_id, uri, :execute,
-               verify_identity: false,
-               actor_authority: actor_authority
+             Trust.authorize(
+               agent_id,
+               uri,
+               :execute,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
              )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
@@ -216,6 +240,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   test "B8 negative control: explicit profile policy can still widen authorization", %{
     agent_id: agent_id,
+    agent_identity: agent_identity,
     actor_authority: actor_authority
   } do
     uri = "arbor://memory/recall"
@@ -225,11 +250,14 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
         %{profile | baseline: :block, rules: %{uri => :auto}}
       end)
 
+    opts = [security_ceilings: %{}, verify_identity: false, actor_authority: actor_authority]
+
     assert {:ok, :authorized} =
-             Trust.authorize(agent_id, uri, :read,
-               security_ceilings: %{},
-               verify_identity: false,
-               actor_authority: actor_authority
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
              )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
@@ -250,13 +278,20 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   test "security regression: trust-ask minting does not encode kernel approval constraints", %{
     agent_id: agent_id,
+    agent_identity: agent_identity,
     actor_authority: actor_authority
   } do
     uri = "arbor://code/write/minted-ask.ex"
     Application.put_env(:arbor_trust, :policy_module, AskPolicy)
+    opts = [actor_authority: actor_authority]
 
     assert {:error, :escalation_disabled} =
-             Trust.authorize(agent_id, uri, :execute, actor_authority: actor_authority)
+             Trust.authorize(
+               agent_id,
+               uri,
+               :execute,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
 
     assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
     assert cap.metadata[:source] == :trust_policy_enforcer
@@ -349,6 +384,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
   test "workspace file_path trust grants are minted against workspace-relative URIs", %{
     agent_id: agent_id,
+    agent_identity: agent_identity,
     actor_authority: actor_authority
   } do
     workspace =
@@ -362,12 +398,19 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     set_profile_rules(agent_id, %{"arbor://fs/read/public" => :allow})
 
+    opts = [
+      file_path: file_path,
+      workspace: workspace,
+      verify_identity: false,
+      actor_authority: actor_authority
+    ]
+
     assert {:ok, :authorized} =
-             Trust.authorize(agent_id, "arbor://fs/read", :execute,
-               file_path: file_path,
-               workspace: workspace,
-               verify_identity: false,
-               actor_authority: actor_authority
+             Trust.authorize(
+               agent_id,
+               "arbor://fs/read",
+               :execute,
+               authorize_opts_with_grant!(opts, agent_identity, "arbor://fs/read")
              )
 
     assert {:ok, cap} =

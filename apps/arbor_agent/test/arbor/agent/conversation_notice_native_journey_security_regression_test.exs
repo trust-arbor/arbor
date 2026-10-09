@@ -190,10 +190,11 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
       )
     )
 
-    for module <- [Arbor.Signals.Store, Arbor.Signals.TopicKeys, Arbor.Signals.Bus] do
-      if Process.whereis(module) == nil, do: start_supervised!(module)
-    end
-
+    # Publication and subscribe accept only the application-supervised bus.
+    # A bus started under this fixture's supervisor is registered and healthy,
+    # then every subscribe returns :unauthorized. action.* and agent.* stay
+    # unrestricted; security.* still requires a principal.
+    assert :ok = Arbor.Signals.ensure_supervised_local_runtime!()
     assert Arbor.Signals.healthy?()
     on_exit(fn -> File.rm_rf!(root) end)
     {:ok, root: root}
@@ -243,7 +244,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
     set_env(
       :arbor_security,
       :session_token_secret,
-      "native-notice-test-#{System.unique_integer([:positive])}"
+      "native-notice-test-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     )
 
     oidc = Arbor.Security.OIDCTestHelper.issue_identity()
@@ -318,10 +319,10 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
     File.write!(turn_path, notice_dot(params))
     File.write!(heartbeat_path, ordinary_dot("Initial finite heartbeat"))
 
-    # HeartbeatService's public graph setting is relative to its specs directory.
-    # Use a private fixture file reached by that existing trusted path setting.
-    heartbeat_graph_name =
-      Path.join(["..", "..", "..", "..", "..", Path.relative_to_cwd(heartbeat_path)])
+    # The loader accepts an already-resolved path. Joining this absolute fixture
+    # onto a relative prefix drops the filesystem root, so the startup beat
+    # looks under specs/pipelines/session and never completes.
+    heartbeat_graph_name = heartbeat_path
 
     # Same public acquisition route as Lifecycle. These restart slots are
     # separate and purpose-bound; neither child receives a legacy signer/key.

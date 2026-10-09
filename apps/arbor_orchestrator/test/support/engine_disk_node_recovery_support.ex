@@ -113,7 +113,8 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
       :absolute_paths
     )
 
-    check!(Path.dirname(disk_root) == Path.expand(System.tmp_dir!()), :private_fixture_parent)
+    {:ok, tmp_root} = Arbor.Common.SafePath.resolve_real(Path.expand(System.tmp_dir!()))
+    check!(Path.dirname(disk_root) == tmp_root, :private_fixture_parent)
 
     check!(
       String.starts_with?(Path.basename(disk_root), "arbor_engine_disk_"),
@@ -126,6 +127,14 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
 
   defp configure!(source_root, disk_root, phase) do
     System.put_env("ARBOR_DB", "sqlite")
+
+    # A raw elixir -pa workload has no Mix config loader. Load Swoosh's .app
+    # defaults before applying config/config.exs, or its Hackney default can
+    # overwrite the configured disabled API client when the app starts.
+    case Application.load(:swoosh) do
+      :ok -> :ok
+      {:error, {:already_loaded, :swoosh}} -> :ok
+    end
 
     source_root
     |> Path.join("config/config.exs")

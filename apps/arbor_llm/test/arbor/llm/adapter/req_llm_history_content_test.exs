@@ -217,7 +217,9 @@ defmodule Arbor.LLM.Adapter.ReqLLMHistoryContentTest do
     message = Message.new(:assistant, [ContentPart.tool_call("call_only", "lookup", "{}")])
     [encoded] = wire_messages([message])
 
-    assert encoded["content"] == []
+    # ReqLLM 1.25 collapses an empty content array to "" because strict OpenAI
+    # and vLLM reject "content": [].
+    assert encoded["content"] == ""
 
     assert [%{"id" => "call_only", "function" => %{"arguments" => "{}"}}] =
              encoded["tool_calls"]
@@ -272,10 +274,19 @@ defmodule Arbor.LLM.Adapter.ReqLLMHistoryContentTest do
   defp wire_body(messages, provider) do
     context = messages |> Adapter.translate_messages() |> ReqLLM.Context.new()
 
-    %Req.Request{options: %{context: context, model: "openrouter/free", operation: :chat}}
-    |> provider.encode_body()
-    |> Map.fetch!(:body)
-    |> Jason.decode!()
+    request =
+      %Req.Request{options: %{context: context, model: "openrouter/free", operation: :chat}}
+      |> provider.encode_body()
+
+    # ReqLLM 1.25 stores the provider body in options[:json]. Req encodes that
+    # map into request.body only when its own encode_body step runs.
+    payload =
+      case request.options[:json] do
+        %{} = json -> json
+        _ -> request.body
+      end
+
+    payload |> Jason.encode!() |> Jason.decode!()
   end
 
   defp json_roundtrip(value), do: value |> Jason.encode!() |> Jason.decode!()

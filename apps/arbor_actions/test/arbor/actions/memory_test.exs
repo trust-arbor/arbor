@@ -71,7 +71,7 @@ defmodule Arbor.Actions.MemoryTest do
           "arbor://memory/write"
         ] do
       cap = %Capability{
-        id: "cap_test_#{agent_id}_#{URI.encode(uri)}",
+        id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
         resource_uri: uri,
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
@@ -82,7 +82,7 @@ defmodule Arbor.Actions.MemoryTest do
       }
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.put_capability_fixture(cap)
+        {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
       end
     end
   end

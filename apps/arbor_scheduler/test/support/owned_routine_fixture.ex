@@ -8,6 +8,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   alias Arbor.Persistence.Repo
   alias Arbor.Scheduler
   alias Arbor.Scheduler.{CapsFile, RoutineCatalog}
+  alias Arbor.Scheduler.RunLeaseIdentityFixture
   alias Arbor.Security
   alias Arbor.Trust
   alias Arbor.Trust.PolicyHost
@@ -196,6 +197,10 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   end
 
   def start!(ctx) do
+    # Test config leaves Scheduler.Identity unstarted. Run registration goes
+    # through that process; without it every owned routine discards as
+    # :scheduler_identity_unavailable before any effect is authorized.
+    :ok = RunLeaseIdentityFixture.ensure_started!()
     Repo.delete_all(Oban.Job)
     workdir = Path.join(ctx.sql_root, "case_#{System.unique_integer([:positive])}")
 

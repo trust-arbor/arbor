@@ -214,6 +214,10 @@ defmodule Arbor.Security.SystemAuthority do
       Arbor.Common.authenticated_call(owner_pid(), :load_persisted_keypair_for_test)
     end
 
+    def identity_for_test do
+      Arbor.Common.authenticated_call(owner_pid(), :identity_for_test)
+    end
+
     @doc false
     def cleanup_legacy_plaintext_record_for_test do
       Arbor.Common.authenticated_call(owner_pid(), :cleanup_legacy_plaintext_record_for_test)
@@ -991,6 +995,10 @@ defmodule Arbor.Security.SystemAuthority do
 
     defp handle_authenticated_request(:load_persisted_keypair_for_test, _from, state) do
       {:reply, load_persisted_keypair(), state}
+    end
+
+    defp handle_authenticated_request(:identity_for_test, _from, %{identity: identity} = state) do
+      {:reply, {:ok, identity}, state}
     end
 
     defp handle_authenticated_request(:cleanup_legacy_plaintext_record_for_test, _from, state) do

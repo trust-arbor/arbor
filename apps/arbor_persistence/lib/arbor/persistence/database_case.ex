@@ -71,8 +71,12 @@ defmodule Arbor.Persistence.DatabaseCase do
         case wait_for_repo_ready(@repo_ready_timeout_ms) do
           :ok ->
             case set_manual_mode() do
-              :ok -> :ok
-              {:error, reason} -> raise_unavailable_database!(reason)
+              :ok ->
+                if sqlite_repo?(), do: ensure_sqlite_writer_lock_table!()
+                :ok
+
+              {:error, reason} ->
+                raise_unavailable_database!(reason)
             end
 
           {:error, reason} ->
@@ -139,7 +143,32 @@ defmodule Arbor.Persistence.DatabaseCase do
     # connection — needed by tests that drive GenServers/indexes.
     pid = Sandbox.start_owner!(Arbor.Persistence.Repo, shared: not (tags[:async] == true))
     on_exit(fn -> Sandbox.stop_owner(pid) end)
+
+    # The SQL sandbox starts a deferred transaction. Exqlite 0.42's SQLite
+    # returns SQLITE_BUSY immediately, without calling the busy handler, when
+    # that transaction has already read and another connection commits before
+    # the first write. Reserve the write lock before the test reads.
+    if sqlite_repo?(), do: reserve_sqlite_writer!()
+
     :ok
+  end
+
+  defp sqlite_repo?, do: Arbor.Persistence.Repo.__adapter__() == Ecto.Adapters.SQLite3
+
+  defp ensure_sqlite_writer_lock_table! do
+    repo = Arbor.Persistence.Repo
+    :ok = Sandbox.checkout(repo, sandbox: false)
+
+    try do
+      repo.query!("CREATE TABLE IF NOT EXISTS arbor_test_writer_lock (id INTEGER PRIMARY KEY)")
+      repo.query!("INSERT OR IGNORE INTO arbor_test_writer_lock (id) VALUES (1)")
+    after
+      Sandbox.checkin(repo)
+    end
+  end
+
+  defp reserve_sqlite_writer! do
+    Arbor.Persistence.Repo.query!("UPDATE arbor_test_writer_lock SET id = 1 WHERE id = 1")
   end
 
   defp set_manual_mode do

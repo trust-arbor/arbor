@@ -33,6 +33,8 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
   end
 
   setup do
+    :ok = Arbor.Scheduler.RunLeaseIdentityFixture.ensure_started!()
+
     base =
       System.tmp_dir!()
       |> Path.join("pipeline_runner_test_#{System.unique_integer([:positive])}")

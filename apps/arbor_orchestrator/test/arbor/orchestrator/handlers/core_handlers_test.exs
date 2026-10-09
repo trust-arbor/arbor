@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
@@ -47,7 +47,7 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
   describe "WaitHandler" do
     alias Arbor.Orchestrator.Handlers.WaitHandler
 
-    test "defaults to human source with auto-approve" do
+    test "defaults to human source and fails closed without an interviewer" do
       node = make_node("wait_1", %{"type" => "wait", "label" => "Continue?"})
 
       graph =
@@ -56,6 +56,23 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
         ])
 
       outcome = WaitHandler.execute(node, make_context(), graph, [])
+      assert outcome.status == :fail
+      assert outcome.failure_reason == "human skipped interaction"
+    end
+
+    test "human source succeeds when the auto-approve interviewer is configured" do
+      alias Arbor.Orchestrator.Human.AutoApproveInterviewer
+
+      node = make_node("wait_1", %{"type" => "wait", "label" => "Continue?"})
+
+      graph =
+        make_graph(%{"wait_1" => node}, [
+          %Graph.Edge{from: "wait_1", to: "next", attrs: %{"label" => "Yes"}}
+        ])
+
+      outcome =
+        WaitHandler.execute(node, make_context(), graph, interviewer: AutoApproveInterviewer)
+
       assert outcome.status == :success
     end
 
@@ -334,6 +351,39 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
     end
 
     test "shell target delegates to ShellHandler" do
+      previous_authorizer = Application.fetch_env(:arbor_shell, :agent_authorizer)
+      Application.put_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
+
+      on_exit(fn ->
+        case previous_authorizer do
+          {:ok, authorizer} -> Application.put_env(:arbor_shell, :agent_authorizer, authorizer)
+          :error -> Application.delete_env(:arbor_shell, :agent_authorizer)
+        end
+      end)
+
+      # Delegation still reaches ShellHandler. Agent execution now also requires
+      # an ordinary filesystem read grant on the canonical cwd; the injected
+      # shell authorizer covers only the command gate.
+      root =
+        Path.join(System.tmp_dir!(), "exec-shell-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(root)
+      {:ok, workdir} = Arbor.Common.SafePath.resolve_real(root)
+      {:ok, identity} = Arbor.Security.generate_identity()
+      :ok = Arbor.Security.register_identity_fixture(identity)
+
+      {:ok, cap} =
+        Arbor.Security.grant_fixture(
+          principal: identity.agent_id,
+          resource: "arbor://fs/read#{workdir}/**"
+        )
+
+      on_exit(fn ->
+        Arbor.Security.revoke_fixture(cap.id)
+        Arbor.Security.deregister_identity_fixture(identity.agent_id)
+        File.rm_rf(root)
+      end)
+
       node =
         make_node("exec_shell", %{
           "type" => "exec",
@@ -342,15 +392,12 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
           "sandbox" => "none"
         })
 
-      # This test exercises exec→shell DELEGATION, not the shell capability gate
-      # (which correctly denies the default `system` principal — see the phase-0
-      # shell auth gate). Inject an approving authorizer so delegation proceeds.
       graph = make_graph()
 
       {:ok, authority} =
         RunAuthorization.new(%{graph | compiled: true},
-          agent_id: "agent_test",
-          workdir: File.cwd!()
+          agent_id: identity.agent_id,
+          workdir: workdir
         )
 
       opts = [
@@ -359,7 +406,9 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       ]
 
       outcome = ExecHandler.execute(node, make_context(), graph, opts)
-      assert outcome.status == :success
+
+      assert outcome.status == :success,
+             "shell delegation failed: #{inspect(outcome.failure_reason)}"
     end
 
     test "function target with handler" do

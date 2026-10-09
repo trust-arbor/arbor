@@ -102,6 +102,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     old_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
 
     on_exit(fn ->
+      :ok = AuditJournalOwner.clear_test_fixture()
       pid = Process.whereis(AuditJournalOwner)
       if is_pid(pid) and pid != original, do: GenServer.stop(pid)
       unless Process.whereis(AuditJournalOwner), do: Process.register(original, AuditJournalOwner)
@@ -120,6 +121,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
       AuditJournalOwner.start_link(mode: :durable, root: root, capacity_profile: :operational)
 
     Process.unlink(journal)
+    :ok = AuditJournalOwner.install_test_fixture(journal)
     start_sink!(SinkRepo, ctx.template)
     use_sink(SinkRepo)
     principal = "agent_retire_sql_#{System.unique_integer([:positive])}"
@@ -228,7 +230,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
 
     assert {:ok, :process_lifetime} = Persistence.durability_class(volatile, ETSEventLog, [])
 
-    for n <- 1..256, do: grant_and_revoke!(ctx.principal, n)
+    for n <- 1..256, do: grant_and_revoke!("#{ctx.principal}_#{n}", n)
     assert {:ok, %{delivered: 0, pending: 512}} = Historian.flush_authority_audit()
     assert {:ok, %{delivered: 0, pending: 512}} = Historian.flush_authority_audit()
 
@@ -285,7 +287,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
     assert {:ok, [%{"operation_id" => g_op, "status" => "effect_applied"}]} =
              Security.audit_journal_pending_operations()
 
-    for n <- 1..255, do: grant_and_revoke!(ctx.principal, n)
+    for n <- 1..255, do: grant_and_revoke!("#{ctx.principal}_#{n}", n)
     assert {:ok, _h} = grant(ctx.principal, "live-h")
     assert {:ok, %{delivered: 512, pending: 0}} = Historian.flush_authority_audit()
 

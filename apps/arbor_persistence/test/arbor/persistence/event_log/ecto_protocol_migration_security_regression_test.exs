@@ -6,6 +6,7 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
 
   @moduletag :database
   @moduletag :integration
+  @moduletag :postgres
 
   @protocol_migration 20_260_712_000_004
   @r4_protocol_migration 20_260_712_000_005
@@ -25,6 +26,7 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
 
   setup_all do
     {:ok, admin} = Postgrex.start_link(postgres_opts())
+    Process.unlink(admin)
     schema = "event_log_protocol_#{System.unique_integer([:positive])}"
     Postgrex.query!(admin, "CREATE SCHEMA #{quote_identifier(schema)}")
     create_legacy_tables!(admin, schema, indexes?: true)

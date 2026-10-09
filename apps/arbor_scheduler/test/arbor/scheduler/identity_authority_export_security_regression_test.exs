@@ -10,7 +10,7 @@ defmodule Arbor.Scheduler.IdentityAuthorityExportSecurityRegressionTest do
   defmodule HandlerHarness do
     use GenServer
 
-    def start_link(state), do: GenServer.start_link(__MODULE__, state, name: Identity)
+    def start_link(state), do: GenServer.start_link(__MODULE__, state)
 
     @impl true
     def init(state), do: {:ok, state}
@@ -22,9 +22,9 @@ defmodule Arbor.Scheduler.IdentityAuthorityExportSecurityRegressionTest do
   @tag spec: "SSEC-002,SSEC-013"
   test "security regression: raw callers cannot retrieve the scheduler signing authority" do
     authority = make_ref()
-    start_supervised!({HandlerHarness, %{signing_authority: authority}})
+    pid = start_supervised!({HandlerHarness, %{signing_authority: authority}})
 
     assert {:error, :scheduler_authority_not_exported} =
-             GenServer.call(Identity, :get_signing_authority)
+             GenServer.call(pid, :get_signing_authority)
   end
 end

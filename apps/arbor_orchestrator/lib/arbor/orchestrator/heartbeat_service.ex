@@ -886,17 +886,21 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   defp resolve_dot_path(graph_name, _opts) do
-    # The heartbeat DOT files live alongside the session pipeline specs
-    base =
-      Path.join([
-        "apps",
-        "arbor_orchestrator",
-        "specs",
-        "pipelines",
-        "session"
-      ])
+    # Session specs live in the orchestrator app. Mix runs that app's tests
+    # with the app directory as cwd; a boot from the umbrella root does not.
+    # Accept either layout, and an already-resolved path.
+    app_relative = Path.join("specs/pipelines/session", graph_name)
 
-    Path.join(base, graph_name)
+    umbrella_relative =
+      Path.join("apps/arbor_orchestrator/specs/pipelines/session", graph_name)
+
+    cond do
+      Path.type(graph_name) == :absolute -> graph_name
+      File.regular?(graph_name) -> graph_name
+      File.regular?(app_relative) -> app_relative
+      File.regular?(umbrella_relative) -> umbrella_relative
+      true -> app_relative
+    end
   end
 
   defp resolve_default_dot_path(opts) do

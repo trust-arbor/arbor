@@ -18,6 +18,8 @@ defmodule Arbor.Actions.AcpToolExposureTest do
   """
 
   use ExUnit.Case, async: false
+
+  alias Arbor.Common.SafePath
   @moduletag :integration
 
   alias Arbor.AI.AcpPool.ToolServer
@@ -108,7 +110,11 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       refute result["isError"], "expected success, got error: #{inspect(result)}"
       decoded = Jason.decode!(hd(result["content"])["text"])
       assert decoded["content"] == "world"
-      assert decoded["path"] == target
+      # File.Read returns the canonical path. macOS tmp lives under /var,
+      # whose real path is /private/var.
+      assert {:ok, canonical_decoded} = SafePath.resolve_real(decoded["path"])
+      assert {:ok, canonical_target} = SafePath.resolve_real(target)
+      assert canonical_decoded == canonical_target
     end
 
     test "workspace constraint blocks out-of-workspace reads through MCP", %{

@@ -377,20 +377,27 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     Application.put_env(:arbor_shell, :agent_authorizer, Shell)
     on_exit(fn -> restore(:arbor_shell, :agent_authorizer, previous_authorizer) end)
 
+    params = %{command: "echo actions-single-ok", sandbox: :none, cwd: cwd}
+    {:ok, digest} = Arbor.Security.approval_argument_digest(params)
+
+    {:ok, receipt} =
+      Arbor.Security.issue_approval_receipt_fixture(
+        agent_id,
+        "arbor://shell/exec/echo",
+        :execute,
+        digest,
+        "irq_single_ok"
+      )
+
     assert {:ok, result} =
              Arbor.Actions.authorize_and_execute(
                agent_id,
                Shell.Execute,
-               %{command: "echo actions-single-ok", sandbox: :none, cwd: cwd},
+               params,
                %{
                  agent_id: agent_id,
                  signed_request: signed_request,
-                 approved_invocation: %{
-                   request_id: "irq_single_ok",
-                   principal_id: agent_id,
-                   resource_uri: "arbor://shell/exec/echo",
-                   decision: :approved
-                 }
+                 approved_invocation: receipt
                }
              )
 

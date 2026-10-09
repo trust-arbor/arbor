@@ -29,8 +29,19 @@ case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
 end
 
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Trust.restore_runtime_fixture()
 
-ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed, :isolated_repo])
+case Supervisor.start_child(Arbor.Trust.Supervisor, {Arbor.Trust.ConfirmationTracker, []}) do
+  {:ok, _pid} -> :ok
+  {:error, {:already_started, _pid}} -> :ok
+  {:error, :already_present} -> :ok
+end
+
+:ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
+
+ExUnit.start(
+  exclude: [:database, :llm, :llm_local, :integration_lm_studio, :distributed, :isolated_repo]
+)
 
 if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
      Process.whereis(Arbor.Shell.Supervisor) != nil do

@@ -425,7 +425,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
 
       survivor = Path.join(path, "survivor.txt")
 
-      assert_receive {:replacement_cleanup_result, cleanup_result}, 5_000
+      assert_receive {:replacement_cleanup_result, cleanup_result}, @archive_callback_timeout
       assert {:error, _reason} = cleanup_result
 
       # Wait for the injected cleanup to materialize the survivor before reading.
@@ -777,7 +777,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           end
         end)
 
-      assert_receive {:acquired, {:ok, lease}}, 3_000
+      assert_receive {:acquired, {:ok, lease}}, @archive_callback_timeout
       File.write!(Path.join(lease.worktree_path, "od.txt"), "owner-death\n")
       {:ok, marker_key} = Core.record_key(lease.workspace_id)
       assert {:ok, initial_marker} = Persistence.get(store_name, backend, marker_key)
@@ -1688,7 +1688,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           end
         end)
 
-      assert_receive {:durable_sequence_acquired, {:ok, lease}}, 3_000
+      assert_receive {:durable_sequence_acquired, {:ok, lease}}, @archive_callback_timeout
       File.write!(Path.join(lease.worktree_path, "dirty-sequence.txt"), "preserve me\n")
 
       owner_ref = Process.monitor(owner)
@@ -2987,7 +2987,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           end
         end)
 
-      assert_receive {:restart_owner_acquired, {:ok, lease}}, 3_000
+      assert_receive {:restart_owner_acquired, {:ok, lease}}, @archive_callback_timeout
       File.write!(Path.join(lease.worktree_path, "late-owner.txt"), "must survive\n")
       stop_registry(server)
 
@@ -4053,21 +4053,35 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
   defp release(server, workspace_id, mode),
     do: WorkspaceLeaseRegistry.release(workspace_id, mode, %{server: server})
 
+  # Acquire and expiry both run contained git inside the registry (~100ms per
+  # command, measured 2026-10-08). :sys.get_state/1's 5s default and the old
+  # 3s/5s mailbox waits closed while that chain was still running.
   defp retained_state(server) do
-    state = :sys.get_state(server_pid(server))
+    state = :sys.get_state(server_pid(server), @archive_callback_timeout)
     {Map.keys(state.retained_by_id), Map.keys(state.retained_by_target)}
   end
 
-  defp retained_count(server), do: map_size(:sys.get_state(server_pid(server)).retained_by_id)
-  defp active_count(server), do: map_size(:sys.get_state(server_pid(server)).leases)
+  defp retained_count(server),
+    do: map_size(:sys.get_state(server_pid(server), @archive_callback_timeout).retained_by_id)
+
+  defp active_count(server),
+    do: map_size(:sys.get_state(server_pid(server), @archive_callback_timeout).leases)
 
   defp retained_target_and_generation(server) do
-    [{target, retained}] = Map.to_list(:sys.get_state(server_pid(server)).retained_by_target)
+    [{target, retained}] =
+      Map.to_list(
+        :sys.get_state(server_pid(server), @archive_callback_timeout).retained_by_target
+      )
+
     {target, retained.expiry_generation}
   end
 
   defp retained_from_state(server) do
-    [{_target, retained}] = Map.to_list(:sys.get_state(server_pid(server)).retained_by_target)
+    [{_target, retained}] =
+      Map.to_list(
+        :sys.get_state(server_pid(server), @archive_callback_timeout).retained_by_target
+      )
+
     retained
   end
 

@@ -597,6 +597,11 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
        ctx do
     set_env(:arbor_security, :system_authority_mode, :ephemeral)
     restart_root!()
+
+    # The restarted authority has a new signing key. Capabilities signed by
+    # the previous key no longer authorize, so the chat receipt fails closed
+    # before private-memory attestation can run. Re-grant under the new key.
+    :ok = refresh_owner_grants!(ctx.owner)
     session = start_session!(ctx, ctx.owner, ctx.session_id)
 
     assert {:error, :private_memory_source_unavailable} =
@@ -863,6 +868,15 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     agent = agent || new_agent!()
     human = human || new_human!()
 
+    :ok = grant_owner_capabilities!(agent, human)
+    %{agent: agent, human: human}
+  end
+
+  defp refresh_owner_grants!(owner) do
+    grant_owner_capabilities!(owner.agent, owner.human)
+  end
+
+  defp grant_owner_capabilities!(agent, human) do
     for {principal, resource} <- [
           {human.agent_id, "arbor://chat/agent/" <> agent.agent_id},
           {agent.agent_id, "arbor://memory/read/" <> agent.agent_id},
@@ -876,7 +890,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
       on_exit(fn -> Security.revoke_fixture(cap.id) end)
     end
 
-    %{agent: agent, human: human}
+    :ok
   end
 
   defp new_agent! do

@@ -23,6 +23,11 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   @moduletag :security_regression
   @moduletag :fast
 
+  @migrations Path.expand(
+                "../../../../arbor_persistence/priv/repo/migrations",
+                __DIR__
+              )
+
   @action Arbor.Actions.SecurityRegression.MessageToolTaint
   @first_prompt "voice-alpha requests the bounded control probe"
   @steer_prompt "voice-alpha adds a same-engagement correction"
@@ -129,11 +134,13 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
       assert {:ok, _started} = Application.ensure_all_started(app)
     end
 
+    ensure_transcript_repo!()
     :ok
   end
 
   setup do
     ensure_security_children!()
+    ensure_identity_alias_store!()
     registry_started_here? = ensure_action_registry!()
 
     previous_env = snapshot_env()
@@ -447,6 +454,73 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
   defp chat_resource(agent_id), do: "arbor://chat/agent/#{agent_id}"
 
+  # Authenticated turns fail closed when the durable transcript cannot be read.
+  # The fast lane does not start the shared Repo, and a down store must not look
+  # like an empty history. This file keeps a private SQLite pool so the real
+  # reader and turn commit run. A Repo that is already up is left in place; a
+  # sandbox pool is shared for this module and is not migrated.
+  defp ensure_transcript_repo! do
+    repo = Arbor.Persistence.Repo
+
+    cond do
+      Process.whereis(repo) == nil ->
+        start_private_transcript_repo!(repo)
+
+      repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox ->
+        :ok = Ecto.Adapters.SQL.Sandbox.checkout(repo)
+        Ecto.Adapters.SQL.Sandbox.mode(repo, {:shared, self()})
+
+        on_exit(fn ->
+          _ = Ecto.Adapters.SQL.Sandbox.checkin(repo)
+        end)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp start_private_transcript_repo!(repo) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "message_tool_taint_repo_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+
+    start_supervised!(
+      {repo,
+       [
+         database: Path.join(root, "transcript.sqlite3"),
+         pool: DBConnection.ConnectionPool,
+         pool_size: 4,
+         busy_timeout: 5_000,
+         journal_mode: :wal
+       ]}
+    )
+
+    Ecto.Migrator.run(repo, @migrations, :up, all: true, log: false)
+    on_exit(fn -> File.rm_rf(root) end)
+    :ok
+  end
+
+  # Chat admission resolves the caller through IdentityAliasResolver, which
+  # reads :arbor_user_config. Test boot leaves agent children off, so a missing
+  # store is an outage and the receipt is denied. An empty store is "unlinked".
+  defp ensure_identity_alias_store! do
+    if Process.whereis(:arbor_user_config) == nil do
+      start_supervised!(
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: :arbor_user_config, backend: nil, write_mode: :sync, collection: "user_config"},
+          id: :arbor_user_config
+        )
+      )
+    end
+
+    :ok
+  end
+
   defp ensure_action_registry! do
     if Process.whereis(ActionRegistry) do
       false
@@ -479,7 +553,8 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "message-tool-taint-selector-#{System.unique_integer([:positive, :monotonic])}"
+      "message-tool-taint-selector-" <>
+        Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     )
   end
 

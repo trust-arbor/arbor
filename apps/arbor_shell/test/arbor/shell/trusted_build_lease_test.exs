@@ -13,7 +13,6 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
   alias Arbor.Shell.TrustedBuild.FallbackOwner
   alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
-  alias Arbor.Shell.TrustedBuildToolchainAuthority
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
@@ -185,6 +184,10 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
   end
 
   test "raw ProcessGroup and Executor calls without a live permit cannot fork" do
+    # function_exported?/3 is false for a module that has not been loaded yet.
+    Code.ensure_loaded!(ProcessGroup)
+    Code.ensure_loaded!(FallbackOwner)
+
     refute function_exported?(ProcessGroup, :run_trusted_build_executable, 6)
     assert function_exported?(ProcessGroup, :run_trusted_build_executable, 2)
     refute function_exported?(FallbackOwner, :run, 3)
@@ -246,7 +249,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
         assert :ok = Lease.attach_phase(lease, phase)
 
-        req_id = GenServer.send_request(lease.worker, {:owner_request, lease.token, :release})
+        req_id = :gen_server.send_request(lease.worker, {:owner_request, lease.token, :release})
 
         assert wait_until(fn ->
                  match?(
@@ -255,17 +258,17 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
                  )
                end)
 
-        assert :timeout = GenServer.wait_response(req_id, 0)
+        assert :timeout = :gen_server.wait_response(req_id, 0)
 
         assert {:error, :trusted_build_release_in_flight} =
                  Shell.release_trusted_build_lease(lease)
 
-        assert :timeout = GenServer.wait_response(req_id, 0)
+        assert :timeout = :gen_server.wait_response(req_id, 0)
         state = :sys.get_state(lease.worker)
         assert match?({pid, _tag} when pid == self(), state.release_from)
 
         send(phase, :stop)
-        assert {:reply, reply} = GenServer.wait_response(req_id, 5_000)
+        assert {:reply, reply} = :gen_server.wait_response(req_id, 5_000)
         assert reply == :ok or match?({:error, {:cleanup_retained, _, _}}, reply)
       after
         if Process.alive?(lease.worker) do
@@ -298,15 +301,14 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
   test "registry generation mismatch locks begin_phase" do
     if @darwin? do
-      {lease, identity, handle} = acquire_fixture!()
-      old = Process.whereis(OwnedTreeRegistry)
+      {lease, _identity, handle} = acquire_fixture!()
 
       try do
-        Process.exit(old, :kill)
-
-        wait_until(fn ->
-          pid = Process.whereis(OwnedTreeRegistry)
-          is_pid(pid) and pid != old
+        # OwnedTreeRegistry sits before the lease supervisor under
+        # rest_for_one, so killing it tears this worker down. Rotate the
+        # generation the live worker pinned and let begin_phase compare it.
+        :sys.replace_state(lease.worker, fn state ->
+          %{state | registry_gen: make_ref()}
         end)
 
         assert {:error, :trusted_build_toolchain_generation_mismatch} =
@@ -339,13 +341,21 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
             owner =
               spawn(fn ->
                 receive do
+                  :record -> :ok
+                end
+
+                # Production records the group id from the port owner.
+                # The phase caller is rejected as :foreign_caller.
+                :ok = Lease.record_group_id(session.lease_pid, 65_534)
+                send(parent, {:owner_ready, self()})
+
+                receive do
                   :die -> :ok
                 end
               end)
 
             :ok = Lease.register_port_owner(session.lease_pid, owner)
-            :ok = Lease.record_group_id(session.lease_pid, 65_534)
-            send(parent, {:owner_ready, owner})
+            send(owner, :record)
 
             receive do
               :hold -> :ok
@@ -356,14 +366,17 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
         assert_receive {:owner_ready, owner}, 2_000
         Process.exit(owner, :kill)
 
+        # The forced kill-helper failure settles in the same scheduler turn
+        # that marks the fallback used, so the pid may already be cleared.
         wait_until(fn ->
           state = :sys.get_state(lease.worker)
-          state.fallback_used == true
+
+          state.fallback_used == true and
+            (is_pid(state.fallback_pid) or state.fallback_pending == false)
         end)
 
         state = :sys.get_state(lease.worker)
         assert state.fallback_used == true
-        assert is_pid(state.fallback_pid)
 
         assert {:error, :trusted_build_launch_unauthorized} =
                  Lease.checkout_fallback(lease.worker, make_ref())
@@ -392,7 +405,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
   test "missing group_id retains workspace identity" do
     if @darwin? do
-      {lease, identity, handle} = acquire_fixture!()
+      {lease, _identity, handle} = acquire_fixture!()
 
       try do
         {:ok, session} = Lease.begin_phase(lease, :deps_get, self())

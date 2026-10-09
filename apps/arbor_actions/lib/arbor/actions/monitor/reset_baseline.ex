@@ -60,6 +60,9 @@ defmodule Arbor.Actions.Monitor.ResetBaseline do
   rescue
     ArgumentError ->
       {:error, {:unknown_metric, metric}}
+  catch
+    :exit, _reason ->
+      {:error, :anomaly_detector_unavailable}
   end
 
   defp detector_available? do

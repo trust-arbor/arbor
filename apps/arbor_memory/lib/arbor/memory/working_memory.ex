@@ -1315,11 +1315,55 @@ defmodule Arbor.Memory.WorkingMemory do
       "version_digest" => Map.get(skill, :version_digest),
       "approval_id" => Map.get(skill, :approval_id),
       "approval_digest" => Map.get(skill, :approval_digest),
-      "taint" => Map.get(skill, :taint),
-      "provenance" => Map.get(skill, :provenance),
       "activated_at" => serialize_datetime(at)
     }
+    |> put_present("taint", serialize_skill_taint(Map.get(skill, :taint)))
+    |> put_present("provenance", serialize_skill_provenance(Map.get(skill, :provenance)))
   end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  defp serialize_skill_taint(nil), do: nil
+  defp serialize_skill_taint(taint) when is_atom(taint), do: Atom.to_string(taint)
+  defp serialize_skill_taint(taint) when is_binary(taint), do: taint
+  defp serialize_skill_taint(_taint), do: nil
+
+  defp serialize_skill_provenance(nil), do: nil
+
+  defp serialize_skill_provenance(provenance)
+       when is_map(provenance) and not is_struct(provenance) do
+    Enum.reduce(provenance, %{}, fn
+      {key, value}, acc when is_atom(key) or is_binary(key) ->
+        case serialize_provenance_value(value) do
+          :drop -> acc
+          encoded -> Map.put(acc, provenance_key(key), encoded)
+        end
+
+      {_key, _value}, acc ->
+        acc
+    end)
+  end
+
+  defp serialize_skill_provenance(_provenance), do: nil
+
+  defp provenance_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp provenance_key(key) when is_binary(key), do: key
+
+  defp serialize_provenance_value(nil), do: nil
+  defp serialize_provenance_value(value) when is_boolean(value) or is_binary(value), do: value
+  defp serialize_provenance_value(value) when is_number(value), do: value
+  defp serialize_provenance_value(value) when is_atom(value), do: Atom.to_string(value)
+
+  defp serialize_provenance_value(value) when is_map(value) and not is_struct(value),
+    do: serialize_skill_provenance(value)
+
+  defp serialize_provenance_value(value) when is_list(value) do
+    encoded = Enum.map(value, &serialize_provenance_value/1)
+    if Enum.any?(encoded, &(&1 == :drop)), do: :drop, else: encoded
+  end
+
+  defp serialize_provenance_value(_value), do: :drop
 
   defp deserialize_item(:thought, str, fallback_id, fallback_datetime) when is_binary(str) do
     %{
@@ -1398,8 +1442,8 @@ defmodule Arbor.Memory.WorkingMemory do
       version_digest: data["version_digest"],
       approval_id: data["approval_id"],
       approval_digest: data["approval_digest"],
-      taint: data["taint"],
-      provenance: data["provenance"],
+      taint: atomize(data["taint"]),
+      provenance: deserialize_skill_provenance(data["provenance"]),
       activated_at: parse_datetime(data["activated_at"]) || fallback_datetime
     }
   end
@@ -1414,8 +1458,8 @@ defmodule Arbor.Memory.WorkingMemory do
       version_digest: data[:version_digest],
       approval_id: data[:approval_id],
       approval_digest: data[:approval_digest],
-      taint: data[:taint],
-      provenance: data[:provenance],
+      taint: atomize(data[:taint]),
+      provenance: deserialize_skill_provenance(data[:provenance]),
       activated_at: parse_datetime(data[:activated_at]) || fallback_datetime
     }
   end
@@ -1642,6 +1686,36 @@ defmodule Arbor.Memory.WorkingMemory do
       {:error, _} -> s
     end
   end
+
+  defp deserialize_skill_provenance(nil), do: nil
+
+  defp deserialize_skill_provenance(provenance)
+       when is_map(provenance) and not is_struct(provenance) do
+    Map.new(provenance, fn {key, value} ->
+      {deserialize_provenance_key(key), deserialize_provenance_value(value)}
+    end)
+  end
+
+  defp deserialize_skill_provenance(other), do: other
+
+  defp deserialize_provenance_key(key) when is_atom(key), do: key
+
+  defp deserialize_provenance_key(key) when is_binary(key) do
+    case SafeAtom.to_existing(key) do
+      {:ok, atom} -> atom
+      {:error, _} -> key
+    end
+  end
+
+  defp deserialize_provenance_key(key), do: key
+
+  defp deserialize_provenance_value(value) when is_map(value) and not is_struct(value),
+    do: deserialize_skill_provenance(value)
+
+  defp deserialize_provenance_value(value) when is_list(value),
+    do: Enum.map(value, &deserialize_provenance_value/1)
+
+  defp deserialize_provenance_value(value), do: value
 
   defp generate_item_id(prefix) do
     prefix <>

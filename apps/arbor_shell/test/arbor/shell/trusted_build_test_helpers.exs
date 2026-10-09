@@ -41,6 +41,11 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
   def rm_fixture!(target, handle) when is_binary(target) and is_map(handle) do
     case authorize_fixture_cleanup(target, handle) do
       :ok ->
+        # Readonly seed trees drop the owner write bit. macOS then refuses to
+        # unlink children and rmdir reports :eexist. Restore write only after
+        # the fixture identity check, and do not follow symlinks.
+        grant_owner_write(target)
+
         case File.rm_rf(target) do
           {:ok, _removed} -> :ok
           {:error, reason, _files} -> {:error, {:rm_rf_failed, reason}}
@@ -48,6 +53,27 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp grant_owner_write(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :symlink}} ->
+        :ok
+
+      {:ok, %{type: :directory, mode: mode}} ->
+        File.chmod(path, Bitwise.bor(mode, 0o200))
+
+        case File.ls(path) do
+          {:ok, names} -> Enum.each(names, &grant_owner_write(Path.join(path, &1)))
+          _ -> :ok
+        end
+
+      {:ok, %{mode: mode}} ->
+        File.chmod(path, Bitwise.bor(mode, 0o200))
+
+      _ ->
+        :ok
     end
   end
 

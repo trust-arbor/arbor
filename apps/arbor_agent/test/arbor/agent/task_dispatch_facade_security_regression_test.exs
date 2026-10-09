@@ -307,7 +307,8 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "agent-dispatch-facade-secret-#{System.unique_integer([:positive])}"
+      "agent-dispatch-facade-secret-" <>
+        Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     )
 
     Application.put_env(:arbor_security, :identity_verification, true)

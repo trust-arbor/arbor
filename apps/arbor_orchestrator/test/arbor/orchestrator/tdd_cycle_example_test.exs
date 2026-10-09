@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
   @moduledoc """
   Demo runner for `specs/pipelines/examples/tdd-cycle.dot`. Sets up a
   fresh tmp mix project, pre-writes a held-out acceptance test from
-  examples, runs the TDD loop against LM Studio + a small model, and
+  examples, runs the TDD loop against local LM Studio models, and
   asserts the loop converged (acceptance tests passed within the
   iteration cap).
 
@@ -11,8 +11,9 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       mix test apps/arbor_orchestrator/test/arbor/orchestrator/tdd_cycle_example_test.exs \\
         --only integration_lm_studio
 
-  The hypothesis being demonstrated: a small model (granite-4.1-3b)
-  + a TDD harness with held-out acceptance criteria can produce
+  The hypothesis being demonstrated: local models (granite-4.1-3b for
+  simple cases, gemma-4-12b-it-qat for RLE) + a TDD harness with
+  held-out acceptance criteria can produce
   correct code within a few iterations, even when the model alone
   wouldn't get there in one shot. The held-out test is the oracle
   the model can't game.
@@ -27,6 +28,8 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
 
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Gateway.Signer.ProxyCore
+  alias Arbor.Actions
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @dot_path Path.expand("../../../specs/pipelines/examples/tdd-cycle.dot", __DIR__)
   @default_key "~/.claude/arbor-personal/claude_cli_mbp.arbor.key"
@@ -49,6 +52,20 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     case Process.whereis(Arbor.Shell.ExecutionRegistry) do
       nil -> {:ok, _} = Arbor.Shell.ExecutionRegistry.start_link([])
       _ -> :ok
+    end
+
+    # mix_test acquires an isolated validation tree. The shell application
+    # starts childless in tests, so its owned-tree authority must be present.
+    case Process.whereis(Arbor.Shell.OwnedTreeRegistry) do
+      nil ->
+        {:ok, _} =
+          Supervisor.start_child(
+            Arbor.Shell.Supervisor,
+            {Arbor.Shell.OwnedTreeRegistry, []}
+          )
+
+      _ ->
+        :ok
     end
 
     :ok
@@ -116,10 +133,10 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       function_name: "encode",
       max_iterations: 10,
       # Above granite-4.1-3b's iterative ceiling — confirmed by 10-iteration
-      # non-convergence. Bumping to qwen3.6-27b to see if the harness scales
-      # cleanly to a larger local model.
+      # non-convergence. Use an installed 12B model that answers promptly;
+      # qwen3.6-27b spent minutes reasoning without emitting source code.
       model_provider: "lm_studio",
-      model_id: "qwen3.6-27b-mtp"
+      model_id: "gemma-4-12b-it-qat"
     }
 
     run_tdd_cycle(spec)
@@ -143,9 +160,11 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       description: """
       Returns "Fizz" for multiples of 3, "Buzz" for multiples of 5,
       "FizzBuzz" for multiples of 15 (both 3 AND 5), and the number
-      itself as a string for all other integers.
+      itself as a string for all other integers. Zero is a multiple of 15,
+      so run(0) must return "FizzBuzz".
       """,
       examples: [
+        {0, "FizzBuzz"},
         {1, "1"},
         {3, "Fizz"},
         {5, "Buzz"},
@@ -172,12 +191,84 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       "arbor://orchestrator/execute/**",
       "arbor://orchestrator/execute/llm_query",
       "arbor://shell/exec/mix/**",
+      "arbor://action/mix/test",
+      "arbor://action/coding/workspace/acquire",
       "arbor://fs/**",
       "arbor://action/tdd/**"
     ])
 
-    workdir = setup_tmp_mix_project(spec)
-    on_exit(fn -> File.rm_rf(workdir) end)
+    {root, repo} = setup_tmp_mix_project(spec)
+    task_id = "tdd_example_#{System.unique_integer([:positive])}"
+
+    # Test-only baseline and shell fixtures still run real Mix while retaining
+    # the validation-resource and lease checks.
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+    prior_mix_shell = Application.get_env(:arbor_actions, :mix_shell_module)
+    use_test_workspace_registry()
+    Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
+
+    on_exit(fn ->
+      settlement = Actions.settle_coding_workspaces(task_id, agent_id)
+      restore_workspace_registry()
+
+      if prior_mix_shell do
+        Application.put_env(:arbor_actions, :mix_shell_module, prior_mix_shell)
+      else
+        Application.delete_env(:arbor_actions, :mix_shell_module)
+      end
+
+      if match?({:ok, _}, settlement), do: File.rm_rf!(root)
+      assert {:ok, _receipt} = settlement
+    end)
+
+    # Acquisition is a pipeline-internal action, so exercise it through an
+    # Engine node. The test then runs the TDD graph in the owned worktree.
+    acquire_graph = """
+    digraph AcquireTDDWorkspace {
+      start [shape=Mdiamond]
+      sanitize_repo [type="sanitize", sanitize="path_traversal",
+        source_key="repo_path", output_key="repo_path", allowed_root_key="allowed_root"]
+      sanitize_branch [type="sanitize", sanitize="command_injection",
+        source_key="branch_name", output_key="branch_name"]
+      sanitize_base_dir [type="sanitize", sanitize="path_traversal",
+        source_key="worktree_base_dir", output_key="worktree_base_dir",
+        allowed_root_key="allowed_root"]
+      acquire [type="exec", target="action", action="coding_workspace_acquire",
+        context_keys="repo_path,branch_name,worktree_base_dir", output_prefix="workspace"]
+      done [shape=Msquare]
+      start -> sanitize_repo -> sanitize_branch -> sanitize_base_dir -> acquire -> done
+    }
+    """
+
+    assert {:ok, acquired} =
+             Arbor.Orchestrator.run(acquire_graph,
+               signer: signer,
+               task_id: task_id,
+               workdir: repo,
+               initial_values: %{
+                 "repo_path" => repo,
+                 "allowed_root" => root,
+                 "branch_name" => "tdd-example-#{System.unique_integer([:positive])}",
+                 "worktree_base_dir" => Path.join(root, "worktrees"),
+                 "session.task_id" => task_id,
+                 "session.agent_id" => agent_id
+               },
+               initial_taint: %{
+                 "repo_path" => :trusted,
+                 "branch_name" => :trusted,
+                 "worktree_base_dir" => :trusted,
+                 "session.task_id" => :trusted
+               }
+             )
+
+    assert acquired.final_outcome.status == :success,
+           "workspace acquisition failed: #{inspect(acquired.final_outcome.failure_reason)}"
+
+    workdir = acquired.context["workspace.worktree_path"]
+    workspace_id = acquired.context["workspace.workspace_id"]
+    assert is_binary(workdir)
+    assert is_binary(workspace_id)
+    File.mkdir_p!(Path.join(workdir, "lib"))
 
     # Write the spec file inside workdir. The DOT reads it via a `read`
     # node, json_extracts each field, and writes the acceptance test from
@@ -188,7 +279,9 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     initial_values = %{
       "spec_path" => spec_path,
       "workdir" => workdir,
+      "workspace_id" => workspace_id,
       "iteration" => 0,
+      "session.task_id" => task_id,
       "session.agent_id" => agent_id
     }
 
@@ -201,6 +294,13 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
              Arbor.Orchestrator.run_file(@dot_path,
                signer: signer,
                initial_values: initial_values,
+               initial_taint: %{
+                 "workspace_id" => :trusted,
+                 "session.task_id" => :trusted,
+                 "iteration" => :trusted
+               },
+               task_id: task_id,
+               workdir: workdir,
                logs_root: logs_root,
                # Each iteration visits ~15 nodes; bump cap for headroom.
                max_steps: 200
@@ -240,6 +340,33 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
            "Pipeline did not reach mark_converged within #{spec.max_iterations} iterations."
 
     refute "mark_escalated" in result.completed_nodes
+  end
+
+  defp use_test_workspace_registry do
+    case Supervisor.terminate_child(Arbor.Actions.Supervisor, WorkspaceLeaseRegistry) do
+      :ok -> :ok = Supervisor.delete_child(Arbor.Actions.Supervisor, WorkspaceLeaseRegistry)
+      {:error, :not_found} -> :ok
+    end
+
+    assert {:ok, _pid} =
+             Supervisor.start_child(
+               Arbor.Actions.Supervisor,
+               {WorkspaceLeaseRegistry,
+                linux_dependency_baseline_materializer:
+                  Arbor.Actions.TestLinuxBaselineMaterializer,
+                retention_journal: :disabled}
+             )
+  end
+
+  defp restore_workspace_registry do
+    :ok = Supervisor.terminate_child(Arbor.Actions.Supervisor, WorkspaceLeaseRegistry)
+    :ok = Supervisor.delete_child(Arbor.Actions.Supervisor, WorkspaceLeaseRegistry)
+
+    assert {:ok, _pid} =
+             Supervisor.start_child(
+               Arbor.Actions.Supervisor,
+               {WorkspaceLeaseRegistry, retention_journal: :disabled}
+             )
   end
 
   # ── Identity / capability setup ───────────────────────────────────
@@ -290,7 +417,8 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
   # ── Tmp mix project setup ─────────────────────────────────────────
 
   defp setup_tmp_mix_project(_spec) do
-    path = Path.join(System.tmp_dir!(), "arbor_tdd_#{System.unique_integer([:positive])}")
+    root = Path.join(System.tmp_dir!(), "arbor_tdd_#{System.unique_integer([:positive])}")
+    path = Path.join(root, "repo")
     File.mkdir_p!(Path.join(path, "lib"))
     File.mkdir_p!(Path.join(path, "test"))
 
@@ -302,10 +430,23 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     """)
 
     File.write!(Path.join([path, "test", "test_helper.exs"]), "ExUnit.start()\n")
+    File.write!(Path.join(path, "mix.lock"), "%{}\n")
 
-    # No lib/ file — the model writes it. No acceptance test either —
-    # the DOT does that from the spec we drop into workdir.
-    path
+    git!(path, ["init", "-q"])
+    git!(path, ["config", "user.email", "tdd-example@example.invalid"])
+    git!(path, ["config", "user.name", "TDD Example"])
+    git!(path, ["add", "-A"])
+    git!(path, ["commit", "-q", "-m", "Initialize TDD example"])
+
+    # The model writes lib/ and the DOT writes the acceptance test in the
+    # leased worktree. The source repo remains a clean base for validation.
+    {root, path}
+  end
+
+  defp git!(path, args) do
+    {output, status} = System.cmd("git", args, cd: path, stderr_to_stdout: true)
+    assert status == 0, "git #{Enum.join(args, " ")} failed: #{output}"
+    String.trim(output)
   end
 
   defp write_spec_file(workdir, spec_path, spec) do

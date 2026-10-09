@@ -101,6 +101,33 @@ defmodule Arbor.Orchestrator.Handlers.SanitizeHandlerTest do
     assert outcome.failure_reason =~ "sanitize failed"
   end
 
+  test "allowed_root_key resolves path_traversal against a context workdir" do
+    root = Path.join(System.tmp_dir!(), "sanitize-root-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    target = Path.join(root, "approved.txt")
+
+    context =
+      ctx_with(%{"path" => target, "workdir" => root}, %{"path" => :derived})
+
+    outcome =
+      SanitizeHandler.execute(
+        build_node(%{
+          "sanitize" => "path_traversal",
+          "source_key" => "path",
+          "output_key" => "clean",
+          "allowed_root_key" => "workdir"
+        }),
+        context,
+        %Graph{},
+        []
+      )
+
+    assert outcome.status == :success
+    assert TaintOps.sanitized?(outcome.output_taint.sanitizations, :path_traversal)
+    assert outcome.output_taint.level == :derived
+  end
+
   test "a missing sanitize attr fails closed" do
     outcome =
       SanitizeHandler.execute(

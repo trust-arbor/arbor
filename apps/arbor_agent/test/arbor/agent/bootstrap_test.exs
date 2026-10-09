@@ -36,6 +36,7 @@ defmodule Arbor.Agent.BootstrapTest do
     {:ok, target} = Identity.generate(name: "mcp-config-target-#{unique}")
     :ok = Security.register_identity_fixture(Identity.public_only(actor))
     :ok = Security.register_identity_fixture(Identity.public_only(target))
+    :ok = Security.store_signing_key_fixture(actor.agent_id, actor.private_key)
 
     mutation_caps =
       for operation <- [:grant, :revoke] do
@@ -62,6 +63,7 @@ defmodule Arbor.Agent.BootstrapTest do
       _ = Security.close_signing_authority(authority)
       _ = Security.revoke_all_fixture(target.agent_id)
       Enum.each(mutation_caps, &Security.revoke_fixture(&1.id))
+      _ = Security.delete_signing_key_fixture(actor.agent_id)
       _ = Security.deregister_identity_fixture(target.agent_id)
       _ = Security.deregister_identity_fixture(actor.agent_id)
     end)

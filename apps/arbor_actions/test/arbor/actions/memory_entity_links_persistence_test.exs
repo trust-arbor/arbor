@@ -7,8 +7,9 @@ defmodule Arbor.Actions.MemoryEntityLinksPersistenceTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.{BufferedStore, QueryableStore}
 
-  @moduletag :fast
+  # This suite owns the only Memory authority and must run as its sole file.
   @moduletag :integration
+  @moduletag :isolated_repo
   @store :arbor_memory_durable
 
   defmodule Backend do

@@ -33,7 +33,7 @@ defmodule Arbor.Persistence.Test.SessionCreationContentionFixture do
           Repo.put_dynamic_repo(name)
 
           Repo.checkout(fn ->
-            assert %{rows: [[5_000]]} = Repo.query!("PRAGMA busy_timeout")
+            assert Arbor.Persistence.SQLiteBusyTimeout.get(Repo) == 5_000
             send(observer, {:connection_warm, self()})
 
             receive do

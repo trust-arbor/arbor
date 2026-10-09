@@ -9,8 +9,9 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
       ./bin/mix test apps/arbor_commands/test/journeys/j0_authenticated_personal_agent_baseline_test.exs --include database --include sqlite --include integration
 
   Independently asserted boundaries: auth, reply, persistence pair, index,
-  dispatched recall, untouched control, outbound denial. See the companion
-  Markdown in this directory for blocked production-path assertions.
+  no generic Memory.recall on authenticated turns, untouched control, outbound
+  denial. See the companion Markdown in this directory for blocked
+  production-path assertions.
 
   Does not replace production turn.dot, does not seed Memory.index, does not
   catch Engine/turn failures, and does not boot this topology from test_helper.
@@ -184,7 +185,7 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
     end
   end
 
-  describe "baseline measurement of index and dispatched recall" do
+  describe "baseline measurement of index and authenticated recall denial" do
     test "does not seed Memory.index; records that the preference is absent from the index after the authenticated turn",
          ctx do
       conversationalist_id = ctx.conversationalist.agent_id
@@ -244,6 +245,7 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
       conversationalist_id = ctx.conversationalist.agent_id
       conversant_id = ctx.conversant.id
       follow_up = J0AuthenticatedBaseline.follow_up()
+      marker = J0AuthenticatedBaseline.preference_marker()
 
       assert OrchestratorConfig.private_conversation_memory() in [false, nil],
              """
@@ -263,7 +265,7 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
                )
 
       _ = J0AuthenticatedBaseline.await_provider_request!()
-      _ = TraceHub.drain(ctx.hub)
+      refute_generic_recall!(TraceHub.drain(ctx.hub), conversationalist_id)
 
       _ = TraceHub.assert_supervised_turn_owner_traced!(ctx.hub)
 
@@ -277,7 +279,8 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
       assert second_reply == J0AuthenticatedBaseline.follow_up_reply()
 
       follow_request = J0AuthenticatedBaseline.await_provider_request!()
-      assert J0AuthenticatedBaseline.newest_user_content(follow_request) =~ follow_up
+      newest = J0AuthenticatedBaseline.newest_user_content(follow_request)
+      assert newest =~ follow_up
 
       events = TraceHub.drain(ctx.hub)
 
@@ -318,7 +321,35 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
              follow-up drain proves nothing. Events: #{inspect(canary_events)}
              """
 
+      # Retrieved memories are prepended onto the current user turn. Prior
+      # conversation history may still contain the preference the human just
+      # stated; that is the transcript, not a generic Memory.recall.
+      refute newest =~ marker,
+             """
+             The follow-up's current user turn contained the preference.
+             Authenticated turns freeze memory_write_policy to :deny, so
+             session_memory.recall may return only session-precomputed private
+             memories. A marker here is a private-recall leak into this turn.
+             Newest user content: #{inspect(newest)}
+             """
+
       J0AuthenticatedBaseline.assert_no_escapes!(ctx.hub)
     end
+  end
+
+  defp refute_generic_recall!(events, agent_id) do
+    dispatched =
+      Enum.filter(events, fn
+        {:j0_dispatched_recall, ^agent_id, _query, _result} -> true
+        _ -> false
+      end)
+
+    assert dispatched == [],
+           """
+           Authenticated Session turns freeze memory_write_policy to :deny.
+           session_memory.recall must return precomputed private memories and
+           must not call Arbor.Memory.recall/2. Observed: #{inspect(dispatched)}
+           Events: #{inspect(events)}
+           """
   end
 end

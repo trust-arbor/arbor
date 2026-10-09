@@ -78,7 +78,11 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
     {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, private_key)
     {:ok, identity} = Identity.new(public_key: public_key, name: "l1-diff-review-example-test")
     assert identity.agent_id == agent_id
-    :ok = Arbor.Security.register_identity_fixture(identity)
+
+    case Arbor.Security.register_identity_fixture(identity) do
+      :ok -> :ok
+      {:error, {:already_registered, ^agent_id}} -> :ok
+    end
 
     signer = fn resource -> SignedRequest.sign(resource, agent_id, private_key) end
 

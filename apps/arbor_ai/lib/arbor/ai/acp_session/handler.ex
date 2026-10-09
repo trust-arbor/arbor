@@ -356,6 +356,12 @@ defmodule Arbor.AI.AcpSession.Handler do
     # operation on any exception/exit from FileGuard.)
     e -> {:error, {:authorization_check_failed, Arbor.LLM.external_exception_message(e)}}
   catch
+    # A missing CapabilityStore exits :noproc from the read client. That is
+    # security being down, not a malformed path, so callers get the stable
+    # denial instead of a sanitized crash tuple.
+    :exit, {:noproc, _reason} ->
+      {:error, :security_unavailable}
+
     kind, reason ->
       {:error, {:authorization_check_failed, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end

@@ -301,6 +301,23 @@ defmodule Arbor.Security.PlatformActivationAuthorizationSecurityRegressionTest d
     assert {:error, :invalid_resource_binding} =
              Security.sign_with_authority(authority, "arbitrary signing oracle bytes")
 
+    assert {:ok, list_payload} =
+             Security.routine_owner_request_payload("list", ~s({"limit":1}))
+
+    assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, list_payload)
+
+    assert {:error, :invalid_routine_request} =
+             Security.routine_owner_request_payload("drop", "x")
+
+    assert {:error, :invalid_resource_binding} =
+             Security.sign_with_authority(
+               authority,
+               "arbor.scheduler.owner-request.v1\0drop\0x"
+             )
+
+    assert {:error, :invalid_resource_binding} =
+             Security.sign_with_authority(authority, list_payload <> <<0>> <> "tail")
+
     refute function_exported?(Security, :sign_detached, 2)
     refute function_exported?(SigningAuthorityBroker, :sign_detached, 2)
 

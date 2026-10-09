@@ -39,6 +39,7 @@ defmodule Arbor.Orchestrator.Test.CheckpointResumeHelper do
     }
 
     assert :ok = PipelineStatus.put(reopened, opts)
+
     assert {:ok, _} = PipelineStatus.claim_for_recovery_record(run_id, node(), opts)
     reopened
   end

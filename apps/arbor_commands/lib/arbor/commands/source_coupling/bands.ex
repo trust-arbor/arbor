@@ -20,6 +20,8 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
   @app_band %{
     "arbor_kernel" => "K",
     "arbor_kernel_runtime" => "K",
+    # L0 device I/O. Same rank as the kernel; voice depends downward on it.
+    "arbor_multimedia" => "K",
     "arbor_contracts" => "K",
     "arbor_common" => "K",
     "arbor_signals" => "K",

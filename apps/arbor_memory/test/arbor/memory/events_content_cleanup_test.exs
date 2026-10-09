@@ -38,7 +38,7 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
     )
 
     start_supervised!(
-      {ETS, name: hot, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      {ETS, name: hot, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled},
       id: hot
     )
 
@@ -117,6 +117,46 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
     assert {:ok, false} = Memory.agent_event_content_absent?(agent, timeout_ms: 5_000)
     assert :ok = Memory.delete_agent_event_content(agent, timeout_ms: 5_000)
     assert {:ok, true} = Memory.agent_event_content_absent?(agent, timeout_ms: 5_000)
+  end
+
+  test "security regression: durable absence cannot hide failed Historian hot eviction", %{
+    hist_durable: durable
+  } do
+    # An authoritative ETS log rejects projection eviction. The durable
+    # stream is still purged, so Historian's read-only absence check alone
+    # cannot establish that the full delete completed.
+    non_projection_hot = unique_name(:c4d_non_projection_hot)
+
+    start_supervised!(
+      {ETS, name: non_projection_hot, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      id: non_projection_hot
+    )
+
+    lease_env!(:arbor_historian, :hot_event_log_target, %{
+      name: non_projection_hot,
+      backend: ETS,
+      opts: []
+    })
+
+    agent = unique_agent("hot_eviction_failure")
+
+    assert :ok =
+             Events.record_identity_changed(agent, %{
+               field: "name",
+               old_value: "a",
+               new_value: "b"
+             })
+
+    stream = ContentCore.stream_id(agent)
+    seed_historian(stream, durable)
+    seed_historian(stream, non_projection_hot)
+
+    assert {:error, {:cleanup_incomplete, ^agent, report}} =
+             Memory.delete_agent_event_content(agent, timeout_ms: 5_000)
+
+    assert report.historian == :delete_indeterminate
+    assert {:ok, true} = Persistence.event_stream_absent?(durable, ETS, stream)
+    assert {:ok, false} = Persistence.event_stream_absent?(non_projection_hot, ETS, stream)
   end
 
   test "absence is read-only, false before cleanup, true after; survivors remain", %{
@@ -495,18 +535,19 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
              })
 
     stream = ContentCore.stream_id(agent_id)
-    # dual_emit writes local EventLog + Signals. Seed historian dual stores explicitly
-    # so both Config targets hold the stream even when durable_emit only hits hardcoded hot.
+    # dual_emit writes local EventLog + Signals. Seed the configured durable
+    # authority and project its committed event into the configured hot cache.
     durable = Application.get_env(:arbor_historian, :durable_event_log_target).name
     hot = Application.get_env(:arbor_historian, :hot_event_log_target).name
-    seed_historian(stream, durable)
-    seed_historian(stream, hot)
+    persisted = seed_historian(stream, durable)
+    assert {:ok, %{projected: 1}} = Persistence.project_committed_events(hot, ETS, [persisted])
     :ok
   end
 
   defp seed_historian(stream_id, name) do
     event = Event.new(stream_id, "identity_changed", %{"agent" => stream_id})
-    assert {:ok, [_]} = Persistence.append(name, ETS, stream_id, event)
+    assert {:ok, [persisted]} = Persistence.append(name, ETS, stream_id, event)
+    persisted
   end
 
   defp seed_archive(target, stream_id) do
@@ -534,7 +575,7 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
              Persistence.event_stream_absent?(:memory_events, ETS, stream)
 
     assert {:ok, false} = Persistence.event_stream_absent?(durable, ETS, stream)
-    assert {:ok, false} = Persistence.event_stream_absent?(hot, ETS, stream)
+    assert {:ok, [_ | _]} = Persistence.read_stream(hot, ETS, stream)
   end
 
   defp assert_absent_on_all(agent_id, durable, hot) do
@@ -545,7 +586,7 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
              Persistence.event_stream_absent?(:memory_events, ETS, stream)
 
     assert {:ok, true} = Persistence.event_stream_absent?(durable, ETS, stream)
-    assert {:ok, true} = Persistence.event_stream_absent?(hot, ETS, stream)
+    assert {:ok, []} = Persistence.read_stream(hot, ETS, stream)
   end
 
   defp assert_closed_report(report) when is_map(report) do

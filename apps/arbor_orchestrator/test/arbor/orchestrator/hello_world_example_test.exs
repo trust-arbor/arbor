@@ -105,7 +105,10 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
     assert identity.agent_id == agent_id,
            "derived agent_id #{identity.agent_id} doesn't match key file agent_id #{agent_id}"
 
-    :ok = Arbor.Security.register_identity_fixture(identity)
+    case Arbor.Security.register_identity_fixture(identity) do
+      :ok -> :ok
+      {:error, {:already_registered, ^agent_id}} -> :ok
+    end
 
     # Build the per-resource signer the orchestrator middleware expects.
     # Each capability check produces a fresh SignedRequest with its own
@@ -135,9 +138,17 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
     # Demonstrates that pipeline composition decouples policy from any
     # language-specific code-gen logic.
     for {language, ext} <- [{"Python", "py"}, {"Rust", "rs"}, {"Elixir", "exs"}] do
-      output_path =
+      workdir =
         Path.join(
           System.tmp_dir!(),
+          "arbor_hello_workdir_#{language}_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workdir)
+
+      output_path =
+        Path.join(
+          workdir,
           "arbor_hello_#{language}_#{System.unique_integer([:positive])}.#{ext}"
         )
 
@@ -148,13 +159,13 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
         )
 
       on_exit(fn ->
-        File.rm(output_path)
+        File.rm_rf(workdir)
         File.rm_rf(logs_root)
       end)
 
       initial_values = %{
         "language" => language,
-        "path" => output_path,
+        "path" => Path.basename(output_path),
         "session.agent_id" => agent_id
       }
 
@@ -162,6 +173,7 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
                Arbor.Orchestrator.run_file(@dot_path,
                  signer: signer,
                  initial_values: initial_values,
+                 workdir: workdir,
                  logs_root: logs_root
                )
 

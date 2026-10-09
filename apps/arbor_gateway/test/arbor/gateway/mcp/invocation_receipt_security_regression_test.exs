@@ -45,7 +45,9 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
     previous = Application.get_env(:arbor_security, :invocation_receipts_enabled)
     Application.put_env(:arbor_security, :invocation_receipts_enabled, true)
 
-    agent_id = "agent_mcp_receipt_regression_#{System.unique_integer([:positive])}"
+    {:ok, identity} = Arbor.Security.generate_identity(name: "mcp-receipt-regression")
+    :ok = Arbor.Security.register_identity_fixture(identity)
+    agent_id = identity.agent_id
     parent = self()
     handler_id = "mcp-receipt-regression-#{System.unique_integer([:positive])}"
 
@@ -68,6 +70,7 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
 
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)
+      :ok = Arbor.Security.deregister_identity_fixture(agent_id)
       if Process.alive?(server_pid), do: GenServer.stop(server_pid, :normal, 1_000)
     end)
 

@@ -1365,17 +1365,17 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
   defp grant_capability(principal_id, resource_uri) do
     cap = %Arbor.Contracts.Security.Capability{
-      id: "cap_#{System.unique_integer([:positive])}",
+      id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
       resource_uri: resource_uri,
       principal_id: principal_id,
       granted_at: DateTime.utc_now(),
       expires_at: nil,
       constraints: %{},
       delegation_depth: 0,
-      metadata: %{test: true}
+      metadata: %{"test" => true}
     }
 
-    Arbor.Security.put_capability_fixture(cap)
+    {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
   end
 
   defp ensure_authorization_request_topic! do

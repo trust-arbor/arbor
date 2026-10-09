@@ -25,7 +25,7 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     lock_source = File.read!(Path.join(umbrella_root(), "mix.lock"))
 
     assert lock_source =~
-             ~r/"boundary":\s*\{:hex,\s*:boundary,\s*"0\.10\.4"/
+             ~r/"boundary":\s*\{:hex,\s*:boundary,\s*"0\.11\.0"/
 
     refute :boundary in Application.spec(:arbor_kernel, :applications)
   end

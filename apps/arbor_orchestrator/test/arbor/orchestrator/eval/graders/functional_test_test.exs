@@ -5,126 +5,69 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTestTest do
 
   @moduletag :fast
 
+  @detail "functional execution disabled: isolated evaluator required"
+
   describe "grade/3" do
-    test "scores 1.0 when all assertions pass" do
+    test "security regression: untrusted subject is not compiled or executed" do
       code = """
-      defmodule Adder do
+      defmodule AdderFT do
         def add(a, b), do: a + b
         def zero, do: 0
       end
       """
 
       expected = %{
-        "module" => "Adder",
+        "module" => "AdderFT",
         "tests" => [
-          %{"call" => "Adder.add(1, 2)", "expect" => "3"},
-          %{"call" => "Adder.add(0, 0)", "expect" => "0"},
-          %{"call" => "Adder.zero()", "expect" => "0"}
+          %{"call" => "AdderFT.add(1, 2)", "expect" => "3"},
+          %{"call" => "AdderFT.add(0, 0)", "expect" => "0"},
+          %{"call" => "AdderFT.zero()", "expect" => "0"}
         ]
       }
 
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 1.0
-      assert result.passed == true
-      assert result.detail =~ "3/3 tests passed"
+      assert FunctionalTest.grade(code, expected) == %{
+               score: 0.0,
+               passed: false,
+               detail: @detail
+             }
+
+      refute :code.is_loaded(AdderFT)
     end
 
-    test "scores fractionally when some assertions fail" do
-      code = """
-      defmodule PartialCalc do
-        def add(a, b), do: a + b
-        def multiply(a, b), do: a + b
+    test "security regression: partial, broken, match, setup, and fenced subjects stay unexecuted" do
+      subjects = [
+        {"""
+         defmodule PartialCalcFT do
+           def add(a, b), do: a + b
+         end
+         """, %{"tests" => [%{"call" => "PartialCalcFT.add(2, 3)", "expect" => "5"}]}, []},
+        {"defmodule BrokenFT do\n  def foo(, do: :bar\nend",
+         %{"tests" => [%{"call" => "BrokenFT.foo()", "expect" => ":bar"}]}, []},
+        {"""
+         defmodule MatchTestFT do
+           def ok_tuple(x), do: {:ok, x}
+         end
+         """, %{"tests" => [%{"call" => "MatchTestFT.ok_tuple(42)", "match" => "{:ok, _}"}]}, []},
+        {"```elixir\ndefmodule FencedFT do\n  def x, do: 42\nend\n```",
+         %{"tests" => [%{"call" => "FencedFT.x()", "expect" => "42"}]}, []},
+        {"defmodule EmptyFT do end", %{}, []}
+      ]
+
+      for {code, expected, opts} <- subjects do
+        assert FunctionalTest.grade(code, expected, opts) == %{
+                 score: 0.0,
+                 passed: false,
+                 detail: @detail
+               }
       end
-      """
 
-      expected = %{
-        "tests" => [
-          %{"call" => "PartialCalc.add(2, 3)", "expect" => "5"},
-          %{"call" => "PartialCalc.multiply(2, 3)", "expect" => "6"}
-        ]
-      }
-
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 0.5
-      assert result.detail =~ "1/2 tests passed"
+      refute :code.is_loaded(PartialCalcFT)
+      refute :code.is_loaded(FencedFT)
     end
 
-    test "scores 0.0 when code doesn't compile" do
-      code = "defmodule Broken do\n  def foo(, do: :bar\nend"
-      expected = %{"tests" => [%{"call" => "Broken.foo()", "expect" => ":bar"}]}
-
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 0.0
-      assert result.passed == false
-      assert result.detail =~ "compilation failed"
-    end
-
-    test "handles match pattern assertions" do
+    test "security regression: a timeout option cannot start the subject" do
       code = """
-      defmodule MatchTest do
-        def ok_tuple(x), do: {:ok, x}
-      end
-      """
-
-      expected = %{
-        "tests" => [
-          %{"call" => "MatchTest.ok_tuple(42)", "match" => "{:ok, _}"}
-        ]
-      }
-
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 1.0
-      assert result.passed == true
-    end
-
-    test "handles setup code before call" do
-      code = """
-      defmodule WithSetup do
-        def greet(name), do: "Hello, \#{name}!"
-      end
-      """
-
-      expected = %{
-        "tests" => [
-          %{
-            "setup" => "name = \"World\"",
-            "call" => "WithSetup.greet(name)",
-            "expect" => "\"Hello, World!\""
-          }
-        ]
-      }
-
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 1.0
-    end
-
-    test "returns 0.0 when no tests in expected" do
-      result = FunctionalTest.grade("defmodule Empty do end", %{})
-      assert result.score == 0.0
-      assert result.detail =~ "no test assertions"
-    end
-
-    test "cleans up compiled modules after grading" do
-      code = """
-      defmodule CleanupCheck do
-        def hello, do: :world
-      end
-      """
-
-      expected = %{
-        "tests" => [%{"call" => "CleanupCheck.hello()", "expect" => ":world"}]
-      }
-
-      FunctionalTest.grade(code, expected)
-
-      # The actual module should be cleaned up (munged name shouldn't persist)
-      # Original name was never compiled — only munged version was
-      refute :code.is_loaded(CleanupCheck)
-    end
-
-    test "handles test timeout gracefully" do
-      code = """
-      defmodule SlowTest do
+      defmodule SlowTestFT do
         def slow do
           Process.sleep(10_000)
           :done
@@ -132,24 +75,15 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTestTest do
       end
       """
 
-      expected = %{
-        "tests" => [%{"call" => "SlowTest.slow()", "expect" => ":done"}]
-      }
+      result =
+        FunctionalTest.grade(
+          code,
+          %{"tests" => [%{"call" => "SlowTestFT.slow()", "expect" => ":done"}]},
+          timeout: 100
+        )
 
-      result = FunctionalTest.grade(code, expected, timeout: 100)
-      assert result.score == 0.0
-      assert result.detail =~ "timeout"
-    end
-
-    test "extracts code from markdown fences" do
-      code = "```elixir\ndefmodule Fenced do\n  def x, do: 42\nend\n```"
-
-      expected = %{
-        "tests" => [%{"call" => "Fenced.x()", "expect" => "42"}]
-      }
-
-      result = FunctionalTest.grade(code, expected)
-      assert result.score == 1.0
+      assert result == %{score: 0.0, passed: false, detail: @detail}
+      refute :code.is_loaded(SlowTestFT)
     end
   end
 end

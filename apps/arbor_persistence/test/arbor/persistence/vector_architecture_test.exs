@@ -23,16 +23,27 @@ defmodule Arbor.Persistence.VectorArchitectureTest do
 
     for filename <- @boundary_sources do
       source = File.read!(Path.join(root, filename))
+      scanned = vector_boundary_source(filename, source)
 
-      refute source =~ "Arbor.Persistence.Repo"
-      refute source =~ "Arbor.Persistence.Schemas"
-      refute source =~ "Ecto."
-      refute source =~ "Pgvector"
-      refute source =~ "Arbor.Memory"
-      refute source =~ "Code.ensure_loaded"
-      refute source =~ ~r/\bapply\s*\(/
+      refute scanned =~ "Arbor.Persistence.Repo"
+      refute scanned =~ "Arbor.Persistence.Schemas"
+      refute scanned =~ "Ecto."
+      refute scanned =~ "Pgvector"
+      refute scanned =~ "Arbor.Memory"
+      refute scanned =~ "Code.ensure_loaded"
+      refute scanned =~ ~r/\bapply\s*\(/
     end
   end
+
+  # config.ex is the shared seam. sql_repository/0 names the conversation SQL
+  # repo, and the moduledoc names VectorStore.Ecto as the product default.
+  # Those are outside the vector functions, which must stay free of that bridge.
+  defp vector_boundary_source("config.ex", source) do
+    [_sql_seam, vector] = String.split(source, "def vector_store_backend", parts: 2)
+    "def vector_store_backend" <> vector
+  end
+
+  defp vector_boundary_source(_filename, source), do: source
 
   test "public facade vector section is only a boundary delegate" do
     source = File.read!(Path.expand("../../../lib/arbor/persistence.ex", __DIR__))

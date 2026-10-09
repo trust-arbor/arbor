@@ -1,5 +1,6 @@
 {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
 Code.require_file("support/durable_event_log.ex", __DIR__)

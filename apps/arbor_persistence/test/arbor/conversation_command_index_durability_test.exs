@@ -3,7 +3,6 @@ defmodule Arbor.Persistence.ConversationCommandIndexDurabilityTest do
   alias Arbor.Persistence
   @moduletag :database
   @moduletag :isolated_repo
-  @moduletag :fast
 
   if Arbor.Persistence.Repo.__adapter__() != Ecto.Adapters.SQLite3 do
     @moduletag skip: "This reopen qualification owns a private SQLite database"
@@ -258,7 +257,7 @@ defmodule Arbor.Persistence.ConversationCommandIndexDurabilityTest do
     assert_receive {:writer_locked, writer_pid}, 5_000
     # The writer occupies one connection. These reads prove the other is fully
     # connected and available before projection attempts native acquisition.
-    assert %{rows: [[5_000]]} = IsolatedRepo.query!("PRAGMA busy_timeout")
+    assert Arbor.Persistence.SQLiteBusyTimeout.get(IsolatedRepo) == 5_000
     assert %{rows: [["wal"]]} = IsolatedRepo.query!("PRAGMA journal_mode")
     projection = Task.async(fn -> Persistence.project_conversation_command(scope, row, 1) end)
 
@@ -268,7 +267,7 @@ defmodule Arbor.Persistence.ConversationCommandIndexDurabilityTest do
       # rather than replacing the database with an adapter that returns :busy.
       assert {:ok, {:error, :conversation_index_unavailable}} = Task.yield(projection, 500)
 
-      assert %{rows: [[5_000]]} = IsolatedRepo.query!("PRAGMA busy_timeout")
+      assert Arbor.Persistence.SQLiteBusyTimeout.get(IsolatedRepo) == 5_000
       assert {:ok, 0} = Persistence.conversation_command_index_watermark(scope)
     after
       send(writer_pid, :release_writer)

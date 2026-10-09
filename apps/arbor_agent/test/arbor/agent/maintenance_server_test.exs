@@ -130,10 +130,25 @@ defmodule Arbor.Agent.MaintenanceServerTest do
           maintenance_interval: 100
         )
 
-      # Wait for at least 2 ticks
-      Process.sleep(350)
+      # A tick runs memory housekeeping before the next interval is armed.
+      # 1.5s covers two 100ms ticks when that work is slow, and it is still
+      # far below the 60s default interval.
+      deadline = System.monotonic_time(:millisecond) + 1_500
 
-      stats = MaintenanceServer.stats(pid)
+      stats =
+        Stream.repeatedly(fn ->
+          current = MaintenanceServer.stats(pid)
+
+          if current.tick_count < 2 and System.monotonic_time(:millisecond) < deadline do
+            Process.sleep(50)
+          end
+
+          current
+        end)
+        |> Enum.find(fn current ->
+          current.tick_count >= 2 or System.monotonic_time(:millisecond) >= deadline
+        end)
+
       assert stats.tick_count >= 2
     end
   end

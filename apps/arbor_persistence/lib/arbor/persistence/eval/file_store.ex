@@ -562,16 +562,24 @@ defmodule Arbor.Persistence.Eval.FileStore do
   defp contained_run_path(root, run_id) do
     filename = run_id <> @json_suffix
 
-    case SafePath.safe_join(root, filename) do
-      {:ok, path} ->
-        if Path.dirname(path) == root do
-          {:ok, path}
-        else
-          {:error, :invalid_run_id}
-        end
+    # Keep the leaf lexical. Resolving it would follow a symlink and hide the
+    # later lstat refusal. Compare the parent after symlink resolution so a
+    # macOS temp root under /var matches its /private/var canonical path.
+    with {:ok, canonical_root} <- SafePath.resolve_real(root),
+         {:ok, path} <- lexical_run_path(root, filename),
+         {:ok, canonical_parent} <- SafePath.resolve_real(Path.dirname(path)),
+         true <- canonical_parent == canonical_root do
+      {:ok, path}
+    else
+      _ -> {:error, :invalid_run_id}
+    end
+  end
 
-      {:error, _} ->
-        {:error, :invalid_run_id}
+  defp lexical_run_path(root, filename) do
+    if Path.basename(filename) == filename and filename not in [".", ".."] do
+      {:ok, Path.join(root, filename)}
+    else
+      {:error, :invalid_run_id}
     end
   end
 

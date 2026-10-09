@@ -6,7 +6,6 @@ defmodule Arbor.Comms.ConversationReadTest do
   alias Arbor.Persistence
 
   @moduletag :database
-  @moduletag :fast
 
   defmodule FaultPersistence do
     def normalize_conversation_page_options(opts),

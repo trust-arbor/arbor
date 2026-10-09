@@ -35,6 +35,7 @@ defmodule Arbor.Agent.Orchestration do
   alias Arbor.Agent.Orchestration.{
     ApprovalInventoryProjection,
     DispatchReadiness,
+    LeaseGrantOwner,
     PendingApproval,
     TaskArtifacts,
     TaskControlLease
@@ -84,11 +85,16 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, agent_id} <- normalize_agent_id(agent_id),
          {:ok, task} <- normalize_task(task),
          {:ok, caller_id} <- caller_id(opts),
-         :ok <- authorize_dispatch(opts, caller_id, agent_id) do
-      # Proof may reach only Security.authorize/4. Strip both key forms before
-      # grants, TaskStore, cleanup descriptors, audit, or retained state.
+         {:ok, ticket} <- authorize_dispatch_for_lease(opts, caller_id, agent_id) do
+      # The owner spends the dispatch authorization once and retains a short
+      # lived ticket. No request proof enters TaskStore, cleanup, or audit.
       safe_opts = strip_session_tokens(opts)
-      dispatch_with_reservation_and_lease(agent_id, task, caller_id, safe_opts)
+
+      try do
+        dispatch_with_reservation_and_lease(agent_id, task, caller_id, safe_opts, ticket)
+      after
+        _ = LeaseGrantOwner.close_dispatch(ticket)
+      end
     end
   end
 
@@ -742,6 +748,25 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
+  defp authorize_dispatch_for_lease(opts, caller_id, agent_id) do
+    cond do
+      security_module(opts) == Arbor.Security and opt(opts, :authorize?, true) == false ->
+        {:error, {:unauthorized, :agent_dispatch_required}}
+
+      security_module(opts) == Arbor.Security ->
+        case security_auth_opts(opts) do
+          {:ok, auth_opts} -> LeaseGrantOwner.begin_dispatch(caller_id, agent_id, auth_opts)
+          {:error, :invalid_session_token} -> {:error, {:unauthorized, :invalid_session_token}}
+        end
+
+      true ->
+        case authorize_dispatch(opts, caller_id, agent_id) do
+          :ok -> {:ok, nil}
+          error -> error
+        end
+    end
+  end
+
   defp require_exact_task_status(requested_id, status) when is_map(status) do
     case Map.get(status, :task_id) || Map.get(status, "task_id") do
       ^requested_id -> :ok
@@ -912,7 +937,7 @@ defmodule Arbor.Agent.Orchestration do
   defp maybe_put_cleanup_trace_id(descriptor, _trace_id), do: descriptor
 
   # reserve → durable marker ack → grant → activate (token-bound).
-  defp dispatch_with_reservation_and_lease(agent_id, task, caller_id, opts) do
+  defp dispatch_with_reservation_and_lease(agent_id, task, caller_id, opts, ticket) do
     store = task_store_module(opts)
     store_opts = task_store_opts(opts)
 
@@ -925,7 +950,7 @@ defmodule Arbor.Agent.Orchestration do
              token,
              recovery_marker_opts(store_opts, agent_id, task, caller_id, opts)
            ) do
-      case grant_task_control_lease(caller_id, task_id, opts) do
+      case grant_task_control_lease(caller_id, task_id, token, opts, ticket) do
         {:ok, lease, granted} ->
           activate_opts =
             store_opts
@@ -1008,6 +1033,8 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp recovery_marker_opts(store_opts, agent_id, task, caller_id, opts) do
+    store_opts = Keyword.put(store_opts, :control_principal_id, caller_id)
+
     case dispatch_task_kind(task) do
       {:ok, kind} ->
         cleanup =
@@ -1076,10 +1103,19 @@ defmodule Arbor.Agent.Orchestration do
     revoke_outcome
   end
 
-  defp grant_task_control_lease(caller_id, task_id, opts) do
+  defp grant_task_control_lease(caller_id, task_id, token, opts, ticket) do
     now = DateTime.utc_now()
 
-    case grant_lease_members(caller_id, task_id, opts, now, TaskControlLease.grant_order(), []) do
+    case grant_lease_members(
+           caller_id,
+           task_id,
+           token,
+           opts,
+           ticket,
+           now,
+           TaskControlLease.grant_order(),
+           []
+         ) do
       {:ok, granted} ->
         kind_to_id = Map.new(granted)
 
@@ -1108,17 +1144,29 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  # Six sequential Security.grant/1 calls are intentional: closed least-risk-first
-  # order with approval_answer last, full reverse-revoke compensation, and no
-  # batch grant API in this slice (packet non-goal). Cost is ~2× the prior
-  # three-member path; do not parallelize (compensation ordering) or add a
-  # generic batch API without a separate design decision.
-  defp grant_lease_members(_caller_id, _task_id, _opts, _now, [], granted), do: {:ok, granted}
+  # Six sequential grants are intentional: closed least-risk-first order with
+  # approval_answer last, full reverse-revoke compensation, and no batch grant
+  # API in this slice (packet non-goal). Arbor.Security is reached through
+  # LeaseGrantOwner so the grant carries that owner's signing authority.
+  # Injected modules still receive grant/1 directly. Do not parallelize
+  # (compensation ordering) or add a generic batch API without a separate
+  # design decision.
+  defp grant_lease_members(_caller_id, _task_id, _token, _opts, _ticket, _now, [], granted),
+    do: {:ok, granted}
 
-  defp grant_lease_members(caller_id, task_id, opts, now, [kind | rest], granted) do
+  defp grant_lease_members(caller_id, task_id, token, opts, ticket, now, [kind | rest], granted) do
     with {:ok, spec} <- TaskControlLease.grant_spec(kind, caller_id, task_id, now),
-         {:ok, cap_id} <- grant_one_lease_member(opts, kind, spec) do
-      grant_lease_members(caller_id, task_id, opts, now, rest, granted ++ [{kind, cap_id}])
+         {:ok, cap_id} <- grant_one_lease_member(opts, kind, spec, token, ticket) do
+      grant_lease_members(
+        caller_id,
+        task_id,
+        token,
+        opts,
+        ticket,
+        now,
+        rest,
+        granted ++ [{kind, cap_id}]
+      )
     else
       # Mint-outcome uncertainty: never report ordinary grant_failed.
       {:error, {:mint_outcome_uncertain, class}} ->
@@ -1192,8 +1240,8 @@ defmodule Arbor.Agent.Orchestration do
 
   defp request_task_reconcile(_opts, _task_id), do: :error
 
-  defp grant_one_lease_member(opts, _kind, spec) do
-    case invoke_lease_grant(security_module(opts), spec) do
+  defp grant_one_lease_member(opts, kind, spec, token, ticket) do
+    case invoke_lease_grant(security_module(opts), kind, spec, token, opts, ticket) do
       {:ok, capability} ->
         case value(capability, :id) do
           id when is_binary(id) and id != "" ->
@@ -1234,7 +1282,17 @@ defmodule Arbor.Agent.Orchestration do
   # Grant exceptions are mint-outcome uncertainty. Do not route this call
   # through apply_if_exported/3, which deliberately collapses exceptions into
   # :module_unavailable for ordinary optional integrations.
-  defp invoke_lease_grant(module, spec) when is_atom(module) do
+  #
+  # Arbor.Security.grant/1 without an actor authority is fail-closed. The
+  # lease owner performs that call. A missing owner is a clean failure (no
+  # mint). An exit during the call still propagates so the caller can treat
+  # it as mint-outcome uncertainty. Injected modules keep grant/1.
+  defp invoke_lease_grant(Arbor.Security, kind, spec, token, opts, ticket) do
+    LeaseGrantOwner.grant(kind, spec, token, task_store_opts(opts), ticket)
+  end
+
+  defp invoke_lease_grant(module, _kind, spec, _token, _opts, _ticket)
+       when is_atom(module) do
     if Code.ensure_loaded?(module) and function_exported?(module, :grant, 1) do
       apply(module, :grant, [spec])
     else
@@ -1242,7 +1300,8 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp invoke_lease_grant(_module, _spec), do: :module_unavailable
+  defp invoke_lease_grant(_module, _kind, _spec, _token, _opts, _ticket),
+    do: :module_unavailable
 
   defp valid_granted_capability_id?(id)
        when is_binary(id) and byte_size(id) > 0 and byte_size(id) <= 256 do
@@ -1284,7 +1343,13 @@ defmodule Arbor.Agent.Orchestration do
 
   defp revoke_one_lease_member(opts, cap_id)
        when is_binary(cap_id) and cap_id != "" do
-    case opts |> security_module() |> apply_if_exported(:revoke, [cap_id]) do
+    result =
+      case security_module(opts) do
+        Arbor.Security -> LeaseGrantOwner.revoke(cap_id)
+        module -> apply_if_exported(module, :revoke, [cap_id])
+      end
+
+    case result do
       :ok -> :ok
       {:ok, _} -> :ok
       {:error, :not_found} -> :ok

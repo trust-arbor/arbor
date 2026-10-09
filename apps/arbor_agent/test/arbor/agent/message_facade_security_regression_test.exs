@@ -613,7 +613,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       Application.put_env(
         :arbor_security,
         :session_token_secret,
-        "conversation-public-#{System.unique_integer([:positive])}"
+        "conversation-public-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       )
 
       Application.put_env(:arbor_security, :identity_verification, true)
@@ -720,6 +720,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
   @tag :conversation_ingress
   @tag :isolated_repo
+  @tag fast: false
   test "security regression: public submission rejects a stopped target before durable admission",
        %{target: target} do
     start_conversation_repo!()
@@ -750,6 +751,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
   @tag :conversation_ingress
   @tag :isolated_repo
+  @tag fast: false
   test "security regression: public conversation replay preserves private ownership over real SQLite",
        %{target: target} do
     start_conversation_repo!()
@@ -855,6 +857,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
   @tag :conversation_ingress
   @tag :isolated_repo
+  @tag fast: false
   test "public durable admission outlives its caller and saves the scrubbed Session delivery", %{
     target: target
   } do
@@ -873,8 +876,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
     {:ok, session_pid} =
       FakeAuthSession.start_link(parent, fn _from, request ->
-        assert {:send_authenticated_message, %UserMessage{content: "durable delivery"}, receipt} =
-                 request
+        assert {:send_conversation_command, %UserMessage{content: "durable delivery"}, receipt,
+                binding} = request
+
+        assert is_map(binding)
 
         assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
         send(parent, :conversation_receipt_consumed)
@@ -1079,7 +1084,8 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       Application.put_env(
         :arbor_security,
         :session_token_secret,
-        "agent-msg-facade-secret-#{System.unique_integer([:positive])}"
+        "agent-msg-facade-secret-" <>
+          Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       )
 
       Application.put_env(:arbor_security, :identity_verification, true)
@@ -2682,6 +2688,20 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest.SessionBridge do
 
   def send_authenticated_message(_session, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_authenticated_message_request}
+
+  # Conversation commands use the production Session arity. The fake session
+  # receives the same tuple Orchestrator.Session sends.
+  def send_conversation_command(session, message, receipt, binding, timeout_ms)
+      when is_map(binding) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(
+      session,
+      {:send_conversation_command, message, receipt, binding},
+      timeout_ms
+    )
+  end
+
+  def send_conversation_command(_session, _message, _receipt, _binding, _timeout_ms),
+    do: {:error, :unauthenticated}
 
   def consult_authenticated(session, message, receipt, parent, timeout) do
     GenServer.call(session, {:consult_authenticated, message, receipt, parent}, timeout)

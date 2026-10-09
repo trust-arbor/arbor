@@ -87,6 +87,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   end
 
   test "Signals durable_emit remains best-effort when Historian rejects the durable write" do
+    ensure_signals_started!()
     ctx = start_isolated_targets()
     configure_target(:durable_event_log_target, ctx.durable, ErrorBackend)
     configure_target(:hot_event_log_target, ctx.hot, ETS)
@@ -301,6 +302,12 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   defmodule ProjectionErrorBackend do
     def project_committed_events(_events, _opts), do: {:error, :boom}
+  end
+
+  # Test config leaves the Signals application supervisor empty. Publication
+  # accepts only that supervisor's bus, so this assertion starts the real tree.
+  defp ensure_signals_started! do
+    Arbor.Signals.ensure_supervised_local_runtime!()
   end
 
   defp start_isolated_targets do

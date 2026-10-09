@@ -19,6 +19,8 @@ defmodule Arbor.Voice.ApplicationTest do
     Arbor.Voice.ToolTaskSupervisor,
     Arbor.Voice.ResourceSupervisor,
     Arbor.Voice.SessionSupervisor,
+    Arbor.Voice.EgressGrantLedger,
+    Arbor.Voice.EgressGrantOwner,
     Arbor.Voice.DeskWorkerSupervisor,
     Arbor.Voice.Presentation,
     Arbor.Voice.DeskSupervisor

@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
   @moduletag :security_regression
 
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Contracts.Security.{Identity, SignedRequest}
   alias Arbor.Security
 
   @action "native_resource_probe"
@@ -68,7 +69,9 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     end
 
     suffix = System.unique_integer([:positive, :monotonic])
-    principal = "agent_native_resource_#{suffix}"
+    assert {:ok, identity} = Identity.generate(name: "native-resource-#{suffix}")
+    assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    principal = identity.agent_id
     task = "native-resource-task-#{suffix}"
     session = "native-resource-session-#{suffix}"
 
@@ -83,6 +86,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     on_exit(fn ->
       Security.revoke_by_task_fixture(task)
       Arbor.Trust.delete_trust_profile(principal)
+      _ = Security.deregister_identity_fixture(principal)
     end)
 
     # This generic middleware fixture supplies trusted in-process source control
@@ -95,6 +99,11 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
       session_id: session,
       workdir: File.cwd!(),
       authorizer: fn _principal, _type -> :ok end,
+      # Session-scoped execution signs a one-use JIT grant payload and the
+      # action resource with the caller's registered key.
+      signer: fn payload ->
+        SignedRequest.sign(payload, identity.agent_id, identity.private_key)
+      end,
       resumable: false,
       conversation_source: %{
         session_pid: self(),

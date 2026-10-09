@@ -742,13 +742,13 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
         id: :arbor_agent_profiles
       )
 
-    # Mirrors Arbor.Agent.Application. Identity alias records live in this
-    # store; since 2026-09-27 (11d209431) Security.resolve_conversation_owner/1
-    # resolves aliases strictly, so without it every authenticated delivery
-    # fails closed as {:error, :unauthorized} (:alias_store_unavailable).
+    # Chat admission resolves the caller through IdentityAliasResolver. An
+    # absent :arbor_user_config store is an outage and the receipt is denied.
+    # An empty store means the human is unlinked and resolves to itself.
     user_config =
       Supervisor.child_spec(
-        {BufferedStore, name: :arbor_user_config, backend: nil, write_mode: :sync},
+        {BufferedStore,
+         name: :arbor_user_config, backend: nil, write_mode: :sync, collection: "user_config"},
         id: :arbor_user_config
       )
 

@@ -238,23 +238,32 @@ defmodule Arbor.Orchestrator.Session.TranscriptRecoveryTest do
       |> Enum.filter(&({:process, &1} in monitors))
 
     on_exit(fn -> stop_process(engine_task) end)
-    trace = :trace.session_create(__MODULE__, self(), [])
+
+    # The turn task marks itself sensitive before the provider runs, so send
+    # traces are suppressed. Suspension already stops this Session from
+    # consuming the envelope; read that delivered message back.
+    engine_ref = Process.monitor(engine_task)
+    send(old_worker, :release)
+    assert_receive {:DOWN, ^engine_ref, :process, ^engine_task, :normal}, 5_000
 
     stale_completion =
-      try do
-        assert 1 = :trace.process(trace, engine_task, true, [:send])
-        send(old_worker, :release)
+      case Process.info(old, :messages) do
+        {:messages, messages} ->
+          Enum.find(messages, fn
+            {:turn_result, token, %UserMessage{}, {:ok, %{final_outcome: %{status: :success}}}} ->
+              is_reference(token)
 
-        assert_receive {:trace, ^engine_task, :send,
-                        {:turn_result, token, %UserMessage{}, {:ok, result}} = completed, ^old},
-                       5_000
+            _ ->
+              false
+          end)
 
-        assert is_reference(token)
-        assert result.final_outcome.status == :success
-        completed
-      after
-        :trace.session_destroy(trace)
+        _ ->
+          nil
       end
+
+    assert {:turn_result, token, %UserMessage{}, {:ok, result}} = stale_completion
+    assert is_reference(token)
+    assert result.final_outcome.status == :success
 
     stop_process(old)
     assert {:error, :session_stopped} = Task.await(old_caller, 2_000)

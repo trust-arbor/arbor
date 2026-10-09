@@ -4,7 +4,6 @@ defmodule Arbor.Persistence.ConversationDirectoryTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.EngagementStore
   @moduletag :database
-  @moduletag :fast
   @owner "human_directory_owner"
   @other "human_directory_other"
 

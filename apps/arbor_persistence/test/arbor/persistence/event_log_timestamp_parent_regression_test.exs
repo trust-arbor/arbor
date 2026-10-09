@@ -4,17 +4,17 @@ defmodule Arbor.Persistence.EventLogTimestampParentRegressionTest do
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EventLog
   alias Arbor.Persistence.Repo
+  alias Arbor.Persistence.Schemas.Event, as: EventRow
+  alias Arbor.Persistence.Schemas.EventLogOperation
 
   @moduletag :database
   @moduletag :integration
 
   setup do
-    case Repo.query!("SELECT to_regclass('public.event_log_operations')").rows do
-      [[nil]] -> :ok
-      [[_table]] -> Repo.query!("DELETE FROM public.event_log_operations")
-    end
-
-    Repo.query!("DELETE FROM public.events")
+    # Schema deletes follow the repo adapter. `public.events` is Postgres-only;
+    # SQLite stores the same rows in `events`.
+    Repo.delete_all(EventLogOperation)
+    Repo.delete_all(EventRow)
     :ok
   end
 

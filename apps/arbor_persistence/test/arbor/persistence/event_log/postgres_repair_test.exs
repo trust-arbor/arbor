@@ -6,6 +6,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
 
   @moduletag :database
   @moduletag :integration
+  @moduletag :postgres
 
   @position_digest "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -23,6 +24,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
 
   setup_all do
     {:ok, admin} = Postgrex.start_link(postgres_opts())
+    Process.unlink(admin)
     schema = "event_log_repair_#{System.unique_integer([:positive])}"
     Postgrex.query!(admin, "CREATE SCHEMA #{quote_identifier(schema)}")
     create_tables!(admin, schema)

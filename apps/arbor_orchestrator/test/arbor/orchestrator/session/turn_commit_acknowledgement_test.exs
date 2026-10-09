@@ -18,7 +18,9 @@ defmodule Arbor.Orchestrator.Session.TurnCommitAcknowledgementTest do
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.TestCapabilities
 
-  @commit_timeout_ms 150
+  # The held-append test yields 80ms after the writer arms. A 150ms budget is
+  # spent by scheduling in a full suite, so a timely {:ok, 2} is classified late.
+  @commit_timeout_ms 1_000
   @timeout_slack_ms 2_500
 
   setup_all do
@@ -274,10 +276,15 @@ defmodule Arbor.Orchestrator.Session.TurnCommitAcknowledgementTest do
         end)
 
       assert_receive {:caller_ready, ^caller}, 1_000
-      true = :erlang.suspend_process(caller)
-      on_exit(fn -> resume_if_suspended(caller) end)
-      Process.sleep(20)
-      true = :erlang.resume_process(caller)
+
+      # A 1ms deadline can fail closed and exit the caller before this process
+      # is scheduled to suspend it. That exit is the assertion below.
+      if Process.alive?(caller) do
+        true = :erlang.suspend_process(caller)
+        on_exit(fn -> resume_if_suspended(caller) end)
+        Process.sleep(20)
+        true = :erlang.resume_process(caller)
+      end
 
       assert_receive {:caller_done, {:error, reason}}, @timeout_slack_ms
       assert reason in [:turn_persistence_uncertain, :turn_persistence_raised]

@@ -125,6 +125,8 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
         ],
         do: set_env(app, key, value)
 
+    :ok = ensure_egress_grant_owner!()
+
     previous = Arbor.LLM.Client.default_client()
 
     client =
@@ -417,6 +419,43 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
       with {:ok, engagement} <- Arbor.Comms.resolve_user_engagement(agent, owner, opts),
            do: {:ok, %{engagement | owner_tenant: "human_foreign"}}
     end
+  end
+
+  test "security regression: voice grant owner refuses arbitrary callback execution" do
+    caller = self()
+
+    assert {:error, :capability_mutation_unauthorized} =
+             GenServer.call(
+               Arbor.Voice.EgressGrantOwner,
+               {:with_authority, fn _authority -> send(caller, :owner_callback_executed) end}
+             )
+
+    refute_received :owner_callback_executed
+
+    assert {:error, :egress_grant_ledger_unauthorized} =
+             Arbor.Voice.EgressGrantLedger.record("forged-capability-id")
+  end
+
+  test "security regression: a voice grant remains revocable after its owner restarts", c do
+    {opts, _script} = voice_opts(c, [], :cloud)
+    assert {:ok, key} = Arbor.Voice.start_session(c.secondary.agent_id, c.target, opts)
+
+    assert {:ok, capabilities} = Security.list_capabilities(c.target)
+
+    assert [%{id: route_id}] =
+             Enum.filter(capabilities, fn cap ->
+               String.starts_with?(cap.resource_uri, "arbor://voice/realtime/xai/")
+             end)
+
+    assert :ok =
+             Supervisor.terminate_child(Arbor.Voice.Supervisor, Arbor.Voice.EgressGrantOwner)
+
+    assert {:ok, _owner} =
+             Supervisor.restart_child(Arbor.Voice.Supervisor, Arbor.Voice.EgressGrantOwner)
+
+    assert :ok = Arbor.Voice.stop_session(key)
+    assert {:ok, remaining} = Security.list_capabilities(c.target)
+    refute Enum.any?(remaining, &(&1.id == route_id))
   end
 
   test "security regression: local backend requires proof before opening", c do
@@ -837,6 +876,28 @@ defmodule Arbor.Voice.ConversationBindingSecurityRegressionTest do
 
       other ->
         flunk("unexpected token verification: #{inspect(other)}")
+    end
+  end
+
+  # Cloud route grants and disclosures are real Security mutations. The voice
+  # agent does not hold grant or revoke. This service principal does, and the
+  # supervised owner is the only process that opens its stored key.
+  defp ensure_egress_grant_owner! do
+    case Arbor.Voice.EgressGrantOwner.fixture_principal() do
+      principal when is_binary(principal) ->
+        :ok
+
+      _ ->
+        {:ok, identity} = Security.generate_identity()
+        :ok = Security.register_identity_fixture(identity)
+        :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+        for resource <- ["arbor://security/grant/**", "arbor://security/revoke/**"] do
+          {:ok, _capability} =
+            Security.grant_fixture(principal: identity.agent_id, resource: resource)
+        end
+
+        Arbor.Voice.EgressGrantOwner.install_fixture!(identity.agent_id)
     end
   end
 

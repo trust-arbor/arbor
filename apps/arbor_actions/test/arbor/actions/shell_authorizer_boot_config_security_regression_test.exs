@@ -147,15 +147,25 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
   end
 
   defp read(c, identity) do
-    Shell.authorize_and_execute(identity.agent_id, "cat input",
+    command = "cat input"
+    # Shell is approval-locked. A hand-built decision map is not a consumed
+    # receipt, so the guarded call denies it. Digest the same %{command: _}
+    # map authorize_command builds from the command and working directory.
+    {:ok, digest} = Security.approval_argument_digest(%{command: command, cwd: c.root})
+
+    {:ok, receipt} =
+      Security.issue_approval_receipt_fixture(
+        identity.agent_id,
+        "arbor://shell/exec/cat",
+        :execute,
+        digest,
+        "irq_synthetic_boot_binding_#{System.unique_integer([:positive])}"
+      )
+
+    Shell.authorize_and_execute(identity.agent_id, command,
       cwd: c.root,
       timeout: 5_000,
-      approved_invocation: %{
-        request_id: "irq_synthetic_boot_binding",
-        principal_id: identity.agent_id,
-        resource_uri: "arbor://shell/exec/cat",
-        decision: :approved
-      }
+      approved_invocation: receipt
     )
   end
 

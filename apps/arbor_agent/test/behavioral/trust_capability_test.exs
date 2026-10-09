@@ -38,7 +38,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       agent_id = "agent_expired_cap_#{:erlang.unique_integer([:positive])}"
 
       cap = %Capability{
-        id: "cap_expired_#{agent_id}",
+        id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
         resource_uri: "arbor://test/expired",
         principal_id: agent_id,
         granted_at: DateTime.add(DateTime.utc_now(), -7200, :second),
@@ -48,7 +48,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
         metadata: %{test: true}
       }
 
-      Arbor.Security.put_capability_fixture(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 
       result = Arbor.Security.authorize(agent_id, "arbor://test/expired")
       # Expired caps should not authorize

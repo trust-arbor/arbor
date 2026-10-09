@@ -47,6 +47,11 @@ defmodule Arbor.AI.AcpSessionTest do
     def init(state), do: {:ok, state}
 
     @impl true
+    def handle_call(:occupy, _from, state) do
+      Process.sleep(500)
+      {:reply, {:ok, %{}}, state}
+    end
+
     def handle_call(_message, _from, state) do
       Process.sleep(40)
       {:reply, {:ok, %{}}, state}
@@ -191,8 +196,11 @@ defmodule Arbor.AI.AcpSessionTest do
           end
 
         "steady_progress" ->
-          for sequence <- 1..5 do
-            Process.sleep(15)
+          steps = state.opts[:progress_steps] || 5
+          pause = state.opts[:progress_sleep_ms] || 15
+
+          for sequence <- 1..steps do
+            Process.sleep(pause)
             send_progress(listener, progress_session_id, sequence)
           end
 
@@ -761,7 +769,9 @@ defmodule Arbor.AI.AcpSessionTest do
     started_at = System.monotonic_time(:millisecond)
 
     assert {:error, :timeout} = AcpSession.send_message(server, "queued", timeout: 10)
-    assert System.monotonic_time(:millisecond) - started_at < 35
+    # The occupier holds the server for 500ms. Queue time must consume the
+    # 10ms deadline, so this returns while that call is still in progress.
+    assert System.monotonic_time(:millisecond) - started_at < 250
     assert {:ok, %{}} = Task.await(blocker)
   end
 
@@ -1326,11 +1336,13 @@ defmodule Arbor.AI.AcpSessionTest do
                SessionRegistry.resolve(registered.worker_session_id, server: registry)
     end
 
-    @tag timeout: 1_000
+    @tag timeout: 5_000
     test "progress updates keep a prompt alive past the inactivity window" do
-      install_fake_progress_client(40)
+      # 20 pauses of 30ms outlast a 400ms window, and each pause stays inside it.
+      install_fake_progress_client(400)
 
-      {:ok, session} = start_fake_progress_session()
+      {:ok, session} =
+        start_fake_progress_session(progress_sleep_ms: 30, progress_steps: 20)
 
       assert {:ok, result} = AcpSession.send_message(session, "steady_progress")
 
@@ -1342,20 +1354,22 @@ defmodule Arbor.AI.AcpSessionTest do
       GenServer.stop(session)
     end
 
-    @tag timeout: 1_000
+    @tag timeout: 5_000
     test "security regression: Claude update UUID refreshes inactivity and becomes durable identity" do
-      install_fake_progress_client(40)
+      install_fake_progress_client(400)
       provider_session_id = "6b9302de-0ed1-48c7-92bd-8963dbc530a8"
 
       {:ok, session} =
         start_fake_progress_session(
           provider: :claude,
           new_session_result: {:ok, %{"sessionId" => "claude_sdk_8890"}},
-          progress_session_id: provider_session_id
+          progress_session_id: provider_session_id,
+          progress_sleep_ms: 30,
+          progress_steps: 20
         )
 
       assert {:ok, %{"text" => "done"}} =
-               AcpSession.send_message(session, "steady_progress", timeout: 1_000)
+               AcpSession.send_message(session, "steady_progress", timeout: 3_000)
 
       # The provider UUID becomes the durable (resume) identity; the ACP session
       # id the client knows stays the one `session/new` returned.
@@ -1466,7 +1480,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
     end
 
-    @tag timeout: 1_000
+    @tag timeout: 5_000
     test "security regression: hard prompt deadline wins over stream callback timeout" do
       install_fake_progress_client(200)
       test_pid = self()
@@ -1477,7 +1491,7 @@ defmodule Arbor.AI.AcpSessionTest do
           client_opts: [test_pid: self()],
           stream_callback: fn _update ->
             send(test_pid, :stream_callback_started)
-            Process.sleep(100)
+            Process.sleep(2_000)
             :ok
           end
         )
@@ -1486,11 +1500,11 @@ defmodule Arbor.AI.AcpSessionTest do
 
       assert {:error, :timeout} =
                AcpSession.send_message(session, "steady_progress",
-                 timeout: 50,
-                 inactivity_timeout_ms: 200
+                 timeout: 800,
+                 inactivity_timeout_ms: 5_000
                )
 
-      assert_receive :stream_callback_started
+      assert_receive :stream_callback_started, 2_000
 
       assert %{status: :recovery_required, session_id: "fake-session"} =
                AcpSession.status(session)
@@ -1552,20 +1566,21 @@ defmodule Arbor.AI.AcpSessionTest do
 
   describe "hostile ACP callbacks" do
     test "finite stream callbacks preserve serial state and event order" do
-      install_fake_progress_client(100)
+      # Five 250ms pauses outlast an 800ms inactivity window unless progress resets it.
+      install_fake_progress_client(800)
       {:ok, seen} = Agent.start_link(fn -> [] end)
 
       {:ok, session} =
         AcpSession.start_link(
           provider: :test,
-          client_opts: [test_pid: self()],
+          client_opts: [test_pid: self(), progress_sleep_ms: 250, progress_steps: 5],
           stream_callback: fn update -> Agent.update(seen, &(&1 ++ [update])) end
         )
 
       on_exit(fn -> safely_close_session(session) end)
 
       assert {:ok, %{"text" => "done"}} =
-               AcpSession.send_message(session, "steady_progress", timeout: 250)
+               AcpSession.send_message(session, "steady_progress", timeout: 5_000)
 
       callbacks = Agent.get(seen, & &1)
       assert length(callbacks) == 5
@@ -1647,7 +1662,7 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "security regression: stream callback throws are bounded and do not kill the session" do
-      install_fake_progress_client(100)
+      install_fake_progress_client(5_000)
 
       {:ok, session} =
         AcpSession.start_link(
@@ -1661,7 +1676,10 @@ defmodule Arbor.AI.AcpSessionTest do
       on_exit(fn -> safely_close_session(session) end)
 
       assert {:ok, %{"text" => "done"}} =
-               AcpSession.send_message(session, "steady_progress", timeout: 250)
+               AcpSession.send_message(session, "steady_progress",
+                 timeout: 10_000,
+                 inactivity_timeout_ms: 5_000
+               )
 
       assert Process.alive?(session)
     end

@@ -2,6 +2,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   use Arbor.Dashboard.ConnCase, async: false
 
   alias Arbor.Dashboard.{Nav, OidcAuth, SessionAuth}
+  alias Arbor.Security
   alias Arbor.Security.SessionToken
 
   @moduletag :fast
@@ -180,11 +181,21 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   defp session(kind) do
     token =
       case kind do
-        :valid -> signed(@subject)
-        :expired -> signed(@subject, ttl: -1)
-        :wrong_subject -> signed("human_other_subject")
-        :malformed -> "not-a-session-proof"
-        :scoped -> elem(Security.issue_conversation_session_fixture(@subject, "agent_target"), 1)
+        :valid ->
+          signed(@subject)
+
+        :expired ->
+          {:ok, expired} = SessionToken.generate_expired_fixture(@subject)
+          expired
+
+        :wrong_subject ->
+          signed("human_other_subject")
+
+        :malformed ->
+          "not-a-session-proof"
+
+        :scoped ->
+          elem(Security.issue_conversation_session_fixture(@subject, "agent_target"), 1)
       end
 
     %{

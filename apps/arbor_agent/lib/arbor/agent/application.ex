@@ -100,6 +100,7 @@ defmodule Arbor.Agent.Application do
             id: :arbor_agent_template_authority_reconciliation
           ),
           Arbor.Agent.Orchestration.TaskStore,
+          Arbor.Agent.Orchestration.LeaseGrantOwner,
           # Dynamic supervisors (Phase 3: three-loop architecture)
           Arbor.Agent.ActionCycleSupervisor,
           Arbor.Agent.MaintenanceSupervisor,

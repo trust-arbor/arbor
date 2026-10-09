@@ -560,15 +560,32 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     caller_base_url = Keyword.get(opts, :base_url)
     inferred_base_url = caller_base_url || default_base_url_for(arbor_provider)
 
+    receive_timeout = Keyword.fetch!(opts, :receive_timeout)
+
+    # ReqLLM 1.25 rejects a top-level embedding :receive_timeout. The private
+    # cap still wins over any caller HTTP option and overrides the provider
+    # default of 30s inside prepare_embedding_request/4.
+    http_options =
+      arbor_provider
+      |> local_req_http_options(opts)
+      |> embed_http_options(receive_timeout)
+
     []
     |> maybe_merge(:base_url, inferred_base_url)
     |> maybe_merge(:api_key, local_api_key(arbor_provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
-    |> maybe_merge(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
-    |> maybe_merge(:req_http_options, local_req_http_options(arbor_provider, opts))
+    |> maybe_merge(:req_http_options, http_options)
     |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end
+
+  defp embed_http_options(nil, receive_timeout), do: [receive_timeout: receive_timeout]
+
+  defp embed_http_options(options, receive_timeout) when is_list(options),
+    do: Keyword.put(options, :receive_timeout, receive_timeout)
+
+  defp embed_http_options(options, receive_timeout) when is_map(options),
+    do: Map.put(options, :receive_timeout, receive_timeout)
 
   defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts, usage_context) do
     run_pipeline(:embed_local, {model, texts, opts}, usage_context)

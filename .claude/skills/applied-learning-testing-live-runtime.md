@@ -2303,3 +2303,147 @@ current maximum-size sources when changing byte, line, regex, or deadline
 budgets (found 2026-10-07 when the PII scan's new 10,000-line cap rejected two
 existing libraries and its locationless overflow finding crashed the pre-commit
 reporter).
+
+<!-- applied-learning: simulate-owner-outages-by-stopping-the-owner -->
+<a id="applied-learning-simulate-owner-outages-by-stopping-the-owner"></a>
+**Simulate supervised owner outages by stopping the owner, not unregistering its name.**
+An authorization path may retain or resolve the supervised PID without using
+the registered name. `Process.unregister/1` left CapabilityStore calls live and
+made the outage regression pass for the wrong reason. Terminate the supervised
+child, assert its protected operations deny, then restart it through the
+supervisor (found 2026-10-08 while fixing ACP outage tests).
+
+<!-- applied-learning: fast-and-database-tags-conflict -->
+<a id="applied-learning-fast-and-database-tags-conflict"></a>
+**Never tag one test both `:fast` and `:database`.** The fast alias uses
+`--only fast:true`; ExUnit selects any test whose effective fast tag is true
+even with `--exclude database`, so it can run against an unmigrated default
+test Repo. For a mixed module, override real database cases with
+`@tag fast: false`. Use `:database` for shared configured Repo tests. A test
+that must start its own exclusive Repo uses only `:isolated_repo`, since
+`--include database` overrides an isolated exclusion in `test.all`. Run it
+separately (found 2026-10-08 after 15 command-index failures in
+`mix test.fast` and an isolated-Repo filter check).
+
+<!-- applied-learning: pin-and-restore-cross-app-test-authorizers -->
+<a id="applied-learning-pin-and-restore-cross-app-test-authorizers"></a>
+**Pin and restore global authorizers in tests that exercise them.** Umbrella
+tests can carry Application env from an earlier app's test helper into the next
+app. A Shell helper's command-only authorizer caused an Actions batch test to
+fail at the filesystem gate under `mix test.fast`, though the test passed in
+isolation. An integration test requiring a specific authorizer should set it
+in setup and restore the exact previous `fetch_env` result on exit (found
+2026-10-08 while reviewing batch context security tests).
+
+<!-- applied-learning: stop-test-started-distribution-after-each-case -->
+<a id="applied-learning-stop-test-started-distribution-after-each-case"></a>
+**Stop distribution when a test started it.** A real-peer test that calls
+`:net_kernel.start/1` must record whether the node was previously alive and
+call `Node.stop/0` in `on_exit` only when it started distribution. Otherwise
+later umbrella apps compare journal entries created under `:nonode@nohost`
+against the new node name and reject local recovery as an unfenced cross-node
+claim. Derive peer and local node names from the test BEAM's OS pid so
+concurrent isolated runs do not collide in epmd (found 2026-10-08 in the
+agent-to-orchestrator fast lane).
+
+<!-- applied-learning: separate-jido-action-names-from-plugin-registry-aliases -->
+<a id="applied-learning-separate-jido-action-names-from-plugin-registry-aliases"></a>
+**Separate Jido action names from plugin registry aliases.** Jido validates
+action names as letters, digits, and underscores; the locked ActionRegistry
+requires dotted plugin names. Keep the module's `name` valid for Jido and
+register it under a dotted alias, then use that alias in execution bindings
+and DOT fixtures (found 2026-10-08 while fixing provenance test registration).
+
+<!-- applied-learning: test-durable-authority-with-owned-fixtures-and-real-consumers -->
+<a id="applied-learning-test-durable-authority-with-owned-fixtures-and-real-consumers"></a>
+**Test durable authority with owned fixtures and real consumers.** A busy suite
+can fill the Security audit journal if no Historian consumer drains it. Start
+the real durable puller on a private migrated database; never make the journal
+silently retire pending effects for test throughput. When replacing supervised
+Security owners in a test, use their explicit fixture registration seams
+(`AuditJournalOwner.install_test_fixture/1`, `AuthorityStore.start_test_fixture/1`)
+or facade calls correctly fail closed (found 2026-10-09 in nonfast audit tests).
+
+<!-- applied-learning: attest-supervised-children-during-application-start-without-get-child -->
+<a id="applied-learning-attest-supervised-children-during-application-start-without-get-child"></a>
+**Attest supervised children during application startup without `get_child/1`.**
+OTP's application master exists before the callback returns its root, but
+`:application_master.get_child/1` can terminate that master while the root is
+still undefined. Verify the linked master → callback → root chain, application
+ownership, exact child path, and registered PID during startup; use the normal
+root lookup after startup. Exercise the production boot in an isolated process,
+because test config with `start_children: false` hides this ordering bug (found
+2026-10-09 in the production SQLite probe).
+
+<!-- applied-learning: keep-nested-mix-build-paths-canonical-on-macos -->
+<a id="applied-learning-keep-nested-mix-build-paths-canonical-on-macos"></a>
+**Keep nested Mix build paths canonical on macOS.** `/tmp` resolves to
+`/private/tmp`; a Mix dependency include symlink made relative under `/tmp`
+can resolve under `/private/Users` and fail with a missing header. Put
+`MIX_BUILD_PATH` under the canonical checkout for release probes, then place
+only the finished release under temporary storage (found 2026-10-09 building
+the Persistence cleanup release regression).
+
+<!-- applied-learning: label-trusted-control-fixtures-before-durable-checkpointing -->
+<a id="applied-learning-label-trusted-control-fixtures-before-durable-checkpointing"></a>
+**Label trusted control fixtures before durable checkpointing.** An unlabeled
+initial value may pass a legacy action boundary, but the checkpoint correctly
+rehydrates missing provenance as untrusted. A restart test must label only its
+compiler- and owner-proven control fields, then assert the resumed Engine
+`final_outcome.status` before inspecting context; `{:ok, run_result}` alone is
+only an envelope (found 2026-10-09 in the design checkpoint BEAM restart test).
+
+<!-- applied-learning: integration-examples-using-mix-test-need-the-validation-test-runtime -->
+<a id="applied-learning-integration-examples-using-mix-test-need-the-validation-test-runtime"></a>
+**Integration examples using Mix.Test need the validation test runtime.** A
+childless Shell test application cannot create owned validation trees, and its
+production Linux materializer and spawn path fail closed. Use the Actions test
+baseline materializer and real-Mix test shell under an isolated registry
+fixture, restore the registry and shell selection after the example, and commit
+an empty `mix.lock` in a dependency-free fixture project. The TDD LM Studio
+example reached its model call but then failed successively at workspace,
+owned-tree, baseline, and lockfile gates before this setup passed on
+2026-10-09.
+
+<!-- applied-learning: make-model-generated-test-edge-semantics-explicit -->
+<a id="applied-learning-make-model-generated-test-edge-semantics-explicit"></a>
+**Make model-generated test edge semantics explicit.** In a TDD pipeline that
+runs both generated and held-out tests, a generated assertion can contradict an
+implicit rule and prevent convergence even when the implementation meets the
+held-out examples. Specify the disputed edge in the prose and held-out cases;
+retain both test sets. When repeated attempts fail on foreign-language syntax,
+put the target language's valid branching form in the implementation prompt
+(found 2026-10-09 with FizzBuzz zero and Python-style `elif` in Elixir). If
+feedback repeats the same invalid library call, give the exact API shape in
+the system prompt; the RLE example converged after specifying that
+`Enum.chunk_by/2` takes a unary key function.
+
+<!-- applied-learning: local-llm-node-timeouts-are-separate-from-exunit-timeouts -->
+<a id="applied-learning-local-llm-node-timeouts-are-separate-from-exunit-timeouts"></a>
+**Local LLM node timeouts are separate from ExUnit timeouts.** A test may allow
+20 minutes while an individual DOT compute node still has a five-minute
+`timeout` and fails first. For slow local reasoning models, use observed call
+latency to set the node timeout as well as the test timeout; keep the model's
+output budget intact unless measured evidence supports lowering it (found
+2026-10-09 when Qwen RLE timed out at 300 seconds despite a prior passing run).
+
+<!-- applied-learning: derive-loop-counters-from-their-prior-control-value -->
+<a id="applied-learning-derive-loop-counters-from-their-prior-control-value"></a>
+**Derive loop counters from their prior control value.** An action that reads
+both a trusted counter and untrusted model or test output gives its whole result
+the combined untrusted provenance. Hoisting its returned counter into the next
+action's control parameter then fails closed on the second retry. Use a pure
+`increment` transform from the prior counter for loop control, while keeping
+the action's model and test feedback as data (found 2026-10-09 in the LM Studio
+TDD RLE example).
+
+<!-- applied-learning: register-real-audit-consumers-after-security-test-bootstrap -->
+<a id="applied-learning-register-real-audit-consumers-after-security-test-bootstrap"></a>
+**Register real audit consumers after Security test bootstrap.**
+`Arbor.Security.TestBootstrap.start!/1` points Security at its test-only audit
+consumer. A journey that starts the real Historian puller must set both
+`:authority_audit_consumer_name` and `:authority_audit_consumer_application` to
+the supervised puller before relying on durable audit delivery, then restore
+the previous values. Otherwise Security rejects the real puller and an audit
+flush reports `:audit_source_unavailable` (found 2026-10-09 merging the
+conversation entrypoint journey).

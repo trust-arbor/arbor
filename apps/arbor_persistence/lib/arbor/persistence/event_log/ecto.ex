@@ -56,6 +56,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Event, as: EventSchema
   alias Arbor.Persistence.Schemas.EventLogOperation, as: OperationSchema
+  alias Arbor.Persistence.SQLiteBusyTimeout
   alias Ecto.{Adapter, Adapters.SQL}
 
   require Logger
@@ -91,7 +92,6 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @append_lock_initial_backoff_ms 2
   @append_lock_max_backoff_ms 50
   @sqlite_busy_slice_ms 5
-  @sqlite_pragma_timeout_ms 25
   @global_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
   @operation_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))"
   @operation_reconcile_lock_sql "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))"
@@ -1658,13 +1658,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     )
   end
 
-  defp sqlite_busy_timeout(repo, deadline_mono) do
-    case repo.query("PRAGMA busy_timeout", [], sqlite_control_opts(deadline_mono)) do
-      {:ok, %{rows: [[timeout]]}} when is_integer(timeout) -> timeout
-      {:ok, result} -> raise "unexpected SQLite busy_timeout result: #{inspect(result)}"
-      {:error, error} -> raise error
-    end
-  end
+  defp sqlite_busy_timeout(repo, _deadline_mono), do: SQLiteBusyTimeout.get(repo)
 
   defp sqlite_attempt_busy_timeout(deadline_mono) do
     case EventLog.remaining_timeout(deadline_mono) do
@@ -1673,46 +1667,10 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end
   end
 
-  defp set_sqlite_busy_timeout(repo, timeout, deadline_mono) do
-    case repo.query(
-           "PRAGMA busy_timeout = #{timeout}",
-           [],
-           sqlite_control_opts(deadline_mono)
-         ) do
-      {:ok, _result} -> :ok
-      {:error, error} -> raise error
-    end
-  end
+  defp set_sqlite_busy_timeout(repo, timeout, _deadline_mono),
+    do: SQLiteBusyTimeout.set(repo, timeout)
 
-  defp reset_sqlite_busy_timeout(repo, timeout) do
-    case repo.query("PRAGMA busy_timeout = #{timeout}", [], timeout: @sqlite_pragma_timeout_ms) do
-      {:ok, _result} -> :ok
-      {:error, %DBConnection.ConnectionError{}} -> :ok
-      {:error, error} -> raise error
-    end
-  catch
-    :exit, reason ->
-      if nested_reason?(reason, :noproc) or sqlite_connection_closed?(reason),
-        do: :ok,
-        else: exit(reason)
-  end
-
-  defp sqlite_connection_closed?(value) when is_binary(value) do
-    String.contains?(String.downcase(value), "connection is closed")
-  end
-
-  defp sqlite_connection_closed?(%{__exception__: true} = error) do
-    error |> Exception.message() |> sqlite_connection_closed?()
-  end
-
-  defp sqlite_connection_closed?(value) when is_tuple(value) do
-    value |> Tuple.to_list() |> Enum.any?(&sqlite_connection_closed?/1)
-  end
-
-  defp sqlite_connection_closed?(value) when is_list(value),
-    do: Enum.any?(value, &sqlite_connection_closed?/1)
-
-  defp sqlite_connection_closed?(_value), do: false
+  defp reset_sqlite_busy_timeout(repo, timeout), do: SQLiteBusyTimeout.restore(repo, timeout)
 
   defp pool_unavailable?(%{__exception__: true} = error) do
     error |> Exception.message() |> pool_unavailable?()
@@ -1733,16 +1691,6 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     do: Enum.any?(value, &pool_unavailable?/1)
 
   defp pool_unavailable?(_value), do: false
-
-  defp sqlite_control_opts(deadline_mono) do
-    timeout =
-      case EventLog.remaining_timeout(deadline_mono) do
-        {:ok, remaining_ms} -> min(remaining_ms, @sqlite_pragma_timeout_ms)
-        {:error, :operation_timeout} -> 1
-      end
-
-    [timeout: timeout, deadline: deadline_mono]
-  end
 
   defp sqlite_transaction_phase(marker) do
     if Process.get(marker), do: :transaction, else: :acquisition

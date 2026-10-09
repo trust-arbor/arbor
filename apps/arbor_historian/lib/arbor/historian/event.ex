@@ -58,7 +58,7 @@ defmodule Arbor.Historian.Event do
 
     # Event identification
     field(:id, String.t())
-    field(:type, atom())
+    field(:type, atom() | String.t())
     field(:version, String.t(), default: "1.0.0")
 
     # What this event is about
@@ -233,6 +233,15 @@ defmodule Arbor.Historian.Event do
   end
 
   defp validate_type(%{type: type}) when is_atom(type) and type != nil, do: :ok
+
+  defp validate_type(%{type: type}) when is_binary(type) do
+    if String.valid?(type) and String.trim(type) != "" and not String.contains?(type, <<0>>) do
+      :ok
+    else
+      {:error, {:invalid_event_type, type}}
+    end
+  end
+
   defp validate_type(%{type: type}), do: {:error, {:invalid_event_type, type}}
 
   defp validate_subject_id(%{subject_id: id}) when is_binary(id) and byte_size(id) > 0,

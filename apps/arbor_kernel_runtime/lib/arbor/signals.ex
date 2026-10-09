@@ -390,6 +390,63 @@ defmodule Arbor.Signals do
   def memory_agent_content_absent?(agent_id, opts \\ []),
     do: check_retained_memory_signal_content_absent_for_agent(agent_id, opts)
 
+  if Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false) do
+    @doc false
+    # Test config leaves Arbor.Signals.Supervisor empty. A bus started under
+    # the ExUnit supervisor is registered, but publication only accepts the
+    # application-supervised child. Start the real local tree there.
+    @spec ensure_supervised_local_runtime!() :: :ok
+    def ensure_supervised_local_runtime! do
+      supervisor = Process.whereis(Arbor.Signals.Supervisor)
+
+      unless is_pid(supervisor) and Process.alive?(supervisor) do
+        raise "Arbor.Signals.Supervisor is not running"
+      end
+
+      children = [
+        {Arbor.Signals.Store, []},
+        {Arbor.Signals.TopicKeys, []},
+        {Arbor.Signals.Channels, []},
+        {Arbor.Signals.SubscriptionRegistry, []},
+        {Arbor.Signals.TelemetryBridge, []},
+        {Arbor.Signals.Bus, []},
+        {Arbor.Signals.Relay, []}
+      ]
+
+      Enum.each(children, fn {module, _opts} = child ->
+        case Supervisor.start_child(supervisor, child) do
+          {:ok, _pid} ->
+            :ok
+
+          {:ok, _pid, _info} ->
+            :ok
+
+          {:error, {:already_started, pid}} ->
+            unless supervised_child?(supervisor, module, pid) do
+              raise "#{inspect(module)} is registered outside Arbor.Signals.Supervisor"
+            end
+
+          {:error, :already_present} ->
+            :ok = Supervisor.delete_child(supervisor, module)
+            {:ok, _pid} = Supervisor.start_child(supervisor, child)
+
+          {:error, reason} ->
+            raise "failed to start #{inspect(module)}: #{inspect(reason)}"
+        end
+      end)
+
+      true = healthy?()
+      :ok
+    end
+
+    defp supervised_child?(supervisor, child_id, pid) do
+      Enum.any?(Supervisor.which_children(supervisor), fn
+        {^child_id, ^pid, _type, _modules} -> true
+        _other -> false
+      end)
+    end
+  end
+
   # ===========================================================================
   # Contract implementations — verbose, AI-readable names
   # ===========================================================================

@@ -10,10 +10,12 @@ defmodule Arbor.AI.AcpTaskControlTest do
   @moduletag :fast
 
   setup_all do
-    for module <- [Arbor.Signals.Store, Arbor.Signals.Bus] do
-      unless Process.whereis(module), do: start_supervised!({module, []})
-    end
-
+    # Signals.subscribe/3 only accepts the bus that is a child of the signals
+    # application supervisor. An ExUnit-supervised bus is registered by name
+    # and still returns :unauthorized. A prior test can stop the application,
+    # so bring that supervisor back before attaching the local children.
+    {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+    :ok = Arbor.Signals.ensure_supervised_local_runtime!()
     :ok
   end
 
@@ -641,9 +643,11 @@ defmodule Arbor.AI.AcpTaskControlTest do
   end
 
   test "security regression: sink failure preserves hard and inactivity timeout recovery" do
+    # Session creation shares this deadline. A 35ms budget expired before the
+    # prompt started. These windows still fire while the fake prompt is blocked.
     scenarios = [
-      {:timeout, [timeout: 35]},
-      {:inactivity_timeout, [timeout: 1_000, inactivity_timeout_ms: 20]}
+      {:timeout, [timeout: 400]},
+      {:inactivity_timeout, [timeout: 2_000, inactivity_timeout_ms: 150]}
     ]
 
     for {timeout_kind, timeout_opts} <- scenarios do
@@ -658,8 +662,8 @@ defmodule Arbor.AI.AcpTaskControlTest do
           )
         end)
 
-      assert_receive {:prompt_started, _worker, client, "same-session", _prompt}
-      assert_receive {:transcript_sink_turn, _sink_worker, turn}, 500
+      assert_receive {:prompt_started, _worker, client, "same-session", _prompt}, 1_000
+      assert_receive {:transcript_sink_turn, _sink_worker, turn}, 3_000
       assert turn["terminal"]["status"] == Atom.to_string(timeout_kind)
 
       assert {:error,
