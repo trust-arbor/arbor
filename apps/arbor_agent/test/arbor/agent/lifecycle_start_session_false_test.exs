@@ -101,14 +101,18 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
   # Own unique RA supervisor / Task.Supervisor / TaskStore per test so
   # Lifecycle.start does not poll a global TaskStore left by order (or absent).
   setup do
+    Process.put(
+      :agent_test_actor_authority,
+      Arbor.Agent.Test.ActorAuthority.open!(:lifecycle_start_session)
+    )
+
     RuntimeAdmissionTopology.start_owned!()
   end
 
   test "start_session: false starts host/executor without Session or HeartbeatService", %{
     store: store
   } do
-    assert {:ok, profile} =
-             Lifecycle.create("Start Session False Probe", template: "test_agent")
+    assert {:ok, profile} = create!("Start Session False Probe", template: "test_agent")
 
     agent_id = profile.agent_id
     cleanup(agent_id)
@@ -150,6 +154,102 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     assert :ok = Lifecycle.stop(agent_id)
   end
 
+  test "security regression: exact branch admission failure suspends identity and revokes grants",
+       %{store: store} do
+    if Process.whereis(Arbor.Agent.UserSupervisor) == nil,
+      do: start_supervised!(Arbor.Agent.UserSupervisor)
+
+    previous_quota = Application.fetch_env(:arbor_agent, :max_agents_per_user)
+
+    previous_cleanup_principal =
+      Application.fetch_env(:arbor_agent, :activation_failure_principal_id)
+
+    {:ok, cleanup_identity} = Arbor.Security.generate_identity()
+    :ok = Arbor.Security.register_identity_fixture(cleanup_identity)
+
+    :ok =
+      Arbor.Security.store_signing_key_fixture(
+        cleanup_identity.agent_id,
+        cleanup_identity.private_key
+      )
+
+    for resource <- [
+          "arbor://security/identity/suspend/**",
+          "arbor://security/revoke/**"
+        ] do
+      assert {:ok, _} =
+               Arbor.Security.grant_fixture(
+                 principal: cleanup_identity.agent_id,
+                 resource: resource
+               )
+    end
+
+    Application.put_env(:arbor_agent, :max_agents_per_user, 0)
+
+    Application.put_env(
+      :arbor_agent,
+      :activation_failure_principal_id,
+      cleanup_identity.agent_id
+    )
+
+    on_exit(fn ->
+      case previous_cleanup_principal do
+        {:ok, value} -> Application.put_env(:arbor_agent, :activation_failure_principal_id, value)
+        :error -> Application.delete_env(:arbor_agent, :activation_failure_principal_id)
+      end
+
+      case previous_quota do
+        {:ok, value} -> Application.put_env(:arbor_agent, :max_agents_per_user, value)
+        :error -> Application.delete_env(:arbor_agent, :max_agents_per_user)
+      end
+
+      _ = Arbor.Security.revoke_all_fixture(cleanup_identity.agent_id)
+      _ = Arbor.Security.delete_signing_key_fixture(cleanup_identity.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(cleanup_identity.agent_id)
+    end)
+
+    assert {:ok, profile} =
+             create!("Exact failed branch probe",
+               template: "pipeline_architect",
+               repo_root: File.cwd!()
+             )
+
+    agent_id = profile.agent_id
+    cleanup(agent_id)
+
+    assert {:error, _reason} =
+             Lifecycle.start(agent_id,
+               principal_id: "human_exact_branch_failure",
+               start_session: false,
+               recover_session: false,
+               task_store: store
+             )
+
+    assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
+    assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
+  end
+
+  test "security regression: exact creation requires provisioned cleanup authority" do
+    previous = Application.fetch_env(:arbor_agent, :activation_failure_principal_id)
+    Application.delete_env(:arbor_agent, :activation_failure_principal_id)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, principal} ->
+          Application.put_env(:arbor_agent, :activation_failure_principal_id, principal)
+
+        :error ->
+          Application.delete_env(:arbor_agent, :activation_failure_principal_id)
+      end
+    end)
+
+    assert {:error, :activation_failure_authority_unavailable} =
+             create!("Exact cleanup preflight probe",
+               template: "pipeline_architect",
+               repo_root: File.cwd!()
+             )
+  end
+
   # arbor_agent does not depend on arbor_orchestrator (both L7); per-app,
   # BranchSupervisor skips the Session child by design. Runs from the root.
   @tag skip:
@@ -160,8 +260,7 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
   test "start_session: true with start_heartbeat: false still starts Session only", %{
     store: store
   } do
-    assert {:ok, profile} =
-             Lifecycle.create("Start Heartbeat False Probe", template: "test_agent")
+    assert {:ok, profile} = create!("Start Heartbeat False Probe", template: "test_agent")
 
     agent_id = profile.agent_id
     cleanup(agent_id)
@@ -206,6 +305,13 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     end
   catch
     :exit, _ -> :ok
+  end
+
+  defp create!(name, opts \\ []) do
+    Lifecycle.create(
+      name,
+      Keyword.put(opts, :actor_authority, Process.get(:agent_test_actor_authority))
+    )
   end
 
   defp cleanup(agent_id) do

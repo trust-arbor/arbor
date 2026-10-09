@@ -32,6 +32,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   alias Arbor.Security.SessionToken
   alias Arbor.Signals
 
+  @session_credential_anchor {Arbor.Orchestrator.Session, :credentials}
+  @session_credential_schema :session_credentials_v1
+
   defmodule OwnerResolver do
     def resolve(id) do
       case Application.get_env(:arbor_security, :session_owner_test_aliases, %{}) do
@@ -184,7 +187,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "vp05d2a1p2-test-secret-#{System.unique_integer([:positive])}"
+      test_session_secret("vp05d2a1p2-test-secret-")
     )
 
     on_exit(fn ->
@@ -216,11 +219,25 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   defp restore(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore(key, value), do: Application.put_env(:arbor_security, key, value)
 
+  # unique_integer stays small for a whole suite, so the old prefix plus that
+  # suffix was under the 32-byte session-secret minimum.
+  defp test_session_secret(prefix) do
+    suffix =
+      System.unique_integer([:positive])
+      |> Integer.to_string()
+      |> String.pad_leading(16, "0")
+
+    prefix <> suffix
+  end
+
   defp register_active_agent! do
     assert {:ok, identity} = Identity.generate(name: "VP05D2A1P2 session agent")
     assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
+    authority = open_session_actor!(identity)
 
     on_exit(fn ->
+      _ = Security.close_signing_authority(authority)
+      _ = Arbor.Common.close_process_private_state(@session_credential_anchor)
       _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
@@ -230,6 +247,42 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
         SignedRequest.sign(resource, identity.agent_id, identity.private_key)
       end
     }
+  end
+
+  # Direct Session.handle_call/3 runs in the test process and never calls
+  # init/1, so the orchestrator gate sees no process-private credential and
+  # denies with :missing_signed_request. Open the same custody shape init uses.
+  defp open_session_actor!(identity) do
+    assert {:ok, proof} =
+             Security.build_signing_authority_acquisition_proof(
+               identity.agent_id,
+               identity.private_key,
+               purpose: :session
+             )
+
+    assert {:ok, authority} =
+             Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    :ok = Arbor.Common.close_process_private_state(@session_credential_anchor)
+
+    :ok =
+      Arbor.Common.open_process_private_state(
+        @session_credential_anchor,
+        @session_credential_schema,
+        %{signing_authority: authority, signer: nil, bootstrap: nil},
+        fn value ->
+          match?(
+            %{
+              signing_authority: %Arbor.Contracts.Security.SigningAuthority{},
+              signer: nil,
+              bootstrap: nil
+            },
+            value
+          ) and map_size(value) == 3
+        end
+      )
+
+    authority
   end
 
   defp register_active_human! do
@@ -1220,7 +1273,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     } do
       put_orchestrator_cap!(agent_id)
       receipt = issue_receipt!(human_id, resource)
-      idle = session_state(agent_id, turn_graph: nil, signer: agent_signer)
+      # A live start pins a compiled graph. nil is refused before the
+      # engagement binding this test observes.
+      idle =
+        session_state(agent_id, turn_graph: hermetic_success_graph!(), signer: agent_signer)
 
       assert {:noreply, started} =
                Session.handle_call(
@@ -2452,6 +2508,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     state =
       session_state(ctx.agent_id,
         signer: ctx.agent_signer,
+        turn_graph: hermetic_success_graph!(),
         turn_in_flight: true,
         turn_from: {self(), make_ref()},
         turn_user_message: UserMessage.from_string("active compatibility turn")

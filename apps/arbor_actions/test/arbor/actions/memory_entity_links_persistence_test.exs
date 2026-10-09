@@ -7,8 +7,10 @@ defmodule Arbor.Actions.MemoryEntityLinksPersistenceTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.{BufferedStore, QueryableStore}
 
-  @moduletag :fast
+  # Not :fast. `mix test --only fast` includes every :fast test even when
+  # `--exclude external` is also set, and this file must stay out of that suite.
   @moduletag :integration
+  @moduletag :external
   @store :arbor_memory_durable
 
   defmodule Backend do

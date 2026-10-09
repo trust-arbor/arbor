@@ -33,7 +33,6 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
     SessionLlm.BuildPrompt,
     Actions.SessionMemory.Recall,
     Actions.SessionMemory.Update,
-    Actions.SessionMemory.Checkpoint,
     Actions.SessionMemory.Consolidate,
     Actions.SessionMemory.UpdateWorkingMemory,
     Actions.SessionMemory.BackgroundChecks,
@@ -164,6 +163,14 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
 
         refute name in exposed_names
       end
+
+      # Retired checkpoint is no longer a tracked DOT target. It stays
+      # pipeline_internal so older graphs fail closed without tool exposure.
+      checkpoint = Actions.SessionMemory.Checkpoint
+
+      assert Actions.pipeline_internal_action?(checkpoint)
+      refute checkpoint in exposed
+      refute "session_memory_checkpoint" in exposed_names
 
       for module <- @dual_use_graph_actions do
         name = to_string(module.name())

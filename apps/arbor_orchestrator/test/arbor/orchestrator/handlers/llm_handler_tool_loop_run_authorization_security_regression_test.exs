@@ -34,7 +34,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
              text: "",
              finish_reason: :tool_calls,
              content_parts: [
-               ContentPart.tool_call("auth_call", "tool_help", %{"probe" => "lineage"})
+               ContentPart.tool_call("auth_call", "test.run_auth_tool_help", %{
+                 "probe" => "lineage"
+               })
              ],
              raw: %{}
            }}
@@ -55,11 +57,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
   setup do
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
 
-    case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
+    case ActionRegistry.register("test.run_auth_tool_help", Arbor.Actions.Tool.Help) do
       :ok -> :ok
-      # Already present (unlocked or core-locked by Registrar.register_core/0)
+      # The fixture alias may already be present from another case.
       {:error, :already_registered} -> :ok
-      {:error, :core_locked} -> :ok
     end
 
     :ok
@@ -74,7 +75,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
           "simulate" => "false",
           "prompt" => "Call the help tool once",
           "use_tools" => "true",
-          "tools" => "tool_help",
+          "tools" => "test.run_auth_tool_help",
           "max_turns" => "2",
           "llm_provider" => AuthorityAdapter.provider(),
           "llm_model" => "test"
@@ -128,7 +129,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
                workdir: File.cwd!()
              )
 
-    assert_receive {:tool_execution, "tool_help", %{"probe" => "lineage"}, _workdir, exec_opts}
+    assert_receive {:tool_execution, "test.run_auth_tool_help", %{"probe" => "lineage"}, _workdir,
+                    exec_opts}
 
     # Exact validated authority term — not a field-projected reconstruction.
     assert Keyword.fetch!(exec_opts, :run_authorization) === authority
@@ -155,7 +157,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
           "simulate" => "false",
           "prompt" => "Call the help tool once",
           "use_tools" => "true",
-          "tools" => "tool_help",
+          "tools" => "test.run_auth_tool_help",
           "max_turns" => "2",
           "llm_provider" => AuthorityAdapter.provider(),
           "llm_model" => "test"
@@ -207,7 +209,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
                workdir: File.cwd!()
              )
 
-    assert_receive {:tool_execution, "tool_help", _, _, exec_opts}
+    assert_receive {:tool_execution, "test.run_auth_tool_help", _, _, exec_opts}
     assert Keyword.fetch!(exec_opts, :signing_authority) === signing_authority
     refute Keyword.has_key?(exec_opts, :signer)
     refute Map.has_key?(context.values, "session.signing_authority")
@@ -224,7 +226,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
           "simulate" => "false",
           "prompt" => "should not execute tools",
           "use_tools" => "true",
-          "tools" => "tool_help",
+          "tools" => "test.run_auth_tool_help",
           "max_turns" => "2",
           "llm_provider" => AuthorityAdapter.provider(),
           "llm_model" => "test"

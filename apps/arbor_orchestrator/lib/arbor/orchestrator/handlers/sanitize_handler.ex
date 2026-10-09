@@ -26,7 +26,11 @@ defmodule Arbor.Orchestrator.Handlers.SanitizeHandler do
     - `source_key` — context key to read the value from (default: "last_response")
     - `output_key` — context key to write the sanitized value to
       (default: "sanitize.{node_id}")
-    - `allowed_root` — optional; passed to sanitizers that need it (path_traversal)
+    - `allowed_root` — optional absolute root passed to sanitizers that need it
+      (`path_traversal`)
+    - `allowed_root_key` — optional context key whose value is that root, used
+      when `allowed_root` is absent. A graph author already chooses the root;
+      this only lets a per-run workdir supply it.
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
@@ -45,7 +49,7 @@ defmodule Arbor.Orchestrator.Handlers.SanitizeHandler do
 
     with {:ok, types} <- parse_types(Map.get(node.attrs, "sanitize")),
          input_taint <- input_taint(context, source_key),
-         opts <- sanitizer_opts(node.attrs),
+         opts <- sanitizer_opts(node.attrs, context),
          {:ok, sanitized, updated_taint} <-
            Sanitizers.sanitize_all(types, value, input_taint, opts) do
       Logger.debug(
@@ -122,10 +126,19 @@ defmodule Arbor.Orchestrator.Handlers.SanitizeHandler do
     end
   end
 
-  defp sanitizer_opts(attrs) do
-    case Map.get(attrs, "allowed_root") do
-      root when is_binary(root) and root != "" -> [allowed_root: root]
-      _ -> []
-    end
+  defp sanitizer_opts(attrs, context) do
+    root =
+      case Map.get(attrs, "allowed_root") do
+        root when is_binary(root) and root != "" ->
+          root
+
+        _ ->
+          case Map.get(attrs, "allowed_root_key") do
+            key when is_binary(key) and key != "" -> Context.get(context, key)
+            _ -> nil
+          end
+      end
+
+    if is_binary(root) and root != "", do: [allowed_root: root], else: []
   end
 end

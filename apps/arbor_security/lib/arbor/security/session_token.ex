@@ -212,6 +212,23 @@ defmodule Arbor.Security.SessionToken do
     @doc false
     def generate_conversation_fixture(principal, target),
       do: do_generate_conversation(principal, target, :fixture)
+
+    # Negative `ttl` is rejected. Tests that need an already-expired proof
+    # resign a valid fixture with an expiry in the past.
+    @doc false
+    @spec generate_expired_fixture(String.t()) :: {:ok, binary()} | {:error, term()}
+    def generate_expired_fixture(principal_id) when is_binary(principal_id) do
+      with {:ok, token} <- generate(principal_id),
+           {:ok, _signature, bytes} <- split_token(token),
+           {:ok, payload} <- safe_decode_payload(bytes) do
+        now = DateTime.to_unix(DateTime.utc_now())
+        expired = %{payload | iat: now - 120, exp: now - 60}
+        expired_bytes = :erlang.term_to_binary(expired)
+        {:ok, Base.url_encode64(mac(expired_bytes) <> expired_bytes, padding: false)}
+      else
+        _ -> {:error, :invalid_token}
+      end
+    end
   end
 
   defp do_generate_conversation(principal, target, registry_authorization) do

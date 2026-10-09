@@ -68,6 +68,7 @@ defmodule Arbor.Orchestrator.MixProject do
       {:arbor_shell, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
+      {:arbor_historian, in_umbrella: true},
       # Source-owned engagement binding after authenticated receipt consumption.
       # arbor_comms is L4 and does not depend on arbor_orchestrator, so this
       # remains a downward, acyclic facade dependency.

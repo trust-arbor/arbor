@@ -6,12 +6,12 @@ defmodule Arbor.Voice.ConversationRuntimeConfigTest do
 
   test "test runtime preserves timezone conversion without starting the network updater" do
     # Read the effective startup configuration; never repair it inside the test.
+    assert Application.get_env(:time_zone_info, :update) == :disabled
     assert Application.get_env(:tzdata, :autoupdate) == :disabled
-    assert {:ok, _started} = Application.ensure_all_started(:tzdata)
+    assert {:ok, _started} = Application.ensure_all_started(:time_zone_info)
 
-    holder = Process.whereis(Tzdata.EtsHolder)
-    assert is_pid(holder)
-    assert Process.alive?(holder)
+    assert TimeZoneInfo.state() == :ok
+    assert TimeZoneInfo.next_update() == :never
     assert Process.whereis(:tzdata_release_updater) == nil
 
     assert {:ok,
@@ -30,7 +30,7 @@ defmodule Arbor.Voice.ConversationRuntimeConfigTest do
              DateTime.shift_zone(
                ~U[2026-09-29 12:00:00Z],
                "America/Chicago",
-               Tzdata.TimeZoneDatabase
+               TimeZoneInfo.TimeZoneDatabase
              )
   end
 end

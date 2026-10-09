@@ -7,8 +7,17 @@ defmodule Arbor.AI.SkillPromptSecurityRegressionTest do
   test "public API host prompt refuses unapproved stored skill instructions" do
     # The optional Memory facade is an actual umbrella owner in this integration
     # fixture. Runtime calls keep it out of this lower app's compile-time graph.
+    # The durable store is owned by this test. TestBootstrap's default authority
+    # is a permanent Memory.Supervisor child and would stay registered into the
+    # next umbrella app, where graph tests require the name to be free.
     memory = Arbor.Memory
-    :ok = apply(Arbor.Memory.TestBootstrap, :start!, [])
+    :ok = apply(Arbor.Memory.TestBootstrap, :start!, [[authority: false]])
+
+    start_supervised!(
+      {Arbor.Persistence.BufferedStore,
+       [name: :arbor_memory_durable, backend: nil, write_mode: :sync]}
+    )
+
     id = "skill-ai-#{System.unique_integer([:positive])}"
     wm = apply(Arbor.Memory.WorkingMemory, :new, [id, [rebuild_from_signals: false]])
 

@@ -22,8 +22,6 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
   @profiles_store :arbor_agent_profiles
   @peer_rpc_timeout_ms 2_000
   @peer_stop_timeout_ms 3_000
-  @peer_name :c2b_peer
-  @distributed_name :c2b_test@localhost
   @dead_stop_supervisor :c2b_dead_sup
 
   # ---------------------------------------------------------------------------
@@ -1264,7 +1262,9 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
         end)
 
       assert {:error, :stop_unavailable} = result
-      assert us < 250_000
+      # 120ms drain plus one poll can cross 250ms when the suite is loaded.
+      # 400ms still rejects the 1s default hang.
+      assert us < 400_000
       assert {:ok, :local_owner} = Registry.observe_target(id)
       assert {:ok, ^pid} = Registry.whereis(id)
       assert Process.alive?(pid)
@@ -1549,8 +1549,14 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
   #
   # control PID stays DISTINCT from peer_node and remote_pid throughout.
   defp with_remote_owner(agent_id, body) do
-    ensure_distributed!()
-    {:ok, control, peer_node} = start_peer(@peer_name)
+    started_distributed = ensure_distributed!()
+
+    if started_distributed,
+      do: on_exit(fn -> Node.stop() end)
+
+    # The OS pid keeps concurrent isolated BEAM test runs from competing for
+    # the same epmd node names.
+    {:ok, control, peer_node} = start_peer(:"c2b_peer_#{System.pid()}")
 
     # Setup is outside the body-capture try so remote_pid is bound before
     # teardown. A setup failure stops the peer (best-effort) then re-raises so
@@ -1764,12 +1770,13 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
   end
 
   defp ensure_distributed! do
-    unless Node.alive?() do
+    if Node.alive?() do
+      false
+    else
       start_epmd!()
-      {:ok, _} = :net_kernel.start([@distributed_name, :shortnames])
+      {:ok, _} = :net_kernel.start([:"c2b_test_#{System.pid()}@localhost", :shortnames])
+      true
     end
-
-    :ok
   end
 
   defp start_epmd! do

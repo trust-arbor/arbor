@@ -59,8 +59,10 @@ end
 
 config :logger, level: :warning
 
-# Keep tests deterministic and offline: tzdata's updater otherwise starts its
-# own HTTP poller and rewrites the bundled timezone data after application boot.
+# Keep tests deterministic and offline. Jido 2.3 uses time_zone_info instead of
+# tzdata; its updater otherwise downloads the IANA database. The tzdata line
+# stays so a later reintroduction does not start that library's HTTP poller.
+config :time_zone_info, update: :disabled
 config :tzdata, :autoupdate, :disabled
 
 # Don't start HTTP server or MCP client supervisor in tests
@@ -278,7 +280,11 @@ else
     repo_adapter: Ecto.Adapters.SQLite3
 
   config :arbor_persistence, Arbor.Persistence.Repo,
-    database: Path.expand("~/.arbor/arbor_test.db"),
+    database:
+      (case System.get_env("ARBOR_SQLITE_PATH") do
+         path when is_binary(path) and path != "" -> Path.expand(path)
+         _ -> Path.expand("~/.arbor/arbor_test.db")
+       end),
     pool: Ecto.Adapters.SQL.Sandbox,
     busy_timeout: 5_000,
     journal_mode: :wal,

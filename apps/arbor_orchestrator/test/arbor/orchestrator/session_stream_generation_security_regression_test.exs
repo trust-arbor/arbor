@@ -4,12 +4,11 @@ defmodule Arbor.Orchestrator.SessionStreamGenerationSecurityRegressionTest do
 
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.TestSupport.SignalsStack
   alias Arbor.Contracts.Session.TurnAuthority
 
   setup do
-    for child <- [Arbor.Signals.Store, Arbor.Signals.Bus] do
-      if Process.whereis(child) == nil, do: start_supervised!(child)
-    end
+    :ok = SignalsStack.ensure!()
 
     root = Path.join(System.tmp_dir!(), "stream-generation-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)

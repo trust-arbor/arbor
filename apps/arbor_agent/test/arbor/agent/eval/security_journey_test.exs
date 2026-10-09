@@ -43,6 +43,17 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
         [persistence: :memory]
       end
 
+    # Earlier agent suites leave the named Trust.Store under the application
+    # supervisor. start_supervised! cannot take that name until the previous
+    # child is removed. Restore the shared memory topology after this test.
+    on_exit(fn ->
+      if Process.whereis(Arbor.Trust.ApplicationSupervisor) do
+        _ = Arbor.Agent.Test.TrustTopology.ensure_owned!()
+      end
+    end)
+
+    release_named_trust_processes()
+
     start_supervised!({Arbor.Trust.Store, store_opts})
 
     start_supervised!(
@@ -347,6 +358,32 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
                Path.dirname(c.path),
                agent_id: c.owner.agent_id
              )
+  end
+
+  defp release_named_trust_processes do
+    supervisor = Process.whereis(Arbor.Trust.ApplicationSupervisor)
+
+    for id <- [Arbor.Trust.Manager, Arbor.Trust.Store] do
+      if is_pid(supervisor) do
+        _ = Supervisor.terminate_child(supervisor, id)
+        _ = Supervisor.delete_child(supervisor, id)
+      end
+
+      case Process.whereis(id) do
+        pid when is_pid(pid) ->
+          ref = Process.monitor(pid)
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, _, _, _} -> :ok
+          after
+            1_000 -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
   end
 
   defp opts(c),

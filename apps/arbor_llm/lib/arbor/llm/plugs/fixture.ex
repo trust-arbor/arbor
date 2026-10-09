@@ -98,7 +98,12 @@ defmodule Arbor.LLM.Plugs.Fixture do
     {"input_cost", :input_cost},
     {"output_cost", :output_cost},
     {"reasoning_cost", :reasoning_cost},
-    {"total_cost", :total_cost}
+    {"total_cost", :total_cost},
+    {"billing_usage_complete", :billing_usage_complete},
+    {"usage_reported", :usage_reported},
+    {"cache_write_tokens_by_ttl", :cache_write_tokens_by_ttl},
+    {"cache_storage_token_hours", :cache_storage_token_hours},
+    {"pricing", :pricing}
   ]
   @usage_atom_keys Enum.map(@usage_fields, &elem(&1, 1))
   @legacy_usage_fields Enum.reject(@usage_fields, fn {_wire, key} ->
@@ -112,7 +117,12 @@ defmodule Arbor.LLM.Plugs.Fixture do
                            :tool_usage,
                            :image_usage,
                            :cost,
-                           :reasoning_cost
+                           :reasoning_cost,
+                           :billing_usage_complete,
+                           :usage_reported,
+                           :cache_write_tokens_by_ttl,
+                           :cache_storage_token_hours,
+                           :pricing
                          ]
                        end)
   @finish_reasons %{
@@ -801,7 +811,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
             {:cont, {:ok, acc}}
 
           {:ok, nil} ->
-            {:cont, {:ok, acc}}
+            {:cont, {:ok, Map.put(acc, wire_key, nil)}}
 
           {:ok, value} ->
             case encode_usage_value(atom_key, value) do
@@ -854,18 +864,43 @@ defmodule Arbor.LLM.Plugs.Fixture do
   end
 
   defp bounded_usage_value(key, value)
-       when key in [:input_includes_cached, :add_reasoning_to_cost] and is_boolean(value),
+       when key in [:input_includes_cached, :add_reasoning_to_cost, :billing_usage_complete] and
+              is_boolean(value),
+       do: {:ok, value}
+
+  defp bounded_usage_value(:cache_storage_token_hours, value)
+       when is_integer(value) and value >= 0 and value <= @max_usage_token,
+       do: {:ok, value}
+
+  defp bounded_usage_value(:cache_storage_token_hours, value)
+       when is_float(value) and value >= 0.0 and value < @max_usage_cost and value == value,
        do: {:ok, value}
 
   defp bounded_usage_value(_key, _value), do: :error
 
-  defp encode_usage_value(key, value) when key in [:tool_usage, :image_usage, :cost],
-    do: FixtureUsage.encode(key, value)
+  defp encode_usage_value(key, value)
+       when key in [
+              :tool_usage,
+              :image_usage,
+              :cost,
+              :usage_reported,
+              :cache_write_tokens_by_ttl,
+              :pricing
+            ],
+       do: FixtureUsage.encode(key, value)
 
   defp encode_usage_value(key, value), do: bounded_usage_value(key, value)
 
-  defp decode_usage_value(key, value) when key in [:tool_usage, :image_usage, :cost],
-    do: FixtureUsage.decode(key, value)
+  defp decode_usage_value(key, value)
+       when key in [
+              :tool_usage,
+              :image_usage,
+              :cost,
+              :usage_reported,
+              :cache_write_tokens_by_ttl,
+              :pricing
+            ],
+       do: FixtureUsage.decode(key, value)
 
   defp decode_usage_value(key, value), do: bounded_usage_value(key, value)
 
@@ -1386,7 +1421,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
             {:cont, acc}
 
           {:ok, nil} ->
-            {:cont, acc}
+            {:cont, Map.put(acc, atom_key, nil)}
 
           {:ok, value} ->
             case decode_usage_value(atom_key, value) do

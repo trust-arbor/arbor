@@ -92,6 +92,15 @@ defmodule Arbor.Gateway.Chat.LifecycleTest.FakeLLMDefaults do
   def default_provider(_opts \\ []), do: :openrouter
 end
 
+defmodule Arbor.Gateway.Chat.LifecycleTest.FakeLifecycleAuthority do
+  @moduledoc false
+
+  def authorize_create(principal, display_name, opts) do
+    facade = Application.fetch_env!(:arbor_gateway, :chat_agent_facade)
+    {:ok, facade.authorize_create(principal, display_name, opts)}
+  end
+end
+
 defmodule Arbor.Gateway.Chat.LifecycleTest do
   use ExUnit.Case, async: false
 
@@ -104,6 +113,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
   alias Arbor.Gateway.Chat.LifecycleTest.{
     FakeAgent,
     FakeLifecycle,
+    FakeLifecycleAuthority,
     FakeLLMDefaults,
     FakeTemplateStore
   }
@@ -122,6 +132,7 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     overrides = [
       chat_agent_facade: FakeAgent,
       chat_lifecycle: FakeLifecycle,
+      chat_lifecycle_authority: FakeLifecycleAuthority,
       chat_template_store: FakeTemplateStore,
       chat_llm_defaults: FakeLLMDefaults,
       lifecycle_test_pid: self(),

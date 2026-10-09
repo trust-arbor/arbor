@@ -33,7 +33,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
              text: "",
              finish_reason: :tool_calls,
              content_parts: [
-               ContentPart.tool_call("tainted_call", "tool_help", %{
+               ContentPart.tool_call("tainted_call", "test.taint_tool_help", %{
                  "topic" => "taint",
                  "detail" => true
                })
@@ -60,10 +60,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
     Adapter.set_parent(self())
     on_exit(fn -> Adapter.clear_parent() end)
 
-    case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
+    case ActionRegistry.register("test.taint_tool_help", Arbor.Actions.Tool.Help) do
       :ok -> :ok
       {:error, :already_registered} -> :ok
-      {:error, :core_locked} -> :ok
     end
 
     :ok
@@ -128,7 +127,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
     assert expected.confidence == :plausible
     assert expected.source == "llm_output"
 
-    assert_receive {:tool_execution, "tool_help", args, _workdir, exec_opts}
+    assert_receive {:tool_execution, "test.taint_tool_help", args, _workdir, exec_opts}
     assert Keyword.fetch!(exec_opts, :taint) == expected
     assert Keyword.fetch!(exec_opts, :param_taint) == Map.new(Map.keys(args), &{&1, expected})
     refute Map.has_key?(context.values, "tool_taint")
@@ -242,7 +241,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
     assert is_list(user_message.content)
     assert media in user_message.content
 
-    assert_receive {:tool_execution, "tool_help", _args, _workdir, exec_opts}
+    assert_receive {:tool_execution, "test.taint_tool_help", _args, _workdir, exec_opts}
     assert Keyword.fetch!(exec_opts, :taint) == expected
   end
 
@@ -291,7 +290,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
     refute Enum.any?(request.messages, &(&1.role == :user))
     refute Enum.any?(request.messages, fn message -> media_part?(message.content) end)
 
-    assert_receive {:tool_execution, "tool_help", _args, _workdir, exec_opts}
+    assert_receive {:tool_execution, "test.taint_tool_help", _args, _workdir, exec_opts}
     assert Keyword.fetch!(exec_opts, :taint) == expected
   end
 
@@ -302,7 +301,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
           "type" => "compute",
           "simulate" => "false",
           "use_tools" => "true",
-          "tools" => "tool_help",
+          "tools" => "test.taint_tool_help",
           "max_turns" => "2",
           "llm_provider" => Adapter.provider(),
           "llm_model" => "test"

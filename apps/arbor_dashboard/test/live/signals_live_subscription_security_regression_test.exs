@@ -17,11 +17,9 @@ defmodule Arbor.Dashboard.Live.SignalsLiveSubscriptionSecurityRegressionTest do
 
     on_exit(fn -> Application.put_env(:arbor_kernel, :signals, previous) end)
 
-    # Test config leaves Signals' application supervisor empty. Start the real
-    # bus and store under this test's supervisor; no fake handle_info delivery.
-    for module <- [Arbor.Signals.Store, Arbor.Signals.Bus] do
-      if Process.whereis(module) == nil, do: start_supervised!(module)
-    end
+    # Publication accepts only the application-supervised bus. An ExUnit-owned
+    # process with the same name is rejected as unauthorized.
+    :ok = Signals.ensure_supervised_local_runtime!()
 
     assert Signals.healthy?()
     :ok

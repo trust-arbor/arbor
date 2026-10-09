@@ -358,7 +358,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
             Keyword.get(
               runtime_opts,
               :verification_spawn_request,
-              &:erlang.spawn_request/5
+              &default_verification_spawn_request/5
             )
 
           fn node, module, function, args, rpc_timeout ->
@@ -396,6 +396,30 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
           pos_integer(),
           (node(), module(), atom(), [term()], [term()] -> reference())
         ) :: term()
+  # `:erlang.spawn_request/5` to `node/0` fails while the VM is not distributed
+  # (`:nonode@nohost`). A local target still has to run the same cancellable
+  # protocol. Distributed targets, including this node once it is alive, keep
+  # the real spawn request.
+  defp default_verification_spawn_request(target, module, function, args, options) do
+    if target == node() and not Node.alive?() and :monitor in options do
+      local_monitored_spawn_request(module, function, args)
+    else
+      :erlang.spawn_request(target, module, function, args, options)
+    end
+  end
+
+  defp local_monitored_spawn_request(module, function, args) do
+    caller = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        apply(module, function, args)
+      end)
+
+    send(caller, {:spawn_reply, ref, :ok, pid})
+    ref
+  end
+
   def cancellable_verification_rpc(
         target,
         Arbor.Agent,

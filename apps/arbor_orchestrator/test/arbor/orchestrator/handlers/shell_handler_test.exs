@@ -1,6 +1,9 @@
 defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   use ExUnit.Case, async: false
   @moduletag :fast
+
+  alias Arbor.Common.SafePath
+
   if :os.type() != {:unix, :darwin},
     do:
       @moduletag(skip: "native handler mechanics require the qualified macOS containment backend")
@@ -51,7 +54,6 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     fixture
   end
 
-  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node

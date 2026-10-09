@@ -958,17 +958,28 @@ defmodule Arbor.Scheduler.RunLease do
       result =
         mutate_active_lease(lease_id, fn lease ->
           if is_nil(lease.agent_id) do
+            store_pid = Process.whereis(Arbor.Scheduler.RunLease.Store)
+
             case safe_external(fn ->
                    register_run_identity(lease, identity, state.scheduler_mutation_token)
                  end) do
               :ok ->
-                updated =
-                  lease
-                  |> put_operation({:identity, identity.agent_id})
-                  |> bump_generation()
+                commit_store_effect(store_pid, fn ->
+                  updated =
+                    lease
+                    |> put_operation({:identity, identity.agent_id})
+                    |> bump_generation()
 
-                :ok = JournalOwner.put(lease_id, updated)
-                :ok
+                  :ok = JournalOwner.put(lease_id, updated)
+                  :ok
+                end)
+                |> rollback_lost_store(lease, state.scheduler_mutation_token, fn ->
+                  deregister_run_identity(
+                    lease,
+                    identity.agent_id,
+                    state.scheduler_mutation_token
+                  )
+                end)
 
               {:error, reason} ->
                 {:error, reason}
@@ -984,6 +995,8 @@ defmodule Arbor.Scheduler.RunLease do
     defp handle_store_call({:grant_capability, lease_id, grant_admission}, state) do
       result =
         mutate_active_lease(lease_id, fn lease ->
+          store_pid = Process.whereis(Arbor.Scheduler.RunLease.Store)
+
           with {:ok, admitted_lease, opts} <-
                  consume_grant_admission(lease, grant_admission),
                {:ok, cap} <-
@@ -994,13 +1007,18 @@ defmodule Arbor.Scheduler.RunLease do
                      state.scheduler_mutation_token
                    )
                  end) do
-            updated =
-              admitted_lease
-              |> put_operation({:capability, cap.id})
-              |> bump_generation()
+            commit_store_effect(store_pid, fn ->
+              updated =
+                admitted_lease
+                |> put_operation({:capability, cap.id})
+                |> bump_generation()
 
-            :ok = JournalOwner.put(lease_id, updated)
-            {:ok, cap}
+              :ok = JournalOwner.put(lease_id, updated)
+              {:ok, cap}
+            end)
+            |> rollback_lost_store(admitted_lease, state.scheduler_mutation_token, fn ->
+              revoke_run_capability(admitted_lease, cap.id, state.scheduler_mutation_token)
+            end)
           else
             {:error, reason} -> {:error, reason}
           end
@@ -1105,6 +1123,51 @@ defmodule Arbor.Scheduler.RunLease do
     catch
       :exit, _reason -> {:error, :state_owner_unavailable}
     end
+
+    # The external mutation and its journal write are one commit. If the store
+    # dies while the mutation is in flight, a later journal write would record
+    # an effect the recovered store never acknowledged.
+    defp commit_store_effect(store_pid, commit) do
+      if store_still_current?(store_pid), do: commit.(), else: :store_lost
+    end
+
+    # The caller observes a failed mutation. Drop the journaled prefix of that
+    # same lease too: recovery would otherwise resurrect an identity the
+    # caller is about to abandon, and the dead store cannot run cleanup.
+    defp rollback_lost_store(:store_lost, lease, token, rollback) do
+      _ = safe_external(rollback)
+      _ = drop_journaled_lease(lease, token)
+      {:error, :run_lease_store_unavailable}
+    end
+
+    defp rollback_lost_store(committed, _lease, _token, _rollback), do: committed
+
+    defp drop_journaled_lease(lease, token) do
+      Enum.each(lease.cap_ids, fn cap_id ->
+        _ = safe_external(fn -> revoke_run_capability(lease, cap_id, token) end)
+      end)
+
+      if is_binary(lease.agent_id) do
+        _ = safe_external(fn -> deregister_run_identity(lease, lease.agent_id, token) end)
+      end
+
+      if lease.authority do
+        _ = safe_external(fn -> lease.security.close_signing_authority(lease.authority) end)
+      end
+
+      if lease.trust_pending and is_binary(lease.agent_id) do
+        _ = safe_external(fn -> lease.trust.delete_trust_profile(lease.agent_id) end)
+      end
+
+      _ = JournalOwner.delete(lease.id)
+      :ok
+    end
+
+    defp store_still_current?(pid) when is_pid(pid) do
+      Process.alive?(pid) and Process.whereis(Arbor.Scheduler.RunLease.Store) == pid
+    end
+
+    defp store_still_current?(_pid), do: false
 
     defp mutate_active_lease(lease_id, fun) do
       case JournalOwner.fetch(lease_id) do

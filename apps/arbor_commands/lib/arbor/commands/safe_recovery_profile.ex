@@ -103,7 +103,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
   end
 
   defp resolve_profile_path(root) do
-    with {:ok, lexical} <- SafePath.safe_join(root, @default_profile_rel),
+    with {:ok, lexical} <- SafePath.lexical_child(root, @default_profile_rel),
          :ok <- require_within(lexical, root),
          {:ok, real} <- resolve_profile_real(lexical),
          :ok <- require_within(real, root),

@@ -160,9 +160,9 @@ defmodule Arbor.Consensus.ConsultationLog do
         }
       }
 
-      case Persistence.insert_eval_run(run_attrs) do
+      case insert_eval_run(run_attrs) do
         {:ok, _} -> {:ok, run_id}
-        {:error, _} -> nil
+        _unavailable -> nil
       end
     end
   end
@@ -390,6 +390,15 @@ defmodule Arbor.Consensus.ConsultationLog do
       created_at: result.inserted_at
     }
     |> Jason.encode!()
+  end
+
+  # A started Repo is not a checked-out connection. DBConnection 2.10 raises
+  # OwnershipError from a fast test that never joined the SQL sandbox, and
+  # this log degrades to "no run" instead of failing the consultation.
+  defp insert_eval_run(attrs) do
+    Persistence.insert_eval_run(attrs)
+  rescue
+    DBConnection.OwnershipError -> {:error, :unavailable}
   end
 
   defp available? do

@@ -111,9 +111,10 @@ defmodule Arbor.Behavioral.SecureCommsTest do
 
       sealed = Crypto.seal("Secret for Bob", pub_bob, alice_sign_priv)
 
-      # Eve has a valid view of Alice's signature, but her X25519 key yields the
-      # wrong ECDH secret → decryption fails.
-      assert {:error, :decryption_failed} = Crypto.unseal(sealed, priv_eve, alice_sign_pub)
+      # The v3 envelope binds the signature to the recipient public key derived
+      # from the X25519 private key. Eve's key changes that context, so
+      # verification fails before any decryption attempt.
+      assert {:error, :bad_signature} = Crypto.unseal(sealed, priv_eve, alice_sign_pub)
     end
 
     test "derive_agent_id produces deterministic ID from public key" do

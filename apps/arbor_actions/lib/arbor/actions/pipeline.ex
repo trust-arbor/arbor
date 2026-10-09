@@ -391,7 +391,9 @@ defmodule Arbor.Actions.Pipeline do
   defp resolve_real_source_file(path, workdir) do
     expanded_workdir = Path.expand(workdir)
 
-    with {:ok, lexical_path} <- SafePath.resolve_within(path, expanded_workdir),
+    with :ok <- SafePath.validate(path),
+         :ok <- SafePath.validate(expanded_workdir),
+         {:ok, lexical_path} <- lexical_source_path(path, expanded_workdir),
          {:ok, real_workdir} <- SafePath.resolve_real(expanded_workdir),
          {:ok, workdir_identity} <- directory_identity(real_workdir),
          {:ok, real_path} <- SafePath.resolve_real(lexical_path),
@@ -399,6 +401,8 @@ defmodule Arbor.Actions.Pipeline do
       # Authorize the caller-visible lexical path so capabilities rooted at a
       # platform alias such as macOS /var still match. Read the canonical path
       # after proving that its real target remains inside the real workdir.
+      # SafePath.resolve_within/2 returns that canonical path, so it cannot be
+      # the authorized path: unscoped fs grants keep the caller's /var prefix.
       {:ok,
        %{
          expanded_workdir: expanded_workdir,
@@ -410,6 +414,22 @@ defmodule Arbor.Actions.Pipeline do
     else
       {:error, :path_traversal} = error -> error
       _other -> {:error, :source_file_not_regular_or_outside_workdir}
+    end
+  end
+
+  # Path.expand/2 collapses `.` and `..` without following symlinks, so a
+  # workdir under macOS /var stays on /var. A symlink whose lexical path is
+  # inside the workdir is still rejected later when its real target leaves
+  # the real workdir.
+  defp lexical_source_path(path, expanded_workdir) do
+    lexical_path = Path.expand(path, expanded_workdir)
+    workdir_prefix = String.trim_trailing(expanded_workdir, "/")
+
+    if workdir_prefix == "/" or lexical_path == workdir_prefix or
+         String.starts_with?(lexical_path, workdir_prefix <> "/") do
+      {:ok, lexical_path}
+    else
+      {:error, :path_traversal}
     end
   end
 

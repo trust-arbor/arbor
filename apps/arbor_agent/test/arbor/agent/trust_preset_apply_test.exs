@@ -123,12 +123,17 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     # Own ready RA supervisor / Task.Supervisor / TaskStore per test so
     # Lifecycle.start exercises ordinary-start admission without ambient globals.
+    Process.put(
+      :agent_test_actor_authority,
+      Arbor.Agent.Test.ActorAuthority.open!(:trust_preset_apply)
+    )
+
     RuntimeAdmissionTopology.start_owned!()
   end
 
   describe "trust_preset applied at create time (security regression, commit 7721f506)" do
     test "a data-first template's declarative trust_preset lands on the agent's trust profile" do
-      assert {:ok, profile} = Lifecycle.create("Test Agent Probe", template: "test_agent")
+      assert {:ok, profile} = create!("Test Agent Probe", template: "test_agent")
       agent_id = profile.agent_id
       cleanup(agent_id)
 
@@ -147,7 +152,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "template orchestrator grant covers mandatory per-node middleware checks" do
-      assert {:ok, profile} = Lifecycle.create("Middleware Gate Probe", template: "test_agent")
+      assert {:ok, profile} = create!("Middleware Gate Probe", template: "test_agent")
       agent_id = profile.agent_id
       cleanup(agent_id)
 
@@ -159,7 +164,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "an agent is authorized on its OWN memory at create time" do
-      assert {:ok, profile} = Lifecycle.create("Self Memory Probe", template: "test_agent")
+      assert {:ok, profile} = create!("Self Memory Probe", template: "test_agent")
       agent_id = profile.agent_id
       cleanup(agent_id)
 
@@ -182,8 +187,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "the self-memory grant does not reach another agent's memory" do
-      assert {:ok, mine} = Lifecycle.create("Self Memory Owner", template: "test_agent")
-      assert {:ok, theirs} = Lifecycle.create("Self Memory Stranger", template: "test_agent")
+      assert {:ok, mine} = create!("Self Memory Owner", template: "test_agent")
+      assert {:ok, theirs} = create!("Self Memory Stranger", template: "test_agent")
       cleanup(mine.agent_id)
       cleanup(theirs.agent_id)
 
@@ -201,7 +206,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     test "security regression: coding template authorizes every canonical graph action" do
       assert {:ok, profile} =
-               Lifecycle.create("Coding Graph Gate Probe", template: "coding_agent")
+               create!("Coding Graph Gate Probe", template: "coding_agent")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -290,7 +295,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "template repo file grants mint concrete FileGuard scopes" do
-      assert {:ok, profile} = Lifecycle.create("Repo File Tool Probe", template: "test_agent")
+      assert {:ok, profile} = create!("Repo File Tool Probe", template: "test_agent")
       agent_id = profile.agent_id
       cleanup(agent_id)
 
@@ -313,7 +318,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       character = Character.new(name: "Scoped Writer", tone: "external")
 
       assert {:ok, profile} =
-               Lifecycle.create("Scoped Repo Writer",
+               create!("Scoped Repo Writer",
                  character: character,
                  capabilities: [%{resource: "arbor://fs/write/repo"}]
                )
@@ -332,7 +337,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "authorized external registrar creates only the reviewed repo-scoped profile" do
-      caller_id = "human_registrar_#{System.unique_integer([:positive])}"
+      assert {:ok, caller_id} =
+               Arbor.Security.signing_authority_principal(
+                 Process.get(:agent_test_actor_authority)
+               )
 
       assert {:ok, _capabilities} =
                Arbor.Security.assign_role_fixture(caller_id, :external_agent_registrar)
@@ -342,7 +350,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  caller_id,
                  "Scoped External Agent",
                  "external",
-                 identity_verified: true
+                 with_actor_authority(identity_verified: true)
                )
 
       cleanup(profile.agent_id)
@@ -372,7 +380,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
           TenantContext.new("human_#{template}", workspace_root: workspace_root)
 
         assert {:ok, profile} =
-                 Lifecycle.create("Tenant #{template} Probe",
+                 create!("Tenant #{template} Probe",
                    template: template,
                    tenant_context: tenant_context
                  )
@@ -409,7 +417,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       store: store
     } do
       assert {:ok, profile} =
-               Lifecycle.create("Pipeline Architect Runtime Probe",
+               create!("Pipeline Architect Runtime Probe",
                  template: "pipeline_architect",
                  sandbox_level: :none
                )
@@ -433,7 +441,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       on_exit(fn -> File.cd!(original_cwd) end)
       File.cd!(Path.join(umbrella_root, "apps"))
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id, with_actor_authority())
       File.cd!(original_cwd)
 
       assert {:ok, _supervisor} =
@@ -488,7 +496,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       on_exit(fn -> File.rm_rf(workspace_root) end)
 
       assert {:ok, profile} =
-               Lifecycle.create("Pipeline Architect Authority Probe",
+               create!("Pipeline Architect Authority Probe",
                  template: "pipeline_architect",
                  tenant_context:
                    TenantContext.new("human_pipeline_architect", workspace_root: workspace_root),
@@ -595,7 +603,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     test "security regression: malformed exact policy stops an already-running architect and revokes authority",
          %{store: store} do
       assert {:ok, profile} =
-               Lifecycle.create("Corrupt Policy Probe", template: "pipeline_architect")
+               create!("Corrupt Policy Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -622,7 +630,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     test "legacy Pipeline Architect profiles migrate to an exact snapshot before activation" do
       assert {:ok, profile} =
-               Lifecycle.create("Legacy Architect Probe", template: "pipeline_architect")
+               create!("Legacy Architect Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -630,14 +638,14 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       legacy = %{profile | metadata: Map.delete(profile.metadata, "exact_template_policy")}
       assert :ok = Arbor.Agent.ProfileStore.store_profile(legacy)
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id, with_actor_authority())
       assert {:ok, migrated} = Lifecycle.restore(agent_id)
       assert %{} = migrated.metadata["exact_template_policy"]
     end
 
     test "security regression: a missing exact template fails closed and removes authority" do
       assert {:ok, profile} =
-               Lifecycle.create("Missing Template Probe", template: "pipeline_architect")
+               create!("Missing Template Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -648,14 +656,14 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  | template: "missing_pipeline_architect"
                })
 
-      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id, with_actor_authority())
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
     test "security regression: a changed exact template fails closed and removes authority" do
       assert {:ok, profile} =
-               Lifecycle.create("Changed Template Probe", template: "pipeline_architect")
+               create!("Changed Template Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -679,14 +687,14 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         File.rm_rf(override_dir)
       end)
 
-      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id, with_actor_authority())
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
     test "security regression: exact reconciliation revokes capabilities widened after creation" do
       assert {:ok, profile} =
-               Lifecycle.create("Widened Capability Probe", template: "pipeline_architect")
+               create!("Widened Capability Probe", template: "pipeline_architect")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -694,7 +702,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, _capability} =
                Arbor.Security.grant_fixture(principal: agent_id, resource: "arbor://shell/exec")
 
-      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id, with_actor_authority())
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       refute "arbor://shell/exec" in Enum.map(caps, & &1.resource_uri)
     end
@@ -708,7 +716,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       result =
         try do
-          Lifecycle.create("Unstored Restrictive Template Probe",
+          create!("Unstored Restrictive Template Probe",
             template: "pipeline_architect"
           )
         after
@@ -724,7 +732,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     test "a template WITHOUT a trust_preset is not forced to :block by this path" do
       assert {:ok, profile} =
-               Lifecycle.create("Plain Agent Probe", template: "conversationalist")
+               create!("Plain Agent Probe", template: "conversationalist")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -750,7 +758,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       File.cd!(isolated_cwd)
 
       assert {:ok, profile} =
-               Lifecycle.create("Non-exact CWD Probe", template: "conversationalist")
+               create!("Non-exact CWD Probe", template: "conversationalist")
 
       cleanup(profile.agent_id)
     end
@@ -761,7 +769,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       store: store
     } do
       assert {:ok, profile} =
-               Lifecycle.create("Concurrent Bootstrap Probe", template: "test_agent")
+               create!("Concurrent Bootstrap Probe", template: "test_agent")
 
       agent_id = profile.agent_id
       cleanup(agent_id)
@@ -821,7 +829,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     @tag :security_regression
     test "destroy removes trust profile, capabilities, identity, and signing key" do
       assert {:ok, profile} =
-               Lifecycle.create("Destroy Authority Probe", template: "test_agent")
+               create!("Destroy Authority Probe", template: "test_agent")
 
       agent_id = profile.agent_id
 
@@ -835,7 +843,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, :active} = Arbor.Security.identity_status(agent_id)
       assert {:ok, _pub} = Arbor.Security.lookup_public_key(agent_id)
 
-      assert :ok = Lifecycle.destroy(agent_id)
+      assert :ok =
+               Lifecycle.destroy(agent_id,
+                 actor_authority: Process.get(:agent_test_actor_authority)
+               )
 
       assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
       assert {:error, :not_found} = Arbor.Security.identity_status(agent_id)
@@ -849,6 +860,17 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   end
 
   # --- helpers ---
+
+  defp create!(name, opts \\ []) do
+    Lifecycle.create(name, with_actor_authority(opts))
+  end
+
+  defp with_actor_authority(opts \\ []) do
+    case Process.get(:agent_test_actor_authority) do
+      nil -> opts
+      authority -> Keyword.put(opts, :actor_authority, authority)
+    end
+  end
 
   defp assert_eventually(assertion, attempts \\ 50)
 

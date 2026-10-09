@@ -199,17 +199,17 @@ defmodule Arbor.Test.BehavioralCase do
 
     for uri <- capabilities do
       cap = %Capability{
-        id: "cap_behavioral_#{agent_id}_#{URI.encode(uri)}",
+        id: "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
         resource_uri: uri,
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
         constraints: %{},
         delegation_depth: 0,
-        metadata: %{test: true, behavioral: true}
+        metadata: %{"test" => true, "behavioral" => true}
       }
 
-      Arbor.Security.put_capability_fixture(cap)
+      {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
     end
   end
 end

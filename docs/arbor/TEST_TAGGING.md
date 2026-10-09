@@ -8,7 +8,7 @@ Guidelines for consistent test tagging across the Arbor codebase.
 
 | Tag | When to use |
 |-----|-------------|
-| `:fast` | Unit tests that complete in < 100ms. Use `@moduletag :fast` for test files that are entirely fast. |
+| `:fast` | Self-contained unit tests that complete in < 100ms. Use `@moduletag :fast` only when the whole file qualifies. Never combine a test's effective `fast: true` with `:database` or `:isolated_repo`: the fast alias selects included tests ahead of exclusions. For a mixed module, mark such cases `@tag fast: false`; the alias uses `--only fast:true` so those cases stay out. |
 | `:slow` | Tests that take > 1 second (network timeouts, large computations). Use `@tag :slow` on individual tests. |
 
 ### Isolation Level
@@ -35,7 +35,7 @@ the regression test a spec ID so the invariant is named, not just tested. See
 
 | Tag | When to use |
 |-----|-------------|
-| `:database` | Exercises a real database backend rather than an in-memory fake, including configured PostgreSQL and test-owned SQLite databases. Excluded by default. |
+| `:database` | Exercises a real database backend rather than an in-memory fake, including configured PostgreSQL and test-owned SQLite databases. Excluded by default. If the test requires exclusive ownership of a private Repo, use only `:isolated_repo` and run it separately; `--include database` overrides the isolated exclusion in an aggregate run. |
 | `:postgres` | Narrows a `:database` integration test to PostgreSQL or pgvector. Pair with `:database` and skip when the compiled Repo adapter is not PostgreSQL. |
 | `:sqlite` | Narrows a `:database` integration test to SQLite. Pair with `:database`; a test-owned temporary database still counts as real database coverage. |
 | `:external` | Requires external services or CLI binaries (e.g., Claude CLI) |

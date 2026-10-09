@@ -87,23 +87,27 @@ defmodule Arbor.Historian.EventConverter do
     encode_event_type_from_string(type)
   end
 
-  # Convert a "category:type" string into a safely-encoded event type atom.
-  # Uses SafeAtom.encode_event_type to create the combined atom safely.
+  defp encode_event_type_from_string(nil), do: nil
+  defp encode_event_type_from_string(value) when is_atom(value), do: value
+
+  # Keep "category:type" as a string unless that combined atom is already
+  # loaded. Encoding through `SafeAtom.encode_event_type/2` otherwise
+  # collapses the pair to `:unknown`, and history queries then miss every
+  # event whose combined atom was not interned by an earlier module.
+  # `HistoryEntry` decodes the string with the category allowlist and
+  # `to_existing/1`, so this does not intern new atoms.
   defp encode_event_type_from_string(value) when is_binary(value) do
     case String.split(value, ":", parts: 2) do
       [category_str, type_str] ->
-        category = SafeAtom.to_category(category_str)
-        # For type, use to_existing to only allow known types
-        type =
-          case SafeAtom.to_existing(type_str) do
-            {:ok, atom} -> atom
-            {:error, _} -> :unknown
-          end
-
-        SafeAtom.encode_event_type(category, type)
+        case SafeAtom.encode_event_type(
+               SafeAtom.to_category(category_str),
+               existing_type(type_str)
+             ) do
+          :unknown -> value
+          combined -> combined
+        end
 
       [_single] ->
-        # Single value without colon - try to atomize it safely
         case SafeAtom.to_existing(value) do
           {:ok, atom} -> atom
           {:error, _} -> :unknown
@@ -111,8 +115,12 @@ defmodule Arbor.Historian.EventConverter do
     end
   end
 
-  defp encode_event_type_from_string(nil), do: nil
-  defp encode_event_type_from_string(value) when is_atom(value), do: value
+  defp existing_type(type_str) do
+    case SafeAtom.to_existing(type_str) do
+      {:ok, atom} -> atom
+      {:error, _} -> :unknown
+    end
+  end
 
   # Subject type uses SafeAtom.to_subject_type which has known allowed values
   defp atomize_subject_type(nil), do: nil

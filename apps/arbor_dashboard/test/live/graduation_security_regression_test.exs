@@ -60,9 +60,8 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     if :ets.whereis(:arbor_agent_registry) == :undefined,
       do: :ets.new(:arbor_agent_registry, [:named_table, :set, :public])
 
-    for module <- [PolicyHost, Arbor.Signals.Store, Arbor.Signals.Bus] do
-      if Process.whereis(module) == nil, do: start_supervised!(module)
-    end
+    if Process.whereis(PolicyHost) == nil, do: start_supervised!(PolicyHost)
+    :ok = Signals.ensure_supervised_local_runtime!()
 
     if Process.whereis(Comms.PubSub) == nil,
       do: start_supervised!({Phoenix.PubSub, name: Comms.PubSub})

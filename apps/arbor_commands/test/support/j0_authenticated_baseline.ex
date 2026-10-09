@@ -259,9 +259,12 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     conversant = Identities.register_human_identity!("conversant")
     refute owner.id == conversant.id
 
-    conversationalist = create_conversationalist!("J0 Conversationalist", owner.id)
+    # Lifecycle.create/2 fails closed without an actor authority. This identity
+    # is the test's mutation actor, not a grant the conversationalist holds.
+    authority = open_mutation_authority!()
+    conversationalist = create_conversationalist!("J0 Conversationalist", owner.id, authority)
     remember(bag, :conversationalist, conversationalist)
-    control = create_conversationalist!("J0 Control Conversationalist", owner.id)
+    control = create_conversationalist!("J0 Control Conversationalist", owner.id, authority)
     remember(bag, :control, control)
     refute conversationalist.agent_id == control.agent_id
 
@@ -727,11 +730,26 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
         id: :arbor_agent_profiles
       )
 
+    # Chat admission resolves the caller through IdentityAliasResolver. An
+    # absent :arbor_user_config store is an outage and the receipt is denied.
+    # An empty store means the human is unlinked and resolves to itself.
+    user_config =
+      Supervisor.child_spec(
+        {BufferedStore,
+         name: :arbor_user_config, backend: nil, write_mode: :sync, collection: "user_config"},
+        id: :arbor_user_config
+      )
+
     Enum.map(
       [
         {Elixir.Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
         {Elixir.Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
         profiles,
+        user_config,
+        # Lifecycle persists the conversationalist's key through this owner.
+        # Test config leaves the agent supervisor empty, so the journey has to
+        # start the same owner the agent suite starts.
+        Arbor.Agent.ProfileAuthorityOwner,
         AgentRegistry,
         Arbor.Agent.SessionManager,
         Arbor.Agent.Supervisor
@@ -839,12 +857,42 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     ConfigurationError -> nil
   end
 
-  defp create_conversationalist!(name, owner_id) do
+  defp open_mutation_authority! do
+    {:ok, identity} = Arbor.Contracts.Security.Identity.generate()
+    :ok = Arbor.Security.register_identity_fixture(identity)
+
+    {:ok, mutation_capability} =
+      Arbor.Security.grant_fixture(
+        principal: identity.agent_id,
+        resource: "arbor://security/**"
+      )
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: :j0_authenticated_baseline,
+        owner: self()
+      )
+
+    {:ok, authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    on_exit(fn ->
+      _ = Arbor.Security.revoke_fixture(mutation_capability.id)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    authority
+  end
+
+  defp create_conversationalist!(name, owner_id, actor_authority) do
     assert {:ok, profile, identity} =
              Lifecycle.create(name,
                template: "conversationalist",
                principal_id: owner_id,
                return_identity: true,
+               actor_authority: actor_authority,
                memory_opts: [index_enabled: true, graph_enabled: true]
              )
 
@@ -931,7 +979,12 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "j0-authenticated-baseline-#{System.unique_integer([:positive, :monotonic])}"
+      "j0-authenticated-baseline-session-token-" <>
+        String.pad_leading(
+          Integer.to_string(System.unique_integer([:positive, :monotonic])),
+          16,
+          "0"
+        )
     )
   end
 

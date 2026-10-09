@@ -285,6 +285,7 @@ defmodule Arbor.AI.BackendTrustTest do
   describe "egress_tier_for/1 (provider only)" do
     test "local providers default to :on_host" do
       assert BackendTrust.egress_tier_for(:lmstudio) == :on_host
+      assert BackendTrust.egress_tier_for(:lm_studio) == :on_host
       assert BackendTrust.egress_tier_for(:ollama) == :on_host
     end
 
@@ -318,6 +319,8 @@ defmodule Arbor.AI.BackendTrustTest do
     test "exposes provider and endpoint classification without internal-module access" do
       assert Arbor.AI.egress_tier_for(:lmstudio) == :on_host
       assert Arbor.AI.egress_tier_for("lmstudio") == :on_host
+      assert Arbor.AI.egress_tier_for(:lm_studio) == :on_host
+      assert Arbor.AI.egress_tier_for("lm_studio") == :on_host
       assert Arbor.AI.egress_tier_for(:anthropic) == :external_provider
 
       assert Arbor.AI.egress_tier_for(:ollama, "http://10.42.42.6:11434") ==

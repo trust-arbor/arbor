@@ -6,7 +6,6 @@ defmodule Arbor.Scheduler.Cores.RoutineCore do
   @digest ~r/\A[0-9a-f]{64}\z/
   @request_id ~r/\A[A-Za-z0-9][A-Za-z0-9_-]{15,95}\z/
   @cap_id ~r/\Acap_[A-Za-z0-9_-]{16,128}\z/
-  @domain "arbor.scheduler.owner-request.v1\0"
 
   def intent(value) when is_map(value) and map_size(value) == 6 do
     with true <- Enum.sort(Map.keys(value)) == Enum.sort(@intent_keys),
@@ -29,15 +28,20 @@ defmodule Arbor.Scheduler.Cores.RoutineCore do
   def intent(_), do: {:error, :invalid_routine_intent}
 
   def payload(:enqueue, value) do
-    with {:ok, intent} <- intent(value), do: {:ok, @domain <> "enqueue\0" <> canonical(intent)}
+    with {:ok, intent} <- intent(value) do
+      Arbor.Security.routine_owner_request_payload("enqueue", canonical(intent))
+    end
   end
 
   def payload(:list, filters) do
-    with {:ok, filters} <- filters(filters), do: {:ok, @domain <> "list\0" <> canonical(filters)}
+    with {:ok, filters} <- filters(filters) do
+      Arbor.Security.routine_owner_request_payload("list", canonical(filters))
+    end
   end
 
-  def payload(:cancel, id) when is_integer(id) and id > 0 and id < 9_223_372_036_854_775_807,
-    do: {:ok, @domain <> "cancel\0" <> Integer.to_string(id)}
+  def payload(:cancel, id) when is_integer(id) and id > 0 and id < 9_223_372_036_854_775_807 do
+    Arbor.Security.routine_owner_request_payload("cancel", Integer.to_string(id))
+  end
 
   def payload(_, _), do: {:error, :invalid_routine_request}
 

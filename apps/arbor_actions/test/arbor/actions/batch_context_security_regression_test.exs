@@ -16,6 +16,16 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
   setup do
     unless Process.whereis(Arbor.Trust.Store), do: start_supervised!(Arbor.Trust.Store)
 
+    previous_authorizer = Application.fetch_env(:arbor_shell, :agent_authorizer)
+    Application.put_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
+
+    on_exit(fn ->
+      case previous_authorizer do
+        {:ok, authorizer} -> Application.put_env(:arbor_shell, :agent_authorizer, authorizer)
+        :error -> Application.delete_env(:arbor_shell, :agent_authorizer)
+      end
+    end)
+
     unique = System.unique_integer([:positive])
     {:ok, identity} = Arbor.Security.generate_identity(name: "batch-context-#{unique}")
     :ok = Arbor.Security.register_identity_fixture(identity)
@@ -144,8 +154,26 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
   end
 
   test "batch preserves a matching verified SignedRequest and AuthContext for authenticated child",
-       %{identity: identity, principal: principal} do
+       %{identity: identity, principal: principal, workspace: workspace} do
     command = "echo batch-auth-context"
+    # Containment admits only the symlink-resolved directory. On macOS that is
+    # `/private/var/...`, and the command needs a read grant on that exact root.
+    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(workspace)
+
+    {:ok, profile} = Arbor.Trust.Store.get_profile(principal)
+
+    :ok =
+      Arbor.Trust.Store.store_profile(%{
+        profile
+        | rules: Map.put(profile.rules, "arbor://fs/read#{cwd}", :auto)
+      })
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(
+               principal: principal,
+               resource: "arbor://fs/read#{cwd}/**"
+             )
+
     {:ok, resource} = Arbor.Actions.Shell.Execute.authorization_resource(%{command: command})
     {:ok, signed_request} = SignedRequest.sign(resource, principal, identity.private_key)
 
@@ -154,7 +182,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
       |> AuthContext.new(signed_request: signed_request)
       |> AuthContext.mark_verified()
 
-    spec = %{"type" => "shell.execute", "params" => %{command: command}}
+    spec = %{"type" => "shell.execute", "params" => %{command: command, cwd: cwd}}
 
     assert [{^spec, {:ok, %{stdout: stdout, exit_code: 0}}}] =
              Arbor.Actions.execute_batch(

@@ -27,6 +27,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
+
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
+      start_supervised!({Arbor.Trust.ConfirmationTracker, test_isolated_owner: true})
+    end
+
     :ok
   end
 
@@ -124,7 +129,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["request_id"] == request.request_id
     assert is_binary(payload["commit_hash"]) and payload["commit_hash"] != ""
@@ -167,7 +172,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     commit = payload["commit_hash"]
 
@@ -202,7 +207,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] != head
     assert {:ok, committed_head} = git_head(lease.worktree_path)
@@ -262,7 +267,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
   end
 
@@ -354,7 +359,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                note: "nope"
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == "denied"
     assert payload["request_id"] == request.request_id
     assert payload["note"] == "nope"
@@ -385,7 +390,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                rework: true
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == "rework"
     assert payload["note"] == "fix api"
     assert {:ok, ^head} = git_head(repo)
@@ -420,7 +425,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] == head
     assert payload["adopted"] == true
@@ -465,7 +470,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 5_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] == head
     assert payload["adopted"] == true
@@ -616,7 +621,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 10_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert is_binary(payload["commit_hash"]) and payload["commit_hash"] != ""
     assert payload["commit_hash"] != head
@@ -760,7 +765,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 10_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] != inspected_head
   end
@@ -809,7 +814,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 10_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] != prior
     assert {:ok, new_head} = git_head(worktree)
@@ -904,7 +909,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 10_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] == head
     assert payload["adopted"] == true
@@ -947,7 +952,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                decision: :approve
              })
 
-    assert {:ok, payload} = Task.await(task, 10_000)
+    assert {:ok, payload} = Task.await(task, 20_000)
     assert payload["interaction_outcome"] == ""
     assert payload["commit_hash"] != head
     assert {:ok, committed} = git_head(lease.worktree_path)

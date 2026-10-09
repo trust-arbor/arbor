@@ -5811,6 +5811,13 @@ defmodule Arbor.Security do
     {:error, :possession_proof_required}
   end
 
+  @doc false
+  @spec routine_owner_request_payload(String.t(), binary()) ::
+          {:ok, binary()} | {:error, :invalid_routine_request}
+  def routine_owner_request_payload(operation, body) do
+    Arbor.Security.RoutineOwnerRequest.payload(operation, body)
+  end
+
   @doc """
   Sign a payload using a previously opened signing authority.
 

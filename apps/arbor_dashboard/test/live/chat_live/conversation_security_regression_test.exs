@@ -140,7 +140,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
     keys = [:conversation_api, :conversation_test]
     previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_dashboard, &1)})
     secret = Application.fetch_env(:arbor_security, :session_token_secret)
-    Application.put_env(:arbor_security, :session_token_secret, "isolated-dashboard-proof-secret")
+
+    Application.put_env(
+      :arbor_security,
+      :session_token_secret,
+      "isolated-dashboard-proof-secret-32"
+    )
 
     state =
       start_supervised!(
@@ -651,7 +656,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.ConversationSecurityRegressionTest do
 
   test "security regression: missing forged expired and foreign proof cannot use direct query fallback" do
     Application.put_env(:arbor_dashboard, :conversation_api, Arbor.Agent)
-    {:ok, expired} = Arbor.Security.SessionToken.generate("human_ui", ttl: -1)
+    {:ok, expired} = Arbor.Security.SessionToken.generate_expired_fixture("human_ui")
     {:ok, foreign} = Arbor.Security.SessionToken.generate("human_someone_else")
 
     for proof <- [nil, "forged", expired, foreign] do

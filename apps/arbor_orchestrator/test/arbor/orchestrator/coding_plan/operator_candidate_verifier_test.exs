@@ -30,7 +30,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
       active =
         Arbor.Security.sign_with_authority(
           authority,
-          "arbor://coding/operator-candidate-verifier-test"
+          "arbor://coding/operator_candidate_verifier_test"
         )
 
       send(

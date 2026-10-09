@@ -11,14 +11,6 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
   alias Arbor.Trust.Store
 
   setup do
-    if Process.whereis(Store) == nil, do: start_supervised!(Store)
-
-    if Process.whereis(Arbor.Trust.Manager) == nil do
-      start_supervised!(
-        {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
-      )
-    end
-
     previous_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
 
@@ -49,6 +41,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     )
 
     rebind_trust!()
+    ensure_trust_processes!()
 
     on_exit(fn ->
       if is_nil(previous_ceilings),
@@ -138,6 +131,16 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
   end
 
+  defp ensure_trust_processes! do
+    if Process.whereis(Store) == nil, do: start_supervised!(Store)
+
+    if Process.whereis(Arbor.Trust.Manager) == nil do
+      start_supervised!(
+        {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
+      )
+    end
+  end
+
   defp grant(c, operation) do
     {:ok, _} =
       Security.grant_fixture(
@@ -148,21 +151,27 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
 
   defp execute(c, command, extra \\ %{}) do
     resource = "arbor://shell/exec/" <> hd(String.split(command))
+    params = Map.merge(%{command: command, cwd: c.cwd, timeout: 5_000}, extra)
     {:ok, proof} = SignedRequest.sign(resource, c.identity.agent_id, c.identity.private_key)
+    {:ok, digest} = Security.approval_argument_digest(params)
+
+    {:ok, receipt} =
+      Security.issue_approval_receipt_fixture(
+        c.identity.agent_id,
+        resource,
+        :execute,
+        digest,
+        "irq_synthetic_shell_containment_#{System.unique_integer([:positive])}"
+      )
 
     Actions.authorize_and_execute(
       c.identity.agent_id,
       Actions.Shell.Execute,
-      Map.merge(%{command: command, cwd: c.cwd, timeout: 5_000}, extra),
+      params,
       %{
         agent_id: c.identity.agent_id,
         signed_request: proof,
-        approved_invocation: %{
-          request_id: "irq_synthetic_shell_containment",
-          principal_id: c.identity.agent_id,
-          resource_uri: resource,
-          decision: :approved
-        }
+        approved_invocation: receipt
       }
     )
   end

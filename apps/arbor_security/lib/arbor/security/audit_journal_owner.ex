@@ -54,7 +54,15 @@ defmodule Arbor.Security.AuditJournalOwner do
   exact record once. T3 first asks the same count-based relief predicate as a
   durable journal, so a refusal that nothing can relieve (a no-consumer
   backlog: nothing delivered, nothing retirable) answers without decoding the
-  hot set and arms no backoff. The first in-memory retirement installs a v3
+  hot set and arms no backoff. In the test environment only, that ephemeral
+  refusal then marks observed `effect_applied` operations delivered and
+  retires them in memory before retrying the refused record. Production,
+  including a production ephemeral journal, stays fail-closed on a
+  no-consumer backlog. A principal-capacity refusal is relieved the same way
+  only when that principal already has observed `effect_applied` operations;
+  unobserved prepares still refuse, and production never relieves a principal
+  refusal. The
+  first in-memory retirement installs a v3
   snapshot, so the admission floor becomes 3 exactly as on a durable journal.
   A failed in-memory compaction keeps the state, records
   `retirement.last_error` and arms the same backoff. Ephemeral status reports
@@ -1032,8 +1040,146 @@ defmodule Arbor.Security.AuditJournalOwner do
         end
 
       true ->
-        {:reply, cap_err, state}
+        relieve_unacked_ephemeral_test_backlog(state, raw, cap_err)
     end
+  end
+
+  # Ordinary test beams never start the Historian consumer, so observed grants
+  # stay `effect_applied` until the soft entry cap refuses the next increase.
+  # Delivering those observations consumes the reservation already held for
+  # the delivered record, and the existing in-memory retirement then frees
+  # the hot set. Durable journals never reach this clause.
+  if Mix.env() == :test do
+    @ephemeral_test_relief_attempts 16
+    @ephemeral_test_delivery_batch 512
+
+    defp relieve_unacked_ephemeral_test_backlog(state, raw, cap_err) do
+      relieve_unacked_ephemeral_test_backlog(state, raw, cap_err, @ephemeral_test_relief_attempts)
+    end
+
+    defp relieve_unacked_ephemeral_test_backlog(state, _raw, cap_err, 0),
+      do: {:reply, cap_err, state}
+
+    defp relieve_unacked_ephemeral_test_backlog(state, raw, cap_err, attempts) do
+      case deliver_applied_for_test(state, @ephemeral_test_delivery_batch) do
+        {:ok, delivered, n} when n > 0 ->
+          case retire_in_memory(delivered, :capacity) do
+            {:ok, retired} ->
+              case AuditJournalCore.append(retired.core, raw) do
+                result when elem(result, 0) == :ok ->
+                  finish_ephemeral_append(result, retired, raw, :retry)
+
+                {:error, reason} when reason in [:soft_capacity_exhausted, :capacity_exhausted] ->
+                  relieve_unacked_ephemeral_test_backlog(
+                    retired,
+                    raw,
+                    {:error, reason},
+                    attempts - 1
+                  )
+
+                {:error, reason} ->
+                  {:reply, {:error, reason}, %{retired | last_error: reason}}
+              end
+
+            {:not_published, kept} ->
+              {:reply, cap_err, kept}
+          end
+
+        _other ->
+          {:reply, cap_err, state}
+      end
+    end
+
+    defp deliver_applied_for_test(state, limit) do
+      batch = state.core |> AuditJournalCore.delivery_batch() |> Enum.take(limit)
+      deliver_items_for_test(state, batch)
+    end
+
+    # The principal cap counts non-delivered increases. Observed grants stay
+    # `effect_applied` without a Historian consumer, so one principal reaches
+    # 128 while the shared entry cap still has room. Delivering only that
+    # principal's observations is the in-memory stand-in for the consumer.
+    # Unobserved prepares are not in the delivery batch and stay refused.
+    defp relieve_observed_principal_for_test(intent, state) do
+      relieve_observed_principal_for_test(intent, state, @ephemeral_test_relief_attempts)
+    end
+
+    defp relieve_observed_principal_for_test(_intent, state, 0) do
+      {:reply, {:error, :principal_capacity_exhausted},
+       %{state | last_refusal: :principal_capacity_exhausted}}
+    end
+
+    defp relieve_observed_principal_for_test(intent, %{mode: :ephemeral} = state, attempts) do
+      principal_id = get_in(intent, ["audit", "data", "principal_id"])
+
+      if operational?(state) and is_binary(principal_id) do
+        case deliver_principal_applied_for_test(state, principal_id) do
+          {:ok, delivered, n} when n > 0 ->
+            case retire_in_memory(delivered, :capacity) do
+              {:ok, retired} ->
+                case AuditJournalCore.principal_increase_admission(retired.core, intent) do
+                  :ok ->
+                    append_prepared_intent(intent, retired)
+
+                  {:error, :principal_capacity_exhausted} ->
+                    relieve_observed_principal_for_test(intent, retired, attempts - 1)
+
+                  {:error, reason} when reason in @refusals ->
+                    {:reply, {:error, reason}, %{retired | last_refusal: reason}}
+
+                  {:error, _reason} ->
+                    {:reply, {:error, :malformed}, retired}
+                end
+
+              {:not_published, kept} ->
+                {:reply, {:error, :principal_capacity_exhausted},
+                 %{kept | last_refusal: :principal_capacity_exhausted}}
+            end
+
+          _other ->
+            {:reply, {:error, :principal_capacity_exhausted},
+             %{state | last_refusal: :principal_capacity_exhausted}}
+        end
+      else
+        {:reply, {:error, :principal_capacity_exhausted},
+         %{state | last_refusal: :principal_capacity_exhausted}}
+      end
+    end
+
+    defp relieve_observed_principal_for_test(_intent, state, _attempts) do
+      {:reply, {:error, :principal_capacity_exhausted},
+       %{state | last_refusal: :principal_capacity_exhausted}}
+    end
+
+    defp deliver_principal_applied_for_test(state, principal_id) do
+      batch =
+        state.core
+        |> AuditJournalCore.delivery_batch()
+        |> Enum.filter(fn item -> get_in(item, ["event", "agent_id"]) == principal_id end)
+        |> Enum.take(@ephemeral_test_delivery_batch)
+
+      deliver_items_for_test(state, batch)
+    end
+
+    defp deliver_items_for_test(state, items) do
+      Enum.reduce_while(items, {:ok, state, 0}, fn item, {:ok, acc, n} ->
+        record = mutation_record(item["operation_id"], "delivered", timestamp())
+
+        case AuditJournalCore.append(acc.core, record) do
+          {:ok, core} -> {:cont, {:ok, %{acc | core: core}, n + 1}}
+          {:ok, core, :idempotent} -> {:cont, {:ok, %{acc | core: core}, n + 1}}
+          {:error, _reason} -> {:halt, {:ok, acc, n}}
+        end
+      end)
+    end
+  else
+    defp relieve_unacked_ephemeral_test_backlog(state, _raw, cap_err),
+      do: {:reply, cap_err, state}
+
+    defp relieve_observed_principal_for_test(_intent, state),
+      do:
+        {:reply, {:error, :principal_capacity_exhausted},
+         %{state | last_refusal: :principal_capacity_exhausted}}
   end
 
   # Ephemeral T2 body, run from handle_continue after the triggering reply.
@@ -1158,6 +1304,9 @@ defmodule Arbor.Security.AuditJournalOwner do
         case AuditJournalCore.principal_increase_admission(state.core, intent) do
           :ok ->
             append_prepared_intent(intent, state)
+
+          {:error, :principal_capacity_exhausted} ->
+            relieve_observed_principal_for_test(intent, state)
 
           {:error, reason} when reason in @refusals ->
             {:reply, {:error, reason}, %{state | last_refusal: reason}}

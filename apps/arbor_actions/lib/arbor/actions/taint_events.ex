@@ -48,7 +48,7 @@ defmodule Arbor.Actions.TaintEvents do
 
   The actual value is never logged to avoid exposing potentially malicious content.
   """
-  @spec emit_taint_blocked(module(), atom(), atom(), atom(), map()) :: :ok
+  @spec emit_taint_blocked(module(), atom(), atom(), atom(), map()) :: :ok | {:error, term()}
   def emit_taint_blocked(action_module, param, taint_level, role, context) do
     data = %{
       action: action_module_to_string(action_module),
@@ -61,11 +61,7 @@ defmodule Arbor.Actions.TaintEvents do
       blocked_value_preview: nil
     }
 
-    if function_exported?(Signals, :durable_emit, 4) do
-      Signals.durable_emit(:security, :taint_blocked, data, stream_id: "security:events")
-    else
-      Signals.emit(:security, :taint_blocked, data)
-    end
+    emit_durable_security(:taint_blocked, data)
   end
 
   @doc """
@@ -92,7 +88,7 @@ defmodule Arbor.Actions.TaintEvents do
   This is called when taint is reduced through human review, consensus,
   or a verified pipeline.
   """
-  @spec emit_taint_reduced(atom(), atom(), atom(), map()) :: :ok
+  @spec emit_taint_reduced(atom(), atom(), atom(), map()) :: :ok | {:error, term()}
   def emit_taint_reduced(from_level, to_level, reason, context) do
     data = %{
       from_level: from_level,
@@ -101,11 +97,7 @@ defmodule Arbor.Actions.TaintEvents do
       agent_id: Map.get(context, :agent_id)
     }
 
-    if function_exported?(Signals, :durable_emit, 4) do
-      Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
-    else
-      Signals.emit(:security, :taint_reduced, data)
-    end
+    emit_durable_security(:taint_reduced, data)
   end
 
   @doc """
@@ -136,7 +128,7 @@ defmodule Arbor.Actions.TaintEvents do
   `intent` records what the gate *would* do (`:ask` / `:advise` / `:allow`).
   Never logs the egressed payload.
   """
-  @spec emit_egress_observed(module(), atom(), atom(), map()) :: :ok
+  @spec emit_egress_observed(module(), atom(), atom(), map()) :: :ok | {:error, term()}
   def emit_egress_observed(action_module, egress_tier, intent, context) do
     data = %{
       action: action_module_to_string(action_module),
@@ -148,10 +140,19 @@ defmodule Arbor.Actions.TaintEvents do
       agent_id: Map.get(context, :agent_id)
     }
 
-    if function_exported?(Signals, :durable_emit, 4) do
-      Signals.durable_emit(:security, :egress_observed, data, stream_id: "security:events")
-    else
-      Signals.emit(:security, :egress_observed, data)
+    emit_durable_security(:egress_observed, data)
+  end
+
+  # `:security` is a restricted topic. Realtime delivery already happened;
+  # durable plaintext persistence stays refused until a durable encryption
+  # provider exists. That refusal is not a failed enforcement event.
+  defp emit_durable_security(type, data) do
+    Code.ensure_loaded!(Signals)
+
+    case Signals.durable_emit(:security, type, data, stream_id: "security:events") do
+      :ok -> :ok
+      {:error, :restricted_durable_encryption_unavailable} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 

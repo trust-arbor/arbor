@@ -149,7 +149,7 @@ defmodule Arbor.Agent.ConversationDirectorySecurityRegressionTest do
 
   test "security regression missing invalid wrong-subject and expired proof stop before index reads",
        c do
-    {:ok, expired} = SessionToken.generate(c.primary.id, ttl: -1)
+    {:ok, expired} = SessionToken.generate_expired_fixture(c.primary.id)
 
     for opts <- [
           [],

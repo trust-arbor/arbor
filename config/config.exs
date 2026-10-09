@@ -20,7 +20,24 @@ config :arbor_security,
       application: :arbor_agent,
       path: [Arbor.Agent.ProfileAuthorityOwner],
       registered_name: Arbor.Agent.ProfileAuthorityOwner,
-      purposes: [:session, :heartbeat, :action_cycle]
+      # Coding handoffs are issued by this same supervised owner. The key
+      # store admits a stored-key bootstrap only when the purpose is listed
+      # here; session, heartbeat, and action-cycle were already admitted.
+      purposes: [
+        :session,
+        :heartbeat,
+        :action_cycle,
+        :exact_activation_failure,
+        :coding_task_executor,
+        :coding_task_recovery,
+        :coding_candidate_operator
+      ]
+    },
+    orchestration_lease_grant_owner: %{
+      application: :arbor_agent,
+      path: [Arbor.Agent.Orchestration.LeaseGrantOwner],
+      registered_name: Arbor.Agent.Orchestration.LeaseGrantOwner,
+      purposes: [:orchestration_lease_grant]
     },
     scheduler_owner: %{
       application: :arbor_scheduler,
@@ -39,6 +56,18 @@ config :arbor_security,
       path: [Arbor.Gateway.Bridge.RegistrationAuthority],
       registered_name: Arbor.Gateway.Bridge.RegistrationAuthority,
       purposes: [:gateway_claude_bridge]
+    },
+    gateway_lifecycle_owner: %{
+      application: :arbor_gateway,
+      path: [Arbor.Gateway.Chat.LifecycleAuthority],
+      registered_name: Arbor.Gateway.Chat.LifecycleAuthority,
+      purposes: [:gateway_agent_lifecycle]
+    },
+    voice_egress_grant_owner: %{
+      application: :arbor_voice,
+      path: [Arbor.Voice.EgressGrantOwner],
+      registered_name: Arbor.Voice.EgressGrantOwner,
+      purposes: [:voice_egress_grant]
     },
     system_authority: %{
       application: :arbor_security,

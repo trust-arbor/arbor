@@ -82,7 +82,7 @@ defmodule Arbor.AI.BackendTrust do
   @spec level(atom()) :: trust_level()
   def level(backend) when is_atom(backend) do
     trust_levels()
-    |> Map.get(backend, :low)
+    |> Map.get(canonical_backend(backend), :low)
   end
 
   @doc """
@@ -108,6 +108,11 @@ defmodule Arbor.AI.BackendTrust do
     backend_level = level(backend)
     compare(backend_level, minimum) in [:gt, :eq]
   end
+
+  # Session config stringifies the orchestrator atom `:lm_studio`. Trust rows
+  # are keyed `:lmstudio`. Both names are the same local backend.
+  defp canonical_backend(:lm_studio), do: :lmstudio
+  defp canonical_backend(backend), do: backend
 
   @doc """
   Sort backend+model pairs by trust level (highest first).
@@ -306,7 +311,7 @@ defmodule Arbor.AI.BackendTrust do
   @spec data_capabilities(atom()) :: [sensitivity()]
   def data_capabilities(backend) when is_atom(backend) do
     capabilities()
-    |> resolve_provider_default(backend)
+    |> resolve_provider_default(canonical_backend(backend))
   end
 
   @doc """
@@ -325,6 +330,7 @@ defmodule Arbor.AI.BackendTrust do
   @spec data_capabilities(atom(), String.t()) :: [sensitivity()]
   def data_capabilities(backend, model) when is_atom(backend) and is_binary(model) do
     caps = capabilities()
+    backend = canonical_backend(backend)
 
     case Map.get(caps, backend) do
       nil ->

@@ -140,6 +140,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
                          parameters_schema
                          resource_uri
                        ))
+  @catalog_action_keys_with_owner Enum.sort([
+                                    "authorization_admission_owner" | @catalog_action_keys
+                                  ])
   @effect_classes Classification.effect_classes()
                   |> Enum.map(&Atom.to_string/1)
                   |> Enum.sort()
@@ -440,7 +443,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp validate_catalog_action(action) when is_map(action) do
     valid? =
-      Map.keys(action) |> Enum.sort() == @catalog_action_keys and
+      catalog_action_keys?(action) and
         is_binary(action["name"]) and String.trim(action["name"]) != "" and
         is_binary(action["description"]) and is_map(action["parameters_schema"]) and
         is_binary(action["module"]) and String.trim(action["module"]) != "" and
@@ -458,6 +461,24 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp validate_catalog_action(_action), do: {:error, :malformed_action}
+
+  # The admission owner is optional. Only Comms.PublishConversationNotice
+  # declares it, and the catalog digest must bind that declaration. Requiring
+  # the key on every action would change every digest.
+  defp catalog_action_keys?(action) do
+    keys = action |> Map.keys() |> Enum.sort()
+
+    cond do
+      keys == @catalog_action_keys ->
+        true
+
+      keys == @catalog_action_keys_with_owner ->
+        action["authorization_admission_owner"] == "actions_facade"
+
+      true ->
+        false
+    end
+  end
 
   defp valid_catalog_execution_dependencies?(dependencies) when is_list(dependencies) do
     Enum.all?(dependencies, fn

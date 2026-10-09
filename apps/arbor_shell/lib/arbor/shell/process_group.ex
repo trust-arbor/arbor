@@ -973,7 +973,7 @@ defmodule Arbor.Shell.ProcessGroup do
     remaining = remaining_ms(deadline)
 
     if remaining <= 0 do
-      close_port(port)
+      exhaust_unready_port(port)
       {:error, :timeout_during_setup}
     else
       receive do
@@ -995,13 +995,125 @@ defmodule Arbor.Shell.ProcessGroup do
           {:error, {:port_exited, :normal}}
 
         {:cancel_shell_execution, _cancel_id} ->
-          close_port(port)
+          exhaust_unready_port(port)
           {:error, :cancelled_during_setup}
       after
         remaining ->
-          close_port(port)
+          exhaust_unready_port(port)
           {:error, :timeout_during_setup}
       end
+    end
+  end
+
+  # OTP 28 `Port.close/1` does not signal a `spawn_executable` process. The
+  # launcher calls `setsid` only after it starts, so a setup timeout can observe
+  # the pid before any process group exists. `kill(-pid)` then returns ESRCH and
+  # the kill helper reports success while the launcher keeps running. Signal the
+  # pid itself, then the group, and do not return while that pid is alive.
+  defp exhaust_unready_port(port) do
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
+        _ -> nil
+      end
+
+    if is_integer(os_pid), do: reap_unready_os_pid(os_pid)
+
+    close_port(port)
+
+    if is_integer(os_pid), do: await_os_pid_absent(os_pid)
+  end
+
+  defp reap_unready_os_pid(os_pid) do
+    deadline = System.monotonic_time(:millisecond) + @teardown_timeout_ms
+    reap_unready_os_pid(os_pid, deadline)
+  end
+
+  defp reap_unready_os_pid(os_pid, deadline) do
+    children = direct_child_pids(os_pid)
+    _ = signal_os_pid(os_pid)
+    _ = native_kill_group(os_pid)
+
+    Enum.each(children, fn child ->
+      _ = signal_os_pid(child)
+      _ = native_kill_group(child)
+    end)
+
+    cond do
+      not os_pid_alive?(os_pid) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        :ok
+
+      true ->
+        Process.sleep(@cleanup_retry_ms)
+        reap_unready_os_pid(os_pid, deadline)
+    end
+  end
+
+  defp await_os_pid_absent(os_pid) do
+    deadline = System.monotonic_time(:millisecond) + @teardown_timeout_ms
+    await_os_pid_absent(os_pid, deadline)
+  end
+
+  defp await_os_pid_absent(os_pid, deadline) do
+    cond do
+      not os_pid_alive?(os_pid) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        :ok
+
+      true ->
+        _ = signal_os_pid(os_pid)
+        Process.sleep(@cleanup_retry_ms)
+        await_os_pid_absent(os_pid, deadline)
+    end
+  end
+
+  defp signal_os_pid(pid) when is_integer(pid) and pid > 0 do
+    _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  end
+
+  defp os_pid_alive?(pid) when is_integer(pid) and pid > 0 do
+    case System.cmd("ps", ["-p", Integer.to_string(pid), "-o", "stat="], stderr_to_stdout: true) do
+      {output, 0} ->
+        case output |> String.trim() |> String.first() do
+          nil -> false
+          "Z" -> false
+          _ -> true
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp direct_child_pids(parent) when is_integer(parent) and parent > 0 do
+    case System.cmd("ps", ["-ax", "-o", "pid=,ppid="], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(fn line ->
+          case String.split(line) do
+            [pid, ppid] ->
+              with {child, ""} <- Integer.parse(pid),
+                   {^parent, ""} <- Integer.parse(ppid),
+                   true <- child > 0 do
+                [child]
+              else
+                _ -> []
+              end
+
+            _ ->
+              []
+          end
+        end)
+
+      _ ->
+        []
     end
   end
 

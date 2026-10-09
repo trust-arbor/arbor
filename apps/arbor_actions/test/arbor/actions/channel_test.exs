@@ -2,19 +2,23 @@ defmodule Arbor.Actions.ChannelTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Actions.Channel
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security
 
   @moduletag :integration
 
   setup do
     # Start channel infrastructure if not already running
     ensure_channel_infra()
+    member = register_agent!("Agent One")
 
-    # Create a test channel via the Comms facade
+    # Create a test channel via the Comms facade. Send uses the authority
+    # principal, so the member id has to be that principal.
     {:ok, channel_id} =
       Arbor.Comms.create_channel("test_channel",
         type: :group,
-        owner_id: "agent_1",
-        members: [%{id: "agent_1", name: "Agent One", type: :agent}],
+        owner_id: member.identity.agent_id,
+        members: [%{id: member.identity.agent_id, name: "Agent One", type: :agent}],
         rate_limit_ms: 0
       )
 
@@ -24,7 +28,7 @@ defmodule Arbor.Actions.ChannelTest do
       :ok
     end)
 
-    %{channel_id: channel_id}
+    %{channel_id: channel_id, member: member}
   end
 
   # ============================================================================
@@ -82,8 +86,14 @@ defmodule Arbor.Actions.ChannelTest do
       assert result.count == 0
     end
 
-    test "returns messages after send", %{channel_id: channel_id} do
-      Arbor.Comms.send_to_channel(channel_id, "agent_1", "Agent One", :agent, "Hello world!")
+    test "returns messages after send", %{channel_id: channel_id, member: member} do
+      Arbor.Comms.send_to_channel(
+        channel_id,
+        member.identity.agent_id,
+        "Agent One",
+        :agent,
+        "Hello world!"
+      )
 
       {:ok, result} = Channel.Read.run(%{channel_id: channel_id}, %{})
       assert result.count == 1
@@ -92,9 +102,15 @@ defmodule Arbor.Actions.ChannelTest do
       assert msg.content == "Hello world!"
     end
 
-    test "respects limit", %{channel_id: channel_id} do
+    test "respects limit", %{channel_id: channel_id, member: member} do
       for i <- 1..5 do
-        Arbor.Comms.send_to_channel(channel_id, "agent_1", "Agent One", :agent, "msg #{i}")
+        Arbor.Comms.send_to_channel(
+          channel_id,
+          member.identity.agent_id,
+          "Agent One",
+          :agent,
+          "msg #{i}"
+        )
       end
 
       {:ok, result} = Channel.Read.run(%{channel_id: channel_id, limit: 3}, %{})
@@ -116,8 +132,8 @@ defmodule Arbor.Actions.ChannelTest do
       assert Channel.Send.category() == "channel"
     end
 
-    test "sends message and returns result", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1", agent_name: "Agent One"}
+    test "sends message and returns result", %{channel_id: channel_id, member: member} do
+      context = member.context
       params = %{channel_id: channel_id, content: "Hello via action!"}
 
       assert {:ok, result} = Channel.Send.run(params, context)
@@ -126,8 +142,8 @@ defmodule Arbor.Actions.ChannelTest do
       assert is_binary(result.message_id)
     end
 
-    test "extracts agent_id from context", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1", agent_name: "Test Agent"}
+    test "extracts agent_id from context", %{channel_id: channel_id, member: member} do
+      context = %{member.context | agent_name: "Test Agent"}
 
       {:ok, _} =
         Channel.Send.run(%{channel_id: channel_id, content: "test"}, context)
@@ -139,18 +155,19 @@ defmodule Arbor.Actions.ChannelTest do
     end
 
     test "fails for non-member", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_unknown", agent_name: "Outsider"}
+      context = register_agent!("Outsider").context
       params = %{channel_id: channel_id, content: "Should fail"}
 
       assert {:error, reason} = Channel.Send.run(params, context)
       assert reason == :not_member
     end
 
-    test "returns error for unknown channel" do
-      context = %{agent_id: "agent_1", agent_name: "Agent One"}
-
+    test "returns error for unknown channel", %{member: member} do
       assert {:error, :not_found} =
-               Channel.Send.run(%{channel_id: "nonexistent", content: "hi"}, context)
+               Channel.Send.run(
+                 %{channel_id: "nonexistent", content: "hi"},
+                 member.context
+               )
     end
   end
 
@@ -165,7 +182,7 @@ defmodule Arbor.Actions.ChannelTest do
     end
 
     test "joins channel and enables sending", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_2", agent_name: "Agent Two"}
+      context = register_agent!("Agent Two").context
 
       # Should fail before joining
       assert {:error, :not_member} =
@@ -197,8 +214,8 @@ defmodule Arbor.Actions.ChannelTest do
       assert Channel.Leave.category() == "channel"
     end
 
-    test "leaves channel and blocks sending", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1", agent_name: "Agent One"}
+    test "leaves channel and blocks sending", %{channel_id: channel_id, member: member} do
+      context = member.context
 
       # Can send while member
       assert {:ok, _} =
@@ -266,13 +283,13 @@ defmodule Arbor.Actions.ChannelTest do
       assert Channel.Members.category() == "channel"
     end
 
-    test "returns member list", %{channel_id: channel_id} do
+    test "returns member list", %{channel_id: channel_id, member: member} do
       assert {:ok, result} = Channel.Members.run(%{channel_id: channel_id}, %{})
       assert result.channel_id == channel_id
       assert result.count >= 1
-      [member | _] = result.members
-      assert member.id == "agent_1"
-      assert member.name == "Agent One"
+      [listed | _] = result.members
+      assert listed.id == member.identity.agent_id
+      assert listed.name == "Agent One"
     end
 
     test "returns error for unknown channel" do
@@ -290,8 +307,8 @@ defmodule Arbor.Actions.ChannelTest do
       assert Channel.Update.category() == "channel"
     end
 
-    test "owner can rename channel", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1"}
+    test "owner can rename channel", %{channel_id: channel_id, member: member} do
+      context = %{agent_id: member.identity.agent_id}
       params = %{channel_id: channel_id, name: "renamed_channel"}
 
       assert {:ok, result} = Channel.Update.run(params, context)
@@ -325,8 +342,8 @@ defmodule Arbor.Actions.ChannelTest do
       assert Channel.Invite.category() == "channel"
     end
 
-    test "owner can invite member", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1"}
+    test "owner can invite member", %{channel_id: channel_id, member: member} do
+      context = %{agent_id: member.identity.agent_id}
 
       params = %{
         channel_id: channel_id,
@@ -343,9 +360,12 @@ defmodule Arbor.Actions.ChannelTest do
       assert Enum.any?(members, &(&1.id == "agent_invited"))
     end
 
-    test "idempotent — re-invite returns already_member", %{channel_id: channel_id} do
-      context = %{agent_id: "agent_1"}
-      params = %{channel_id: channel_id, invitee_id: "agent_1"}
+    test "idempotent — re-invite returns already_member", %{
+      channel_id: channel_id,
+      member: member
+    } do
+      context = %{agent_id: member.identity.agent_id}
+      params = %{channel_id: channel_id, invitee_id: member.identity.agent_id}
 
       assert {:ok, result} = Channel.Invite.run(params, context)
       assert result.status == :already_member
@@ -392,6 +412,47 @@ defmodule Arbor.Actions.ChannelTest do
   # ============================================================================
   # Helpers
   # ============================================================================
+
+  defp register_agent!(name) do
+    {:ok, identity} = Identity.generate(name: name)
+    :ok = Security.register_identity_fixture(Identity.public_only(identity))
+
+    :ok =
+      Security.store_signing_keypair_fixture(
+        identity.agent_id,
+        identity.private_key,
+        identity.encryption_private_key
+      )
+
+    {:ok, signing_authority} = open_authority(identity)
+    {:ok, send_authority} = Security.issue_channel_authority(signing_authority, :send)
+
+    on_exit(fn ->
+      _ = Security.delete_signing_key_fixture(identity.agent_id)
+      _ = Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    %{
+      identity: identity,
+      context: %{
+        agent_id: identity.agent_id,
+        agent_name: name,
+        channel_authority: send_authority
+      }
+    }
+  end
+
+  defp open_authority(identity) do
+    with {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             identity.agent_id,
+             identity.private_key,
+             purpose: :session,
+             owner: self()
+           ) do
+      Security.open_signing_authority(proof)
+    end
+  end
 
   defp ensure_channel_infra do
     # Registry

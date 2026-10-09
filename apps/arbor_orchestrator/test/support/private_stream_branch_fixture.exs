@@ -128,14 +128,15 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
             {Arbor.Agent.SessionManager, Arbor.Agent.SessionManager},
             {Arbor.Agent.Orchestration.TaskSupervisor,
              {Task.Supervisor, name: Arbor.Agent.Orchestration.TaskSupervisor}},
-            {Arbor.Historian.AuthorityAuditPuller, Arbor.Historian.AuthorityAuditPuller},
-            {Arbor.Signals.Store, Arbor.Signals.Store},
-            {Arbor.Signals.TopicKeys, Arbor.Signals.TopicKeys},
-            {Arbor.Signals.Bus, Arbor.Signals.Bus}
+            {Arbor.Historian.AuthorityAuditPuller, Arbor.Historian.AuthorityAuditPuller}
           ] do
         if Process.whereis(name) == nil, do: start!(name, spec)
       end
 
+      # Publication and subscribe accept only the application-supervised bus.
+      # A bus started under this fixture's supervisor is registered and healthy,
+      # then every subscribe returns :unauthorized.
+      assert :ok = Arbor.Signals.ensure_supervised_local_runtime!()
       assert Arbor.Signals.healthy?()
 
       assert :ok =
@@ -371,7 +372,10 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
             do: assert(:ok = Supervisor.terminate_child(supervisor, state.branch_id))
 
           if state[:target] do
-            refute is_pid(BranchSupervisor.whereis(state.target))
+            # terminate_child returns when the supervisor sees the exit. The
+            # ExecutorRegistry drops its entry only after it handles the same
+            # DOWN, so a lookup in this gap still returns the dead pid.
+            assert :ok = await_branch_gone!(state.target)
             assert :ok = Arbor.Agent.Registry.unregister(state.target)
           end
 
@@ -595,6 +599,26 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
       _ -> :ok
     catch
       _, _ -> :ok
+    end
+  end
+
+  defp await_branch_gone!(agent_id, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 1_000
+
+    case BranchSupervisor.whereis(agent_id) do
+      nil ->
+        :ok
+
+      pid when is_pid(pid) ->
+        if Process.alive?(pid) do
+          flunk("branch supervisor #{inspect(pid)} stayed alive after terminate_child")
+        else
+          assert System.monotonic_time(:millisecond) < deadline,
+                 "dead branch #{inspect(pid)} stayed registered after terminate_child"
+
+          Process.sleep(10)
+          await_branch_gone!(agent_id, deadline)
+        end
     end
   end
 

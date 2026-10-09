@@ -15,7 +15,6 @@ defmodule Arbor.Persistence.ConversationNoticeStoreTest do
 
   @moduletag :database
   @moduletag :isolated_repo
-  @moduletag :fast
 
   defmodule IsolatedRepo do
     use Ecto.Repo, otp_app: :arbor_persistence, adapter: Ecto.Adapters.SQLite3
@@ -558,7 +557,7 @@ defmodule Arbor.Persistence.ConversationNoticeStoreTest do
     assert {:ok, %{notice: %{ordinal: 2}}} =
              Persistence.append_conversation_notice(scope, value(scope, 2))
 
-    assert %{rows: [[5_000]]} = IsolatedRepo.query!("PRAGMA busy_timeout")
+    assert Arbor.Persistence.SQLiteBusyTimeout.get(IsolatedRepo) == 5_000
   end
 
   test "one admission safely acquires a promptly released writer before its first effect", %{
@@ -841,7 +840,7 @@ defmodule Arbor.Persistence.ConversationNoticeStoreTest do
       end)
 
     assert_receive :first_connection_ready
-    assert %{rows: [[5_000]]} = IsolatedRepo.query!("PRAGMA busy_timeout")
+    assert Arbor.Persistence.SQLiteBusyTimeout.get(IsolatedRepo) == 5_000
     send(ready.pid, :release_ready_connection)
     assert :ok = Task.await(ready)
   end

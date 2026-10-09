@@ -109,10 +109,11 @@ digraph DeploymentDecisionGate {
   ]
 
   prep_approve_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="approve_output_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_approve [
@@ -132,10 +133,11 @@ digraph DeploymentDecisionGate {
   ]
 
   prep_modify_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="modify_output_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_modify [
@@ -155,10 +157,11 @@ digraph DeploymentDecisionGate {
   ]
 
   prep_reject_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="reject_output_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_reject [

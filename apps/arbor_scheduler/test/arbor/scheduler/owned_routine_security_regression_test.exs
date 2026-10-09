@@ -215,14 +215,17 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
     selected = List.last(f.owner.caps)
 
     assert {:ok, alternative} =
-             Security.grant(principal: f.owner.identity.agent_id, resource: "arbor://fs/write/**")
+             Security.grant_fixture(
+               principal: f.owner.identity.agent_id,
+               resource: "arbor://fs/write/**"
+             )
 
-    on_exit(fn -> Security.revoke(alternative.id) end)
+    on_exit(fn -> Security.revoke_fixture(alternative.id) end)
     assert alternative.id != selected.id
     assert {:ok, held} = Security.list_capabilities(f.owner.identity.agent_id)
     assert Enum.any?(held, &(&1.id == selected.id))
     assert Enum.any?(held, &(&1.id == alternative.id))
-    assert :ok = Security.revoke(selected.id)
+    assert :ok = Security.revoke_fixture(selected.id)
     assert %{discard: 1, success: 0} = F.drain()
     assert Repo.get!(Oban.Job, job.id).state == "discarded"
     refute_received {:routine_effect, _, _, _}
@@ -235,7 +238,7 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
 
       case unquote(mutation) do
         :suspend ->
-          assert :ok = Security.suspend_identity(f.owner.identity.agent_id)
+          assert :ok = Security.suspend_identity_fixture(f.owner.identity.agent_id)
 
         :trust_ask ->
           selected = List.last(f.owner.caps)
@@ -284,7 +287,7 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
 
       case unquote(mutation) do
         :revoke ->
-          assert :ok = Security.revoke(List.last(f.owner.caps).id)
+          assert :ok = Security.revoke_fixture(List.last(f.owner.caps).id)
 
         :cancel ->
           assert :ok = Scheduler.cancel_owned_routine(job.id, F.proof!(f.owner, :cancel, job.id))
@@ -298,7 +301,7 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
                    )
 
         :suspend ->
-          assert :ok = Security.suspend_identity(f.owner.identity.agent_id)
+          assert :ok = Security.suspend_identity_fixture(f.owner.identity.agent_id)
       end
 
       send(actor, {:continue_routine, marker})

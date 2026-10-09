@@ -3,7 +3,7 @@ defmodule Arbor.Persistence.ConversationNoticeStore do
   import Ecto.Query
   alias Ecto.Adapter
   alias Ecto.Adapters.SQL
-  alias Arbor.Persistence.{Config, ConversationNoticePageCore}
+  alias Arbor.Persistence.{Config, ConversationNoticePageCore, SQLiteBusyTimeout}
   alias Arbor.Persistence.Schemas.{Engagement, ConversationNotice, ConversationNoticeHead}
 
   @value_keys [:notice_id, :recipient_subject_id, :kind, :text, :provenance]
@@ -403,14 +403,13 @@ defmodule Arbor.Persistence.ConversationNoticeStore do
     repo.get_dynamic_repo()
     |> Adapter.lookup_meta()
     |> SQL.checkout(query_options(repo, deadline), fn ->
-      %{rows: [[original]]} =
-        repo.query!("PRAGMA busy_timeout", [], control_options(repo, deadline))
+      original = SQLiteBusyTimeout.get(repo)
 
       try do
-        repo.query!("PRAGMA busy_timeout = 5", [], control_options(repo, deadline))
+        SQLiteBusyTimeout.set(repo, 5)
         bounded_transaction(repo, deadline, fun, mode: :immediate)
       after
-        repo.query("PRAGMA busy_timeout = #{original}", [], timeout: 25, queue: false)
+        SQLiteBusyTimeout.restore(repo, original)
       end
     end)
   end
@@ -436,7 +435,4 @@ defmodule Arbor.Persistence.ConversationNoticeStore do
         repo.rollback(:notice_unavailable)
     end
   end
-
-  defp control_options(repo, deadline),
-    do: Keyword.update!(query_options(repo, deadline), :timeout, &min(&1, 25))
 end

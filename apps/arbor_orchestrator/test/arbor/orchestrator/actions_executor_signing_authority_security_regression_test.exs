@@ -5,7 +5,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     defstruct [:payload]
   end
 
-  @moduletag :fast
+  @moduletag :isolated_repo
   @moduletag :security_regression
   @task_timeout 15_000
   @trace_timeout 2_000

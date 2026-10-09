@@ -13,8 +13,7 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
   @resource "arbor://action/reports/build_morning_digest"
 
   setup do
-    if Process.whereis(Arbor.Scheduler.RunLeaseSupervisor) == nil,
-      do: start_supervised!(Arbor.Scheduler.RunLeaseSupervisor)
+    :ok = ensure_ready_run_lease!()
 
     temporary = Path.join(System.tmp_dir!(), "arbor-digest-#{System.unique_integer([:positive])}")
 
@@ -180,6 +179,57 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
 
       refute File.exists?(report(fixture, "morning-digest"))
       assert File.ls!(Path.dirname(report(fixture, "morning-digest"))) == []
+    end
+  end
+
+  # The lease store answers routine checks only after its reconciler runs, and
+  # that reconciler is admitted only as a child of the scheduler runtime
+  # supervisor. An ExUnit-owned supervisor stays in recovery forever.
+  defp ensure_ready_run_lease! do
+    {:ok, _} = Application.ensure_all_started(:arbor_scheduler)
+
+    case Process.whereis(Arbor.Scheduler.RunLeaseSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        token =
+          case Application.fetch_env(:arbor_scheduler, :test_scheduler_mutation_token) do
+            {:ok, token} ->
+              token
+
+            :error ->
+              token = make_ref()
+              Application.put_env(:arbor_scheduler, :test_scheduler_mutation_token, token)
+              token
+          end
+
+        case Supervisor.start_child(
+               Arbor.Scheduler.Supervisor,
+               {Arbor.Scheduler.RunLeaseSupervisor, scheduler_mutation_token: token}
+             ) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "run lease supervisor failed to start: #{inspect(reason)}"
+        end
+    end
+
+    await_run_lease_ready!()
+  end
+
+  defp await_run_lease_ready!(attempts \\ 200) do
+    probe = "agent_" <> String.duplicate("0", 64)
+
+    case Arbor.Scheduler.RunLease.routine_requirement(probe) do
+      {:ok, required?} when is_boolean(required?) ->
+        :ok
+
+      {:error, :recovery_in_progress} when attempts > 0 ->
+        Process.sleep(10)
+        await_run_lease_ready!(attempts - 1)
+
+      other ->
+        raise "run lease did not leave recovery: #{inspect(other)}"
     end
   end
 

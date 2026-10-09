@@ -14,7 +14,8 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       name: "agent_nested_coding_validation",
       description: "Runs a nested coding validation command",
       schema: [
-        command: [type: :string, required: true]
+        command: [type: :string, required: true],
+        cwd: [type: :string, required: true]
       ]
 
     @impl true
@@ -22,7 +23,7 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       Arbor.Actions.authorize_and_execute(
         Map.fetch!(context, :agent_id),
         Arbor.Actions.Shell.Execute,
-        %{command: params.command, sandbox: :none},
+        %{command: params.command, sandbox: :none, cwd: params.cwd},
         context
       )
     end
@@ -32,6 +33,9 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     ensure_runtime_started()
     previous = security_config()
     configure_minimal_security()
+
+    previous_authorizer = Application.fetch_env(:arbor_shell, :agent_authorizer)
+    Application.put_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "action-cycle-r4")
     :ok = Arbor.Security.register_identity_fixture(identity)
@@ -48,6 +52,11 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
 
     on_exit(fn ->
       restore_security_config(previous)
+
+      case previous_authorizer do
+        {:ok, authorizer} -> Application.put_env(:arbor_shell, :agent_authorizer, authorizer)
+        :error -> Application.delete_env(:arbor_shell, :agent_authorizer)
+      end
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
         Arbor.Security.revoke_all_fixture(identity.agent_id)
@@ -73,9 +82,10 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
        %{identity: identity} do
     agent_id = identity.agent_id
     command = "echo intent-dispatch-authorized"
-    intent = shell_intent(command)
     resource = shell_resource(command)
     authorize_agent(agent_id, [resource])
+    cwd = admit_workdir!(agent_id, ["read"])
+    intent = shell_intent(command, cwd)
 
     assert {:ok, %Percept{outcome: :failure, error: :authenticated_principal_required}} =
              IntentDispatcher.dispatch(agent_id, intent)
@@ -131,9 +141,12 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     command = "echo nested-coding-validation-authorized"
     outer_resource = Arbor.Actions.canonical_uri_for(NestedCodingValidationAction, %{})
     authorize_agent(identity.agent_id, [outer_resource, shell_resource(command)])
+    cwd = admit_workdir!(identity.agent_id, ["read"])
 
     intent =
-      Intent.action(:"security_regression.agent_nested_coding_validation", %{command: command},
+      Intent.action(
+        :"security_regression.agent_nested_coding_validation",
+        %{command: command, cwd: cwd},
         capability: outer_resource
       )
 
@@ -146,15 +159,18 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
   end
 
   test "security regression: full ActionCycleServer maps shell execute and performs authorized side effect",
-       %{identity: identity, signer: signer, marker: marker} do
+       %{identity: identity, signer: signer, marker: _marker} do
     authorize_agent(identity.agent_id, ["arbor://shell/exec/touch"])
-    server = start_cycle_server(identity.agent_id, signer, marker)
+    cwd = admit_workdir!(identity.agent_id, ["read", "write"])
+    marker = Path.join(cwd, "cycle-side-effect")
+    File.rm(marker)
+    server = start_cycle_server(identity.agent_id, signer, marker, cwd)
 
     assert :ok =
              ActionCycleServer.enqueue_percept(server, %{type: :test, content: "run shell intent"})
 
     assert eventually(fn -> File.exists?(marker) end),
-           "the public ActionCycleServer cycle never executed its canonical shell/execute intent"
+           "the public ActionCycleServer cycle never executed its canonical shell/execute intent; stats=#{inspect(cycle_stats(server))}"
 
     assert eventually(fn -> ActionCycleServer.stats(server).cycle_count >= 1 end)
 
@@ -254,22 +270,27 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
              Arbor.Security.claim_signing_authority(bootstrap)
   end
 
-  defp start_cycle_server(agent_id, signer, marker) do
+  defp start_cycle_server(agent_id, signer, marker, cwd \\ nil) do
     name = {:via, Registry, {Arbor.Agent.ActionCycleRegistry, agent_id}}
     calls = :atomics.new(1, signed: false)
 
     llm_fn = fn _context ->
       case :atomics.add_get(calls, 1, 1) do
         1 ->
+          intent = %{
+            "capability" => "shell",
+            "op" => "execute",
+            "target" => "touch #{marker}",
+            "reason" => "public ActionCycleServer regression"
+          }
+
+          intent =
+            if is_binary(cwd), do: Map.put(intent, "params", %{"cwd" => cwd}), else: intent
+
           {:ok,
            %{
              "mental_actions" => [],
-             "intent" => %{
-               "capability" => "shell",
-               "op" => "execute",
-               "target" => "touch #{marker}",
-               "reason" => "public ActionCycleServer regression"
-             },
+             "intent" => intent,
              "wait" => false
            }}
 
@@ -307,10 +328,11 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     bootstrap
   end
 
-  defp shell_intent(command) do
-    Intent.action(:shell_execute, %{command: command, sandbox: :none},
-      capability: "arbor://shell"
-    )
+  defp shell_intent(command, cwd \\ nil) do
+    params = %{command: command, sandbox: :none}
+    params = if is_binary(cwd), do: Map.put(params, :cwd, cwd), else: params
+
+    Intent.action(:shell_execute, params, capability: "arbor://shell")
   end
 
   defp shell_resource(command) do
@@ -337,6 +359,33 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     }
   end
 
+  defp admit_workdir!(agent_id, operations) when is_list(operations) do
+    root =
+      Path.join(System.tmp_dir!(), "intent_dispatch_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
+
+    rules =
+      Enum.reduce(operations, profile.rules, fn operation, acc ->
+        Map.put(acc, "arbor://fs/#{operation}#{cwd}", :auto)
+      end)
+
+    :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
+
+    Enum.each(operations, fn operation ->
+      assert {:ok, _capability} =
+               Arbor.Security.grant_fixture(
+                 principal: agent_id,
+                 resource: "arbor://fs/#{operation}#{cwd}/**"
+               )
+    end)
+
+    on_exit(fn -> File.rm_rf(cwd) end)
+    cwd
+  end
+
   defp authorize_agent(agent_id, resources) do
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
     rules = Enum.reduce(resources, profile.rules, &Map.put(&2, &1, :auto))
@@ -346,6 +395,14 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       assert {:ok, _capability} =
                Arbor.Security.grant_fixture(principal: agent_id, resource: resource)
     end)
+  end
+
+  defp cycle_stats(server) do
+    ActionCycleServer.stats(server)
+  rescue
+    error -> {:stats_unavailable, Exception.message(error)}
+  catch
+    kind, reason -> {:stats_unavailable, {kind, reason}}
   end
 
   defp eventually(fun, attempts \\ 120)

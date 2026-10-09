@@ -299,6 +299,27 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     )
   end
 
+  @doc false
+  @spec lease_grant_admitted?(task_id(), String.t(), String.t(), keyword() | map()) ::
+          {:ok, String.t()} | {:error, :lease_grant_not_admitted}
+  def lease_grant_admitted?(task_id, reservation_token, principal_id, opts \\ []) do
+    GenServer.call(
+      store_name(opts),
+      {:lease_grant_admitted?, task_id, reservation_token, principal_id}
+    )
+  end
+
+  @doc false
+  @spec lease_revoke_admitted?(String.t(), keyword() | map()) ::
+          {:ok, String.t(), TaskControlLease.kind()} | {:error, :lease_revoke_not_admitted}
+  def lease_revoke_admitted?(capability_id, opts \\ [])
+
+  def lease_revoke_admitted?(capability_id, opts) when is_binary(capability_id) do
+    GenServer.call(store_name(opts), {:lease_revoke_admitted?, capability_id})
+  end
+
+  def lease_revoke_admitted?(_, _), do: {:error, :lease_revoke_not_admitted}
+
   @doc """
   Activate a reserved task with an optional closed task-control lease.
 
@@ -1053,6 +1074,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       # authority handoff. Live application-env changes cannot turn an arbitrary
       # runner into an authority claimant after this owner starts.
       coding_authority_executor: coding_authority_executor,
+      # Test crash-recovery stores are not the application child, so they cannot
+      # authorize a handoff themselves. When set, recovery still validates the
+      # lease here and asks the application TaskStore to authorize the runner.
+      delegate_coding_authority_handoff:
+        @test_build and Keyword.get(opts, :delegate_coding_authority_handoff) == true,
       # Trusted cleanup selectors fixed at store start (not per-dispatch).
       # Tests may override; never accepted via dispatch opts/descriptor.
       approval_cleanup_mfa: approval_cleanup_mfa,
@@ -1315,6 +1341,43 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     # Public readiness is the conjunction of recovery replay and fence-seed
     # readiness: dispatch admission requires both before it can proceed.
     {:reply, state.recovery_ready? == true and state.target_fence_ready? == true, state}
+  end
+
+  def handle_call({:lease_grant_admitted?, task_id, token, principal_id}, _from, state) do
+    result =
+      case Map.get(Map.get(state, :reservations, %{}), task_id) do
+        %{
+          token_hash: token_hash,
+          marker_written?: true,
+          control_principal_id: ^principal_id,
+          target_agent_id: target_agent_id,
+          owner_pid: owner_pid
+        }
+        when is_pid(owner_pid) ->
+          if Process.alive?(owner_pid) and TaskControlLease.token_match?(token_hash, token),
+            do: {:ok, target_agent_id},
+            else: {:error, :lease_grant_not_admitted}
+
+        _ ->
+          {:error, :lease_grant_not_admitted}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:lease_revoke_admitted?, capability_id}, _from, state) do
+    result =
+      Enum.find_value(Map.get(state, :lease_pending_retirement, %{}), fn {task_id, bucket} ->
+        case Map.get(Map.get(bucket, :members, %{}), capability_id) do
+          %{kind: kind} ->
+            if kind in TaskControlLease.kinds(), do: {:ok, task_id, kind}, else: nil
+
+          _ ->
+            nil
+        end
+      end)
+
+    {:reply, result || {:error, :lease_revoke_not_admitted}, state}
   end
 
   def handle_call({:reserve, target_agent_id, _opts}, {owner_pid, _}, state)
@@ -2309,7 +2372,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     else
       {:ok,
        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-         apply(runner, operation_callback(operation), [agent_id, task, runner_context])
+         apply(
+           runner,
+           operation_callback(operation),
+           runner_callback_args(operation, agent_id, task, runner_context)
+         )
        end)}
     end
   rescue
@@ -2333,22 +2400,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         receive do
           {:coding_authority_handoff_ready, ^store} ->
-            apply(runner, operation_callback(handoff_context.operation), [
-              agent_id,
-              task,
-              runner_context
-            ])
+            apply(
+              runner,
+              operation_callback(handoff_context.operation),
+              runner_callback_args(
+                handoff_context.operation,
+                agent_id,
+                task,
+                runner_context
+              )
+            )
         after
           5_000 -> {:error, :signing_authority_handoff_unavailable}
         end
       end)
 
-    case Arbor.Agent.ProfileAuthorityOwner.authorize_signing_authority_handoff(
-           agent_id,
-           purpose,
-           task_ref.pid,
-           handoff_context
-         ) do
+    case authorize_runner_handoff(state, agent_id, purpose, task_ref.pid, handoff_context) do
       :ok ->
         send(task_ref.pid, {:coding_authority_handoff_ready, store})
         {:ok, task_ref}
@@ -2362,12 +2429,55 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp operation_callback(:run), do: :run
   defp operation_callback(:recover), do: :recover_task
 
+  # `run/3` receives the dispatch task. `recover_task/2` must not: recovery
+  # authority is the durable context, never the original public task payload.
+  defp runner_callback_args(:recover, agent_id, _task, runner_context),
+    do: [agent_id, runner_context]
+
+  defp runner_callback_args(_operation, agent_id, task, runner_context),
+    do: [agent_id, task, runner_context]
+
   defp coding_authority_runner?(state, runner, :json_clean) do
     is_atom(state.coding_authority_executor) and runner == state.coding_authority_executor and
-      fixed_application_child?(self(), __MODULE__)
+      (fixed_application_child?(self(), __MODULE__) or
+         state.delegate_coding_authority_handoff == true)
   end
 
   defp coding_authority_runner?(_state, _runner, _context_mode), do: false
+
+  defp authorize_runner_handoff(state, agent_id, purpose, claimant, handoff_context) do
+    if fixed_application_child?(self(), __MODULE__) do
+      Arbor.Agent.ProfileAuthorityOwner.authorize_signing_authority_handoff(
+        agent_id,
+        purpose,
+        claimant,
+        handoff_context
+      )
+    else
+      delegate_runner_handoff(state, agent_id, purpose, claimant, handoff_context)
+    end
+  end
+
+  if @test_build do
+    defp delegate_runner_handoff(
+           %{delegate_coding_authority_handoff: true},
+           agent_id,
+           purpose,
+           claimant,
+           handoff_context
+         ) do
+      # The owner admits only the application TaskStore. This call runs there.
+      authorize_signing_authority_handoff_fixture(
+        agent_id,
+        purpose,
+        claimant,
+        handoff_context
+      )
+    end
+  end
+
+  defp delegate_runner_handoff(_state, _agent_id, _purpose, _claimant, _handoff_context),
+    do: {:error, :signing_authority_handoff_unauthorized}
 
   defp validate_coding_authority_lease(state, lease, context) when is_map(lease) do
     task_id = Map.get(context, "task_id") || Map.get(context, :task_id)
@@ -3835,7 +3945,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:lease_retire_begin, ^attempt_ref} ->
         results =
           Enum.map(member_ids, fn id ->
-            {id, normalize_revoke_outcome(revoke_one_id(id, security_module, revoke_fun))}
+            {id,
+             normalize_revoke_outcome(revoke_one_id(id, security_module, revoke_fun, store_pid))}
           end)
 
         send(store_pid, {:lease_retire_complete, attempt_ref, results})
@@ -3848,7 +3959,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  defp revoke_one_id(id, _security_module, revoke_fun)
+  defp revoke_one_id(id, _security_module, revoke_fun, _store_pid)
        when is_binary(id) and id != "" and is_function(revoke_fun, 1) do
     revoke_fun.(id)
   rescue
@@ -3858,7 +3969,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     _, _ -> {:error, :error}
   end
 
-  defp revoke_one_id(id, security_module, _revoke_fun) when is_binary(id) and id != "" do
+  defp revoke_one_id(id, Arbor.Security, _revoke_fun, store_pid)
+       when is_binary(id) and id != "" do
+    Arbor.Agent.Orchestration.LeaseGrantOwner.revoke(id, name: store_pid)
+  end
+
+  defp revoke_one_id(id, security_module, _revoke_fun, _store_pid)
+       when is_binary(id) and id != "" do
     if is_atom(security_module) and Code.ensure_loaded?(security_module) and
          function_exported?(security_module, :revoke, 1) do
       apply(security_module, :revoke, [id])
@@ -3872,7 +3989,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     _, _ -> {:error, :error}
   end
 
-  defp revoke_one_id(_id, _security_module, _revoke_fun), do: {:error, :invalid_id}
+  defp revoke_one_id(_id, _security_module, _revoke_fun, _store_pid),
+    do: {:error, :invalid_id}
 
   defp normalize_revoke_outcome(:ok), do: :ok
   defp normalize_revoke_outcome({:ok, _}), do: :ok
@@ -4685,7 +4803,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         worker_timer: nil,
         reply_to: reply_to,
         payload: payload,
-        expected_token_hash: Keyword.get(opts, :expected_token_hash)
+        expected_token_hash: Keyword.get(opts, :expected_token_hash),
+        control_principal_id: Keyword.get(opts, :control_principal_id)
       }
 
       state =
@@ -4958,7 +5077,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               {:ok, marker} ->
                 state =
                   begin_recovery_op(state, :marker_put, task_id, from, marker,
-                    expected_token_hash: reservation.token_hash
+                    expected_token_hash: reservation.token_hash,
+                    control_principal_id: Keyword.get(opts, :control_principal_id)
                   )
 
                 {:noreply, state}
@@ -5507,7 +5627,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp apply_recovery_result(
          state,
-         %{kind: :marker_put, task_id: task_id, expected_token_hash: expected},
+         %{
+           kind: :marker_put,
+           task_id: task_id,
+           expected_token_hash: expected,
+           control_principal_id: control_principal_id
+         },
          {:ok, _}
        )
        when is_binary(task_id) and is_binary(expected) do
@@ -5515,7 +5640,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     # completion must not stamp marker_written? on a replacement reservation.
     case Map.get(state.reservations, task_id) do
       %{token_hash: ^expected} = reservation ->
-        put_in(state.reservations[task_id], %{reservation | marker_written?: true})
+        put_in(
+          state.reservations[task_id],
+          reservation
+          |> Map.put(:marker_written?, true)
+          |> Map.put(:control_principal_id, control_principal_id)
+        )
 
       _ ->
         state

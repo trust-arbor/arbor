@@ -474,11 +474,17 @@ defmodule Arbor.Security.Escalation do
   end
 
   defp in_workspace?(path, workspace) when is_binary(path) and is_binary(workspace) do
-    expanded_path = Path.expand(path)
-    expanded_workspace = Path.expand(workspace)
+    case Arbor.Common.SafePath.resolve_within(path, workspace) do
+      {:ok, _resolved} ->
+        true
 
-    expanded_path == expanded_workspace or
-      String.starts_with?(expanded_path, expanded_workspace <> "/")
+      {:error, _} ->
+        expanded_path = Path.expand(path)
+        expanded_workspace = Path.expand(workspace)
+
+        expanded_path == expanded_workspace or
+          String.starts_with?(expanded_path, expanded_workspace <> "/")
+    end
   end
 
   defp in_workspace?(_path, _workspace), do: nil

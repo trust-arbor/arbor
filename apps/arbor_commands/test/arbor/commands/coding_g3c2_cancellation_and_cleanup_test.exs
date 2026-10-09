@@ -683,6 +683,11 @@ defmodule Arbor.Commands.CodingG3C2CancellationAndCleanupTest do
         "test_stage_timeout"
       ])
 
+    :ok = Arbor.Commands.Test.AgentAuthorityTopology.ensure_owned!()
+
+    :ok =
+      Arbor.Commands.Test.AgentAuthorityTopology.authorize_recovery!(agent, task_id, caller)
+
     {:ok, authority, security} = CodingRunRecovery.acquire_resume_authority(agent)
 
     {:ok, {run_auth, _opts}} =
@@ -893,6 +898,7 @@ defmodule Arbor.Commands.CodingG3C2CancellationAndCleanupTest do
          recovery_force_ready: false,
          task_control_recovery_facade: TaskControlRecoveryMemory,
          task_control_security_module: TrackingSecurity,
+         delegate_coding_authority_handoff: true,
          runner: CodingTaskExecutor},
         id: store_id
       )

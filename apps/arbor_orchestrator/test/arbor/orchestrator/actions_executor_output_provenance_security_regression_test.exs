@@ -22,12 +22,14 @@ defmodule Arbor.Orchestrator.ActionsExecutorOutputProvenanceSecurityRegressionTe
     end)
 
     for module <- [ProvenanceIngress, ProvenanceSink] do
-      case ActionRegistry.resolve(module.name()) do
+      registry_name = "test.#{module.name()}"
+
+      case ActionRegistry.resolve(registry_name) do
         {:ok, ^module} ->
           :ok
 
         {:error, :not_found} ->
-          :ok = ActionRegistry.register(module.name(), module)
+          :ok = ActionRegistry.register(registry_name, module)
 
         other ->
           flunk("provenance fixture name already belongs to another action: #{inspect(other)}")
@@ -108,7 +110,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorOutputProvenanceSecurityRegressionTe
   end
 
   test "security regression: failed or malformed provenance callbacks remain hostile" do
-    {:ok, binding} = ActionsExecutor.resolve_execution_binding(ProvenanceIngress.name())
+    {:ok, binding} = ActionsExecutor.resolve_execution_binding("test.#{ProvenanceIngress.name()}")
 
     for failure <- ["raise", "exit", "throw", "malformed"] do
       assert ActionsExecutor.output_taint_bound(binding, %{"failure" => failure}) == :hostile
@@ -116,7 +118,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorOutputProvenanceSecurityRegressionTe
   end
 
   test "a verified action with no optional provenance callback still returns nil" do
-    {:ok, binding} = ActionsExecutor.resolve_execution_binding(ProvenanceSink.name())
+    {:ok, binding} = ActionsExecutor.resolve_execution_binding("test.#{ProvenanceSink.name()}")
     assert ActionsExecutor.output_taint_bound(binding, %{}) == nil
   end
 
@@ -124,9 +126,9 @@ defmodule Arbor.Orchestrator.ActionsExecutorOutputProvenanceSecurityRegressionTe
     dot = """
     digraph Provenance {
       start [shape=Mdiamond]
-      ingress [type=exec, target=action, action=bound_provenance_ingress, output_prefix="incoming"]
+      ingress [type=exec, target=action, action="test.bound_provenance_ingress", output_prefix="incoming"]
       copy [type=transform, transform=identity, source_key="incoming.payload", output_key="payload"]
-      sink [type=exec, target=action, action=bound_provenance_sink, context_keys="payload"]
+      sink [type=exec, target=action, action="test.bound_provenance_sink", context_keys="payload"]
       done [shape=Msquare]
       start -> ingress -> copy -> sink -> done
     }

@@ -4,7 +4,6 @@ defmodule Arbor.Persistence.ConversationWindowTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
   @moduletag :database
-  @moduletag :fast
   @own "eng_0123456789abcdef0123456789abcdef"
   @other "eng_abcdef0123456789abcdef0123456789"
 

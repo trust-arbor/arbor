@@ -231,6 +231,10 @@ defmodule Arbor.Actions.SessionLlm do
           section -> prepend_to_last_user(timestamped, section)
         end
 
+      # `user_prompt` is the model-facing turn: Arbor context, then the
+      # current user message. Provenance tests require it to equal the last
+      # user message content, so the raw question stays after the boundary
+      # rather than in a separate field.
       last_user = Enum.find(Enum.reverse(final_messages), &(&1["role"] == "user")) || %{}
       {:ok, %{user_prompt: last_user["content"] || "", messages: final_messages}}
     end

@@ -34,6 +34,11 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
     {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
+      start_supervised!({Arbor.Trust.ConfirmationTracker, test_isolated_owner: true})
+    end
+
     :ok
   end
 

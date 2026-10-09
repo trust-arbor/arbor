@@ -364,7 +364,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
          :ok <- verify_parent_owner(real_stat.uid, process_uid),
          parent_binding = Map.put(parent_binding, :process_uid, process_uid),
          :ok <- revalidate_parent(parent_binding),
-         {:ok, leaf} <- SafePath.safe_join(real_parent, basename) do
+         # lexical_child keeps a final symlink visible. safe_join resolves it,
+         # so a linked root looks like its target and can pass or chmod that target.
+         {:ok, leaf} <- SafePath.lexical_child(real_parent, basename) do
       {:ok, parent_binding, leaf}
     else
       {:ok, _stat} -> {:error, :parent_not_a_directory}

@@ -6,7 +6,8 @@ defmodule Arbor.Persistence.SessionTranscriptTest do
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
   @moduletag :database
-  @moduletag :fast
+  # Not :fast. `mix test --only fast` includes a :fast test even when
+  # :isolated_repo is excluded, and this file has to start Repo itself.
   @moduletag :isolated_repo
   @engagement "eng_0123456789abcdef0123456789abcdef"
   @foreign "eng_abcdef0123456789abcdef0123456789"

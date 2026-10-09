@@ -63,7 +63,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
              text: "",
              finish_reason: :tool_calls,
              content_parts: [
-               ContentPart.tool_call("c1", "tool_help", %{"probe" => "usage"})
+               ContentPart.tool_call("c1", "test.usage_tool_help", %{"probe" => "usage"})
              ],
              raw: %{}
            }}
@@ -246,10 +246,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
   test "tool-loop path derives trusted provider_usage_context on Client.complete opts" do
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
 
-    case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
+    case ActionRegistry.register("test.usage_tool_help", Arbor.Actions.Tool.Help) do
       :ok -> :ok
       {:error, :already_registered} -> :ok
-      {:error, :core_locked} -> :ok
     end
 
     node =
@@ -260,7 +259,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
           "simulate" => "false",
           "prompt" => "Call help",
           "use_tools" => "true",
-          "tools" => "tool_help",
+          "tools" => "test.usage_tool_help",
           "max_turns" => "2",
           "llm_provider" => CapturingAdapter.provider(),
           "llm_model" => "test"

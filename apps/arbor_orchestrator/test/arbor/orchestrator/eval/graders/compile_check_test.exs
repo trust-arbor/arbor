@@ -16,7 +16,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CompileCheckTest do
       result = CompileCheck.grade(code, nil)
       assert result.score == 1.0
       assert result.passed == true
-      assert result.detail == "compiles clean"
+      assert result.detail == "syntax parses cleanly; execution not performed"
     end
 
     test "scores 0.0 for syntax errors" do
@@ -25,7 +25,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CompileCheckTest do
       result = CompileCheck.grade(code, nil)
       assert result.score == 0.0
       assert result.passed == false
-      assert result.detail =~ "compilation failed"
+      assert result.detail =~ "syntax parsing failed"
     end
 
     test "scores 1.0 when code compiles with warnings (e.g., @impl without behaviour)" do

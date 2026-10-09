@@ -1832,7 +1832,11 @@ defmodule Arbor.Actions do
       |> maybe_put_auth_scope(:task_id, context_value(clean_context, :task_id))
       |> maybe_put_auth_scope(:session_id, context_value(clean_context, :session_id))
       |> maybe_put_auth_scope(:argument_digest, approval_argument_digest)
-      |> Keyword.put(:approval_action, :execute)
+      # Receipts are minted for the atom `:execute`. The approval prompt's
+      # operation name is a separate fact; putting the receipt verb in
+      # `:approval_action` overwrote `file.write` with `:execute`.
+      |> Keyword.put(:receipt_action, :execute)
+      |> Keyword.put(:approval_action, action_module_to_name(action_module))
       |> maybe_put_conversation_source()
       |> maybe_put_approved_invocation(clean_context)
       |> Keyword.put(
@@ -3605,11 +3609,19 @@ defmodule Arbor.Actions do
 
   defp approval_in_workspace?(:file_path, path, workspace)
        when is_binary(path) and is_binary(workspace) do
-    expanded_path = Path.expand(path)
-    expanded_workspace = Path.expand(workspace)
+    case SafePath.resolve_within(path, workspace) do
+      # macOS resolves `/var` to `/private/var`. A lexical prefix check then
+      # reports a contained file as outside the workspace.
+      {:ok, _resolved} ->
+        true
 
-    expanded_path == expanded_workspace or
-      String.starts_with?(expanded_path, expanded_workspace <> "/")
+      {:error, _} ->
+        expanded_path = Path.expand(path)
+        expanded_workspace = Path.expand(workspace)
+
+        expanded_path == expanded_workspace or
+          String.starts_with?(expanded_path, expanded_workspace <> "/")
+    end
   end
 
   defp approval_in_workspace?(_target_type, _target, _workspace), do: nil

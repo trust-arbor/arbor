@@ -18,7 +18,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorCallOutcomeSecurityRegressionTest do
   alias Arbor.Trust.Store, as: TrustStore
 
   @resource "arbor://action/test/executor-call-outcome-probe"
-  @action_name "executor_call_outcome_probe"
+  # Core lock requires a plugin namespace. A bare name is rejected.
+  @action_name "test.executor_call_outcome_probe"
 
   defmodule ProbeAction do
     use Jido.Action,

@@ -6,6 +6,21 @@ defmodule Arbor.Actions.ShellTest do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SignedRequest
 
+  defp issued_shell_receipt(agent_id, resource_uri, arguments, request_id) do
+    {:ok, digest} = Arbor.Security.approval_argument_digest(arguments)
+
+    {:ok, receipt} =
+      Arbor.Security.issue_approval_receipt_fixture(
+        agent_id,
+        resource_uri,
+        :execute,
+        digest,
+        request_id
+      )
+
+    receipt
+  end
+
   defp run_execute(params, context) do
     agent_id = Map.get(context, :agent_id) || Map.get(context, "agent_id")
     private_key = Map.fetch!(context, :test_private_key)
@@ -199,7 +214,7 @@ defmodule Arbor.Actions.ShellTest do
     test "context can override options", %{agent_context: agent_context} do
       context = Map.put(agent_context, :cwd, agent_context.test_cwd)
       assert {:ok, result} = run_execute(%{command: "pwd"}, context)
-      assert String.contains?(result.stdout, "tmp")
+      assert String.trim(result.stdout) == agent_context.test_cwd
     end
 
     test "schema declares max_output_bytes and forwards a tight ceiling", %{
@@ -434,17 +449,51 @@ defmodule Arbor.Actions.ShellTest do
       agent_id: agent_id,
       resource_uri: resource_uri
     } do
-      assert {:error, :unauthorized} =
-               Shell.authorize_command(agent_id, "grep needle README.md")
+      command = "grep needle README.md"
+
+      assert {:error, :unauthorized} = Shell.authorize_command(agent_id, command)
 
       assert {:ok, :authorized} =
-               Shell.authorize_command(agent_id, "grep needle README.md",
-                 approved_invocation: %{
-                   request_id: "irq_validation",
-                   principal_id: agent_id,
-                   resource_uri: resource_uri,
-                   decision: :approved
-                 }
+               Shell.authorize_command(agent_id, command,
+                 approved_invocation:
+                   issued_shell_receipt(
+                     agent_id,
+                     resource_uri,
+                     %{command: command},
+                     "irq_validation"
+                   )
+               )
+    end
+
+    test "security regression: an approved shell digest cannot authorize a different command", %{
+      agent_id: agent_id,
+      resource_uri: resource_uri
+    } do
+      approved_command = "grep needle README.md"
+      different_command = "grep secret README.md"
+      approved_params = %{command: approved_command}
+      {:ok, approved_digest} = Arbor.Security.approval_argument_digest(approved_params)
+
+      receipt =
+        issued_shell_receipt(
+          agent_id,
+          resource_uri,
+          approved_params,
+          "irq_shell_command_binding"
+        )
+
+      assert {:error, :unauthorized} =
+               Shell.authorize_command(agent_id, different_command,
+                 approved_invocation: receipt,
+                 params: approved_params,
+                 argument_digest: approved_digest
+               )
+
+      assert {:ok, :authorized} =
+               Shell.authorize_command(agent_id, approved_command,
+                 approved_invocation: receipt,
+                 params: approved_params,
+                 argument_digest: approved_digest
                )
     end
 
@@ -483,6 +532,7 @@ defmodule Arbor.Actions.ShellTest do
 
       {:ok, _} = Arbor.Trust.set_rule(agent_id, "arbor://fs/read#{cwd}", :auto)
       command = "echo shell-approval-ok"
+      approved_params = %{command: command, sandbox: :none, cwd: cwd}
 
       # No marker → gated: either pending_approval (escalated IRQ) or unauthorized.
       # Must NOT auto-run, and must NOT return the old misleading "try again and
@@ -507,15 +557,16 @@ defmodule Arbor.Actions.ShellTest do
       # With the exact approved-invocation marker, Execute must run without a
       # second Trust/Security re-auth that would re-ask.
       assert {:ok, result} =
-               run_execute(%{command: command, sandbox: :none}, %{
+               run_execute(approved_params, %{
                  agent_id: agent_id,
                  test_private_key: private_key,
-                 approved_invocation: %{
-                   request_id: "irq_shell_exec_regression",
-                   principal_id: agent_id,
-                   resource_uri: echo_uri,
-                   decision: :approved
-                 }
+                 approved_invocation:
+                   issued_shell_receipt(
+                     agent_id,
+                     echo_uri,
+                     approved_params,
+                     "irq_shell_exec_regression"
+                   )
                })
 
       assert result.exit_code == 0

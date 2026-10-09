@@ -40,6 +40,19 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
       if Process.whereis(name) == nil, do: start_supervised!(child)
     end
 
+    # Agent's own test helper starts this owner. Dashboard and Gateway leave
+    # the agent supervisor empty, and store_profile fails closed without it.
+    supervisor = Process.whereis(Arbor.Agent.AppSupervisor)
+    assert is_pid(supervisor)
+
+    if Process.whereis(Arbor.Agent.ProfileAuthorityOwner) == nil do
+      case Supervisor.start_child(supervisor, Arbor.Agent.ProfileAuthorityOwner) do
+        {:ok, pid} when is_pid(pid) -> :ok
+        {:error, {:already_started, pid}} when is_pid(pid) -> :ok
+        other -> flunk("profile authority owner did not start: #{inspect(other)}")
+      end
+    end
+
     root =
       Path.join(
         System.tmp_dir!(),
@@ -80,7 +93,7 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
   end
 
   def setup!(root) do
-    ctx = Humans.setup!()
+    ctx = Humans.setup!(store_signing_key: true)
 
     for {app, key, value} <- [
           {:arbor_security, :uri_registry_enforcement, true},
@@ -228,8 +241,10 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
     session = :trace.session_create(:management_session_effects, self(), [])
 
     try do
-      for operation <- [:stop, :destroy],
-          do: assert(:trace.function(session, {Lifecycle, operation, 1}, true, [:local]) > 0)
+      # stop/1 is the running effect. destroy/1 is the fail-closed stub;
+      # the admitted effect is destroy/2.
+      for {operation, arity} <- [{:stop, 1}, {:destroy, 1}, {:destroy, 2}],
+          do: assert(:trace.function(session, {Lifecycle, operation, arity}, true, [:local]) > 0)
 
       assert :trace.process(session, pid, true, [:call]) == 1
       result = fun.()
@@ -242,7 +257,7 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
 
   defp drain(pid, barrier, effects) do
     receive do
-      {:trace, ^pid, :call, {Lifecycle, op, [target]}} ->
+      {:trace, ^pid, :call, {Lifecycle, op, [target | _]}} when is_binary(target) ->
         drain(pid, barrier, [{op, target} | effects])
 
       {:trace_delivered, ^pid, ^barrier} ->

@@ -922,7 +922,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     store =
       start_configured_steering_store(supervisor,
-        steer_confirmation_delay_ms: 20
+        steer_confirmation_delay_ms: 200
       )
 
     assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
@@ -943,14 +943,19 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert second["delivery_mode"] == nil
     assert steer_call_count_for(second["control_id"]) == 0
 
-    assert_eventually(fn ->
-      first_updated = get_control(store, task_id, first["control_id"])
-      assert first_updated["delivery_mode"] == "same_session_follow_up"
-      assert first_updated["status"] == "queued"
-      assert first_updated["control_id"] == first["control_id"]
-      assert first_updated["message"] == "implement later"
-      assert first_updated["target_stage"] == "implement"
-    end)
+    # The queued follow-up exists only until the next confirmation. A short
+    # delay lets both timers sit in the mailbox and collapse that state.
+    assert_eventually(
+      fn ->
+        first_updated = get_control(store, task_id, first["control_id"])
+        assert first_updated["delivery_mode"] == "same_session_follow_up"
+        assert first_updated["status"] == "queued"
+        assert first_updated["control_id"] == first["control_id"]
+        assert first_updated["message"] == "implement later"
+        assert first_updated["target_stage"] == "implement"
+      end,
+      80
+    )
 
     assert_eventually(fn ->
       assert steer_call_count_for(second["control_id"]) >= 1
@@ -958,12 +963,15 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert second_updated["delivery_mode"] == "same_session_follow_up"
     end)
 
-    assert_eventually(fn ->
-      first_updated = get_control(store, task_id, first["control_id"])
-      second_updated = get_control(store, task_id, second["control_id"])
-      assert first_updated["status"] == "delivered"
-      assert second_updated["status"] == "delivered"
-    end)
+    assert_eventually(
+      fn ->
+        first_updated = get_control(store, task_id, first["control_id"])
+        second_updated = get_control(store, task_id, second["control_id"])
+        assert first_updated["status"] == "delivered"
+        assert second_updated["status"] == "delivered"
+      end,
+      40
+    )
   end
 
   test "same_session_follow_up queued acceptance is once with same-id confirmation", %{
@@ -5295,13 +5303,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   end
 
   defp ensure_signals_started do
-    if Process.whereis(Arbor.Signals.Store) == nil do
-      start_supervised!({Arbor.Signals.Store, []})
-    end
-
-    if Process.whereis(Arbor.Signals.Bus) == nil do
-      start_supervised!({Arbor.Signals.Bus, []})
-    end
+    Arbor.Signals.ensure_supervised_local_runtime!()
   end
 
   defp start_configured_steering_store(supervisor, opts \\ []) do

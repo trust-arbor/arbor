@@ -82,7 +82,14 @@ defmodule Arbor.Eval.Graders.CompileCheck do
   end
 
   defp try_parse(code) do
-    case Code.string_to_quoted(code, existing_atoms_only: true) do
+    # existing_atoms_only refuses novel module names, so every realistic eval
+    # sample scored 0. The encoder checks syntax without interning atoms and
+    # without compiling. The quoted form is intentionally not executable.
+    case Code.string_to_quoted(code,
+           existing_atoms_only: true,
+           static_atoms_encoder: &static_atoms_encoder/2,
+           emit_warnings: false
+         ) do
       {:ok, _quoted} -> :ok
       {:error, {_line, error, token}} -> {:error, Exception.format_banner(:error, error, token)}
     end
@@ -90,6 +97,14 @@ defmodule Arbor.Eval.Graders.CompileCheck do
     e -> {:error, Exception.message(e)}
   catch
     kind, reason -> {:error, "#{kind}: #{inspect(reason)}"}
+  end
+
+  defp static_atoms_encoder(atom_name, _meta) when is_binary(atom_name) do
+    if atom_name == "" or byte_size(atom_name) > 256 or not String.valid?(atom_name) do
+      {:error, "invalid atom"}
+    else
+      {:ok, {:__syntax_atom__, atom_name}}
+    end
   end
 
   defp try_with_boilerplate(code, boilerplate) do

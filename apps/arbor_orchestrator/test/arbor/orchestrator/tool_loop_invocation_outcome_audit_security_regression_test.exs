@@ -17,7 +17,8 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
   alias Arbor.Trust.Store, as: TrustStore
 
   @resource "arbor://action/test/tool-audit-outcome-probe"
-  @action_name "tool_audit_outcome_probe"
+  # Core lock requires a plugin namespace. A bare name is rejected.
+  @action_name "test.tool_audit_outcome_probe"
   @script_key {__MODULE__, :behaviour}
 
   defmodule ProbeAction do
@@ -62,7 +63,7 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
            finish_reason: :tool_calls,
            raw: %{},
            content_parts: [
-             ContentPart.tool_call("probe_call", "tool_audit_outcome_probe", %{
+             ContentPart.tool_call("probe_call", "test.tool_audit_outcome_probe", %{
                "behaviour" => :persistent_term.get(@script_key)
              })
            ]

@@ -33,6 +33,9 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
 
     test "returns [] for an agent with no granted capabilities", %{agent_id: agent_id} do
+      # Exposure follows the enforcer. A neighbor that left it on would mint
+      # the default profile and this agent would look fully tooled.
+      set_policy_enforcer_enabled(false)
       assert Arbor.Actions.tool_modules_for_agent(agent_id) == []
     end
 

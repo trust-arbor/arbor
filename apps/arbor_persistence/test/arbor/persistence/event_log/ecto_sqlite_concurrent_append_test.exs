@@ -320,7 +320,7 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
   test "nonzero busy_timeout cannot overrun the append deadline or commit later" do
     parent = self()
 
-    assert {:ok, %{rows: [[500]]}} = SQLitePoolRepo.query("PRAGMA busy_timeout")
+    assert Arbor.Persistence.SQLiteBusyTimeout.get(SQLitePoolRepo) == 500
 
     locker =
       Task.async(fn ->

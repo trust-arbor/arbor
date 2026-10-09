@@ -9,6 +9,9 @@ defmodule Arbor.Actions.Coding.BranchAuditTest do
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
+  # Two sandboxed audits of the fixture measured 72s on 2026-10-08.
+  # The default 60s cap expires while a git command is still running.
+  @moduletag timeout: 180_000
 
   test "SECURITY REGRESSION: forged cached success is live-revalidated before retirement", %{
     tmp_dir: tmp_dir

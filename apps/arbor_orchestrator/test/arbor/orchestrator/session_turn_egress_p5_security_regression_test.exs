@@ -28,6 +28,10 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   alias Arbor.Orchestrator.Session.TurnEgress
   alias Arbor.Security
 
+  @session_credential_anchor {Arbor.Orchestrator.Session, :credentials}
+  @session_credential_schema :session_credentials_v1
+  @actor_authority_key {__MODULE__, :actor_authority}
+
   @external_tier :external_provider
   @local_tier :on_host
 
@@ -189,7 +193,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     Application.put_env(
       :arbor_security,
       :session_token_secret,
-      "vp05d2a1p5-test-secret-#{System.unique_integer([:positive])}"
+      test_session_secret("vp05d2a1p5-test-secret-")
     )
 
     Application.put_env(:arbor_orchestrator, :_p5_test_pid, self())
@@ -222,6 +226,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     resource = "arbor://chat/agent/#{agent.agent_id}"
     grant!(human_id, resource)
     put_orchestrator_cap!(agent.agent_id)
+    Process.put(@actor_authority_key, agent.authority)
 
     %{
       agent_id: agent.agent_id,
@@ -235,6 +240,17 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   defp restore_sec(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_sec(key, value), do: Application.put_env(:arbor_security, key, value)
 
+  # unique_integer stays small for a whole suite, so the old prefix plus that
+  # suffix was under the 32-byte session-secret minimum.
+  defp test_session_secret(prefix) do
+    suffix =
+      System.unique_integer([:positive])
+      |> Integer.to_string()
+      |> String.pad_leading(16, "0")
+
+    prefix <> suffix
+  end
+
   # Canonical bootstrap: it freezes the authority root and starts the whole
   # topology in the required order, instead of a hand-copied subset that can
   # drift from it. Idempotent, so it also restores children a test stopped.
@@ -246,16 +262,72 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert {:ok, identity} = Identity.generate(name: "VP05D2A1P5 agent")
     assert :ok = Security.register_identity_fixture(Identity.public_only(identity))
 
+    assert {:ok, mutation_cap} =
+             Security.grant_fixture(
+               principal: identity.agent_id,
+               resource: "arbor://security/grant/#{identity.agent_id}"
+             )
+
+    # Disclosure revocation attests against arbor://security/revoke/<principal>.
+    # The grant URI above authorizes issue only.
+    assert {:ok, revoke_cap} =
+             Security.grant_fixture(
+               principal: identity.agent_id,
+               resource: "arbor://security/revoke/#{identity.agent_id}"
+             )
+
+    authority = open_session_actor!(identity)
+
     on_exit(fn ->
+      _ = Security.close_signing_authority(authority)
+      _ = Arbor.Common.close_process_private_state(@session_credential_anchor)
+      _ = Security.revoke_fixture(mutation_cap.id)
+      _ = Security.revoke_fixture(revoke_cap.id)
       _ = Security.deregister_identity_fixture(identity.agent_id)
     end)
 
     %{
       agent_id: identity.agent_id,
+      authority: authority,
       signer: fn resource ->
         SignedRequest.sign(resource, identity.agent_id, identity.private_key)
       end
     }
+  end
+
+  # Disclosure grants and Session.handle_call/3 both require the actor that
+  # init/1 would have sealed. These tests build Session structs directly.
+  defp open_session_actor!(identity) do
+    assert {:ok, proof} =
+             Security.build_signing_authority_acquisition_proof(
+               identity.agent_id,
+               identity.private_key,
+               purpose: :session
+             )
+
+    assert {:ok, authority} =
+             Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    :ok = Arbor.Common.close_process_private_state(@session_credential_anchor)
+
+    :ok =
+      Arbor.Common.open_process_private_state(
+        @session_credential_anchor,
+        @session_credential_schema,
+        %{signing_authority: authority, signer: nil, bootstrap: nil},
+        fn value ->
+          match?(
+            %{
+              signing_authority: %Arbor.Contracts.Security.SigningAuthority{},
+              signer: nil,
+              bootstrap: nil
+            },
+            value
+          ) and map_size(value) == 3
+        end
+      )
+
+    authority
   end
 
   defp register_active_human! do
@@ -462,6 +534,15 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   end
 
   defp issue_disclosure!(state, auth, route, tier \\ @external_tier) do
+    state =
+      case Map.get(state, :signing_authority) do
+        %Arbor.Contracts.Security.SigningAuthority{} ->
+          state
+
+        _ ->
+          Map.put(state, :signing_authority, Process.get(@actor_authority_key))
+      end
+
     # Base has arity-3 issue helper; candidate has arity-4 with frozen tier.
     assert Code.ensure_loaded?(TurnEgress)
 
@@ -699,7 +780,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert bound.canonical_owner_id == authority.canonical_owner_id
     assert bound.authenticated_principal_id == authority.authenticated_principal_id
     assert bound.turn_id == authority.turn_id
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: authenticated external issues disclosure and admits exact route",
@@ -731,7 +812,9 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     TurnEgress.deactivate_fence(fence)
     assert {:error, _} = authorizer.(route)
 
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    assert :ok =
+             Security.revoke(cap_id, actor_authority: Process.get(@actor_authority_key))
+
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
     authorizer2 =
@@ -814,7 +897,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert_received {:wave, 1, "anthropic", "claude-test-p5"}
     assert_received {:wave, 2, "anthropic", "claude-test-p5"}
     assert {:error, _} = authorizer.(%{route | model: "mutated"})
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: ProviderRouter primary admits fallback denied",
@@ -860,7 +943,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert outcome.status in [:success, :partial_success, :fail]
     assert :allow = authorizer.(route)
     assert {:error, _} = authorizer.(fallback)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: initial taint labels final user keys untrusted" do
@@ -1033,7 +1116,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
                model: "uncatalogued-custom-model"
              })
 
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: local provider uses ordinary trust semantics",
@@ -1184,7 +1267,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
     refute after_err.turn_in_flight
     refute TurnEgress.fence_active?(fence)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 lifecycle: user cancel kill-before-revoke and before finalize/reply",
@@ -1252,7 +1335,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     # No wave after fence deactivation / kill / revoke.
     Process.sleep(30)
     refute_received {:late_wave, _}
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 lifecycle: timeout kill-before-revoke and before finalize/reply",
@@ -1290,7 +1373,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute after_to.turn_in_flight
     refute TurnEgress.fence_active?(fence)
     refute Process.alive?(task_pid)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 lifecycle: task DOWN crash cleanup revokes",
@@ -1326,7 +1409,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
     refute after_down.turn_in_flight
     refute TurnEgress.fence_active?(fence)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 lifecycle: auth caller DOWN kills task before revoke",
@@ -1525,7 +1608,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert :ok = Session.terminate(:shutdown, state)
     refute TurnEgress.fence_active?(fence)
     refute Process.alive?(task_pid)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 lifecycle: preparation refusal does not start engine",
@@ -1649,7 +1732,8 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert {:error, {:egress_blocked, :external_provider, :disclosure_rejected}} =
              wrong_route_authz.(wrong_route)
 
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    assert :ok =
+             Security.revoke(cap_id, actor_authority: Process.get(@actor_authority_key))
 
     revoked =
       build_authz!(
@@ -1756,7 +1840,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert {:error, {:egress_blocked, :external_provider, :disclosure_required}} =
              no_cap.(route)
 
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: stale turn_token cannot finalize newer auth turn",
@@ -1823,7 +1907,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute after_ok.turn_in_flight
     assert Map.get(after_ok, :turn_token) == nil
     refute TurnEgress.fence_active?(fence)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: legacy 3-tuple cannot complete tokenless in-flight turn",
@@ -1875,7 +1959,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute_receive {^reply_ref, _}, 50
 
     TurnEgress.deactivate_fence(fence)
-    TurnEgress.safe_revoke_disclosure(cap_id)
+    TurnEgress.safe_revoke_disclosure(cap_id, Process.get(@actor_authority_key))
   end
 
   test "VOICE-17 security regression: task deactivates fence before turn_result is observed",

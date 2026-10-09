@@ -1254,15 +1254,23 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     Process.exit(registry_pid, :kill)
     assert_receive {:DOWN, ^registry_ref, :process, ^registry_pid, :killed}, 5_000
 
-    assert_eventually(fn ->
-      not Process.alive?(resource_owner) and
-        not File.exists?(resource.root_path) and
-        not File.exists?(resource.candidate_path) and
-        not File.exists?(snapshot.base_worktree_path) and
-        not File.exists?(dependency_root) and
-        Git.worktree_registration(repo, resource.candidate_path) == {:ok, nil} and
-        Git.worktree_registration(repo, snapshot.base_worktree_path) == {:ok, nil}
-    end)
+    # `and` evaluated both Git.worktree_registration calls on every poll. Each
+    # call is a contained-git execute (~100ms per command, several commands),
+    # so the poll contended with the owner's own cleanup git. Wait on the cheap
+    # facts first. 1_200 * 25ms covers the owner's 20s cleanup budget.
+    assert_eventually(
+      fn ->
+        not Process.alive?(resource_owner) &&
+          not File.exists?(resource.root_path) &&
+          not File.exists?(resource.candidate_path) &&
+          not File.exists?(snapshot.base_worktree_path) &&
+          not File.exists?(dependency_root)
+      end,
+      1_200
+    )
+
+    assert Git.worktree_registration(repo, resource.candidate_path) == {:ok, nil}
+    assert Git.worktree_registration(repo, snapshot.base_worktree_path) == {:ok, nil}
 
     assert File.dir?(lease.worktree_path)
   end

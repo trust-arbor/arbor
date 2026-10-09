@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Agent.Orchestration.{TaskControlLease, TaskStore}
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.{Plan, VerificationReport, WorkPacket}
   alias Arbor.Contracts.Security.Identity
@@ -175,6 +176,10 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
     archive_reviewed_plan!(plan, task_id)
     plan_path = Path.join(root, "reviewed-plan.json")
     File.write!(plan_path, Jason.encode!(plan))
+
+    # Operator verification admits a handoff only for a task the application
+    # TaskStore already dispatched to the coding executor.
+    admit_operator_task!(identity.agent_id, task_id)
 
     args = [
       "--verify",
@@ -454,10 +459,48 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
     end
   end
 
+  defp admit_operator_task!(agent_id, task_id) do
+    assert wait_for_store_ready()
+
+    now = DateTime.utc_now()
+
+    for kind <- TaskControlLease.grant_order() do
+      {:ok, spec} = TaskControlLease.grant_spec(kind, agent_id, task_id, now)
+
+      assert {:ok, _capability} = Security.grant_fixture(spec)
+    end
+
+    assert {:ok, capabilities} = Security.list_capabilities(agent_id, task_id: task_id)
+
+    assert {:ok, lease} = TaskControlLease.from_listed_capabilities(task_id, capabilities)
+    assert is_map(lease)
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               agent_id,
+               %{"kind" => "coding_change"},
+               task_id: task_id,
+               caller_id: agent_id,
+               task_control_lease: lease
+             )
+  end
+
+  defp wait_for_store_ready do
+    Enum.reduce_while(1..50, false, fn _attempt, _ready ->
+      if TaskStore.recovery_ready?() do
+        {:halt, true}
+      else
+        Process.sleep(20)
+        {:cont, false}
+      end
+    end)
+  end
+
   defp ensure_runtime_stacks! do
     {:ok, _started} = Application.ensure_all_started(:arbor_security)
     {:ok, _started} = Application.ensure_all_started(:arbor_trust)
     {:ok, _started} = Application.ensure_all_started(:arbor_actions)
+    :ok = Arbor.Commands.Test.AgentAuthorityTopology.ensure_owned!()
 
     :ok = Arbor.Security.TestBootstrap.start!()
 

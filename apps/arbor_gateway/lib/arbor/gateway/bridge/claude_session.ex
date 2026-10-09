@@ -244,30 +244,25 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   end
 
   defp do_authorize(agent_id, "Read", %{"file_path" => path} = tool_input, _cwd) do
-    resource_uri = "arbor://fs/read/#{normalize_path(path)}"
-    authorize_resource(agent_id, resource_uri, :read, tool_input)
+    authorize_resource(agent_id, fs_resource("read", path), :read, tool_input)
   end
 
   defp do_authorize(agent_id, "Write", %{"file_path" => path} = tool_input, _cwd) do
-    resource_uri = "arbor://fs/write/#{normalize_path(path)}"
-    authorize_resource(agent_id, resource_uri, :write, tool_input)
+    authorize_resource(agent_id, fs_resource("write", path), :write, tool_input)
   end
 
   defp do_authorize(agent_id, "Edit", %{"file_path" => path} = tool_input, _cwd) do
-    resource_uri = "arbor://fs/write/#{normalize_path(path)}"
-    authorize_resource(agent_id, resource_uri, :write, tool_input)
+    authorize_resource(agent_id, fs_resource("write", path), :write, tool_input)
   end
 
   defp do_authorize(agent_id, "Grep", tool_input, _cwd) do
     path = Map.get(tool_input, "path", ".")
-    resource_uri = "arbor://fs/read/#{normalize_path(path)}"
-    authorize_resource(agent_id, resource_uri, :read, tool_input)
+    authorize_resource(agent_id, fs_resource("read", path), :read, tool_input)
   end
 
   defp do_authorize(agent_id, "Glob", tool_input, _cwd) do
     path = Map.get(tool_input, "path", ".")
-    resource_uri = "arbor://fs/read/#{normalize_path(path)}"
-    authorize_resource(agent_id, resource_uri, :read, tool_input)
+    authorize_resource(agent_id, fs_resource("read", path), :read, tool_input)
   end
 
   defp do_authorize(agent_id, "Task", tool_input, _cwd) do
@@ -300,6 +295,13 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
       {:error, _reason} ->
         {:error, :unauthorized, "No capability for #{resource_uri}"}
     end
+  end
+
+  # Absolute paths already start with `/`. Embedding them after another slash
+  # creates an empty URI segment (`arbor://fs/read//tmp/...`), which the
+  # registry rejects before the `arbor://fs/read/**` grant can match.
+  defp fs_resource(operation, path) when operation in ["read", "write"] do
+    "arbor://fs/#{operation}/#{normalize_path(path) |> String.trim_leading("/")}"
   end
 
   # M18: Use Path.expand for canonicalization, then safe prefix replacement.

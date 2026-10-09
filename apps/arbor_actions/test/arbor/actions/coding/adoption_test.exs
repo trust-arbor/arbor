@@ -7,6 +7,9 @@ defmodule Arbor.Actions.Coding.AdoptionTest do
 
   @moduletag :fast
   @moduletag :security_regression
+  # Immutable candidate proofs use the same sandboxed git path as branch
+  # audit. A single dry-run measured 72s on 2026-10-08, over the 60s cap.
+  @moduletag timeout: 180_000
 
   test "adoption archives proof first and retires an exact invocation-created branch", %{
     tmp_dir: tmp_dir

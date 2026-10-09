@@ -75,7 +75,7 @@ defmodule Arbor.Shell.TrustedBuildArchiveStatTest do
     handle = Helpers.capture_handle!(root)
     out = Path.join(root, "archive_stat_harness")
     c_src = Path.expand("../../../c_src", __DIR__)
-    harness = Path.expand("../native/archive_stat_harness.c", __DIR__)
+    harness = Path.expand("../../native/archive_stat_harness.c", __DIR__)
 
     {output, status} =
       System.cmd(

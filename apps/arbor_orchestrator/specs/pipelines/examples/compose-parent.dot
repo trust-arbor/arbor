@@ -162,10 +162,11 @@ digraph ComposeParent {
   ]
 
   prep_first_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="first_output_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_first [
@@ -183,10 +184,11 @@ digraph ComposeParent {
   ]
 
   prep_second_path [
-    type="transform",
-    transform="identity",
+    type="sanitize",
+    sanitize="path_traversal",
     source_key="second_output_path",
-    output_key="path"
+    output_key="path",
+    allowed_root_key="workdir"
   ]
 
   write_second [

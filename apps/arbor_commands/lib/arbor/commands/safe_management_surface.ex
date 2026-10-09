@@ -119,11 +119,9 @@ defmodule Arbor.Commands.SafeManagementSurface do
   end
 
   defp receipt_lexical(root, receipt_path) do
-    if SafePath.absolute?(receipt_path) do
-      {:ok, Path.expand(receipt_path)}
-    else
-      SafePath.safe_join(root, receipt_path)
-    end
+    # Keep the leaf lexical. safe_join/2 follows a symlink and then the
+    # lexical-versus-real comparison can no longer see it.
+    SafePath.lexical_child(root, receipt_path)
   end
 
   defp require_within(path, root) do
@@ -238,7 +236,7 @@ defmodule Arbor.Commands.SafeManagementSurface do
 
     result =
       Enum.reduce_while(opts, {:ok, @default_opts, MapSet.new()}, fn option,
-                                                                    {:ok, admitted, seen} ->
+                                                                     {:ok, admitted, seen} ->
         admit_option(option, admitted, seen, allowed, kind)
       end)
 

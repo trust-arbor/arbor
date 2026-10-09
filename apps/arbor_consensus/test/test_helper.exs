@@ -42,18 +42,20 @@ end
 # We create capabilities directly because Capability.new validates principal_id starts
 # with "agent_", but test agents use simple names like "admin" and "admin_1".
 for agent <- ["admin", "admin_1"] do
+  # Audit admission requires cap_ plus 32 lowercase hex. Capability.new/1 also
+  # refuses these principal ids because they do not start with "agent_".
   cap = %Arbor.Contracts.Security.Capability{
-    id: "cap_test_#{agent}_consensus_admin",
+    id: "cap_" <> Base.encode16(:erlang.md5("consensus-admin-" <> agent), case: :lower),
     resource_uri: "arbor://consensus/admin",
     principal_id: agent,
     granted_at: DateTime.utc_now(),
     expires_at: nil,
     constraints: %{},
     delegation_depth: 0,
-    metadata: %{test: true}
+    metadata: %{"test" => true}
   }
 
-  Arbor.Security.put_capability_fixture(cap)
+  {:ok, :stored} = Arbor.Security.put_capability_fixture(cap)
 end
 
 ExUnit.start(exclude: [:llm, :llm_local])

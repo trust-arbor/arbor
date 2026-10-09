@@ -83,7 +83,7 @@ defmodule Arbor.MixProject do
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": [
-        "test --only fast --exclude database --exclude llm --exclude llm_local --exclude external"
+        "test --only fast:true --exclude database --exclude llm --exclude llm_local --exclude external"
       ],
       "test.all": [
         "test --include llm --include llm_local --include integration --include external --include database"

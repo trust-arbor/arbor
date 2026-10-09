@@ -54,20 +54,30 @@ defmodule Arbor.Persistence.VerdictLog do
     domain = Keyword.fetch!(opts, :domain)
 
     if repo_started?() do
-      {run_attrs, result_attrs} = project(verdict, opts)
-
-      with {:ok, _} <- Arbor.Persistence.insert_eval_run(run_attrs),
-           {:ok, _} <- Arbor.Persistence.insert_eval_result(result_attrs) do
-        Logger.debug("VerdictLog: stored #{domain} verdict #{run_attrs.id}")
-        {:ok, run_attrs.id}
-      else
-        {:error, reason} ->
-          Logger.debug("VerdictLog: #{domain} write failed: #{inspect(reason)}")
-          :ok
-      end
+      write_projected(domain, verdict, opts)
     else
       :ok
     end
+  end
+
+  # A sandbox without a checkout raises instead of returning `{:error, _}`.
+  # Observability must not fail an opinion that was already decided.
+  defp write_projected(domain, verdict, opts) do
+    {run_attrs, result_attrs} = project(verdict, opts)
+
+    with {:ok, _} <- Arbor.Persistence.insert_eval_run(run_attrs),
+         {:ok, _} <- Arbor.Persistence.insert_eval_result(result_attrs) do
+      Logger.debug("VerdictLog: stored #{domain} verdict #{run_attrs.id}")
+      {:ok, run_attrs.id}
+    else
+      {:error, reason} ->
+        Logger.debug("VerdictLog: #{domain} write failed: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.debug("VerdictLog: #{domain} write failed: #{Exception.message(exception)}")
+      :ok
   end
 
   @doc """

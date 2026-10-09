@@ -25,7 +25,8 @@ defmodule Arbor.Memory.HistoricalAccumulationFormatTest do
   setup do
     # Goal/Intent writes also enqueue semantic projections. The test config pins
     # their embedding entry point to the deterministic local hash provider.
-    assert Application.get_env(:arbor_ai, :embedding_test_fallback) == true
+    previous_embedding_fallback = Application.fetch_env(:arbor_ai, :embedding_test_fallback)
+    Application.put_env(:arbor_ai, :embedding_test_fallback, true)
     fixture = DurableGraphAuthority.start!()
     existing_writers = writer_pids()
     agent_id = "agent_historical_format_#{System.unique_integer([:positive])}"
@@ -37,6 +38,11 @@ defmodule Arbor.Memory.HistoricalAccumulationFormatTest do
       _ = IntentStore.clear(agent_id)
       _ = KnowledgeGraphStore.delete_graph(agent_id)
       _ = Memory.cleanup_for_agent(agent_id)
+
+      case previous_embedding_fallback do
+        {:ok, value} -> Application.put_env(:arbor_ai, :embedding_test_fallback, value)
+        :error -> Application.delete_env(:arbor_ai, :embedding_test_fallback)
+      end
     end)
 
     Map.merge(fixture, %{agent_id: agent_id, existing_writers: existing_writers})

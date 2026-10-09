@@ -381,6 +381,28 @@ defmodule Arbor.Common.SafePath do
   end
 
   @doc """
+  Join `path` under `root` without following symlinks at or below the root.
+
+  `resolve_within/2` returns the canonical target, so a later `resolve_real/1`
+  comparison cannot see the link that was followed. This returns the lexical
+  child instead. The root's own ancestors are still resolved, so a macOS
+  temporary directory under `/var` matches its `/private/var` form. Callers
+  detect redirection by comparing this path with `resolve_real/1`.
+  """
+  @spec lexical_child(path(), path()) :: {:ok, path()} | {:error, within_error() | :not_found}
+  def lexical_child(root, path) when is_binary(root) and is_binary(path) do
+    with :ok <- validate(root),
+         :ok <- validate(path),
+         {:ok, canonical_root} <- resolve_real(root),
+         expanded <- expand_under(canonical_root, path),
+         {:ok, lexical} <- rebase_lexical(expanded, canonical_root) do
+      {:ok, lexical}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Validate that a path doesn't contain dangerous sequences.
 
   This performs static validation without filesystem access. Use `within?/2`
@@ -705,6 +727,46 @@ defmodule Arbor.Common.SafePath do
   catch
     _kind, _reason -> {:error, :path_changed}
   end
+
+  defp expand_under(root, path) do
+    if absolute?(path), do: Path.expand(path), else: Path.expand(path, root)
+  end
+
+  defp rebase_lexical(expanded, canonical_root) do
+    if expanded == canonical_root or String.starts_with?(expanded, canonical_root <> "/") do
+      {:ok, expanded}
+    else
+      case directory_identity(canonical_root) do
+        {:ok, {device, inode}} ->
+          climb_to_root(expanded, canonical_root, device, inode, [])
+
+        {:error, :enoent} ->
+          {:error, :not_found}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp climb_to_root(current, canonical_root, device, inode, suffix) do
+    case File.lstat(current, time: :posix) do
+      {:ok, %File.Stat{type: :directory, major_device: ^device, inode: ^inode}} ->
+        {:ok, join_suffix(canonical_root, suffix)}
+
+      _other ->
+        parent = Path.dirname(current)
+
+        if parent == current do
+          {:error, :path_traversal}
+        else
+          climb_to_root(parent, canonical_root, device, inode, [Path.basename(current) | suffix])
+        end
+    end
+  end
+
+  defp join_suffix(root, []), do: root
+  defp join_suffix(root, suffix), do: Path.join([root | suffix])
 
   defp directory_identity(path) do
     case File.stat(path, time: :posix) do

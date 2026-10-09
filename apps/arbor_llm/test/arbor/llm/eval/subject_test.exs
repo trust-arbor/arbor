@@ -163,7 +163,9 @@ defmodule Arbor.LLM.Eval.SubjectTest do
 
       assert duration_ms >= 0
 
-      assert Jason.decode!(text) == %{
+      decoded = Jason.decode!(text)
+
+      assert Map.delete(decoded, "receive_timeout") == %{
                "max_tokens" => 1_234,
                "messages" => [
                  %{"content" => "Be precise", "role" => "system"},
@@ -171,9 +173,12 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                ],
                "model" => "test-model",
                "provider" => "eval_test",
-               "receive_timeout" => 4_321,
                "temperature" => 0.25
              }
+
+      # The transport timeout is the time left on the caller deadline.
+      # Setup can consume a few milliseconds; it must not be widened.
+      assert decoded["receive_timeout"] in 4_221..4_321
     end
 
     test "accepts string and atom-keyed inputs" do

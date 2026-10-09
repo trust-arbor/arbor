@@ -11,6 +11,11 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   """
   use GenServer
   @owner_table :arbor_agent_profile_authority_owner_directory
+  @activation_failure_purpose :exact_activation_failure
+  @activation_failure_resources [
+    "arbor://security/identity/suspend/**",
+    "arbor://security/revoke/**"
+  ]
   @handoff_ttl_ms 30_000
   @handoff_purposes %{
     coding_task_executor: 0,
@@ -70,6 +75,32 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   @doc false
   def issue_runtime_admission_signing_authority_bootstrap(principal, purpose),
     do: call({:issue_runtime_admission_signing_authority_bootstrap, {principal, purpose}})
+
+  if Mix.env() == :test do
+    @doc false
+    def issue_runtime_admission_signing_authority_bootstrap(principal, purpose, store_ref)
+        when is_atom(store_ref) or is_pid(store_ref) or is_tuple(store_ref) do
+      call(
+        {:issue_runtime_admission_signing_authority_bootstrap, {principal, purpose, store_ref}}
+      )
+    end
+  end
+
+  @doc false
+  def suspend_admitted_identity(principal, reason, store_ref)
+      when is_binary(principal) and (is_atom(reason) or is_binary(reason)) and
+             (is_atom(store_ref) or is_pid(store_ref)) do
+    call({:suspend_admitted_identity, principal, reason, store_ref})
+  end
+
+  @doc false
+  def revoke_admitted_capabilities(principal, store_ref)
+      when is_binary(principal) and (is_atom(store_ref) or is_pid(store_ref)) do
+    call({:revoke_admitted_capabilities, principal, store_ref})
+  end
+
+  @doc false
+  def activation_failure_ready?, do: call(:activation_failure_ready?)
 
   @doc false
   def issue_supervised_action_cycle_bootstrap(principal),
@@ -147,12 +178,69 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
         {caller, _tag},
         state
       ) do
+    {:reply, issue_runtime_admission_bootstrap(caller, principal, purpose), state}
+  end
+
+  if Mix.env() == :test do
+    def handle_call(
+          {:issue_runtime_admission_signing_authority_bootstrap, {principal, purpose, store_ref}},
+          {caller, _tag},
+          state
+        ) do
+      result =
+        with true <- purpose in [:session, :heartbeat],
+             true <- runtime_admission_worker?(caller, principal, store_ref) do
+          issue_bootstrap(principal, purpose)
+        else
+          _ -> {:error, :signing_authority_handoff_unauthorized}
+        end
+
+      {:reply, result, state}
+    end
+  end
+
+  def handle_call(
+        {:suspend_admitted_identity, principal, reason, store_ref},
+        {caller, _tag},
+        state
+      ) do
     result =
-      with true <- purpose in [:session, :heartbeat],
-           true <- runtime_admission_worker?(caller, principal) do
-        issue_bootstrap(principal, purpose)
-      else
-        _ -> {:error, :signing_authority_handoff_unauthorized}
+      with_activation_failure_authority(caller, principal, store_ref, fn authority ->
+        Arbor.Security.suspend_identity(principal,
+          reason: reason,
+          actor_authority: authority
+        )
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:revoke_admitted_capabilities, principal, store_ref},
+        {caller, _tag},
+        state
+      ) do
+    result =
+      with_activation_failure_authority(caller, principal, store_ref, fn authority ->
+        case Arbor.Security.revoke_all(principal, actor_authority: authority) do
+          {:ok, _count} -> :ok
+          {:error, :not_found} -> :ok
+          other -> other
+        end
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:activation_failure_ready?, _from, state) do
+    result =
+      case open_activation_failure_authority() do
+        {:ok, authority} ->
+          _ = Arbor.Security.close_signing_authority(authority)
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
       end
 
     {:reply, result, state}
@@ -425,22 +513,81 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
 
   defp task_store_caller?(_caller), do: false
 
+  defp with_activation_failure_authority(caller, principal, store_ref, operation) do
+    if runtime_admission_worker?(caller, principal, store_ref) do
+      case open_activation_failure_authority() do
+        {:ok, authority} ->
+          try do
+            operation.(authority)
+          after
+            _ = Arbor.Security.close_signing_authority(authority)
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :signing_authority_handoff_unauthorized}
+    end
+  end
+
+  defp open_activation_failure_authority do
+    principal = Application.get_env(:arbor_agent, :activation_failure_principal_id)
+
+    with true <- is_binary(principal) and principal != "",
+         {:ok, capabilities} <- Arbor.Security.list_capabilities(principal),
+         true <-
+           Enum.all?(@activation_failure_resources, fn resource ->
+             Enum.any?(capabilities, fn capability ->
+               capability.resource_uri == resource and
+                 Arbor.Contracts.Security.Capability.valid?(capability)
+             end)
+           end),
+         {:ok, proof} <-
+           Arbor.Security.build_stored_signing_authority_acquisition_proof(
+             principal,
+             @activation_failure_purpose,
+             self(),
+             __MODULE__
+           ) do
+      Arbor.Security.open_signing_authority(proof)
+    else
+      _ -> {:error, :activation_failure_authority_unavailable}
+    end
+  end
+
+  defp issue_runtime_admission_bootstrap(caller, principal, purpose) do
+    with true <- purpose in [:session, :heartbeat],
+         true <- runtime_admission_worker?(caller, principal) do
+      issue_bootstrap(principal, purpose)
+    else
+      _ -> {:error, :signing_authority_handoff_unauthorized}
+    end
+  end
+
   defp runtime_admission_worker?(caller, principal)
        when is_pid(caller) and is_binary(principal) do
     case supervised_child_pid(Arbor.Agent.Orchestration.TaskStore) do
       store when is_pid(store) ->
-        GenServer.call(store, {:runtime_admission_worker_candidate, caller, principal}) == :ok
+        runtime_admission_worker?(caller, principal, store)
 
       _ ->
         false
     end
+  end
+
+  defp runtime_admission_worker?(_caller, _principal), do: false
+
+  defp runtime_admission_worker?(caller, principal, store)
+       when is_pid(caller) and is_binary(principal) and (is_pid(store) or is_atom(store)) do
+    GenServer.call(store, {:runtime_admission_worker_candidate, caller, principal}) == :ok
   rescue
     _ -> false
   catch
     :exit, _ -> false
   end
 
-  defp runtime_admission_worker?(_caller, _principal), do: false
+  defp runtime_admission_worker?(_caller, _principal, _store), do: false
 
   defp action_cycle_consumer?(caller, principal)
        when is_pid(caller) and is_binary(principal) do

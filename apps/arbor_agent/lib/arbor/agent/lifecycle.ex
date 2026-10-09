@@ -92,6 +92,7 @@ defmodule Arbor.Agent.Lifecycle do
           | {:error, term()}
   def create(display_name, opts \\ []) do
     with {:ok, character, opts} <- resolve_template(opts),
+         :ok <- require_exact_cleanup_ready(opts),
          {:ok, identity} <- generate_identity(display_name) do
       case run_creation(display_name, character, identity, opts) do
         {:ok, _profile} = success ->
@@ -105,6 +106,12 @@ defmodule Arbor.Agent.Lifecycle do
           error
       end
     end
+  end
+
+  defp require_exact_cleanup_ready(opts) do
+    if Keyword.has_key?(opts, :exact_template_policy),
+      do: ProfileAuthorityOwner.activation_failure_ready?(),
+      else: :ok
   end
 
   defp run_creation(display_name, character, identity, opts) do
@@ -338,7 +345,7 @@ defmodule Arbor.Agent.Lifecycle do
              fingerprint,
              name: store_ref
            ) do
-      do_ordinary_start_effects(agent_id, opts, branch_witness)
+      do_ordinary_start_effects(agent_id, opts, branch_witness, store_ref)
     end
   end
 
@@ -471,23 +478,113 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp do_ordinary_start_effects(agent_id, opts, branch_witness) do
+  defp do_ordinary_start_effects(agent_id, opts, branch_witness, store_ref) do
+    {opts, temporary_bootstrap} = ensure_worker_mutation_authority(agent_id, opts, store_ref)
+
+    try do
+      do_ordinary_start_effects_with_authority(
+        agent_id,
+        opts,
+        branch_witness,
+        temporary_bootstrap,
+        store_ref
+      )
+    after
+      close_temporary_mutation_bootstrap(temporary_bootstrap)
+    end
+  end
+
+  # prepare_and_activate runs in the admitted worker, which is not the process
+  # that opened a caller-supplied authority. Mutation checks require the caller
+  # to own the authority, so the bound worker claims a short-lived slot from
+  # the stored agent key and closes it before branch bootstraps are issued.
+  defp ensure_worker_mutation_authority(agent_id, opts, store_ref) do
+    case mutation_authority(opts) do
+      {:ok, _authority} ->
+        {opts, nil}
+
+      {:error, :capability_mutation_unauthorized} ->
+        claim_worker_mutation_authority(agent_id, opts, store_ref)
+    end
+  end
+
+  defp claim_worker_mutation_authority(agent_id, opts, store_ref) do
+    # Use the slot this start will not keep. start_session: false must not
+    # leave a session bootstrap behind; a heartbeat start keeps :session free.
+    purpose =
+      if session_child_enabled?(Keyword.get(opts, :start_session, true)),
+        do: :heartbeat,
+        else: :session
+
+    case issue_worker_mutation_bootstrap(agent_id, purpose, store_ref) do
+      {:ok, bootstrap} ->
+        case Arbor.Security.claim_signing_authority(bootstrap) do
+          {:ok, authority} ->
+            {Keyword.put(opts, :actor_authority, authority), bootstrap}
+
+          _ ->
+            _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+            {opts, nil}
+        end
+
+      _ ->
+        {opts, nil}
+    end
+  end
+
+  # Production admission always uses the fixed TaskStore, which is what
+  # ProfileAuthorityOwner already verifies. Tests bind a private store; the
+  # test-only arity checks that same store and is absent from dev/prod BEAMs.
+  if Mix.env() == :test do
+    defp issue_worker_mutation_bootstrap(agent_id, purpose, store_ref) do
+      Arbor.Agent.ProfileAuthorityOwner.issue_runtime_admission_signing_authority_bootstrap(
+        agent_id,
+        purpose,
+        store_ref
+      )
+    end
+  else
+    defp issue_worker_mutation_bootstrap(agent_id, purpose, _store_ref) do
+      Arbor.Agent.ProfileAuthorityOwner.issue_runtime_admission_signing_authority_bootstrap(
+        agent_id,
+        purpose
+      )
+    end
+  end
+
+  defp close_temporary_mutation_bootstrap(nil), do: :ok
+
+  defp close_temporary_mutation_bootstrap(bootstrap) do
+    _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+    :ok
+  end
+
+  defp do_ordinary_start_effects_with_authority(
+         agent_id,
+         opts,
+         branch_witness,
+         temporary_bootstrap,
+         store_ref
+       ) do
     case restore(agent_id) do
       {:ok, profile} ->
         case prepare_and_activate_authority(profile, opts) do
           {:ok, prepared_profile, policy_mode} ->
-            result = start_activated_profile(prepared_profile, opts, branch_witness)
+            # Drop the temporary slot before branch bootstraps are issued so a
+            # session/heartbeat restart slot is not hidden behind it.
+            close_temporary_mutation_bootstrap(temporary_bootstrap)
+            result = start_activated_profile(prepared_profile, opts, branch_witness, store_ref)
 
             case {result, policy_mode} do
               {{:error, _} = error, {:exact, _envelope}} ->
-                handle_authority_failure(prepared_profile, error, opts)
+                handle_authority_failure(prepared_profile, error, opts, store_ref)
 
               _ ->
                 result
             end
 
           {:error, _} = error ->
-            handle_authority_failure(profile, error, opts)
+            handle_authority_failure(profile, error, opts, store_ref)
         end
 
       {:error, _} = error ->
@@ -495,7 +592,7 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp start_activated_profile(profile, opts, witness) do
+  defp start_activated_profile(profile, opts, witness, store_ref) do
     agent_id = profile.agent_id
 
     # Post-admission idempotent observation only (never before TaskStore admit).
@@ -505,11 +602,11 @@ defmodule Arbor.Agent.Lifecycle do
         {:ok, pid}
 
       nil ->
-        do_start(profile, opts, witness)
+        do_start(profile, opts, witness, store_ref)
     end
   end
 
-  defp do_start(profile, opts, witness) do
+  defp do_start(profile, opts, witness, store_ref \\ nil) do
     agent_id = profile.agent_id
     start_session = Keyword.get(opts, :start_session, true)
 
@@ -520,7 +617,12 @@ defmodule Arbor.Agent.Lifecycle do
     heartbeat_enabled = heartbeat_child_enabled?(profile, opts, session_enabled)
 
     with {:ok, bootstraps} <-
-           issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled) do
+           issue_branch_authority_bootstraps(
+             agent_id,
+             session_enabled,
+             heartbeat_enabled,
+             store_ref
+           ) do
       # Build child opts for the BranchSupervisor. The private key is scoped to
       # issue_branch_authority_bootstraps/1 and never crosses this boundary.
       host_opts = build_host_opts(agent_id, profile, opts)
@@ -627,15 +729,16 @@ defmodule Arbor.Agent.Lifecycle do
   # Lifecycle is the only production caller that handles a decrypted signing
   # key. It converts that short-lived possession into two independent opaque
   # restart slots before any branch child starts.
-  defp issue_branch_authority_bootstraps(_agent_id, false, false), do: {:ok, %{}}
+  defp issue_branch_authority_bootstraps(_agent_id, false, false, _store_ref), do: {:ok, %{}}
 
-  defp issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled) do
+  defp issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled, store_ref) do
     with {:ok, session} <-
-           issue_optional_authority_bootstrap(agent_id, :session, session_enabled) do
+           issue_optional_authority_bootstrap(agent_id, :session, session_enabled, store_ref) do
       case issue_optional_authority_bootstrap(
              agent_id,
              :heartbeat,
-             heartbeat_enabled
+             heartbeat_enabled,
+             store_ref
            ) do
         {:ok, heartbeat} ->
           {:ok, compact_bootstraps(%{session: session, heartbeat: heartbeat})}
@@ -647,11 +750,11 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp issue_optional_authority_bootstrap(_agent_id, _purpose, false),
+  defp issue_optional_authority_bootstrap(_agent_id, _purpose, false, _store_ref),
     do: {:ok, nil}
 
-  defp issue_optional_authority_bootstrap(agent_id, purpose, true),
-    do: issue_authority_bootstrap(agent_id, purpose)
+  defp issue_optional_authority_bootstrap(agent_id, purpose, true, store_ref),
+    do: issue_authority_bootstrap(agent_id, purpose, store_ref)
 
   defp compact_bootstraps(bootstraps),
     do: Enum.reject(bootstraps, fn {_purpose, bootstrap} -> is_nil(bootstrap) end) |> Map.new()
@@ -666,12 +769,26 @@ defmodule Arbor.Agent.Lifecycle do
       Map.get(extract_heartbeat_config(profile, opts), :enabled, true)
   end
 
-  defp issue_authority_bootstrap(agent_id, purpose),
-    do:
+  # The admitted worker is the only caller allowed to open these slots.
+  # Production verifies that worker against the fixed TaskStore. A test store
+  # is the same check against the store that authenticated this worker.
+  if Mix.env() == :test do
+    defp issue_authority_bootstrap(agent_id, purpose, store_ref)
+         when is_atom(store_ref) or is_pid(store_ref) do
       Arbor.Agent.ProfileAuthorityOwner.issue_runtime_admission_signing_authority_bootstrap(
         agent_id,
-        purpose
+        purpose,
+        store_ref
       )
+    end
+  end
+
+  defp issue_authority_bootstrap(agent_id, purpose, _store_ref) do
+    Arbor.Agent.ProfileAuthorityOwner.issue_runtime_admission_signing_authority_bootstrap(
+      agent_id,
+      purpose
+    )
+  end
 
   defp close_branch_authority_bootstraps(bootstraps) do
     Enum.each(bootstraps, fn {_purpose, bootstrap} ->
@@ -2368,7 +2485,8 @@ defmodule Arbor.Agent.Lifecycle do
       {:ok, prepared_profile, envelope} ->
         snapshot = ExactTemplatePolicy.snapshot(envelope)
 
-        with :ok <- register_profile_identity(prepared_profile, :strict, actor_authority),
+        with :ok <- ProfileAuthorityOwner.activation_failure_ready?(),
+             :ok <- register_profile_identity(prepared_profile, :strict, actor_authority),
              :ok <- ensure_exact_trust_profile(prepared_profile.agent_id, snapshot),
              :ok <-
                reconcile_exact_capabilities(
@@ -2547,31 +2665,13 @@ defmodule Arbor.Agent.Lifecycle do
             created_at: profile.created_at || DateTime.utc_now()
           }
 
-          registration_result =
-            with {:ok, possession_proof} <-
-                   ProfileAuthorityOwner.build_stored_identity_registration_proof(
-                     identity,
-                     actor_authority
-                   ) do
-              Arbor.Security.register_stored_identity(
-                identity,
-                actor_authority,
-                possession_proof
-              )
-            end
-
-          case registration_result do
-            :ok ->
-              :ok
-
-            {:error, :already_registered} ->
-              :ok
-
-            {:error, {:already_registered, _agent_id}} ->
-              :ok
-
-            {:error, reason} ->
-              identity_registration_failure(mode, agent_id, reason)
+          # An already-active identity with the same keys is not a mutation.
+          # A missing, revoked, or different key still requires an authorized
+          # registration and keeps the caller's failure mode.
+          if active_identity_matches?(agent_id, pub_key, encryption_public_key) do
+            :ok
+          else
+            register_decoded_profile_identity(identity, mode, actor_authority)
           end
         else
           _ ->
@@ -2581,6 +2681,49 @@ defmodule Arbor.Agent.Lifecycle do
       _ ->
         identity_registration_failure(mode, agent_id, :identity_metadata_missing)
     end
+  end
+
+  defp register_decoded_profile_identity(identity, mode, actor_authority) do
+    agent_id = identity.agent_id
+
+    registration_result =
+      with {:ok, possession_proof} <-
+             ProfileAuthorityOwner.build_stored_identity_registration_proof(
+               identity,
+               actor_authority
+             ) do
+        Arbor.Security.register_stored_identity(
+          identity,
+          actor_authority,
+          possession_proof
+        )
+      end
+
+    case registration_result do
+      :ok ->
+        :ok
+
+      {:error, :already_registered} ->
+        :ok
+
+      {:error, {:already_registered, _agent_id}} ->
+        :ok
+
+      {:error, reason} ->
+        identity_registration_failure(mode, agent_id, reason)
+    end
+  end
+
+  defp active_identity_matches?(agent_id, pub_key, encryption_public_key) do
+    Arbor.Security.lookup_public_key(agent_id) == {:ok, pub_key} and
+      encryption_key_matches?(agent_id, encryption_public_key) and
+      Arbor.Security.identity_status(agent_id) == {:ok, :active}
+  end
+
+  defp encryption_key_matches?(_agent_id, nil), do: true
+
+  defp encryption_key_matches?(agent_id, encryption_public_key) do
+    Arbor.Security.lookup_encryption_key(agent_id) == {:ok, encryption_public_key}
   end
 
   defp identity_registration_failure(:strict, _agent_id, reason),
@@ -2644,13 +2787,18 @@ defmodule Arbor.Agent.Lifecycle do
     ProfileStore.store_profile(profile)
   end
 
-  defp handle_authority_failure(%Profile{} = profile, {:error, reason} = error, opts) do
+  defp handle_authority_failure(
+         %Profile{} = profile,
+         {:error, reason} = error,
+         opts,
+         store_ref \\ nil
+       ) do
     if ExactTemplatePolicy.managed_profile?(profile) do
       _ = stop(profile.agent_id)
 
       results = [
-        suspend_exact_identity(profile.agent_id, opts),
-        cleanup_agent_authority(profile.agent_id, opts)
+        suspend_exact_identity(profile.agent_id, opts, store_ref),
+        cleanup_agent_authority(profile.agent_id, opts, store_ref)
       ]
 
       case Enum.reject(results, &(&1 == :ok)) do
@@ -2665,15 +2813,18 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp suspend_exact_identity(agent_id, opts) do
+  defp suspend_exact_identity(agent_id, opts, store_ref) do
     case Arbor.Security.identity_status(agent_id) do
       {:ok, :active} ->
-        safe_cleanup(fn ->
-          Arbor.Security.suspend_identity(agent_id,
-            reason: :exact_policy_activation_failed,
-            actor_authority: Keyword.get(opts, :actor_authority)
-          )
-        end)
+        case safe_cleanup(fn ->
+               Arbor.Security.suspend_identity(agent_id,
+                 reason: :exact_policy_activation_failed,
+                 actor_authority: Keyword.get(opts, :actor_authority)
+               )
+             end) do
+          :ok -> :ok
+          {:error, _reason} = error -> suspend_admitted_identity(agent_id, store_ref, error)
+        end
 
       {:ok, :suspended} ->
         :ok
@@ -2730,9 +2881,22 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp cleanup_agent_authority(agent_id, opts) do
+  defp suspend_admitted_identity(_agent_id, nil, error), do: error
+
+  defp suspend_admitted_identity(agent_id, store_ref, _error) do
+    case Arbor.Agent.ProfileAuthorityOwner.suspend_admitted_identity(
+           agent_id,
+           :exact_policy_activation_failed,
+           store_ref
+         ) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:identity_suspension_failed, reason}}
+    end
+  end
+
+  defp cleanup_agent_authority(agent_id, opts, store_ref \\ nil) do
     results = [
-      revoke_all_agent_capabilities(agent_id, opts),
+      revoke_all_agent_capabilities(agent_id, opts, store_ref),
       safe_cleanup(fn -> Arbor.Trust.delete_trust_profile(agent_id) end)
     ]
 
@@ -2742,12 +2906,12 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp revoke_all_agent_capabilities(agent_id, opts) do
+  defp revoke_all_agent_capabilities(agent_id, opts, store_ref) do
     with {:ok, actor_authority} <- mutation_authority(opts) do
       case Arbor.Security.revoke_all(agent_id, actor_authority: actor_authority) do
         {:ok, _count} -> :ok
         {:error, :not_found} -> :ok
-        {:error, reason} -> {:error, {:capability_revoke_failed, reason}}
+        {:error, reason} -> revoke_admitted_capabilities(agent_id, store_ref, reason)
         other -> {:error, {:unexpected_capability_revoke_result, other}}
       end
     end
@@ -2756,6 +2920,17 @@ defmodule Arbor.Agent.Lifecycle do
   catch
     :exit, reason -> {:error, {:capability_cleanup_exit, reason}}
     kind, reason -> {:error, {:capability_cleanup_failure, kind, reason}}
+  end
+
+  defp revoke_admitted_capabilities(_agent_id, nil, reason),
+    do: {:error, {:capability_revoke_failed, reason}}
+
+  defp revoke_admitted_capabilities(agent_id, store_ref, _reason) do
+    case Arbor.Agent.ProfileAuthorityOwner.revoke_admitted_capabilities(agent_id, store_ref) do
+      :ok -> :ok
+      {:ok, _count} -> :ok
+      {:error, reason} -> {:error, {:capability_revoke_failed, reason}}
+    end
   end
 
   defp safe_cleanup(cleanup) when is_function(cleanup, 0) do

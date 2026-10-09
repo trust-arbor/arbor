@@ -182,7 +182,9 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
     with :ok <- safe_cli_path(path, field),
          :ok <- json_extension(path, field),
-         {:ok, lexical} <- SafePath.resolve_within(path, root),
+         # Lexical child so a symlink output is still a symlink at lstat time.
+         # `resolve_within/2` would follow it and hide that rejection.
+         {:ok, lexical} <- SafePath.lexical_child(root, path),
          parent <- Path.dirname(lexical),
          {:ok, real_parent} <- SafePath.resolve_real(parent),
          {:ok, ^real_parent} <- SafePath.resolve_within(real_parent, root),

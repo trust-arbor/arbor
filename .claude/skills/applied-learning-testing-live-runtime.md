@@ -2303,3 +2303,53 @@ current maximum-size sources when changing byte, line, regex, or deadline
 budgets (found 2026-10-07 when the PII scan's new 10,000-line cap rejected two
 existing libraries and its locationless overflow finding crashed the pre-commit
 reporter).
+
+<!-- applied-learning: simulate-owner-outages-by-stopping-the-owner -->
+<a id="applied-learning-simulate-owner-outages-by-stopping-the-owner"></a>
+**Simulate supervised owner outages by stopping the owner, not unregistering its name.**
+An authorization path may retain or resolve the supervised PID without using
+the registered name. `Process.unregister/1` left CapabilityStore calls live and
+made the outage regression pass for the wrong reason. Terminate the supervised
+child, assert its protected operations deny, then restart it through the
+supervisor (found 2026-10-08 while fixing ACP outage tests).
+
+<!-- applied-learning: fast-and-database-tags-conflict -->
+<a id="applied-learning-fast-and-database-tags-conflict"></a>
+**Never tag one test both `:fast` and `:database`.** The fast alias uses
+`--only fast:true`; ExUnit selects any test whose effective fast tag is true
+even with `--exclude database`, so it can run against an unmigrated default
+test Repo. For a mixed module, override real database cases with
+`@tag fast: false`. Use `:database` for shared configured Repo tests. A test
+that must start its own exclusive Repo uses only `:isolated_repo`, since
+`--include database` overrides an isolated exclusion in `test.all`. Run it
+separately (found 2026-10-08 after 15 command-index failures in
+`mix test.fast` and an isolated-Repo filter check).
+
+<!-- applied-learning: pin-and-restore-cross-app-test-authorizers -->
+<a id="applied-learning-pin-and-restore-cross-app-test-authorizers"></a>
+**Pin and restore global authorizers in tests that exercise them.** Umbrella
+tests can carry Application env from an earlier app's test helper into the next
+app. A Shell helper's command-only authorizer caused an Actions batch test to
+fail at the filesystem gate under `mix test.fast`, though the test passed in
+isolation. An integration test requiring a specific authorizer should set it
+in setup and restore the exact previous `fetch_env` result on exit (found
+2026-10-08 while reviewing batch context security tests).
+
+<!-- applied-learning: stop-test-started-distribution-after-each-case -->
+<a id="applied-learning-stop-test-started-distribution-after-each-case"></a>
+**Stop distribution when a test started it.** A real-peer test that calls
+`:net_kernel.start/1` must record whether the node was previously alive and
+call `Node.stop/0` in `on_exit` only when it started distribution. Otherwise
+later umbrella apps compare journal entries created under `:nonode@nohost`
+against the new node name and reject local recovery as an unfenced cross-node
+claim. Derive peer and local node names from the test BEAM's OS pid so
+concurrent isolated runs do not collide in epmd (found 2026-10-08 in the
+agent-to-orchestrator fast lane).
+
+<!-- applied-learning: separate-jido-action-names-from-plugin-registry-aliases -->
+<a id="applied-learning-separate-jido-action-names-from-plugin-registry-aliases"></a>
+**Separate Jido action names from plugin registry aliases.** Jido validates
+action names as letters, digits, and underscores; the locked ActionRegistry
+requires dotted plugin names. Keep the module's `name` valid for Jido and
+register it under a dotted alias, then use that alias in execution bindings
+and DOT fixtures (found 2026-10-08 while fixing provenance test registration).

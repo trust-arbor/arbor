@@ -279,7 +279,7 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     test "security regression: #{@backend} fallback excludes cold-rehydrated conversations",
          ctx do
       seed_pair(ctx.agent_id)
-      stored = StrictSeam.records()
+      stored = records_for_agent(ctx.agent_id)
       StrictSeam.configure(:search_error, :unsupported)
       pid = start_index(ctx.agent_id, @backend)
 
@@ -291,14 +291,14 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
       assert {:error, :not_found} = Index.get(pid, "mem_category_conversation")
       assert {:error, :not_found} = Index.get(pid, "mem_metadata_conversation")
       assert StrictSeam.searches() == 1
-      assert StrictSeam.records() == stored
+      assert records_for_agent(ctx.agent_id) == stored
     end
   end
 
   test "security regression: warm cache preserves excluded records and authoritative category",
        ctx do
     seed_pair(ctx.agent_id)
-    stored = StrictSeam.records()
+    stored = records_for_agent(ctx.agent_id)
     StrictSeam.configure(:search_error, :unsupported)
     pid = start_index(ctx.agent_id, :dual, rehydrate: false)
     assert {:ok, %{entry_count: 0}} = Memory.index_stats(ctx.agent_id)
@@ -310,7 +310,7 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     assert {:ok, [%{id: "mem_control"}]} =
              Memory.recall(ctx.agent_id, "query", embedding: vector(), limit: 10)
 
-    assert StrictSeam.records() == stored
+    assert records_for_agent(ctx.agent_id) == stored
   end
 
   test "security regression: conflicting legacy metadata aliases stay excluded after warm normalization",
@@ -329,7 +329,7 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     reverse = put_in(reverse, [:body, "metadata", :type], :fact)
     StrictSeam.configure(:list_override, [hidden, reverse, control])
     StrictSeam.configure(:search_error, :unsupported)
-    stored = StrictSeam.records()
+    stored = records_for_agent(ctx.agent_id)
     pid = start_index(ctx.agent_id, :dual, rehydrate: false)
 
     assert :ok = Memory.warm_index_cache(ctx.agent_id, limit: 10)
@@ -340,7 +340,7 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     assert {:ok, [%{id: "mem_control"}]} =
              Memory.recall(ctx.agent_id, "query", embedding: vector(), limit: 10)
 
-    assert StrictSeam.records() == stored
+    assert records_for_agent(ctx.agent_id) == stored
 
     assert :ok = stop_supervised({Index, ctx.agent_id})
     cold_pid = start_index(ctx.agent_id, :dual)
@@ -350,12 +350,12 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     assert {:ok, [%{id: "mem_control"}]} =
              Memory.recall(ctx.agent_id, "query", embedding: vector(), limit: 10)
 
-    assert StrictSeam.records() == stored
+    assert records_for_agent(ctx.agent_id) == stored
   end
 
   test "security regression: cold restart retains exclusion and stored records", ctx do
     seed_pair(ctx.agent_id)
-    stored = StrictSeam.records()
+    stored = records_for_agent(ctx.agent_id)
     StrictSeam.configure(:search_error, :unsupported)
     start_index(ctx.agent_id, :dual)
     assert :ok = stop_supervised({Index, ctx.agent_id})
@@ -367,7 +367,7 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
     assert {:ok, [%{id: "mem_control"}]} =
              Memory.recall(ctx.agent_id, "query", embedding: vector(), limit: 10)
 
-    assert StrictSeam.records() == stored
+    assert records_for_agent(ctx.agent_id) == stored
   end
 
   for reader <- [:index, :embeddings, :formatted] do
@@ -426,7 +426,12 @@ defmodule Arbor.Memory.UnownedConversationRecallSecurityRegressionTest do
              Memory.warm_index_cache(ctx.agent_id, limit: 10)
 
     assert {:ok, %{entry_count: 0}} = Memory.index_stats(ctx.agent_id)
-    assert map_size(StrictSeam.records()) == 2
+    assert map_size(records_for_agent(ctx.agent_id)) == 2
+  end
+
+  defp records_for_agent(agent_id) do
+    StrictSeam.records()
+    |> Map.filter(fn {{record_agent_id, _}, _} -> record_agent_id == agent_id end)
   end
 
   defp read(:index, agent_id),

@@ -549,4 +549,22 @@ defmodule Arbor.AI.UsageStatsTest do
       assert sonnet_stats.failures == 1
     end
   end
+
+  test "daily summary reads its own table without stopping the server" do
+    UsageStats.record_success(:anthropic, %{
+      model: "claude-opus-4",
+      tier: :critical,
+      latency_ms: 20,
+      input_tokens: 10,
+      output_tokens: 4,
+      cost: 0.01
+    })
+
+    :timer.sleep(10)
+    pid = Process.whereis(UsageStats)
+    send(pid, :emit_daily_summary)
+
+    assert UsageStats.all_stats() != %{}
+    assert Process.alive?(pid)
+  end
 end

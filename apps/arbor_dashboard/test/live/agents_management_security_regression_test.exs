@@ -75,7 +75,7 @@ defmodule Arbor.Dashboard.Live.AgentsManagementSecurityRegressionTest do
       Fixture.grant!(ctx.human_id, operation, target.target)
       other = Humans.human!()
       {:ok, mismatch} = Security.SessionToken.generate(other)
-      {:ok, expired} = Security.SessionToken.generate(ctx.human_id, ttl: -1)
+      {:ok, expired} = Security.SessionToken.generate_expired_fixture(ctx.human_id)
       {:ok, terminal} = Security.issue_conversation_session_fixture(ctx.human_id, target.target)
 
       for token <- [nil, "forged", mismatch, expired, terminal] do

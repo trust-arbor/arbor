@@ -26,7 +26,8 @@ defmodule Arbor.Persistence.AgentTelemetry do
     :blocked, sensitivity, provider, model}`
   - `:compaction` -- `%{utilization, tokens_before, tokens_after}`
 
-  Returns `{:error, :repo_unavailable}` when the Repo process is not running.
+  Returns `{:error, :repo_unavailable}` when the Repo process is not running,
+  or when a sandbox checkout is required and this process does not own one.
   """
   @spec persist_event(String.t(), atom(), map()) ::
           :ok | {:error, :repo_unavailable | term()}
@@ -48,6 +49,8 @@ defmodule Arbor.Persistence.AgentTelemetry do
         {:error, reason} -> {:error, reason}
       end
     end
+  rescue
+    DBConnection.OwnershipError -> {:error, :repo_unavailable}
   end
 
   @doc """
@@ -114,6 +117,8 @@ defmodule Arbor.Persistence.AgentTelemetry do
           {:error, reason}
       end
     end
+  rescue
+    DBConnection.OwnershipError -> {:error, :repo_unavailable}
   end
 
   @doc false

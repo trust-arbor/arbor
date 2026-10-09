@@ -7,7 +7,6 @@ defmodule Arbor.Persistence.ConversationPageTest do
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
 
   @moduletag :database
-  @moduletag :fast
   @engagement "eng_0123456789abcdef0123456789abcdef"
   @other "eng_abcdef0123456789abcdef0123456789"
 

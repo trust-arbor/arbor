@@ -2769,9 +2769,16 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   defp require_platform_activation_purpose(_purpose), do: {:error, :purpose_mismatch}
 
   defp validate_resource_binding(payload) when is_binary(payload) do
-    if byte_size(payload) <= 2_048 and Arbor.Contracts.Security.CapabilityUri.valid?(payload),
-      do: :ok,
-      else: {:error, :invalid_resource_binding}
+    cond do
+      byte_size(payload) <= 2_048 and Arbor.Contracts.Security.CapabilityUri.valid?(payload) ->
+        :ok
+
+      Arbor.Security.RoutineOwnerRequest.valid?(payload) ->
+        :ok
+
+      true ->
+        {:error, :invalid_resource_binding}
+    end
   end
 
   defp validate_resource_binding(_payload), do: {:error, :invalid_resource_binding}

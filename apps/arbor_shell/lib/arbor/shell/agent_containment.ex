@@ -135,9 +135,12 @@ defmodule Arbor.Shell.AgentContainment do
   defp filesystem_authorizer do
     case Application.get_env(:arbor_shell, :agent_authorizer) do
       module when is_atom(module) and not is_nil(module) ->
-        if function_exported?(module, :authorize_filesystem, 5),
-          do: {:ok, module},
-          else: {:error, :agent_filesystem_authorizer_unavailable}
+        # function_exported?/3 is false until the configured module is loaded.
+        # A cold VM otherwise refuses every agent filesystem check.
+        if Code.ensure_loaded?(module) and
+             function_exported?(module, :authorize_filesystem, 5),
+           do: {:ok, module},
+           else: {:error, :agent_filesystem_authorizer_unavailable}
 
       _ ->
         {:error, :agent_filesystem_authorizer_unavailable}

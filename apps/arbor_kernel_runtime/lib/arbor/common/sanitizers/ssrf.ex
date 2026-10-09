@@ -143,7 +143,10 @@ defmodule Arbor.Common.Sanitizers.SSRF do
         |> Keyword.put(:pool_timeout, min(pool_timeout_ms, remaining_ms))
         |> Keyword.put(:receive_timeout, remaining_ms)
         |> Keyword.put(:plug, nil)
-        |> Keyword.put(:adapter, &Req.Steps.run_finch/1)
+        # Req 0.7 replaced the `Req.Steps.run_finch/1` step with the `Req.Finch`
+        # adapter module. A function capture of the removed step raises
+        # UndefinedFunctionError before any request runs.
+        |> Keyword.put(:adapter, Req.Finch)
         |> Keyword.put(:finch, FinchPool.req_name())
         |> Keyword.put(:finch_request, callback)
 

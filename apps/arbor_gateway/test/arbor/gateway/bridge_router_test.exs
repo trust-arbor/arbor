@@ -20,7 +20,15 @@ defmodule Arbor.Gateway.Bridge.RouterTest do
 
     def start_link(_opts), do: Agent.start_link(fn -> %{} end, name: __MODULE__)
     def reset, do: Agent.update(__MODULE__, fn _ -> %{} end)
-    def get_trust_profile(id), do: Agent.get(__MODULE__, &Map.fetch(&1, id))
+
+    def get_trust_profile(id) do
+      Agent.get(__MODULE__, fn profiles ->
+        case Map.fetch(profiles, id) do
+          {:ok, profile} -> {:ok, profile}
+          :error -> {:error, :not_found}
+        end
+      end)
+    end
 
     def create_trust_profile(id) do
       Agent.get_and_update(__MODULE__, fn profiles ->

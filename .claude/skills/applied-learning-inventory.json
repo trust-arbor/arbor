@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 767,
+  "entry_count": 772,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -9515,8 +9515,73 @@
       "source_incident": "found 2026-10-07 when the PII scan's new 10,000-line cap rejected two existing libraries and its locationless overflow finding crashed the pre-commit reporter",
       "always_loaded": false,
       "content_sha256": "535ab1bfa29982a65615bbe08ded1bd69261321d640f39c649a0cde75ee0052c"
+    },
+    {
+      "source_ordinal": 773,
+      "source_kind": "post-migration",
+      "slug": "simulate-owner-outages-by-stopping-the-owner",
+      "title": "Simulate supervised owner outages by stopping the owner, not unregistering its name.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-simulate-owner-outages-by-stopping-the-owner",
+      "source_date": "2026-10-08",
+      "source_incident": "found 2026-10-08 while fixing ACP outage tests",
+      "always_loaded": false,
+      "content_sha256": "9d7cfb3b7221805fbcde72714131ca23c05aea2235d66ebf1fda6b3c52c867d3"
+    },
+    {
+      "source_ordinal": 774,
+      "source_kind": "post-migration",
+      "slug": "fast-and-database-tags-conflict",
+      "title": "Never tag one test both `:fast` and `:database`.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-fast-and-database-tags-conflict",
+      "source_date": "2026-10-08",
+      "source_incident": "found 2026-10-08 after 15 command-index failures in mix test.fast",
+      "always_loaded": false,
+      "content_sha256": "9e8dab38b1c24944bed32a3a28fdce48daeb4c8d2667ecc3cd0f6530c0ebb920"
+    },
+    {
+      "source_ordinal": 775,
+      "source_kind": "post-migration",
+      "slug": "pin-and-restore-cross-app-test-authorizers",
+      "title": "Pin and restore global authorizers in tests that exercise them.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-pin-and-restore-cross-app-test-authorizers",
+      "source_date": "2026-10-08",
+      "source_incident": "found 2026-10-08 while reviewing batch context security tests",
+      "always_loaded": false,
+      "content_sha256": "bff769f69c3e947c84522e51f36c557b93714c1299027cdf4f2a3a7d146117e5"
+    },
+    {
+      "source_ordinal": 776,
+      "source_kind": "post-migration",
+      "slug": "stop-test-started-distribution-after-each-case",
+      "title": "Stop distribution when a test started it.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-stop-test-started-distribution-after-each-case",
+      "source_date": "2026-10-08",
+      "source_incident": "found 2026-10-08 in the agent-to-orchestrator fast lane",
+      "always_loaded": false,
+      "content_sha256": "14ee1c2ab1f8760aff9c8f6ade246810469e26595f76219025c76e69057c2650"
+    },
+    {
+      "source_ordinal": 777,
+      "source_kind": "post-migration",
+      "slug": "separate-jido-action-names-from-plugin-registry-aliases",
+      "title": "Separate Jido action names from plugin registry aliases.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-separate-jido-action-names-from-plugin-registry-aliases",
+      "source_date": "2026-10-08",
+      "source_incident": "found 2026-10-08 while fixing provenance test registration",
+      "always_loaded": false,
+      "content_sha256": "c004c635117da1b69b1180d71c921a8754715ff62c7e5d09a9c8f289c54ab1c8"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 306
+  "post_migration_entry_count": 311
 }

@@ -2,7 +2,6 @@ defmodule Arbor.Persistence.ConversationCommandIndexTest do
   use Arbor.Persistence.DatabaseCase, async: false
   alias Arbor.Persistence
   @moduletag :database
-  @moduletag :fast
 
   test "security regression exact original scope filters before the active limit" do
     scope = scope("owner")

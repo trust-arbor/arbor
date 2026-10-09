@@ -112,6 +112,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     prev_security_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
     prev_trust_approval = Application.get_env(:arbor_trust, :approval_guard_enabled)
     prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+    prev_shell_authorizer = Application.fetch_env(:arbor_shell, :agent_authorizer)
 
     Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
@@ -122,6 +123,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     Application.put_env(:arbor_security, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
+    Application.put_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
 
     # Endpoint inputs carry :derived provenance (2026-09-27). These tests pin
     # principal authority, not taint, so run under the dev policy
@@ -140,6 +142,11 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       restore_env(:arbor_security, :approval_guard_enabled, prev_security_approval)
       restore_env(:arbor_trust, :approval_guard_enabled, prev_trust_approval)
       restore_env(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
+
+      case prev_shell_authorizer do
+        {:ok, authorizer} -> Application.put_env(:arbor_shell, :agent_authorizer, authorizer)
+        :error -> Application.delete_env(:arbor_shell, :agent_authorizer)
+      end
     end)
 
     :ok

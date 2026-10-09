@@ -154,7 +154,7 @@ defmodule Arbor.Trust.GraduationSecurityRegressionTest do
     {:ok, pending} = Trust.graduation_status(ctx.agent_id, @prefix, read_opts(ctx))
     other = Fixture.human!()
     {:ok, wrong} = SessionToken.generate(other)
-    {:ok, expired} = SessionToken.generate(ctx.human_id, ttl: -1)
+    {:ok, expired} = SessionToken.generate_expired_fixture(ctx.human_id)
 
     for token <- ["forged", wrong, expired, nil] do
       opts = Keyword.put(decision_opts(ctx, pending), :session_token, token)

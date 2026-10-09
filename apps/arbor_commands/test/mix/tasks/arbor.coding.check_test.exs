@@ -440,6 +440,9 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
   test "default verification transport completes through a cancellable remote process" do
     path = write_plan!(Plan.to_map(valid_plan!()))
     on_exit(fn -> File.rm(path) end)
+    # The RPC replies only when the default TaskStore is registered. The
+    # umbrella suite inherits one from earlier apps; this file starts its own.
+    ensure_operator_verification_store!()
 
     assert {:error, error} =
              Check.execute(
@@ -723,6 +726,25 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert output ==
              ~s({"error":"invalid_arbor_coding_check_command","field":"agent_id","reason":"required"}\n)
+  end
+
+  defp ensure_operator_verification_store! do
+    store = Arbor.Agent.Orchestration.TaskStore
+
+    if Process.whereis(store) == nil do
+      supervisor =
+        start_supervised!(
+          {Task.Supervisor,
+           name: :"arbor_coding_check_tasks_#{System.unique_integer([:positive])}"}
+        )
+
+      start_supervised!(
+        {store,
+         task_supervisor: supervisor, cleanup_supervisor: supervisor, recovery_force_ready: true}
+      )
+    end
+
+    :ok
   end
 
   defp valid_plan!(profile \\ "default", wall_clock_ms \\ 900_000) do

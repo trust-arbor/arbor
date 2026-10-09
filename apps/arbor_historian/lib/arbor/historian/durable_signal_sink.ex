@@ -7,6 +7,12 @@ defmodule Arbor.Historian.DurableSignalSink do
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
 
+  # Security and signal appends are best-effort: a lock records a gap and the
+  # caller continues. The default EventLog deadline is 5_000 ms. Exqlite 0.42
+  # disconnects on SQLITE_BUSY and the append retries until that deadline, so
+  # one locked append stalls the engine before Session can start its commit guard.
+  @best_effort_append_timeout_ms 250
+
   @spec persist(String.t(), term(), map(), keyword()) :: :ok | {:error, :persist_failed}
   def persist(stream_id, event_type, data, opts) do
     case construct(stream_id, event_type, data, opts) do
@@ -152,7 +158,9 @@ defmodule Arbor.Historian.DurableSignalSink do
   # In-process observe-before-:ok (P1C-B). Persistence.append applies
   # EventLog's operation deadline; do not wrap in Task.start.
   defp commit_durable(stream_id, event, target) do
-    case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
+    opts = Keyword.put_new(target.opts, :append_timeout_ms, @best_effort_append_timeout_ms)
+
+    case Persistence.append(target.name, target.backend, stream_id, event, opts) do
       {:ok, committed_events} ->
         if valid_committed_reply?(committed_events, stream_id, event) do
           {:ok, committed_events}

@@ -437,22 +437,22 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
 
     test "sum", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :sum, name: name, repo: Repo)
-      assert Decimal.equal?(result, 60)
+      assert_aggregate_equal(result, 60)
     end
 
     test "avg", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :avg, name: name, repo: Repo)
-      assert_in_delta Decimal.to_float(result), 20.0, 0.01
+      assert_in_delta aggregate_float(result), 20.0, 0.01
     end
 
     test "min", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :min, name: name, repo: Repo)
-      assert Decimal.equal?(result, 10)
+      assert_aggregate_equal(result, 10)
     end
 
     test "max", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :max, name: name, repo: Repo)
-      assert Decimal.equal?(result, 30)
+      assert_aggregate_equal(result, 30)
     end
 
     test "returns nil for no matching records", %{name: name} do
@@ -464,7 +464,7 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
     test "aggregates with filter", %{name: name} do
       filter = Filter.new() |> Filter.where(:key, :in, ["a", "b"])
       {:ok, result} = Postgres.aggregate(filter, :score, :sum, name: name, repo: Repo)
-      assert Decimal.equal?(result, 30)
+      assert_aggregate_equal(result, 30)
     end
   end
 
@@ -796,4 +796,18 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       end)
     end)
   end
+
+  # Postgres `numeric` arrives as a Decimal. SQLite `REAL` aggregates arrive as
+  # floats. Decimal 2.4 rejects implicit float conversion.
+  defp assert_aggregate_equal(result, expected) when is_integer(expected) do
+    assert Decimal.equal?(aggregate_decimal(result), Decimal.new(expected))
+  end
+
+  defp aggregate_float(%Decimal{} = result), do: Decimal.to_float(result)
+  defp aggregate_float(result) when is_float(result), do: result
+  defp aggregate_float(result) when is_integer(result), do: result / 1
+
+  defp aggregate_decimal(%Decimal{} = result), do: result
+  defp aggregate_decimal(result) when is_float(result), do: Decimal.from_float(result)
+  defp aggregate_decimal(result) when is_integer(result), do: Decimal.new(result)
 end

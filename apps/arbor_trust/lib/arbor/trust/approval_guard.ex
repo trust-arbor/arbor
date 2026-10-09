@@ -209,7 +209,7 @@ defmodule Arbor.Trust.ApprovalGuard do
   defp approved_invocation?(principal_id, resource_uri, opts) do
     receipt = opt(opts, :approved_invocation)
     digest = opt(opts, :argument_digest)
-    action = opt(opts, :approval_action) || :execute
+    action = receipt_action(opts)
 
     is_map(receipt) and is_binary(digest) and
       Arbor.Security.confirm_consumed_approval_receipt(
@@ -223,6 +223,23 @@ defmodule Arbor.Trust.ApprovalGuard do
     _ -> false
   catch
     _, _ -> false
+  end
+
+  # Receipts are bound to an atom (`:execute`). `:approval_action` is the
+  # human-facing operation name (`"file.write"`) and must not retarget the
+  # receipt. An explicit `:receipt_action` wins; an atom `:approval_action`
+  # still works for callers that have not split the keys.
+  defp receipt_action(opts) do
+    case opt(opts, :receipt_action) do
+      action when is_atom(action) and not is_nil(action) ->
+        action
+
+      _ ->
+        case opt(opts, :approval_action) do
+          action when is_atom(action) and not is_nil(action) -> action
+          _ -> :execute
+        end
+    end
   end
 
   defp opt(opts, key) when is_list(opts) do

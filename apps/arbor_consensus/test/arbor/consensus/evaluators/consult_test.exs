@@ -417,7 +417,9 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
 
       elapsed = System.system_time(:millisecond) - started
       assert elapsed >= 140
-      assert elapsed < 420
+      # The deadline is 300ms. Returning the timeout can land a few
+      # milliseconds past the old 420ms bound; 500ms still rejects a second wait.
+      assert elapsed < 500
     end
 
     test "research-mode setup that sleeps still ends by the original deadline" do

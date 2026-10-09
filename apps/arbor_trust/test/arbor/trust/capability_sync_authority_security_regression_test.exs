@@ -15,7 +15,11 @@ defmodule Arbor.Trust.CapabilitySyncAuthoritySecurityRegressionTest do
     {:ok, _profile} = Manager.create_trust_profile(agent_id)
 
     on_exit(fn ->
-      _ = Store.delete_profile(agent_id)
+      # A store started under this test dies with the test process before
+      # on_exit runs. Only the long-lived store still needs the profile removed.
+      if is_pid(Process.whereis(Store)) do
+        _ = Store.delete_profile(agent_id)
+      end
     end)
 
     {:ok, agent_id: agent_id}

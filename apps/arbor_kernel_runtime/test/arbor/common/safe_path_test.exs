@@ -848,6 +848,31 @@ defmodule Arbor.Common.SafePathTest do
     end
   end
 
+  describe "lexical_child/2" do
+    test "keeps a leaf symlink instead of returning its target", %{tmp_dir: tmp_dir} do
+      {:ok, canonical} = SafePath.resolve_real(tmp_dir)
+      target = Path.join(canonical, "target.txt")
+      link = Path.join(canonical, "link.txt")
+      File.write!(target, "payload")
+      :ok = File.ln_s(target, link)
+
+      assert {:ok, ^link} = SafePath.lexical_child(tmp_dir, "link.txt")
+      assert {:ok, ^target} = SafePath.resolve_real(link)
+    end
+
+    test "rebases a non-canonical absolute path onto the resolved root", %{tmp_dir: tmp_dir} do
+      {:ok, canonical} = SafePath.resolve_real(tmp_dir)
+      file = Path.join(canonical, "notes.txt")
+      File.write!(file, "notes")
+
+      assert {:ok, ^file} = SafePath.lexical_child(tmp_dir, file)
+    end
+
+    test "rejects a lexical escape", %{tmp_dir: tmp_dir} do
+      assert {:error, :path_traversal} = SafePath.lexical_child(tmp_dir, "../outside.txt")
+    end
+  end
+
   defp eventually(fun, attempts \\ 100)
   defp eventually(fun, 0), do: fun.()
 

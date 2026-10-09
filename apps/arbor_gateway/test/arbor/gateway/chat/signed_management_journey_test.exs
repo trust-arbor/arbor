@@ -26,6 +26,7 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
   alias Arbor.Agent, as: Agents
   alias Arbor.Agent.Test.{ManagementSessionFixture, RuntimeAdmissionTopology, TrustTopology}
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Gateway.Chat.LifecycleAuthority
   alias Arbor.Gateway.Router
   alias Arbor.Security
   alias Arbor.Security.TestSupport.ApprovalAnswerFixture, as: Grants
@@ -73,7 +74,16 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
 
     {:ok, identity} = Security.generate_identity()
     assert :ok = Security.register_identity_fixture(identity)
-    on_exit(fn -> Security.deregister_identity_fixture(identity.agent_id) end)
+
+    # Create opens this stored key from the supervised lifecycle owner.
+    # Registration alone does not deposit the private key.
+    assert :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
+
+    on_exit(fn ->
+      assert :ok = Security.delete_signing_key_fixture(identity.agent_id)
+      assert :ok = Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
     template = "signed-private-#{System.unique_integer([:positive])}"
     Arbor.Agent.TemplateStore.set_templates_dir(Path.join(root, "templates"))
 
@@ -119,6 +129,14 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
 
     ManagementSessionFixture.preserved!(a)
     ManagementSessionFixture.preserved!(b)
+  end
+
+  test "security regression: raw callers cannot run callbacks inside lifecycle authority", ctx do
+    assert {:error, :capability_mutation_unauthorized} =
+             GenServer.call(
+               LifecycleAuthority,
+               {:with_principal, ctx.identity.agent_id, fn _authority -> :callback_executed end}
+             )
   end
 
   test "security regression: full Router verifies method path body and nonce before exact stop capability and actual effect",
@@ -205,6 +223,19 @@ defmodule Arbor.Gateway.Chat.SignedManagementJourneyTest do
     assert MapSet.new(Arbor.Agent.Lifecycle.list_agents(), & &1.agent_id) == before
     assert :ok = Security.revoke_fixture(pending.id)
     Grants.grant!(ctx.identity.agent_id, "arbor://agent/lifecycle/create")
+
+    # Creating an agent registers and endorses a new identity. The lifecycle
+    # capability alone does not authorize those security mutations.
+    for resource <- [
+          "arbor://security/identity/register",
+          "arbor://security/identity/endorse/**",
+          "arbor://security/grant/**",
+          "arbor://security/revoke/**",
+          "arbor://security/identity/deregister/**"
+        ] do
+      Grants.grant!(ctx.identity.agent_id, resource)
+    end
+
     created = request(ctx.identity, "POST", "/api/chat/agents", body)
     assert created.status == 200, created.resp_body
     assert %{"agent_id" => id, "running" => true} = Jason.decode!(created.resp_body)

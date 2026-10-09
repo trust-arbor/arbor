@@ -95,6 +95,23 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
     original_strict = Application.get_env(:arbor_security, :strict_identity_mode, false)
     original_signing = Application.get_env(:arbor_security, :capability_signing_required, true)
 
+    authorization_posture = [
+      {:arbor_security, :policy_enforcer_enabled},
+      {:arbor_security, :approval_guard_enabled},
+      {:arbor_security, :consensus_escalation_enabled},
+      {:arbor_security, :uri_registry_enforcement},
+      {:arbor_security, :invocation_receipts_enabled},
+      {:arbor_trust, :policy_enforcer_enabled},
+      {:arbor_trust, :approval_guard_enabled}
+    ]
+
+    previous_posture =
+      Enum.map(authorization_posture, fn {app, key} ->
+        previous = Application.fetch_env(app, key)
+        Application.put_env(app, key, false)
+        {app, key, previous}
+      end)
+
     Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :reflex_checking_enabled, false)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
@@ -126,9 +143,60 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
       Application.put_env(:arbor_security, :reflex_checking_enabled, original_reflex)
       Application.put_env(:arbor_security, :strict_identity_mode, original_strict)
       Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+
+      Enum.each(previous_posture, fn
+        {app, key, {:ok, value}} -> Application.put_env(app, key, value)
+        {app, key, :error} -> Application.delete_env(app, key)
+      end)
     end)
 
     %{store: store}
+  end
+
+  test "security regression: lease owner refuses arbitrary capability grant", %{store: _store} do
+    principal = "agent_unadmitted_#{System.unique_integer([:positive])}"
+    resource = "arbor://agent/task/read/task_unadmitted"
+
+    assert {:error, :lease_grant_unauthorized} =
+             GenServer.call(
+               Arbor.Agent.Orchestration.LeaseGrantOwner,
+               {:grant, [principal: principal, resource: resource]}
+             )
+
+    assert {:ok, capabilities} = Security.list_capabilities(principal)
+    refute Enum.any?(capabilities, &(&1.resource_uri == resource))
+  end
+
+  test "security regression: acknowledged reservation alone cannot mint a lease", %{store: store} do
+    principal = "agent_no_dispatch_#{System.unique_integer([:positive])}"
+    target = "agent_reserved_#{System.unique_integer([:positive])}"
+
+    assert {:ok, %{task_id: task_id, reservation_token: token}} =
+             TaskStore.reserve(target, name: store)
+
+    assert :ok =
+             TaskStore.commit_recovery_marker(task_id, token,
+               name: store,
+               control_principal_id: principal
+             )
+
+    assert {:ok, spec} =
+             Arbor.Agent.Orchestration.TaskControlLease.grant_spec(
+               :task_read,
+               principal,
+               task_id,
+               DateTime.utc_now()
+             )
+
+    assert {:error, :lease_dispatch_unauthorized} =
+             Arbor.Agent.Orchestration.LeaseGrantOwner.grant(
+               :task_read,
+               spec,
+               token,
+               name: store
+             )
+
+    assert {:ok, []} = Security.list_capabilities(principal)
   end
 
   test "security regression: dispatch omits required caller authority on parent; candidate mints exact-task authority",
@@ -141,11 +209,13 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
              Security.grant_fixture(
                principal: caller,
                resource: "arbor://agent/dispatch/#{agent}",
+               max_uses: 1,
                constraints: %{},
                delegation_depth: 0
              )
 
-    # Public dispatch never accepts caller task_id (server-owned ids).
+    # A rejected caller-selected task ID must not spend the one-use dispatch
+    # grant before the valid dispatch below.
     assert {:error, :caller_selected_task_id_rejected} =
              Orchestration.dispatch(agent, "work a",
                caller_id: caller,
@@ -331,9 +401,43 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
                consensus_module: FakeConsensus
              )
 
-    # Exact-task cancel also works with the automatic lease on the candidate.
+    # Restart the signing owner after minting. TaskStore's pending retirement
+    # membership must still authorize exact revocation after its in-memory
+    # mint set disappears.
+    assert :ok =
+             Supervisor.terminate_child(
+               Arbor.Agent.AppSupervisor,
+               Arbor.Agent.Orchestration.LeaseGrantOwner
+             )
+
+    assert {:ok, _} =
+             Supervisor.restart_child(
+               Arbor.Agent.AppSupervisor,
+               Arbor.Agent.Orchestration.LeaseGrantOwner
+             )
+
+    # Exact-task cancel and retirement work after owner restart.
     assert {:ok, %{state: :cancelled}} =
              Orchestration.cancel_task(task_a, caller_id: caller, name: store)
+
+    {:ok, cancel_uri} =
+      Arbor.Agent.Orchestration.TaskControlLease.uri(:task_cancel, task_a)
+
+    assert_denied_eventually(caller, cancel_uri, 100)
+  end
+
+  defp assert_denied_eventually(_principal, _resource, 0),
+    do: flunk("cancel lease remained authorized after retirement")
+
+  defp assert_denied_eventually(principal, resource, attempts) do
+    case Security.authorize(principal, resource, :execute, verify_identity: false) do
+      {:ok, :authorized} ->
+        Process.sleep(50)
+        assert_denied_eventually(principal, resource, attempts - 1)
+
+      {:error, _} ->
+        :ok
+    end
   end
 
   defp interaction_request(id, agent_id, user_id, resource_uri, opts) do

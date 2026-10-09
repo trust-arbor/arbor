@@ -3,15 +3,14 @@ defmodule Arbor.Orchestrator.OrdinaryTurnStreamSignalSecurityRegressionTest do
 
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.TestSupport.SignalsStack
 
   @moduletag :fast
   @moduletag :security_regression
   @private_chunk "PRIVATE ordinary café turn 🌲"
 
   setup do
-    for child <- [Arbor.Signals.Store, Arbor.Signals.Bus] do
-      if Process.whereis(child) == nil, do: start_supervised!(child)
-    end
+    :ok = SignalsStack.ensure!()
 
     id = "ordinary-stream-privacy-#{System.unique_integer([:positive])}"
     root = Path.join(System.tmp_dir!(), id)

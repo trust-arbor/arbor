@@ -9,7 +9,7 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
   alias Arbor.Security
   alias Arbor.Security.SessionToken
 
-  def setup! do
+  def setup!(opts \\ []) do
     assert :ok = Security.TestBootstrap.start!()
 
     settings = [
@@ -33,7 +33,7 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
       end)
     end)
 
-    human = human!()
+    human = human!(opts)
     {:ok, token} = SessionToken.generate(human)
 
     %{
@@ -43,9 +43,22 @@ defmodule Arbor.Security.TestSupport.ApprovalAnswerFixture do
     }
   end
 
-  def human! do
+  def human!(opts \\ []) do
     oidc = Security.OIDCTestHelper.issue_identity()
     assert :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
+
+    # OIDC registration proves the human and keeps the private key out of the
+    # store. Session lifecycle mutations open that stored key, so only the
+    # caller that will exercise them deposits the fixture key.
+    if Keyword.get(opts, :store_signing_key, false) do
+      assert :ok =
+               Security.store_signing_key_fixture(
+                 oidc.identity.agent_id,
+                 oidc.identity.private_key
+               )
+
+      on_exit(fn -> Security.delete_signing_key_fixture(oidc.identity.agent_id) end)
+    end
 
     on_exit(fn ->
       assert :ok = Security.deregister_identity_fixture(oidc.identity.agent_id)

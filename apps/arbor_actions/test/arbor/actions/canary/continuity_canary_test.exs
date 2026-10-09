@@ -180,7 +180,11 @@ defmodule Arbor.Actions.Canary.ContinuityCanaryTest do
 
       {_recall_out, prompt_out} = session_3_recall_and_build(agent_id, @s3_question)
 
-      assert prompt_out[:user_prompt] == @s3_question
+      # `user_prompt` is the model-facing turn (Arbor context, then the
+      # question). The question survives as the current user message; it is
+      # not replaced by the injected recall.
+      boundary = "\n\n---\n\n## Current user message\n"
+      assert [_context, @s3_question] = String.split(prompt_out[:user_prompt], boundary, parts: 2)
       assert rendered(prompt_out[:messages]) =~ @s3_question
     end
   end
