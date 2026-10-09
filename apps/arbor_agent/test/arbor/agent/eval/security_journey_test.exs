@@ -43,6 +43,10 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
         [persistence: :memory]
       end
 
+    # This journey needs its own Trust owners (store_opts above); stop the
+    # app-owned ones an earlier module's TrustTopology.ensure_owned!/0 left
+    # running, and restore them when the test exits.
+    :ok = Arbor.Agent.Test.TrustTopology.release_owned!()
     start_supervised!({Arbor.Trust.Store, store_opts})
 
     start_supervised!(
