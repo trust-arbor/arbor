@@ -435,6 +435,17 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
       assert Enum.any?(result.violations, &(&1.type == :pii_scan_incomplete))
     end
 
+    test "the source-scan deadline scales with admitted lines and stays bounded" do
+      # A flat 1 s deadline failed the in-bounds 14.2k-line TaskStore closed on
+      # every scan (it needs 1.3-2 s), blocking all arbor_agent commits.
+      assert PIIDetection.source_scan_timeout_ms(20) < 1_100
+      assert PIIDetection.source_scan_timeout_ms(14_200) >= 4_000
+      assert PIIDetection.source_scan_timeout_ms(16_384) <= 6_000
+
+      assert PIIDetection.source_scan_timeout_ms(1_000_000) ==
+               PIIDetection.source_scan_timeout_ms(16_384)
+    end
+
     @tag :slow
     test "handles pathological input without hanging" do
       evil_input = ~s|api_key: "| <> String.duplicate("a", 10_000)
