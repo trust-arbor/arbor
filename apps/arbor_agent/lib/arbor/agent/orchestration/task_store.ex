@@ -2612,7 +2612,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp fixed_application_child?(candidate, child_id) when is_pid(candidate) do
-    with master when is_pid(master) <- :application_controller.get_master(:arbor_agent),
+    # Never ask the master for its child before :arbor_agent is started: OTP 28
+    # crashes a still-starting application master on get_child, which hangs
+    # the whole boot (see Arbor.Security.SupervisedOwner.application_root/1).
+    with true <- Enum.any?(Application.started_applications(), &match?({:arbor_agent, _, _}, &1)),
+         master when is_pid(master) <- :application_controller.get_master(:arbor_agent),
          {root, _module} when is_pid(root) <- :application_master.get_child(master),
          {^child_id, child, _type, _modules} when is_pid(child) <-
            Enum.find(Supervisor.which_children(root), fn

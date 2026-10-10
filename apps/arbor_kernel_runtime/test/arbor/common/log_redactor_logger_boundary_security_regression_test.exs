@@ -91,6 +91,62 @@ defmodule Arbor.Common.LogRedactorLoggerBoundarySecurityRegressionTest do
     refute format_output =~ "FORMATTER CRASH"
   end
 
+  defmodule CrashingServer do
+    @moduledoc false
+    use GenServer
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_cast({:boom, marker}, _state), do: raise("crash marker #{marker}")
+  end
+
+  # 2026-10-09: Elixir's primary translator turns a gen_server terminate report
+  # into `{:report, flat_map ++ elixir_translation}` plus a report_cb that only
+  # prints `:elixir_translation`. The 256-node walk dropped that key from the
+  # big flat map, so every supervisor/GenServer crash rendered as `[error] nil`
+  # — the Trust boot hang left no exit reason anywhere in the daemon log.
+  test "security regression: a real GenServer crash renders its reason, not nil, and stays redacted" do
+    marker = "boundary-#{System.unique_integer([:positive])}"
+    secret = "sk-ant-api03-" <> String.duplicate("Z", 32)
+
+    big_state =
+      1..400
+      |> Map.new(fn i -> {"field_#{i}", "value_#{i}"} end)
+      |> Map.put(:note, "ANTHROPIC_API_KEY=#{secret}")
+
+    {:ok, pid} = GenServer.start(CrashingServer, big_state)
+    ref = Process.monitor(pid)
+    GenServer.cast(pid, {:boom, marker})
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
+    {event, output} = receive_rendered_containing(marker, 2_000)
+
+    assert match?(%{msg: {:string, _}}, event)
+    refute output == "nil"
+    assert output =~ "crash marker #{marker}"
+    refute inspect(event) =~ secret
+    refute output =~ secret
+  end
+
+  defp receive_rendered_containing(marker, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    receive_loop = fn loop ->
+      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      receive do
+        {:redacted_logger_event, event, rendered} ->
+          if rendered =~ marker, do: {event, rendered}, else: loop.(loop)
+      after
+        remaining -> flunk("no rendered log event contained #{marker}")
+      end
+    end
+
+    receive_loop.(receive_loop)
+  end
+
   defp default_handler_uses_redaction_filter? do
     with {:ok, %{filters: filters}} <- :logger.get_handler_config(:default) do
       Enum.any?(filters, fn

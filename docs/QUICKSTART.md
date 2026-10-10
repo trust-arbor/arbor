@@ -165,6 +165,33 @@ the caveats at the end.
 Useful afterwards: `./bin/mix arbor.status`, `./bin/mix arbor.restart`,
 `./bin/mix arbor.stop`.
 
+### If the server does not start
+
+When startup fails, `arbor.start` prints the first failure from
+`~/.arbor/logs/arbor-dev.log`. It also reports a node stuck mid-boot instead of
+waiting out the full timeout. Common first-run causes:
+
+- **`:session_token_secret_missing`**: set `ARBOR_SESSION_TOKEN_SECRET` in
+  `.env` to at least 32 random bytes (for example `openssl rand -base64 48`).
+- **`:offline_migration_required`**: the security store in `.arbor/security`
+  was written by an older Arbor (before 2026-10-07), and there is no migration
+  tool yet. The error names the directory. To start fresh, stop Arbor, move the
+  directory aside as a backup, and start again:
+
+  ```bash
+  ./bin/mix arbor.stop
+  ```
+
+  ```bash
+  mkdir -p ~/.arbor/backups && mv .arbor/security ~/.arbor/backups/security-$(date +%Y%m%d)
+  ```
+
+  Identities, capabilities and grants in the old store do not carry over; run
+  §5 again afterwards.
+
+A half-started server may still be running after a failure. Stop it with
+`./bin/mix arbor.stop` before starting again.
+
 ## 5. Local operator identity (development only)
 
 ```bash

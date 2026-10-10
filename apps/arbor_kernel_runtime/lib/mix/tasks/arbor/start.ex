@@ -316,7 +316,7 @@ defmodule Mix.Tasks.Arbor.Start do
         Mix.shell().error("""
 
         #{Readiness.timeout_diagnostic(:node_unreachable, expected, @node_timeout_ms)}
-        Check the log file for errors: #{log_file}
+        #{log_failure_hint(log_file)}
 
         The launched process (pid #{pid}) is still recorded in
         #{Config.metadata_file()} as `state: "starting"` — `mix arbor.stop`
@@ -329,7 +329,7 @@ defmodule Mix.Tasks.Arbor.Start do
         Mix.shell().error("""
 
         #{Readiness.timeout_diagnostic(last_result, expected, @app_timeout_ms)}
-        Check the log file for errors: #{log_file}
+        #{log_failure_hint(log_file)}
 
         The launched process (pid #{pid}) is still recorded in
         #{Config.metadata_file()} as `state: "starting"` — `mix arbor.stop`
@@ -339,6 +339,28 @@ defmodule Mix.Tasks.Arbor.Start do
         exit({:shutdown, 1})
     end
   end
+
+  # Each launch truncates the log, so the first failure in it belongs to this
+  # boot. Surface it instead of making the operator go find it: an early
+  # `Could not start application` halts the node (seen here only as
+  # :nodedown), and a stalled start leaves only a crash report behind.
+  defp log_failure_hint(log_file) do
+    case File.read(log_file) do
+      {:ok, contents} ->
+        case Readiness.failure_excerpt(contents) do
+          {:ok, excerpt} ->
+            "First failure in #{log_file}:\n\n" <> indent(excerpt) <> "\n"
+
+          :none ->
+            "No error found in #{log_file}; check it for context."
+        end
+
+      {:error, reason} ->
+        "Could not read the log file #{log_file} (#{inspect(reason)})."
+    end
+  end
+
+  defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("    " <> &1))
 
   @doc false
   @spec daemon_launch_argv(map()) :: {:ok, [String.t()]} | {:error, term()}
@@ -609,7 +631,7 @@ defmodule Mix.Tasks.Arbor.Start do
     case poll_node_reachable(node, node_deadline) do
       :ok ->
         app_deadline = System.monotonic_time(:millisecond) + @app_timeout_ms
-        poll_apps_ready(node, expected, app_deadline, :no_observation)
+        poll_apps_ready(node, expected, app_deadline, :no_observation, [])
 
       :timeout ->
         {:error, :node_unreachable}
@@ -634,7 +656,7 @@ defmodule Mix.Tasks.Arbor.Start do
     end
   end
 
-  defp poll_apps_ready(node, expected, deadline_mono_ms, last_result) do
+  defp poll_apps_ready(node, expected, deadline_mono_ms, last_result, dead_starts) do
     now = System.monotonic_time(:millisecond)
 
     case Readiness.poll_decision(deadline_mono_ms, now, last_result) do
@@ -649,7 +671,10 @@ defmodule Mix.Tasks.Arbor.Start do
 
       {:continue, remaining} ->
         observation = observe_started_apps(node, remaining)
-        classified = Readiness.classify_observation(expected, observation)
+        partial = Readiness.classify_observation(expected, observation)
+
+        {classified, dead_starts} =
+          observe_stalled_start(node, partial, dead_starts, remaining)
 
         case Readiness.poll_decision(
                deadline_mono_ms,
@@ -668,7 +693,7 @@ defmodule Mix.Tasks.Arbor.Start do
           {:continue, remaining_after} ->
             sleep = Readiness.sleep_ms(remaining_after, @poll_interval_ms)
             if sleep > 0, do: Process.sleep(sleep)
-            poll_apps_ready(node, expected, deadline_mono_ms, classified)
+            poll_apps_ready(node, expected, deadline_mono_ms, classified, dead_starts)
         end
     end
   end
@@ -685,6 +710,35 @@ defmodule Mix.Tasks.Arbor.Start do
         apps when is_list(apps) -> {:ok, apps}
         other -> {:error, {:unexpected_rpc_result, other}}
       end
+    end
+  end
+
+  # A partially started node may be stuck rather than slow: an application
+  # whose master died during start/2 stays `starting` forever. Detect it
+  # instead of waiting out the whole cold-start budget.
+  defp observe_stalled_start(node, {:partial, missing, present} = classified, previous, remaining) do
+    dead_starts = observe_dead_starts(node, Readiness.rpc_timeout_ms(remaining, @rpc_timeout_ms))
+
+    case Readiness.stalled_start(previous, dead_starts) do
+      nil -> {classified, dead_starts}
+      app -> {{:stalled_start, app, missing, present}, dead_starts}
+    end
+  end
+
+  defp observe_stalled_start(_node, classified, _previous, _remaining), do: {classified, []}
+
+  # Observe only: :application.info/0 and get_master/1 read controller state.
+  defp observe_dead_starts(_node, timeout) when timeout <= 0, do: []
+
+  defp observe_dead_starts(node, timeout) do
+    case :rpc.call(node, :application, :info, [], timeout) do
+      info when is_list(info) ->
+        for app <- Readiness.starting_application_names(info),
+            :rpc.call(node, :application_controller, :get_master, [app], timeout) == :undefined,
+            do: app
+
+      _other ->
+        []
     end
   end
 

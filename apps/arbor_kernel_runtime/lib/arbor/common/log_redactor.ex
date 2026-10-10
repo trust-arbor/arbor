@@ -21,6 +21,8 @@ defmodule Arbor.Common.LogRedactor do
   @max_depth 12
   @max_nodes 256
   @max_format_chars 4_096
+  @max_rendered_bytes 65_536
+  @max_flat_otp_report_keys 16
 
   # Plain map — never include :__struct__, so Inspect/protocol cannot dispatch.
   @redacted_marker %{redacted: true}
@@ -38,8 +40,8 @@ defmodule Arbor.Common.LogRedactor do
           {:string, chardata} ->
             %{log_event | msg: {:string, chardata |> IO.chardata_to_string() |> redact_binary()}}
 
-          {:report, %{label: label, report: _} = report} when is_tuple(label) ->
-            redact_otp_report(log_event, report)
+          {:report, report} when is_map(report) or is_list(report) ->
+            redact_report(log_event, report)
 
           {:report, report} ->
             {redacted, _budget} = walk(report, @max_depth, @max_nodes)
@@ -79,6 +81,62 @@ defmodule Arbor.Common.LogRedactor do
   # string preserves the reason without exposing the unredacted state.
   defp redact_otp_report(log_event, %{label: label, report: report}) do
     %{log_event | msg: {:string, otp_report_string(label, report)}}
+  end
+
+  # Logger's primary translator filter runs BEFORE this handler filter. When
+  # it understands a report it keeps `{:report, report}` but adds the rendered
+  # text under `:elixir_translation` and points `meta.report_cb` at a callback
+  # that prints only that key. A gen_server/gen_statem terminate report is a
+  # FLAT map (`label`, `reason`, `state`, `last_message`, ... — no `report`
+  # key), so it used to fall through to the 256-node walk, which dropped
+  # `:elixir_translation` and made the report_cb print `nil`. Every
+  # supervisor crash, including the 2026-10-09 Trust boot hang, logged as
+  # `[error] nil`. Redact the already-rendered translation instead.
+  defp redact_report(log_event, report) do
+    case report_translation(report) do
+      {:ok, translation} ->
+        rendered = translation |> IO.chardata_to_string() |> bound_rendered()
+        %{log_event | msg: {:string, redact_binary(rendered)}}
+
+      :error ->
+        redact_untranslated_report(log_event, report)
+    end
+  end
+
+  defp report_translation(%{elixir_translation: translation}), do: {:ok, translation}
+  defp report_translation([{:elixir_translation, translation} | _rest]), do: {:ok, translation}
+  defp report_translation(_report), do: :error
+
+  defp redact_untranslated_report(log_event, %{label: label, report: _} = report)
+       when is_tuple(label) do
+    redact_otp_report(log_event, report)
+  end
+
+  # Untranslated flat OTP report (translator disabled or unknown label). OTP
+  # emits these with a handful of atom keys; the size bound keeps an arbitrary
+  # caller-built map from being copied wholesale before the walk budget applies.
+  defp redact_untranslated_report(log_event, %{label: label} = report)
+       when is_tuple(label) and map_size(report) <= @max_flat_otp_report_keys do
+    fields = report |> Map.delete(:label) |> Enum.sort()
+    %{log_event | msg: {:string, otp_report_string(label, fields)}}
+  end
+
+  defp redact_untranslated_report(log_event, report) do
+    {redacted, _budget} = walk(report, @max_depth, @max_nodes)
+    %{log_event | msg: {:report, redacted}}
+  end
+
+  defp bound_rendered(rendered) when byte_size(rendered) <= @max_rendered_bytes, do: rendered
+
+  defp bound_rendered(rendered) do
+    head =
+      case :unicode.characters_to_binary(binary_part(rendered, 0, @max_rendered_bytes)) do
+        valid when is_binary(valid) -> valid
+        {:incomplete, valid, _rest} -> valid
+        {:error, valid, _rest} -> valid
+      end
+
+    head <> "\n... (log message truncated)"
   end
 
   # Keys of a proper keyword list, or :improper when it is not one (an

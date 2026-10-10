@@ -165,6 +165,47 @@ defmodule Arbor.Common.LogRedactorTest do
       refute rendered == "nil"
     end
 
+    test "regression: a translated flat gen_server terminate report keeps its rendered reason" do
+      # Shape produced by Elixir's primary translator for OTP 28 gen_server
+      # crashes: a FLAT report map (no :report key) plus :elixir_translation.
+      secret = "sk-ant-api03-SECRETSECRETSECRET"
+      big_state = Map.new(1..300, fn i -> {"k#{i}", "v#{i}"} end)
+
+      report = %{
+        label: {:gen_server, :terminate},
+        name: SomeServer,
+        last_message: {:"$gen_cast", :boom},
+        state: Map.put(big_state, :api_key, secret),
+        reason: {%RuntimeError{message: "resume exploded"}, []},
+        elixir_translation: [
+          "GenServer SomeServer terminating\n",
+          ["** (RuntimeError) resume exploded", "\nState: ", "api_key=#{secret}"]
+        ]
+      }
+
+      event = %{level: :error, msg: {:report, report}, meta: %{}}
+
+      assert %{msg: {:string, rendered}} = LogRedactor.filter(event, :log)
+      assert rendered =~ "resume exploded"
+      refute rendered =~ "SECRETSECRET"
+    end
+
+    test "an untranslated flat OTP report renders its reason instead of collapsing" do
+      big_state = Map.new(1..300, fn i -> {"k#{i}", "v#{i}"} end)
+
+      report = %{
+        label: {:gen_statem, :terminate},
+        name: SomeStatem,
+        state: big_state,
+        reason: :statem_exploded
+      }
+
+      event = %{level: :error, msg: {:report, report}, meta: %{}}
+
+      assert %{msg: {:string, rendered}} = LogRedactor.filter(event, :log)
+      assert rendered =~ "reason: :statem_exploded"
+    end
+
     test "walks keyword-list reports without raising" do
       secret = "AKIA" <> "IOSFODNN7EXAMPLE"
       event = %{level: :info, meta: %{}, msg: {:report, [a: 1, detail: "key=#{secret}"]}}

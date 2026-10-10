@@ -997,6 +997,78 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   Tests setting up unrelated state use the compile-time `*_fixture` APIs; a
   production caller must never select them or regain a raw-key path.
 
+## 34. Role owners claim key custody while their own app is still starting (2026-10-09)
+
+- **What:** `SigningKeyStore.Owner` and `Identity.Registry` admit role owners
+  (`trust_grant_owner`, `scheduler_owner`, `system_lifecycle_owner`, ...) only
+  as the exact child at their configured supervision path, via
+  `Arbor.Security.SupervisedOwner.authorized?/3`. Owners claim custody from a
+  `handle_continue`, which still runs *inside* their application's `start/2`
+  (`Scheduler.Application.start/2` even waits for it). On OTP 28,
+  `:application_master.get_child/1` against an application whose `start/2` has
+  not returned crashes that master with `badarg`
+  (`erlang:is_process_alive(undefined)` in `get_child_i/3`); the application
+  controller never hears `application_started` and keeps the app in
+  `starting` forever. `application_root/1` now asks the master only once the app
+  is in `Application.started_applications/0`. During `start/2` the root is bound
+  from VM-maintained spawn parents (caller → … → root → start/2 process → that
+  app's master), and the exact child ids are still checked top-down with
+  bounded `which_children` calls. This is not "admit because the app is not
+  started yet"; the parent chain cannot be forged by the caller.
+- **Symptom:** `mix arbor.start` stalls at a partial app set (2026-10-09: 15/26,
+  `arbor_trust` and everything after it missing, port 4000 dead) while the BEAM
+  stays up. The log shows `init got unexpected: {'ETS-TRANSFER',
+  arbor_trust_policy_host_claim, ...}` (the PolicyHost table falling to its
+  `init` heir as the supervisor shuts down) and then a crash report from
+  `Arbor.Trust.ApplicationSupervisor`, which rendered as `[error] nil` until the
+  LogRedactor fix of the same day. `mix arbor.start` now fails fast with
+  "`<app>` is stuck starting".
+- **Action:** never call `:application_master.get_child/1` or
+  `:application.get_supervisor/1` for an application that is not yet started.
+  Inside `arbor_security` use `SupervisedOwner`; elsewhere,
+  `Arbor.Common.supervised_registered_child_pid/4` (it fails closed while the
+  app is starting). To diagnose a stuck boot, attach with the daemon's cookie
+  home: `HOME=~/.arbor/distribution elixir --name probe@127.0.0.1 --erl
+  "-kernel inet_dist_use_interface {127,0,0,1}" script.exs`. Then read
+  `:application.info()[:starting]`. An app listed there whose
+  `:application_controller.get_master/1` is `:undefined` died mid-start. To find
+  what killed it, set `:erlang.trace(:all, true, [:procs, :call])` before boot,
+  plus a `:receive` trace on that app's master (the group leader of its root
+  supervisor).
+
+## 35. Fresh-store dev boot gates (2026-10-09)
+
+- **`ARBOR_SESSION_TOKEN_SECRET`:** since `ddf05e470` there is no committed dev
+  secret. `arbor_security` refuses to start with
+  `:session_token_secret_missing`. **Action:** set it in `.env` (see
+  `.env.example`).
+- **Pre-authenticated authority store:** records from before 2026-10-07
+  (envelope v2 or the older raw layout) are refused with
+  `:offline_migration_required`. The startup error now carries
+  `%{authority_root: dir, action: ...}`, and the same text is logged.
+  **Action:** stop Arbor and move the directory aside, e.g. `mv
+  <repo>/.arbor/security ~/.arbor/backups/security-<date>`. Then start fresh.
+  Identities, capabilities and grants are not carried over. No migration tool
+  exists yet (deferred decision).
+- **Scheduler capability (OPEN):** `ddf05e470` removed `Scheduler.Identity`'s
+  self-grant of `arbor://orchestrator/execute/**`. On a fresh store,
+  `arbor_scheduler` now refuses to start with `{:scheduler_identity_start_failed,
+  {:capability_provision_failed, {:scheduler_capability_not_provisioned,
+  "arbor://orchestrator/execute/**"}}}`. The node halts. Nothing can provision
+  that capability first: genesis (`mix arbor.user.init`) needs a running server.
+  The scheduler identity itself *is* created and stored before the check fails.
+  **Action:** pending a decision on how system principals are provisioned
+  (dormant-until-provisioned vs. a genesis-time grant).
+- **Trust grant owner dormant:** `[Trust.CapabilityGrantOwner] dormant:
+  {:grant_owner_capability_not_provisioned, agent_id}` is by design until an
+  operator runs `mix arbor.trust.grant_owner provision --key-file ...` after
+  genesis. It does not block boot.
+- **Reading a failed boot:** `mix arbor.start` prints the first `Could not start
+  application` line, or the first `[error]` entry, from
+  `~/.arbor/logs/arbor-dev.log`. Every restart rotates the log and keeps only 3
+  generations, so repeated diagnostic restarts discard older failures. Copy the
+  log out first if you need it.
+
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
 **Do not telemetry-invert distributed security state sync.** Security observability can emit `:telemetry` and let `arbor_signals` bridge it back to signals, but nonce, capability, and identity sync are load-bearing cross-node security state. `NonceCache` uses `security.nonce_seen` to block replay against peer nodes; `CapabilityStore` uses revocation signals to evict revoked grants on peers; `Identity.Registry` uses identity lifecycle signals to keep peer caches current. Telemetry is in-process and synchronous, so it cannot replace node-hop transport. B9 extraction needs an injected sync transport (likely Phoenix.PubSub or `Arbor.Signals` behind a behaviour), not a telemetry bridge, before dropping the `arbor_signals` dependency.
