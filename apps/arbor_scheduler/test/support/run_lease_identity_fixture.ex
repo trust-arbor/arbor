@@ -11,7 +11,7 @@ defmodule Arbor.Scheduler.RunLeaseIdentityFixture do
       :ok = ensure_security_tree!()
 
       case Process.whereis(Identity) do
-        pid when is_pid(pid) -> await_ready!(pid)
+        pid when is_pid(pid) -> ensure_ready!(pid)
         nil -> bootstrap_identity!()
       end
 
@@ -42,21 +42,25 @@ defmodule Arbor.Scheduler.RunLeaseIdentityFixture do
 
   defp bootstrap_identity! do
     case start_identity() do
-      {:ok, pid} ->
-        case await_ready(pid) do
-          :ok -> :ok
-          {:error, :not_ready} -> provision_and_restart!()
-        end
-
-      {:error, {:already_started, pid}} ->
-        await_ready!(pid)
-
-      {:error, reason} ->
-        raise "failed to bootstrap scheduler identity: #{inspect(reason)}"
+      {:ok, pid} -> ensure_ready!(pid)
+      {:error, {:already_started, pid}} -> ensure_ready!(pid)
+      {:error, reason} -> raise "failed to bootstrap scheduler identity: #{inspect(reason)}"
     end
   end
 
-  defp provision_and_restart! do
+  # A fresh scheduler identity stays dormant (alive, no authority) until an
+  # operator grants its required capabilities; the fixture plays operator.
+  defp ensure_ready!(pid) do
+    case await_ready(pid) do
+      :ok ->
+        :ok
+
+      {:error, :not_ready} ->
+        if Process.alive?(pid), do: provision_and_retry!(), else: bootstrap_identity!()
+    end
+  end
+
+  defp provision_and_retry! do
     {:ok, agent_ids} = Security.lookup_identity_ids_by_display_name("scheduler")
 
     Enum.each(agent_ids, fn agent_id ->
@@ -71,15 +75,7 @@ defmodule Arbor.Scheduler.RunLeaseIdentityFixture do
       end)
     end)
 
-    case start_identity() do
-      {:ok, pid} -> await_ready!(pid)
-      {:error, {:already_started, pid}} -> await_ready!(pid)
-      {:error, reason} -> raise "failed to start scheduler identity: #{inspect(reason)}"
-    end
-  end
-
-  defp await_ready!(pid) do
-    case await_ready(pid) do
+    case Identity.retry_bootstrap() do
       :ok -> :ok
       {:error, reason} -> raise "scheduler identity did not become ready: #{inspect(reason)}"
     end

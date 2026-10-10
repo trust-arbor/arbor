@@ -233,6 +233,20 @@ and if you do move, fold the new id onto the original one:
 When you later add a real identity-provider login, it derives its own id; link
 it to this one the same way so your grants and agents carry over.
 
+### Provision the scheduler
+
+The scheduler never grants itself authority. On a fresh install it starts
+**dormant**: Arbor runs normally, but scheduled jobs are held in standby and
+nothing executes or fires from cron. Once genesis has made you an
+administrator, grant it its capabilities with your key file:
+
+```bash
+./bin/mix arbor.scheduler.provision --key-file ~/.arbor/operator.key
+```
+
+`./bin/mix arbor.scheduler.provision --status` shows whether it is still
+dormant and which capabilities it lacks.
+
 ## 6. First reply (conversationalist)
 
 ```bash

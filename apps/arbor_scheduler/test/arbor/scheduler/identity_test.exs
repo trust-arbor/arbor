@@ -322,21 +322,48 @@ defmodule Arbor.Scheduler.IdentityTest do
     refute Enum.any?(capabilities, &(&1.resource_uri == resource))
   end
 
-  test "security regression: missing scheduler authority fails closed but preserves bootstrap identity" do
+  test "security regression: missing scheduler authority stays dormant and never self-grants" do
+    # A fresh install has no operator grant yet. The identity must neither
+    # crash the scheduler application (that blocked every fresh boot) nor
+    # mint its own authority; it waits, dormant, for an operator.
     assert {:error,
-            {:capability_provision_failed,
-             {:scheduler_capability_not_provisioned, "arbor://orchestrator/execute/**"}}} =
-             start_identity_expect_error()
+            {:scheduler_identity_dormant,
+             {:capability_provision_failed,
+              {:scheduler_capability_not_provisioned, "arbor://orchestrator/execute/**"}}}} =
+             start_scheduler_identity()
+
+    pid = Process.whereis(Identity)
+    assert is_pid(pid) and Process.alive?(pid)
 
     assert {:ok, [agent_id]} = Security.lookup_identity_ids_by_display_name("scheduler")
+    on_exit(fn -> cleanup_identity(agent_id) end)
+
     assert {:ok, public_key} = Security.lookup_public_key(agent_id)
     assert is_binary(public_key)
     assert {:ok, :available} = Security.signing_key_status(agent_id)
 
+    assert %{
+             state: :dormant,
+             principal_id: ^agent_id,
+             missing_capabilities: missing
+           } = Identity.status()
+
+    assert missing == Identity.required_capability_uris()
+    assert Identity.agent_id() == agent_id
+
+    # Re-checking without an operator grant stays dormant and grants nothing.
+    assert {:error, {:scheduler_identity_dormant, _reason}} = Identity.retry_bootstrap()
+    assert {:ok, capabilities} = Security.list_capabilities(agent_id)
+    assert capabilities == []
+
+    assert {:error, :scheduler_authority_not_exported} =
+             GenServer.call(Identity, :get_signing_authority)
+
     grant_required_capabilities(agent_id)
 
-    assert {:ok, pid} = start_scheduler_identity()
-    assert Identity.agent_id() == agent_id
+    assert :ok = Identity.retry_bootstrap()
+    assert Process.whereis(Identity) == pid
+    assert %{state: :ready, principal_id: ^agent_id, missing_capabilities: []} = Identity.status()
 
     assert {:error, :scheduler_authority_not_exported} =
              GenServer.call(Identity, :get_signing_authority)
@@ -386,10 +413,12 @@ defmodule Arbor.Scheduler.IdentityTest do
       {:capability_provision_failed,
        {:scheduler_capability_not_provisioned, "arbor://orchestrator/execute/**"}}
 
-    with {:error, ^missing_capability} <- start_scheduler_identity(opts),
+    with {:error, {:scheduler_identity_dormant, ^missing_capability}} <-
+           start_scheduler_identity(opts),
          {:ok, [agent_id]} <- Security.lookup_identity_ids_by_display_name("scheduler"),
          :ok <- grant_required_capabilities(agent_id),
-         {:ok, pid} <- start_scheduler_identity(opts) do
+         :ok <- Identity.retry_bootstrap(),
+         pid when is_pid(pid) <- Process.whereis(Identity) do
       {:ok, pid, agent_id}
     end
   end
@@ -412,8 +441,6 @@ defmodule Arbor.Scheduler.IdentityTest do
       Process.flag(:trap_exit, previous)
     end
   end
-
-  defp start_identity_expect_error, do: start_identity_expect_error([])
 
   defp forged_call(server, claimed_caller, request) do
     test = self()

@@ -1050,15 +1050,49 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   <repo>/.arbor/security ~/.arbor/backups/security-<date>`. Then start fresh.
   Identities, capabilities and grants are not carried over. No migration tool
   exists yet (deferred decision).
-- **Scheduler capability (OPEN):** `ddf05e470` removed `Scheduler.Identity`'s
-  self-grant of `arbor://orchestrator/execute/**`. On a fresh store,
-  `arbor_scheduler` now refuses to start with `{:scheduler_identity_start_failed,
-  {:capability_provision_failed, {:scheduler_capability_not_provisioned,
-  "arbor://orchestrator/execute/**"}}}`. The node halts. Nothing can provision
-  that capability first: genesis (`mix arbor.user.init`) needs a running server.
-  The scheduler identity itself *is* created and stored before the check fails.
-  **Action:** pending a decision on how system principals are provisioned
-  (dormant-until-provisioned vs. a genesis-time grant).
+- **Scheduler dormant until provisioned (2026-10-10):** `ddf05e470` removed
+  `Scheduler.Identity`'s self-grant. Its five required capabilities
+  (`arbor://orchestrator/execute/**`, `arbor://security/identity/register`,
+  `arbor://security/{grant,revoke}/**`,
+  `arbor://security/identity/deregister/**`) must be granted by an operator.
+  Without them the identity is created and registered but stays **dormant**.
+  No authority is opened, mutations fail closed, and Oban runs in standby
+  (`queues: false, plugins: false`: jobs insert, nothing executes, cron is
+  off). The boot completes. **Symptom:** `[Scheduler.Identity] dormant:
+  scheduler principal agent_... lacks ...`; `mix arbor.scheduler.provision
+  --status` shows `dormant` / `Oban: standby`. **Action:** after genesis, run
+  `mix arbor.scheduler.provision --key-file <operator key>`. It signs one grant
+  per missing capability locally, submits only the proofs, then calls
+  `Arbor.Scheduler.activate/0`, which re-bootstraps Identity and swaps Oban to
+  its configured queues.
+- **Scheduler start deadlock on its own run-lease store (fixed 2026-10-10):**
+  `Scheduler.Application.start/2` waits for `RunIdentityReaper`, which waits
+  for run-lease recovery. Recovery resolves its store through
+  `Arbor.Common.supervised_registered_child_pid/4`, which used to fail closed
+  until `:arbor_scheduler` was started. **Symptom:**
+  `{:run_identity_reaper_start_failed, {:run_identity_reconciliation_failed,
+  {:active_run_lease_lookup_failed, :recovery_in_progress}}}`. The helper now
+  binds a starting app's root through `Arbor.Common.starting_application_root/3`
+  (the spawn-parent chain from §34).
+- **Genesis cannot write the operator key file (OPEN, 2026-10-10):**
+  since `ddf05e470`, `IdentityStore.create_new/2` returns
+  `Identity.public_only/1`. `mix arbor.user.init` creates the human identity
+  but fails with `Failed to write operator key file ...: identity did not
+  include a private key` (or `:missing_private_key`). Without a key file there
+  is no genesis, so no administrator, so nothing can be provisioned (scheduler,
+  Trust grant owner). Genesis tests use fixtures and never ran the CLI path.
+  **Action:** pending a decision on how a locally created operator obtains its
+  key (e.g. CLI-generated keypair with only the public part registered).
+- **Local genesis is refused while OIDC is configured:** with `OIDC_ISSUER`
+  and `OIDC_CLIENT_ID` set (for example in `.env`), `mix arbor.user.init`
+  stops with "An OIDC provider is configured". This is by design (D1); OIDC
+  genesis is an open item in the 2026-10-08 decision.
+- **Worktree daemons share the main authority store:** `.env` sets
+  `ARBOR_SECURITY_STATE_DIR`, so a daemon started from a worktree that uses
+  the main `.env` writes the *main* checkout's `.arbor/security`. For an
+  isolated store, export `ARBOR_SECURITY_STATE_DIR=<scratch dir>` before
+  `mix arbor.start`; the `.env` loader never overrides a variable that is
+  already set.
 - **Trust grant owner dormant:** `[Trust.CapabilityGrantOwner] dormant:
   {:grant_owner_capability_not_provisioned, agent_id}` is by design until an
   operator runs `mix arbor.trust.grant_owner provision --key-file ...` after

@@ -118,34 +118,13 @@ defmodule Arbor.Security.SupervisedOwner do
   # custody from their own continuation, while their application's start/2 is
   # still running — Scheduler.Application.start/2 even waits for that claim.
   # The master cannot be asked for its child yet (see application_root/1), so
-  # bind the root to the application from VM-maintained spawn parents instead,
-  # which no process can forge: walking exactly length(child_path) parents up
-  # from the caller must reach a root whose parent is the process the master
-  # spawned to run start/2, and that master must be the controller's master
-  # for `application`. The exact child ids are then still confirmed top-down.
+  # the root is bound from unforgeable spawn parents by
+  # Arbor.Common.starting_application_root/3, and the exact child ids are then
+  # still confirmed top-down.
   defp starting_application_authorized?(caller, application, child_path) do
-    with master when is_pid(master) <- :application_controller.get_master(application),
-         {:ok, controller} <- spawn_parent(master),
-         ^controller <- Process.whereis(:application_controller),
-         {:ok, root} <- spawn_ancestor(caller, length(child_path)),
-         {:ok, starter} <- spawn_parent(root),
-         {:ok, ^master} <- spawn_parent(starter) do
-      child_at_path(root, child_path, @startup_lookup_timeout_ms) == caller
-    else
-      _ -> false
-    end
-  end
-
-  defp spawn_ancestor(pid, 0), do: {:ok, pid}
-
-  defp spawn_ancestor(pid, depth) do
-    with {:ok, parent} <- spawn_parent(pid), do: spawn_ancestor(parent, depth - 1)
-  end
-
-  defp spawn_parent(pid) do
-    case Process.info(pid, :parent) do
-      {:parent, parent} when is_pid(parent) -> {:ok, parent}
-      _ -> :error
+    case Arbor.Common.starting_application_root(application, caller, length(child_path)) do
+      {:ok, root} -> child_at_path(root, child_path, @startup_lookup_timeout_ms) == caller
+      :error -> false
     end
   end
 
