@@ -60,6 +60,16 @@ defmodule Arbor.Contracts.AI.Compactor do
   @doc "Run compaction if the projected view exceeds the effective window."
   @callback maybe_compact(t()) :: t()
 
+  @doc """
+  Run compaction with options. Optional.
+
+  Supported option: `llm: false` — compact without any model work (no LLM
+  summarization). Rebuild and restore paths call this so they stay free of
+  LLM calls; callers check `function_exported?/3` and fall back to leaving the
+  rebuilt compactor as is when it is not implemented.
+  """
+  @callback maybe_compact(t(), keyword()) :: t()
+
   @doc "Return the projected message view for LLM calls."
   @callback llm_messages(t()) :: [message()]
 
@@ -68,4 +78,6 @@ defmodule Arbor.Contracts.AI.Compactor do
 
   @doc "Return compaction statistics."
   @callback stats(t()) :: stats()
+
+  @optional_callbacks maybe_compact: 2
 end

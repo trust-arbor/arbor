@@ -14,6 +14,11 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.ContextBuilder
+
+  # Runtime bridge: the live compactor lives in arbor_agent, which the
+  # orchestrator reaches only through the {module, opts} compactor spec.
+  @context_compactor Arbor.Agent.ContextCompactor
 
   # ── Mock Compactor ────────────────────────────────────────────
 
@@ -121,6 +126,54 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       compactor = Builders.init_compactor({NonExistentCompactorModule, []})
 
       assert compactor == nil
+    end
+
+    # CC-1 (.arbor/roadmap/2-planned/agent-context-continuity.md, D5): restart,
+    # engagement switch and transcript bootstrap all rebuild through
+    # init_compactor/2. The rebuilt view must respect the window, and the
+    # rebuild path must never perform model work.
+    test "regression: rebuilding from a long transcript is bounded and makes no LLM calls" do
+      assert Code.ensure_loaded?(@context_compactor)
+
+      test_pid = self()
+      window = 6_000
+
+      summarizer = fn _prompt, _config ->
+        send(test_pid, :cc1_rebuild_summarizer_called)
+        {:ok, "summary"}
+      end
+
+      messages =
+        Enum.flat_map(1..80, fn turn ->
+          [
+            %{"role" => "user", "content" => "U-FACT-#{turn} " <> rebuild_filler(584)},
+            %{
+              "role" => "assistant",
+              "content" => rebuild_filler(1_470) <> " Decision: A-FACT-#{turn}"
+            }
+          ]
+        end)
+
+      assert length(messages) == 160
+
+      compactor =
+        ContextBuilder.init_compactor(
+          {@context_compactor,
+           [effective_window: window, enable_llm_compaction: true, summarizer: summarizer]},
+          messages
+        )
+
+      projection_tokens =
+        compactor
+        |> @context_compactor.llm_messages()
+        |> Enum.map(&@context_compactor.estimate_tokens/1)
+        |> Enum.sum()
+
+      assert projection_tokens <= window,
+             "rebuilt projection is #{projection_tokens} tokens against a #{window}-token window"
+
+      assert length(@context_compactor.full_transcript(compactor)) == 160
+      refute_received :cc1_rebuild_summarizer_called
     end
   end
 
@@ -325,6 +378,14 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       })
 
     taint
+  end
+
+  defp rebuild_filler(length) do
+    ~w(alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima)
+    |> Stream.cycle()
+    |> Enum.take(div(length, 4) + 1)
+    |> Enum.join(" ")
+    |> String.slice(0, length)
   end
 
   defp persistence_adapters do

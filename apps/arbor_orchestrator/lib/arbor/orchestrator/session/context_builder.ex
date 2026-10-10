@@ -37,6 +37,10 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
 
   # ── Compactor construction ───────────────────────────────────────
 
+  # Rebuild path (restart, engagement switch, transcript bootstrap): seed the
+  # compactor, then bound the rebuilt view WITHOUT model work. LLM calls stay
+  # on the admitted turn-commit path (see Session.Transcript). Compactors that
+  # don't implement the optional maybe_compact/2 are left as seeded.
   @doc false
   def init_compactor(spec, messages \\ [])
 
@@ -45,10 +49,16 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   def init_compactor({module, compactor_opts}, messages)
       when is_atom(module) and is_list(compactor_opts) and is_list(messages) do
     if Code.ensure_loaded?(module) and function_exported?(module, :new, 1) do
-      messages
-      |> Enum.reduce(apply(module, :new, [compactor_opts]), fn message, compactor ->
-        apply(module, :append, [compactor, message])
-      end)
+      compactor =
+        Enum.reduce(messages, apply(module, :new, [compactor_opts]), fn message, compactor ->
+          apply(module, :append, [compactor, message])
+        end)
+
+      if function_exported?(module, :maybe_compact, 2) do
+        apply(module, :maybe_compact, [compactor, [llm: false]])
+      else
+        compactor
+      end
     else
       Logger.warning("[Session] Compactor module #{inspect(module)} not available, disabling")
       nil

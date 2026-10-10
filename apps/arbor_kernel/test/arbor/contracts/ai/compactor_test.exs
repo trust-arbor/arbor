@@ -14,7 +14,12 @@ defmodule Arbor.Contracts.AI.CompactorTest do
       assert {:llm_messages, 1} in callbacks
       assert {:full_transcript, 1} in callbacks
       assert {:stats, 1} in callbacks
-      assert length(callbacks) == 6
+
+      # maybe_compact/2 (compact without model work) is optional so existing
+      # implementations stay valid; the six above remain required.
+      assert {:maybe_compact, 2} in callbacks
+      assert Compactor.behaviour_info(:optional_callbacks) == [maybe_compact: 2]
+      assert length(callbacks -- Compactor.behaviour_info(:optional_callbacks)) == 6
     end
   end
 

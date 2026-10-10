@@ -56,6 +56,24 @@ defmodule Arbor.Agent.Config do
   # executors that opt in, so it gets a larger but still finite deadline.
   @default_executor_finalization_timeout_ms 2_000
 
+  @doc """
+  Model for the context compactor's narrative summaries, or `nil` when unset.
+
+  `Arbor.Agent.ContextCompactor` resolves an explicit `:compaction_model`
+  option first, then this setting, then `config :arbor_ai, :default_model`.
+  """
+  @spec compaction_model() :: String.t() | nil
+  def compaction_model, do: Application.get_env(@app, :compaction_model)
+
+  @doc """
+  Provider for the context compactor's narrative summaries, or `nil` when unset.
+
+  Resolved like `compaction_model/0`, falling back to
+  `config :arbor_ai, :default_provider`.
+  """
+  @spec compaction_provider() :: atom() | String.t() | nil
+  def compaction_provider, do: Application.get_env(@app, :compaction_provider)
+
   @doc "Fixed supervised owner for opt-in conversation delivery workers."
   def conversation_task_supervisor, do: Arbor.Agent.Orchestration.TaskSupervisor
 

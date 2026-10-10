@@ -207,7 +207,9 @@ defmodule Arbor.Agent.Eval.TemporalEvalTest do
 
   describe "compressed stubs with temporal markers" do
     test "stubs contain observation markers after compaction" do
-      c = ContextCompactor.new(effective_window: 200)
+      # Large enough that the decayed stubs fit the bounded view (CC-1): with a
+      # 200-token window every stub was moved behind the omission marker.
+      c = ContextCompactor.new(effective_window: 1_000)
 
       ts = ~U[2026-02-20 14:30:00Z]
 
