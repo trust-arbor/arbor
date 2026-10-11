@@ -282,9 +282,14 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     end
   end
 
+  # Security regression (2026-10-11 cross-library review F-016): the default
+  # used to be a RUNTIME `Mix.env() == :prod` call, so dev daemons dispatched
+  # unknown node types to LlmHandler and releases (no Mix) crashed. Unknown
+  # handler types now fail closed everywhere unless an operator explicitly
+  # opts out via config.
   @doc false
   def strict_unknown_handlers? do
-    Application.get_env(:arbor_orchestrator, :strict_unknown_handlers, Mix.env() == :prod)
+    Application.get_env(:arbor_orchestrator, :strict_unknown_handlers, true)
   end
 
   if @test_fixtures do

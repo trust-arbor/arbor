@@ -41,6 +41,9 @@ defmodule Arbor.Contracts.Security.Identity do
   @typedoc "Identity lifecycle status"
   @type status :: :active | :suspended | :revoked
 
+  # Security (2026-10-11 cross-library review F-022): private key material
+  # must never reach logs, crash reports, or `inspect/1` output.
+  @derive {Inspect, except: [:private_key, :encryption_private_key]}
   typedstruct enforce: true do
     @typedoc "A cryptographic agent identity"
 

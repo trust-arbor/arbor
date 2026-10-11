@@ -148,6 +148,24 @@ defmodule Arbor.Actions.TrustTest do
       assert profile.baseline == :ask
       assert profile.rules["arbor://code/read"] == :auto
     end
+
+    test "security regression (F-005): an agent cannot apply a trust profile to itself",
+         %{agent_id: agent_id} do
+      # Pre-fix the action rewrote ANY agent's baseline/rules — its own
+      # included — through the internal Trust.Store. With the facade binding
+      # the caller as `context[:agent_id]`, a self-targeted call must be refused
+      # and the stored profile must not change.
+      {:ok, before} = Arbor.Trust.get_trust_profile(agent_id)
+
+      assert {:error, message} =
+               ApplyProfile.run(
+                 %{agent_id: agent_id, baseline: "auto", rules: %{"arbor://net" => "auto"}},
+                 %{agent_id: agent_id}
+               )
+
+      assert message =~ "cannot apply a trust profile to itself"
+      assert {:ok, ^before} = Arbor.Trust.get_trust_profile(agent_id)
+    end
   end
 
   describe "ApplyProfile — durable audit (security regression)" do

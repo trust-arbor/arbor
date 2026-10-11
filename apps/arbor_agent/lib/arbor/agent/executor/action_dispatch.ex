@@ -192,10 +192,13 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   # actions were exempt.
   #
   # The fix routes through authorize_and_execute when an agent_id is
-  # available (the Executor now threads it from the agent's identity). When
-  # nil — e.g. system-internal callers, tests that don't bootstrap Security —
-  # falls back to the direct apply so existing system-level dispatch keeps
-  # working.
+  # available (the Executor now threads it from the agent's identity).
+  #
+  # Security regression (2026-10-11 cross-library review F-017): a nil
+  # agent_id used to fall back to a direct `apply(action_mod, :run, …)` with
+  # no capability, trust, taint, or approval gate ("system-level dispatch").
+  # The only production caller passes `state.agent_id`; a missing principal
+  # now fails closed on this path exactly like the discovered-action path.
   defp run_runtime_action(action_mod, params, error_tag, unavailable_tag, agent_id, context) do
     if is_binary(agent_id) and byte_size(agent_id) > 0 do
       run_via_authorize_and_execute(
@@ -207,7 +210,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
         context
       )
     else
-      run_direct(action_mod, params, error_tag, unavailable_tag)
+      {:error, {:missing_principal, error_tag}}
     end
   end
 
@@ -230,15 +233,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       {:ok, :pending_approval, id} -> {:ok, :pending_approval, id}
       {:ok, {:ok, result}} -> {:ok, result}
       {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
-      {:ok, result} -> {:ok, result}
-      {:error, reason} -> {:error, {error_tag, reason}}
-      nil -> {:error, unavailable_tag}
-    end
-  end
-
-  defp run_direct(action_mod, params, error_tag, unavailable_tag) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case safe_call(fn -> apply(action_mod, :run, [params, %{}]) end) do
       {:ok, result} -> {:ok, result}
       {:error, reason} -> {:error, {error_tag, reason}}
       nil -> {:error, unavailable_tag}
@@ -298,11 +292,11 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
         result -> result
       end
     else
-      case safe_call(fn -> action_module.run(params, %{}) end) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, {action, reason}}
-        nil -> {:error, {:action_failed, action}}
-      end
+      # Security regression (2026-10-11 cross-library review F-017): a nil
+      # agent_id used to fall back to `action_module.run(params, %{})` with
+      # no capability, trust, taint, or approval gate. The only production
+      # caller passes `state.agent_id`; anything else is a bug or an attack.
+      {:error, {:missing_principal, action}}
     end
   end
 

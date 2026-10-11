@@ -172,6 +172,10 @@ config :arbor_llm,
   default_provider: System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter"
 
 config :arbor_consensus, start_children: false
+# The Coordinator's code default is now fail-closed (`require_authorizer: true`,
+# 2026-10-11 cross-library review F-016). Tests that exercise the deny branch
+# flip this explicitly; everything else keeps the historical permissive setup.
+config :arbor_consensus, require_authorizer: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
 config :arbor_sandbox, start_children: false

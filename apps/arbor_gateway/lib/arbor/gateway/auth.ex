@@ -49,9 +49,13 @@ defmodule Arbor.Gateway.Auth do
     end
   end
 
+  # Env first: the committed dev literal in config/dev.exs must never shadow
+  # an operator-set ARBOR_GATEWAY_API_KEY (2026-10-11 cross-library review F-019).
   defp get_configured_key do
-    Application.get_env(:arbor_gateway, :api_key) ||
-      System.get_env("ARBOR_GATEWAY_API_KEY")
+    case System.get_env("ARBOR_GATEWAY_API_KEY") do
+      key when is_binary(key) and key != "" -> key
+      _ -> Application.get_env(:arbor_gateway, :api_key)
+    end
   end
 
   defp extract_key(conn) do

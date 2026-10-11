@@ -3076,7 +3076,10 @@ defmodule Arbor.Actions do
       _ -> Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts)
     end
   rescue
-    _ -> Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts)
+    # Fail closed (2026-10-11 cross-library review F-027): if the self-scope
+    # rule cannot be evaluated, the child-specific `:block` cannot be honoured,
+    # so the parent authorization must not run.
+    _ -> {:error, :unauthorized}
   end
 
   @doc """

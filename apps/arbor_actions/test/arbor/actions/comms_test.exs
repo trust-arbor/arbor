@@ -85,13 +85,16 @@ defmodule Arbor.Actions.CommsTest do
     end
 
     test "passes opts through to channel" do
+      # Attachments are no longer accepted without a bound principal holding a
+      # path-scoped fs cap (2026-10-11 review F-010; see
+      # comms_attachment_security_regression_test.exs), so this pass-through
+      # check covers subject/from only.
       params = %{
         channel: :mock,
         to: "user@example.com",
         message: "Report ready",
         subject: "Daily Report",
-        from: "arbor@example.com",
-        attachments: ["/tmp/report.pdf"]
+        from: "arbor@example.com"
       }
 
       assert {:ok, _result} = SendMessage.run(params, %{})
@@ -99,7 +102,7 @@ defmodule Arbor.Actions.CommsTest do
       assert_received {:mock_send, "user@example.com", "Report ready", opts}
       assert opts[:subject] == "Daily Report"
       assert opts[:from] == "arbor@example.com"
-      assert opts[:attachments] == ["/tmp/report.pdf"]
+      refute Keyword.has_key?(opts, :attachments)
     end
 
     test "formats message by default" do

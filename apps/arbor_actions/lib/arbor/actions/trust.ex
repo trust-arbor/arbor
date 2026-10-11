@@ -312,7 +312,7 @@ defmodule Arbor.Actions.Trust do
         |> Enum.map(fn {uri, mode} -> {uri, parse_mode(mode)} end)
         |> Enum.into(%{})
 
-      case update_trust_profile(agent_id, baseline, rules) do
+      case update_trust_profile(agent_id, baseline, rules, context) do
         {:ok, _profile} ->
           Logger.info("[InterviewAgent] Applied trust profile changes for #{agent_id}")
           emit_profile_changed(agent_id, baseline, rules, context)
@@ -330,23 +330,35 @@ defmodule Arbor.Actions.Trust do
           {:error,
            "Trust system is not available. It may still be starting up — try again in a moment."}
 
+        {:error, :self_target_refused} ->
+          {:error,
+           "An agent cannot apply a trust profile to itself. " <>
+             "Trust changes for the calling agent must be made by the operator."}
+
         {:error, reason} ->
           {:error,
            "Failed to apply profile changes: #{Arbor.Actions.Trust.format_reason(reason)}"}
       end
     end
 
-    defp update_trust_profile(agent_id, baseline, rules) do
-      if Code.ensure_loaded?(Arbor.Trust.Store) and
-           function_exported?(Arbor.Trust.Store, :update_profile, 2) do
-        apply(Arbor.Trust.Store, :update_profile, [
-          agent_id,
-          fn profile ->
-            %{profile | baseline: baseline, rules: rules}
-          end
-        ])
-      else
-        {:error, :trust_unavailable}
+    # Security regression (2026-10-11 cross-library review F-005): this action
+    # rewrote ANY agent's baseline/rules — its own included — through the
+    # internal `Arbor.Trust.Store`, bypassing the facade's prefix rejection and
+    # canonicalisation. One approved call was enough for a prompt-injected
+    # agent to set itself `:auto` on every un-ceilinged URI. The target may
+    # never be the authorized principal, and the write goes through the
+    # `Arbor.Trust` facade so ceilings, canonicalisation and audit apply.
+    defp update_trust_profile(agent_id, baseline, rules, context) do
+      cond do
+        Map.get(context, :agent_id) == agent_id ->
+          {:error, :self_target_refused}
+
+        Code.ensure_loaded?(Arbor.Trust) and
+            function_exported?(Arbor.Trust, :ensure_trust_profile, 2) ->
+          Arbor.Trust.ensure_trust_profile(agent_id, baseline: baseline, rules: rules)
+
+        true ->
+          {:error, :trust_unavailable}
       end
     end
 

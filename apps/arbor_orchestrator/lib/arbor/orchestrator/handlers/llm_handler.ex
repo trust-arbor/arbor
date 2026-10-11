@@ -286,7 +286,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               true ->
                 # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
                 # decision). Missing or failed policy must stop this dispatch too.
-                case egress_halt_outcome(context, base_updates) do
+                case egress_halt_outcome(node, context, base_updates) do
                   %Outcome{} = halt ->
                     halt
 
@@ -813,9 +813,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   @taint_severity %{trusted: 0, derived: 1, untrusted: 2, hostile: 3}
 
-  defp egress_halt_outcome(context, base_updates) do
+  # Security regression (2026-10-11 cross-library review F-018): this gate
+  # authorized the tier of `session.llm_provider` while the request itself went
+  # to `node.attrs["llm_provider"]` (node attrs win in `do_build_llm_request`).
+  # A compose child could pin a cloud provider over an on-host session default
+  # and be authorized as `:on_host`. The gate now classifies the provider the
+  # request will actually use.
+  defp egress_halt_outcome(node, context, base_updates) do
     agent_id = Context.get(context, "session.agent_id", "system")
-    provider = Context.get(context, "session.llm_provider")
+    provider = resolved_request_provider(node, context)
     tier = resolve_egress_tier(provider)
     taint = egress_taint_level(context)
     # Destination-scoped egress caps match on the provider (the LLM endpoint
@@ -919,6 +925,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Resolve the egress tier for the provider via BackendTrust (provider -> tier).
   defp resolve_egress_tier(provider) do
     Arbor.AI.egress_tier_for(provider, nil)
+  end
+
+  # Same precedence as `do_build_llm_request/4`: node attrs first, then the
+  # session default. Keep the two in sync — the gate must see the destination
+  # the dispatcher sees.
+  defp resolved_request_provider(node, context) do
+    attrs = Map.get(node, :attrs) || %{}
+
+    Map.get(attrs, "llm_provider") ||
+      Map.get(attrs, "handler") ||
+      Context.get(context, "session.llm_provider")
   end
 
   # Conservative egress taint: the MOST severe level across all context taint —
@@ -1049,7 +1066,49 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
+  # Security regression (2026-10-11 cross-library review F-002): a DOT
+  # attribute could put the ACP CLI into `bypassPermissions` / `auto` mode,
+  # which skips the ACP permission callback — and with it every Arbor
+  # capability, trust-mode, and shell-ceiling decision — for every tool the
+  # CLI runs. Graph text is model-authorable (compose / pipeline.run), so
+  # attributes may only TIGHTEN the CLI's permission posture. Loosening modes
+  # fail the node; they are not silently downgraded.
+  @acp_permission_modes_refused_from_graph [:bypass, :bypass_permissions, :auto]
+
+  @doc false
+  def acp_permission_modes_refused_from_graph, do: @acp_permission_modes_refused_from_graph
+
   defp build_llm_request(node, context, system_content, user_content) do
+    case refuse_acp_permission_loosening(node) do
+      :ok -> do_build_llm_request(node, context, system_content, user_content)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp refuse_acp_permission_loosening(node) do
+    requested = Map.get(node.attrs, "acp_permission_mode")
+
+    atom =
+      case requested do
+        nil -> nil
+        mode when is_binary(mode) -> safe_permission_atom(mode)
+        mode when is_atom(mode) -> mode
+        _ -> nil
+      end
+
+    if atom in @acp_permission_modes_refused_from_graph do
+      Logger.error(
+        "[LlmHandler] #{node.id}: refusing acp_permission_mode=#{inspect(requested)} — " <>
+          "graph attributes may only tighten ACP permissions"
+      )
+
+      {:error, {:acp_permission_mode_refused, requested}}
+    else
+      :ok
+    end
+  end
+
+  defp do_build_llm_request(node, context, system_content, user_content) do
     messages =
       case Map.get(node.attrs, "messages_context_key") do
         nil ->

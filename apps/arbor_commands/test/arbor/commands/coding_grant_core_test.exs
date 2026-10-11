@@ -67,6 +67,39 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     end)
   end
 
+  test "security regression (F-023): high-blast URIs named by a plan are never auto-granted" do
+    # 2026-10-11 cross-library review: the URIs this task signs come from the
+    # plan file's own manifest — model-shaped text. Only wildcards were refused,
+    # so `arbor://shell/exec/bash` or `arbor://trust/write` converged into an
+    # operator-signed grant.
+    {:ok, state} = Core.new([])
+
+    for uri <- [
+          "arbor://shell/exec/bash",
+          "arbor://shell",
+          "arbor://trust/write",
+          "arbor://agent/create/external/x",
+          "arbor://agent/spawn_worker",
+          "arbor://code/hot_load/Some.Mod",
+          "arbor://governance/policy",
+          "arbor://approval/answer/agent_x",
+          "arbor://security/grant"
+        ] do
+      {_, effect} = Core.step(state, {:readiness, missing_report([@uri_a, uri])})
+      assert {:halt, result} = effect, "expected halt for #{uri}, got #{inspect(effect)}"
+      assert result.status == :refused_capability_uri, "#{uri}: #{inspect(result)}"
+    end
+
+    # The reviewed workflow's git verb and the coordinator's dispatch right stay grantable.
+    {_, {:grant, git_target}} =
+      Core.step(state, {:readiness, missing_report(["arbor://shell/exec/git"])})
+
+    assert git_target.uri == "arbor://shell/exec/git"
+
+    {_, {:grant, dispatch_target}} = Core.step(state, {:readiness, missing_report([@uri_c])})
+    assert dispatch_target.uri == @uri_c
+  end
+
   test "empty caller-missing list converges" do
     {:ok, state} = Core.new([])
     {_, {:halt, result}} = Core.step(state, {:readiness, missing_report([])})

@@ -55,21 +55,75 @@ defmodule Arbor.Comms.Router do
   # text, so the dashboard adapter's `parse_response/1` always returns
   # `:not_interaction`. Other channel adapters (Telegram, Discord)
   # would add their own dispatch arm here.
+  #
+  # Security regression (2026-10-11 cross-library review F-003): interaction
+  # replies used to be routed BEFORE the chat sender allowlist, and the
+  # partial path resolved the *configured operator's* sole pending approval
+  # for whoever sent "ok"/"yes". Any Signal sender could therefore answer a
+  # pending shell / hot_load / trust escalation. Only the configured
+  # interaction recipient (SIGNAL_TO) or an explicitly authorized sender may
+  # now answer; with neither configured, nothing is routed as an interaction
+  # (fail closed) and the text falls through to ordinary chat handling.
   defp maybe_route_as_interaction(%Message{channel: :signal, content: content, from: from})
        when is_binary(content) do
     case Signal.InteractionAdapter.parse_response(content) do
-      {:interaction_response, request_id, response, metadata} ->
-        route_explicit_response(request_id, response, metadata, from)
-
-      {:interaction_response_partial, response, metadata} ->
-        route_partial_response(response, metadata, from)
-
       :not_interaction ->
         :not_interaction
+
+      parsed ->
+        if interaction_sender_authorized?(from) do
+          dispatch_parsed_interaction(parsed, from)
+        else
+          Logger.warning(
+            "[Router] Signal interaction reply from unauthorized sender ignored " <>
+              "(from=#{inspect(from)}); passing through as chat"
+          )
+
+          safe_emit_unauthorized_interaction_reply(from)
+          :not_interaction
+        end
     end
   end
 
   defp maybe_route_as_interaction(_), do: :not_interaction
+
+  defp dispatch_parsed_interaction({:interaction_response, request_id, response, metadata}, from),
+    do: route_explicit_response(request_id, response, metadata, from)
+
+  defp dispatch_parsed_interaction({:interaction_response_partial, response, metadata}, from),
+    do: route_partial_response(response, metadata, from)
+
+  @doc false
+  # Public for the security regression test; not part of the comms facade.
+  def interaction_sender_authorized?(from) when is_binary(from) and from != "" do
+    allowed = authorized_interaction_senders()
+    allowed != [] and from in allowed
+  end
+
+  def interaction_sender_authorized?(_from), do: false
+
+  defp authorized_interaction_senders do
+    recipient =
+      case Application.get_env(:arbor_comms, :signal, []) do
+        kw when is_list(kw) -> Keyword.get(kw, :interaction_recipient)
+        _ -> nil
+      end
+
+    explicit = Config.authorized_senders()
+
+    [recipient | explicit]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
+
+  defp safe_emit_unauthorized_interaction_reply(from) do
+    Arbor.Signals.emit(:comms, :interaction_reply_unauthorized, %{channel: :signal, from: from})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
 
   defp route_explicit_response(request_id, response, metadata, from) do
     metadata = Map.merge(metadata, %{from: from})

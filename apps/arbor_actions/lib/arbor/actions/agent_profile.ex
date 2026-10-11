@@ -66,12 +66,24 @@ defmodule Arbor.Actions.AgentProfile do
       %{agent_id: :control, display_name: :data}
     end
 
+    # Security regression (2026-10-11 cross-library review F-029): the target
+    # came from params only, so a bare `arbor://agent/profile` cap renamed any
+    # agent. When the facade has bound a principal, it must be the target.
+    defp require_self(agent_id, context) do
+      case Map.get(context, :agent_id) do
+        nil -> :ok
+        ^agent_id -> :ok
+        _other -> {:error, "Only the agent itself can change its display name"}
+      end
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(params, _context) do
+    def run(params, context) do
       %{agent_id: agent_id, display_name: new_name} = params
 
-      with :ok <- validate_name(new_name),
+      with :ok <- require_self(agent_id, context),
+           :ok <- validate_name(new_name),
            {:ok, profile} <- load_profile(agent_id),
            previous_name <- profile.display_name || profile.character.name || "Agent" do
         updated_profile = %{profile | display_name: new_name}
