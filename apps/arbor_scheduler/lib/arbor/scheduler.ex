@@ -38,7 +38,50 @@ defmodule Arbor.Scheduler do
   - `.arbor/roadmap/1-brainstorming/priorities-2026-06-02.md` — H1.
   """
 
+  alias Arbor.Scheduler.{Identity, Runtime}
   alias Arbor.Scheduler.Workers.PipelineRunner
+
+  @activation_poll_ms 50
+
+  @doc """
+  Scheduler identity and execution status: `state` (`:ready`, `:dormant`,
+  `:pending` or `:unavailable`), the scheduler `principal_id`, the
+  operator-provisioned capabilities it still lacks, and whether Oban is
+  `:active` or in `:standby`.
+  """
+  @spec identity_status() :: map()
+  def identity_status do
+    Identity.status() |> Map.put(:oban, Runtime.oban_mode())
+  end
+
+  @doc """
+  Re-checks a dormant scheduler identity after an operator granted its
+  capabilities and waits for Oban to leave standby. Opens no authority and
+  starts no work unless every required capability is held.
+  """
+  @spec activate(timeout()) :: {:ok, map()} | {:error, term()}
+  def activate(timeout \\ 10_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    case Identity.retry_bootstrap() do
+      :ok -> await_oban_active(deadline)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp await_oban_active(deadline) do
+    cond do
+      Runtime.oban_mode() == :active ->
+        {:ok, identity_status()}
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, {:oban_not_active, Runtime.oban_mode()}}
+
+      true ->
+        Process.sleep(@activation_poll_ms)
+        await_oban_active(deadline)
+    end
+  end
 
   @doc "Canonical bytes for a closed owner-bound enqueue/list/cancel request. No authorization is conferred."
   defdelegate routine_request_payload(operation, value),

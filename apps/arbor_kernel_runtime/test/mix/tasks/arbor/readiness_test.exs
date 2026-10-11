@@ -171,6 +171,94 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
     end
   end
 
+  describe "stalled start detection" do
+    test "starting_application_names/1 reads the controller's starting entries" do
+      info = [
+        loaded: [],
+        running: [kernel: :undefined],
+        starting: [{:arbor_trust, :temporary, :normal, {self(), make_ref()}}]
+      ]
+
+      assert Readiness.starting_application_names(info) == [:arbor_trust]
+      assert Readiness.starting_application_names(loaded: []) == []
+      assert Readiness.starting_application_names(:not_a_list) == []
+    end
+
+    test "stalled_start/2 needs the same dead start in two consecutive observations" do
+      assert Readiness.stalled_start([], [:arbor_trust]) == nil
+      assert Readiness.stalled_start([:arbor_trust], [:arbor_trust]) == :arbor_trust
+      assert Readiness.stalled_start([:arbor_trust], []) == nil
+      assert Readiness.stalled_start([:other], [:arbor_trust]) == nil
+    end
+
+    test "a stalled start fails immediately instead of waiting out the budget" do
+      result = {:stalled_start, :arbor_trust, [:arbor_trust], [:arbor_security]}
+      assert Readiness.poll_decision(1_000_000, 0, result) == {:done_failed, result}
+    end
+
+    test "the stalled-start diagnostic names the stuck application" do
+      message =
+        Readiness.timeout_diagnostic(
+          {:stalled_start, :arbor_trust, [:arbor_trust, :arbor_agent], [:arbor_security]},
+          [:arbor_agent, :arbor_security, :arbor_trust],
+          600_000
+        )
+
+      assert message =~ "arbor_trust is stuck starting"
+      assert message =~ "Started:       1/3"
+      assert message =~ "Missing:       arbor_trust, arbor_agent"
+    end
+  end
+
+  describe "failure_excerpt/1" do
+    test "prefers Mix's Could not start application line" do
+      log = """
+      12:00:00.000 [error] something earlier
+      ** (Mix) Could not start application arbor_security: Arbor.Security.Application.start(:normal, []) returned an error: :session_token_secret_missing
+      """
+
+      assert {:ok, excerpt} = Readiness.failure_excerpt(log)
+      assert excerpt =~ ":session_token_secret_missing"
+      refute excerpt =~ "something earlier"
+    end
+
+    test "drops shutdown chatter after Mix's line" do
+      log = """
+      ** (Mix) Could not start application arbor_scheduler: returned an error: :boom
+      [os_mon] memory supervisor port (memsup): Erlang has closed
+      """
+
+      assert {:ok,
+              "** (Mix) Could not start application arbor_scheduler: returned an error: :boom"} =
+               Readiness.failure_excerpt(log)
+    end
+
+    test "falls back to the first [error] entry with its continuation lines" do
+      log = """
+      12:00:00.000 [info] booting
+
+      12:00:01.000 [error] GenServer Arbor.Trust.ApplicationSupervisor terminating
+      ** (stop) {:badarg, [{:erlang, :is_process_alive, [:undefined]}]}
+      Last message: {:EXIT, #PID<0.1.0>, :badarg}
+
+      12:00:02.000 [error] a later error
+      """
+
+      assert {:ok, excerpt} = Readiness.failure_excerpt(log)
+      assert excerpt =~ "ApplicationSupervisor terminating"
+      assert excerpt =~ "Last message"
+      refute excerpt =~ "a later error"
+    end
+
+    test "bounds the excerpt and reports :none for a clean log" do
+      long = "12:00:00.000 [error] " <> String.duplicate("x", 5_000)
+      assert {:ok, excerpt} = Readiness.failure_excerpt(long <> "\n" <> Enum.join(1..100, "\n"))
+      assert byte_size(excerpt) < 5_000
+      assert length(String.split(excerpt, "\n")) <= 25
+      assert Readiness.failure_excerpt("12:00:00.000 [info] fine\n") == :none
+    end
+  end
+
   describe "sleep_ms/2" do
     test "never sleeps past remaining budget" do
       assert Readiness.sleep_ms(500, 500) == 500

@@ -5,6 +5,8 @@ defmodule Arbor.Security.Application do
 
   alias Arbor.Security.ProviderGate
 
+  require Logger
+
   @compile_env Mix.env()
   @provider_gate Arbor.Security.ProviderGate
   @supervisor Arbor.Security.Supervisor
@@ -202,11 +204,43 @@ defmodule Arbor.Security.Application do
              name,
              timeout
            ) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:authority_store_startup_failed, name, reason}}}
+        :ok ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt,
+           {:error, {:authority_store_startup_failed, name, actionable_startup_failure(reason)}}}
       end
     end)
   end
+
+  # Stores written before authenticated authority records (2026-10-07) are
+  # refused and no offline migration tool exists yet. A bare
+  # :offline_migration_required atom left operators hunting for the store, so
+  # name the directory and the only recovery available today.
+  @doc false
+  def actionable_startup_failure({:authority_store_hydration_failed, :offline_migration_required}) do
+    root =
+      case Arbor.Security.Config.authority_root() do
+        {:ok, root} -> root
+        {:error, _reason} -> "the configured authority root"
+      end
+
+    action =
+      "#{root} holds authority records from before authenticated records " <>
+        "(2026-10-07) and no migration tool exists yet. Stop Arbor, move the " <>
+        "directory aside as a backup (for example: mv #{root} " <>
+        "~/.arbor/backups/security-$(date +%Y%m%d)), and start again to begin " <>
+        "with a fresh store. Identities, capabilities and grants in the old " <>
+        "store are not carried over."
+
+    Logger.error("[Arbor.Security] Authority store needs offline migration: " <> action)
+
+    {:authority_store_hydration_failed, :offline_migration_required,
+     %{authority_root: root, action: action}}
+  end
+
+  def actionable_startup_failure(reason), do: reason
 
   defp start_downstream_children(
          supervisor,

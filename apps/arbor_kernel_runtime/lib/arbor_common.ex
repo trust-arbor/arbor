@@ -92,6 +92,16 @@ defmodule Arbor.Common do
     )
   end
 
+  @doc """
+  Binds a candidate process to the root supervisor of an application that is
+  still inside `start/2`, from VM-maintained spawn parents and without asking
+  the application master (OTP 28 crashes a starting master on `get_child`).
+  Returns the root; callers must still confirm the exact child path from it.
+  """
+  @spec starting_application_root(atom(), pid(), pos_integer()) :: {:ok, pid()} | :error
+  def starting_application_root(application, candidate, depth),
+    do: Arbor.Common.SupervisedOwner.starting_application_root(application, candidate, depth)
+
   @doc "Creates the shared handler-registry child spec for an owning supervisor."
   @spec handler_registry_child_spec(keyword()) :: Supervisor.child_spec()
   def handler_registry_child_spec(opts \\ []), do: Arbor.Common.HandlerRegistry.child_spec(opts)

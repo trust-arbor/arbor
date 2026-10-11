@@ -57,6 +57,13 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   @max_additional_patterns 64
   @max_pattern_source_bytes 4_096
   @scan_timeout 1_000
+  # Source scans run every detector over every admitted line, so one flat
+  # deadline made in-bounds files fail closed deterministically: the 14k-line
+  # Orchestration.TaskStore always timed out at 1 s and blocked every
+  # arbor_agent commit (2026-10-10). Budget per admitted line on top of the
+  # base; @max_lines still caps the total (about 5.1 s), and a pathological
+  # pattern on a short input still hits roughly the base deadline.
+  @source_scan_timeout_per_line_us 250
 
   # Delegate pattern definitions to SensitiveData
   defdelegate path_patterns(), to: SensitiveData
@@ -159,7 +166,7 @@ defmodule Arbor.Eval.Checks.PIIDetection do
          {:ok, result} <-
            SafeRegex.within_timeout(
              fn -> do_run(lines, additional_names, additional_patterns) end,
-             timeout: @scan_timeout
+             timeout: source_scan_timeout(lines)
            ) do
       result
     else
@@ -528,6 +535,14 @@ defmodule Arbor.Eval.Checks.PIIDetection do
 
   defp validate_scan_opts(opts) do
     if Keyword.keyword?(opts), do: :ok, else: {:error, :invalid_scan_options}
+  end
+
+  defp source_scan_timeout(lines), do: source_scan_timeout_ms(length(lines))
+
+  @doc false
+  @spec source_scan_timeout_ms(non_neg_integer()) :: pos_integer()
+  def source_scan_timeout_ms(line_count) when is_integer(line_count) and line_count >= 0 do
+    @scan_timeout + div(min(line_count, @max_lines) * @source_scan_timeout_per_line_us, 1_000)
   end
 
   defp validate_code(code) do

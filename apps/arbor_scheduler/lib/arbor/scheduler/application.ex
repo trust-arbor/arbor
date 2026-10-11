@@ -11,8 +11,10 @@ defmodule Arbor.Scheduler.Application do
     runtime_children =
       if start_children? do
         [
-          # Identity must start BEFORE Oban so the scheduler has its stable
-          # SigningAuthority before workers can dispatch pipelines.
+          # Identity owns the scheduler's stable SigningAuthority. Oban below
+          # starts in standby and only Identity switches it to the configured
+          # queues and plugins once that authority is open, so no worker can
+          # dispatch a pipeline before it (or while Identity is dormant).
           {Arbor.Scheduler.Identity, scheduler_mutation_token: scheduler_mutation_token},
           {Arbor.Scheduler.RunLeaseSupervisor,
            scheduler_mutation_token: scheduler_mutation_token},
@@ -25,7 +27,7 @@ defmodule Arbor.Scheduler.Application do
           # Oban — scheduling substrate. Repo lives in arbor_persistence.
           # Cron jobs configured under :arbor_scheduler, Oban; see
           # config/config.exs for the cron table.
-          {Oban, Application.fetch_env!(:arbor_scheduler, Oban)}
+          Arbor.Scheduler.Runtime.oban_child_spec(:standby)
         ]
       else
         []
@@ -44,16 +46,15 @@ defmodule Arbor.Scheduler.Application do
          ) do
       {:ok, supervisor} = started ->
         if start_children? do
+          # A dormant identity (no operator-provisioned capability yet, e.g. a
+          # fresh install before genesis) must not fail the boot: the rest of
+          # Arbor is needed to provision it. Oban simply stays in standby.
           case Arbor.Scheduler.Identity.await_ready() do
             :ok ->
-              case Arbor.Scheduler.RunIdentityReaper.await_ready() do
-                :ok ->
-                  started
+              await_reaper(supervisor, started)
 
-                {:error, reason} ->
-                  Supervisor.stop(supervisor, :shutdown)
-                  {:error, {:run_identity_reaper_start_failed, reason}}
-              end
+            {:error, {:scheduler_identity_dormant, _reason}} ->
+              await_reaper(supervisor, started)
 
             {:error, reason} ->
               Supervisor.stop(supervisor, :shutdown)
@@ -65,6 +66,17 @@ defmodule Arbor.Scheduler.Application do
 
       error ->
         error
+    end
+  end
+
+  defp await_reaper(supervisor, started) do
+    case Arbor.Scheduler.RunIdentityReaper.await_ready() do
+      :ok ->
+        started
+
+      {:error, reason} ->
+        Supervisor.stop(supervisor, :shutdown)
+        {:error, {:run_identity_reaper_start_failed, reason}}
     end
   end
 end

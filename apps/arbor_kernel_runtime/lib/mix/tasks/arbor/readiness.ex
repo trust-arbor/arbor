@@ -22,6 +22,7 @@ defmodule Mix.Tasks.Arbor.Readiness do
   @type readiness_result ::
           :ready
           | {:partial, missing :: [app_name()], present :: [app_name()]}
+          | {:stalled_start, app_name(), missing :: [app_name()], present :: [app_name()]}
           | {:observation_unavailable, reason :: term()}
 
   @type poll_decision ::
@@ -93,6 +94,88 @@ defmodule Mix.Tasks.Arbor.Readiness do
   end
 
   @doc """
+  Application names the remote application controller still lists as
+  `starting`, from the `:application.info/0` shape.
+  """
+  @spec starting_application_names(term()) :: [app_name()]
+  def starting_application_names(info) when is_list(info) do
+    case List.keyfind(info, :starting, 0) do
+      {:starting, entries} when is_list(entries) ->
+        for entry <- entries,
+            is_tuple(entry) and tuple_size(entry) > 0 and is_atom(elem(entry, 0)),
+            do: elem(entry, 0)
+
+      _other ->
+        []
+    end
+  end
+
+  def starting_application_names(_info), do: []
+
+  @doc """
+  Detects a start that can never finish.
+
+  On OTP 28 an application master that exits before its `start/2` callback
+  returns never casts `application_started`; the application controller drops
+  the master's exit and keeps the application in `starting` forever, so the
+  node stays up with a partial application set. `dead_starts` are the
+  `starting` applications that had no live master in one observation. An
+  application dead in two consecutive observations is reported, which skips
+  the instant between the controller admitting a start and the master
+  registering itself.
+  """
+  @spec stalled_start([app_name()], [app_name()]) :: app_name() | nil
+  def stalled_start(previous_dead_starts, dead_starts)
+      when is_list(previous_dead_starts) and is_list(dead_starts) do
+    Enum.find(dead_starts, &(&1 in previous_dead_starts))
+  end
+
+  @failure_excerpt_max_lines 25
+  @failure_excerpt_max_line_bytes 600
+
+  @doc """
+  Pulls the first boot failure out of a daemon log for start diagnostics.
+
+  Prefers Mix's `Could not start application` line (the daemon halts after
+  it); otherwise the first `[error]` entry with its continuation lines, which
+  is where a crash report lands when a start stalls instead of failing.
+  Bounded to #{@failure_excerpt_max_lines} lines.
+  """
+  @spec failure_excerpt(String.t()) :: {:ok, String.t()} | :none
+  def failure_excerpt(log_contents) when is_binary(log_contents) do
+    lines = String.split(log_contents, ["\r\n", "\n"])
+
+    case Enum.find_index(lines, &String.contains?(&1, "Could not start application")) do
+      nil ->
+        case Enum.find_index(lines, &String.contains?(&1, "[error]")) do
+          nil -> :none
+          index -> {:ok, excerpt_from(lines, index, &(String.trim(&1) != ""))}
+        end
+
+      # Mix's line is followed by unrelated shutdown chatter; keep only its
+      # own indented continuation lines.
+      index ->
+        {:ok, excerpt_from(lines, index, &String.match?(&1, ~r/^\s+\S/))}
+    end
+  end
+
+  def failure_excerpt(_log_contents), do: :none
+
+  defp excerpt_from(lines, index, continuation?) do
+    [first | rest] = Enum.drop(lines, index)
+
+    [first | Enum.take_while(rest, continuation?)]
+    |> Enum.take(@failure_excerpt_max_lines)
+    |> Enum.map_join("\n", &truncate_line/1)
+  end
+
+  defp truncate_line(line) when byte_size(line) <= @failure_excerpt_max_line_bytes, do: line
+
+  defp truncate_line(line) do
+    String.slice(line, 0, @failure_excerpt_max_line_bytes) <> " ..."
+  end
+
+  @doc """
   Remaining milliseconds until an absolute monotonic deadline (never negative).
   """
   @spec remaining_ms(integer(), integer()) :: non_neg_integer()
@@ -132,6 +215,9 @@ defmodule Mix.Tasks.Arbor.Readiness do
         :done_ready
 
       match?({:observation_unavailable, {:badrpc, :nodedown}}, last_result) ->
+        {:done_failed, last_result}
+
+      match?({:stalled_start, _app, _missing, _present}, last_result) ->
         {:done_failed, last_result}
 
       remaining <= 0 ->
@@ -197,6 +283,18 @@ defmodule Mix.Tasks.Arbor.Readiness do
     |> String.trim()
   end
 
+  def timeout_diagnostic({:stalled_start, app, missing, present}, expected, _app_timeout_ms) do
+    """
+    Arbor application #{app} is stuck starting and will never finish: its OTP
+    application master exited before #{app}'s start/2 returned, so the
+    application controller waits forever (the node stays up, half-booted).
+      Started:       #{length(present)}/#{length(expected)}
+      Missing:       #{format_app_list(missing)}
+    The exit reason is the first crash report in the daemon log (excerpt below).
+    """
+    |> String.trim()
+  end
+
   def timeout_diagnostic(
         {:observation_unavailable, {:badrpc, :nodedown}},
         expected,
@@ -235,6 +333,10 @@ defmodule Mix.Tasks.Arbor.Readiness do
   @spec status_label(readiness_result()) :: String.t()
   def status_label(:ready), do: "running (applications ready)"
 
+  def status_label({:stalled_start, app, _missing, _present}) do
+    "reachable (stuck: #{app} can never finish starting)"
+  end
+
   def status_label({:partial, missing, _present}) do
     "reachable (applications starting; missing: #{format_app_list(missing)})"
   end
@@ -256,6 +358,9 @@ defmodule Mix.Tasks.Arbor.Readiness do
   """
   @spec status_missing_label(readiness_result()) :: String.t()
   def status_missing_label(:ready), do: "none"
+
+  def status_missing_label({:stalled_start, _app, missing, present}),
+    do: status_missing_label({:partial, missing, present})
 
   def status_missing_label({:partial, missing, _present}) when is_list(missing) do
     case missing do

@@ -11,12 +11,21 @@ defmodule Arbor.Scheduler.Identity do
   identity registry and the authority proof. The scheduler display name is the
   normal durable locator. `system_scheduler` is read only as a fallback for
   legacy installations and is never created for a fresh identity.
+
+  The scheduler never grants itself authority. Until an operator grants the
+  principal every capability in `required_capability_uris/0` (see
+  `mix arbor.scheduler.provision`), the identity stays **dormant**: it is
+  created and registered, but no authority is opened, every mutation fails
+  closed, and Oban runs in standby (jobs can be inserted, nothing executes).
+  `retry_bootstrap/0` re-checks after provisioning; on the transition to ready
+  the identity switches Oban to its configured queues and plugins.
   """
 
   use GenServer
 
   require Logger
 
+  alias Arbor.Scheduler.Runtime
   alias Arbor.Security
   alias Arbor.Trust
 
@@ -34,6 +43,7 @@ defmodule Arbor.Scheduler.Identity do
   @test_env Mix.env() == :test
   @custody_table Arbor.Scheduler.Identity.Custody
   @custody_tag :arbor_scheduler_identity_custody_v1
+  @runtime_supervisor Arbor.Scheduler.Supervisor
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -51,10 +61,37 @@ defmodule Arbor.Scheduler.Identity do
     :exit, _ -> nil
   end
 
-  @doc false
+  @doc """
+  Waits for bootstrap to finish. Returns `{:error, {:scheduler_identity_dormant,
+  reason}}` while the principal lacks its operator-provisioned capabilities.
+  """
   @spec await_ready(timeout()) :: :ok | {:error, term()}
   def await_ready(timeout \\ 30_000) do
     GenServer.call(__MODULE__, :await_ready, timeout)
+  catch
+    :exit, {reason, {GenServer, :call, _args}} -> {:error, reason}
+    :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  Public, secret-free bootstrap status: `:pending`, `:ready`, or `:dormant`, the
+  scheduler principal, and the required capabilities it does not hold yet.
+  """
+  @spec status(timeout()) :: map()
+  def status(timeout \\ 30_000) do
+    GenServer.call(__MODULE__, :status, timeout)
+  catch
+    :exit, _ -> %{state: :unavailable, principal_id: nil, missing_capabilities: [], reason: nil}
+  end
+
+  @doc """
+  Re-runs bootstrap when dormant (after an operator provisioned the principal)
+  and makes sure Oban leaves standby once ready. Idempotent; it opens no
+  authority unless every required capability is already granted.
+  """
+  @spec retry_bootstrap(timeout()) :: :ok | {:error, term()}
+  def retry_bootstrap(timeout \\ 30_000) do
+    GenServer.call(__MODULE__, :retry_bootstrap, timeout)
   catch
     :exit, {reason, {GenServer, :call, _args}} -> {:error, reason}
     :exit, reason -> {:error, reason}
@@ -107,10 +144,20 @@ defmodule Arbor.Scheduler.Identity do
     # children while it was still blocked waiting for this init to acknowledge.
     # A continuation runs only after the child has been recorded; ordinary
     # calls remain queued until this callback establishes the ready state.
+    case bootstrap(pending_state) do
+      {:stop, reason} -> {:stop, reason, pending_state}
+      state -> {:noreply, state}
+    end
+  end
 
+  # Returns the next state, or {:stop, reason} for failures an operator grant
+  # cannot repair. A missing operator-provisioned capability is not one of
+  # them: the scheduler stays dormant so the rest of Arbor can boot, and a
+  # fresh install can reach genesis and provision it.
+  defp bootstrap(state) do
     case read_bootstrap_custody() do
       {:error, reason} ->
-        {:stop, reason, pending_state}
+        {:stop, reason}
 
       {:ok, opts} ->
         security = Keyword.get(opts, :security_facade, Security)
@@ -123,26 +170,92 @@ defmodule Arbor.Scheduler.Identity do
                 {:ok, authority} ->
                   Logger.info("[Scheduler.Identity] #{status} keypair for #{identity.agent_id}")
                   :ok = put_ready_custody(authority, security, mutation_token)
+                  activate_runtime()
 
-                  {:noreply,
-                   %{
-                     phase: :ready,
-                     agent_id: identity.agent_id,
-                     authenticated_calls: pending_state.authenticated_calls
-                   }}
+                  %{
+                    phase: :ready,
+                    agent_id: identity.agent_id,
+                    dormant_reason: nil,
+                    missing_capabilities: [],
+                    authenticated_calls: state.authenticated_calls
+                  }
+
+                {:error,
+                 {:capability_provision_failed, {:scheduler_capability_not_provisioned, _}} =
+                     reason} ->
+                  dormant_state(state, identity.agent_id, reason, security)
 
                 {:error, reason} ->
                   Logger.error("[Scheduler.Identity] init failed: #{inspect(reason)}")
-                  {:stop, reason, pending_state}
+                  {:stop, reason}
               end
 
             {:error, reason} ->
               Logger.error("[Scheduler.Identity] init failed: #{inspect(reason)}")
-              {:stop, reason, pending_state}
+              {:stop, reason}
           end
         else
-          {:error, reason} -> {:stop, reason, pending_state}
+          {:error, reason} -> {:stop, reason}
         end
+    end
+  end
+
+  defp dormant_state(state, agent_id, reason, security) do
+    missing = missing_capabilities(agent_id, security)
+
+    Logger.warning(
+      "[Scheduler.Identity] dormant: scheduler principal #{agent_id} lacks " <>
+        "#{Enum.join(missing, ", ")}. Scheduled work stays in standby until an " <>
+        "operator grants them: mix arbor.scheduler.provision --key-file ~/.arbor/operator.key"
+    )
+
+    %{
+      phase: :dormant,
+      agent_id: agent_id,
+      dormant_reason: reason,
+      missing_capabilities: missing,
+      authenticated_calls: state.authenticated_calls
+    }
+  end
+
+  defp missing_capabilities(agent_id, security) do
+    case security.list_capabilities(agent_id) do
+      {:ok, capabilities} ->
+        held = MapSet.new(capabilities, & &1.resource_uri)
+        Enum.reject(@required_capabilities, &MapSet.member?(held, &1))
+
+      _error ->
+        @required_capabilities
+    end
+  rescue
+    _ -> @required_capabilities
+  catch
+    :exit, _ -> @required_capabilities
+  end
+
+  # Oban is the only scheduler component that produces work, so it starts in
+  # standby and leaves it only from here, after the authority is open. Runs in
+  # a task: the parent supervisor may still be inside init/1 at boot, and a
+  # synchronous call from this child would deadlock it. Only the production
+  # runtime tree is touched (tests start Identity with start_children: false).
+  defp activate_runtime do
+    with true <- Application.get_env(:arbor_scheduler, :start_children, true),
+         {:parent, parent} when is_pid(parent) <- Process.info(self(), :parent),
+         ^parent <- Process.whereis(@runtime_supervisor) do
+      {:ok, _task} =
+        Task.start(fn ->
+          case Runtime.activate_oban(parent) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.error("[Scheduler.Identity] Oban activation failed: #{inspect(reason)}")
+          end
+        end)
+
+      :ok
+    else
+      _ -> :ok
     end
   end
 
@@ -151,7 +264,30 @@ defmodule Arbor.Scheduler.Identity do
     {:reply, {:error, :scheduler_authority_not_exported}, state}
   end
 
+  def handle_call(:await_ready, _from, %{phase: :dormant} = state),
+    do: {:reply, {:error, {:scheduler_identity_dormant, state.dormant_reason}}, state}
+
   def handle_call(:await_ready, _from, state), do: {:reply, :ok, state}
+
+  def handle_call(:status, _from, state), do: {:reply, public_status(state), state}
+
+  def handle_call(:retry_bootstrap, _from, %{phase: :dormant} = state) do
+    case bootstrap(state) do
+      {:stop, reason} ->
+        {:stop, reason, {:error, reason}, state}
+
+      %{phase: :ready} = next ->
+        {:reply, :ok, next}
+
+      next ->
+        {:reply, {:error, {:scheduler_identity_dormant, next.dormant_reason}}, next}
+    end
+  end
+
+  def handle_call(:retry_bootstrap, _from, %{phase: :ready} = state) do
+    activate_runtime()
+    {:reply, :ok, state}
+  end
 
   def handle_call(:get_agent_id, _from, state) do
     {:reply, {:ok, state.agent_id}, state}
@@ -162,6 +298,15 @@ defmodule Arbor.Scheduler.Identity do
   # admitted through AuthenticatedCall and exact supervision provenance.
   def handle_call(_request, _from, state) do
     {:reply, {:error, :scheduler_mutation_unauthorized}, state}
+  end
+
+  defp public_status(state) do
+    %{
+      state: state.phase,
+      principal_id: Map.get(state, :agent_id),
+      missing_capabilities: Map.get(state, :missing_capabilities, []),
+      reason: Map.get(state, :dormant_reason)
+    }
   end
 
   @impl true
