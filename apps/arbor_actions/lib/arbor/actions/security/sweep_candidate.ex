@@ -11,13 +11,47 @@ defmodule Arbor.Actions.Security.SweepCandidate do
 
   ## Input
 
-  The `SynthesizeDetector` `{:ok, _}` map is passed through as the candidate
-  (`module_source` + `shape` + `spec`), plus the seed `Finding`:
+  The `SynthesizeDetector` `{:ok, _}` map is passed through as the candidate,
+  plus the seed `Finding`:
 
-    * `candidate` — the synthesize result map (must carry `module_source` and
-      `shape`; `spec` supplies the category/invariant for S1 Finding conversion).
+    * `candidate` — the synthesize result map. Its `spec` is the ONLY thing the
+      sweep compiles from (see Provenance below); `module_source`, when present,
+      must be byte-identical to what that spec regenerates. `shape` is
+      informative only — the validated `spec.shape` drives dispatch.
     * `finding` — the confirmed seed `Finding` (struct or map). Excluded from the
       sweep results: the seed is the bug we already know, not a new sibling.
+
+  ## Provenance: the candidate is REBUILT from its spec, never compiled as given
+
+  This action compiles and runs code in the VM, and its `candidate` param is
+  reachable from an agent-authored DOT graph (every exec node runs
+  `pipeline_internal`-allowed). Compiling `candidate.module_source` verbatim
+  would therefore be an arbitrary-code-execution crossing: anything that can put
+  a map in the context could run module-body code at compile time and
+  `detect/1` / `run/1` right after (2026-10-11 cross-library review F-008; the
+  same class as the 2026-08-16 in-VM code-execution crossings).
+
+  So the sweep never compiles caller-supplied text:
+
+    1. `candidate.spec` is coerced through `DetectorSpec.coerce/1` — the same
+       allowlist path `SynthesizeDetector` uses for LLM/JSON specs — into a
+       validated `%DetectorSpec{}`. It may arrive as the struct (in-process), an
+       atom-keyed map, or a JSON-clean string-keyed map (after the Engine
+       context boundary). Missing or invalid →
+       `{:error, {:sweep_failed, :invalid_spec}}`.
+    2. The detector source is REGENERATED from that spec via
+       `DetectorTemplate.module_source/2` (the one spec→source dispatch) and
+       compiled under a fresh unique module name.
+    3. If `candidate.module_source` is present it must equal the regenerated
+       source modulo the leading `defmodule` header (the module name is
+       per-run). Any difference →
+       `{:error, {:sweep_failed, :module_source_provenance_mismatch}}` — and
+       nothing is compiled.
+
+  A genuine `SynthesizeDetector` result always passes (its `module_source` IS the
+  template output for its `spec`), so the shipped `synthesize-and-sweep.dot`
+  pipeline is unaffected. Only text that did not come from the template for this
+  spec is refused.
 
   ## How the sweep runs (by shape)
 
@@ -62,7 +96,10 @@ defmodule Arbor.Actions.Security.SweepCandidate do
       candidate: [
         type: {:or, [:map, :struct]},
         required: true,
-        doc: "The SynthesizeDetector {:ok, _} result map (module_source + shape + spec)"
+        doc:
+          "The SynthesizeDetector {:ok, _} result map. `spec` is required and is " <>
+            "what gets compiled (regenerated via DetectorTemplate); `module_source` " <>
+            "is optional and, when present, must match that regeneration"
       ],
       finding: [
         type: {:or, [:map, :struct]},
@@ -92,6 +129,7 @@ defmodule Arbor.Actions.Security.SweepCandidate do
     ]
 
   alias Arbor.Actions.Security.Detectors.Common
+  alias Arbor.Actions.Security.{DetectorSpec, DetectorTemplate}
   alias Arbor.Actions.Security.Recorder
   alias Arbor.Contracts.Security.Finding
 
@@ -99,12 +137,11 @@ defmodule Arbor.Actions.Security.SweepCandidate do
   def run(%{candidate: candidate, finding: finding} = params, _context) do
     seed = normalize_finding(finding)
     root = params[:root] || "apps"
-    shape = shape_of(candidate)
-    source = candidate[:module_source] || candidate["module_source"]
 
-    with {:ok, source} <- require_source(source),
-         {:ok, module} <- compile_in_memory(source) do
-      raw = sweep(shape, module, candidate, seed, root, params[:git_sha])
+    with {:ok, spec} <- candidate_spec(candidate),
+         :ok <- verify_provenance(candidate, spec),
+         {:ok, module} <- compile_from_spec(spec) do
+      raw = sweep(spec.shape, module, spec, seed, root, params[:git_sha])
       {siblings, seed_excluded?} = exclude_seed_and_dedup(raw, seed)
 
       summary = maybe_record(siblings, params)
@@ -114,27 +151,26 @@ defmodule Arbor.Actions.Security.SweepCandidate do
          siblings: siblings,
          hit_count: length(siblings),
          seed_excluded: seed_excluded?,
-         shape: shape,
+         shape: spec.shape,
          summary: summary
        }}
     end
   end
 
   # ---------------------------------------------------------------------------
-  # Sweep dispatch by shape
+  # Sweep dispatch by shape (the validated spec's shape — the template that was
+  # actually compiled — never the candidate's informative `shape` field)
   # ---------------------------------------------------------------------------
 
   # S3: the generated whole-tree detector already returns [Finding].
-  defp sweep(:s3, module, _candidate, _seed, root, git_sha) do
+  defp sweep(:s3, module, _spec, _seed, root, git_sha) do
     module.detect(root: root, git_sha: git_sha)
   end
 
   # S1: per-file AST. Enumerate, parse, run/1, convert violations → Findings,
   # mirroring StaticScan's conversion (the candidate is a `use Arbor.Eval`
   # module, so we drive its run/1 ourselves rather than via the suite).
-  defp sweep(_s1, module, candidate, _seed, root, git_sha) do
-    spec = candidate[:spec] || candidate["spec"]
-
+  defp sweep(:s1, module, spec, _seed, root, git_sha) do
     root
     |> Common.elixir_source_files()
     |> Enum.flat_map(&scan_file(&1, module, spec, git_sha))
@@ -157,15 +193,12 @@ defmodule Arbor.Actions.Security.SweepCandidate do
   # Mirror StaticScan.finding_from_violation/4: category + invariant come from
   # the spec; location {file,line,function}; detector provenance marked
   # synthesized so siblings are distinguishable from hand-authored L0 findings.
-  defp finding_from_violation(file, violation, spec, git_sha) do
-    category = spec_category(spec)
-    invariant = spec_invariant(spec)
-
+  defp finding_from_violation(file, violation, %DetectorSpec{} = spec, git_sha) do
     Finding.new(
-      category: category,
+      category: spec.category,
       title: violation[:message] || "Synthesized detector match",
       git_sha: git_sha,
-      detector: %{layer: "L0", name: spec_name(spec), version: "1", synthesized: true},
+      detector: %{layer: "L0", name: spec.name, version: "1", synthesized: true},
       severity: %{level: severity_level(violation[:severity])},
       confidence: %{score: 0.6, rationale: "synthesized S1 sweep (#{violation[:type]})"},
       location: %{
@@ -174,7 +207,7 @@ defmodule Arbor.Actions.Security.SweepCandidate do
         line: violation[:line],
         function: violation[:function]
       },
-      invariant_violated: invariant,
+      invariant_violated: spec.invariant,
       evidence: %{
         smell_match: violation[:type],
         code_excerpt: Common.code_excerpt(file, violation[:function], violation[:line])
@@ -230,18 +263,53 @@ defmodule Arbor.Actions.Security.SweepCandidate do
   end
 
   # ---------------------------------------------------------------------------
-  # Candidate compile (mirrors SynthesizeDetector's in-memory compile)
+  # Provenance: spec → regenerate → (optional) compare → compile (F-008)
   # ---------------------------------------------------------------------------
 
-  defp require_source(src) when is_binary(src) and src != "", do: {:ok, src}
-  defp require_source(_), do: {:error, {:sweep_failed, :no_module_source}}
+  # The candidate's spec is the only trusted input. DetectorSpec.coerce/1 accepts
+  # the struct, an atom-keyed map, or a JSON-clean string-keyed map, through the
+  # same allowlist path SynthesizeDetector uses — and fails closed on anything
+  # else (nil, non-map, unsupported/invalid spec).
+  defp candidate_spec(candidate) do
+    case DetectorSpec.coerce(fetch(candidate, :spec)) do
+      {:ok, %DetectorSpec{} = spec} -> {:ok, spec}
+      {:error, _reason} -> {:error, {:sweep_failed, :invalid_spec}}
+    end
+  end
 
-  # Compile the candidate under a fresh, unique module name so a sweep never
-  # clashes with the synthesis-time G1 module (or a prior sweep). The generated
-  # source names its own module; we rewrite that to a per-run unique name.
-  defp compile_in_memory(source) do
+  # A supplied module_source is never compiled — it is only compared against what
+  # the spec regenerates (modulo the per-run `defmodule` header). Absent is fine
+  # (the spec alone fully determines the detector); present-but-different, or
+  # not a string, is a provenance mismatch and the sweep refuses before any
+  # compile.
+  defp verify_provenance(candidate, spec) do
+    case fetch(candidate, :module_source) do
+      nil ->
+        :ok
+
+      supplied when is_binary(supplied) ->
+        if strip_header(supplied) == strip_header(DetectorTemplate.module_source(spec)),
+          do: :ok,
+          else: {:error, {:sweep_failed, :module_source_provenance_mismatch}}
+
+      _other ->
+        {:error, {:sweep_failed, :module_source_provenance_mismatch}}
+    end
+  end
+
+  # Regenerate the source from the validated spec under a fresh, unique module
+  # name (collision-free across sweeps and vs. the synthesis-time G1 module) and
+  # compile THAT — never the caller's text.
+  defp compile_from_spec(spec) do
+    unique = "Arbor.Actions.Security.Sweep.Candidate_#{System.unique_integer([:positive])}"
+    source = DetectorTemplate.module_source(spec, module: unique)
+
     try do
-      [{compiled, _bin} | _] = Code.compile_string(rename_module(source))
+      # `source` is DetectorTemplate output for a validated %DetectorSpec{} (every
+      # spec value reaches it via inspect/1 or escape_doc/1) — never caller text;
+      # a caller-supplied module_source was only COMPARED above, never compiled.
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+      [{compiled, _bin} | _] = Code.compile_string(source)
       {:ok, compiled}
     rescue
       e -> {:error, {:sweep_failed, {:compile_error, Exception.message(e)}}}
@@ -250,12 +318,11 @@ defmodule Arbor.Actions.Security.SweepCandidate do
     end
   end
 
-  # Rewrite the `defmodule <Name> do` header to a unique sweep module name so the
-  # in-memory compile is collision-free across runs.
-  defp rename_module(source) do
-    unique = "Arbor.Actions.Security.Sweep.Candidate_#{System.unique_integer([:positive])}"
-
-    Regex.replace(~r/\Adefmodule\s+[A-Za-z0-9_.]+\s+do/, source, "defmodule #{unique} do",
+  # The generated source names its module exactly once, in the leading
+  # `defmodule` line, and that name is per-run (`.G1_<n>` at synthesis,
+  # `Sweep.Candidate_<n>` here). The comparison masks that header only.
+  defp strip_header(source) do
+    Regex.replace(~r/\Adefmodule\s+[A-Za-z0-9_.]+\s+do/, source, "defmodule __CANDIDATE__ do",
       global: false
     )
   end
@@ -264,28 +331,11 @@ defmodule Arbor.Actions.Security.SweepCandidate do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp shape_of(candidate) do
-    case candidate[:shape] || candidate["shape"] do
-      :s3 -> :s3
-      "s3" -> :s3
-      _ -> :s1
-    end
-  end
-
-  defp spec_category(spec), do: spec_field(spec, :category) || :other
-  defp spec_invariant(spec), do: spec_field(spec, :invariant)
-  defp spec_name(spec), do: spec_field(spec, :name) || "synthesized"
-
-  # The spec carried in the candidate is a `%DetectorSpec{}` struct (no Access),
-  # but may also arrive as a plain atom-/string-keyed map (DOT/JSON path). Read a
-  # field from any of those forms.
-  defp spec_field(%_{} = struct, field), do: Map.get(struct, field)
-
-  defp spec_field(spec, field) when is_map(spec) do
-    spec[field] || spec[Atom.to_string(field)]
-  end
-
-  defp spec_field(_spec, _field), do: nil
+  # Read a candidate field from a struct, an atom-keyed map, or a string-keyed
+  # map (the DOT/JSON path).
+  defp fetch(%_{} = struct, key), do: Map.get(struct, key)
+  defp fetch(map, key) when is_map(map), do: map[key] || map[Atom.to_string(key)]
+  defp fetch(_other, _key), do: nil
 
   defp normalize_finding(%Finding{} = f), do: f
 

@@ -87,6 +87,12 @@ defmodule Arbor.Actions.Security.DetectorSpec do
   @s3_categories [:capability_overmatch, :serialization_drop]
   @clause_positions [:rescue, :catch_all, :rescue_or_catch_all]
 
+  # Transport-form coercion allowlists (see `coerce_params/1`). Known atom-valued
+  # tokens are converted ONLY when they name one of these — never
+  # `String.to_atom/1` on model/transport output.
+  @known_literal_atoms ~w(ok error true false nil authorized unauthorized verified unverified)
+  @known_clause_positions Enum.map(@clause_positions, &Atom.to_string/1)
+
   typedstruct do
     @typedoc "A synthesizable detector specification (S1 per-file AST or S3 tree-wide)"
 
@@ -261,4 +267,176 @@ defmodule Arbor.Actions.Security.DetectorSpec do
   defp validate_match_pattern(_), do: {:error, :invalid_match_pattern}
 
   defp default_name(category), do: "synthesized_#{category}"
+
+  # ---------------------------------------------------------------------------
+  # Transport-form coercion (any representation → validated spec)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Coerce ANY representation of a spec into a validated `%DetectorSpec{}`.
+
+  Accepts:
+
+    * a built `%DetectorSpec{}` — re-validated by round-tripping through
+      `build/1`, so a hand-built struct still gets every check;
+    * an in-process map (atom or string keys, canonical atom/tuple values);
+    * a JSON-clean map (string keys; string/boolean/list values) — the form a
+      spec takes after crossing the Engine context / checkpoint boundary, or as
+      decoded from the LLM-synthesis node's output.
+
+  Maps go through `coerce_params/1` first, so atom-valued fields are only ever
+  produced from allowlists — never `String.to_atom/1` on transport data. `nil`,
+  an empty map, or a non-map is `{:error, :invalid_spec}`; a map that coerces
+  but fails validation returns `build/1`'s error.
+
+  This is the single entry point `Arbor.Actions.Security.SweepCandidate` trusts:
+  it rebuilds the candidate detector from THIS struct, never from caller-supplied
+  source (F-008).
+  """
+  @spec coerce(term()) :: {:ok, t()} | {:error, term()}
+  def coerce(%__MODULE__{} = spec), do: build(Map.from_struct(spec))
+
+  def coerce(map) when is_map(map) and not is_struct(map) and map_size(map) > 0,
+    do: map |> coerce_params() |> build()
+
+  def coerce(_other), do: {:error, :invalid_spec}
+
+  @doc """
+  Normalize a spec map in transport form into `build/1` params.
+
+  Handles the JSON-clean string-keyed/string-valued form (the LLM-synthesis
+  node's decoded output, or a spec that crossed the Engine's JSON context
+  boundary) AND an in-process atom-keyed map. Known atom-valued fields are
+  coerced against allowlists — NEVER `String.to_atom/1` on model/transport
+  output. Literals are coerced from JSON tokens: a string token to its
+  atom/boolean/nil value, and a 2-element list like `["ok", "_"]` to the tuple
+  `{:ok, :_}` (the `{:ok, _}` wildcard form). Values that are already canonical
+  atoms/tuples pass through unchanged, so a `Map.from_struct/1`'d spec
+  round-trips to an identical struct. `nil`/unrecognized fields are dropped so
+  `build/1` applies its defaults.
+
+  Shared by `SynthesizeDetector` (its JSON spec path) and `SweepCandidate` (via
+  `coerce/1`), so both stages agree on what a transported spec means.
+  """
+  @spec coerce_params(map()) :: map()
+  def coerce_params(map) when is_map(map) and not is_struct(map) do
+    %{
+      name: get(map, :name),
+      shape: coerce_shape(get(map, :shape)),
+      category: coerce_category(get(map, :category)),
+      invariant: get(map, :invariant),
+      name_match: coerce_name_match(get(map, :name_match)),
+      target_literals: coerce_literals(get(map, :target_literals)),
+      exclusions: coerce_literals(get(map, :exclusions)),
+      clause_position: coerce_clause_position(get(map, :clause_position)),
+      match_pattern: coerce_match_pattern(get(map, :match_pattern))
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp get(map, key) when is_atom(key), do: map[key] || map[Atom.to_string(key)]
+
+  defp coerce_category(nil), do: nil
+
+  # A string category is matched against BOTH the S1 and S3 known sets
+  # (allowlist only — never String.to_atom on model output). An already-atom
+  # category passes through untouched: it exists, and build/1 rejects it if it
+  # is not a supported shape.
+  defp coerce_category(str) when is_binary(str) do
+    Enum.find(@s1_categories ++ @s3_categories, &(Atom.to_string(&1) == str))
+  end
+
+  defp coerce_category(atom) when is_atom(atom), do: atom
+  defp coerce_category(_), do: nil
+
+  # The S3 match_pattern. `kind` is allowlisted; the call target and literal value
+  # are coerced through the SAME hardened coercions as S1 literals/name_match
+  # (no String.to_atom on raw model output). A "Mod.fun" call stays a binary.
+  defp coerce_match_pattern(%{} = mp) do
+    case coerce_match_kind(mp[:kind] || mp["kind"]) do
+      :literal -> %{kind: :literal, literal: coerce_literal(mp[:literal] || mp["literal"])}
+      :call -> %{kind: :call, call: coerce_call_target(mp[:call] || mp["call"])}
+      _ -> nil
+    end
+  end
+
+  defp coerce_match_pattern(_), do: nil
+
+  # A call target: a remote "Mod.fun" stays a binary (matched textually by the
+  # generated detector); a bare "fun" / "@fun" / ":fun" becomes an existing atom
+  # when known, else falls back to the binary form (never minting new atoms). An
+  # already-atom target passes through.
+  defp coerce_call_target(str) when is_binary(str) do
+    if String.contains?(str, "."),
+      do: str,
+      else: to_known_atom_or(strip_colon(strip_at(str)), str)
+  end
+
+  defp coerce_call_target(atom) when is_atom(atom) and not is_nil(atom), do: atom
+  defp coerce_call_target(_), do: nil
+
+  defp strip_at("@" <> rest), do: rest
+  defp strip_at(str), do: str
+
+  defp coerce_clause_position(pos) when pos in @clause_positions, do: pos
+
+  defp coerce_clause_position(str) when is_binary(str) and str in @known_clause_positions do
+    String.to_existing_atom(str)
+  end
+
+  defp coerce_clause_position(_), do: nil
+
+  # Substring strings pass through; "@name" is an exact-name atom (when it already
+  # exists); an already-atom exact name passes through.
+  defp coerce_name_match(list) when is_list(list) do
+    Enum.flat_map(list, fn
+      "@" <> exact -> [to_known_atom_or(exact, exact)]
+      bin when is_binary(bin) -> [bin]
+      atom when is_atom(atom) and not is_boolean(atom) and not is_nil(atom) -> [atom]
+      _ -> []
+    end)
+  end
+
+  defp coerce_name_match(_), do: nil
+
+  defp coerce_literals(list) when is_list(list), do: Enum.map(list, &coerce_literal/1)
+  defp coerce_literals(_), do: nil
+
+  # A single JSON literal token → an Elixir literal. A 2-element list → a tuple
+  # (recursively), enabling ["ok", "_"] → {:ok, :_}. Already-canonical terms
+  # (atoms, tuples, numbers) pass through.
+  defp coerce_literal([a, b]), do: {coerce_literal(a), coerce_literal(b)}
+  defp coerce_literal("_"), do: :_
+  defp coerce_literal(true), do: true
+  defp coerce_literal(false), do: false
+  defp coerce_literal(nil), do: nil
+
+  defp coerce_literal(str) when is_binary(str) do
+    cond do
+      str == "true" -> true
+      str == "false" -> false
+      str == "nil" -> nil
+      str in @known_literal_atoms -> String.to_existing_atom(strip_colon(str))
+      String.starts_with?(str, ":") -> to_known_atom_or(strip_colon(str), str)
+      true -> str
+    end
+  end
+
+  defp coerce_literal(other), do: other
+
+  defp strip_colon(":" <> rest), do: rest
+  defp strip_colon(str), do: str
+
+  defp to_known_atom_or(name, fallback) do
+    if name in @known_literal_atoms do
+      String.to_existing_atom(name)
+    else
+      try do
+        String.to_existing_atom(name)
+      rescue
+        ArgumentError -> fallback
+      end
+    end
+  end
 end

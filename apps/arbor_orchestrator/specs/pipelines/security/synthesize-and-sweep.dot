@@ -24,11 +24,13 @@
 // brace-heavy multi-line string) — exactly the kind of value the boundary says NOT
 // to thread as a nested struct through context. So rather than reconstruct that map
 // in DOT, this pipeline threads `finding`/`spec` straight to BOTH nodes and lets
-// SweepCandidate re-synthesize-equivalent by recompiling from the candidate map it
-// is handed in-process when driven directly (the agent/Engine passes the synthesize
-// result as the `candidate` param). When invoked purely via DOT, supply the
-// synthesize result as the `candidate` initial_value. See the action moduledoc +
-// the E1.3 report for the full rationale; E1.4 wires the human-gated assembly.
+// SweepCandidate regenerate the detector from the candidate's validated `spec`
+// (it never compiles `candidate.module_source` verbatim — F-008 provenance gate;
+// a present module_source must match that regeneration) when driven directly (the
+// agent/Engine passes the synthesize result as the `candidate` param). When invoked
+// purely via DOT, supply the synthesize result as the `candidate` initial_value.
+// See the action moduledoc + the E1.3 report for the full rationale; E1.4 wires
+// the human-gated assembly.
 //
 // Keep this brace-light: the DOT lexer is sensitive to nested `{}` (E1.2 note). LLM
 // nodes are NOT used here — synthesis falls back to the deterministic spec — so no
