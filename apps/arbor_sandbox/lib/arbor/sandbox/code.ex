@@ -29,8 +29,12 @@ defmodule Arbor.Sandbox.Code do
     module (`m = System; m.cmd(...)`, `@mod.f(...)`, `state.mod.f()`),
     `apply/2`, `Kernel.apply/2`, `Function.capture/3`, `:erlang.make_fun/3`,
     `&dynamic.f/arity`, and `spawn*` with an anonymous function.
-    `apply/3` / `Kernel.apply/3` / `spawn/3` with a literal module are checked
-    exactly like the equivalent direct call.
+    `apply/3` / `Kernel.apply/3` with a literal module **and** a literal
+    function atom are checked exactly like the equivalent direct call, so
+    `apply(:lists, :map, ...)` passes wherever `:lists.map(...)` does and
+    `apply(System, :cmd, ...)` is refused wherever `System.cmd/2` is. A
+    non-literal module or function, `apply` routed through `Kernel`, and
+    `spawn/3` in any form are refused.
   - `import` / `alias` of a module that carries per-function restrictions
     (`System`, `File`, `Code`, `Module`, `Function`, `:erlang`, ...) is
     rejected, because an imported bare call or a shadowing alias
@@ -55,6 +59,16 @@ defmodule Arbor.Sandbox.Code do
   (via the Erlang allowlist) `:os`, `:rpc`, `:erpc`, `:code`, `:init`,
   `:file`. It is a validator-internal level, not an
   `Arbor.Contracts.Security.SandboxLevel` canonical level.
+
+  `:ets` is deliberately absent from the Erlang allowlist (decision
+  2026-10-11). ETS is global mutable state and much of it is security state:
+  trust profiles, the confirmation tracker, the agent template store that
+  feeds capability grants, the agent registry, and every agent's working
+  memory are `:public` named tables. A hot-loaded module must keep its state
+  in its own process. If a real hot-load ever needs ETS, the agreed path is a
+  separate opt-in capability (`arbor://code/hot_load/ets`) that unlocks a
+  read-only subset per hot-load — not a blanket allowance. See
+  `.arbor/roadmap/0-inbox/hot-load-ets-opt-in-capability.md`.
 
   ## Known residual gap
 
@@ -556,30 +570,39 @@ defmodule Arbor.Sandbox.Code do
     end
   end
 
-  # apply/3 is dynamic dispatch by construction. Below :full it is rejected
-  # outright (a direct call expresses the same thing and can be verified);
-  # `apply(__MODULE__, f, a)` is exempt because the target is the module
-  # being validated. At :full and above a literal target is checked exactly
-  # like the equivalent direct call, so `apply(:os, :cmd, ...)` and
-  # `Kernel.apply(Code, :eval_string, ...)` can no longer slip past.
+  # apply/3 with a literal module AND a literal function atom is the direct
+  # call spelled differently, so it is checked exactly like
+  # `module.function(...)` at every level (2026-10-11 review follow-up,
+  # option B: consistency across levels — `apply(:lists, :map, ...)` passes
+  # wherever `:lists.map(...)` does, `apply(:os, :cmd, ...)` and
+  # `Kernel.apply(Code, :eval_string, ...)` are refused wherever the direct
+  # call is). `apply(__MODULE__, f, a)` is exempt because the target is the
+  # module being validated. Anything the validator cannot attribute to a
+  # concrete target — a non-literal module or function, or `apply` routed
+  # through `Kernel` whose real target sits inside a runtime list — is
+  # dynamic dispatch and is refused below :full.
   defp check_apply(module_arg, function_arg, args, level, location, acc) do
     case resolve_module(module_arg) do
       :self ->
         acc
 
-      _ when level in @restrictive_levels ->
-        check_dynamic_dispatch(level, location, "apply/3", acc)
+      {:module, Kernel} when level in @restrictive_levels ->
+        check_dynamic_dispatch(level, location, "apply/3 through Kernel", acc)
 
       {:module, Kernel} ->
-        # apply(Kernel, :apply, [...]) / apply(Kernel, :spawn, [...]) — the
-        # real target is nested inside a runtime list and cannot be verified.
         acc
 
       {:module, module} when is_atom(function_arg) ->
         check_module_call(module, function_arg, list_args(args), level, location, acc)
 
+      {:module, _module} when level in @restrictive_levels ->
+        check_dynamic_dispatch(level, location, "apply/3 with a non-literal function", acc)
+
       {:module, module} ->
         check_module_call(module, :__dynamic__, [], level, location, acc)
+
+      :dynamic when level in @restrictive_levels ->
+        check_dynamic_dispatch(level, location, "apply/3", acc)
 
       :dynamic ->
         acc

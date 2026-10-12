@@ -45,10 +45,14 @@ defmodule Arbor.Sandbox.CodeDynamicDispatchSecurityRegressionTest do
     {"nested field receiver", ~S|state.mod.cmd("id", [])|},
     {"import + bare call", ~S|import System; cmd("id", [])|},
     {"import with only:", ~S|import System, only: [cmd: 2]; cmd("id", [])|},
-    {"Kernel.apply/3 literal module", ~S|Kernel.apply(System, :cmd, ["id", []])|},
-    {"Elixir.Kernel.apply/3", ~S|Elixir.Kernel.apply(System, :cmd, ["id", []])|},
-    {"apply/3 literal module", ~S|apply(System, :cmd, ["id", []])|},
     {"apply/3 nested through Kernel", ~S|apply(Kernel, :apply, [System, :cmd, ["id", []]])|},
+    {"apply/3 with a variable module", ~S|m = System; apply(m, :cmd, ["id", []])|},
+    {"apply/3 with a variable function", ~S|f = :cmd; apply(System, f, ["id", []])|},
+    {"apply/3 of a forbidden Erlang module", ~S|apply(:file, :write_file, ["/tmp/x", "y"])|},
+    {"apply/3 of :erpc", ~S|apply(:erpc, :call, [:n, :os, :cmd, [~c"id"]])|},
+    {"apply/3 nested through :erlang", ~S|apply(:erlang, :apply, [:os, :cmd, [~c"id"]])|},
+    {"apply/3 of Kernel.spawn", ~S|apply(Kernel, :spawn, [fn -> :os.cmd(~c"id") end])|},
+    {"spawn/3 with a literal allowed module", ~S|spawn(:lists, :map, [& &1, [1]])|},
     {"apply/2", ~S|apply(fun, ["id", []])|},
     {"Kernel.apply/2", ~S|Kernel.apply(fun, ["id", []])|},
     {"capture of dynamic receiver", ~S|f = &m.cmd/2; f.("id", [])|},
@@ -88,6 +92,57 @@ defmodule Arbor.Sandbox.CodeDynamicDispatchSecurityRegressionTest do
           assert_refused(unquote(source), unquote(level))
         end
       end
+    end
+  end
+
+  # Option B (2026-10-11 review follow-up): a literal module + literal
+  # function `apply/3` is the direct call spelled differently and must get the
+  # same verdict as the direct call at every level — never looser (the
+  # pre-fix hole) and never stricter (the interim blanket refusal).
+  for level <- [:pure, :limited, :hot_load] do
+    describe "literal apply/3 mirrors the direct call at #{level}" do
+      test "an allowed direct call stays allowed through apply/3" do
+        assert :ok = validate(~S|:lists.map(& &1, [1])|, unquote(level))
+        assert :ok = validate(~S|apply(:lists, :map, [& &1, [1]])|, unquote(level))
+        assert :ok = validate(~S|Kernel.apply(:lists, :map, [& &1, [1]])|, unquote(level))
+        assert :ok = validate(~S|apply(Enum, :map, [[1], & &1])|, unquote(level))
+        assert :ok = validate(~S|apply(:maps, :get, [:a, %{a: 1}])|, unquote(level))
+      end
+
+      test "System.cmd through apply/3 gets exactly the direct call's verdict" do
+        direct = validate(~S|System.cmd("id", [])|, unquote(level))
+
+        for source <- [
+              ~S|apply(System, :cmd, ["id", []])|,
+              ~S|Kernel.apply(System, :cmd, ["id", []])|,
+              ~S|Elixir.Kernel.apply(System, :cmd, ["id", []])|
+            ] do
+          result = validate(source, unquote(level))
+
+          case {direct, result} do
+            {:ok, :ok} ->
+              :ok
+
+            {{:error, _}, {:error, _}} ->
+              :ok
+
+            other ->
+              flunk(
+                "#{source} at #{inspect(unquote(level))} must match the direct call; " <>
+                  "got {direct, apply} = #{inspect(other)}"
+              )
+          end
+        end
+      end
+    end
+  end
+
+  describe "literal apply/3 verdicts match the level's posture" do
+    test "System.cmd is allowed at :limited and refused at :pure and :hot_load, via apply too" do
+      assert :ok = validate(~S|apply(System, :cmd, ["id", []])|, :limited)
+      assert_refused(~S|apply(System, :cmd, ["id", []])|, :pure)
+      assert_refused(~S|apply(System, :cmd, ["id", []])|, :hot_load)
+      assert_refused(~S|Kernel.apply(Code, :eval_string, ["1"])|, :limited)
     end
   end
 
