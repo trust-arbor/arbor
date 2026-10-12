@@ -11,7 +11,7 @@ defmodule Arbor.Actions.Session do
   |--------|-------------|
   | `Classify` | Classify session input type (query/command/tool_result/blocked) |
   | `ModeSelect` | Select BDI cognitive mode from goals/intents/turn state |
-  | `ProcessResults` | Parse and validate LLM JSON response into 10 typed output fields |
+  | `ProcessResults` | Parse and validate LLM JSON response into typed output fields plus a parse status |
   """
 
   # ============================================================================
@@ -187,11 +187,22 @@ defmodule Arbor.Actions.Session do
     |------|------|----------|-------------|
     | `raw_content` | string | yes | Raw LLM response (JSON string) |
 
+    Heartbeat graphs bind `last_response` and `session.cognitive_mode` instead;
+    both arrive as string keys.
+
     ## Returns
 
     Map with validated fields: actions, goal_updates, new_goals, memory_notes,
     concerns, curiosity, decompositions, new_intents, proposal_decisions,
-    identity_insights, proposals, fix_proposal
+    identity_insights, proposals, fix_proposal — plus the parse outcome:
+    `parse_status` (`"parsed" | "parse_failed" | "no_reply"`), `parse_error`,
+    and `parse_rejected_fields`. See `Arbor.Actions.Session.ProcessResultsCore`.
+
+    A reply that does not parse still yields empty fields, so no actions run
+    (fail closed). It is no longer silent: it is marked `parse_failed`, logged
+    as a warning with a bounded, redacted preview, and emitted as an
+    `agent.heartbeat_parse_failed` signal — so a broken reply can be told apart
+    from an idle agent.
     """
     use Jido.Action,
       name: "session_process_results",
@@ -201,134 +212,99 @@ defmodule Arbor.Actions.Session do
         raw_content: [type: :string, required: false, doc: "Raw LLM response (JSON string)"]
       ]
 
+    alias Arbor.Actions.Session.ProcessResultsCore
+    alias Arbor.Common.SensitiveData
+
+    require Logger
+
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       raw =
         params[:raw_content] || params["raw_content"] || params["llm.content"] ||
           params["last_response"] || params["session.llm_response"] || ""
 
-      json_text = extract_json(raw)
+      mode =
+        params[:cognitive_mode] || params["cognitive_mode"] || params["session.cognitive_mode"]
 
-      case Jason.decode(json_text) do
-        {:ok, parsed} when is_map(parsed) ->
-          {:ok,
-           %{
-             actions: validated_list(parsed, "actions", &valid_action?/1),
-             goal_updates: validated_list(parsed, "goal_updates", &is_map/1),
-             new_goals: validated_list(parsed, "new_goals", &is_map/1),
-             memory_notes: validated_list(parsed, "memory_notes", &valid_memory_note?/1),
-             concerns: validated_list(parsed, "concerns", &is_binary/1),
-             curiosity: validated_list(parsed, "curiosity", &is_binary/1),
-             decompositions: validated_list(parsed, "decompositions", &is_map/1),
-             new_intents: validated_list(parsed, "new_intents", &is_map/1),
-             proposal_decisions:
-               validated_list(parsed, "proposal_decisions", &valid_proposal_decision?/1),
-             identity_insights: validated_list(parsed, "identity_insights", &is_map/1),
-             proposals: extract_authored_proposals(parsed),
-             fix_proposal: extract_fix_proposal(parsed)
-           }}
+      core = ProcessResultsCore.new(raw, cognitive_mode: mode)
+
+      cond do
+        ProcessResultsCore.parse_failed?(core) ->
+          report_parse_failure(core, raw, mode, context)
+
+        core.rejected_fields != [] ->
+          Logger.info(
+            "[Session.ProcessResults] heartbeat reply parsed with malformed fields " <>
+              "#{Enum.join(core.rejected_fields, ",")}; their invalid items were dropped. " <>
+              "agent=#{label(context_agent_id(context))} mode=#{label(mode)}"
+          )
+
+        true ->
+          :ok
+      end
+
+      {:ok, ProcessResultsCore.show(core)}
+    end
+
+    # Visibility only: the result is already fail-closed (empty fields).
+    defp report_parse_failure(core, raw, mode, context) do
+      agent_id = context_agent_id(context)
+      reason = Atom.to_string(core.reason)
+
+      preview =
+        raw
+        |> ProcessResultsCore.preview_window()
+        |> SensitiveData.redact()
+        |> ProcessResultsCore.truncate_preview()
+
+      Logger.warning(
+        "[Session.ProcessResults] heartbeat reply did not parse (#{reason}); no actions " <>
+          "will run. agent=#{label(agent_id)} mode=#{label(mode)} " <>
+          "bytes=#{core.reply_bytes} preview=#{inspect(preview)}"
+      )
+
+      emit_parse_failed(%{
+        agent_id: agent_id,
+        reason: reason,
+        cognitive_mode: text_or_nil(mode),
+        reply_bytes: core.reply_bytes
+      })
+    end
+
+    # Fire-and-forget observability, once per failed parse. The payload carries
+    # no reply content: signals fan out to every subscriber.
+    defp emit_parse_failed(data) do
+      if Process.whereis(Arbor.Signals.Bus) != nil do
+        metadata = if data.agent_id, do: %{agent_id: data.agent_id}, else: %{}
+        Arbor.Signals.emit(:agent, :heartbeat_parse_failed, data, metadata: metadata)
+      end
+
+      :ok
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    defp context_agent_id(context) when is_map(context) do
+      case Map.get(context, :agent_id) || Map.get(context, "agent_id") do
+        id when is_binary(id) ->
+          id
 
         _ ->
-          {:ok,
-           %{
-             actions: [],
-             goal_updates: [],
-             new_goals: [],
-             memory_notes: [],
-             concerns: [],
-             curiosity: [],
-             decompositions: [],
-             new_intents: [],
-             proposal_decisions: [],
-             identity_insights: [],
-             proposals: [],
-             fix_proposal: nil
-           }}
+          case Map.get(context, :auth_context) do
+            %{principal_id: id} when is_binary(id) -> id
+            _ -> nil
+          end
       end
     end
 
-    defp validated_list(parsed, key, validator) do
-      case Map.get(parsed, key) do
-        items when is_list(items) -> Enum.filter(items, validator)
-        _ -> []
-      end
-    end
+    defp context_agent_id(_context), do: nil
 
-    defp valid_action?(%{"type" => type}) when is_binary(type), do: true
-    defp valid_action?(_), do: false
+    defp label(value), do: text_or_nil(value) || "unknown"
 
-    defp valid_memory_note?(note) when is_binary(note), do: true
-    defp valid_memory_note?(%{"text" => text}) when is_binary(text), do: true
-    defp valid_memory_note?(_), do: false
-
-    defp valid_proposal_decision?(%{"proposal_id" => id, "decision" => d})
-         when is_binary(id) and d in ["accept", "reject", "defer"],
-         do: true
-
-    defp valid_proposal_decision?(_), do: false
-
-    @eval_fix_kinds ~w(fix bug_fix fix_proposal)
-
-    defp extract_authored_proposals(parsed) when is_map(parsed) do
-      from_list = validated_list(parsed, "proposals", &valid_authored_proposal?/1)
-
-      if from_list != [] do
-        from_list
-      else
-        case extract_legacy_fix_proposal(parsed) do
-          nil -> []
-          text -> [%{"kind" => "fix", "content" => text}]
-        end
-      end
-    end
-
-    defp valid_authored_proposal?(%{"kind" => kind, "content" => content})
-         when is_binary(kind) and is_binary(content) do
-      String.trim(kind) != "" and nonempty_trim(content) != nil
-    end
-
-    defp valid_authored_proposal?(_), do: false
-
-    defp extract_fix_proposal(parsed) when is_map(parsed) do
-      authored = extract_authored_proposals(parsed)
-
-      Enum.find_value(authored, fn item ->
-        kind = item["kind"] || item[:kind]
-
-        if to_string(kind) in @eval_fix_kinds do
-          nonempty_trim(item["content"] || item[:content] || "")
-        end
-      end)
-    end
-
-    defp extract_legacy_fix_proposal(parsed) when is_map(parsed) do
-      case Map.get(parsed, "fix_proposal") do
-        text when is_binary(text) ->
-          nonempty_trim(text)
-
-        %{"content" => text} when is_binary(text) ->
-          nonempty_trim(text)
-
-        %{"text" => text} when is_binary(text) ->
-          nonempty_trim(text)
-
-        _ ->
-          nil
-      end
-    end
-
-    defp nonempty_trim(text) do
-      case String.trim(text) do
-        "" -> nil
-        trimmed -> trimmed
-      end
-    end
-
-    defp extract_json(text) do
-      case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do
-        [_, json] -> String.trim(json)
-        nil -> String.trim(text)
-      end
-    end
+    defp text_or_nil(value) when is_binary(value) and value != "", do: value
+    defp text_or_nil(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
+    defp text_or_nil(_value), do: nil
   end
 end

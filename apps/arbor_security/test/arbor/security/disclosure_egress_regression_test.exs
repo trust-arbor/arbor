@@ -191,7 +191,12 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
           issuer_signature: {:not, :a_binary}
       }
 
-      assert {:error, _reason} = CapabilityStore.put_fixture(malformed)
+      # The authority store holds only the serialized capability, and a
+      # non-binary signature has no stored form: the store refuses the
+      # candidate before the audit journal (not as a journal outage), and
+      # nothing is stored under its id. Egress must still refuse that id.
+      assert {:error, :invalid_capability_record} = CapabilityStore.put_fixture(malformed)
+      assert {:error, :not_found} = CapabilityStore.get(malformed.id)
       assert_refused(ctx, malformed.id)
       assert is_binary(SystemAuthority.agent_id())
     end

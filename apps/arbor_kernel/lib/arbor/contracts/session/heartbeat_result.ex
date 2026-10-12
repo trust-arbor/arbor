@@ -62,6 +62,12 @@ defmodule Arbor.Contracts.Session.HeartbeatResult do
     field(:decompositions, [map()], default: [])
     field(:proposal_decisions, [map()], default: [])
     field(:completed_nodes, [String.t()], default: [])
+    # Outcome of parsing the beat's LLM reply (`session.process_results`):
+    # "parsed" | "parse_failed" | "no_reply", with parse_error naming the
+    # failure class. nil when the beat never reached the parser. Empty field
+    # lists alone cannot tell an idle beat from an unreadable reply.
+    field(:parse_status, String.t() | nil)
+    field(:parse_error, String.t() | nil)
     field(:duration_ms, non_neg_integer() | nil)
     field(:emitted_at, DateTime.t())
   end
@@ -100,6 +106,8 @@ defmodule Arbor.Contracts.Session.HeartbeatResult do
       decompositions: List.wrap(Map.get(ctx, "session.decompositions", [])),
       proposal_decisions: List.wrap(Map.get(ctx, "session.proposal_decisions", [])),
       completed_nodes: List.wrap(Map.get(ctx, "__completed_nodes__", [])),
+      parse_status: Map.get(ctx, "session.parse_status"),
+      parse_error: Map.get(ctx, "session.parse_error"),
       duration_ms: usage.duration_ms,
       emitted_at: DateTime.utc_now()
     }
@@ -141,7 +149,9 @@ defmodule Arbor.Contracts.Session.HeartbeatResult do
       proposal_decisions: hr.proposal_decisions,
       goal_updates: hr.goal_updates,
       new_goals: hr.new_goals,
-      completed_nodes: hr.completed_nodes
+      completed_nodes: hr.completed_nodes,
+      parse_status: hr.parse_status,
+      parse_error: hr.parse_error
     }
   end
 
@@ -159,6 +169,8 @@ defmodule Arbor.Contracts.Session.HeartbeatResult do
       actions_count: length(hr.actions),
       goal_updates_count: length(hr.goal_updates) + length(hr.new_goals),
       memory_notes_count: length(hr.memory_notes),
+      parse_status: hr.parse_status,
+      parse_error: hr.parse_error,
       duration_ms: hr.duration_ms,
       emitted_at: hr.emitted_at
     }

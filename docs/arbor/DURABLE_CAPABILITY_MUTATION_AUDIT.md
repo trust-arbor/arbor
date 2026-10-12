@@ -54,6 +54,18 @@ reduction that executes without a journal record emits
 process log a warning, then every 100th with the cumulative count, so a sustained
 outage is visible without flooding the log.
 
+Refused grants are counted the same way (`refused_grants` in the same status,
+since 2026-10-11) and logged on the same rate limit with the journal's exact
+refusal reason as a bounded label (for example `soft_capacity_exhausted`,
+`operation_terminal` or `commit_uncertain:timeout`), whatever their class. The
+journal owner's once-per-episode capacity report (below) adds the retained
+working set for capacity refusals. A capability the authority store cannot
+represent (for example a non-binary `issuer_signature`; the serialized form is
+the only stored form) is refused as `{:error, :invalid_capability_record}` before
+the journal is consulted, not as `:audit_unavailable`. An unexpected exception
+inside the grant boundary is still refused as `:audit_unavailable`, and its
+exception module is logged.
+
 ## Delivery and correlation
 
 Historian's supervised AuthorityAuditPuller fetches applied intents through the

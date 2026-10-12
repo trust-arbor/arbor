@@ -212,9 +212,14 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "context can override options", %{agent_context: agent_context} do
-      context = Map.put(agent_context, :cwd, agent_context.test_cwd)
+      # run_execute/2 defaults params.cwd to test_cwd, so only a context cwd
+      # that differs from it proves the context value wins.
+      override = Path.join(agent_context.test_cwd, "context_override")
+      File.mkdir_p!(override)
+      context = Map.put(agent_context, :cwd, override)
+
       assert {:ok, result} = run_execute(%{command: "pwd"}, context)
-      assert String.trim(result.stdout) == agent_context.test_cwd
+      assert String.trim(result.stdout) == override
     end
 
     test "schema declares max_output_bytes and forwards a tight ceiling", %{

@@ -15,6 +15,14 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
 
   setup do
     original = Process.whereis(AuditJournalOwner)
+
+    # Registered before the owner is unregistered and the replacement starts:
+    # a failed start, or a failing cleanup step below, must not leave the
+    # application's journal owner unregistered for every later test file
+    # (that cascades into :audit_unavailable far from its cause). on_exit
+    # callbacks run in reverse order, so this restore runs last.
+    on_exit(fn -> restore_registered_owner!(original) end)
+
     true = Process.unregister(AuditJournalOwner)
     root = scratch_dir!("capability-audit")
     {:ok, journal} = AuditJournalOwner.start_link(mode: :durable, root: root)
@@ -31,11 +39,24 @@ defmodule Arbor.Security.CapabilityAuditWiringSecurityRegressionTest do
       {:ok, caps} = Security.list_capabilities(principal)
       Enum.each(caps, fn cap -> Security.revoke_fixture(cap.id) end)
       if Process.alive?(journal), do: GenServer.stop(journal)
-      true = Process.register(original, AuditJournalOwner)
       File.rm_rf!(root)
     end)
 
     %{principal: principal, journal: journal, root: root}
+  end
+
+  defp restore_registered_owner!(original) do
+    case Process.whereis(AuditJournalOwner) do
+      ^original ->
+        :ok
+
+      nil ->
+        true = Process.register(original, AuditJournalOwner)
+
+      _replacement ->
+        true = Process.unregister(AuditJournalOwner)
+        true = Process.register(original, AuditJournalOwner)
+    end
   end
 
   defp scratch_dir!(prefix) do

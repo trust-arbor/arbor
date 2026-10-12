@@ -525,6 +525,17 @@ reserved soft capacity; the final turn failed although it passed alone. Preserve
 the no-consumer failure, add the real consumer, and prove content readback and
 acknowledgement rather than increasing limits or resetting the journal.
 
+A suppressed child therefore fails far from its cause. On 2026-09-29, with
+Historian's `AuthorityAuditPuller` suppressed, nothing acknowledged Security
+audit deliveries, so about 1,024 grants into a long suite every grant returned
+`:audit_unavailable` (`:soft_capacity_exhausted`) while each file passed alone.
+`Arbor.Security.TestBootstrap.start!/1` has started
+`Arbor.Security.TestAuditConsumer` in every test BEAM since 2026-10-07. For a
+failure that only appears in full-suite runs, log the refusing process's
+counters (`Security.audit_journal_status/0`,
+`Security.capability_mutation_audit_status/0`) at the first failure before
+bisecting test files.
+
 <!-- applied-learning: in-elixir-map-literals-place-every-key-value-entry-before-keyword-style-atom-entries -->
 <a id="applied-learning-in-elixir-map-literals-place-every-key-value-entry-before-keyword-style-atom-entries"></a>
 **In Elixir map literals, place every `key => value` entry before keyword-style atom entries.** A map that starts with `foo: value` and later adds `dynamic_key => value` is a syntax error; either order all association entries first or use `Map.put/3` for dynamic keys (found 2026-07-14 during delegated Apple admission-core review).

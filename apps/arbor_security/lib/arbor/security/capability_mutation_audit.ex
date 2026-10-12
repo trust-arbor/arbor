@@ -20,6 +20,18 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   The first 10 degraded reductions of the calling process log a warning, then
   every 100th with the cumulative count, so a sustained outage cannot flood
   the log an operator reads.
+
+  Refused grants of every class are counted (`refused_grants` in
+  `last_status/0`) and logged on the same rate limit with the journal's exact
+  refusal reason as a bounded label, so a refused grant is never a bare
+  `:audit_unavailable` in the log. Capacity refusals additionally get the
+  journal owner's once-per-episode report of its retained working set.
+
+  A capability the authority store cannot represent (its serialized form is
+  the only stored form) is refused as `{:error, :invalid_capability_record}`
+  before the journal is consulted; it is not a journal outage. An unexpected
+  exception inside the grant boundary is still refused as
+  `:audit_unavailable`, but its exception module is logged.
   """
 
   require Logger
@@ -35,6 +47,7 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   @status_key {__MODULE__, :last_status}
   @correlation_key {__MODULE__, :correlation}
   @degraded_key {__MODULE__, :degraded_reductions}
+  @refused_key {__MODULE__, :refused_grants}
   @warn_first 10
   @warn_every 100
 
@@ -56,6 +69,7 @@ defmodule Arbor.Security.CapabilityMutationAudit do
     @status_key
     |> Process.get(%{audit: :none, effect: :none, operation: :none, reason: :none})
     |> Map.put(:degraded_reductions, Process.get(@degraded_key, 0))
+    |> Map.put(:refused_grants, Process.get(@refused_key, 0))
   end
 
   @doc false
@@ -75,15 +89,26 @@ defmodule Arbor.Security.CapabilityMutationAudit do
 
   @doc false
   @spec warn_degraded_reduction?(pos_integer()) :: boolean()
-  def warn_degraded_reduction?(count) when is_integer(count) and count > 0,
-    do: count <= @warn_first or rem(count, @warn_every) == 0
+  def warn_degraded_reduction?(count), do: rate_limited_warning?(count)
 
-  def warn_degraded_reduction?(_count), do: false
+  @doc false
+  @spec warn_refused_grant?(pos_integer()) :: boolean()
+  def warn_refused_grant?(count), do: rate_limited_warning?(count)
+
+  @doc false
+  @spec reason_label(term()) :: String.t()
+  def reason_label(reason) when is_atom(reason) and not is_nil(reason), do: Atom.to_string(reason)
+
+  def reason_label({tag, detail}) when is_atom(tag) and is_atom(detail) and not is_nil(tag),
+    do: "#{tag}:#{detail}"
+
+  def reason_label({tag, _detail}) when is_atom(tag) and not is_nil(tag), do: "#{tag}:other"
+  def reason_label(_reason), do: "other"
 
   def put(%Capability{} = cap, mode) when mode in [:create, :upsert] do
-    with {:ok, before} <- entry(cap.id),
+    with {:ok, data} <- serialize(cap),
+         {:ok, before} <- entry(cap.id),
          :ok <- admit_put(mode, before) do
-      data = Serializer.serialize(cap)
       proposed = Record.new(cap.id, data)
       replacement = Core.replacement(proposed, before)
 
@@ -94,9 +119,20 @@ defmodule Arbor.Security.CapabilityMutationAudit do
       end
     end
   rescue
-    _ -> {:error, :audit_unavailable}
+    exception ->
+      Logger.warning(
+        "Capability grant audit boundary raised #{inspect(exception.__struct__)}; " <>
+          "refused as audit_unavailable"
+      )
+
+      {:error, :audit_unavailable}
   catch
-    _, _ -> {:error, :audit_unavailable}
+    kind, _reason ->
+      Logger.warning(
+        "Capability grant audit boundary caught #{kind}; refused as audit_unavailable"
+      )
+
+      {:error, :audit_unavailable}
   end
 
   def delete(key, expected \\ :current) do
@@ -171,12 +207,25 @@ defmodule Arbor.Security.CapabilityMutationAudit do
 
   defp refused_grant(operation, intent, reason) do
     class = reason_class(reason)
+    count = Process.get(@refused_key, 0) + 1
+    Process.put(@refused_key, count)
 
     :telemetry.execute(
       [:arbor, :security, :audit_journal, :refused],
       %{count: 1},
       %{operation: operation, reason: class}
     )
+
+    # Every refusal class, rate limited per CapabilityStore process. The
+    # journal owner separately reports a capacity episode's retained working
+    # set once; this line names the exact reason for each refused grant.
+    if warn_refused_grant?(count) do
+      Logger.warning(
+        "Capability grant refused by the authority audit journal (refused #{count}, " <>
+          "reason #{reason_label(reason)}, class #{class}, " <>
+          "operation #{intent["operation_id"] || "none"})"
+      )
+    end
 
     status(operation, intent["operation_id"], :not_applied, :refused, class)
     {:error, :audit_unavailable}
@@ -311,6 +360,20 @@ defmodule Arbor.Security.CapabilityMutationAudit do
 
   defp record_observation(intent, observation),
     do: AuditJournalOwner.observe(intent["operation_id"], observation)
+
+  # The authority store holds only the serialized capability. A struct whose
+  # fields have no stored representation (e.g. a non-binary signature) cannot
+  # be prepared, applied or observed, so it is refused before the journal.
+  defp serialize(cap) do
+    {:ok, Serializer.serialize(cap)}
+  rescue
+    _ -> {:error, :invalid_capability_record}
+  end
+
+  defp rate_limited_warning?(count) when is_integer(count) and count > 0,
+    do: count <= @warn_first or rem(count, @warn_every) == 0
+
+  defp rate_limited_warning?(_count), do: false
 
   defp entry(key), do: AuthorityStore.authoritative_entry(key, name: @store)
   defp admit_put(:create, %Record{}), do: {:error, :conflict}

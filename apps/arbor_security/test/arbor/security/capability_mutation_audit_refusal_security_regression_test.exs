@@ -138,16 +138,29 @@ defmodule Arbor.Security.CapabilityMutationAuditRefusalSecurityRegressionTest do
     full = replace_owner!(healthy, operational_root(rejected_terminals(3072)))
     drain(@refused)
 
-    assert {:error, :audit_unavailable} =
-             Security.grant_fixture(
-               principal: ctx.principal,
-               resource: "arbor://memory/write/cap"
-             )
+    refusal_log =
+      capture_log([level: :warning], fn ->
+        assert {:error, :audit_unavailable} =
+                 Security.grant_fixture(
+                   principal: ctx.principal,
+                   resource: "arbor://memory/write/cap"
+                 )
+      end)
 
     # Parent 52a2cc3fa: no event and a stale status without a reason.
     assert [{%{count: 1}, %{operation: :grant, reason: :capacity}}] = drain(@refused)
     assert {:ok, status} = Security.capability_mutation_audit_status()
     assert %{operation: :grant, effect: :not_applied, audit: :refused, reason: :capacity} = status
+
+    # The refused grant is counted and, rate limited per CapabilityStore
+    # process, logged with the journal's exact reason: never a bare
+    # :audit_unavailable in the log.
+    assert is_integer(status.refused_grants) and status.refused_grants >= 1
+
+    if status.refused_grants <= 10 or rem(status.refused_grants, 100) == 0 do
+      assert refusal_log =~ "refused by the authority audit journal"
+      assert refusal_log =~ "reason soft_capacity_exhausted, class capacity"
+    end
 
     # At 4096 retained identities even reductions are refused by capacity: the
     # reduction still executes, unjournaled, and is signalled.

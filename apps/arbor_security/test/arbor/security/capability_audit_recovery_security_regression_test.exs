@@ -58,10 +58,11 @@ defmodule Arbor.Security.CapabilityAuditRecoverySecurityRegressionTest do
       backend_opts: [base_dir: Path.join(root, "authority")]
     ]
 
-    start_authority_fixture!(store_opts)
-    start_journal_fixture!(journal_opts)
-    principal = "agent_audit_recovery_#{System.unique_integer([:positive])}"
-
+    # Registered after the originals are unregistered but before the
+    # replacements start: a failed fixture start must not leave the
+    # application's store and journal owner unregistered for every later test
+    # file (that cascades into :capability_store_unavailable /
+    # :audit_unavailable far from its cause).
     on_exit(fn ->
       try do
         Application.delete_env(:arbor_security, :audit_recovery_post_effect_fault)
@@ -75,6 +76,10 @@ defmodule Arbor.Security.CapabilityAuditRecoverySecurityRegressionTest do
         File.rm_rf!(root)
       end
     end)
+
+    start_authority_fixture!(store_opts)
+    start_journal_fixture!(journal_opts)
+    principal = "agent_audit_recovery_#{System.unique_integer([:positive])}"
 
     %{principal: principal, store_opts: store_opts, journal_opts: journal_opts}
   end

@@ -692,7 +692,12 @@ defmodule Arbor.Orchestrator.Session.Persistence do
                 "memory_notes_count" => length(List.wrap(memory_notes)),
                 "goal_updates_count" =>
                   length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
-                "actions_count" => length(List.wrap(actions))
+                "actions_count" => length(List.wrap(actions)),
+                # Written by session.process_results. Zero counts alone cannot
+                # tell an idle beat from an unreadable reply; nil means the beat
+                # never reached the parser (e.g. idle mode).
+                "parse_status" => Map.get(result_ctx, "session.parse_status"),
+                "parse_error" => Map.get(result_ctx, "session.parse_error")
               }
             })
 

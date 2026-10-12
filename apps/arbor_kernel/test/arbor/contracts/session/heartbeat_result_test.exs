@@ -112,6 +112,32 @@ defmodule Arbor.Contracts.Session.HeartbeatResultTest do
     end
   end
 
+  describe "reply parse outcome" do
+    test "carries a parse failure so it is not read as an idle beat" do
+      ctx = %{"session.parse_status" => "parse_failed", "session.parse_error" => "not_json"}
+      hr = HeartbeatResult.from_result_ctx(state(), result(ctx))
+
+      assert hr.parse_status == "parse_failed"
+      assert hr.parse_error == "not_json"
+
+      data = HeartbeatResult.to_signal_data(hr)
+      assert data.parse_status == "parse_failed"
+      assert data.parse_error == "not_json"
+
+      row = HeartbeatResult.to_persistence(hr)
+      assert row.parse_status == "parse_failed"
+      assert row.parse_error == "not_json"
+    end
+
+    test "is nil when the beat never reached the parser" do
+      hr = HeartbeatResult.from_result_ctx(state(), result(%{}))
+
+      assert hr.parse_status == nil
+      assert hr.parse_error == nil
+      assert HeartbeatResult.to_signal_data(hr).parse_status == nil
+    end
+  end
+
   describe "to_telemetry/1" do
     test "produces a measurements map" do
       hr = HeartbeatResult.from_result_ctx(state(), result(%{}))

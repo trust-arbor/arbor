@@ -461,6 +461,15 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     :ok = File.chmod(root, 0o700)
     :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, AuditJournalOwner)
 
+    # Registered before the replacement starts so a failed start cannot leave
+    # the application's journal child terminated for the rest of the run (every
+    # later grant would fail :audit_unavailable far from this file). on_exit
+    # callbacks run in reverse order, so this restore runs last.
+    on_exit(fn ->
+      :ok = AuditJournalOwner.clear_test_fixture()
+      {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, AuditJournalOwner)
+    end)
+
     {:ok, supervisor} =
       Supervisor.start_link(
         [{AuditJournalOwner, mode: :durable, root: root, capacity_profile: :operational}],
@@ -471,9 +480,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     :ok = AuditJournalOwner.install_test_fixture(Process.whereis(AuditJournalOwner))
 
     on_exit(fn ->
-      :ok = AuditJournalOwner.clear_test_fixture()
       if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
-      {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, AuditJournalOwner)
     end)
 
     supervisor

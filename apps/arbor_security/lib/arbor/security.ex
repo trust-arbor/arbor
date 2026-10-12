@@ -5629,9 +5629,11 @@ defmodule Arbor.Security do
   `:effect` and `:audit` as before (a refused grant reports
   `effect: :not_applied, audit: :refused`), plus `:reason` — the closed class
   of the last journal refusal (`:none | :capacity | :identity | :unavailable`)
-  — and `:degraded_reductions`, the number of reductions the CapabilityStore
-  process executed without a journal record since it started. Public mutation
-  results are unchanged (`{:error, :audit_unavailable}` for a refused grant).
+  — `:degraded_reductions`, the number of reductions the CapabilityStore
+  process executed without a journal record since it started, and
+  `:refused_grants`, the number of grants the journal refused in that process.
+  Public mutation results are unchanged (`{:error, :audit_unavailable}` for a
+  refused grant).
   """
   def capability_mutation_audit_status do
     GenServer.call(CapabilityStore, :mutation_audit_status)

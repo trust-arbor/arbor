@@ -38,9 +38,31 @@ defmodule Arbor.Security.CapabilityMutationAuditTest do
     refute CapabilityMutationAudit.warn_degraded_reduction?(:many)
   end
 
+  test "refused-grant warnings share the degraded-reduction rate limit" do
+    warned = Enum.filter(1..1_000, &CapabilityMutationAudit.warn_refused_grant?/1)
+    assert warned == Enum.to_list(1..10) ++ Enum.to_list(100..1_000//100)
+    refute CapabilityMutationAudit.warn_refused_grant?(0)
+    refute CapabilityMutationAudit.warn_refused_grant?(:many)
+  end
+
+  test "refusal reasons log as bounded labels, never as raw terms" do
+    assert CapabilityMutationAudit.reason_label(:soft_capacity_exhausted) ==
+             "soft_capacity_exhausted"
+
+    assert CapabilityMutationAudit.reason_label({:commit_uncertain, :timeout}) ==
+             "commit_uncertain:timeout"
+
+    assert CapabilityMutationAudit.reason_label({:not_committed, %{path: "/secret"}}) ==
+             "not_committed:other"
+
+    assert CapabilityMutationAudit.reason_label(nil) == "other"
+    assert CapabilityMutationAudit.reason_label("free text") == "other"
+  end
+
   test "last_status/0 carries the reason and the degraded count with safe defaults" do
     status = CapabilityMutationAudit.last_status()
     assert status.reason == :none
     assert status.degraded_reductions == 0
+    assert status.refused_grants == 0
   end
 end
