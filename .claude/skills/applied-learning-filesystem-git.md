@@ -523,3 +523,7 @@ Use bounded read-only probes outside the agent sandbox with approval, because a
 sandbox network denial is separate evidence. A successful `ls-remote` proves read
 connectivity, not push authorization; do not push, restart services, or rewrite the
 remote during diagnosis without authorization.
+
+<!-- applied-learning: a-shared-dependency-cache-can-drift-from-the-branch-lock -->
+<a id="applied-learning-a-shared-dependency-cache-can-drift-from-the-branch-lock"></a>
+**A shared dependency cache can drift from the branch's lock.** Pointing `MIX_DEPS_PATH` at the main checkout's `deps/` assumes that cache matches the branch's `mix.lock`. When the main checkout carries another session's uncommitted lock edit, Mix stops with `lock mismatch: the dependency is out of date` for the changed git deps. Never run `mix deps.get` against the shared cache, because it rewrites another session's checkout. Build a private deps directory instead: symlink every shared dependency except the mismatched ones, `git clone --no-checkout` those from the shared cache, check out the locked revision, and reset `remote.origin.url` to the lock's URL (Mix compares it). Then point `MIX_DEPS_PATH` at that directory (found 2026-10-01 with `membrane_core`/`membrane_portaudio_plugin` while proving the receipt payload fix).

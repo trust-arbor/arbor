@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 786,
+  "entry_count": 787,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -9762,8 +9762,21 @@
       "source_incident": "found 2026-09-22 when Homebrew Git could not reach homelab origin but system curl and Apple Git could",
       "always_loaded": false,
       "content_sha256": "b561722dabbd4de2ae02bf111a35afa8b08d7cb08892a76a3c2260ee4b97e13a"
+    },
+    {
+      "source_ordinal": 792,
+      "source_kind": "post-migration",
+      "slug": "a-shared-dependency-cache-can-drift-from-the-branch-lock",
+      "title": "A shared dependency cache can drift from the branch's lock.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-a-shared-dependency-cache-can-drift-from-the-branch-lock",
+      "source_date": "2026-10-01",
+      "source_incident": "found 2026-10-01 proving the invocation receipt payload v2 fix in a worktree",
+      "always_loaded": false,
+      "content_sha256": "00637b46960705e4fac1034bf45dfaa4fa5b40122fcd18862670636ba0409937"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 325
+  "post_migration_entry_count": 326
 }

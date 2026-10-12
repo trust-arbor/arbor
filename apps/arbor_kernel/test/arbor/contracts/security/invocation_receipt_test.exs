@@ -54,6 +54,15 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
       refute r1.id == r2.id
       refute r1.nonce == r2.nonce
     end
+
+    @tag :fast
+    test "rejects a non-atom action (security regression: it crashed the signer)" do
+      assert {:error, :invalid_action} =
+               InvocationReceipt.new(@valid_attrs ++ [action: %{action: :execute}])
+
+      assert {:error, :invalid_action} = InvocationReceipt.new(@valid_attrs ++ [action: "read"])
+      assert {:ok, %{action: nil}} = InvocationReceipt.new(@valid_attrs ++ [action: nil])
+    end
   end
 
   describe "signing_payload/1" do
@@ -85,6 +94,68 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
       # Force same id/nonce/timestamp for comparison
       r2 = %{r2 | id: r1.id, nonce: r1.nonce, timestamp: r1.timestamp}
       refute InvocationReceipt.signing_payload(r1) == InvocationReceipt.signing_payload(r2)
+    end
+
+    @tag :fast
+    test "encodes a real delegation record's constraints map (security regression)" do
+      # Shape produced by Signer.sign_delegation/3; interpolating the map raised.
+      record = %{
+        delegator_id: "agent_parent",
+        delegator_signature: :crypto.strong_rand_bytes(64),
+        constraints: %{rate_limit: 10, allowed_paths: ["/a", "/b"], nested: %{z: 1, a: 2}},
+        delegated_at: ~U[2026-09-28 12:00:00Z]
+      }
+
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs ++ [delegation_chain: [record]])
+      payload = InvocationReceipt.signing_payload(receipt)
+      assert payload == InvocationReceipt.signing_payload(receipt)
+
+      loosened = %{record | constraints: Map.put(record.constraints, :rate_limit, 1_000)}
+
+      refute payload ==
+               InvocationReceipt.signing_payload(%{receipt | delegation_chain: [loosened]})
+    end
+
+    @tag :fast
+    test "pins the v2 byte layout (known answer)" do
+      # Every stored v2 receipt verifies against exactly these bytes. A change
+      # here needs a new @signing_version and a decision record, not an edit.
+      {:ok, receipt} =
+        InvocationReceipt.new(
+          @valid_attrs ++
+            [
+              action: :read,
+              task_id: "task_1",
+              delegation_chain: [%{delegator: "agent_a", delegatee: "agent_b"}]
+            ]
+        )
+
+      receipt = %{
+        receipt
+        | id: "rcpt_kat",
+          nonce: <<0::128>>,
+          timestamp: ~U[2026-10-01 12:00:00Z],
+          issuer_id: "agent_authority"
+      }
+
+      expected =
+        <<20::32, "arbor-receipt-sig-v2">> <>
+          <<?b, 8::32, "rcpt_kat">> <>
+          <<?b, 10::32, "cap_abc123">> <>
+          <<?b, 13::32, "agent_test001">> <>
+          <<?b, 20::32, "arbor://fs/read/docs">> <>
+          <<?a, 4::32, "read">> <>
+          <<?a, 7::32, "granted">> <>
+          <<?d, 37::32, ?b, 20::32, "2026-10-01T12:00:00Z", ?b, 7::32, "Etc/UTC">> <>
+          <<?b, 16::32, 0::128>> <>
+          <<?a, 3::32, "nil">> <>
+          <<?b, 6::32, "task_1">> <>
+          <<?b, 15::32, "agent_authority">> <>
+          <<?l, 57::32, ?m, 52::32>> <>
+          <<?a, 9::32, "delegatee", ?b, 7::32, "agent_b">> <>
+          <<?a, 9::32, "delegator", ?b, 7::32, "agent_a">>
+
+      assert InvocationReceipt.signing_payload(receipt) == expected
     end
   end
 
@@ -166,6 +237,115 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
       signed = %{receipt | signature: signature}
       assert {:error, :invalid_receipt_signature} = InvocationReceipt.verify(signed, wrong_pub)
     end
+
+    @tag :fast
+    test "an unencodable tampered field is rejected, not raised" do
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+      receipt = %{receipt | issuer_id: "agent_authority"}
+
+      {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+      payload = InvocationReceipt.signing_payload(receipt)
+      signature = :crypto.sign(:eddsa, :sha512, payload, [priv, :ed25519])
+      tampered = %{receipt | signature: signature, action: %{action: :execute}}
+
+      assert {:error, :invalid_receipt_signature} = InvocationReceipt.verify(tampered, pub)
+    end
+  end
+
+  describe "signing_payload/1 chain boundaries (security regression)" do
+    # Before receipt payload v2 the delegation chain was signed as `k=v` pairs
+    # joined with "," and records joined with ";", unescaped and untyped. A
+    # delegator signature is 64 raw bytes, and maps were signed as their JSON
+    # text, so whoever presented a signed receipt could re-shape its chain
+    # into a different one with the same signed bytes and `verify/2` still
+    # returned :ok. Each case below verified against the other chain.
+
+    setup do
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs ++ [action: :read])
+      %{receipt: %{receipt | issuer_id: "agent_authority"}}
+    end
+
+    @tag :fast
+    test "two delegation records cannot be re-presented as one", %{receipt: receipt} do
+      root = delegation_record("agent_root", %{})
+      middle = delegation_record("agent_middle", %{rate_limit: 5})
+
+      # The second record hidden inside the first record's signature bytes.
+      merged = %{
+        root
+        | delegator_signature: root.delegator_signature <> ";" <> legacy_record_text(middle)
+      }
+
+      assert_signature_binds_chain(receipt, [root, middle], [merged])
+    end
+
+    @tag :fast
+    test "a delegation value cannot absorb the field after it", %{receipt: receipt} do
+      record = delegation_record("agent_root", %{})
+
+      absorbed =
+        record
+        |> Map.delete(:delegator_signature)
+        |> Map.put(
+          :delegator_id,
+          "agent_root,delegator_signature=" <> record.delegator_signature
+        )
+
+      assert_signature_binds_chain(receipt, [record], [absorbed])
+    end
+
+    @tag :fast
+    test "a constraints map is not interchangeable with its JSON text", %{receipt: receipt} do
+      record = delegation_record("agent_root", %{rate_limit: 5})
+      stringly = %{record | constraints: ~s([["rate_limit",5]])}
+
+      assert_signature_binds_chain(receipt, [record], [stringly])
+    end
+
+    @tag :fast
+    test "atom keys are not interchangeable with string keys", %{receipt: receipt} do
+      record = delegation_record("agent_root", %{rate_limit: 5})
+      # A reader of `record.constraints` sees no constraints on this copy.
+      string_keyed = Map.new(record, fn {key, value} -> {Atom.to_string(key), value} end)
+
+      assert_signature_binds_chain(receipt, [record], [string_keyed])
+    end
+
+    @tag :fast
+    test "an absent optional field is not interchangeable with an empty one",
+         %{receipt: receipt} do
+      a = InvocationReceipt.signing_payload(%{receipt | session_id: nil})
+      b = InvocationReceipt.signing_payload(%{receipt | session_id: ""})
+      refute a == b
+    end
+
+    @tag :fast
+    test "the payload is domain-separated by its signing version", %{receipt: receipt} do
+      version = InvocationReceipt.signing_version()
+      size = byte_size(version)
+
+      assert <<^size::32, ^version::binary-size(size), _rest::binary>> =
+               InvocationReceipt.signing_payload(receipt)
+    end
+  end
+
+  describe "signing_payload/1 encodability" do
+    @tag :fast
+    test "a receipt whose chain holds a term with no canonical encoding is refused" do
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+      bad = %{receipt | delegation_chain: [%{delegator_id: "agent_root", ref: make_ref()}]}
+
+      assert_raise ArgumentError, fn -> InvocationReceipt.signing_payload(bad) end
+    end
+
+    @tag :fast
+    test "a non-atom action is refused" do
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+
+      assert_raise ArgumentError, fn ->
+        InvocationReceipt.signing_payload(%{receipt | action: %{action: :execute}})
+      end
+    end
   end
 
   describe "signed?/1" do
@@ -181,5 +361,53 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
       signed = %{receipt | signature: :crypto.strong_rand_bytes(64)}
       assert InvocationReceipt.signed?(signed)
     end
+  end
+
+  # Shaped like `Arbor.Security.Capability.Signer.sign_delegation/3` output.
+  defp delegation_record(delegator_id, constraints) do
+    %{
+      delegator_id: delegator_id,
+      delegator_signature: :crypto.strong_rand_bytes(64),
+      constraints: constraints,
+      delegated_at: ~U[2026-10-01 12:00:00.000000Z]
+    }
+  end
+
+  # How the unversioned (v1) encoder rendered one record: keys sorted, values
+  # interpolated, maps as key-sorted JSON pair lists.
+  defp legacy_record_text(record) do
+    record
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map_join(",", fn
+      {key, value} when is_map(value) and not is_struct(value) ->
+        "#{key}=#{Jason.encode!(legacy_pairs(value))}"
+
+      {key, value} ->
+        "#{key}=#{value}"
+    end)
+  end
+
+  defp legacy_pairs(map) when is_map(map) and not is_struct(map),
+    do: map |> Enum.map(fn {k, v} -> [to_string(k), legacy_pairs(v)] end) |> Enum.sort()
+
+  defp legacy_pairs(other), do: other
+
+  # Sign the receipt over `chain`, then present the same signature with
+  # `other_chain`: the payloads must differ and only the signed chain verifies.
+  defp assert_signature_binds_chain(receipt, chain, other_chain) do
+    signed_receipt = %{receipt | delegation_chain: chain}
+    presented = %{receipt | delegation_chain: other_chain}
+
+    refute InvocationReceipt.signing_payload(signed_receipt) ==
+             InvocationReceipt.signing_payload(presented)
+
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    payload = InvocationReceipt.signing_payload(signed_receipt)
+    signature = :crypto.sign(:eddsa, :sha512, payload, [priv, :ed25519])
+
+    assert :ok = InvocationReceipt.verify(%{signed_receipt | signature: signature}, pub)
+
+    assert {:error, :invalid_receipt_signature} =
+             InvocationReceipt.verify(%{presented | signature: signature}, pub)
   end
 end

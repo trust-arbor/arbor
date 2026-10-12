@@ -1129,6 +1129,29 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   generations, so repeated diagnostic restarts discard older failures. Copy the
   log out first if you need it.
 
+## 36. Invocation receipts need an atom `action` and an encodable receipt (2026-09-28; payload v2 2026-10-01)
+
+- **What:** with `config :arbor_security, invocation_receipts_enabled: true`
+  (default `false`), every granted `Arbor.Security.authorize/4` builds an
+  `InvocationReceipt` and has `SystemAuthority` sign it through
+  `InvocationReceiptBroker`. The action is part of the signed payload, so it
+  must be an atom (or `nil`); `InvocationReceipt.new/1` returns
+  `{:error, :invalid_action}` otherwise. Since payload v2
+  (`"arbor-receipt-sig-v2"`, landed on main 2026-10-11) every field is a typed,
+  length-delimited term, so delegation-chain values must be binaries, atoms,
+  numbers, proper lists, plain maps or `DateTime`s. Anything else gets
+  `{:error, :invalid_receipt}` from the authority instead of crashing it.
+- **Symptom:** a warning that no receipt was emitted for the call
+  (`:invalid_action`, `:invalid_receipt`, or an unavailable authority). The call
+  is still authorized; receipts are evidence of a decision already made, so a
+  missing one is an audit gap, not a denial. A receipt that went through a JSON
+  round trip no longer verifies, because v2 signs native types.
+- **Action:** pass atom actions (`:execute`, `:read`). Rebuild a receipt with
+  native types (atom keys, raw signature bytes, `DateTime`) before
+  `InvocationReceipt.verify/2`. Unversioned v1 receipts do not verify, by design.
+  Decision: `.arbor/decisions/2026-10-01-invocation-receipt-payload-v2.md`.
+  Regression: `apps/arbor_security/test/arbor/security/invocation_receipt_security_regression_test.exs`.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

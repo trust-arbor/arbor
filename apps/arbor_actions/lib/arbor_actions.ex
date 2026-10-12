@@ -1916,6 +1916,14 @@ defmodule Arbor.Actions do
       {:error, {:pending_approval, proposal_id}} when is_binary(proposal_id) ->
         {:ok, :pending_approval, proposal_id}
 
+      # An egress-gate block (e.g. untrusted data to an external provider)
+      # keeps its reason so the caller can tell it from a missing capability.
+      # The compute-node LLM path already explains egress blocks; the reason
+      # is a tier/taint class, not sensitive detail (ported 2026-10-11 from
+      # claude/friendly-gates-52e320).
+      {:error, {:egress_blocked, _tier, _reason}} = egress_blocked ->
+        egress_blocked
+
       {:error, _reason} ->
         {:error, :unauthorized}
     end

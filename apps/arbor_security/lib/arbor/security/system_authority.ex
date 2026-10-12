@@ -1019,11 +1019,25 @@ defmodule Arbor.Security.SystemAuthority do
            _from,
            %{identity: identity} = state
          ) do
-      receipt = Map.put(receipt, :issuer_id, identity.agent_id)
-      payload = InvocationReceipt.signing_payload(receipt)
-      signature = Crypto.sign(payload, identity.private_key)
-      {:reply, {:ok, Map.put(receipt, :signature, signature)}, state}
+      {:reply, sign_receipt_payload(receipt, identity), state}
     end
+  end
+
+  # Receipt payload v2 (ported 2026-10-11 from claude/lucid-mestorf-7d16c0):
+  # `InvocationReceipt.signing_payload/1` raises `ArgumentError` for a receipt
+  # field it cannot encode canonically (a non-atom action, a chain value with
+  # no typed encoding). That raise must never propagate inside the trust root —
+  # it would exit the authorize/4 caller, spend the security supervisor's
+  # restart intensity on caller data, and in `:ephemeral` mode mint a new
+  # authority key so every earlier signature stopped verifying. Answer with an
+  # error instead; the broker already fails the receipt closed on any error.
+  defp sign_receipt_payload(receipt, identity) do
+    receipt = Map.put(receipt, :issuer_id, identity.agent_id)
+    payload = InvocationReceipt.signing_payload(receipt)
+    signature = Crypto.sign(payload, identity.private_key)
+    {:ok, Map.put(receipt, :signature, signature)}
+  rescue
+    ArgumentError -> {:error, :invalid_receipt}
   end
 
   defp handle_authenticated_request(
@@ -1989,10 +2003,7 @@ defmodule Arbor.Security.SystemAuthority do
          caller
        ) do
       # Set issuer_id before computing the payload so the signature covers it.
-      receipt = Map.put(receipt, :issuer_id, identity.agent_id)
-      payload = InvocationReceipt.signing_payload(receipt)
-      signature = Crypto.sign(payload, identity.private_key)
-      {:reply, {:ok, Map.put(receipt, :signature, signature)}, state}
+      {:reply, sign_receipt_payload(receipt, identity), state}
     else
       {:reply, {:error, :receipt_signing_unauthorized}, state}
     end
