@@ -66,6 +66,19 @@ if :ets.whereis(:arbor_memory_goals) == :undefined do
   raise "test_helper: :arbor_memory_goals missing after TestBootstrap (GoalStore did not start)"
 end
 
+# One shared ExecutablePolicy for the run, as the actions, orchestrator, commands
+# and shell suites do. Its init SHA-256-pins every executable in the trusted
+# PATH directories (about 4 s idle for ~1300 files), so starting one per test
+# (IntentDispatcher suites, 25+ tests) cost minutes and, under full-suite load,
+# timed a setup out at 60 s. Per-test setups keep their `unless whereis` guard.
+if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
+     Process.whereis(Arbor.Shell.Supervisor) != nil do
+  Supervisor.start_child(
+    Arbor.Shell.Supervisor,
+    {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}
+  )
+end
+
 # Fixed production-name runtime-admission topology so public Lifecycle.start/2
 # callers (Manager, Bootstrap, Reconciler) resolve a ready TaskStore without
 # polling a missing store for the ordinary-start readiness deadline.
