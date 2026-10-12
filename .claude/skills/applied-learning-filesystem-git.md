@@ -510,3 +510,16 @@ other agents' originals untouched. Quote Git-owned ref globs in shell commands s
 zsh does not expand or reject them before `git bundle` runs. Reboot persistence is
 not an off-device backup or validation acceptance (found 2026-09-07 during G5E
 preservation).
+
+<!-- applied-learning: compare-native-and-package-manager-git-before-diagnosing-a-lan-outage -->
+<a id="applied-learning-compare-native-and-package-manager-git-before-diagnosing-a-lan-outage"></a>
+**Compare native and package-manager Git before diagnosing a LAN outage.** On
+2026-09-22, Homebrew Git 2.55.0 failed immediately with `No route to host` while
+system curl and `/usr/bin/git` 2.54.0 reached the same Forgejo repository; disabling
+proxies did not help. This isolates a client-specific failure, not a dead server.
+macOS Local Network permission or process filtering is a hypothesis until verified;
+check the responsible terminal app's permission without resetting privacy globally.
+Use bounded read-only probes outside the agent sandbox with approval, because a
+sandbox network denial is separate evidence. A successful `ls-remote` proves read
+connectivity, not push authorization; do not push, restart services, or rewrite the
+remote during diagnosis without authorization.

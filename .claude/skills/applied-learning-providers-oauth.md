@@ -235,6 +235,12 @@ compliance.
 <a id="applied-learning-provider-security-flags-must-be-proven-on-the-exact-transport"></a>
 **Provider security flags must be proven on the exact transport.** Grok CLI `--tools`, `--disallowed-tools`, and `--deny Bash(*)` are headless-policy claims that did not constrain `grok agent stdio`; an anonymous ACP denial proves only missing handler identity/authority, not provider-level shell containment. Test the actual ACP transport and client-visible contract, not a nearby CLI mode (found 2026-07-19 during Grok ACP containment work).
 
+Trace compatibility adapters as well as the route label: legacy `provider: "acp"`
+launches the native CLI even with `runtime: "arbor"`. A runtime-only restriction
+misses that path. Qualify the effective adapter, including default-provider and
+fallback resolution, before declaring a control inherited (found 2026-09-09 in
+the final private-turn memory-write audit).
+
 <!-- applied-learning: provider-registration-is-independent-of-credential-readiness -->
 <a id="applied-learning-provider-registration-is-independent-of-credential-readiness"></a>
 **Provider registration is independent of credential readiness.** A known provider

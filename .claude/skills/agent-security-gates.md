@@ -12,6 +12,20 @@ another one. It doubles as user documentation — anyone standing up agents need
 
 ---
 
+## Private turns: memory write containment (2026-09-09)
+
+- **What:** receipt-authenticated private Session turns carry a source-owned
+  `memory_write_policy: :deny` until scoped writers and readers are qualified.
+  Memory-family mutations and child-launch routes that lose the restriction
+  are unavailable; native runtimes include the legacy `provider: "acp"` adapter
+  even when its route says `runtime: "arbor"`.
+- **Symptom:** `:private_turn_memory_write_denied` on an action, or
+  `:memory_write_policy_runtime_unsupported` before provider execution.
+- **Action:** keep the denial and use the supported Arbor runtime. More grants,
+  a permissive tool argument, or a `fact` type cannot relax this source policy.
+  Replace the denial only with a qualified scoped Memory operation; see
+  [the current boundary and next ownership slice](../../docs/arbor/PRIVATE_TURN_MEMORY_WRITES.md).
+
 ## 1. Restricted signal topics (`security.*`, and other privileged namespaces)
 
 - **What:** `Arbor.Signals.subscribe/3` authorizes the *pattern*. `security.*` topics
@@ -89,10 +103,22 @@ another one. It doubles as user documentation — anyone standing up agents need
   the escalation comes from a lower layer: either a capability `requires_approval`
   constraint on the granted fs/write cap, or the profile being re-resolved (which
   resets `arbor://fs/write => :ask`, per `profile_resolver.ex`) at authorize time.
-  **Root cause not yet pinned; no known eval-usable bypass.** Until then: for
-  autonomous agents that must write, either provision a pre-approved write cap or have
-  the agent return output another way. (The crm-export eval task outputs its report in
-  the response instead of `file_write` for exactly this reason.)
+  **ROOT CAUSE PINNED 2026-10-11 (cross-library review, design-friction D1):** the
+  "no fs/write ceiling" claim above is stale. `arbor://fs/write` is profiled
+  `:high / :require_human` in `arbor_trust/.../capability_risk_profiles.ex:69-70`,
+  which `ceiling_mode/1` (`:213-214`) projects into a `:ask` **ceiling**; a rule cannot
+  beat a ceiling (`authority.ex:158`). Independently, `PolicyEnforcer.grant_decision_for_profile`
+  (`policy_enforcer.ex:260-282`) clamps every JIT-minted `:auto`/`:allow` cap to `:ask`
+  unless the profile is `blast_radius: :low` — and EVERY `arbor://action/**` profile is
+  `:require_human` (`arbor_actions.ex:4296-4340`). The only relief,
+  `ApprovalGuard.pre_approved_bypasses_ceiling?/2`, needs `metadata.provenance` AND a
+  non-glob leaf, but workspace caps are minted as `arbor://fs/write/<root>/**` with no
+  provenance (`lifecycle.ex:2258-2267`). Net: no action URI can be made autonomous by a
+  trust rule; only an operator-minted standing cap with provenance works. Until the
+  relief path is designed (stamp provenance + bounded leaf on workspace caps, or let
+  operators override `default_approval` for a workspace root), either provision such a
+  cap or have the agent return output another way. (The crm-export eval task outputs
+  its report in the response instead of `file_write` for exactly this reason.)
 
 ## 4. A granted cap ≠ permission to run — the trust profile sets the MODE
 
@@ -1102,6 +1128,53 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `~/.arbor/logs/arbor-dev.log`. Every restart rotates the log and keeps only 3
   generations, so repeated diagnostic restarts discard older failures. Copy the
   log out first if you need it.
+
+## 2026-10-11 cross-library review — new gates and sharpened ones
+
+- **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a
+  reply as an HITL interaction only when `from` equals the configured
+  `interaction_recipient` (`SIGNAL_TO`) or an `authorized_senders` entry; otherwise the
+  text is chat and an `comms.interaction_reply_unauthorized` signal fires.
+  **Symptom:** "I replied APPROVE on Signal and nothing happened." **Action:** set
+  `SIGNAL_TO` to the operator's own number (runtime.exs also derives
+  `authorized_senders` from it). Never widen the chat allowlist to make approvals work.
+- **Inbound chat is closed until someone is allowlisted (F-004).** An empty
+  `:arbor_comms :handler authorized_senders` now denies every sender
+  (`{:error, :no_authorized_senders}`, logged). **Action:** set `SIGNAL_TO` or the
+  config key; the old "empty list = everyone" behaviour is gone.
+- **Graph attributes can only tighten the ACP CLI (F-002).** `acp_permission_mode` of
+  `bypass` / `bypass_permissions` / `auto` fails the compute node
+  (`{:acp_permission_mode_refused, mode}`); `default`, `plan`, `dont_ask`,
+  `accept_edits` still flow. **Symptom:** a pipeline that used `bypass` now fails at the
+  compute node. **Action:** drop the attribute; grant the worker real Arbor capabilities
+  instead of bypassing the ACP permission callback.
+- **`comms_send_message` attachments need a path-scoped `arbor://fs/read` cap (F-010).**
+  Each attachment goes through `FileGuard.authorize(principal, path, :read)`; with no
+  bound principal attachments are refused. `egress_destination/2` is now the
+  recipient, so scope `arbor://comms/send` per recipient instead of a blanket allow.
+- **`session_memory.*` targets are the bound principal (F-009).** A params `agent_id`
+  that differs from `context[:agent_id]` raises `principal_mismatch`. Pipelines that
+  passed `session.agent_id` through still work (same id).
+- **`trust_apply_profile` cannot target the caller (F-005)** and `arbor://trust/write`
+  / `auto_promote` are always-locked (never unattended, F-015). The InterviewAgent
+  flow must run as the operator (session token) when it targets itself.
+- **The dashboard binds loopback (F-001).** `ARBOR_DASHBOARD_BIND_IP=0.0.0.0` is the
+  explicit LAN opt-in; set `DASHBOARD_USER`/`DASHBOARD_PASS` (now actually mounted,
+  F-012) before doing so.
+- **Sensitivity now sees the prompt (F-006).** A turn whose prompt carries a detected
+  secret classifies `:restricted`; the router may send it local or refuse the cloud
+  provider. That is the consent promise working — don't "fix" it by removing the key.
+- **Testing egress gates: a `:policy_module` stub is NOT consulted for egress.**
+  `Arbor.Trust.authorize_egress/3` → `Policy.tighten_public_opts/2` → the local
+  `Policy.egress_mode/2`, which reads the PolicyHost snapshot's `default_egress_modes`
+  (dev/prod set `external_provider: :allow`; test leaves it `:ask`) and the profile's
+  `egress_modes`. A stub module's `egress_mode/2` never fires — assert on outcomes
+  (`:partial_success` + `egress_blocked`) or set a real profile instead (learned
+  2026-10-11 writing the F-018 regression test).
+- **Review record:** `.arbor/reviews/arbor-cross-library-20261011/` (40 findings;
+  executive + technical reports).
+
+---
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
