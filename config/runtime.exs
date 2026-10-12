@@ -598,7 +598,25 @@ config :arbor_gateway, port: arbor_gateway_port
 
 # Keyword lists deep-merge in config, so this sets the port without discarding
 # the endpoint's other options (secret_key_base, check_origin, server, ...).
-config :arbor_dashboard, Arbor.Dashboard.Endpoint, http: [port: arbor_dashboard_port]
+#
+# Bind address: loopback unless ARBOR_DASHBOARD_BIND_IP names an interface
+# (e.g. "0.0.0.0" or "10.42.42.6"). The dashboard has no authentication in the
+# dev profile, so LAN exposure is an explicit operator decision, never the
+# default (2026-10-11 cross-library review F-001).
+arbor_dashboard_bind_ip =
+  case System.get_env("ARBOR_DASHBOARD_BIND_IP") do
+    nil ->
+      {127, 0, 0, 1}
+
+    raw ->
+      case :inet.parse_address(String.to_charlist(String.trim(raw))) do
+        {:ok, ip} -> ip
+        {:error, _} -> raise "ARBOR_DASHBOARD_BIND_IP must be an IP address, got: #{inspect(raw)}"
+      end
+  end
+
+config :arbor_dashboard, Arbor.Dashboard.Endpoint,
+  http: [ip: arbor_dashboard_bind_ip, port: arbor_dashboard_port]
 
 if config_env() == :prod do
   secret_key_base =

@@ -57,6 +57,7 @@ defmodule Arbor.Commands.CodingGrantCore do
           :converged
           | :unconverged
           | :malformed_report
+          | :refused_capability_uri
           | :grant_failed
           | :report_truncated
           | :invalid_max_rounds
@@ -593,16 +594,45 @@ defmodule Arbor.Commands.CodingGrantCore do
 
       {:error, :malformed_report} = error ->
         {:halt, error}
+
+      {:error, :refused_capability_uri} = error ->
+        {:halt, error}
     end
   end
+
+  # Security regression (2026-10-11 cross-library review F-023): the URIs this
+  # task signs come from the plan file's own manifest and node attrs — plan
+  # text is model-shaped. Only wildcards were refused, so a plan naming
+  # `arbor://shell/exec/bash` or `arbor://trust/write` converged into an
+  # operator-signed grant. High-blast classes are never auto-granted; the
+  # operator must mint those by hand. `arbor://shell/exec/git` stays grantable
+  # because the reviewed coding workflow needs it.
+  # (`arbor://agent/dispatch` and `agent/task/adopt` stay grantable: the
+  # coordinator needs them; lifecycle minting does not belong in a plan.)
+  @never_auto_grant_prefixes [
+    "arbor://shell",
+    "arbor://trust",
+    "arbor://governance",
+    "arbor://agent/create",
+    "arbor://agent/destroy",
+    "arbor://agent/spawn",
+    "arbor://agent/spawn_worker",
+    "arbor://agent/lifecycle",
+    "arbor://security",
+    "arbor://code/hot_load",
+    "arbor://consensus/admin",
+    "arbor://approval",
+    "arbor://monitor/remediate"
+  ]
+  @auto_grant_exceptions ["arbor://shell/exec/git"]
 
   defp admit_uri(uri) when is_binary(uri) do
     case CapabilityUri.parse(uri) do
       {:ok, parsed} ->
-        if unsafe_capability_uri?(parsed) do
-          {:error, :malformed_report}
-        else
-          {:ok, uri}
+        cond do
+          unsafe_capability_uri?(parsed) -> {:error, :malformed_report}
+          refused_capability_uri?(uri) -> {:error, :refused_capability_uri}
+          true -> {:ok, uri}
         end
 
       {:error, _reason} ->
@@ -611,6 +641,18 @@ defmodule Arbor.Commands.CodingGrantCore do
   end
 
   defp admit_uri(_uri), do: {:error, :malformed_report}
+
+  defp refused_capability_uri?(uri) do
+    excepted? =
+      Enum.any?(@auto_grant_exceptions, fn ex ->
+        uri == ex or CapabilityUri.prefix_match?(ex, uri)
+      end)
+
+    not excepted? and
+      Enum.any?(@never_auto_grant_prefixes, fn prefix ->
+        uri == prefix or CapabilityUri.prefix_match?(prefix, uri)
+      end)
+  end
 
   defp unsafe_capability_uri?(parsed) do
     parsed.wildcard != :none or parsed.segments == ["**"] or ".." in parsed.segments

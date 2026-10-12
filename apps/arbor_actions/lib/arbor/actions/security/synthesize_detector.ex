@@ -19,7 +19,9 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
        category), OR accept a pre-built spec passed by the LLM-synthesis node
        (`synthesize-detector.dot`). A non-S1 category is rejected upstream by
        `DetectorSpec.build/1` with `{:error, {:unsupported_shape, _}}`.
-    2. Generate the module source via `DetectorTemplate.s1_module_source/2`.
+    2. Generate the module source via `DetectorTemplate.module_source/2` (S1 or
+       S3 by `spec.shape` — the one spec→source dispatch, shared with
+       `SweepCandidate`'s provenance regeneration).
     3. **G1 re-catch:** compile the generated source in-memory, parse the original
        finding's source file to AST, run the generated detector's `run/1` against
        it, and ASSERT it flags a violation at the finding's function (and line, if
@@ -84,7 +86,7 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
 
     with {:ok, spec} <- resolve_spec(finding, params[:spec]),
          module_name <- unique_module_name(spec),
-         source <- module_source(spec, module_name),
+         source <- DetectorTemplate.module_source(spec, module: module_name),
          {:ok, module} <- compile_in_memory(source, module_name),
          :ok <- g1(spec.shape, module, finding) do
       {:ok,
@@ -98,14 +100,6 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
        }}
     end
   end
-
-  # The template differs by shape: S1 emits a `use Arbor.Eval` per-file check with
-  # `run/1`; S3 emits a whole-tree detector with `detect/1`.
-  defp module_source(%DetectorSpec{shape: :s3} = spec, module_name),
-    do: DetectorTemplate.s3_module_source(spec, module: module_name)
-
-  defp module_source(%DetectorSpec{} = spec, module_name),
-    do: DetectorTemplate.s1_module_source(spec, module: module_name)
 
   # ---------------------------------------------------------------------------
   # Spec resolution (LLM-supplied OR deterministic)
@@ -175,13 +169,10 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
 
   # --- LLM-produced spec decoding (JSON → DetectorSpec params) ---------------
 
-  # Known atom-valued fields are coerced against allowlists — NEVER
-  # String.to_atom on model output. Literals are coerced from JSON tokens:
-  # a string token to its atom/boolean/nil value, and a 2-element list like
-  # ["ok", "_"] to the tuple {:ok, :_} (the `{:ok, _}` wildcard form).
-  @known_literal_atoms ~w(ok error true false nil authorized unauthorized verified unverified)
-  @known_clause_positions ~w(rescue catch_all rescue_or_catch_all)
-
+  # Decoded JSON is normalized by `DetectorSpec.coerce_params/1` — allowlist
+  # coercion of every atom-valued field, NEVER String.to_atom on model output.
+  # That is the same path `SweepCandidate` rebuilds a candidate's spec through,
+  # so synthesis and sweep can never disagree about what a transported spec means.
   defp spec_from_json(text) do
     trimmed = String.trim(text || "")
 
@@ -189,7 +180,7 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
       :empty
     else
       case decode_json(trimmed) do
-        {:ok, %{} = map} -> {:ok, coerce_spec_params(map)}
+        {:ok, %{} = map} -> {:ok, DetectorSpec.coerce_params(map)}
         _ -> :empty
       end
     end
@@ -203,126 +194,6 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
     |> Jason.decode()
   end
 
-  defp coerce_spec_params(map) do
-    %{
-      name: get(map, "name"),
-      shape: coerce_shape(get(map, "shape")),
-      category: coerce_category(get(map, "category")),
-      invariant: get(map, "invariant"),
-      name_match: coerce_name_match(get(map, "name_match")),
-      target_literals: coerce_literals(get(map, "target_literals")),
-      exclusions: coerce_literals(get(map, "exclusions")),
-      clause_position: coerce_clause_position(get(map, "clause_position")),
-      match_pattern: coerce_match_pattern(get(map, "match_pattern"))
-    }
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-    |> Map.new()
-  end
-
-  defp get(map, key), do: map[key] || map[String.to_atom(key)]
-
-  # shape is a closed, known token set → coerce against the allowlist only.
-  defp coerce_shape("s1"), do: :s1
-  defp coerce_shape("s3"), do: :s3
-  defp coerce_shape(_), do: nil
-
-  defp coerce_category(nil), do: nil
-
-  # Match against BOTH the S1 and S3 known category sets (allowlist only — never
-  # String.to_atom on model output).
-  defp coerce_category(str) when is_binary(str) do
-    Enum.find(
-      DetectorSpec.s1_categories() ++ DetectorSpec.s3_categories(),
-      &(Atom.to_string(&1) == str)
-    )
-  end
-
-  defp coerce_category(_), do: nil
-
-  # The S3 match_pattern. `kind` is allowlisted; the call target and literal value
-  # are coerced through the SAME hardened coercions as S1 literals/name_match
-  # (no String.to_atom on raw model output). A "Mod.fun" call stays a binary.
-  defp coerce_match_pattern(%{} = mp) do
-    kind = mp["kind"] || mp[:kind]
-
-    case kind do
-      "literal" -> %{kind: :literal, literal: coerce_literal(mp["literal"] || mp[:literal])}
-      "call" -> %{kind: :call, call: coerce_call_target(mp["call"] || mp[:call])}
-      _ -> nil
-    end
-  end
-
-  defp coerce_match_pattern(_), do: nil
-
-  # A call target: a remote "Mod.fun" stays a binary (matched textually by the
-  # generated detector); a bare "fun" / "@fun" / ":fun" becomes an existing atom
-  # when known, else falls back to the binary form (never minting new atoms).
-  defp coerce_call_target(str) when is_binary(str) do
-    if String.contains?(str, "."),
-      do: str,
-      else: to_known_atom_or(strip_colon(strip_at(str)), str)
-  end
-
-  defp coerce_call_target(_), do: nil
-
-  defp strip_at("@" <> rest), do: rest
-  defp strip_at(str), do: str
-
-  defp coerce_clause_position(str) when is_binary(str) and str in @known_clause_positions do
-    String.to_existing_atom(str)
-  end
-
-  defp coerce_clause_position(_), do: nil
-
-  defp coerce_name_match(list) when is_list(list) do
-    Enum.flat_map(list, fn
-      "@" <> exact -> [to_known_atom_or(exact, exact)]
-      bin when is_binary(bin) -> [bin]
-      _ -> []
-    end)
-  end
-
-  defp coerce_name_match(_), do: nil
-
-  defp coerce_literals(list) when is_list(list), do: Enum.map(list, &coerce_literal/1)
-  defp coerce_literals(_), do: nil
-
-  # A single JSON literal token → an Elixir literal. A 2-element list → a tuple
-  # (recursively), enabling ["ok", "_"] → {:ok, :_}.
-  defp coerce_literal([a, b]), do: {coerce_literal(a), coerce_literal(b)}
-  defp coerce_literal("_"), do: :_
-  defp coerce_literal(true), do: true
-  defp coerce_literal(false), do: false
-  defp coerce_literal(nil), do: nil
-
-  defp coerce_literal(str) when is_binary(str) do
-    cond do
-      str == "true" -> true
-      str == "false" -> false
-      str == "nil" -> nil
-      str in @known_literal_atoms -> String.to_existing_atom(strip_colon(str))
-      String.starts_with?(str, ":") -> to_known_atom_or(strip_colon(str), str)
-      true -> str
-    end
-  end
-
-  defp coerce_literal(other), do: other
-
-  defp strip_colon(":" <> rest), do: rest
-  defp strip_colon(str), do: str
-
-  defp to_known_atom_or(name, fallback) do
-    if name in @known_literal_atoms do
-      String.to_existing_atom(name)
-    else
-      try do
-        String.to_existing_atom(name)
-      rescue
-        ArgumentError -> fallback
-      end
-    end
-  end
-
   # ---------------------------------------------------------------------------
   # G1: in-memory compile + re-catch the seed
   # ---------------------------------------------------------------------------
@@ -333,6 +204,10 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
     purge(mod)
 
     try do
+      # `source` is DetectorTemplate output for the spec resolved above (allowlist-
+      # coerced; every value interpolated via inspect/1 or escape_doc/1) — this
+      # action never compiles caller-supplied text.
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
       [{compiled, _bin} | _] = Code.compile_string(source)
       {:ok, compiled}
     rescue

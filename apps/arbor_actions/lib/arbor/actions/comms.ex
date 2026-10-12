@@ -104,8 +104,46 @@ defmodule Arbor.Actions.Comms do
     # default. (PollMessages is ingress — covered by its output_taint, not gated.)
     def effect_class, do: :network_egress
 
+    # Recipient-scoped egress (2026-10-11 cross-library review F-010): without a
+    # destination the gate could only ever be a blanket `:ask`/`:allow` on
+    # `arbor://comms/send`, which is what made unscoped attachments dangerous.
+    def egress_destination(%{to: to}, _context) when is_binary(to) and to != "", do: to
+    def egress_destination(_params, _context), do: nil
+
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
+      case authorize_attachments(params[:attachments], context) do
+        :ok -> do_run(params, context)
+        {:error, _} = error -> error
+      end
+    end
+
+    # Security regression (2026-10-11 cross-library review F-010): attachment
+    # paths were read verbatim (`File.read!` / `--attachment=`), so a model
+    # could mail `~/.arbor/oauth/*.json` to any recipient. Every attachment
+    # must now be a path the bound principal holds an `arbor://fs/read` cap for;
+    # with no bound principal, attachments are refused outright.
+    defp authorize_attachments(nil, _context), do: :ok
+    defp authorize_attachments([], _context), do: :ok
+
+    defp authorize_attachments(paths, context) when is_list(paths) do
+      case Map.get(context, :agent_id) do
+        agent_id when is_binary(agent_id) and agent_id != "" ->
+          Enum.reduce_while(paths, :ok, fn path, :ok ->
+            case Arbor.Security.FileGuard.authorize(agent_id, to_string(path), :read) do
+              {:ok, _resolved} -> {:cont, :ok}
+              _other -> {:halt, {:error, {:attachment_unauthorized, to_string(path)}}}
+            end
+          end)
+
+        _ ->
+          {:error, :attachments_require_principal}
+      end
+    end
+
+    defp authorize_attachments(_other, _context), do: {:error, :invalid_attachments}
+
+    defp do_run(params, _context) do
       Actions.emit_started(__MODULE__, params)
 
       channel = params.channel

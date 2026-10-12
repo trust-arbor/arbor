@@ -34,6 +34,23 @@ defmodule Arbor.Actions.Security.DetectorTemplate do
   alias Arbor.Actions.Security.DetectorSpec
 
   @doc """
+  Returns compilable Elixir source for `spec`, dispatching on `spec.shape`:
+  `:s3` → `s3_module_source/2`, otherwise (`:s1`) → `s1_module_source/2`.
+
+  This is the ONE spec→source dispatch. `SynthesizeDetector` uses it to generate
+  a candidate, and `SweepCandidate` uses it to REGENERATE the candidate from its
+  validated spec — refusing any caller-supplied `module_source` that differs
+  (the F-008 provenance gate; see `Arbor.Actions.Security.SweepCandidate`).
+  Every path that turns a spec into compilable source must go through here so
+  the two stages can never disagree about what a spec compiles to.
+  """
+  @spec module_source(DetectorSpec.t(), keyword()) :: String.t()
+  def module_source(spec, opts \\ [])
+
+  def module_source(%DetectorSpec{shape: :s3} = spec, opts), do: s3_module_source(spec, opts)
+  def module_source(%DetectorSpec{} = spec, opts), do: s1_module_source(spec, opts)
+
+  @doc """
   Returns compilable Elixir source for the S1 detector described by `spec`.
 
   The module name is derived from `spec.name` (camelized) under

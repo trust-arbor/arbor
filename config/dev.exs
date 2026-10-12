@@ -134,8 +134,21 @@ config :phoenix_live_view,
   debug_heex_annotations: true,
   debug_attributes: true
 
+# Consensus: the Coordinator refuses proposals without an authorizer by
+# default (fail closed; 2026-10-11 cross-library review F-016). Dev keeps the
+# historical permissive behaviour explicitly — agent-facing proposal actions
+# are already capability-gated at the Arbor.Actions facade
+# (`arbor://consensus/propose`). Remove this line to require
+# `Arbor.Consensus.Authorizers.CapabilityAuthorizer` for in-VM callers too.
+config :arbor_consensus, require_authorizer: false
+
+# Security (2026-10-11 cross-library review F-001): bind the operator UI to
+# loopback. The dashboard has no authentication in the dev profile (every
+# request becomes `human_dashboard`), so an unbound listener exposes every
+# agent's memory, goals and proposal review to the LAN. Override with
+# ARBOR_DASHBOARD_BIND_IP in runtime.exs when you really want LAN access.
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
-  http: [port: 4001],
+  http: [ip: {127, 0, 0, 1}, port: 4001],
   secret_key_base: String.duplicate("arbor_dashboard_dev_secret_", 4),
   debug_errors: true,
   code_reloader: false,

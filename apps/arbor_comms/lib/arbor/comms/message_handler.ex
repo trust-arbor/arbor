@@ -90,6 +90,10 @@ defmodule Arbor.Comms.MessageHandler do
     end
   end
 
+  @doc false
+  # Test seam for the sender allowlist decision (not part of the comms facade).
+  def check_authorized_for_test(%Message{} = msg), do: check_authorized(msg)
+
   defp check_authorized(%Message{from: from}) do
     allowed = Config.authorized_senders()
     aliases = Config.handler_config(:contact_aliases, %{})
@@ -98,10 +102,25 @@ defmodule Arbor.Comms.MessageHandler do
     all_allowed =
       Enum.flat_map(aliases, fn {_sender, names} -> names end) ++ allowed
 
-    if all_allowed == [] or from in all_allowed do
-      :ok
-    else
-      {:error, :unauthorized}
+    # Security regression (2026-10-11 cross-library review F-004): an empty
+    # allowlist used to admit EVERY sender into an unchecked cloud LLM turn
+    # on the operator's key. Inbound chat is now closed until the operator
+    # names who may talk to the agents (SIGNAL_TO, or
+    # `config :arbor_comms, :handler, authorized_senders: [...]`).
+    cond do
+      all_allowed == [] ->
+        Logger.warning(
+          "[MessageHandler] inbound message from #{inspect(from)} refused: no authorized " <>
+            "senders configured (set SIGNAL_TO or :arbor_comms :handler authorized_senders)"
+        )
+
+        {:error, :no_authorized_senders}
+
+      from in all_allowed ->
+        :ok
+
+      true ->
+        {:error, :unauthorized}
     end
   end
 

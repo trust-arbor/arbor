@@ -30,25 +30,17 @@ defmodule Arbor.Agent.Executor.ActionDispatchH7Test do
                "deny when caller has no caps — H7 regression. Got: #{inspect(result)}"
     end
 
-    test ":proposal_submit without agent_id still uses the direct apply path" do
-      # Backward compatibility: callers that don't have an agent_id (system
-      # internal paths, certain tests) keep getting the direct apply
-      # behavior. Without an agent_id we don't have anyone to authorize
-      # against; the choice is "deny everything" (which would break those
-      # paths) or "fall back to direct" (which preserves existing behavior
-      # and the operator can layer their own gate at the caller). This
-      # test pins the fallback.
-      result = ActionDispatch.dispatch(:proposal_submit, %{proposal: %{}})
+    test "security regression (F-017): dispatch without an agent_id never reaches run/2" do
+      # Pre-fix, a nil agent_id fell back to `action_module.run(params, %{})`
+      # with no capability, trust, taint, or approval gate ("system-level
+      # dispatch"). The only production caller passes `state.agent_id`; a nil
+      # principal is a bug or an attack and must fail closed.
+      # The hardcoded compound action path reports the action's error tag.
+      assert {:error, {:missing_principal, :proposal_submit_failed}} =
+               ActionDispatch.dispatch(:proposal_submit, %{proposal: %{}})
 
-      # Direct apply will either run the action or return :consensus_unavailable
-      # if the consensus module isn't loaded. Either way it's NOT a
-      # :proposal_submit_failed shape (that's the authorize_and_execute
-      # branch).
-      assert match?({:error, :consensus_unavailable}, result) or
-               match?({:ok, _}, result) or
-               match?({:error, {:proposal_submit_failed, _}}, result),
-             "nil agent_id should preserve fallback dispatch behavior. " <>
-               "Got: #{inspect(result)}"
+      assert {:error, {:missing_principal, "memory.remember"}} =
+               ActionDispatch.dispatch("memory.remember", %{content: "x"}, nil)
     end
   end
 end

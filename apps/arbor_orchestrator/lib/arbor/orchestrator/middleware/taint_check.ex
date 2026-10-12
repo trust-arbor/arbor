@@ -73,7 +73,10 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
   defp enforce_taint_profile_before(token) do
     case token.node.taint_profile do
       nil ->
-        token
+        # No compiled profile to enforce, but the classification result must
+        # still reach the handler: `__data_sensitivity__` drives the
+        # sensitivity router and model-policy admission (F-006).
+        propagate_sensitivity_to_context(token)
 
       %TaintProfile{} = profile ->
         token
@@ -413,11 +416,23 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     end
   end
 
+  # `prompt_context_key` / `system_prompt_context_key` are how the stock
+  # turn.dot / heartbeat.dot compute nodes source their prompt. Until the
+  # 2026-10-11 cross-library review (F-006) they were not scanned here, so
+  # `__data_sensitivity__` was never derived from the prompt bytes and the
+  # sensitivity router / model-policy admission were dormant on the main
+  # agent path. Keep this list in sync with `Engine.node_input_keys/1`.
   defp extract_input_keys(node) do
     attrs = node.attrs
 
     keys =
-      for key <- ["source_key", "input_key", "graph_source_key"],
+      for key <- [
+            "source_key",
+            "input_key",
+            "graph_source_key",
+            "prompt_context_key",
+            "system_prompt_context_key"
+          ],
           val = Map.get(attrs, key),
           val != nil,
           do: val

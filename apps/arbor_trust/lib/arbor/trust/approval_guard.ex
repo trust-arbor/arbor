@@ -13,10 +13,18 @@ defmodule Arbor.Trust.ApprovalGuard do
 
   require Logger
 
+  # Security regression (2026-10-11 cross-library review F-015): this list is a
+  # FLOOR. A resolved `:auto` mode (e.g. from an operator `security_ceilings`
+  # override) must still be gated for these classes, and the match is
+  # segment-aware so `arbor://shellx` does not inherit the lock. Trust
+  # mutation joins the list: it is the only path by which an agent could
+  # raise its own autonomy, so it must never be unattended.
   @always_locked_uri_classes [
     "arbor://shell",
     "arbor://governance",
-    "arbor://code/hot_load"
+    "arbor://code/hot_load",
+    "arbor://trust/write",
+    "arbor://trust/auto_promote"
   ]
 
   @doc """
@@ -63,7 +71,13 @@ defmodule Arbor.Trust.ApprovalGuard do
   end
 
   defp check_with_policy(capability, principal_id, resource_uri, opts) do
-    case get_confirmation_mode(principal_id, resource_uri, opts) do
+    mode = get_confirmation_mode(principal_id, resource_uri, opts)
+
+    # Floor: an always-locked class can never resolve to unattended `:auto`,
+    # whatever the profile or an operator ceiling override says (F-015).
+    mode = if mode == :auto and always_locked?(resource_uri), do: :gated, else: mode
+
+    case mode do
       :auto ->
         cond do
           approved_invocation?(principal_id, resource_uri, opts) ->
@@ -287,7 +301,9 @@ defmodule Arbor.Trust.ApprovalGuard do
   defp uri_parameter_bounded?(_), do: false
 
   defp always_locked?(uri) when is_binary(uri) do
-    Enum.any?(@always_locked_uri_classes, &String.starts_with?(uri, &1))
+    Enum.any?(@always_locked_uri_classes, fn class ->
+      uri == class or Arbor.Contracts.Security.CapabilityUri.prefix_match?(class, uri)
+    end)
   end
 
   defp always_locked?(_), do: true

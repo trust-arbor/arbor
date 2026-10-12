@@ -1196,11 +1196,13 @@ defmodule Arbor.Agent.Manager do
   defp infer_runtime(%{provider: :acp}), do: :arbor
   defp infer_runtime(_), do: :arbor
 
+  # Security (2026-10-11 cross-library review F-021): this used to request
+  # `permission_mode: :bypass`. `Claude.build_request` dropped the opt, so it
+  # was inert, but honouring it would hand the model an unrestricted CLI.
+  # Agents run under the ACP default, which routes every tool ask through
+  # `Arbor.Security.authorize`.
   defp query_runtime(:acp, pid, input, opts) do
-    Claude.query(pid, input,
-      timeout: Keyword.get(opts, :timeout, :infinity),
-      permission_mode: :bypass
-    )
+    Claude.query(pid, input, timeout: Keyword.get(opts, :timeout, :infinity))
   end
 
   defp query_runtime(:arbor, pid, input, opts), do: APIAgent.query(pid, input, opts)

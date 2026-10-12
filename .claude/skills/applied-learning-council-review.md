@@ -218,6 +218,19 @@ frozen plan).
 <a id="applied-learning-reviewer-evidence-must-not-truncate-below-admitted-ledger-size"></a>
 **Reviewer evidence must not truncate below admitted ledger size.** If recheck requires every owned active finding, the prompt must expose every admitted id, including minor/nit findings. J0's valid 42,651-byte ledger became a 32,768-byte escaped preview, causing six incomplete-owner abstentions on 2026-09-07. Match admission and rendering bounds, preserve strict update validation, and project bounded known failure tags without report payloads. Regression coverage should construct a valid ledger through its real core, render both reviewer prompts, and close the next cycle from model-visible evidence; prove the parent fails on truncation, not a newly added helper's missing function.
 
+<!-- applied-learning: separate-end-state-architecture-from-current-delivery-constraints -->
+<a id="applied-learning-separate-end-state-architecture-from-current-delivery-constraints"></a>
+**Separate end-state architecture from current delivery constraints.** When Hysun
+asks for an ideal future system, begin with the owner's desired properties and
+fundamental security boundaries. Treat missing software, hardware support,
+ecosystem maturity, and earlier delivery decisions as work to evaluate, not
+permanent limits. Keep migration sequencing separate from the target design.
+Arbor's long-term premise includes an owner-controlled device running the full
+stack locally, including AI; a preinstalled phone, laptop, or appliance can make
+that ownership accessible. Do not silently reduce that vision to a thin client
+or a permanently hosted model (clarified 2026-09-20 after interface/OS
+brainstorming was answered as a constrained migration plan).
+
 <!-- applied-learning: trace-the-exact-reviewed-symbol-before-closing-a-finding -->
 <a id="applied-learning-trace-the-exact-reviewed-symbol-before-closing-a-finding"></a>
 **Trace the exact reviewed symbol before closing a finding.** Repositories can

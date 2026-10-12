@@ -13,6 +13,10 @@ defmodule Arbor.Shell.Executor do
   alias Arbor.Shell.{ProcessGroup, Sandbox}
 
   @default_timeout 30_000
+  # Upper bound for a caller-supplied timeout (matches PortSession's
+  # @max_stream_timeout). The agent path lets `:timeout` through option
+  # narrowing, so it must be clamped here (2026-10-11 cross-library review F-024).
+  @max_timeout 600_000
   @default_max_output_bytes 8_388_608
   @max_max_output_bytes 16_777_216
 
@@ -159,7 +163,9 @@ defmodule Arbor.Shell.Executor do
 
   @doc false
   @spec normalize_timeout(term()) :: pos_integer()
-  def normalize_timeout(timeout) when is_integer(timeout) and timeout > 0, do: timeout
+  def normalize_timeout(timeout) when is_integer(timeout) and timeout > 0,
+    do: min(timeout, @max_timeout)
+
   def normalize_timeout(_timeout), do: @default_timeout
 
   @doc false

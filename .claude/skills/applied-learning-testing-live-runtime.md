@@ -421,6 +421,11 @@ A history-status UI fixture must append fresh persisted identities, or seed
 status before the first read. Changing a cached entry's status at the same id
 and ordinal correctly trips the immutable-overlap gate; do not relax that
 gate to exercise a label (2026-10-04 retained-partial presentation review).
+Platform-dependent maintenance scripts must probe required APIs before writing.
+The attempted APFS duplicate consolidation stopped on unavailable Python
+os.listxattr before cloning any file; its incomplete running receipt did not
+mean the process remained alive. Use the terminal process result and preserve
+the failure rather than restarting from a stale marker (2026-10-04).
 
 Before asserting a public runtime receipt, trace its value from the metadata
 producer through the public projection. An implementation module and a public
@@ -2165,7 +2170,14 @@ replacing a frozen release during Gateway qualification (2026-09-29).
 
 <!-- applied-learning: verify-producer-payloads-against-current-consumer-contracts -->
 <a id="applied-learning-verify-producer-payloads-against-current-consumer-contracts"></a>
-**Verify producer payloads against current consumer contracts.**
+**Verify producer payloads against current consumer contracts.** A call site is
+not proof that a write succeeds: trace the actual payload through validation and
+observe its result through the public consumer. Keep a regression using the real
+producer shape when strengthening serialization or provenance contracts. Normalize
+JSON data at the producer; do not weaken the storage boundary to accept arbitrary
+structs. When restoring a previously rejected write, qualify its read/disclosure
+scope too (found 2026-09-09: AgentSeed's DateTime metadata is rejected by the strict
+memory Index input contract while finalize_query swallows the error).
 
 Native browser events can contain framework metadata absent from mounted
 render_click helpers. Qualify a real browser click, then regress its exact
@@ -2180,10 +2192,30 @@ browser (2026-10-03). Regress the real producer through the public adapter with
 multiple active rows, ties and pagination; preserve completeness/watermark
 checks instead of treating a contract rejection as lost authorization.
 
+<!-- applied-learning: verify-effective-file-selectors-before-accepting-scoped-lint-evidence -->
+<a id="applied-learning-verify-effective-file-selectors-before-accepting-scoped-lint-evidence"></a>
+**Verify effective file selectors before accepting scoped lint evidence.** Use
+exact positional paths for the pinned Credo CLI (`credo --strict path1 path2`)
+and verify its reported source-file count matches the intended scope. Its
+`treat_unknown_args_as_files` branch overwrites `--files-included` with positional
+arguments, including an empty list (`deps/credo/lib/credo/cli/options.ex:136-139`).
+A seemingly scoped invocation therefore scanned 3,696 files on 2026-09-09; stop
+an unexpectedly broadened run and correct the selector before accepting lint
+results. Recheck effective selection when upgrading the tool.
+
+<!-- applied-learning: pin-the-absolute-namespace-of-nested-policy-test-modules -->
+<a id="applied-learning-pin-the-absolute-namespace-of-nested-policy-test-modules"></a>
+**Pin the absolute namespace of nested policy test modules.** When a regression declares a fake inside a test module but admission classifies the global application namespace, write `defmodule Elixir.Arbor...` and use the same absolute reference. A nested `defmodule Arbor...` creates a test-module-prefixed name and can test the wrong policy family (found 2026-09-09 while reviewing private-turn memory containment tests).
+
+A test double declared inside one `describe` block also needs a qualified reference
+from another block (`__MODULE__.RecordingLog`): its implicit alias is lexically
+scoped. Assert that the callback was observed; a graceful production logging rescue
+can hide an unresolved double as a no-op (found 2026-09-22 while testing design
+council rationale persistence).
+
 <!-- applied-learning: preserve-the-formatter-api-s-newline-contract -->
 <a id="applied-learning-preserve-the-formatter-api-s-newline-contract"></a>
-**Preserve the formatter API's newline contract.**
-
+**Preserve the formatter API's newline contract.** `Code.format_file!/2` already includes the file's terminating newline; appending another creates blank-at-EOF churn. If formatting without Mix in an isolated source review, write its iodata directly, or normalize to exactly one final newline, then verify the exact files with the repository formatter (found 2026-09-09 during private-turn memory containment validation).
 For a read-only check, compare the complete source to the formatter's complete
 iodata output; trimming only the source incorrectly reports a mismatch and can
 trigger that same extra-newline churn (2026-10-05 OAuth codec qualification).
@@ -2194,6 +2226,10 @@ change `Macro.to_string/1` rendering. Then compare exact final formatter bytes.
 On 2026-10-05, the first pass exited 1 and its unadmitted metadata was corrected
 to incomplete; the later complete five-file format and normalized parse
 comparison passed.
+
+<!-- applied-learning: avoid-compiler-reserved-attributes-for-test-matrix-values -->
+<a id="applied-learning-avoid-compiler-reserved-attributes-for-test-matrix-values"></a>
+**Avoid compiler-reserved attributes for test matrix values.** In an Elixir module-level test matrix, use a task-specific attribute such as `@child_type`, not `@type`: `@type` records a typespec instead of an ordinary scalar, so interpolating it into a test name fails before any regression executes. Prefer explicit `unquote` when a test macro supports it (found 2026-09-09 during isolated memory-policy transport compilation).
 
 <!-- applied-learning: derive-integration-fixture-roots-from-source-locations-not-mix-working-directory -->
 <a id="applied-learning-derive-integration-fixture-roots-from-source-locations-not-mix-working-directory"></a>

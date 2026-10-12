@@ -202,21 +202,51 @@ defmodule Arbor.Comms.Channels.Email do
     Map.get(@content_types, ext, "application/octet-stream")
   end
 
+  # Security regression (2026-10-11 cross-library review F-013): delivery used
+  # `tls: :if_available` + `verify: :verify_none`, so a LAN attacker could strip
+  # STARTTLS and read SMTP_PASS and every outbound mail. TLS is now required
+  # whenever credentials are configured and the relay certificate is verified
+  # against the system CA store. `config :arbor_comms, :email, tls_verify: :none`
+  # is the explicit (logged) opt-out for a self-signed local relay.
   defp deliver(email) do
-    smtp_config = [
-      relay: config(:smtp_host) || "localhost",
+    relay = config(:smtp_host) || "localhost"
+    password = config(:smtp_pass)
+    credentials? = is_binary(password) and password != ""
+
+    SMTP.deliver(
+      email,
+      relay: relay,
       port: smtp_port(),
       username: config(:smtp_user),
-      password: config(:smtp_pass),
+      password: password,
       ssl: false,
-      tls: :if_available,
-      tls_options: [verify: :verify_none],
+      tls: if(credentials?, do: :always, else: :if_available),
+      tls_options: tls_options(relay),
       auth: :if_available,
       retries: 2,
       no_mx_lookups: true
-    ]
+    )
+  end
 
-    SMTP.deliver(email, smtp_config)
+  @doc false
+  # Public for the security regression test; not part of the comms facade.
+  def tls_options(relay) do
+    case config(:tls_verify) do
+      :none ->
+        Logger.warning(
+          "[Email] SMTP relay certificate verification DISABLED by config (tls_verify: :none)"
+        )
+
+        [verify: :verify_none]
+
+      _ ->
+        [
+          verify: :verify_peer,
+          cacerts: :public_key.cacerts_get(),
+          server_name_indication: String.to_charlist(relay),
+          depth: 3
+        ]
+    end
   end
 
   defp smtp_port do

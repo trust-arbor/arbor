@@ -352,6 +352,15 @@ defmodule Arbor.Actions.Code do
     - Requires `arbor://code/hot_load/{module}` capability
     - Requires an allowing granular trust policy
     - Cannot hot-load protected modules (security, persistence, kernel)
+    - The source is validated by `Arbor.Sandbox.Code` at the `:hot_load`
+      level (no OS processes, no dynamic code loading, no cluster access,
+      no dynamic dispatch) before it is compiled
+    - The source must define exactly the authorized `module` — one
+      `defmodule`, no nested modules. This is checked statically before
+      compilation and again against the modules `Code.compile_string/1`
+      actually produced; on a mismatch every compiled module is evicted
+      (F-007: a capability for `Foo` must not let the source redefine `Bar`)
+    - `verify_fn` must be a 0-arity function on the authorized module
     - All attempts are logged to EventLog permanently
 
     ## Parameters
@@ -407,9 +416,10 @@ defmodule Arbor.Actions.Code do
     Control parameters:
     - `module` - Which module to load is a critical control decision
     - `verify_fn` - The verification function affects what code runs
+    - `source` - The source IS the code that will run in the VM; untrusted
+      or hostile provenance must not reach the compiler (F-007)
 
     Data parameters:
-    - `source` - The source code is data being processed (though dangerous)
     - `rollback_timeout_ms` - Numeric timeout doesn't affect security
     """
     @spec taint_roles() :: %{atom() => :control | :data}
@@ -417,7 +427,7 @@ defmodule Arbor.Actions.Code do
       %{
         module: :control,
         verify_fn: :control,
-        source: :data,
+        source: :control,
         rollback_timeout_ms: :data
       }
     end
@@ -440,11 +450,13 @@ defmodule Arbor.Actions.Code do
       with {:ok, module} <- parse_module(module_str),
            :ok <- check_not_protected(module),
            {:ok, _principal_id} <- Actions.authorized_principal(context, __MODULE__),
-           :ok <- validate_source_safety(source),
+           {:ok, ast} <- validate_source_safety(source),
+           :ok <- check_declared_modules(ast, module),
            {:ok, original_binary} <- save_original(module),
-           {:ok, compiled_module} <- compile_source(source) do
+           {:ok, compiled_modules} <- compile_source(source),
+           :ok <- bind_compiled_modules(compiled_modules, module, original_binary) do
         # Load the new module
-        {:ok, result} = load_module(compiled_module, verify_fn, timeout, original_binary)
+        {:ok, result} = load_module(module, verify_fn, timeout, original_binary)
 
         Actions.emit_completed(__MODULE__, %{
           module: module_str,
@@ -514,15 +526,61 @@ defmodule Arbor.Actions.Code do
       end
     end
 
+    # F-007: hot-loaded source is validated at the :hot_load level — :limited
+    # minus OS exec, dynamic code loading, cluster access and dynamic dispatch.
     defp validate_source_safety(source) do
       case Code.string_to_quoted(source) do
         {:ok, ast} ->
-          Arbor.Sandbox.Code.validate(ast, :limited)
+          case Arbor.Sandbox.Code.validate(ast, :hot_load) do
+            :ok -> {:ok, ast}
+            {:error, _} = error -> error
+          end
 
         {:error, {_meta, message, _token}} ->
           {:error, {:parse_error, message}}
       end
     end
+
+    # F-007: the source must declare exactly one module, by literal name, and
+    # it must be the authorized module. This runs BEFORE compilation so a
+    # protected or unauthorized module is never redefined even momentarily.
+    # `bind_compiled_modules/3` re-checks against what the compiler produced.
+    defp check_declared_modules(ast, module) do
+      declared = declared_modules(ast)
+
+      cond do
+        declared == [module] ->
+          :ok
+
+        Enum.any?(declared, &(&1 == :__dynamic__)) ->
+          {:error,
+           {:module_mismatch,
+            authorized: module, declared: declared, reason: :dynamic_module_name}}
+
+        true ->
+          {:error, {:module_mismatch, authorized: module, declared: declared}}
+      end
+    end
+
+    defp declared_modules(ast) do
+      {_, declared} =
+        Macro.prewalk(ast, [], fn
+          {:defmodule, _, [name_ast | _]} = node, acc ->
+            {node, [resolve_declared_name(name_ast) | acc]}
+
+          node, acc ->
+            {node, acc}
+        end)
+
+      Enum.reverse(declared)
+    end
+
+    defp resolve_declared_name({:__aliases__, _, parts}) when is_list(parts) do
+      if Enum.all?(parts, &is_atom/1), do: Module.concat(parts), else: :__dynamic__
+    end
+
+    defp resolve_declared_name(name) when is_atom(name) and not is_nil(name), do: name
+    defp resolve_declared_name(_), do: :__dynamic__
 
     defp compile_source(source) do
       # Source is always treated as a source string, never a file path.
@@ -533,14 +591,45 @@ defmodule Arbor.Actions.Code do
       try do
         # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
         case Code.compile_string(source_code) do
-          [{module, _binary}] -> {:ok, module}
-          [{module, _binary} | _] -> {:ok, module}
           [] -> {:error, :no_module_compiled}
+          compiled -> {:ok, Enum.map(compiled, &elem(&1, 0))}
         end
       rescue
         e ->
           {:error, {:compile_error, Exception.message(e)}}
       end
+    end
+
+    # F-007: `Code.compile_string/1` has already loaded every module the source
+    # defined. The capability and the protected-module check are bound to
+    # `module` only, so the compiled set must be exactly `[module]`. Anything
+    # else is evicted (original restored from the code path when available,
+    # otherwise purged + deleted) and the call is refused.
+    defp bind_compiled_modules([module], module, _original_binary) do
+      check_not_protected(module)
+    end
+
+    defp bind_compiled_modules(compiled, module, original_binary) do
+      Enum.each(compiled, fn
+        ^module -> restore_original(module, original_binary)
+        other -> evict_module(other)
+      end)
+
+      {:error, {:module_mismatch, authorized: module, compiled: compiled}}
+    end
+
+    defp evict_module(module) do
+      case :code.get_object_code(module) do
+        {^module, binary, filename} ->
+          # Pre-existing module with a .beam on the code path — put it back.
+          :code.load_binary(module, filename, binary)
+
+        :error ->
+          :code.purge(module)
+          :code.delete(module)
+      end
+
+      :ok
     end
 
     defp load_module(module, verify_fn, timeout, original_binary) do
@@ -597,14 +686,26 @@ defmodule Arbor.Actions.Code do
       end
     end
 
-    defp run_verification(_module, verify_fn_str) do
-      with {:ok, {m, f, a}} <- parse_mfa(verify_fn_str) do
+    # F-007: the verification function may only live on the authorized module.
+    # Without this, `verify_fn` was an "apply any 0-arity function on any
+    # module" primitive behind a capability for an unrelated module.
+    defp run_verification(module, verify_fn_str) do
+      with {:ok, {m, f, a}} <- parse_mfa(verify_fn_str),
+           :ok <- check_verify_module(m, module) do
         try do
           m |> apply(f, a) |> interpret_verification_result()
         rescue
           e -> {:error, Exception.message(e)}
         end
       end
+    end
+
+    defp check_verify_module(module, module), do: :ok
+
+    defp check_verify_module(other, module) do
+      {:error,
+       "Verification function must be on the authorized module #{inspect(module)}, " <>
+         "got #{inspect(other)}"}
     end
 
     defp interpret_verification_result(false), do: {:error, :verification_returned_false}
@@ -671,6 +772,20 @@ defmodule Arbor.Actions.Code do
 
     defp format_error({:compile_error, msg}), do: "Compilation error: #{msg}"
     defp format_error({:parse_error, msg}), do: "Compilation error: #{msg}"
+
+    defp format_error({:module_mismatch, details}) do
+      authorized = Keyword.fetch!(details, :authorized)
+      found = Keyword.get(details, :compiled) || Keyword.get(details, :declared)
+
+      "Hot-load refused (module_mismatch): source must define exactly " <>
+        "#{inspect(authorized)}, but it defines #{inspect(found)}"
+    end
+
+    defp format_error({:code_violations, violations}) do
+      summary = Enum.map_join(violations, "; ", & &1.description)
+      "Hot-load refused (code_violations): #{summary}"
+    end
+
     defp format_error(reason), do: "Hot-load failed: #{inspect(reason)}"
   end
 end

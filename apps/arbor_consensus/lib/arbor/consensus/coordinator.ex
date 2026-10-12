@@ -1251,9 +1251,13 @@ defmodule Arbor.Consensus.Coordinator do
 
   # Public (@doc false) for the M6 regression test, which flips the config
   # and exercises the deny branch without spinning up a prod-mode app.
+  # Security regression (2026-10-11 cross-library review F-016): the default
+  # used to be a RUNTIME `Mix.env() == :prod` call — permissive in the dev
+  # daemon the operator actually runs, and an `UndefinedFunctionError` in a
+  # release. A missing authorizer now fails closed unless config opts out.
   @doc false
   def require_authorizer? do
-    Application.get_env(:arbor_consensus, :require_authorizer, Mix.env() == :prod)
+    Application.get_env(:arbor_consensus, :require_authorizer, true)
   end
 
   defp compute_fingerprint(proposal) do

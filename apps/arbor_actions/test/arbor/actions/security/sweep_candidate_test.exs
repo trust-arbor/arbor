@@ -244,12 +244,27 @@ defmodule Arbor.Actions.Security.SweepCandidateTest do
   end
 
   describe "errors" do
-    test "a candidate with no module_source → {:error, {:sweep_failed, :no_module_source}}" do
+    test "a candidate with no spec → {:error, {:sweep_failed, :invalid_spec}}" do
       %{dir: dir, seed_file: seed_file} = s1_fixture_tree()
       seed = s1_seed(seed_file)
 
-      assert {:error, {:sweep_failed, :no_module_source}} =
+      # The spec is the only thing the sweep compiles from (F-008): without one
+      # there is nothing trustworthy to regenerate, so the sweep fails closed.
+      assert {:error, {:sweep_failed, :invalid_spec}} =
                SweepCandidate.run(%{candidate: %{shape: :s1}, finding: seed, root: dir}, %{})
+    end
+
+    test "a candidate carrying only its spec (no module_source) sweeps from the regenerated source" do
+      %{dir: dir, seed_file: seed_file, sibling_file: sibling_file} = s1_fixture_tree()
+      seed = s1_seed(seed_file)
+      candidate = seed |> s1_candidate() |> Map.delete(:module_source)
+
+      assert {:ok, result} =
+               SweepCandidate.run(%{candidate: candidate, finding: seed, root: dir}, %{})
+
+      assert result.seed_excluded == true
+      assert [sibling] = result.siblings
+      assert sibling.location[:file] == sibling_file
     end
   end
 end

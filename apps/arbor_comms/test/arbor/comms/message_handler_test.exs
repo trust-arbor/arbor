@@ -74,7 +74,10 @@ defmodule Arbor.Comms.MessageHandlerTest do
       Process.sleep(50)
     end
 
-    test "allows all senders when authorized_senders is empty" do
+    test "security regression (F-004): an empty authorized_senders list denies every sender" do
+      # Pre-fix `all_allowed == [] -> :ok` admitted any Signal account into an
+      # unchecked cloud LLM turn on the operator's key. Inbound chat is closed
+      # until the operator names who may talk to the agents.
       Application.put_env(:arbor_comms, :handler,
         enabled: true,
         authorized_senders: [],
@@ -89,8 +92,7 @@ defmodule Arbor.Comms.MessageHandlerTest do
           direction: :inbound
         )
 
-      assert :ok = MessageHandler.process(msg)
-      Process.sleep(50)
+      assert {:error, :no_authorized_senders} = MessageHandler.check_authorized_for_test(msg)
     end
   end
 

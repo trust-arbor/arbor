@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 781,
+  "entry_count": 786,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5475,7 +5475,7 @@
       "anchor": "applied-learning-provider-security-flags-must-be-proven-on-the-exact-transport",
       "source_date": "2026-07-19",
       "source_incident": "found 2026-07-19 during Grok ACP containment work).",
-      "content_sha256": "42610ea00696fdd44e8b2d086abd72b8c8bd92da4023010c66762de709b6cb94",
+      "content_sha256": "3f41767cf611aa14921ad35ac75c13db46e229ab7bf74d895bf2e6a99f90bcce",
       "always_loaded": false
     },
     {
@@ -6354,7 +6354,7 @@
       "anchor": "applied-learning-independently-rerun-delegated-verification-against-the-committed-revision",
       "source_date": "2026-07-25",
       "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
-      "content_sha256": "3c0878a74bd204a4e9a9b2abb79bd59529b285ef7a4900d0595fd8916fc172b9",
+      "content_sha256": "c460b9d119184bb043f7d57592d4df60421fd85b496ce1334ed7212f8f566756",
       "always_loaded": false
     },
     {
@@ -9059,7 +9059,7 @@
       "source_date": "2026-09-09",
       "source_incident": "found 2026-09-09 while tracing AgentSeed DateTime metadata rejection through the strict memory Index input contract",
       "always_loaded": false,
-      "content_sha256": "564c933f40501a84fc03062e6b5bebedb3563e1247c33ff8df512f1b3284e409"
+      "content_sha256": "d97453c81c3f8ddbec8170fdc65d584f1f3ca0a25fa72d510cc43d255198fe19"
     },
     {
       "source_ordinal": 735,
@@ -9072,7 +9072,7 @@
       "source_date": "2026-09-09",
       "source_incident": "found 2026-09-09 during private-turn memory containment source and test review",
       "always_loaded": false,
-      "content_sha256": "6b148f77b7394036db812d2479ddb40d17bb76ee553fe33ed9be48a1a991cc65"
+      "content_sha256": "33ace56a211ed3c07019d67c78ea7fa747c9a93a80bf1dce0389181329ff5590"
     },
     {
       "source_ordinal": 739,
@@ -9697,8 +9697,73 @@
       "source_incident": "found 2026-10-09 merging the conversation entrypoint journey",
       "always_loaded": false,
       "content_sha256": "d9a01bb51266e2683204e849738e06a28bd0a599834a66d71e33971a5190f0c2"
+    },
+    {
+      "source_ordinal": 787,
+      "source_kind": "post-migration",
+      "slug": "verify-effective-file-selectors-before-accepting-scoped-lint-evidence",
+      "title": "Verify effective file selectors before accepting scoped lint evidence.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-verify-effective-file-selectors-before-accepting-scoped-lint-evidence",
+      "source_date": "2026-09-09",
+      "source_incident": "found 2026-09-09 when pinned Credo replaced --files-included with empty positional arguments and scanned 3696 files",
+      "always_loaded": false,
+      "content_sha256": "eabeecf21dd73adb71aef3a93cbe060c158dd672cf77f14d11a1e372a775525b"
+    },
+    {
+      "source_ordinal": 788,
+      "source_kind": "post-migration",
+      "slug": "pin-the-absolute-namespace-of-nested-policy-test-modules",
+      "title": "Pin the absolute namespace of nested policy test modules.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-pin-the-absolute-namespace-of-nested-policy-test-modules",
+      "source_date": "2026-09-09",
+      "source_incident": "found 2026-09-09 during private-turn memory containment source and test review",
+      "always_loaded": false,
+      "content_sha256": "62f4c4f5cbc1dcba9ad3a66c0cfd1f9a1de356060d73dbd52a332fb217a701ed"
+    },
+    {
+      "source_ordinal": 789,
+      "source_kind": "post-migration",
+      "slug": "avoid-compiler-reserved-attributes-for-test-matrix-values",
+      "title": "Avoid compiler-reserved attributes for test matrix values.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-avoid-compiler-reserved-attributes-for-test-matrix-values",
+      "source_date": "2026-09-09",
+      "source_incident": "found 2026-09-09 during isolated memory-policy transport compilation",
+      "always_loaded": false,
+      "content_sha256": "a393acb19e032767fad7ca7f9be07d2b60b2bfe6a6780fa1651fad0083c97f51"
+    },
+    {
+      "source_ordinal": 790,
+      "source_kind": "post-migration",
+      "slug": "separate-end-state-architecture-from-current-delivery-constraints",
+      "title": "Separate end-state architecture from current delivery constraints.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-separate-end-state-architecture-from-current-delivery-constraints",
+      "source_date": "2026-09-20",
+      "source_incident": "clarified 2026-09-20 after interface/OS brainstorming was answered as a constrained migration plan",
+      "always_loaded": false,
+      "content_sha256": "bcf927f48d2416c242ff2a473bd303a3c05080c7540e2afb28d773519bc9c4b2"
+    },
+    {
+      "source_ordinal": 791,
+      "source_kind": "post-migration",
+      "slug": "compare-native-and-package-manager-git-before-diagnosing-a-lan-outage",
+      "title": "Compare native and package-manager Git before diagnosing a LAN outage.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-compare-native-and-package-manager-git-before-diagnosing-a-lan-outage",
+      "source_date": "2026-09-22",
+      "source_incident": "found 2026-09-22 when Homebrew Git could not reach homelab origin but system curl and Apple Git could",
+      "always_loaded": false,
+      "content_sha256": "b561722dabbd4de2ae02bf111a35afa8b08d7cb08892a76a3c2260ee4b97e13a"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 320
+  "post_migration_entry_count": 325
 }

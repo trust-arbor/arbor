@@ -19,6 +19,38 @@ defmodule Arbor.Actions.SessionMemory do
 
   require Logger
 
+  @doc false
+  # Security regression (2026-10-11 cross-library review F-009): these
+  # pipeline-internal actions took the target agent from params, so an
+  # agent-authored graph (`pipeline.run` with inline DOT) could write another
+  # agent's memory notes / working memory. When the facade has bound a
+  # principal (`context[:agent_id]`, always true on the authorize_and_execute
+  # path), the target MUST be that principal; a differing params id is refused.
+  # Direct in-VM calls with no bound principal keep the params fallback
+  # (Attacker B, accepted by the architecture).
+  def bind_agent_id!(params, context) when is_map(params) and is_map(context) do
+    from_params = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+
+    case Map.get(context, :agent_id) do
+      principal when is_binary(principal) and principal != "" ->
+        cond do
+          from_params in [nil, ""] ->
+            principal
+
+          from_params == principal ->
+            principal
+
+          true ->
+            raise ArgumentError,
+                  "session_memory target #{inspect(from_params)} does not match the " <>
+                    "authorized principal #{inspect(principal)} (principal_mismatch)"
+        end
+
+      _ ->
+        from_params
+    end
+  end
+
   # Shared runtime bridge — same pattern as Session.Adapters
   @doc false
   def bridge(module, function, args, default) do
@@ -88,8 +120,8 @@ defmodule Arbor.Actions.SessionMemory do
       {:ok, %{recalled_memories: memories}}
     end
 
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -205,13 +237,13 @@ defmodule Arbor.Actions.SessionMemory do
           # bridge for compatibility calls carrying no writable notes.
           {:ok, %{memory_updated: false}}
         else
-          index_notes(params)
+          index_notes(params, context)
         end
       end
     end
 
-    defp index_notes(params) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    defp index_notes(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -295,8 +327,8 @@ defmodule Arbor.Actions.SessionMemory do
       ]
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -384,8 +416,8 @@ defmodule Arbor.Actions.SessionMemory do
     alias Arbor.Actions.SessionMemory
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -464,8 +496,8 @@ defmodule Arbor.Actions.SessionMemory do
     @default_history_limit 200
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       if is_nil(agent_id) or agent_id == "" do
         {:error, :missing_agent_id}
