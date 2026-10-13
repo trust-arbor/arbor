@@ -426,100 +426,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end
 
-    # arbor_agent does not depend on arbor_orchestrator (both L7), so in the
-    # per-app test BEAM BranchSupervisor skips the Session child by design and
-    # this assertion has nothing to inspect. It runs from the umbrella root,
-    # where every app loads. Skip with the reason rather than fail red.
-    @tag skip:
-           if(Code.ensure_loaded?(Arbor.Orchestrator.Session),
-             do: false,
-             else: "needs arbor_orchestrator loaded — run from the umbrella root"
-           )
-    test "pipeline architect runtime restrictions are load-bearing through Session config", %{
-      lifecycle_actor: actor
-    } do
-      # Starts a Session, whose signing-authority bootstrap is issued only to a
-      # runtime-admission worker bound in the production-named TaskStore
-      # (ProfileAuthorityOwner), so this start cannot use the owned test store.
-      %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
-
-      assert {:ok, profile} =
-               create_agent(actor, "Pipeline Architect Runtime Probe",
-                 template: "pipeline_architect",
-                 sandbox_level: :none
-               )
-
-      agent_id = profile.agent_id
-      cleanup(agent_id, actor)
-
-      assert profile.sandbox_level == :strict
-
-      assert profile.initial_capabilities
-             |> Enum.map(&(&1[:resource] || &1["resource"]))
-             |> Enum.sort() ==
-               Enum.sort([
-                 "arbor://orchestrator/execute",
-                 "arbor://fs/read/repo",
-                 "arbor://fs/list/repo"
-               ])
-
-      original_cwd = File.cwd!()
-      umbrella_root = umbrella_root_from(__DIR__)
-      on_exit(fn -> File.cd!(original_cwd) end)
-      File.cd!(Path.join(umbrella_root, "apps"))
-
-      assert {:ok, ^agent_id} =
-               Lifecycle.ensure_identity(agent_id, actor_authority: actor.authority)
-
-      File.cd!(original_cwd)
-
-      assert {:ok, _supervisor} =
-               Lifecycle.start(agent_id,
-                 actor_authority: actor.authority,
-                 runtime: :acp,
-                 provider: :ollama,
-                 model: "caller-override-must-not-stick",
-                 context_management: :none,
-                 tools: ["file_write", "shell_execute", "pipeline_run"],
-                 sandbox_level: :none,
-                 start_heartbeat: false,
-                 recover_session: false,
-                 task_store: store
-               )
-
-      %{executor: executor, session: session} = BranchSupervisor.child_pids(agent_id)
-      assert is_pid(executor)
-      assert is_pid(session)
-
-      session_state = Arbor.Orchestrator.Session.get_state(session)
-      assert session_state.config["llm_runtime"] == :arbor
-      assert session_state.config["llm_provider"] == "openai_oauth"
-      assert session_state.config["llm_model"] == "gpt-5.5"
-
-      assert session_state.config["tools"] ==
-               ~w(file_read file_list file_search file_exists)
-
-      refute Enum.any?(session_state.config["tools"], fn tool ->
-               tool in ~w(file_write file_edit shell_execute agent_spawn_worker pipeline_run)
-             end)
-
-      assert :sys.get_state(executor).sandbox_level == :strict
-
-      assert :ok = Lifecycle.stop(agent_id)
-
-      assert {:ok, _supervisor} =
-               Lifecycle.start(agent_id,
-                 actor_authority: actor.authority,
-                 start_heartbeat: false,
-                 recover_session: false,
-                 task_store: store
-               )
-
-      %{session: restored_session} = BranchSupervisor.child_pids(agent_id)
-      restored_state = Arbor.Orchestrator.Session.get_state(restored_session)
-      assert restored_state.config["llm_provider"] == "openai_oauth"
-      assert restored_state.config["llm_model"] == "gpt-5.5"
-    end
+    # Session-starting assertion lives in arbor_commands
+    # (`pipeline_architect_session_restrictions_test.exs`). arbor_agent cannot
+    # depend on arbor_orchestrator (both L7), so BranchSupervisor skips the
+    # Session child in this app's per-app test BEAM.
 
     test "pipeline architect capabilities and trust rules deny execution authority", %{
       lifecycle_actor: actor
@@ -1015,21 +925,6 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     (root || cwd)
     |> String.trim_trailing("/")
-  end
-
-  defp umbrella_root_from(path) do
-    expanded = Path.expand(path)
-
-    cond do
-      File.exists?(Path.join(expanded, "mix.exs")) and File.dir?(Path.join(expanded, "apps")) ->
-        expanded
-
-      Path.dirname(expanded) == expanded ->
-        raise "could not locate umbrella root from #{path}"
-
-      true ->
-        umbrella_root_from(Path.dirname(expanded))
-    end
   end
 
   defp tmp_workspace(template) do

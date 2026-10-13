@@ -266,50 +266,10 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
              )
   end
 
-  # arbor_agent does not depend on arbor_orchestrator (both L7); per-app,
-  # BranchSupervisor skips the Session child by design. Runs from the root.
-  @tag skip:
-         if(Code.ensure_loaded?(Arbor.Orchestrator.Session),
-           do: false,
-           else: "needs arbor_orchestrator loaded — run from the umbrella root"
-         )
-  test "start_session: true with start_heartbeat: false still starts Session only", %{
-    lifecycle_actor: actor
-  } do
-    # Starts a Session, whose signing-authority bootstrap is issued only to a
-    # runtime-admission worker bound in the production-named TaskStore
-    # (ProfileAuthorityOwner), so this start cannot use the owned test store.
-    %{store: store} = RuntimeAdmissionTopology.start_fixed_production!()
-
-    assert {:ok, profile} =
-             Lifecycle.create("Start Heartbeat False Probe",
-               template: "test_agent",
-               actor_authority: actor.authority
-             )
-
-    agent_id = profile.agent_id
-    cleanup(agent_id, actor)
-
-    assert {:ok, sup_pid} =
-             Lifecycle.start(agent_id,
-               actor_authority: actor.authority,
-               start_heartbeat: false,
-               recover_session: false,
-               task_store: store
-             )
-
-    children = Supervisor.which_children(sup_pid)
-    child_ids = Enum.map(children, fn {id, _pid, _type, _mods} -> id end)
-
-    pids = BranchSupervisor.child_pids(agent_id)
-    assert is_pid(pids.host)
-    assert is_pid(pids.executor)
-    assert is_pid(pids.session)
-    assert :session in child_ids
-    refute :heartbeat_service in child_ids
-
-    assert :ok = Lifecycle.stop(agent_id)
-  end
+  # Session-starting assertion lives in arbor_commands
+  # (`lifecycle_start_session_only_test.exs`). arbor_agent cannot depend on
+  # arbor_orchestrator (both L7), so BranchSupervisor skips the Session child
+  # in this app's per-app test BEAM.
 
   defp principal_bootstraps(agent_id) do
     case Process.whereis(SigningAuthorityBroker) do
