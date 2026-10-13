@@ -8,10 +8,10 @@ defmodule Arbor.Security.LoopbackHTTPServer do
   #
   # No DNS, no egress: every byte stays on the loopback interface.
 
-  # `accept/2` is also the server's mailbox polling boundary. An idle poll is
-  # not an end-of-service condition: under a loaded suite the caller can be
-  # descheduled for longer than an arbitrary socket timeout after `start/2`
-  # returns. `await/2` explicitly asks an idle server to finish instead.
+  # `start/2` does not return until the accept loop is running. `accept/2` is
+  # also the server's mailbox polling boundary: an idle poll is not an
+  # end-of-service condition, because under a loaded suite the caller can be
+  # descheduled after bind. `await/2` explicitly asks an idle server to finish.
   @accept_poll_timeout 50
   @read_timeout 5_000
 
@@ -71,6 +71,8 @@ defmodule Arbor.Security.LoopbackHTTPServer do
 
         receive do
           {:serve, ^listen} ->
+            send(owner, {:accepting, ref})
+
             case serve(listen, resolved, connections, %Report{}, ref, owner_monitor) do
               {:ok, report} ->
                 :gen_tcp.close(listen)
@@ -88,6 +90,7 @@ defmodule Arbor.Security.LoopbackHTTPServer do
 
     :ok = :gen_tcp.controlling_process(listen, pid)
     send(pid, {:serve, listen})
+    await_accepting(ref)
 
     {base_url, %Handle{pid: pid, ref: ref, owner: owner}}
   end
@@ -123,6 +126,20 @@ defmodule Arbor.Security.LoopbackHTTPServer do
   def stop(%Handle{pid: pid}) do
     Process.exit(pid, :kill)
     :ok
+  end
+
+  # `start/2` used to return after `send({:serve, listen})` and before the
+  # spawned owner entered `accept/2`. A client that connected in that window
+  # could sit in the listen backlog (or, on some hosts, see ECONNREFUSED)
+  # until the 1s discovery timeout fired. Wait until the accept loop is
+  # entered so the returned URL is actually serviced.
+  defp await_accepting(ref) do
+    receive do
+      {:accepting, ^ref} -> :ok
+    after
+      5_000 ->
+        raise "LoopbackHTTPServer.start/2 timed out waiting for the accept loop"
+    end
   end
 
   defp flunk_timeout do
