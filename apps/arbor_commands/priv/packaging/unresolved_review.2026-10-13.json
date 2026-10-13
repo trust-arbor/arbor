@@ -1,0 +1,14 @@
+{
+  "apps/arbor_actions/lib/arbor/actions/code.ex|Arbor.Actions.Code.HotLoad|dynamic_module_concat|module_concat|f8291557ecb00130d6f60a891097898b9a11fc64c0df692c685e018e952ec117": {
+    "disposition": "false_positive",
+    "rationale": "parts is reconstructed from the AST of source submitted to HotLoad (resolve_declared_name/1) so the declared module name can be compared to the compiled module; it names a module in caller-supplied source, not a static Arbor repository coupling edge."
+  },
+  "apps/arbor_sandbox/lib/arbor/sandbox/code.ex|Arbor.Sandbox.Code|dynamic_module_concat|module_concat|f8291557ecb00130d6f60a891097898b9a11fc64c0df692c685e018e952ec117": {
+    "disposition": "false_positive",
+    "rationale": "parts is reconstructed from the AST of code submitted into the sandbox (resolve_module/1) so a literal alias can be checked against the allowlist; it names a module in externally-submitted sandboxed code, not in Arbor repository source."
+  },
+  "apps/arbor_sandbox/lib/arbor/sandbox/code.ex|Arbor.Sandbox.Code|dynamic_module_concat|module_concat|3897efd3225bba46580428374b739ba8a12ebb340bf35eea8f26fbca85dbfbee": {
+    "disposition": "false_positive",
+    "rationale": "Module.concat([base_module, sub_module]) expands alias Foo.{Bar, Baz} targets while walking submitted sandbox AST (directive_targets/1); both pieces come from the scanned snippet, not from Arbor repository source, so this is not a repository coupling edge."
+  }
+}
