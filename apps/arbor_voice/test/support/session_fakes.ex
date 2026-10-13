@@ -497,7 +497,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
             accepted_failures: 0,
             cleanup_runs: 0,
             handoff_cleanup_keys: [],
-            last_owner: nil
+            last_owner: nil,
+            close_subscribers: []
           }
         end)
 
@@ -540,6 +541,21 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def set_meta_mode(agent, mode), do: Agent.update(agent, &%{&1 | meta_mode: mode})
     def set_close_mode(agent, mode), do: Agent.update(agent, &%{&1 | close_mode: mode})
     def owner(agent), do: Agent.get(agent, & &1.last_owner)
+
+    @doc """
+    Subscribe the caller to the next `close/1` on this tracker. Returns a
+    unique ref; `close/1` sends `{:resource_owner_closed, ref, agent, owner}`.
+    """
+    def subscribe_close(agent) when is_pid(agent) do
+      ref = make_ref()
+      observer = self()
+
+      Agent.update(agent, fn state ->
+        %{state | close_subscribers: [{observer, ref} | state.close_subscribers]}
+      end)
+
+      ref
+    end
 
     # Tracker state is read/updated via Agent, but every real ResourceOwner
     # call MUST run in the original Session caller process — ResourceOwner's
@@ -694,8 +710,18 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def close(owner) do
       agent = lookup_owner_agent!(owner)
-      mode = Agent.get(agent, fn s -> s.close_mode end)
-      _ = Agent.update(agent, fn s -> %{s | closes: s.closes + 1} end)
+
+      {mode, subscribers} =
+        Agent.get_and_update(agent, fn state ->
+          subscribers = Map.get(state, :close_subscribers, [])
+
+          {{state.close_mode, subscribers},
+           %{state | closes: state.closes + 1, close_subscribers: []}}
+        end)
+
+      Enum.each(subscribers, fn {pid, ref} ->
+        send(pid, {:resource_owner_closed, ref, agent, owner})
+      end)
 
       case mode do
         :ok ->

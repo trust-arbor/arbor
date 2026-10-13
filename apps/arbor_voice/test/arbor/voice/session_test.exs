@@ -190,11 +190,12 @@ defmodule Arbor.Voice.SessionTest do
 
     assert {:ok, _} = start_owned_desk_compat(user, agent, ctx.opts, custody)
     on_exit(fn -> Voice.stop_session({user, agent}) end)
+    owner_ref = Process.monitor(owner)
+    close_ref = TrackingResourceOwner.subscribe_close(ctx.owner_tracker)
     send(owner, :stop)
-    # Same 2s bound as the other close/registry waits in this file. The 500ms
-    # wait was shorter than lifecycle_opts/1's cleanup budget (2 × 200ms) plus
-    # the 100ms desk-lease backup, so closes == 1 raced the owner close path.
-    wait_until(fn -> TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1 end, 2_000)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, _}, 5_000
+    assert_receive {:resource_owner_closed, ^close_ref, tracker, _owner_pid}, 5_000
+    assert tracker == ctx.owner_tracker
     assert TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1
   end
 
@@ -1024,36 +1025,29 @@ defmodule Arbor.Voice.SessionTest do
     end
   end
 
-  defp await_voice_runtime_idle!(timeout_ms \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_voice_runtime_idle_until(deadline, _terminated? = false)
-  end
-
-  defp await_voice_runtime_idle_until(deadline, terminated?) do
+  defp await_voice_runtime_idle! do
+    # Leftovers from a prior test (especially :cleanup_pending Sessions) do
+    # not always exit on their own. Monitor, ask them to exit, then wait for
+    # the :DOWN — no sleep/poll. 5s is only the hang guard.
     leftover = voice_runtime_children()
 
-    cond do
-      leftover == [] ->
-        :ok
+    monitors =
+      Enum.map(leftover, fn
+        {:task, pid} -> {pid, Process.monitor(pid)}
+        {_supervisor, pid} -> {pid, Process.monitor(pid)}
+      end)
 
-      System.monotonic_time(:millisecond) >= deadline and not terminated? ->
-        Enum.each(leftover, fn
-          {:task, pid} ->
-            Process.exit(pid, :kill)
+    Enum.each(leftover, fn
+      {:task, pid} ->
+        Process.exit(pid, :kill)
 
-          {supervisor, pid} ->
-            _ = DynamicSupervisor.terminate_child(supervisor, pid)
-        end)
+      {supervisor, pid} ->
+        _ = DynamicSupervisor.terminate_child(supervisor, pid)
+    end)
 
-        await_voice_runtime_idle_until(System.monotonic_time(:millisecond) + 1_000, true)
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("voice runtime children still running: #{inspect(leftover)}")
-
-      true ->
-        Process.sleep(10)
-        await_voice_runtime_idle_until(deadline, terminated?)
-    end
+    Enum.each(monitors, fn {pid, ref} ->
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+    end)
   end
 
   defp voice_runtime_children do
