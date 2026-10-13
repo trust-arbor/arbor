@@ -25,7 +25,19 @@ defmodule Arbor.Voice.SessionTest do
     {"user_#{n}", "agent_#{n}"}
   end
 
+  @runtime_supervisors [
+    Arbor.Voice.SessionSupervisor,
+    Arbor.Voice.ResourceSupervisor,
+    Arbor.Voice.CleanupLeaseSupervisor,
+    Arbor.Voice.BackendWorkerSupervisor
+  ]
+
   defp lifecycle_opts(extra \\ []) do
+    # Named ETS fakes are process-independent so Session/owner callbacks can
+    # reach them. Replacing the :agent row before a previous cleanup task
+    # finishes lets that callback write into the next test's ledger/tracker.
+    await_voice_runtime_idle!()
+
     {:ok, eng} = FakeEngagementStore.start()
     {:ok, ledger} = FakeLedger.start()
     {:ok, signals} = FakeSignals.start()
@@ -33,6 +45,7 @@ defmodule Arbor.Voice.SessionTest do
 
     ControllableBackend.ensure_table!()
     ControllableBackend.set_mode(:ok)
+    ControllableBackend.reset_close_count()
 
     opts =
       [
@@ -65,6 +78,7 @@ defmodule Arbor.Voice.SessionTest do
     Arbor.Voice.Test.ConversationSecurityFixture.install()
     assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
     assert is_pid(Process.whereis(Arbor.Voice.ResourceSupervisor))
+    await_voice_runtime_idle!()
     :ok
   end
 
@@ -136,6 +150,12 @@ defmodule Arbor.Voice.SessionTest do
     ref = Process.monitor(owner)
     assert_receive {:DOWN, ^ref, :process, ^owner, _}
     revoked = :atomics.new(1, [])
+    # Desk.live?/1 is Process.alive?(pid) and revoked == 0. A short-lived
+    # spawn's pid can be recycled under this file's process churn, so the
+    # pid check alone is not a durable "dead" witness. Real desk death
+    # writes the revoked cell; do the same after DOWN so reuse cannot
+    # admit a backend.
+    :atomics.put(revoked, 1, 1)
 
     custody = %{
       pid: owner,
@@ -171,16 +191,20 @@ defmodule Arbor.Voice.SessionTest do
     assert {:ok, _} = start_owned_desk_compat(user, agent, ctx.opts, custody)
     on_exit(fn -> Voice.stop_session({user, agent}) end)
     send(owner, :stop)
-    wait_until(fn -> TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1 end, 500)
+    # Same 2s bound as the other close/registry waits in this file. The 500ms
+    # wait was shorter than lifecycle_opts/1's cleanup budget (2 × 200ms) plus
+    # the 100ms desk-lease backup, so closes == 1 raced the owner close path.
+    wait_until(fn -> TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1 end, 2_000)
     assert TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1
   end
 
-  # The predecessor has ordinary startup only. Exercise that real behavior so
-  # these witnesses fail on unwanted backend entry/retention, not missing APIs.
+  # function_exported?/3 is false until Arbor.Voice is loaded, so a seed that
+  # runs these witnesses first used to fall through to start_session/3 and
+  # ignore custody — dead-pid proofs then started a backend, and desk-death
+  # proofs never saw a close. Load the facade, then call the custody API.
   defp start_owned_desk_compat(user, agent, opts, custody) do
-    if function_exported?(Voice, :start_owned_desk_session, 4),
-      do: apply(Voice, :start_owned_desk_session, [user, agent, opts, custody]),
-      else: Voice.start_session(user, agent, opts)
+    {:module, _} = Code.ensure_loaded(Voice)
+    Voice.start_owned_desk_session(user, agent, opts, custody)
   end
 
   test "public stop timeout covers owner close, death confirmation, and scheduling margin" do
@@ -998,6 +1022,70 @@ defmodule Arbor.Voice.SessionTest do
         do_wait_until(fun, deadline)
       end
     end
+  end
+
+  defp await_voice_runtime_idle!(timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    await_voice_runtime_idle_until(deadline, _terminated? = false)
+  end
+
+  defp await_voice_runtime_idle_until(deadline, terminated?) do
+    leftover = voice_runtime_children()
+
+    cond do
+      leftover == [] ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline and not terminated? ->
+        Enum.each(leftover, fn
+          {:task, pid} ->
+            Process.exit(pid, :kill)
+
+          {supervisor, pid} ->
+            _ = DynamicSupervisor.terminate_child(supervisor, pid)
+        end)
+
+        await_voice_runtime_idle_until(System.monotonic_time(:millisecond) + 1_000, true)
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("voice runtime children still running: #{inspect(leftover)}")
+
+      true ->
+        Process.sleep(10)
+        await_voice_runtime_idle_until(deadline, terminated?)
+    end
+  end
+
+  defp voice_runtime_children do
+    supervisor_children =
+      Enum.flat_map(@runtime_supervisors, fn supervisor ->
+        case Process.whereis(supervisor) do
+          nil ->
+            []
+
+          _pid ->
+            supervisor
+            |> DynamicSupervisor.which_children()
+            |> Enum.flat_map(fn
+              {_, pid, _, _} when is_pid(pid) -> [{supervisor, pid}]
+              _other -> []
+            end)
+        end
+      end)
+
+    cleanup_tasks =
+      case Process.whereis(Arbor.Voice.ResourceCleanupTaskSupervisor) do
+        nil ->
+          []
+
+        _pid ->
+          Enum.map(
+            Task.Supervisor.children(Arbor.Voice.ResourceCleanupTaskSupervisor),
+            &{:task, &1}
+          )
+      end
+
+    supervisor_children ++ cleanup_tasks
   end
 
   test "PCM speech word limits fail closed before startup and do not affect text-mode configuration" do
