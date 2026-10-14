@@ -342,6 +342,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
                 expires_at_ms: 1_000 + requested_ms + 60_000
               }
 
+              bind_reservation!(reservation.id, agent)
+
               {{:return, {:ok, reservation}},
                %{
                  state
@@ -364,7 +366,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def consume(reservation, elapsed_ms, opts) do
-      agent = lookup_agent!()
+      agent = lookup_reservation_agent!(reservation)
 
       outcome =
         Agent.get_and_update(agent, fn state ->
@@ -394,7 +396,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def release(reservation, opts) do
-      agent = lookup_agent!()
+      agent = lookup_reservation_agent!(reservation)
 
       outcome =
         Agent.get_and_update(agent, fn state ->
@@ -432,6 +434,23 @@ defmodule Arbor.Voice.Test.SessionFakes do
       case :ets.lookup(@table, :agent) do
         [{:agent, agent}] -> agent
         [] -> raise "FakeLedger not started"
+      end
+    end
+
+    # Cleanup tasks can outlive the test that reserved. Bind consume/release to
+    # that reservation's agent so a later start/1 cannot steal the call.
+    defp bind_reservation!(id, agent) when is_binary(id) and is_pid(agent) do
+      ensure_table!()
+      :ets.insert(@table, {{:reservation, id}, agent})
+      :ok
+    end
+
+    defp lookup_reservation_agent!(%Reservation{id: id}) do
+      ensure_table!()
+
+      case :ets.lookup(@table, {:reservation, id}) do
+        [{{:reservation, ^id}, agent}] -> agent
+        [] -> lookup_agent!()
       end
     end
   end
@@ -478,7 +497,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
             accepted_failures: 0,
             cleanup_runs: 0,
             handoff_cleanup_keys: [],
-            last_owner: nil
+            last_owner: nil,
+            close_subscribers: []
           }
         end)
 
@@ -522,6 +542,21 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def set_close_mode(agent, mode), do: Agent.update(agent, &%{&1 | close_mode: mode})
     def owner(agent), do: Agent.get(agent, & &1.last_owner)
 
+    @doc """
+    Subscribe the caller to the next `close/1` on this tracker. Returns a
+    unique ref; `close/1` sends `{:resource_owner_closed, ref, agent, owner}`.
+    """
+    def subscribe_close(agent) when is_pid(agent) do
+      ref = make_ref()
+      observer = self()
+
+      Agent.update(agent, fn state ->
+        %{state | close_subscribers: [{observer, ref} | state.close_subscribers]}
+      end)
+
+      ref
+    end
+
     # Tracker state is read/updated via Agent, but every real ResourceOwner
     # call MUST run in the original Session caller process — ResourceOwner's
     # owner-bound check rejects foreign callers (Agent pid ≠ Session pid).
@@ -550,6 +585,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
                  opts
                ) do
             {:ok, owner} = result ->
+              bind_owner!(owner, agent)
               _ = Agent.update(agent, &%{&1 | last_owner: owner})
               result
 
@@ -568,7 +604,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def configure(owner, config) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
       mode = Agent.get(agent, fn s -> s.configure_mode end)
       _ = Agent.update(agent, fn s -> %{s | configures: s.configures + 1} end)
 
@@ -579,7 +615,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def meta(owner) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
       mode = Agent.get(agent, fn s -> s.meta_mode end)
       _ = Agent.update(agent, fn s -> %{s | metas: s.metas + 1} end)
 
@@ -599,7 +635,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def recv(owner, timeout), do: Arbor.Voice.ResourceOwner.recv(owner, timeout)
 
     def register_cleanup(owner, key, fun) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
 
       mode =
         Agent.get_and_update(agent, fn state ->
@@ -617,7 +653,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def adopt_provisional_cleanup(owner, key, fun) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
 
       mode =
         Agent.get_and_update(agent, fn state ->
@@ -646,14 +682,14 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def remove_cleanup(owner, key) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
       _ = Agent.update(agent, &%{&1 | removes: &1.removes + 1})
 
       Arbor.Voice.ResourceOwner.remove_cleanup(owner, key)
     end
 
     def activate_turn(owner, lease) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
 
       mode =
         Agent.get_and_update(agent, fn state ->
@@ -667,15 +703,25 @@ defmodule Arbor.Voice.Test.SessionFakes do
     end
 
     def fence_and_drain(owner, scope) do
-      agent = lookup_agent!()
+      agent = lookup_owner_agent!(owner)
       _ = Agent.update(agent, fn s -> %{s | fences: s.fences + 1} end)
       Arbor.Voice.ResourceOwner.fence_and_drain(owner, scope)
     end
 
     def close(owner) do
-      agent = lookup_agent!()
-      mode = Agent.get(agent, fn s -> s.close_mode end)
-      _ = Agent.update(agent, fn s -> %{s | closes: s.closes + 1} end)
+      agent = lookup_owner_agent!(owner)
+
+      {mode, subscribers} =
+        Agent.get_and_update(agent, fn state ->
+          subscribers = Map.get(state, :close_subscribers, [])
+
+          {{state.close_mode, subscribers},
+           %{state | closes: state.closes + 1, close_subscribers: []}}
+        end)
+
+      Enum.each(subscribers, fn {pid, ref} ->
+        send(pid, {:resource_owner_closed, ref, agent, owner})
+      end)
 
       case mode do
         :ok ->
@@ -701,6 +747,24 @@ defmodule Arbor.Voice.Test.SessionFakes do
       case :ets.lookup(@table, :agent) do
         [{:agent, agent}] -> agent
         [] -> raise "TrackingResourceOwner not started"
+      end
+    end
+
+    # Session/owner callbacks can outlive the test that started them. Bind each
+    # ResourceOwner pid to the tracker that created it so a later start_tracker/1
+    # cannot steal close/cleanup counts.
+    defp bind_owner!(owner, agent) when is_pid(owner) and is_pid(agent) do
+      ensure_table!()
+      :ets.insert(@table, {{:owner, owner}, agent})
+      :ok
+    end
+
+    defp lookup_owner_agent!(owner) when is_pid(owner) do
+      ensure_table!()
+
+      case :ets.lookup(@table, {:owner, owner}) do
+        [{{:owner, ^owner}, agent}] -> agent
+        [] -> lookup_agent!()
       end
     end
 
@@ -768,8 +832,10 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def reset_close_count do
       ensure_table!()
+      generation = make_ref()
+      :ets.insert(@table, {:generation, generation})
       :ets.insert(@table, {:close_count, 0})
-      :ok
+      generation
     end
 
     defp mode do
@@ -784,8 +850,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
     @impl true
     def open(_opts) do
       ensure_table!()
-      reset_close_count()
-      {:ok, %{id: make_ref(), closed: false}}
+      generation = current_generation()
+      {:ok, %{id: make_ref(), closed: false, generation: generation}}
     end
 
     @impl true
@@ -806,17 +872,29 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def recv(session, _timeout), do: {:ok, session, {:turn_done, %{text: ""}}}
 
     @impl true
-    def close(_session) do
+    def close(session) do
       ensure_table!()
 
-      count =
-        case :ets.lookup(@table, :close_count) do
-          [{:close_count, n}] -> n + 1
-          [] -> 1
-        end
+      if Map.get(session, :generation) == current_generation() do
+        count =
+          case :ets.lookup(@table, :close_count) do
+            [{:close_count, n}] -> n + 1
+            [] -> 1
+          end
 
-      :ets.insert(@table, {:close_count, count})
+        :ets.insert(@table, {:close_count, count})
+      end
+
       :ok
+    end
+
+    defp current_generation do
+      ensure_table!()
+
+      case :ets.lookup(@table, :generation) do
+        [{:generation, generation}] -> generation
+        [] -> reset_close_count()
+      end
     end
 
     @impl true
