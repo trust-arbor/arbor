@@ -118,10 +118,10 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
   @tag :security_regression
   test "security regression: full persistent peer returns ready and preserves authority across restart" do
     control = ApplicationSpecPeer.start!()
-    authority_root = private_authority_root!()
+    {base_dir, authority_root, ledger_path} = private_authority_fixture!()
 
     try do
-      prepare_full_peer!(control, authority_root)
+      prepare_full_peer!(control, authority_root, ledger_path)
 
       assert {:ok, _started} =
                peer_call(control, Application, :ensure_all_started, [:arbor_security])
@@ -143,12 +143,11 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
       assert second.terminal_login != first.terminal_login
     after
       ApplicationSpecPeer.stop(control)
-      File.rm_rf!(authority_root)
-      File.rm(authority_root <> ".revocation-ledger.json")
+      File.rm_rf!(base_dir)
     end
   end
 
-  defp prepare_full_peer!(control, authority_root) do
+  defp prepare_full_peer!(control, authority_root, ledger_path) do
     :ok =
       ApplicationSpecPeer.prepare_restricted!(
         control,
@@ -181,7 +180,7 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
         start_children: true,
         storage_backend: Arbor.Security.Store.JSONFile,
         authority_state_root: authority_root,
-        revocation_ledger_path: authority_root <> ".revocation-ledger.json",
+        revocation_ledger_path: ledger_path,
         audit_journal_mode: :durable,
         system_authority_mode: :persistent,
         master_key_path: Path.join(authority_root, "master.key"),
@@ -246,14 +245,20 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
     pid
   end
 
-  defp private_authority_root! do
+  defp private_authority_fixture! do
     {:ok, canonical_tmp} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-    authority_root = Path.join(canonical_tmp, "arbor-security-peer-startup-#{token}")
+    base_dir = Path.join(canonical_tmp, "arbor-security-peer-startup-#{token}")
+    authority_root = Path.join(base_dir, "authority")
+    ledger_path = Path.join(base_dir, "capability-revocations.json")
+
+    File.mkdir!(base_dir)
+    File.chmod!(base_dir, 0o700)
     File.mkdir!(authority_root)
     File.chmod!(authority_root, 0o700)
-    on_exit(fn -> File.rm_rf!(authority_root) end)
-    authority_root
+    on_exit(fn -> File.rm_rf!(base_dir) end)
+
+    {base_dir, authority_root, ledger_path}
   end
 
   defp peer_call(control, module, function, args) do
