@@ -2045,7 +2045,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     Application.put_env(:arbor_security, :max_capabilities_per_agent, 2)
 
     on_exit(fn ->
-      Application.put_env(:arbor_security, :max_capabilities_per_agent, prev_per)
+      restore_application_env(:max_capabilities_per_agent, prev_per)
     end)
 
     principal = "agent_ack_c4"
