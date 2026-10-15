@@ -188,7 +188,6 @@ defmodule Arbor.Agent.Manager do
       model_config =
         Keyword.get(opts, :model_config) ||
           get_in(profile.metadata, [:last_model_config]) ||
-          get_in(profile.metadata, ["last_model_config"]) ||
           default_model_config()
 
       # Persisted configs have string keys — atomize
@@ -1096,9 +1095,7 @@ defmodule Arbor.Agent.Manager do
   defp atomize_value(_key, value), do: value
 
   defp sync_model_config(agent_id, profile, model_config) do
-    persisted_config =
-      get_in(profile.metadata, [:last_model_config]) ||
-        get_in(profile.metadata, ["last_model_config"])
+    persisted_config = get_in(profile.metadata, [:last_model_config])
 
     if persisted_config != nil and atomize_model_config(persisted_config) != model_config do
       Logger.info(

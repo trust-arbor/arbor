@@ -442,6 +442,34 @@ defmodule Arbor.Agent.ProfileStoreTest do
       {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_5")
       assert loaded.metadata.last_model_config.fallback_chain == chain
     end
+
+    test "JSON-reloaded last_model_config keeps prior fields when putting a new key" do
+      # Persistence (Postgres/JSON) stringifies metadata keys. put_model_config_value/3
+      # used to read only :last_model_config, so a JSON-reloaded profile looked
+      # empty and the write created a parallel atom-keyed map that dropped
+      # every previously persisted field.
+      profile =
+        make_profile("agent_pmcv_json",
+          metadata: %{
+            last_model_config: %{id: "claude", provider: :anthropic, model: "claude-sonnet"}
+          }
+        )
+
+      {:ok, json} = Jason.encode(Profile.serialize(profile))
+      {:ok, serialized} = Jason.decode(json)
+      {:ok, restored} = Profile.deserialize(serialized)
+
+      :ok = ProfileStore.store_profile(restored)
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_json", :runtime, :acp)
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_json")
+      lmc = loaded.metadata[:last_model_config]
+      assert lmc[:id] == "claude"
+      assert lmc[:provider] == "anthropic"
+      assert lmc[:model] == "claude-sonnet"
+      assert lmc[:runtime] == :acp
+      refute Map.has_key?(loaded.metadata, "last_model_config")
+    end
   end
 
   defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)
