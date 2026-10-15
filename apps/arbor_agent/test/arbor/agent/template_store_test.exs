@@ -128,6 +128,26 @@ defmodule Arbor.Agent.TemplateStoreTest do
             do: assert(Enum.all?(Map.keys(cap), &is_binary/1))
       end
     end
+
+    test "every shipped template uses only allowed goal types" do
+      # Arbor.Contracts.Memory.Goal.goal_type/0 — the set GoalStore persists.
+      allowed = MapSet.new(["achieve", "maintain", "explore", "learn", "avoid"])
+      names = TemplateStore.builtin_names()
+      assert names != []
+
+      disallowed =
+        for name <- names,
+            {:ok, data} <- [TemplateStore.resolve(name)],
+            goal <- data["initial_goals"] || [],
+            type = goal["type"] || goal[:type],
+            type_string = if(is_atom(type), do: Atom.to_string(type), else: type),
+            type_string not in allowed do
+          {name, type_string, goal["description"] || goal[:description]}
+        end
+
+      assert disallowed == [],
+             "shipped templates use goal types outside #{inspect(MapSet.to_list(allowed))}: #{inspect(disallowed)}"
+    end
   end
 
   describe "to_keyword/1" do

@@ -23,7 +23,7 @@ character:
   - "security-relevant changes need regression tests"
 initial_goals:
 - description: "Produce reviewable Arbor changes through isolated worktrees, Codex ACP delegation, validation, and committed branches"
-  type: "capability"
+  type: "achieve"
 - description: "Build the Test Agent and Security Auditor support loop before raising autonomy"
   type: "maintain"
 - description: "Improve the ACP coding wrapper without widening its own authority"
