@@ -29,12 +29,14 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   require Logger
   alias Arbor.Agent.Eval.{AgentTask, AgentTaskGrader, AgentTaskJudge}
 
-  # EXACT canonical cap URIs (no /**) so ToolDisclosure.profile_tools — which
-  # reverse-maps a cap to a tool by canonical URI — actually exposes the tool.
+  # ToolDisclosure.profile_tools reverse-maps a cap to a tool by canonical URI.
+  # web_search_eval stays exact. web_browse grants arbor://net/http/** so
+  # URL-scoped Browse/Snapshot authorization matches (C8: exact class URIs
+  # do not cover descendants). tools: at creation remains the exposure path.
   # web_search_eval = the fixtured injected search; web_browse = the real egress.
   @cap_uris %{
     "web_search_eval" => "arbor://eval/search",
-    "web_browse" => "arbor://net/http",
+    "web_browse" => "arbor://net/http/**",
     # Coordinator dispatch: delegate a scoped sub-task to an ephemeral worker. The worker's
     # caps are the INTERSECTION with the parent, so the coordinator also needs the sub-caps
     # (e.g. fs_read) in the task's `capabilities` for workers to inherit them.
@@ -492,7 +494,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   defp capability_uri(:fs_read, dir) when is_binary(dir), do: fs_uri("read", dir)
   defp capability_uri(:fs_list, dir) when is_binary(dir), do: fs_uri("list", dir)
   defp capability_uri(:fs_write, dir) when is_binary(dir), do: fs_uri("write", dir)
-  defp capability_uri(:net_http, _dir), do: "arbor://net/http"
+  defp capability_uri(:net_http, _dir), do: "arbor://net/http/**"
   defp capability_uri(:comms_notify, _dir), do: "arbor://comms/notify/session"
   defp capability_uri(_, _), do: nil
 

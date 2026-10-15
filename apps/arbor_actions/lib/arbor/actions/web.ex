@@ -28,9 +28,9 @@ defmodule Arbor.Actions.Web do
   ## Authorization
 
   Capability URIs:
-  - `arbor://net/http`
+  - `arbor://net/http/<percent-encoded-url>` for `Browse` and `Snapshot`
+    (`arbor://net/http/**` remains a broad grant)
   - `arbor://net/search`
-  - `arbor://net/http`
 
   ## Security
 
@@ -41,6 +41,7 @@ defmodule Arbor.Actions.Web do
 
   alias Arbor.Common.Sanitizers
 
+  @max_http_url_bytes 4_096
   @max_redirects 5
   @test_options_enabled Application.compile_env(
                           :arbor_kernel_runtime,
@@ -72,6 +73,47 @@ defmodule Arbor.Actions.Web do
   end
 
   def validate_url(_url, _context), do: {:error, "URL must be a string"}
+
+  @doc false
+  @spec http_authorization_resource(map() | term()) :: {:ok, String.t()} | {:error, atom()}
+  def http_authorization_resource(params) when is_map(params) do
+    url = Map.get(params, :url) || Map.get(params, "url")
+    encode_http_resource(url)
+  end
+
+  def http_authorization_resource(_params), do: {:error, :invalid_web_url}
+
+  defp encode_http_resource(url) when is_binary(url) do
+    cond do
+      url == "" ->
+        {:error, :invalid_web_url}
+
+      byte_size(url) > @max_http_url_bytes ->
+        {:error, :invalid_web_url}
+
+      not String.valid?(url) ->
+        {:error, :invalid_web_url}
+
+      String.contains?(url, <<0>>) ->
+        {:error, :invalid_web_url}
+
+      String.trim(url) != url ->
+        {:error, :invalid_web_url}
+
+      true ->
+        case URI.parse(url) do
+          %URI{scheme: scheme, host: host}
+          when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+            encoded = URI.encode(url, &URI.char_unreserved?/1)
+            {:ok, "arbor://net/http/#{encoded}"}
+
+          _other ->
+            {:error, :invalid_web_url}
+        end
+    end
+  end
+
+  defp encode_http_resource(_url), do: {:error, :invalid_web_url}
 
   @doc false
   @spec validate_browser_url(String.t()) :: :ok | {:error, String.t()}
@@ -326,6 +368,9 @@ defmodule Arbor.Actions.Web do
 
     # Destination-scoped egress caps match on the fetched host.
     def egress_destination(params, _context), do: URI.parse(params[:url] || "").host
+
+    @doc false
+    def authorization_resource(params), do: Web.http_authorization_resource(params)
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -910,6 +955,9 @@ defmodule Arbor.Actions.Web do
 
     # Destination-scoped egress caps match on the fetched host.
     def egress_destination(params, _context), do: URI.parse(params[:url] || "").host
+
+    @doc false
+    def authorization_resource(params), do: Web.http_authorization_resource(params)
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
