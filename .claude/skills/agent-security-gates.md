@@ -1152,6 +1152,22 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   Decision: `.arbor/decisions/2026-10-01-invocation-receipt-payload-v2.md`.
   Regression: `apps/arbor_security/test/arbor/security/invocation_receipt_security_regression_test.exs`.
 
+## 37. `/api/bridge/authorize_tool` is not an HTTP side door (2026-10-15)
+
+- **What:** the unused `POST /api/bridge/authorize_tool` Plug route (Claude Code
+  PreToolUse) is gone. `arbor_bridge_authorize.sh` was removed 2026-08-26 after
+  it failed open on every tool call once `/api/*` gained auth (2026-02-07).
+  Nothing in apps, scripts, JS, clients, or live hooks called the route.
+- **Symptom:** authenticated `POST /api/bridge/authorize_tool` returns **404**,
+  not a `{decision: allow|deny}` JSON body. The handler modules
+  (`Arbor.Gateway.Bridge.Router`, `RegistrationAuthority`, `Schemas.Bridge`) are
+  not on the code path.
+- **Action:** do not re-add an HTTP authorize endpoint. Harness tool
+  authorization is the signed-MCP / ACP path. In-process
+  `ClaudeSession.authorize_tool/4` remains a fail-closed library API and still
+  refuses ambient session minting without actor authority.
+  Regression: `bridge_authorize_tool_route_security_regression_test.exs`.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

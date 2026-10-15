@@ -21,7 +21,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
 
   ## Usage
 
-      # Ensure session is registered (called by bridge endpoint)
+      # Ensure session is registered (in-process; the HTTP PreToolUse route is gone)
       {:ok, agent_id} = ClaudeSession.ensure_registered(session_id, cwd)
 
       # Check if tool is authorized

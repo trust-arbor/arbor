@@ -3,11 +3,13 @@ defmodule Arbor.Gateway do
   Arbor Gateway — HTTP entry point and MCP integration hub.
 
   Provides:
-  - **Bridge**: Claude Code tool authorization via PreToolUse hooks
   - **MCP Server**: Exposes Arbor actions as MCP tools (via `/mcp` endpoint)
   - **MCP Client**: Connects to external MCP servers, exposing their tools to agents
   - **Dev tools**: Runtime evaluation, recompile, system info (dev only)
   - **Health**: Liveness checks
+
+  The HTTP `/api/bridge/authorize_tool` PreToolUse side door was removed.
+  Harness tool authorization is the signed-MCP / ACP path.
 
   ## Architecture
 
@@ -16,7 +18,6 @@ defmodule Arbor.Gateway do
        ↓
   Arbor.Gateway.Router
        ├── /health                      → liveness check
-       ├── /api/bridge/authorize_tool   → Claude Code authorization
        ├── /mcp                         → MCP server (ExMCP.HttpPlug)
        └── /api/dev/*                   → development tools
 

@@ -3,7 +3,7 @@ defmodule Arbor.Gateway.Application do
   Application supervisor for the Arbor Gateway.
 
   Starts the HTTP server that serves as the single HTTP entry point
-  for Arbor — bridge authorization, dev tools, and future API endpoints.
+  for Arbor — MCP, memory, chat, signals, and (in dev/test) tools.
   """
 
   use Application
@@ -48,11 +48,10 @@ defmodule Arbor.Gateway.Application do
     # Endpoint registry for agent-to-agent MCP
     endpoint_children = [{Arbor.Gateway.MCP.EndpointRegistry, []}]
 
-    bridge_children = [Arbor.Gateway.Bridge.RegistrationAuthority]
     lifecycle_children = [Arbor.Gateway.Chat.LifecycleAuthority]
 
     children =
-      mcp_children ++ endpoint_children ++ bridge_children ++ lifecycle_children ++ http_children
+      mcp_children ++ endpoint_children ++ lifecycle_children ++ http_children
 
     opts = [strategy: :one_for_one, name: Arbor.Gateway.Supervisor]
     Supervisor.start_link(children, opts)
