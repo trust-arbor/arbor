@@ -545,18 +545,34 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
       refute match?({:ok, []}, Store.query_events("agent_err"))
     end
 
-    test "provider load failure still creates a zeroed in-memory row" do
+    test "provider load {:error, reason} is not reported as a zeroed lifetime" do
+      Arbor.Common.Config.Testing.put(
+        :telemetry_persistence_module,
+        Arbor.Common.AgentTelemetry.StoreTest.ErrorProvider
+      )
+
+      assert {:error, :boom} = Store.load_lifetime_from_db("agent_load_err")
+      refute Store.load_lifetime_from_db("agent_load_err") in [nil, {:ok, nil}]
+
+      assert {:error, {:lifetime_load_failed, :boom}} =
+               Store.record_turn("agent_load_err", %{input_tokens: 4})
+
+      assert Store.get("agent_load_err") == nil
+    end
+
+    test "provider load exception is {:error, reason} and does not create a zeroed row" do
       Arbor.Common.Config.Testing.put(
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.RaisingLoadProvider
       )
 
-      assert Store.load_lifetime_from_db("agent_load_fail") == nil
-      assert Store.record_turn("agent_load_fail", %{input_tokens: 4}) == :ok
-      t = Store.get("agent_load_fail")
-      assert t.session_input_tokens == 4
-      assert t.lifetime_input_tokens == 4
-      assert t.turn_count == 1
+      assert {:error, %RuntimeError{}} = Store.load_lifetime_from_db("agent_load_fail")
+      refute Store.load_lifetime_from_db("agent_load_fail") in [nil, {:ok, nil}]
+
+      assert {:error, {:lifetime_load_failed, %RuntimeError{}}} =
+               Store.record_turn("agent_load_fail", %{input_tokens: 4})
+
+      assert Store.get("agent_load_fail") == nil
     end
 
     test "raising persist cannot crash record_tool and still updates ETS" do
@@ -578,6 +594,9 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.HappyProvider
       )
+
+      assert {:ok, %{lifetime_input_tokens: 100, turn_count: 3}} =
+               Store.load_lifetime_from_db("agent_happy")
 
       assert Store.record_turn("agent_happy", %{input_tokens: 1}) == :ok
       t = Store.get("agent_happy")

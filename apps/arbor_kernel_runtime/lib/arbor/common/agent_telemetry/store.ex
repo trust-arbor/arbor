@@ -66,51 +66,72 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   Record a completed LLM turn. Auto-creates telemetry if agent is new.
   Persists the event asynchronously through the configured provider.
   """
-  @spec record_turn(String.t(), map()) :: :ok
+  @spec record_turn(String.t(), map()) :: :ok | {:error, term()}
   def record_turn(agent_id, usage) when is_binary(agent_id) and is_map(usage) do
-    :ok = GenServer.call(__MODULE__, {:record_turn, agent_id, usage})
-    persist_event(agent_id, :turn_completed, usage)
-    :ok
+    case GenServer.call(__MODULE__, {:record_turn, agent_id, usage}) do
+      :ok ->
+        persist_event(agent_id, :turn_completed, usage)
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
   Record a tool call. Auto-creates telemetry if agent is new.
   Persists the event asynchronously through the configured provider.
   """
-  @spec record_tool(String.t(), String.t(), :ok | :error | :gated, non_neg_integer()) :: :ok
+  @spec record_tool(String.t(), String.t(), :ok | :error | :gated, non_neg_integer()) ::
+          :ok | {:error, term()}
   def record_tool(agent_id, tool_name, result, duration_ms)
       when is_binary(agent_id) and is_binary(tool_name) do
-    :ok = GenServer.call(__MODULE__, {:record_tool, agent_id, tool_name, result, duration_ms})
+    case GenServer.call(__MODULE__, {:record_tool, agent_id, tool_name, result, duration_ms}) do
+      :ok ->
+        persist_event(agent_id, :tool_call, %{
+          tool_name: tool_name,
+          result: result,
+          duration_ms: duration_ms
+        })
 
-    persist_event(agent_id, :tool_call, %{
-      tool_name: tool_name,
-      result: result,
-      duration_ms: duration_ms
-    })
+        :ok
 
-    :ok
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
   Record a sensitivity routing decision. Auto-creates telemetry if agent is new.
   Persists the event asynchronously through the configured provider.
   """
-  @spec record_routing(String.t(), :classified | :rerouted | :tokenized | :blocked) :: :ok
+  @spec record_routing(String.t(), :classified | :rerouted | :tokenized | :blocked) ::
+          :ok | {:error, term()}
   def record_routing(agent_id, decision) when is_binary(agent_id) do
-    :ok = GenServer.call(__MODULE__, {:record_routing, agent_id, decision})
-    persist_event(agent_id, :routing_decision, %{decision: decision})
-    :ok
+    case GenServer.call(__MODULE__, {:record_routing, agent_id, decision}) do
+      :ok ->
+        persist_event(agent_id, :routing_decision, %{decision: decision})
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
   Record a context compaction event. Auto-creates telemetry if agent is new.
   Persists the event asynchronously through the configured provider.
   """
-  @spec record_compaction(String.t(), float()) :: :ok
+  @spec record_compaction(String.t(), float()) :: :ok | {:error, term()}
   def record_compaction(agent_id, utilization_pct) when is_binary(agent_id) do
-    :ok = GenServer.call(__MODULE__, {:record_compaction, agent_id, utilization_pct})
-    persist_event(agent_id, :compaction, %{utilization: utilization_pct})
-    :ok
+    case GenServer.call(__MODULE__, {:record_compaction, agent_id, utilization_pct}) do
+      :ok ->
+        persist_event(agent_id, :compaction, %{utilization: utilization_pct})
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -147,10 +168,15 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   @doc """
   Load lifetime aggregate metrics from the configured provider for an agent.
 
-  Returns a map of lifetime metrics or `nil` if no provider is configured or
-  the durable store is unavailable.
+  Returns:
+  - `{:ok, map}` when the provider returns lifetime aggregates
+  - `nil` when no provider is configured or the provider has no stored row
+  - `{:error, reason}` when the provider or query fails
+
+  A load failure is never reported as a missing/zero lifetime. Callers must
+  handle `{:error, reason}` visibly instead of hydrating zeros.
   """
-  @spec load_lifetime_from_db(String.t()) :: map() | nil
+  @spec load_lifetime_from_db(String.t()) :: {:ok, map()} | nil | {:error, term()}
   def load_lifetime_from_db(agent_id) when is_binary(agent_id) do
     case persistence_module() do
       nil ->
@@ -158,24 +184,26 @@ defmodule Arbor.Common.AgentTelemetry.Store do
 
       provider ->
         case provider.load_lifetime(agent_id) do
-          map when is_map(map) -> map
-          _ -> nil
+          map when is_map(map) -> {:ok, map}
+          nil -> nil
+          {:error, reason} -> {:error, reason}
+          other -> {:error, other}
         end
     end
   rescue
     e ->
-      Logger.debug(
+      Logger.warning(
         "[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{Exception.message(e)}"
       )
 
-      nil
+      {:error, e}
   catch
     kind, reason ->
-      Logger.debug(
+      Logger.warning(
         "[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{inspect({kind, reason})}"
       )
 
-      nil
+      {:error, {kind, reason}}
   end
 
   @doc """
@@ -256,27 +284,19 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   end
 
   def handle_call({:record_turn, agent_id, usage}, _from, state) do
-    telemetry = get_or_create(agent_id)
-    put_owned(agent_id, AgentTelemetry.record_turn(telemetry, usage))
-    {:reply, :ok, state}
+    reply_record(state, agent_id, &AgentTelemetry.record_turn(&1, usage))
   end
 
   def handle_call({:record_tool, agent_id, tool_name, result, duration_ms}, _from, state) do
-    telemetry = get_or_create(agent_id)
-    put_owned(agent_id, AgentTelemetry.record_tool(telemetry, tool_name, result, duration_ms))
-    {:reply, :ok, state}
+    reply_record(state, agent_id, &AgentTelemetry.record_tool(&1, tool_name, result, duration_ms))
   end
 
   def handle_call({:record_routing, agent_id, decision}, _from, state) do
-    telemetry = get_or_create(agent_id)
-    put_owned(agent_id, AgentTelemetry.record_routing(telemetry, decision))
-    {:reply, :ok, state}
+    reply_record(state, agent_id, &AgentTelemetry.record_routing(&1, decision))
   end
 
   def handle_call({:record_compaction, agent_id, utilization_pct}, _from, state) do
-    telemetry = get_or_create(agent_id)
-    put_owned(agent_id, AgentTelemetry.record_compaction(telemetry, utilization_pct))
-    {:reply, :ok, state}
+    reply_record(state, agent_id, &AgentTelemetry.record_compaction(&1, utilization_pct))
   end
 
   def handle_call({:delete, agent_id}, _from, state) do
@@ -297,6 +317,21 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   # Private
   # ===========================================================================
 
+  defp reply_record(state, agent_id, fun) when is_function(fun, 1) do
+    case get_or_create(agent_id) do
+      {:ok, telemetry} ->
+        put_owned(agent_id, fun.(telemetry))
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Telemetry.Store] Refusing to create a zeroed lifetime for #{agent_id}: #{inspect(reason)}"
+        )
+
+        {:reply, {:error, {:lifetime_load_failed, reason}}, state}
+    end
+  end
+
   defp get_or_create(agent_id) do
     case get(agent_id) do
       nil ->
@@ -305,23 +340,30 @@ defmodule Arbor.Common.AgentTelemetry.Store do
 
         case load_lifetime_from_db(agent_id) do
           nil ->
-            base
+            {:ok, base}
 
-          lifetime ->
-            %{
-              base
-              | lifetime_input_tokens: lifetime[:lifetime_input_tokens] || 0,
-                lifetime_output_tokens: lifetime[:lifetime_output_tokens] || 0,
-                lifetime_cached_tokens: lifetime[:lifetime_cached_tokens] || 0,
-                lifetime_cost: lifetime[:lifetime_cost] || 0.0,
-                turn_count: lifetime[:turn_count] || 0,
-                compaction_count: lifetime[:compaction_count] || 0
-            }
+          {:ok, lifetime} when is_map(lifetime) ->
+            {:ok, hydrate_lifetime(base, lifetime)}
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
       telemetry ->
-        telemetry
+        {:ok, telemetry}
     end
+  end
+
+  defp hydrate_lifetime(base, lifetime) when is_map(lifetime) do
+    %{
+      base
+      | lifetime_input_tokens: lifetime[:lifetime_input_tokens] || 0,
+        lifetime_output_tokens: lifetime[:lifetime_output_tokens] || 0,
+        lifetime_cached_tokens: lifetime[:lifetime_cached_tokens] || 0,
+        lifetime_cost: lifetime[:lifetime_cost] || 0.0,
+        turn_count: lifetime[:turn_count] || 0,
+        compaction_count: lifetime[:compaction_count] || 0
+    }
   end
 
   defp put_owned(agent_id, telemetry) do

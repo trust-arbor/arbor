@@ -1,10 +1,14 @@
 # Mix prunes unused OTP apps from the code path. ProviderGate needs os_mon
-# after Application.ensure_all_started/1, including --no-start child-app runs.
-:code.lib_dir()
-|> List.to_string()
-|> Path.join("os_mon-*/ebin")
-|> Path.wildcard()
-|> Enum.each(&Code.append_path/1)
+# (and its sasl dependency) after Application.ensure_all_started/1, including
+# --no-start child-app runs.
+lib_dir = :code.lib_dir() |> List.to_string()
+
+for app <- ["sasl", "os_mon"] do
+  lib_dir
+  |> Path.join(app <> "-*/ebin")
+  |> Path.wildcard()
+  |> Enum.each(&Code.append_path/1)
+end
 
 unless Process.whereis(Arbor.AI.Supervisor) do
   {:ok, _} = Application.ensure_all_started(:arbor_ai)
