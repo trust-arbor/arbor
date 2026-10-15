@@ -3,6 +3,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
   import Bitwise
 
+  alias Arbor.AI.AcpSession.GrokAgentProfileCore
   alias Arbor.Common.SafePath
 
   @create_attempts 4
@@ -44,28 +45,6 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   ]
   @grok_log_filename "grok.log"
   @grok_agent_profile_filename "arbor-agent-profile.md"
-  @grok_agent_profile_content """
-  ---
-  name: arbor-no-shell
-  description: Arbor ACP coding profile with native file tools and no process execution.
-  prompt_mode: full
-  permission_mode: default
-  agents_md: true
-  tools:
-    - read_file
-    - search_replace
-    - grep
-    - list_dir
-  disallowedTools:
-    - run_terminal_cmd
-    - task
-    - get_task_output
-    - kill_task
-  ---
-
-  Use native file tools for reading and editing.
-  Process execution and subagents are unavailable by design.
-  """
   @max_grok_auth_payload_bytes 65_600
   @max_grok_access_token_bytes 65_536
   @max_grok_auth_lock_bytes 1_024
@@ -125,14 +104,22 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   def create, do: create(@create_attempts)
 
   @spec inject(keyword(), map()) :: {:ok, keyword()} | {:error, atom()}
-  def inject(client_opts, cleanup_identity), do: inject(client_opts, cleanup_identity, nil)
+  def inject(client_opts, cleanup_identity), do: inject(client_opts, cleanup_identity, nil, [])
 
   @spec inject(keyword(), map(), atom() | nil) :: {:ok, keyword()} | {:error, atom()}
-  def inject(client_opts, %{path: runtime_home}, provider)
-      when is_list(client_opts) and is_binary(runtime_home) and runtime_home != "" do
-    if Keyword.keyword?(client_opts) do
+  def inject(client_opts, cleanup_identity, provider)
+      when is_atom(provider) or is_nil(provider) do
+    inject(client_opts, cleanup_identity, provider, [])
+  end
+
+  @spec inject(keyword(), map(), atom() | nil, keyword()) :: {:ok, keyword()} | {:error, atom()}
+  def inject(client_opts, %{path: runtime_home}, provider, opts)
+      when is_list(client_opts) and is_binary(runtime_home) and runtime_home != "" and
+             is_list(opts) do
+    if Keyword.keyword?(client_opts) and Keyword.keyword?(opts) do
       with {:ok, client_opts} <- inject_arbor_home(client_opts, runtime_home),
-           {:ok, client_opts} <- inject_provider_home(client_opts, runtime_home, provider) do
+           {:ok, client_opts} <-
+             inject_provider_home(client_opts, runtime_home, provider, opts) do
         {:ok, client_opts}
       end
     else
@@ -140,7 +127,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  def inject(_client_opts, _cleanup_identity, _provider),
+  def inject(_client_opts, _cleanup_identity, _provider, _opts),
     do: {:error, :invalid_acp_client_options}
 
   @doc """
@@ -485,11 +472,24 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @doc false
   @spec verify_grok_agent_profile(String.t()) :: :ok | {:error, atom()}
   def verify_grok_agent_profile(path) when is_binary(path) do
+    grok_home = Path.dirname(path)
+
+    case remembered_grok_agent_profile(grok_home) do
+      {:ok, content} -> verify_grok_agent_profile(path, content)
+      :error -> {:error, :grok_agent_profile_unavailable}
+    end
+  end
+
+  def verify_grok_agent_profile(_path), do: {:error, :grok_agent_profile_unavailable}
+
+  @spec verify_grok_agent_profile(String.t(), String.t()) :: :ok | {:error, atom()}
+  def verify_grok_agent_profile(path, content)
+      when is_binary(path) and is_binary(content) and content != "" do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
-      when (mode &&& 0o7777) == 0o600 and size == byte_size(@grok_agent_profile_content) ->
-        case Arbor.LLM.read_bounded_regular_file(path, byte_size(@grok_agent_profile_content)) do
-          {:ok, @grok_agent_profile_content} -> :ok
+      when (mode &&& 0o7777) == 0o600 and size == byte_size(content) ->
+        case Arbor.LLM.read_bounded_regular_file(path, byte_size(content)) do
+          {:ok, ^content} -> :ok
           {:ok, _other} -> {:error, :grok_agent_profile_tampered}
           {:error, _reason} -> {:error, :grok_agent_profile_unavailable}
         end
@@ -508,7 +508,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  def verify_grok_agent_profile(_path), do: {:error, :grok_agent_profile_unavailable}
+  def verify_grok_agent_profile(_path, _content), do: {:error, :grok_agent_profile_unavailable}
 
   defp create(0), do: {:error, :acp_runtime_home_unavailable}
 
@@ -585,14 +585,15 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   defp arbor_home_key?(key),
     do: key == "ARBOR_HOME" or key == :ARBOR_HOME or key == ~c"ARBOR_HOME"
 
-  defp inject_provider_home(client_opts, runtime_home, :grok) do
+  defp inject_provider_home(client_opts, runtime_home, :grok, opts) do
     if Keyword.has_key?(client_opts, :adapter) or Keyword.has_key?(client_opts, :adapter_opts) do
       {:error, :grok_runtime_native_transport_required}
     else
       grok_home = Path.join(runtime_home, @grok_home_directory)
+      content = GrokAgentProfileCore.render(grok_capability_uris(opts))
 
       with {:ok, created?} <- ensure_private_grok_home(grok_home),
-           :ok <- stage_grok_agent_profile(grok_home, created?),
+           :ok <- stage_grok_agent_profile(grok_home, created?, content),
            {:ok, profile_path} <- bind_grok_agent_profile(client_opts, grok_home),
            {:ok, env} <- put_grok_isolation_env(Keyword.get(client_opts, :env), grok_home),
            {:ok, env} <- prepare_grok_external_auth(env, grok_home) do
@@ -604,7 +605,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp inject_provider_home(client_opts, runtime_home, :kiro) do
+  defp inject_provider_home(client_opts, runtime_home, :kiro, _opts) do
     if Keyword.has_key?(client_opts, :adapter) or Keyword.has_key?(client_opts, :adapter_opts) do
       {:error, :kiro_runtime_native_transport_required}
     else
@@ -617,7 +618,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp inject_provider_home(client_opts, runtime_home, :antigravity) do
+  defp inject_provider_home(client_opts, runtime_home, :antigravity, _opts) do
     if Keyword.get(client_opts, :command) != ["antigravity-acp"] or
          Enum.any?(@antigravity_forbidden_client_keys, &Keyword.has_key?(client_opts, &1)) do
       {:error, :antigravity_acp_runtime_native_transport_required}
@@ -638,7 +639,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp inject_provider_home(client_opts, _runtime_home, _provider), do: {:ok, client_opts}
+  defp inject_provider_home(client_opts, _runtime_home, _provider, _opts), do: {:ok, client_opts}
 
   defp ensure_private_provider_home(path, failure_reason) do
     case File.lstat(path) do
@@ -716,21 +717,83 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp stage_grok_agent_profile(grok_home, true) do
+  defp stage_grok_agent_profile(grok_home, true, content) do
     path = grok_agent_profile_path(grok_home)
+    remember_grok_agent_profile(grok_home, content)
 
-    case write_private_file(path, @grok_agent_profile_content, :grok_agent_profile_stage_failed) do
-      :ok -> verify_grok_agent_profile(path)
-      {:error, :already_exists} -> verify_grok_agent_profile(path)
+    case write_private_file(path, content, :grok_agent_profile_stage_failed) do
+      :ok -> verify_grok_agent_profile(path, content)
+      {:error, :already_exists} -> verify_grok_agent_profile(path, content)
       {:error, _reason} -> {:error, :grok_agent_profile_stage_failed}
     end
   end
 
-  defp stage_grok_agent_profile(grok_home, false) do
+  defp stage_grok_agent_profile(grok_home, false, content) do
+    remember_grok_agent_profile(grok_home, content)
+
     grok_home
     |> grok_agent_profile_path()
-    |> verify_grok_agent_profile()
+    |> verify_grok_agent_profile(content)
   end
+
+  defp remember_grok_agent_profile(grok_home, content)
+       when is_binary(grok_home) and is_binary(content) and content != "" do
+    :persistent_term.put({__MODULE__, :grok_agent_profile, grok_home}, content)
+  end
+
+  defp remembered_grok_agent_profile(grok_home) when is_binary(grok_home) do
+    case :persistent_term.get({__MODULE__, :grok_agent_profile, grok_home}, :missing) do
+      content when is_binary(content) and content != "" -> {:ok, content}
+      _other -> :error
+    end
+  end
+
+  defp grok_capability_uris(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get(opts, :capability_uris, :absent) do
+        uris when is_list(uris) ->
+          Enum.filter(uris, &is_binary/1)
+
+        :absent ->
+          fetch_capability_uris(Keyword.get(opts, :agent_id))
+
+        _other ->
+          []
+      end
+    else
+      []
+    end
+  end
+
+  defp grok_capability_uris(_opts), do: []
+
+  defp fetch_capability_uris(agent_id) when is_binary(agent_id) and agent_id != "" do
+    module = Application.get_env(:arbor_ai, :security_module, Arbor.Security)
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :list_capabilities, 2) do
+      case module.list_capabilities(agent_id, []) do
+        {:ok, capabilities} when is_list(capabilities) ->
+          capabilities
+          |> Enum.map(&capability_uri/1)
+          |> Enum.filter(&is_binary/1)
+
+        _other ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp fetch_capability_uris(_agent_id), do: []
+
+  defp capability_uri(%{resource_uri: uri}), do: uri
+  defp capability_uri(%{"resource_uri" => uri}), do: uri
+  defp capability_uri(_), do: nil
 
   defp bind_grok_agent_profile(client_opts, grok_home) do
     profile_path = grok_agent_profile_path(grok_home)
