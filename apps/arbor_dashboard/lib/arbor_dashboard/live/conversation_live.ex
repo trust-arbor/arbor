@@ -1,8 +1,10 @@
 defmodule Arbor.Dashboard.Live.ConversationLive do
   @moduledoc "Candidate Home and native surface for authenticated private conversations."
   use Phoenix.LiveView, log: false
+  alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Dashboard.Components.VoiceDeskComponent
   alias Arbor.Dashboard.ConversationReviewCore
+  alias Arbor.Dashboard.InteractionAdapter
   alias Arbor.Dashboard.Live.ConversationLive.{Home, Surface}
 
   @impl true
@@ -24,7 +26,22 @@ defmodule Arbor.Dashboard.Live.ConversationLive do
         if(connected?(socket), do: get_connect_info(socket, :x_headers))
       )
 
+    socket = attach_dashboard_interactions(socket)
+
     {:ok, if(connected?(socket) and target, do: Surface.connect(socket), else: socket)}
+  end
+
+  @doc """
+  Subscribe the calling process to dashboard HITL prompts for `user_id`.
+
+  ConversationLive is the production consumer of
+  `Arbor.Dashboard.InteractionAdapter` broadcasts. ChatLive used to
+  subscribe here; without this the adapter publishes to a topic nobody
+  receives.
+  """
+  @spec subscribe_interactions(String.t()) :: :ok | {:error, term()}
+  def subscribe_interactions(user_id) when is_binary(user_id) do
+    InteractionAdapter.subscribe(user_id)
   end
 
   @impl true
@@ -63,6 +80,9 @@ defmodule Arbor.Dashboard.Live.ConversationLive do
 
   def handle_info(:refresh_conversation, socket),
     do: {:noreply, Surface.event(socket, "conversation:refresh", %{})}
+
+  def handle_info({:dashboard_interaction, %Interaction{} = interaction}, socket),
+    do: {:noreply, apply_dashboard_interaction(socket, interaction)}
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, socket),
     do: {:noreply, socket |> Home.down(ref) |> Surface.down(ref) |> Home.sync()}
@@ -137,8 +157,7 @@ defmodule Arbor.Dashboard.Live.ConversationLive do
                 if @conversation_snapshot.connected,
                   do: "aw-conversation-dot is-connected",
                   else: "aw-conversation-dot"
-              }>
-              </span>
+              }></span>
               {if @conversation_snapshot.connected, do: "Connected", else: "Disconnected"}
               <button
                 :if={@conversation_snapshot.connected}
@@ -585,6 +604,27 @@ defmodule Arbor.Dashboard.Live.ConversationLive do
       </div>
     </section>
     """
+  end
+
+  defp attach_dashboard_interactions(socket) do
+    user_id = socket.assigns[:current_agent_id]
+
+    if connected?(socket) and is_binary(user_id) do
+      _ = subscribe_interactions(user_id)
+      _ = InteractionAdapter.track_presence(self(), user_id)
+    end
+
+    socket
+  end
+
+  defp apply_dashboard_interaction(socket, %Interaction{} = interaction) do
+    if interaction.agent_id == socket.assigns[:agent_id] do
+      socket
+      |> Surface.event("conversation:refresh", %{})
+      |> Home.sync()
+    else
+      Home.refresh(socket)
+    end
   end
 
   defp progress_label(%{"type" => type, "node_id" => nil}), do: String.replace(type, "_", " ")

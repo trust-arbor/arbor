@@ -3,10 +3,8 @@ defmodule Arbor.Dashboard.InteractionAdapter do
   Dashboard channel adapter for `Arbor.Comms.InteractionRouter`.
 
   Broadcasts interaction requests on the per-user dashboard-interaction
-  PubSub channel. The retired ChatLive was the only subscriber; since its
-  removal (2026-10-08) no LiveView subscribes. The routed ConversationLive
-  reads prompts and submits answers through `Arbor.Agent`'s authenticated
-  conversation facade instead.
+  PubSub channel. `Arbor.Dashboard.Live.ConversationLive` subscribes at
+  mount via `subscribe/1` so approvals and questions are not lost.
 
   Phase 1 scope. Multi-node correct because the broadcast uses the
   cluster-aware PubSub server; whichever node hosts the user's LiveView
@@ -62,6 +60,26 @@ defmodule Arbor.Dashboard.InteractionAdapter do
   @spec topic_for_user(String.t()) :: String.t()
   def topic_for_user(user_id) when is_binary(user_id) do
     "dashboard:interactions:" <> user_id
+  end
+
+  @doc """
+  Subscribe the calling process to this user's dashboard interaction topic.
+  """
+  @spec subscribe(String.t()) :: :ok | {:error, term()}
+  def subscribe(user_id) when is_binary(user_id) do
+    Phoenix.PubSub.subscribe(pubsub_server(), topic_for_user(user_id))
+  end
+
+  @doc """
+  Register dashboard presence so the InteractionRouter can deliver here.
+  """
+  @spec track_presence(pid(), String.t()) :: :ok | {:ok, term()} | {:error, term()}
+  def track_presence(pid, user_id) when is_pid(pid) and is_binary(user_id) do
+    Arbor.Comms.track_presence(pid, user_id, :dashboard, %{liveview_pid: pid})
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # HITL traffic is pinned to Arbor.Comms.PubSub (owned by Arbor.Comms.Application)
