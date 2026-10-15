@@ -32,29 +32,18 @@ defmodule Arbor.Gateway.Dev.RouterTest do
   end
 
   describe "POST /eval" do
-    test "evaluates simple expressions from localhost" do
+    test "refuses HTTP eval of request bodies from localhost" do
       conn =
         conn(:post, "/eval", Jason.encode!(%{code: "1 + 2"}))
         |> put_req_header("content-type", "application/json")
         |> Map.put(:remote_ip, {127, 0, 0, 1})
         |> Router.call(@opts)
 
-      assert conn.status == 200
+      assert conn.status == 403
       body = Jason.decode!(conn.resp_body)
-      assert body["status"] == "ok"
-      assert body["result"] == "3"
-    end
-
-    test "returns error for invalid code" do
-      conn =
-        conn(:post, "/eval", Jason.encode!(%{code: "undefined_var + 1"}))
-        |> put_req_header("content-type", "application/json")
-        |> Map.put(:remote_ip, {127, 0, 0, 1})
-        |> Router.call(@opts)
-
-      assert conn.status == 422
-      body = Jason.decode!(conn.resp_body)
-      assert body["status"] == "error"
+      assert body["status"] == "forbidden"
+      assert body["reason"] =~ "eval"
+      refute Map.has_key?(body, "result")
     end
   end
 

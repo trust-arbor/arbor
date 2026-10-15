@@ -7,7 +7,7 @@ defmodule Arbor.Gateway.Router do
   - `/health` — liveness check
   - `/api/bridge/*` — Claude Code tool authorization
   - `/api/memory/*` — memory operations for bridged agents
-  - `/api/dev/*` — development tools (eval, recompile, info)
+  - `/api/dev/*` — development tools (recompile, info; HTTP eval is refused)
   - `/api/signals/*` — signal ingestion from external sources (hooks, etc.)
   - `/mcp` — MCP server for progressive-disclosure Arbor tools (authenticated)
   """
