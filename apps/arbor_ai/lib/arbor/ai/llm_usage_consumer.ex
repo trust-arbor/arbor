@@ -2,11 +2,14 @@ defmodule Arbor.AI.LLMUsageConsumer do
   @moduledoc """
   Supervised owner for `[:arbor, :llm, :usage]` telemetry.
 
-  The telemetry callback validates only, then casts the canonical event map to
-  this GenServer. Serialized durable admission through
-  `Arbor.AI.record_provider_usage/2` and the subsequent BudgetTracker
-  compatibility projection both run in the GenServer mailbox so a slow ledger
-  cannot delay the originating model response.
+  The telemetry callback validates only, then enqueues the canonical event map
+  in `Arbor.AI.LLMUsageOutbox` and casts the outbox id to this GenServer.
+  Serialized durable admission through `Arbor.AI.record_provider_usage/2` and
+  the subsequent BudgetTracker compatibility projection both run in the
+  GenServer mailbox so a slow ledger cannot delay the originating model
+  response. The outbox survives a consumer crash; init redelivers unacked
+  rows. Ack happens after the admit attempt so ledger `event_id` exact-once
+  remains the replay fence.
 
   Ledger target and telemetry handler identity are **immutable init state**.
   Init either accepts an explicit normalized `:ledger_target` override or
@@ -32,6 +35,7 @@ defmodule Arbor.AI.LLMUsageConsumer do
   alias Arbor.AI
   alias Arbor.AI.BudgetTracker
   alias Arbor.AI.Config
+  alias Arbor.AI.LLMUsageOutbox
   alias Arbor.Contracts.LLM.ProviderUsageEvent
 
   @event [:arbor, :llm, :usage]
@@ -101,10 +105,24 @@ defmodule Arbor.AI.LLMUsageConsumer do
 
     case resolve_ledger(opts) do
       {:ok, ledger} ->
-        state = %{name: name, handler_id: handler_id, ledger: ledger}
-        # Detach only this instance's stable id (legacy singleton or named).
-        attach_handler(handler_id, self())
-        {:ok, state}
+        outbox = outbox_name(name, opts)
+
+        case LLMUsageOutbox.ensure_started(outbox) do
+          {:ok, _pid} ->
+            state = %{
+              name: name,
+              handler_id: handler_id,
+              ledger: ledger,
+              outbox: outbox
+            }
+
+            # Detach only this instance's stable id (legacy singleton or named).
+            attach_handler(handler_id, self(), outbox)
+            {:ok, state, {:continue, :redeliver}}
+
+          {:error, reason} ->
+            {:stop, {:outbox_unavailable, reason}}
+        end
 
       {:error, reason} ->
         {:stop, reason}
@@ -114,26 +132,56 @@ defmodule Arbor.AI.LLMUsageConsumer do
   def init(_opts), do: init([])
 
   @impl true
-  def handle_cast({:admit_usage, event_map}, state) when is_map(event_map) do
-    _ = admit_and_project(event_map, state)
+  def handle_continue(:redeliver, state) do
+    Enum.each(LLMUsageOutbox.pending(state.outbox), fn {id, _event_map} ->
+      GenServer.cast(self(), {:admit_usage, id})
+    end)
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:admit_usage, id}, state) when is_integer(id) and id > 0 do
+    case LLMUsageOutbox.lookup(state.outbox, id) do
+      {:ok, event_map} when is_map(event_map) ->
+        _ = admit_and_project(event_map, state)
+        _ = LLMUsageOutbox.ack(state.outbox, id)
+
+      _ ->
+        :ok
+    end
+
     {:noreply, state}
   end
 
   def handle_cast(_msg, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     _ = safe_detach(Map.get(state, :handler_id))
+
+    # Named/test instances own an unlinked outbox. Planned shutdown releases it.
+    # A crash leaves the table so the supervised restart can redeliver.
+    if planned_shutdown?(reason) and state[:name] != __MODULE__ and is_atom(state[:outbox]) do
+      _ = LLMUsageOutbox.stop(state.outbox)
+    end
+
     :ok
   end
 
   @doc false
-  # Telemetry callback: validate only, then cast to the owning GenServer.
+  # Telemetry callback: validate only, enqueue, then cast the outbox id.
   # Never reads Config, admits to the ledger, or projects BudgetTracker here.
-  def handle_event(@event, measurements, metadata, %{owner: owner}) do
+  def handle_event(@event, measurements, metadata, %{owner: owner, outbox: outbox}) do
     case validate_event(measurements, metadata) do
       {:ok, event_map} ->
-        GenServer.cast(owner, {:admit_usage, event_map})
+        case LLMUsageOutbox.enqueue(outbox, event_map) do
+          {:ok, id} ->
+            GenServer.cast(owner, {:admit_usage, id})
+
+          {:error, _} ->
+            :ok
+        end
 
       {:error, reason} ->
         observe_failure(reason, metadata)
@@ -172,9 +220,27 @@ defmodule Arbor.AI.LLMUsageConsumer do
   defp telemetry_handler_id(name) when name == __MODULE__, do: __MODULE__
   defp telemetry_handler_id(name), do: {__MODULE__, name}
 
-  defp attach_handler(handler_id, owner) when is_pid(owner) do
+  defp outbox_name(__MODULE__, opts) do
+    Keyword.get(opts, :outbox, LLMUsageOutbox)
+  end
+
+  defp outbox_name(name, opts) when is_atom(name) do
+    Keyword.get(opts, :outbox, Module.concat(name, Outbox))
+  end
+
+  defp planned_shutdown?(:normal), do: true
+  defp planned_shutdown?(:shutdown), do: true
+  defp planned_shutdown?({:shutdown, _}), do: true
+  defp planned_shutdown?(_reason), do: false
+
+  defp attach_handler(handler_id, owner, outbox) when is_pid(owner) and is_atom(outbox) do
     _ = safe_detach(handler_id)
-    :ok = :telemetry.attach(handler_id, @event, &__MODULE__.handle_event/4, %{owner: owner})
+
+    :ok =
+      :telemetry.attach(handler_id, @event, &__MODULE__.handle_event/4, %{
+        owner: owner,
+        outbox: outbox
+      })
   end
 
   defp safe_detach(nil), do: :ok

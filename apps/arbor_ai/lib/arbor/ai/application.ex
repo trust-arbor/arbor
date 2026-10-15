@@ -103,7 +103,10 @@ defmodule Arbor.AI.Application do
 
   defp llm_usage_consumer_child do
     if Application.get_env(:arbor_ai, :enable_llm_usage_tracking, true) do
-      [Arbor.AI.LLMUsageConsumer]
+      [
+        {Arbor.AI.LLMUsageOutbox, name: Arbor.AI.LLMUsageOutbox},
+        Arbor.AI.LLMUsageConsumer
+      ]
     else
       []
     end

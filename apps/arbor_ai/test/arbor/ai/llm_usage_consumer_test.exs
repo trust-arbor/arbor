@@ -38,7 +38,14 @@ defmodule Arbor.AI.LLMUsageConsumerTest do
           :ok
       end
 
-      ETS.append(stream_id, events, opts)
+      result = ETS.append(stream_id, events, opts)
+
+      case :persistent_term.get(@gate_key, nil) do
+        pid when is_pid(pid) -> send(pid, {:append_done, self()})
+        _ -> :ok
+      end
+
+      result
     end
 
     @impl true
@@ -390,6 +397,66 @@ defmodule Arbor.AI.LLMUsageConsumerTest do
     end)
 
     assert %{requests: 1, total_tokens: 3} = BudgetTracker.today_stats()
+  end
+
+  @tag ledger_mode: :none
+  test "consumer crash after enqueue redelivers pending usage to the ledger" do
+    # ledger_mode: :none — setup started no consumer. Start exactly one gated.
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    store_name = :"crash_usage_store_#{:erlang.unique_integer([:positive])}"
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    consumer_name = :"crash_usage_consumer_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {ETS, name: store_name, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      id: store_name
+    )
+
+    GatedETS.set_gate(self())
+    gated_target = %{name: store_name, backend: GatedETS, opts: []}
+
+    start_supervised!(
+      {LLMUsageConsumer, name: consumer_name, ledger_target: gated_target},
+      id: consumer_name,
+      restart: :permanent
+    )
+
+    assert_eventually(fn -> handler_count(consumer_name) == 1 end)
+    BudgetTracker.reset()
+
+    emit(%{count: 1, input: 11, output: 2, total: 13, cached: 0},
+      provider: "openai",
+      model: "gpt-4",
+      event_id: "crash-redeliver-1"
+    )
+
+    assert_receive {:append_blocked, blocked_pid}, 1_000
+    consumer_pid = Process.whereis(consumer_name)
+    assert is_pid(consumer_pid)
+    assert blocked_pid == consumer_pid
+
+    ref = Process.monitor(consumer_pid)
+    Process.exit(consumer_pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^consumer_pid, _} -> :ok
+    after
+      2_000 -> flunk("consumer #{inspect(consumer_name)} did not exit after kill")
+    end
+
+    # Redelivery must resume from durable outbox — not the dead mailbox.
+    # A bare GenServer.cast is gone with the process, so this receive times out
+    # until the handoff is persisted and acked after ledger admission.
+    assert_receive {:append_blocked, blocked_again}, 2_000
+    refute blocked_again == consumer_pid
+
+    send(blocked_again, :release_append)
+    assert_receive {:append_done, ^blocked_again}, 1_000
+
+    assert {:ok, [%{id: "crash-redeliver-1"}]} =
+             Persistence.read_stream(store_name, ETS, @stream_id, from: 1, limit: 10)
+
+    assert %{requests: 1, total_tokens: 13} = BudgetTracker.today_stats()
   end
 
   @tag ledger_mode: :none

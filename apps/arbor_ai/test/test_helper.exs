@@ -1,3 +1,15 @@
+# Mix prunes unused OTP apps from the code path. ProviderGate needs os_mon
+# after Application.ensure_all_started/1, including --no-start child-app runs.
+:code.lib_dir()
+|> List.to_string()
+|> Path.join("os_mon-*/ebin")
+|> Path.wildcard()
+|> Enum.each(&Code.append_path/1)
+
+unless Process.whereis(Arbor.AI.Supervisor) do
+  {:ok, _} = Application.ensure_all_started(:arbor_ai)
+end
+
 defmodule Arbor.AI.TestSupport.ProviderRouteEvidenceEventLog do
   @moduledoc false
   alias Arbor.Persistence.EventLog.ETS
