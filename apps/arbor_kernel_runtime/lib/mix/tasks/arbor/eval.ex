@@ -13,7 +13,8 @@ defmodule Mix.Tasks.Arbor.Rpc do
 
   This is intentionally a root administration command. Erlang distribution
   cookie possession is the only authority boundary; the expression is not
-  sandboxed or separately authorized.
+  sandboxed or separately authorized. HTTP and agent callers must not reach
+  this path — see `docs/security/code-eval-inventory.md`.
   """
   use Mix.Task
 

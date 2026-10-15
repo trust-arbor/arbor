@@ -226,6 +226,13 @@ checkpoint projection.
 This is an execution identity and code-binding control. It does not prove that the
 BEAM process, the operating system, or every un-authorized legacy run is uncompromised.
 
+### In-VM code evaluation
+
+Host `Code.eval_string` / `Code.compile_string` of untrusted input is refused.
+Agent eval goes through `Arbor.Sandbox.authorize_eval/4` (Dune). The closed
+inventory of remaining host loaders, with justifications and Hysun flags, is
+[`docs/security/code-eval-inventory.md`](../security/code-eval-inventory.md).
+
 Authoritative code: [`RunAuthorization`](../../apps/arbor_orchestrator/lib/arbor/orchestrator/engine/run_authorization.ex),
 [`ExecutionManifest`](../../apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan/execution_manifest.ex),
 and [`DOT pipeline guide`](./DOT_PIPELINE_GUIDE.md).
