@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 787,
+  "entry_count": 788,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7251,7 +7251,7 @@
       "anchor": "applied-learning-isolate-mix-build-roots-by-revision-and-environment",
       "source_date": "2026-07-30",
       "source_incident": "found 2026-07-30 while preparing the OAuth security regression comparison).",
-      "content_sha256": "69db28396004e0e2e707128b7f2f8073be968a9e08055c16d52a9cc73d143db5",
+      "content_sha256": "b2f2cf3cd88c035725ab2bcda3c5cde08a25465f5f3448c2af0e28dc79f2b90d",
       "always_loaded": false
     },
     {
@@ -9775,8 +9775,21 @@
       "source_incident": "found 2026-10-01 proving the invocation receipt payload v2 fix in a worktree",
       "always_loaded": false,
       "content_sha256": "00637b46960705e4fac1034bf45dfaa4fa5b40122fcd18862670636ba0409937"
+    },
+    {
+      "source_ordinal": 793,
+      "source_kind": "post-migration",
+      "slug": "inspect-generated-command-helpers-before-execution",
+      "title": "Inspect generated command helpers before execution.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-inspect-generated-command-helpers-before-execution",
+      "source_date": "2026-10-14",
+      "source_incident": "found 2026-10-14 preparing isolated upstream Membrane contributions",
+      "always_loaded": false,
+      "content_sha256": "ec44a43850af247b450d34cbfe87bd7381d039fde2233931b21c9d04794f72e4"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 326
+  "post_migration_entry_count": 327
 }

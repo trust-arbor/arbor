@@ -4,6 +4,15 @@ Read this when handling paths, files, symlinks, worktrees, Git provenance, index
 
 ## Retained Applied Learning
 
+<!-- applied-learning: inspect-generated-command-helpers-before-execution -->
+<a id="applied-learning-inspect-generated-command-helpers-before-execution"></a>
+**Inspect generated command helpers before execution.** Check the actual file
+bytes, shell syntax, and intended argument boundaries before the first invocation,
+especially after multi-file patches. A missing patch delimiter can append document
+content to an otherwise valid command and change its argv. On 2026-10-14, a local
+Mix validation helper accidentally included the next file's patch header; source
+inspection exposed the malformed command before any upstream build ran.
+
 <!-- applied-learning: put-ripgrep-filters-before-the-option-terminator -->
 <a id="applied-learning-put-ripgrep-filters-before-the-option-terminator"></a>
 **Put ripgrep filters before the option terminator.** When a search pattern

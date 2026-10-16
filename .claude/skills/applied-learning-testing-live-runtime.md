@@ -1428,6 +1428,11 @@ stale BEAMs and invalidate comparison evidence. Give every revision and
 two-revision proof (found 2026-07-30 while preparing the OAuth security
 regression comparison).
 
+Reinforced on 2026-10-14 during upstream Membrane validation: a concurrent
+development compile removed test-support BEAMs from a shared override root.
+Validation helpers should require an explicit `MIX_ENV` for overridden roots
+and derive a separate child directory for each environment.
+
 <!-- applied-learning: run-directly-changed-app-tests-before-downstream-tests -->
 <a id="applied-learning-run-directly-changed-app-tests-before-downstream-tests"></a>
 **Run directly changed app tests before downstream tests.** A complete
