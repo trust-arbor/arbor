@@ -6,6 +6,54 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponentTest do
 
   @moduletag :fast
 
+  test "security regression: a static local-dev session cannot claim verified identity" do
+    # Observe the real Security boundary in this isolated test VM. Before the
+    # fix it was called with identity_verified: true despite no session proof.
+    test_pid = self()
+
+    tracer =
+      spawn_link(fn ->
+        receive do
+          {:trace, ^test_pid, :call, {Arbor.Security, :authorize, args}} ->
+            send(test_pid, {:unproven_registration_authorization, args})
+
+          :stop ->
+            :ok
+        end
+      end)
+
+    Code.ensure_loaded!(Arbor.Security)
+    :erlang.trace_pattern({Arbor.Security, :authorize, 4}, true, [:local])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    on_exit(fn ->
+      :erlang.trace_pattern({Arbor.Security, :authorize, 4}, false, [:local])
+      send(tracer, :stop)
+    end)
+
+    socket =
+      %Socket{}
+      |> Phoenix.Component.assign(%{
+        current_agent_id: "human_dashboard",
+        session_token: nil,
+        local_dev_operator?: true,
+        external_agents_error: nil,
+        just_registered: nil,
+        show_register_form: false
+      })
+
+    updated =
+      ExternalAgentsComponent.update_external_agents(socket, "submit_registration", %{
+        "display_name" => "Unproven local operator",
+        "agent_type" => "external"
+      })
+
+    :erlang.trace(self(), false, [:call])
+    refute_receive {:unproven_registration_authorization, _args}
+    assert updated.assigns.just_registered == nil
+    assert updated.assigns.external_agents_error =~ "Sign in"
+  end
+
   describe "register without principal" do
     test "fails closed when the socket has no authenticated principal" do
       socket =
