@@ -636,7 +636,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_mismatch",
                observed_at,
                "The exact base commit does not match the pinned Linux dependency baseline.",
-               "Rebuild the Linux dependency baseline for this commit before dispatch.",
+               "Run mix arbor.baseline.build && mix arbor.baseline.activate <digest> for this commit, then retry dispatch.",
                driver
              )}
 
