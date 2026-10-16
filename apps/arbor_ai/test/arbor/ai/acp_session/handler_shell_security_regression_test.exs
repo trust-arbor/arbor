@@ -29,6 +29,7 @@ defmodule Arbor.AI.AcpSession.HandlerShellSecurityRegressionTest do
       for {app, key, value} <- [
             {:arbor_ai, :security_module, Security},
             {:arbor_ai, :trust_policy_module, AutoPolicy},
+            {:arbor_shell, :agent_authorizer, authorizer},
             {:arbor_trust, :policy_module, AutoPolicy},
             {:arbor_trust, :approval_guard_enabled, true}
           ] do
@@ -80,13 +81,16 @@ defmodule Arbor.AI.AcpSession.HandlerShellSecurityRegressionTest do
   test "security regression: execute kind cannot be hidden behind a read tool name", %{
     state: state
   } do
-    assert {:ok, %{"outcome" => "denied"}, ^state} =
-             Handler.handle_permission_request(
-               "s1",
-               %{"name" => "Read", "kind" => "execute", "rawInput" => %{"command" => "ls"}},
-               [],
-               state
-             )
+    for identity <- [
+          %{"name" => "Read", "kind" => "execute"},
+          %{:name => "Read", :kind => "read", "kind" => "execute"},
+          %{"name" => "Read", "toolCallId" => "run_shell_command__run_shell_command_1_0"}
+        ] do
+      call = Map.put(identity, "rawInput", %{"command" => "ls"})
+
+      assert {:ok, %{"outcome" => "denied"}, ^state} =
+               Handler.handle_permission_request("s1", call, [], state)
+    end
   end
 
   test "security regression: opaque Kiro tools cannot evade the shell floor", %{state: state} do
@@ -123,5 +127,60 @@ defmodule Arbor.AI.AcpSession.HandlerShellSecurityRegressionTest do
                [],
                state
              )
+  end
+
+  test "security regression: command authorization reaches the configured Shell owner", %{
+    state: state,
+    agent_id: agent_id
+  } do
+    Application.put_env(:arbor_shell, :agent_authorizer, fn principal, command, opts ->
+      send(self(), {:shell_authorized, principal, command, opts})
+      {:ok, :authorized}
+    end)
+
+    assert {:ok, %{"outcome" => "approved"}, ^state} =
+             Handler.handle_permission_request(
+               "s1",
+               %{"name" => "Bash", "rawInput" => %{"cmd" => "ls -a"}},
+               [],
+               state
+             )
+
+    assert_receive {:shell_authorized, ^agent_id, "ls -a", opts}
+    assert opts[:cwd] == state.workspace_root
+    assert opts[:prepared_command].command_name == "ls"
+
+    # Real Shell preflight rejects compounds before the injected authorizer.
+    assert {:ok, %{"outcome" => "denied"}, ^state} =
+             Handler.handle_permission_request(
+               "s1",
+               %{"name" => "Bash", "rawInput" => %{"command" => "ls; pwd"}},
+               [],
+               state
+             )
+
+    refute_received {:shell_authorized, _, _, _}
+  end
+
+  test "security regression: unavailable shell owner and ambiguous command inputs deny", %{
+    state: state
+  } do
+    Application.put_env(:arbor_shell, :agent_authorizer, nil)
+
+    for input <- [
+          %{"command" => "ls"},
+          %{"command" => "ls", "cmd" => "pwd"},
+          %{"command" => ["sh", "-c", "ls"]},
+          %{"command" => "ls", "env" => %{"PATH" => "/attacker"}},
+          %{}
+        ] do
+      assert {:ok, %{"outcome" => "denied"}, ^state} =
+               Handler.handle_permission_request(
+                 "s1",
+                 %{"name" => "Bash", "rawInput" => input},
+                 [],
+                 state
+               )
+    end
   end
 end

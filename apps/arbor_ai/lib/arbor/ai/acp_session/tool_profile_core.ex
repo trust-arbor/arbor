@@ -20,6 +20,8 @@ defmodule Arbor.AI.AcpSession.ToolProfileCore do
   may offer every tool, and per-call authorization decides.
   """
 
+  alias Arbor.AI.AcpSession.ToolClass
+
   @tool_prefix "arbor://acp/tool"
   @tool_name_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._~-]*\z/
 
@@ -63,9 +65,16 @@ defmodule Arbor.AI.AcpSession.ToolProfileCore do
     {allowed, gated} =
       Enum.reduce(names, {[], []}, fn name, {allowed, gated} ->
         case safe_mode(mode_fun, "#{@tool_prefix}/#{name}") do
-          :auto -> {[name | allowed], gated}
-          :gated -> {allowed, [name | gated]}
-          _deny -> {allowed, gated}
+          :auto ->
+            if ToolClass.shell?(name),
+              do: {allowed, [name | gated]},
+              else: {[name | allowed], gated}
+
+          :gated ->
+            {allowed, [name | gated]}
+
+          _deny ->
+            {allowed, gated}
         end
       end)
 

@@ -17,6 +17,7 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   @behaviour ExMCP.ACP.Client.Handler
 
+  alias Arbor.AI.AcpSession.ToolClass
   alias Arbor.Common.SafePath
 
   require Logger
@@ -88,7 +89,11 @@ defmodule Arbor.AI.AcpSession.Handler do
               tool: tool_name,
               provider_call_id: Map.get(tool_call, "toolCallId")
             },
-            fn -> authorize_action(state.agent_id, resource_uri, :execute, state) end
+            fn ->
+              with :authorized <- authorize_action(state.agent_id, resource_uri, :execute, state) do
+                authorize_shell_tool(tool_name, tool_call, state)
+              end
+            end
           )
 
         case decision do
@@ -315,6 +320,38 @@ defmodule Arbor.AI.AcpSession.Handler do
   end
 
   # -- Private --
+
+  # ACP authority is necessary but never substitutes for the Shell facade's
+  # command validation and configured Trust-aware authorizer. In particular,
+  # checking only Trust.Policy.confirmation_mode would miss ApprovalGuard's
+  # always-locked floor when a configured policy resolves shell to :auto.
+  defp authorize_shell_tool(tool_name, tool_call, state) do
+    if ToolClass.shell?(tool_name, tool_call) do
+      with {:ok, command, opts} <- ToolClass.shell_input(tool_call, state.workspace_root) do
+        case Arbor.Shell.authorize(state.agent_id, command, opts) do
+          {:ok, :authorized} ->
+            :authorized
+
+          {:ok, :pending_approval, request_id} ->
+            await_human_approval(state.agent_id, request_id, "arbor://shell/exec", state)
+
+          {:error, reason} ->
+            {:denied, "shell authorization denied: #{bounded_reason(reason)}"}
+
+          _ ->
+            {:denied, "shell authorization returned an invalid result"}
+        end
+      else
+        {:error, reason} -> {:denied, "shell authorization denied: #{bounded_reason(reason)}"}
+      end
+    else
+      :authorized
+    end
+  rescue
+    _ -> {:denied, "shell authorization unavailable"}
+  catch
+    _, _ -> {:denied, "shell authorization unavailable"}
+  end
 
   # Path validation: when workspace_root is set, enforce SafePath bounds.
   # When no workspace_root, allow any path (backward compat).

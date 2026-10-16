@@ -326,7 +326,7 @@ defmodule Arbor.Actions.AcpTest do
     test "normalize_permission_mode refuses unknown values instead of atomizing input" do
       assert Acp.StartSession.normalize_permission_mode("default") == :default
       assert Acp.StartSession.normalize_permission_mode(:deny) == :deny
-      assert Acp.StartSession.normalize_permission_mode("bypass") == :bypass
+      assert Acp.StartSession.normalize_permission_mode("bypass") == nil
       assert Acp.StartSession.normalize_permission_mode("String.to_atom footgun") == nil
     end
 

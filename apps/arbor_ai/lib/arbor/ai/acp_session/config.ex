@@ -133,31 +133,25 @@ defmodule Arbor.AI.AcpSession.Config do
     #     permission_mode: :default -> the CLI ASKS for each tool; the request is routed over the
     #                                  SDK stdio permission channel into Arbor's handler (Layer 2).
     #     permission_mode: :deny    -> deny.
-    #     allowed_tools:    ["Read","Grep","Glob","LS","Bash"]  -> CLI auto-runs these without
+    #     allowed_tools:    ["Read","Grep","Glob","LS"]  -> CLI auto-runs these without
     #                                  asking (use for read-only RECON); others still ask.
     #     disallowed_tools: [...]    -> hard-block these tools.
     #
     #   Layer 2 — Arbor's capability handler (`acp_session/handler.ex`): when the CLI ASKS
     #     (:default mode), Arbor authorizes `arbor://acp/tool/<ToolName>` against the session's
     #     agent_id capabilities. No cap → DENIED. So for :default you must ALSO grant the agent
-    #     `arbor://acp/tool/<Tool>` caps (or a bounded `arbor://acp/tool/**` subtree
-    #     cap), or the ask is rejected.
-    #
-    # RECON use (e.g. the coding-recon eval): the simplest working policy is `permission_mode:
-    # :bypass` (CLI recons freely in its sandboxed cwd — read-only intent). For a tighter policy,
-    # use `:default` + `allowed_tools: [read-only tools]` AND grant the matching acp/tool caps.
-    # NOTE (2026-07-03): an eval Claude run hit Layer 2 (denied `cd; grep`) despite this :bypass
-    # default — the eval's `acp_start_session` wasn't threading the catalog adapter_opts. Fix:
-    # ensure the ACP start path merges these adapter_opts (or pass permission_mode explicitly).
+    #     `arbor://acp/tool/<Tool>` caps, or the ask is rejected. Shell-class tools
+    #     must additionally pass Arbor.Shell.authorize/3, including its configured
+    #     Trust-aware authorizer and always-locked floor. Shell pre-allow rules
+    #     are removed after adapter options are merged so they cannot skip it.
     # `:default` since 2026-08-25: the CLI asks before every tool and
     # `Arbor.AI.AcpSession.Handler.handle_permission_request/4` answers from
     # `Arbor.Security.authorize/4` — a fresh agent can talk but cannot touch
     # files until it is granted that, which is Arbor's earned-trust model. The
     # previous `:bypass` default made the quickstart's `conversationalist` an
     # unrestricted Claude Code in the repo (its first reply summarised the
-    # uncommitted diff). Callers that need bypass (recon evals, the legacy
-    # `Claude.query` path in Agent.Manager) pass `permission_mode: :bypass`
-    # explicitly.
+    # uncommitted diff). Agent.Manager no longer requests bypass, and the ACP
+    # session action refuses caller-supplied bypass modes.
     claude: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.ClaudeSDK,

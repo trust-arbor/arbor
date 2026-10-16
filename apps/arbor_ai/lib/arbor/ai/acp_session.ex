@@ -1039,6 +1039,7 @@ defmodule Arbor.AI.AcpSession do
     |> Keyword.put(:handler_opts, Keyword.merge(handler_opts, tool_profile_opts))
     |> merge_adapter_opts(tool_profile_opts)
     |> append_allowed_tools(mcp_allow_tools)
+    |> Arbor.AI.AcpSession.ToolClass.require_shell_callbacks()
     |> Keyword.put_new(:pending_request_timeout, @default_pending_request_timeout_ms)
     |> Keyword.put_new(:handler_request_timeout, @default_handler_request_timeout_ms)
     |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))

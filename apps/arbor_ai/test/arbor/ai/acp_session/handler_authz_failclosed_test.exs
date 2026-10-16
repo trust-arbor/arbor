@@ -112,7 +112,7 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
   end
 
   describe "ACP tool identity security regression" do
-    test "uses structured kind instead of a human-readable command title" do
+    test "uses structured kind and denies execution without structured command input" do
       Application.put_env(:arbor_ai, :trust_policy_module, AutoTrustPolicy)
       Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
       Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
@@ -124,9 +124,10 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
         "toolCallId" => "call-7752274a-0d51-433c-99e4-2899adc362d4-27"
       }
 
-      assert {:ok, %{"outcome" => "approved"}, ^state} =
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
                Handler.handle_permission_request("s1", tool_call, [], state)
 
+      assert reason =~ "shell authorization"
       assert_receive {"arbor://acp/tool/execute", :execute}
     end
 
@@ -147,7 +148,7 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
       refute_receive {_uri, :execute}
     end
 
-    test "security regression: Kiro opaque ids use a provider-scoped capability" do
+    test "security regression: Kiro provider-scoped capability does not confer execution" do
       Application.put_env(:arbor_ai, :trust_policy_module, AutoTrustPolicy)
       Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
       Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
@@ -158,9 +159,10 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
         "toolCallId" => "tooluse_60NpwuAE0q7zHuFzBQAN8Z"
       }
 
-      assert {:ok, %{"outcome" => "approved"}, ^state} =
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
                Handler.handle_permission_request("s1", tool_call, [], state)
 
+      assert reason =~ "shell authorization"
       assert_receive {"arbor://acp/tool/kiro", :execute}
     end
 

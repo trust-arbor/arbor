@@ -306,7 +306,7 @@ defmodule Arbor.Actions.Acp do
     | `session_id` | string | no | Provider conversation ID to resume |
     | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false); DOT may serialize this as `"true"` or `"false"` |
     | `fallback_to_fresh_on_resume_unavailable` | boolean | no | Start a fresh conversation when resume is structurally unsupported (default: false); DOT may serialize this as `"true"` or `"false"` |
-    | `permission_mode` | string | no | Adapter permission mode: default, bypass, or deny |
+    | `permission_mode` | string | no | Adapter permission mode: default or deny; bypass modes are refused |
     | `allowed_tools` | list | no | Adapter tool allowlist |
     | `disallowed_tools` | list | no | Adapter tool denylist |
     | `timeout` | integer | no | Timeout in ms (default: 120000) |
@@ -351,7 +351,7 @@ defmodule Arbor.Actions.Acp do
         ],
         permission_mode: [
           type: :any,
-          doc: "Adapter permission mode: default, bypass, or deny"
+          doc: "Adapter permission mode: default or deny; bypass modes are refused"
         ],
         allowed_tools: [
           type: {:list, :string},
@@ -400,7 +400,8 @@ defmodule Arbor.Actions.Acp do
     def on_before_validate_params(params) do
       with {:ok, normalized} <- normalize_use_pool_param(params),
            {:ok, normalized} <-
-             normalize_fallback_to_fresh_on_resume_unavailable_param(normalized) do
+             normalize_fallback_to_fresh_on_resume_unavailable_param(normalized),
+           {:ok, normalized} <- normalize_permission_mode_param(normalized) do
         {:ok, normalized}
       else
         {:error, reason} -> {:error, Acp.format_error(reason)}
@@ -421,6 +422,7 @@ defmodule Arbor.Actions.Acp do
 
       with {:ok, params} <- normalize_use_pool_param(params),
            {:ok, params} <- normalize_fallback_to_fresh_on_resume_unavailable_param(params),
+           {:ok, params} <- normalize_permission_mode_param(params),
            :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
            {:ok, grok_sandbox_authority} <-
@@ -706,12 +708,34 @@ defmodule Arbor.Actions.Acp do
       do: {:error, :invalid_fallback_to_fresh_on_resume_unavailable}
 
     @doc false
+    def normalize_permission_mode_param(params) do
+      case {Map.fetch(params, :permission_mode), Map.fetch(params, "permission_mode")} do
+        {:error, :error} ->
+          {:ok, params}
+
+        {{:ok, _}, {:ok, _}} ->
+          {:error, {:acp_permission_mode_refused, :ambiguous_keys}}
+
+        {{:ok, value}, :error} ->
+          put_permission_mode(params, value)
+
+        {:error, {:ok, value}} ->
+          put_permission_mode(Map.delete(params, "permission_mode"), value)
+      end
+    end
+
+    defp put_permission_mode(params, value)
+         when value in [nil, :default, :deny, "default", "deny"],
+         do: {:ok, Map.put(params, :permission_mode, normalize_permission_mode(value))}
+
+    defp put_permission_mode(_params, value),
+      do: {:error, {:acp_permission_mode_refused, value}}
+
+    @doc false
     def normalize_permission_mode(nil), do: nil
     def normalize_permission_mode(:default), do: :default
-    def normalize_permission_mode(:bypass), do: :bypass
     def normalize_permission_mode(:deny), do: :deny
     def normalize_permission_mode("default"), do: :default
-    def normalize_permission_mode("bypass"), do: :bypass
     def normalize_permission_mode("deny"), do: :deny
     def normalize_permission_mode(_), do: nil
 

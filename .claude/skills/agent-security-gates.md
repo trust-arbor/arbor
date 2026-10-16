@@ -299,6 +299,23 @@ another one. It doubles as user documentation — anyone standing up agents need
   This subtree includes native execution tools, so do not grant it to read-only agents;
   grant exact child URIs instead when the provider exposes stable canonical names.
 
+### ACP execution also needs the Shell gate (2026-10-15)
+
+Native execution names and `kind=execute` must also pass
+`Arbor.Shell.authorize/3`: an ACP wildcard never substitutes for a command-scoped
+shell grant, command validation, or the configured Trust-aware authorizer's
+always-locked approval floor. Exact shell tool grants remain askable at launch;
+explicit shell pre-allow rules and wildcard pre-allow patterns are removed after
+adapter-option merges. A descriptive title or opaque Kiro callback without a
+structured command cannot establish shell authority and is denied.
+
+Symptom: ACP tools can be granted while a terminal request still returns
+`shell authorization denied`. Supply classifiable structured `rawInput` and
+the same shell authority/approval required by Arbor's own shell actions. Do not
+restore callback-free execution with `permission_mode=bypass`: the session
+action rejects that mode and its aliases before creating a session. Keep
+read-only workloads on exact read/list/search child capabilities.
+
 ## 10. Nested reviewed graphs need exact child-action authority
 
 - **What:** a capability for the outer composite action does not authorize actions in

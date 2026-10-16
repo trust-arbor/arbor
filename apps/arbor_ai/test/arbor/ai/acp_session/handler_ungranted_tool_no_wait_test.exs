@@ -85,7 +85,7 @@ defmodule Arbor.AI.AcpSession.HandlerUngrantedToolNoWaitTest do
   end
 
   defp request(state, tool) do
-    tool_call = %{"tool_name" => tool, "kind" => "execute"}
+    tool_call = %{"tool_name" => tool, "kind" => if(tool == "Bash", do: "execute", else: "read")}
 
     options = [
       %{"optionId" => "allow_once", "kind" => "allow_once"},
