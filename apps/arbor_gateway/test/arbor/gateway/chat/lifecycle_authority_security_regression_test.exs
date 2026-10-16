@@ -23,18 +23,29 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest.PrivateAge
   alias Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest.PrivateStart
 
   def authorize_create(principal, name, opts) do
-    send(self(), {:lifecycle_authority, :create, Keyword.get(opts, :actor_authority)})
+    notify({:lifecycle_authority, :create, Keyword.get(opts, :actor_authority)})
     Arbor.Agent.authorize_create(principal, name, opts)
   end
 
   def authorize_start(principal, agent_id, opts) do
-    send(self(), {:lifecycle_authority, :start, Keyword.get(opts, :actor_authority)})
+    notify({:lifecycle_authority, :start, Keyword.get(opts, :actor_authority)})
     Arbor.Agent.authorize_start(principal, agent_id, opts ++ PrivateStart.test_opts())
   end
 
   def authorize_stop(principal, agent_id, opts) do
-    send(self(), {:lifecycle_authority, :stop, Keyword.get(opts, :actor_authority)})
+    notify({:lifecycle_authority, :stop, Keyword.get(opts, :actor_authority)})
     Arbor.Agent.authorize_stop(principal, agent_id, opts)
+  end
+
+  # Create runs inside Chat.LifecycleAuthority (a named GenServer). send(self())
+  # therefore landed in the owner's mailbox, not the test process — the route
+  # still answered 200/403 via Arbor.Agent, so it looked like the real facade
+  # was used. Notify the test pid stored by setup.
+  defp notify(message) do
+    case Application.get_env(:arbor_gateway, :lifecycle_authority_notify) do
+      pid when is_pid(pid) -> send(pid, message)
+      _ -> send(self(), message)
+    end
   end
 end
 
@@ -133,7 +144,8 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest do
           chat_template_store: Arbor.Agent.TemplateStore,
           chat_security: Security,
           chat_agent_manager: Arbor.Agent.Manager,
-          lifecycle_authority_fixture_store: store
+          lifecycle_authority_fixture_store: store,
+          lifecycle_authority_notify: self()
         ],
         do: put_env(key, value)
 
@@ -177,7 +189,10 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest do
 
       assert_received {:lifecycle_authority, :create, authority}
       assert authority.principal_id == ctx.human.agent_id
-      assert authority.purpose == :agent_lifecycle
+      # Create mutates identity state, so Chat.LifecycleAuthority (the named
+      # GenServer) opens the principal's stored key itself. The HTTP-opened
+      # `:agent_lifecycle` authority is not reused as a proof (2026-10-08 D2).
+      assert authority.purpose == :gateway_agent_lifecycle
       # One operation only: closed once the request completed.
       assert {:error, _} = Security.signing_authority_principal(authority)
     end
@@ -220,7 +235,9 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest do
       refused = request(agent, "POST", "/api/chat/agents", body)
       assert refused.status == 403
       assert Jason.decode!(refused.resp_body)["error"] =~ "capability_mutation_unauthorized"
-      assert_received {:lifecycle_authority, :create, nil}
+      # The GenServer fails closed at stored-key proof/open before the facade
+      # runs. A non-human therefore never reaches authorize_create.
+      refute_received {:lifecycle_authority, :create, _}
 
       keyless = registered_human!()
 
