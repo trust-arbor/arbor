@@ -211,9 +211,35 @@ module AppliedLearningReview
         update_fields(item, row, %w[class scope])
       when "add"
         add(row, today)
+      when "move"
+        move(row)
       else
         raise Error, "unsupported action: #{row["action"]}"
       end
+    end
+
+    # Relocate a live entry, byte-for-byte, to another existing live corpus file
+    # (used to split an oversized topic file). The digest is unchanged.
+    def move(row)
+      item = live_entry(row.fetch("slug"))
+      destination = row.fetch("destination")
+      raise Error, "move destination must be a live skill file" unless
+        destination.match?(%r{\A\.claude/skills/(?:[^/]+/)*[^/]+\.md\z})
+      raise Error, "move destination cannot be the archive" if destination.start_with?(inventory.fetch("archive_root") + "/")
+      raise Error, "#{item["slug"]}: refusing to move an always-loaded entry" if item["always_loaded"]
+      raise Error, "#{item["slug"]}: already in #{destination}" if item["destination"] == destination
+      raise Error, "move destination must already exist: #{destination}" unless
+        @files.key?(destination) || File.exist?(path(destination))
+      block_text = block(item).fetch(:block).rstrip
+      replace_block(item, nil)
+      if row["after"]
+        previous = live_entry(row["after"])
+        raise Error, "after entry must belong to destination" unless previous["destination"] == destination
+        replace_block(previous, block(previous).fetch(:block).rstrip + "\n\n" + block_text)
+      else
+        @files[destination] = read(destination).rstrip + "\n\n" + block_text + "\n"
+      end
+      item["destination"] = destination
     end
 
     def add(row, today)
@@ -539,7 +565,7 @@ module AppliedLearningReview
       external = EXTERNAL.any? { |prefix| anchor == prefix || anchor.start_with?(prefix + ".") || anchor.start_with?(prefix + "/") }
       found = if external
         true
-      elsif anchor.match?(%r{\A(?:apps|config|clients|bin|docs|\.claude|scripts)/})
+      elsif anchor.match?(%r{\A(?:apps|config|clients|bin|docs|\.claude|scripts|packages|images)/})
         # Scope anchors are evidence, not write destinations: normalize benign
         # parent segments and treat escaping/example paths as misses.
         full = File.expand_path(anchor, corpus.root)
