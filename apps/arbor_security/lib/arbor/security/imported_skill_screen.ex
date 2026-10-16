@@ -49,9 +49,11 @@ defmodule Arbor.Security.ImportedSkillScreen do
   end
 
   defp decoded_base64_views(text) do
-    ~r/[A-Za-z0-9+\-\/_]{#{@min_blob_bytes},}={0,2}/
-    |> Regex.scan(text)
-    |> List.flatten()
+    # Standard base64 may include `/`; url-safe uses `-` `_`. Scan both.
+    # Path-like tokens are still attempted; failed decode is not a view.
+    (scan_blobs(text, ~r/[A-Za-z0-9+\/]{#{@min_blob_bytes},}={0,2}/) ++
+       scan_blobs(text, ~r/[A-Za-z0-9_-]{#{@min_blob_bytes},}={0,2}/))
+    |> Enum.uniq()
     |> Enum.flat_map(&decode_base64_blob/1)
   end
 
@@ -94,16 +96,22 @@ defmodule Arbor.Security.ImportedSkillScreen do
   defp usable_decoded(_), do: []
 
   defp reject_undecodable_dense_blobs(text) do
-    base64_blobs = Regex.scan(~r/[A-Za-z0-9+\-\/_]{#{@min_blob_bytes},}={0,2}/, text)
-    hex_blobs = Regex.scan(~r/\b[0-9a-fA-F]{#{@min_blob_bytes},}\b/, text)
+    # Do not treat filesystem paths or kebab-case names as base64.
+    # `/` and `-` are in the (url-safe) alphabets, so `/tmp/.../SKILL.md`
+    # and `arbor-skill-import-<hex>` are 24+ "blobs" that will not decode.
+    # Opaque tokens without those separators (31 A's, padded ciphertext)
+    # still fail closed.
+    base64_blobs = scan_blobs(text, ~r/[A-Za-z0-9+]{#{@min_blob_bytes},}={0,2}/)
+
+    hex_blobs = scan_blobs(text, ~r/\b[0-9a-fA-F]{#{@min_blob_bytes},}\b/)
 
     undecodable_base64? =
-      Enum.any?(List.flatten(base64_blobs), fn blob ->
+      Enum.any?(base64_blobs, fn blob ->
         byte_size(blob) <= @max_blob_bytes and not decodable_base64?(blob)
       end)
 
     undecodable_hex? =
-      Enum.any?(List.flatten(hex_blobs), fn blob ->
+      Enum.any?(hex_blobs, fn blob ->
         byte_size(blob) <= @max_blob_bytes and not decodable_hex?(blob)
       end)
 
@@ -112,6 +120,12 @@ defmodule Arbor.Security.ImportedSkillScreen do
     else
       :ok
     end
+  end
+
+  defp scan_blobs(text, regex) do
+    regex
+    |> Regex.scan(text)
+    |> List.flatten()
   end
 
   defp decodable_base64?(blob) do

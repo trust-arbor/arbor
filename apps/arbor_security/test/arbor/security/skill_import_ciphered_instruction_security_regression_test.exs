@@ -70,6 +70,30 @@ defmodule Arbor.Security.SkillImportCipheredInstructionSecurityRegressionTest do
              })
   end
 
+  test "admits a SkillImporter inspect payload with path, hash, and source_bytes" do
+    hash = Base.encode16(:crypto.hash(:sha256, "clean"), case: :lower)
+    tmp = Path.join(System.tmp_dir!(), "arbor-skill-import-#{hash}")
+
+    skill = %{
+      name: "harmless-skill",
+      description: "test skill",
+      body: "A clean imported skill with no metadata URL.",
+      path: Path.join(tmp, "harmless-skill/SKILL.md"),
+      source_bytes: "---\nname: harmless-skill\n---\n\nA clean imported skill.\n",
+      content_hash: hash,
+      taint: :untrusted
+    }
+
+    payload =
+      inspect(skill, limit: :infinity, printable_limit: :infinity, width: 120)
+
+    assert :ok =
+             Security.validate_imported_skill(%{
+               name: "harmless-skill",
+               body: payload
+             })
+  end
+
   defp rot13(text) when is_binary(text) do
     for <<c <- text>>, into: "" do
       cond do
