@@ -121,7 +121,7 @@ defmodule Arbor.Memory.IndexRehydrationTest do
               id: ^entry_id,
               content: ^content,
               model_id: "legacy:unspecified",
-              provenance_status: :verified
+              provenance_status: :legacy_unlabeled
             }} = Index.get(pid, entry_id)
 
     assert {:ok, [%{id: ^entry_id, content: ^content} | _]} =

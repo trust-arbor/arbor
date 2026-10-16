@@ -2,6 +2,7 @@ defmodule Arbor.Memory.Index.Input do
   @moduledoc false
 
   alias Arbor.Contracts.Persistence.{VectorOperation, VectorRecord}
+  alias Arbor.Memory.EmbeddingTaint
 
   @max_vector_items 4_096
   @max_recall_limit 1_000
@@ -15,11 +16,12 @@ defmodule Arbor.Memory.Index.Input do
     with :ok <- validate_content(content),
          {:ok, metadata_bytes} <- validate_metadata(metadata),
          {:ok, opts, embedding_bytes} <-
-           validate_embedding_opts(opts, [:embedding, :type, :source]),
+           validate_embedding_opts(opts, [:embedding, :type, :source, :taint]),
+         {:ok, taint} <- EmbeddingTaint.from_opts(Keyword.take(opts, [:taint])),
          true <-
            byte_size(content) + metadata_bytes + embedding_bytes + @transport_overhead_bytes <=
              VectorOperation.limits().max_batch_bytes do
-      {:ok, {content, metadata, opts}}
+      {:ok, {content, metadata, Keyword.put(opts, :taint, taint)}}
     else
       false -> invalid(:invalid_content)
       {:error, _reason} = error -> error
@@ -29,13 +31,14 @@ defmodule Arbor.Memory.Index.Input do
 
   @spec batch(term(), term()) :: {:ok, {[{String.t(), map()}], keyword()}} | {:error, term()}
   def batch(items, opts) do
-    with {:ok, opts, embedding_bytes} <- validate_embedding_opts(opts, [:embedding]),
+    with {:ok, opts, embedding_bytes} <- validate_embedding_opts(opts, [:embedding, :taint]),
+         {:ok, taint} <- EmbeddingTaint.from_opts(Keyword.take(opts, [:taint])),
          {:ok, items, count, payload_bytes} <- validate_batch_items(items),
          true <- count > 0 and count <= VectorOperation.limits().max_batch_operations,
          true <-
            payload_bytes + count * (embedding_bytes + @transport_overhead_bytes) <=
              VectorOperation.limits().max_batch_bytes do
-      {:ok, {items, opts}}
+      {:ok, {items, Keyword.put(opts, :taint, taint)}}
     else
       false -> {:error, :invalid_batch}
       {:error, _reason} = error -> error

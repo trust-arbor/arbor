@@ -10,11 +10,11 @@ defmodule Arbor.Memory.IndexOps do
   """
 
   alias Arbor.Contracts.Persistence.{VectorMatch, VectorRecord}
-  alias Arbor.Contracts.Security.TaintEnvelope
 
   alias Arbor.Memory.{
     Embedding,
     EmbeddingEvidence,
+    EmbeddingTaint,
     Index,
     IndexSupervisor,
     RecallAdmissionCore,
@@ -37,6 +37,7 @@ defmodule Arbor.Memory.IndexOps do
   - `:type` - Category type for the entry (atom)
   - `:source` - Source of the content
   - `:embedding` - Pre-computed embedding (skips embedding call)
+  - `:taint` - Source-owned taint label; omitted labels remain untrusted/unverified
 
   ## Examples
 
@@ -72,6 +73,8 @@ defmodule Arbor.Memory.IndexOps do
   Recall content similar to query.
 
   Performs semantic search in the agent's memory index.
+  Results carry `:taint` and `:provenance_status`; callers must preserve these
+  labels when incorporating recalled content into a prompt or action.
 
   ## Options
 
@@ -105,7 +108,8 @@ defmodule Arbor.Memory.IndexOps do
   end
 
   @doc """
-  Index multiple items in a batch.
+  Index multiple items in a batch. The source-owned `:taint` option applies to
+  every item; payload metadata cannot supply per-item authoritative labels.
 
   ## Examples
 
@@ -144,12 +148,14 @@ defmodule Arbor.Memory.IndexOps do
 
   Bypasses the in-memory index. Owner generates a fresh source_key; caller
   metadata `:id` is never authority. Precomputed vectors bind
-  `legacy:unspecified` model evidence and missing-label taint.
+  `legacy:unspecified` model evidence. The optional `:taint` producer label is
+  preserved; omitted labels remain untrusted/unverified. Metadata is body data.
   """
-  @spec store_embedding(String.t(), String.t(), [float()], map()) ::
+  @spec store_embedding(String.t(), String.t(), [float()], map(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
-  def store_embedding(agent_id, content, embedding, metadata \\ %{}) do
-    with {:ok, evidence} <- EmbeddingEvidence.from_precomputed(embedding),
+  def store_embedding(agent_id, content, embedding, metadata \\ %{}, opts \\ []) do
+    with {:ok, taint} <- EmbeddingTaint.from_opts(opts),
+         {:ok, evidence} <- EmbeddingEvidence.from_precomputed(embedding),
          entry_id when is_binary(entry_id) <- generate_owner_entry_id(),
          closed <-
            StrictEmbeddingInput.index_insert(%{
@@ -159,7 +165,7 @@ defmodule Arbor.Memory.IndexOps do
              vector: evidence.vector,
              metadata: sanitize_store_metadata(metadata),
              model_evidence: evidence.model_evidence,
-             taint: TaintEnvelope.missing_fallback()
+             taint: taint
            }),
          seam <- StrictVectorSeam.resolve(),
          {:ok, operation, _view} <- safe_vector_call(fn -> seam.encode_operation(closed) end),
@@ -420,14 +426,16 @@ defmodule Arbor.Memory.IndexOps do
               {:halt, {:error, :malformed_persistence_result}}
 
             true ->
-              result = %{
-                id: source_key,
-                content: Map.get(body, "content", ""),
-                similarity: sim,
-                metadata: Map.get(body, "metadata", %{}),
-                model_id: model_id,
-                provenance_status: provenance_status
-              }
+              result =
+                %{
+                  id: source_key,
+                  content: Map.get(body, "content", ""),
+                  similarity: sim,
+                  metadata: Map.get(body, "metadata", %{}),
+                  model_id: model_id,
+                  provenance_status: provenance_status
+                }
+                |> Map.merge(EmbeddingTaint.fields(field(view, :taint), provenance_status))
 
               # Every row still passes the strict checks above, including rows
               # omitted from the reply. Later malformed rows remain errors.

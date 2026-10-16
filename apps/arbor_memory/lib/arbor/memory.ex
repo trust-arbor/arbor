@@ -189,7 +189,10 @@ defmodule Arbor.Memory do
   defdelegate recall(agent_id, query, opts \\ []), to: IndexOps
   defdelegate batch_index(agent_id, items, opts \\ []), to: IndexOps
   defdelegate index_stats(agent_id), to: IndexOps
-  defdelegate store_embedding(agent_id, content, embedding, metadata \\ %{}), to: IndexOps
+
+  defdelegate store_embedding(agent_id, content, embedding, metadata \\ %{}, opts \\ []),
+    to: IndexOps
+
   defdelegate search_embeddings(agent_id, query_embedding, opts \\ []), to: IndexOps
   defdelegate embedding_stats(agent_id), to: IndexOps
   defdelegate warm_index_cache(agent_id, opts \\ []), to: IndexOps

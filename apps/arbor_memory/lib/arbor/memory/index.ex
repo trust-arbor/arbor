@@ -57,6 +57,7 @@ defmodule Arbor.Memory.Index do
   alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Memory.EmbeddingEvidence
+  alias Arbor.Memory.EmbeddingTaint
   alias Arbor.Memory.Index.Input
   alias Arbor.Memory.RecallAdmissionCore
   alias Arbor.Memory.StrictEmbeddingInput
@@ -90,7 +91,9 @@ defmodule Arbor.Memory.Index do
           content: String.t(),
           similarity: float(),
           metadata: map(),
-          indexed_at: DateTime.t()
+          indexed_at: DateTime.t(),
+          taint: Arbor.Contracts.Security.Taint.t(),
+          provenance_status: :verified | :legacy_unlabeled | :invalid_durable_provenance
         }
 
   @default_max_entries 10_000
@@ -148,6 +151,7 @@ defmodule Arbor.Memory.Index do
   - `:type` - Category type for the entry (atom)
   - `:source` - Source of the content
   - `:embedding` - Pre-computed embedding (skips embedding call)
+  - `:taint` - Source-owned taint label; omitted labels remain untrusted/unverified
 
   ## Examples
 
@@ -1247,7 +1251,7 @@ defmodule Arbor.Memory.Index do
       encoding: Map.get(prepared, :encoding, VectorRecord.encoding()),
       category: StrictEmbeddingInput.category_for_type(type),
       taint: Map.get(prepared, :taint, TaintEnvelope.missing_fallback()),
-      provenance_status: Map.get(prepared, :provenance_status, :verified),
+      provenance_status: Map.get(prepared, :provenance_status, :legacy_unlabeled),
       model_evidence: Map.get(prepared, :model_evidence, :absent)
     }
   end
@@ -1738,6 +1742,9 @@ defmodule Arbor.Memory.Index do
       metadata: metadata,
       indexed_at: view_field(view, :indexed_at) || DateTime.utc_now()
     }
+    |> Map.merge(
+      EmbeddingTaint.fields(view_field(view, :taint), view_field(view, :provenance_status))
+    )
   end
 
   defp atomize_metadata_keys(metadata) do
@@ -1798,6 +1805,9 @@ defmodule Arbor.Memory.Index do
       metadata: entry.metadata,
       indexed_at: entry.indexed_at
     }
+    |> Map.merge(
+      EmbeddingTaint.fields(Map.get(entry, :taint), Map.get(entry, :provenance_status))
+    )
   end
 
   defp do_batch_index(preflighted, state) do
@@ -2627,22 +2637,22 @@ defmodule Arbor.Memory.Index do
              {:ok, vector} <- VectorRecord.normalize_vector(vector) do
           now = DateTime.utc_now()
 
-          entry = %{
-            id: source_key,
-            content: content,
-            embedding: vector,
-            metadata: normalize_metadata(atomize_metadata_keys(metadata)),
-            indexed_at: now,
-            accessed_at: now,
-            access_count: 0,
-            model_id: model_id,
-            dimensions: dimensions,
-            encoding: encoding,
-            category: view_field(view, :category),
-            taint: view_field(view, :taint),
-            provenance_status: provenance_status,
-            model_evidence: {:model_id, model_id}
-          }
+          entry =
+            %{
+              id: source_key,
+              content: content,
+              embedding: vector,
+              metadata: normalize_metadata(atomize_metadata_keys(metadata)),
+              indexed_at: now,
+              accessed_at: now,
+              access_count: 0,
+              model_id: model_id,
+              dimensions: dimensions,
+              encoding: encoding,
+              category: view_field(view, :category),
+              model_evidence: {:model_id, model_id}
+            }
+            |> Map.merge(EmbeddingTaint.fields(view_field(view, :taint), provenance_status))
 
           # Preserve restrictive evidence from before metadata key normalization.
           # This cache-local marker is never serialized or used as owner proof.
@@ -2847,10 +2857,9 @@ defmodule Arbor.Memory.Index do
          model_evidence: evidence.model_evidence,
          model_id: evidence.model_id,
          dimensions: VectorRecord.dimensions(),
-         encoding: VectorRecord.encoding(),
-         taint: TaintEnvelope.missing_fallback(),
-         provenance_status: :verified
-       }}
+         encoding: VectorRecord.encoding()
+       }
+       |> Map.merge(EmbeddingTaint.fields(Keyword.fetch!(opts, :taint)))}
     end
   rescue
     _error -> {:error, :operation_failed}
@@ -2869,20 +2878,20 @@ defmodule Arbor.Memory.Index do
            {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
            {:ok, normalized_embedding, normalized_metadata, evidence} <-
              preflight_entry(backend, evidence, metadata) do
-        prepared = %{
-          entry_id: entry_id,
-          now: now,
-          content: content,
-          embedding: normalized_embedding,
-          metadata: normalized_metadata,
-          position: position,
-          model_evidence: evidence.model_evidence,
-          model_id: evidence.model_id,
-          dimensions: VectorRecord.dimensions(),
-          encoding: VectorRecord.encoding(),
-          taint: TaintEnvelope.missing_fallback(),
-          provenance_status: :verified
-        }
+        prepared =
+          %{
+            entry_id: entry_id,
+            now: now,
+            content: content,
+            embedding: normalized_embedding,
+            metadata: normalized_metadata,
+            position: position,
+            model_evidence: evidence.model_evidence,
+            model_id: evidence.model_id,
+            dimensions: VectorRecord.dimensions(),
+            encoding: VectorRecord.encoding()
+          }
+          |> Map.merge(EmbeddingTaint.fields(Keyword.fetch!(opts, :taint)))
 
         {:cont, {:ok, [prepared | acc]}}
       else

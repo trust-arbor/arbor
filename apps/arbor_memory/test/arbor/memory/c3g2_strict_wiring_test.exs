@@ -200,7 +200,7 @@ defmodule Arbor.Memory.C3G2StrictWiringTest do
       assert e1.content == e2.content
       assert e1.id != e2.id
       assert e1.model_id == "legacy:unspecified"
-      assert e1.provenance_status == :verified
+      assert e1.provenance_status == :legacy_unlabeled
     end
   end
 
