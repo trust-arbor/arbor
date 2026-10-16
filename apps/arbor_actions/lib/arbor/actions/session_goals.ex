@@ -18,6 +18,10 @@ defmodule Arbor.Actions.SessionGoals do
 
   require Logger
 
+  # These graph syscalls share SessionMemory's principal-binding boundary:
+  # node params may select only the executor's authorized agent. Trusted
+  # direct in-VM calls without a bound principal retain the params fallback.
+
   # ============================================================================
   # UpdateGoals
   # ============================================================================
@@ -49,8 +53,8 @@ defmodule Arbor.Actions.SessionGoals do
       ]
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -187,8 +191,8 @@ defmodule Arbor.Actions.SessionGoals do
       ]
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -303,8 +307,8 @@ defmodule Arbor.Actions.SessionGoals do
       ]
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -401,8 +405,8 @@ defmodule Arbor.Actions.SessionGoals do
     @categories ~w(capability skill personality trait value preference)a
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"
@@ -533,8 +537,8 @@ defmodule Arbor.Actions.SessionGoals do
     @default_max_age_ms :timer.minutes(30)
 
     @impl true
-    def run(params, _context) do
-      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+    def run(params, context) do
+      agent_id = Arbor.Actions.SessionMemory.bind_agent_id!(params, context)
 
       unless agent_id do
         raise ArgumentError, "agent_id is required"

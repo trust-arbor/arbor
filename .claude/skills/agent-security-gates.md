@@ -1195,6 +1195,10 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 - **`session_memory.*` targets are the bound principal (F-009).** A params `agent_id`
   that differs from `context[:agent_id]` raises `principal_mismatch`. Pipelines that
   passed `session.agent_id` through still work (same id).
+  This also applies to all five `session_goals.*` syscalls (2026-10-15): bind
+  before any goal, intent, proposal or identity bridge. Pipeline-internal
+  classification and an execution capability do not authorize another agent's
+  mind state. Direct trusted in-VM calls retain the accepted params fallback.
 - **`trust_apply_profile` cannot target the caller (F-005)** and `arbor://trust/write`
   / `auto_promote` are always-locked (never unattended, F-015). The InterviewAgent
   flow must run as the operator (session token) when it targets itself.
