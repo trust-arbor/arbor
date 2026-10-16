@@ -832,6 +832,80 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     Application.put_env(:arbor_security, :egress_gate_enforcing, false)
   end
 
+  test "security regression: hostile non-tool Session compute cannot use an external disclosure",
+       %{agent_id: agent_id, human_id: human_id, call_counter: counter} do
+    # Exercise the production dispatch, TurnEgress, Trust and Security path.
+    # Only the final provider adapter is replaced, so the successful control
+    # proves the same route and valid disclosure can actually reach provider I/O.
+    Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+
+    route = external_route()
+    state = %{agent_id: agent_id, session_id: "session_hostile_non_tool"}
+    {bound, cap_id} = issue_disclosure!(state, authority!(human_id), route)
+    actor_authority = Process.get(@actor_authority_key)
+
+    on_exit(fn ->
+      TurnEgress.safe_revoke_disclosure(cap_id, actor_authority)
+    end)
+
+    authorizer =
+      TurnEgress.build_taint_authorizer(%{
+        fence: TurnEgress.new_fence(),
+        frozen_route: route,
+        frozen_tier: @external_tier,
+        agent_id: agent_id,
+        session_id: state.session_id,
+        turn_id: bound.turn_id,
+        human_id: human_id,
+        disclosure_capability_id: cap_id
+      })
+
+    untrusted = %Arbor.Contracts.Security.Taint{level: :untrusted}
+    hostile = %Arbor.Contracts.Security.Taint{level: :hostile}
+    assert :allow = authorizer.(route, untrusted)
+
+    assert {:error, {:egress_blocked, :external_provider, :hostile}} =
+             authorizer.(route, hostile)
+
+    context =
+      Arbor.Orchestrator.Engine.Context.new(
+        %{
+          "session.agent_id" => agent_id,
+          "session.llm_provider" => route.provider,
+          "session.llm_model" => route.model,
+          "session.llm_runtime" => :arbor,
+          "session.input" => "content carrying the recorded provenance"
+        },
+        taint: %{"session.input" => untrusted}
+      )
+
+    node = %{
+      id: "hostile_non_tool",
+      attrs: %{"simulate" => "false", "prompt_context_key" => "session.input"}
+    }
+
+    opts = [
+      llm_client: recording_client(),
+      frozen_egress_route: route,
+      turn_egress_authorizer: authorizer
+    ]
+
+    control = LlmHandler.execute(node, context, %{attrs: %{}}, opts)
+    assert control.status == :success
+    assert :atomics.get(counter, 1) == 1
+    assert_received {:external_complete, _}
+
+    hostile_context =
+      Arbor.Orchestrator.Engine.Context.record_output_taint(context, ["session.input"], hostile)
+
+    outcome = LlmHandler.execute(node, hostile_context, %{attrs: %{}}, opts)
+    assert :atomics.get(counter, 1) == 1
+    refute_received {:external_complete, _}
+    assert outcome.status == :fail
+    assert outcome.failure_reason =~ "egress_blocked"
+  end
+
   test "VOICE-17 security regression: ToolLoop multi-wave exact route with disclosure",
        %{agent_id: agent_id, human_id: human_id} do
     fence = TurnEgress.new_fence()

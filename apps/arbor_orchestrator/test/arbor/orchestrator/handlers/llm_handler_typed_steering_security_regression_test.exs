@@ -257,9 +257,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     assert length(collect_tag(:handler_adapter_attempt)) == 1
   end
 
-  test "security regression: arity-2 initial and direct route admission use exact conservative taint" do
+  test "security regression: initial admission is conservative and direct dispatch retains context taint" do
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingRouteDispatcher)
     parent = self()
+    input_taint = %Taint{level: :hostile, source: "direct-context", chain: ["direct-context"]}
 
     turn_authorizer = fn route, %Taint{} = taint ->
       send(parent, {:direct_turn_authorized, route, taint})
@@ -269,18 +270,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     outcome =
       LlmHandler.execute(
         direct_node(),
-        context(:direct, []),
+        Context.record_output_taint(context(:direct, []), ["session.input"], input_taint),
         graph(),
         base_opts(turn_authorizer)
       )
 
     assert outcome.status == :success
-    calls = collect_tag(:direct_turn_authorized)
-    assert length(calls) == 2
 
-    Enum.each(calls, fn {:direct_turn_authorized, _route, taint} ->
-      assert taint == conservative_untrusted_taint()
-    end)
+    assert [
+             {:direct_turn_authorized, _frozen_route, initial_taint},
+             {:direct_turn_authorized, _dispatch_route, dispatch_taint}
+           ] = collect_tag(:direct_turn_authorized)
+
+    assert initial_taint == conservative_untrusted_taint()
+    assert dispatch_taint == input_taint
 
     assert_receive {:direct_route_authorization, _route, :allow, dispatch_opts}
     refute Keyword.has_key?(dispatch_opts, :turn_egress_authorizer)
