@@ -595,10 +595,12 @@ defmodule Arbor.Shell.TrustedPath do
     probe_euid_attempt(System.tmp_dir!(), @euid_probe_retries)
   end
 
-  # POSIX/NFSv4/rich ACLs can grant extra principals without dirtying the
-  # traditional group/other write bits TrustedPath already checks (default
-  # ACLs on 0700 dirs; named-user access ACLs on 0755). Any ACL xattr on the
-  # target or an ancestor fails closed. Probe our launcher, never the target.
+  # POSIX/NFSv4/rich ACLs and Darwin ACEs can grant extra principals write
+  # without dirtying traditional group/other bits (default ACLs on 0700 dirs).
+  # Only GRANT write/append/add_file/delete_child to a principal other than
+  # the owner or root is untrusting. Deny-only ACEs (macOS `group:everyone
+  # deny delete` on ~/Desktop) stay trusted. Probe our launcher, never the
+  # target. Unparsed nfs4/richacl xattrs still fail closed.
   defp require_no_acl(path) when is_binary(path) do
     with :ok <- validate_absolute_path(path),
          {:ok, launcher} <- acl_launcher_path() do
