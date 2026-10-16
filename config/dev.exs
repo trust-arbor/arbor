@@ -122,8 +122,9 @@ config :arbor_memory,
   mutation_admission_backend: Arbor.Persistence.QueryableStore.Postgres,
   mutation_admission_backend_opts: [repo: Arbor.Persistence.Repo]
 
-# Local-dev dashboard: no OIDC required. A stable operator session lets
-# Settings → External Agents register. Auto-save private keys only here.
+# Local-dev dashboard: no OIDC required for viewing. The stable operator
+# identity is unproven; external-agent registration requires a real session.
+# Auto-save private keys only here after authorized registration.
 config :arbor_dashboard,
   local_dev_operator: true,
   auto_save_external_agent_keys: true

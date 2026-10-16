@@ -10,6 +10,9 @@ defmodule Arbor.Dashboard.Config do
   def session_auth_api,
     do: Application.get_env(:arbor_dashboard, :session_auth_api, Arbor.Security)
 
+  def mutation_security_api,
+    do: Application.get_env(:arbor_dashboard, :mutation_security_api, Arbor.Security)
+
   def voice_api, do: Application.get_env(:arbor_dashboard, :voice_api, Arbor.Voice)
   def multimedia_api, do: Application.get_env(:arbor_dashboard, :multimedia_api, Arbor.Multimedia)
 

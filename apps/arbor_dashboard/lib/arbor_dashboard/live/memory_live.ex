@@ -116,22 +116,27 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     end
   end
 
-  def handle_event("accept-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.accept_proposal(agent_id, proposal_id) end)
-    {:noreply, load_tab_data(socket, "proposals", agent_id)}
-  end
+  def handle_event(event, %{"id" => proposal_id}, socket)
+      when event in ["accept-proposal", "reject-proposal", "defer-proposal"] do
+    with agent_id when is_binary(agent_id) and agent_id != "" <- socket.assigns[:agent_id],
+         :ok <-
+           Arbor.Dashboard.MutationAuth.authorize(
+             socket,
+             "arbor://memory/write/#{agent_id}",
+             :write
+           ) do
+      safe_call(fn ->
+        case event do
+          "accept-proposal" -> Arbor.Memory.accept_proposal(agent_id, proposal_id)
+          "reject-proposal" -> Arbor.Memory.reject_proposal(agent_id, proposal_id)
+          "defer-proposal" -> Arbor.Memory.defer_proposal(agent_id, proposal_id)
+        end
+      end)
 
-  def handle_event("reject-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.reject_proposal(agent_id, proposal_id) end)
-    {:noreply, load_tab_data(socket, "proposals", agent_id)}
-  end
-
-  def handle_event("defer-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.defer_proposal(agent_id, proposal_id) end)
-    {:noreply, load_tab_data(socket, "proposals", agent_id)}
+      {:noreply, load_tab_data(socket, "proposals", agent_id)}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "Memory change was refused.")}
+    end
   end
 
   # ── Info Handlers ─────────────────────────────────────────────────

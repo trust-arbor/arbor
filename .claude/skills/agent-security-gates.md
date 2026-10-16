@@ -1018,6 +1018,11 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   directory or a root. Worked examples:
   `shell_filesystem_containment_security_regression_test.exs` (arbor_actions)
   and the Shell cases in `agent_endpoint_test.exs` (arbor_gateway).
+  Test fixture roots need the same care: `.claude` is protected at every path
+  segment, so a worktree-private `TMPDIR` beneath `.claude/worktrees` still
+  produces `:agent_filesystem_protected`. Have the shared harness provision a
+  canonical temp root outside protected segments; do not relax containment to
+  clear test failures (observed in the 2026-10-15 security worktrees).
 
 ## 33. Security-state mutations need caller-owned authority (2026-10-06)
 
@@ -1205,6 +1210,17 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 - **The dashboard binds loopback (F-001).** `ARBOR_DASHBOARD_BIND_IP=0.0.0.0` is the
   explicit LAN opt-in; set `DASHBOARD_USER`/`DASHBOARD_PASS` (now actually mounted,
   F-012) before doing so.
+- **Dashboard mutations require the browser subject's real session proof
+  (2026-10-15, F-020).** Proposal accept/reject/defer authorizes
+  `arbor://memory/write/<target>`; channel creation authorizes
+  `arbor://comms/channel/create` and records the authenticated owner. Only
+  `{:ok, :authorized}` admits the mutation; approval, missing proof and Security
+  failures refuse it. External-agent registration also requires a session token;
+  `local_dev_operator?` never supplies `identity_verified`. **Action:** use a
+  proved session with the required resource scope and explicit capability.
+  The existing human-session scope list excludes memory, so the proposal
+  mutation path remains closed pending an explicit scope/policy decision.
+  Do not mint proof or grant capabilities from a page visit to clear a refusal.
 - **Sensitivity now sees the prompt (F-006).** A turn whose prompt carries a detected
   secret classifies `:restricted`; the router may send it local or refuse the cloud
   provider. That is the consent promise working — don't "fix" it by removing the key.

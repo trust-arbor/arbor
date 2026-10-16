@@ -77,11 +77,11 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponentTest do
       assert updated.assigns.external_agents_error =~ "Sign in"
     end
 
-    test "security regression: an authenticated viewer cannot register an external agent" do
+    test "security regression: a viewer with invalid session proof cannot register an external agent" do
       socket =
         %Socket{}
         |> Phoenix.Component.assign(:current_agent_id, "human_unprivileged_viewer")
-        |> Phoenix.Component.assign(:session_token, nil)
+        |> Phoenix.Component.assign(:session_token, "invalid-session-proof")
         |> Phoenix.Component.assign(:local_dev_operator?, false)
         |> Phoenix.Component.assign(:external_agents_error, nil)
         |> Phoenix.Component.assign(:just_registered, nil)

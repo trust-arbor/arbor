@@ -211,26 +211,24 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp do_register(display_name, agent_type, socket) do
-    with :ok <- ExternalAgentsCore.require_principal(socket.assigns[:current_agent_id]) do
+    with :ok <- ExternalAgentsCore.require_principal(socket.assigns[:current_agent_id]),
+         {:ok, auth_opts} <- registration_auth_opts(socket) do
       Arbor.Agent.register_external_agent(
         socket.assigns.current_agent_id,
         display_name,
         agent_type,
-        registration_auth_opts(socket)
+        auth_opts
       )
     end
   end
 
   defp registration_auth_opts(socket) do
-    cond do
-      is_binary(socket.assigns[:session_token]) and socket.assigns.session_token != "" ->
-        [session_token: socket.assigns.session_token]
+    case socket.assigns[:session_token] do
+      token when is_binary(token) and token != "" ->
+        {:ok, [session_token: token]}
 
-      socket.assigns[:local_dev_operator?] == true ->
-        [identity_verified: true]
-
-      true ->
-        []
+      _ ->
+        {:error, :unauthenticated}
     end
   end
 

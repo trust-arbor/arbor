@@ -90,7 +90,7 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
   end
 
   def handle_event("create-channel", %{"name" => name, "type" => type}, socket) do
-    case safe_create_channel(name, type) do
+    case safe_create_channel(socket, name, type) do
       {:ok, _channel_id} ->
         channels = safe_load_channels(socket.assigns.name_filter, socket.assigns.type_filter)
         {total, public_count} = count_stats(channels)
@@ -109,7 +109,7 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
         {:noreply, socket}
 
       {:error, _reason} ->
-        {:noreply, socket}
+        {:noreply, put_flash(socket, :error, "Channel creation was refused.")}
     end
   end
 
@@ -422,9 +422,20 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
     :exit, _ -> nil
   end
 
-  defp safe_create_channel(name, type) do
-    type_atom = String.to_existing_atom(type)
-    Arbor.Comms.create_channel(name, type: type_atom)
+  defp safe_create_channel(socket, name, type) do
+    with :ok <-
+           Arbor.Dashboard.MutationAuth.authorize(socket, "arbor://comms/channel/create", :create) do
+      type_atom = String.to_existing_atom(type)
+      owner = socket.assigns.current_agent_id
+
+      Arbor.Comms.create_channel(name,
+        type: type_atom,
+        owner_id: owner,
+        members: [
+          %{id: owner, name: socket.assigns[:current_user_display_name] || owner, type: :human}
+        ]
+      )
+    end
   rescue
     _ -> {:error, :create_failed}
   catch
