@@ -26,7 +26,7 @@ defmodule Arbor.Historian.StreamContent do
 
   @spec delete(String.t(), keyword()) :: delete_result()
   def delete(stream_id, opts \\ []) do
-    with {:ok, %{timeout_ms: timeout_ms}} <- Core.admit(stream_id, opts),
+    with {:ok, %{timeout_ms: timeout_ms}} <- Core.admit_delete(stream_id, opts),
          {:ok, durable} <- Config.durable_event_log_target() do
       deadline_mono = System.monotonic_time(:millisecond) + timeout_ms
       run_delete(stream_id, durable, deadline_mono, :none_proven_absent)

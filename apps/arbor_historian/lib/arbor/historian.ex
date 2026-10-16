@@ -826,6 +826,10 @@ defmodule Arbor.Historian do
   reminted). Returns `:ok` only after durable absence is proven and the hot
   projection acknowledges exact-stream eviction. Partial or uncertain outcomes
   report `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}`.
+  Security authority-mutation and invocation audit streams are append-only here:
+  deleting `security:authority_mutation:` or `security:invocation:` streams returns
+  `{:error, :delete_not_supported}` before contacting either store. Read-only
+  absence checks remain supported.
   """
   @spec delete_stream_content(String.t(), keyword()) ::
           Arbor.Contracts.API.Historian.stream_content_delete_result()

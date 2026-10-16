@@ -48,6 +48,19 @@ defmodule Arbor.Historian.StreamContent.Core do
     end
   end
 
+  @spec admit_delete(term(), term()) ::
+          {:ok, %{timeout_ms: pos_integer()}}
+          | {:error, :invalid_stream_id | :invalid_precondition | :delete_not_supported}
+  def admit_delete(stream_id, opts) do
+    with {:ok, admitted} <- admit(stream_id, opts) do
+      if audit_stream?(stream_id), do: {:error, :delete_not_supported}, else: {:ok, admitted}
+    end
+  end
+
+  defp audit_stream?("security:authority_mutation:" <> _), do: true
+  defp audit_stream?("security:invocation:" <> _), do: true
+  defp audit_stream?(_stream_id), do: false
+
   @spec remaining_ms(integer(), integer()) :: {:ok, pos_integer()} | :exhausted
   def remaining_ms(deadline_mono, now_mono)
       when is_integer(deadline_mono) and is_integer(now_mono) do
