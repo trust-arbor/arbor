@@ -27,9 +27,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
 
   @schema_version 1
   @max_records 256
-  # Operational default remains `@max_records`. Decode/load admits every live
-  # retained record up to this DoS ceiling so a hard 256 cap cannot drop
-  # evidence that still needs retention. Compaction rotates expired rows.
+  # Create-admission default remains `@max_records`. The durable journal
+  # persists and reloads every live retained record up to this DoS ceiling.
+  # Compaction drops expired rows only — live overflow is never evicted to
+  # enforce the 256 create target.
   @inventory_record_ceiling 8_192
   @max_string_bytes 4_096
   @max_workspace_id_bytes 128

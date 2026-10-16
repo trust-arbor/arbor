@@ -52,11 +52,13 @@ defmodule Arbor.Actions.Config do
   def workspace_retention_max_ttl_ms, do: @workspace_retention_max_ms
 
   @doc """
-  Operator-configurable write-side retained-record limit.
+  Operator-configurable write-side *create-admission* limit.
 
-  Defaults to `WorkspaceRetentionJournalCore.max_records/0`. Decode/load uses
-  the higher inventory ceiling so existing live evidence is not dropped. The
-  configured write limit cannot exceed that ceiling.
+  Defaults to `WorkspaceRetentionJournalCore.max_records/0` (256). This refuses
+  a *new* retained marker when the live journal is already at the operator
+  target. It is not a load-time drop: the durable store persists and reloads
+  every live record up to `inventory_record_ceiling/0`. Compaction drops only
+  expired rows. The configured write limit cannot exceed that ceiling.
   """
   @spec workspace_retention_max_records(keyword()) :: pos_integer()
   def workspace_retention_max_records(opts \\ []) do

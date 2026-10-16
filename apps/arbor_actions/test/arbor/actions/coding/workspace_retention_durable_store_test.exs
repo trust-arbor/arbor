@@ -6,6 +6,61 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStoreTest do
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: Core
   alias Arbor.Persistence
 
+  test "writes more than 256 live retained records and reloads every one after restart",
+       %{tmp_dir: tmp_dir} do
+    root = Path.join(tmp_dir, "overflow-live-journal")
+    name = start_store(root)
+    count = Core.max_records() + 1
+    now = DateTime.utc_now()
+    expires_at = DateTime.add(now, 3600, :second)
+
+    written =
+      Enum.map(1..count, fn index ->
+        record = live_retained_record(index, expires_at)
+        {:ok, key} = Core.record_key(record.workspace_id)
+        assert :ok = Persistence.put(name, WorkspaceRetentionDurableStore, key, record)
+        {key, record}
+      end)
+
+    assert {:ok, keys} = Persistence.list(name, WorkspaceRetentionDurableStore)
+    assert length(keys) == count
+
+    values =
+      Map.new(keys, fn key ->
+        assert {:ok, value} = Persistence.get(name, WorkspaceRetentionDurableStore, key)
+        {key, value}
+      end)
+
+    assert {:ok, decoded} = Core.decode_inventory(keys, values)
+    assert length(decoded) == count
+    assert Enum.all?(decoded, &(Core.restore_decision(&1) == :restore))
+
+    assert {:ok, %{kept: kept, dropped: dropped}} =
+             Core.compact_inventory(decoded, now: now)
+
+    assert length(kept) == count
+    assert dropped == []
+
+    stop_store(name)
+    start_store(root, name)
+
+    assert {:ok, keys_after} = Persistence.list(name, WorkspaceRetentionDurableStore)
+    assert length(keys_after) == count
+
+    values_after =
+      Map.new(keys_after, fn key ->
+        assert {:ok, value} = Persistence.get(name, WorkspaceRetentionDurableStore, key)
+        {key, value}
+      end)
+
+    assert {:ok, decoded_after} = Core.decode_inventory(keys_after, values_after)
+    assert length(decoded_after) == count
+
+    expected_ids = MapSet.new(written, fn {_key, record} -> record.workspace_id end)
+    actual_ids = MapSet.new(decoded_after, & &1.workspace_id)
+    assert actual_ids == expected_ids
+  end
+
   test "runtime aggregate exhaustion is rejected without poisoning and restart remains healthy",
        %{
          tmp_dir: tmp_dir
@@ -651,5 +706,36 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStoreTest do
   defp put(name, workspace_suffix, payload_size) do
     value = %{"payload" => String.duplicate("x", payload_size)}
     Persistence.put(name, WorkspaceRetentionDurableStore, workspace_suffix, value)
+  end
+
+  defp live_retained_record(index, expires_at) do
+    worktree_path = "/tmp/arbor-retention-overflow/worktree-#{index}"
+
+    {:ok, record} =
+      Core.encode_record(%{
+        workspace_id: "ws_ovf_#{index}",
+        repo_path: "/tmp/arbor-retention-overflow/repo-#{index}",
+        worktree_path: worktree_path,
+        display_worktree_path: worktree_path,
+        branch: "ovf-#{index}",
+        base_commit: "abc#{index}",
+        ownership: "owned",
+        lifecycle: "retained",
+        runtime_id: "rt_ovf_fixture",
+        lstat_identity: %{
+          type: "directory",
+          major_device: 0,
+          minor_device: 0,
+          inode: index + 1
+        },
+        worktree_registration: %{
+          path: worktree_path,
+          head: "abc#{index}",
+          branch: "ovf-#{index}"
+        },
+        expires_at: expires_at
+      })
+
+    record
   end
 end
