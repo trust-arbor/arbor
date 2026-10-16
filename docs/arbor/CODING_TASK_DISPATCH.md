@@ -862,6 +862,16 @@ Both variables are required, and three failure modes are worth knowing:
   or reuse across differently-shaped workspaces.** Dependency `priv` symlinks
   are relative to the worktree's `_build`/`deps` layout; breaking that surfaces
   as missing runtime assets rather than as an invalid cache.
+- **Prefer a `deps/` symlink in the worktree over `MIX_DEPS_PATH` alone.**
+  `_build/test/lib/<dep>/priv` entries are relative symlinks. Without a
+  worktree-local `deps/` they dangle (`LLMDB` `LoadError :enoent`, then
+  `{:no_provider_supports_runtime, :acp}`). `ln -s <canonical>/deps deps`.
+- **Keep `TMPDIR` outside the checkout.** Otherwise "outside the repo"
+  fixtures land inside the worktree (`file_read` of an outside path
+  succeeds; `git_root_outside_root`; containment tests find the worktree
+  `bin/mix`; Grok `:grok_repository_root_required`).
+- **Do not symlink the canonical `.env` into a test worktree.** Exported
+  provider keys make `unified_llm_test.exs` see `default_provider == "google"`.
 - **Containerized validation needs the mount targets to exist.** Because the
   worktree ships without `deps/` or `_build/`, a read-only repository bind has
   no directory to mount them onto and fails with `errno 30`. Create the empty

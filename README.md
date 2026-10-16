@@ -71,6 +71,10 @@ opt-in, not the getting-started path.
 ./bin/mix quality
 ```
 
+Isolated Git worktrees need extra harness setup (`deps/` symlink, `TMPDIR`
+outside the checkout, no `.env` symlink). See
+[Isolated worktree harness](docs/arbor/TEST_TAGGING.md#isolated-worktree-harness).
+
 ## License
 
 Arbor is released under the [MIT License](LICENSE).
