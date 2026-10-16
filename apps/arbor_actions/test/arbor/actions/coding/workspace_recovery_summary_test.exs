@@ -3,9 +3,26 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
   @owner_operation_timeout 10_000
+
+  setup do
+    server = :"recovery_summary_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       [
+         name: server,
+         retention_journal: :disabled,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+       ]},
+      id: server
+    )
+
+    {:ok, server: server}
+  end
 
   describe "discovery and canonical URI" do
     test "registers under the existing coding workspace namespace" do
@@ -25,13 +42,14 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
   describe "run/2" do
     test "returns deterministic bounded authoritative state without raw diff or absolute paths",
          %{
-           tmp_dir: tmp_dir
+           tmp_dir: tmp_dir,
+           server: server
          } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/recovery-summary"
       base = git!(repo, ["rev-parse", "HEAD"])
 
-      assert {:ok, lease} = acquire(repo, branch, tmp_dir)
+      assert {:ok, lease} = acquire(repo, branch, tmp_dir, server)
 
       secret_diff_line = "RAW_DIFF_CONTENT_MUST_NOT_APPEAR"
       File.write!(Path.join(lease.worktree_path, "committed.txt"), secret_diff_line <> "\n")
@@ -51,8 +69,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
         review_feedback_json: ~s({"status":"changes_requested","note":"cover refs"})
       }
 
-      assert {:ok, first} = Workspace.RecoverySummary.run(params, %{})
-      assert {:ok, second} = Workspace.RecoverySummary.run(params, %{})
+      assert {:ok, first} = Workspace.RecoverySummary.run(params, %{server: server})
+      assert {:ok, second} = Workspace.RecoverySummary.run(params, %{server: server})
       assert first == second
 
       prompt = first.recovery_prompt
@@ -76,12 +94,13 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
       refute prompt =~ "GIT_"
       assert byte_size(prompt) <= 24_576
 
-      release(lease.workspace_id)
+      release(lease.workspace_id, server)
     end
 
     test "security regression: opaque workspace id and task id alone do not authorize recovery",
          %{
-           tmp_dir: tmp_dir
+           tmp_dir: tmp_dir,
+           server: server
          } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       parent = self()
@@ -97,14 +116,16 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
                 branch_name: "test/recovery-authority",
                 worktree_base_dir: Path.join(tmp_dir, "worktrees")
               },
-              %{task_id: task_id, agent_id: principal_id}
+              %{task_id: task_id, agent_id: principal_id, server: server}
             )
 
           send(parent, {:leased, lease})
 
           receive do
             :release ->
-              Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "remove"}, %{})
+              Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "remove"}, %{
+                server: server
+              })
           after
             5_000 -> :ok
           end
@@ -113,30 +134,36 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
       assert_receive {:leased, lease}, @owner_operation_timeout
       params = recovery_params(lease.workspace_id)
 
-      assert {:error, :not_authorized} = Workspace.RecoverySummary.run(params, %{})
+      assert {:error, :not_authorized} =
+               Workspace.RecoverySummary.run(params, %{server: server})
 
       assert {:error, :not_authorized} =
-               Workspace.RecoverySummary.run(params, %{task_id: task_id})
+               Workspace.RecoverySummary.run(params, %{task_id: task_id, server: server})
 
       assert {:error, :not_authorized} =
                Workspace.RecoverySummary.run(params, %{
                  task_id: task_id,
-                 agent_id: "agent_other"
+                 agent_id: "agent_other",
+                 server: server
                })
 
       assert {:ok, result} =
                Workspace.RecoverySummary.run(params, %{
                  task_id: task_id,
-                 agent_id: principal_id
+                 agent_id: principal_id,
+                 server: server
                })
 
       assert result.recovery_prompt =~ "Prior conversation was lost"
       send(owner, :release)
     end
 
-    test "caps commits, status paths, and supplied prompt material", %{tmp_dir: tmp_dir} do
+    test "caps commits, status paths, and supplied prompt material", %{
+      tmp_dir: tmp_dir,
+      server: server
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
-      assert {:ok, lease} = acquire(repo, "test/recovery-bounds", tmp_dir)
+      assert {:ok, lease} = acquire(repo, "test/recovery-bounds", tmp_dir, server)
 
       for index <- 1..22 do
         File.write!(Path.join(lease.worktree_path, "commit-#{index}.txt"), "#{index}\n")
@@ -159,7 +186,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
         review_feedback_json: Jason.encode!(%{"message" => String.duplicate("r", 4_000)})
       }
 
-      assert {:ok, result} = Workspace.RecoverySummary.run(params, %{})
+      assert {:ok, result} = Workspace.RecoverySummary.run(params, %{server: server})
       prompt = result.recovery_prompt
 
       assert length(Regex.scan(~r/^- [0-9a-f]{40} /m, prompt)) == 20
@@ -182,61 +209,71 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
 
       assert review_preview =~ ~s({"message":"rrr)
 
-      release(lease.workspace_id)
+      release(lease.workspace_id, server)
     end
 
-    test "rejects malformed feedback JSON", %{tmp_dir: tmp_dir} do
+    test "rejects malformed feedback JSON", %{tmp_dir: tmp_dir, server: server} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
-      assert {:ok, lease} = acquire(repo, "test/recovery-json", tmp_dir)
+      assert {:ok, lease} = acquire(repo, "test/recovery-json", tmp_dir, server)
 
       assert {:error, :invalid_validation_feedback_json} =
                Workspace.RecoverySummary.run(
                  Map.put(recovery_params(lease.workspace_id), :validation_feedback_json, "{"),
-                 %{}
+                 %{server: server}
                )
 
-      release(lease.workspace_id)
+      release(lease.workspace_id, server)
     end
 
-    test "invalid-ref regression: detached HEAD fails closed", %{tmp_dir: tmp_dir} do
+    test "invalid-ref regression: detached HEAD fails closed", %{
+      tmp_dir: tmp_dir,
+      server: server
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
-      assert {:ok, lease} = acquire(repo, "test/recovery-detached", tmp_dir)
+      assert {:ok, lease} = acquire(repo, "test/recovery-detached", tmp_dir, server)
       git!(lease.worktree_path, ["checkout", "--detach"])
 
       assert {:error, :invalid_branch_state} =
-               Workspace.RecoverySummary.run(recovery_params(lease.workspace_id), %{})
+               Workspace.RecoverySummary.run(recovery_params(lease.workspace_id), %{
+                 server: server
+               })
 
-      release(lease.workspace_id)
+      release(lease.workspace_id, server)
     end
 
-    test "invalid-ref regression: base outside HEAD ancestry fails closed", %{tmp_dir: tmp_dir} do
+    test "invalid-ref regression: base outside HEAD ancestry fails closed", %{
+      tmp_dir: tmp_dir,
+      server: server
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
-      assert {:ok, lease} = acquire(repo, "test/recovery-unrelated", tmp_dir)
+      assert {:ok, lease} = acquire(repo, "test/recovery-unrelated", tmp_dir, server)
 
       tree = git!(lease.worktree_path, ["rev-parse", "HEAD^{tree}"])
       unrelated = git!(lease.worktree_path, ["commit-tree", tree, "-m", "unrelated root"])
       git!(lease.worktree_path, ["reset", "--hard", unrelated])
 
       assert {:error, :base_not_ancestor_of_head} =
-               Workspace.RecoverySummary.run(recovery_params(lease.workspace_id), %{})
+               Workspace.RecoverySummary.run(recovery_params(lease.workspace_id), %{
+                 server: server
+               })
 
-      release(lease.workspace_id)
+      release(lease.workspace_id, server)
     end
   end
 
-  defp acquire(repo, branch, tmp_dir) do
+  defp acquire(repo, branch, tmp_dir, server) do
     Workspace.Acquire.run(
       %{
         repo_path: repo,
         branch_name: branch,
         worktree_base_dir: Path.join(tmp_dir, "worktrees")
       },
-      %{}
+      %{server: server}
     )
   end
 
-  defp release(workspace_id) do
-    Workspace.Release.run(%{workspace_id: workspace_id, mode: "remove"}, %{})
+  defp release(workspace_id, server) do
+    Workspace.Release.run(%{workspace_id: workspace_id, mode: "remove"}, %{server: server})
   end
 
   defp recovery_params(workspace_id) do

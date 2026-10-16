@@ -105,10 +105,13 @@ defmodule Arbor.Actions.Coding.Workspace.RecoverySummary do
     do: {:error, "workspace_id, task, and pending_prompt are required"}
 
   defp authorized_lease(workspace_id, context) do
-    WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
-      task_id: Workspace.context_task_id(context),
-      principal_id: Workspace.context_principal_id(context)
-    })
+    WorkspaceLeaseRegistry.inspect_lease(
+      workspace_id,
+      Workspace.registry_caller(context, %{
+        task_id: Workspace.context_task_id(context),
+        principal_id: Workspace.context_principal_id(context)
+      })
+    )
   end
 
   defp normalize_input(task, pending_prompt, params) do

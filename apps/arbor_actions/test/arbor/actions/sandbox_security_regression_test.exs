@@ -30,12 +30,12 @@ defmodule Arbor.Actions.SandboxSecurityRegressionTest do
 
     unless Process.whereis(Arbor.Trust.Store), do: start_supervised!(Arbor.Trust.Store)
 
+    # start_link/1 would link Registry to the test process. When the test
+    # exits the Registry dies before on_exit, so cleanup then crashes with
+    # "Arbor.Sandbox.Registry not running". Own it with the ExUnit supervisor.
     case Process.whereis(Arbor.Sandbox.Registry) do
-      nil ->
-        {:ok, _pid} = Arbor.Sandbox.Registry.start_link([])
-
-      _pid ->
-        :ok
+      nil -> start_supervised!(Arbor.Sandbox.Registry)
+      _pid -> :ok
     end
 
     previous = %{
@@ -71,30 +71,32 @@ defmodule Arbor.Actions.SandboxSecurityRegressionTest do
     File.mkdir_p!(base_path)
 
     on_exit(fn ->
-      cleanup_sandbox(target_id)
-      cleanup_sandbox(caller_id)
-      cleanup_sandbox(victim_id)
-      File.rm_rf(base_path)
+      try do
+        cleanup_sandbox(target_id)
+        cleanup_sandbox(caller_id)
+        cleanup_sandbox(victim_id)
+        File.rm_rf(base_path)
 
-      if Process.whereis(Arbor.Security.CapabilityStore) do
-        Arbor.Security.revoke_all_fixture(caller_id)
-        Arbor.Security.revoke_all_fixture(victim_id)
+        if Process.whereis(Arbor.Security.CapabilityStore) do
+          Arbor.Security.revoke_all_fixture(caller_id)
+          Arbor.Security.revoke_all_fixture(victim_id)
+        end
+
+        if Process.whereis(Arbor.Trust.Store) do
+          Arbor.Trust.Store.delete_profile(caller_id)
+          Arbor.Trust.Store.delete_profile(victim_id)
+        end
+      after
+        restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
+        restore(:arbor_security, :capability_signing_required, previous.signing)
+        restore(:arbor_security, :identity_verification, previous.identity)
+        restore(:arbor_security, :strict_identity_mode, previous.strict)
+        restore(:arbor_security, :uri_registry_enforcement, previous.uri)
+        restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
+        restore(:arbor_security, :approval_guard_enabled, previous.security_approval)
+        restore(:arbor_trust, :approval_guard_enabled, previous.trust_approval)
+        restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
       end
-
-      if Process.whereis(Arbor.Trust.Store) do
-        Arbor.Trust.Store.delete_profile(caller_id)
-        Arbor.Trust.Store.delete_profile(victim_id)
-      end
-
-      restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
-      restore(:arbor_security, :capability_signing_required, previous.signing)
-      restore(:arbor_security, :identity_verification, previous.identity)
-      restore(:arbor_security, :strict_identity_mode, previous.strict)
-      restore(:arbor_security, :uri_registry_enforcement, previous.uri)
-      restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
-      restore(:arbor_security, :approval_guard_enabled, previous.security_approval)
-      restore(:arbor_trust, :approval_guard_enabled, previous.trust_approval)
-      restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
     end)
 
     {:ok, caller_id: caller_id, target_id: target_id, victim_id: victim_id, base_path: base_path}

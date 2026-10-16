@@ -775,9 +775,9 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
   @doc false
   def caller_context_opts(context) do
-    %{
+    Arbor.Actions.Coding.Workspace.registry_caller(context, %{
       task_id: Arbor.Actions.Coding.Workspace.context_task_id(context),
       principal_id: Arbor.Actions.Coding.Workspace.context_principal_id(context)
-    }
+    })
   end
 end

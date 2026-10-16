@@ -775,10 +775,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   defp resolve_workspace_lease(workspace_id, context)
        when is_binary(workspace_id) and workspace_id != "" do
-    caller = %{
-      task_id: Workspace.context_task_id(context),
-      principal_id: Workspace.context_principal_id(context)
-    }
+    caller =
+      Workspace.registry_caller(context, %{
+        task_id: Workspace.context_task_id(context),
+        principal_id: Workspace.context_principal_id(context)
+      })
 
     WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller)
   end
@@ -831,10 +832,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   defp resolve_workspace_storage(workspace_id, path, context)
        when is_binary(workspace_id) and workspace_id != "" and is_binary(path) do
-    caller = %{
-      task_id: Workspace.context_task_id(context),
-      principal_id: Workspace.context_principal_id(context)
-    }
+    caller =
+      Workspace.registry_caller(context, %{
+        task_id: Workspace.context_task_id(context),
+        principal_id: Workspace.context_principal_id(context)
+      })
 
     with {:ok, lease} <- WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller),
          {:ok, repo_path} <- lease_path(lease, :repo_path),
