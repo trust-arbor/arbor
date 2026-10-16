@@ -108,6 +108,81 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
   end
 
   @tag spec: "VOICE-8"
+  test "parallel tool outputs send one response.create after the last pending output" do
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [
+          frames: [
+            tool_call_frame("call_a", "lookup"),
+            tool_call_frame("call_b", "lookup"),
+            %{"type" => "response.done"}
+          ]
+        ],
+        effect_authorizer: &allow_effect/2,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    assert {:ok, session, {:tool_call, %{id: "call_a"}}} = XaiRealtime.recv(session, 1_000)
+    assert {:ok, session, {:tool_call, %{id: "call_b"}}} = XaiRealtime.recv(session, 1_000)
+    assert {:ok, session, {:turn_done, _}} = XaiRealtime.recv(session, 1_000)
+
+    {:ok, session} = XaiRealtime.send_tool_result(session, "call_a", "first")
+    refute Enum.any?(session.transport_state.sent, &(&1 == %{"type" => "response.create"}))
+
+    assert List.last(session.transport_state.sent) == %{
+             "type" => "conversation.item.create",
+             "item" => %{
+               "type" => "function_call_output",
+               "call_id" => "call_a",
+               "output" => "first"
+             }
+           }
+
+    {:ok, session} = XaiRealtime.send_tool_result(session, "call_b", "second")
+
+    creates =
+      Enum.filter(session.transport_state.sent, &(&1 == %{"type" => "response.create"}))
+
+    assert length(creates) == 1
+
+    assert Enum.take(session.transport_state.sent, -3) == [
+             function_output_frame("call_a", "first"),
+             function_output_frame("call_b", "second"),
+             %{"type" => "response.create"}
+           ]
+  end
+
+  @tag spec: "VOICE-8"
+  test "response.create waits for response.done when outputs finish first" do
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [
+          frames: [
+            tool_call_frame("call_early", "lookup"),
+            %{"type" => "response.done"}
+          ]
+        ],
+        effect_authorizer: &allow_effect/2,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    assert {:ok, session, {:tool_call, %{id: "call_early"}}} = XaiRealtime.recv(session, 1_000)
+    {:ok, session} = XaiRealtime.send_tool_result(session, "call_early", "early")
+    refute Enum.any?(session.transport_state.sent, &(&1 == %{"type" => "response.create"}))
+
+    assert {:ok, session, {:turn_done, _}} = XaiRealtime.recv(session, 1_000)
+
+    creates =
+      Enum.filter(session.transport_state.sent, &(&1 == %{"type" => "response.create"}))
+
+    assert length(creates) == 1
+    assert List.last(session.transport_state.sent) == %{"type" => "response.create"}
+    refute inspect(session) =~ "call_early"
+  end
+
+  @tag spec: "VOICE-8"
   test "malformed tool arguments yield a structured error event, not a crash" do
     frame = %{
       "type" => "response.function_call_arguments.done",
@@ -985,6 +1060,26 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       refute log =~ secret
       refute log =~ "stub-token"
     end
+  end
+
+  defp tool_call_frame(call_id, name) do
+    %{
+      "type" => "response.function_call_arguments.done",
+      "call_id" => call_id,
+      "name" => name,
+      "arguments" => Jason.encode!(%{"task" => name})
+    }
+  end
+
+  defp function_output_frame(call_id, output) do
+    %{
+      "type" => "conversation.item.create",
+      "item" => %{
+        "type" => "function_call_output",
+        "call_id" => call_id,
+        "output" => output
+      }
+    }
   end
 
   defp runtime_script(frames) do
