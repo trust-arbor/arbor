@@ -1942,10 +1942,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     dispatch_opts =
       cond do
         session_turn_egress_seam?(engine_opts) ->
+          # Match the legacy egress boundary's conservative all-context scope.
+          # The initial frozen-route admit happens before prompt assembly, but
+          # dispatch has the actual labels, including hostile provenance.
+          taint =
+            Context.worst_taint(context, Map.keys(Context.taint_map(context))) ||
+              SignalTaint.from_level(:trusted)
+
           Keyword.put(
             dispatch_opts,
             :route_authorizer,
-            wrap_dispatch_route_authorizer(Keyword.fetch!(engine_opts, :turn_egress_authorizer))
+            wrap_dispatch_route_authorizer(
+              Keyword.fetch!(engine_opts, :turn_egress_authorizer),
+              taint
+            )
           )
 
         Keyword.has_key?(dispatch_opts, :provider_route_input) ->
@@ -1988,7 +1998,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  defp wrap_dispatch_route_authorizer(turn_authorizer)
+  defp wrap_dispatch_route_authorizer(turn_authorizer, taint)
        when is_function(turn_authorizer, 1) or is_function(turn_authorizer, 2) do
     fn route ->
       case TurnEgress.project_dispatch_route(route) do
@@ -1996,7 +2006,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           case safe_call_turn_authorizer(
                  turn_authorizer,
                  scalar,
-                 conservative_untrusted_taint()
+                 taint
                ) do
             :allow -> :allow
             {:requires_approval, _} -> {:requires_approval, :egress}
@@ -2009,7 +2019,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  defp wrap_dispatch_route_authorizer(_), do: denying_route_authorizer()
+  defp wrap_dispatch_route_authorizer(_, _), do: denying_route_authorizer()
 
   defp wrap_llm_call_authorizer(turn_authorizer) when is_function(turn_authorizer, 1) do
     fn request ->

@@ -260,34 +260,48 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
   test "security regression: initial admission is conservative and direct dispatch retains context taint" do
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingRouteDispatcher)
     parent = self()
-    input_taint = %Taint{level: :hostile, source: "direct-context", chain: ["direct-context"]}
+    hostile = %Taint{level: :hostile, source: "direct-context", chain: ["direct-context"]}
+    trusted = %Taint{level: :trusted, confidence: :verified, sanitizations: 255}
 
     turn_authorizer = fn route, %Taint{} = taint ->
       send(parent, {:direct_turn_authorized, route, taint})
       :allow
     end
 
-    outcome =
-      LlmHandler.execute(
-        direct_node(),
-        Context.record_output_taint(context(:direct, []), ["session.input"], input_taint),
-        graph(),
-        base_opts(turn_authorizer)
-      )
+    for {input_taint, expected_taint} <- [
+          {hostile, hostile},
+          {trusted, trusted},
+          {nil, %Taint{level: :trusted}},
+          {%Taint{level: :invalid}, Taint.invalid_durable_provenance()}
+        ],
+        streaming? <- [false, true] do
+      opts =
+        if streaming?,
+          do: Keyword.put(base_opts(turn_authorizer), :on_stream, fn _event -> :ok end),
+          else: base_opts(turn_authorizer)
 
-    assert outcome.status == :success
+      # This key is deliberately absent from the prompt and values: egress
+      # uses all context provenance, rather than only the current prompt key.
+      context =
+        Context.record_output_taint(context(:direct, []), ["off_prompt.content"], input_taint)
 
-    assert [
-             {:direct_turn_authorized, _frozen_route, initial_taint},
-             {:direct_turn_authorized, _dispatch_route, dispatch_taint}
-           ] = collect_tag(:direct_turn_authorized)
+      outcome = LlmHandler.execute(direct_node(), context, graph(), opts)
 
-    assert initial_taint == conservative_untrusted_taint()
-    assert dispatch_taint == input_taint
+      assert outcome.status == :success
 
-    assert_receive {:direct_route_authorization, _route, :allow, dispatch_opts}
-    refute Keyword.has_key?(dispatch_opts, :turn_egress_authorizer)
-    refute Keyword.has_key?(dispatch_opts, :steer_check)
+      assert [
+               {:direct_turn_authorized, _frozen_route, initial_taint},
+               {:direct_turn_authorized, _dispatch_route, dispatch_taint}
+             ] = collect_tag(:direct_turn_authorized)
+
+      assert initial_taint == conservative_untrusted_taint()
+      assert dispatch_taint == expected_taint
+
+      assert_receive {:direct_route_authorization, _route, :allow, dispatch_opts}
+      assert Keyword.has_key?(dispatch_opts, :callbacks) == streaming?
+      refute Keyword.has_key?(dispatch_opts, :turn_egress_authorizer)
+      refute Keyword.has_key?(dispatch_opts, :steer_check)
+    end
   end
 
   test "security regression: post-steer provider failure suppresses fallback replay" do

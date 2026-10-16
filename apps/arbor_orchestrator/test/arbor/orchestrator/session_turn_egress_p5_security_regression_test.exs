@@ -843,10 +843,9 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     route = external_route()
     state = %{agent_id: agent_id, session_id: "session_hostile_non_tool"}
     {bound, cap_id} = issue_disclosure!(state, authority!(human_id), route)
-    actor_authority = Process.get(@actor_authority_key)
 
     on_exit(fn ->
-      TurnEgress.safe_revoke_disclosure(cap_id, actor_authority)
+      Security.revoke_fixture(cap_id)
     end)
 
     authorizer =
@@ -903,7 +902,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert :atomics.get(counter, 1) == 1
     refute_received {:external_complete, _}
     assert outcome.status == :fail
-    assert outcome.failure_reason =~ "egress_blocked"
+    assert outcome.failure_reason =~ "authorization_failed"
   end
 
   test "VOICE-17 security regression: ToolLoop multi-wave exact route with disclosure",
