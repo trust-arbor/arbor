@@ -9,6 +9,7 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   alias Arbor.Common.LazyLoader
   alias Arbor.Memory.ContextWindow.Formatting
   alias Arbor.Memory.FactExtractor
+  alias Arbor.Memory.GraphOps
   alias Arbor.Memory.Signals
 
   # Threshold for semantic dedup of retrieved context (cosine similarity)
@@ -287,6 +288,21 @@ defmodule Arbor.Memory.ContextWindow.Compression do
     :ok
   end
 
+  @doc false
+  @spec ingest_extracted_facts(String.t(), [map()]) :: :ok
+  def ingest_extracted_facts(_agent_id, []), do: :ok
+
+  def ingest_extracted_facts(agent_id, facts)
+      when is_binary(agent_id) and is_list(facts) do
+    if GraphOps.has_graph?(agent_id) do
+      Enum.each(facts, &ingest_one_extracted_fact(agent_id, &1))
+    end
+
+    :ok
+  end
+
+  def ingest_extracted_facts(_agent_id, _facts), do: :ok
+
   # ============================================================================
   # Deduplication
   # ============================================================================
@@ -546,7 +562,8 @@ defmodule Arbor.Memory.ContextWindow.Compression do
       [
         source: "compression_cycle_#{window.compression_count}",
         min_confidence: window.min_fact_confidence,
-        receive_timeout: compression_llm_timeout()
+        receive_timeout: compression_llm_timeout(),
+        method: fact_extraction_method(window)
       ]
       |> maybe_add_llm_opt(:model, window.fact_extraction_model)
       |> maybe_add_llm_opt(:provider, window.fact_extraction_provider)
@@ -567,6 +584,69 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   rescue
     e -> {:error, {:fact_extraction_error, e}}
   end
+
+  # When no extraction model/provider is configured, stay hermetic and use
+  # regex so compression does not silently hit the default LLM lane.
+  defp fact_extraction_method(%{fact_extraction_model: nil, fact_extraction_provider: nil}),
+    do: :regex
+
+  defp fact_extraction_method(_window), do: :auto
+
+  defp ingest_one_extracted_fact(agent_id, fact) when is_map(fact) do
+    content = fact_field(fact, :content)
+
+    if is_binary(content) and content != "" do
+      # Knowledge-graph codec rejects atoms outside @semantic_atoms.
+      # Extensible metadata must stay JSON-clean (string keys/values).
+      fact_data = %{
+        content: content,
+        confidence: fact_field(fact, :confidence) || 0.5,
+        source: stringify_metadata_value(fact_field(fact, :source)) || "compression",
+        metadata: %{
+          "category" => stringify_metadata_value(fact_field(fact, :category)),
+          "entities" => stringify_metadata_list(fact_field(fact, :entities)),
+          "ingested_from" => "fact_extractor"
+        }
+      }
+
+      case GraphOps.add_pending_fact(agent_id, fact_data) do
+        {:ok, _pending_id} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.debug("Fact ingest skipped during compression",
+            agent_id: agent_id,
+            reason: inspect(reason)
+          )
+
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp ingest_one_extracted_fact(_agent_id, _fact), do: :ok
+
+  defp fact_field(fact, key) when is_map(fact) and is_atom(key) do
+    Map.get(fact, key) || Map.get(fact, Atom.to_string(key))
+  end
+
+  defp stringify_metadata_value(nil), do: nil
+  defp stringify_metadata_value(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_metadata_value(value) when is_binary(value), do: value
+  defp stringify_metadata_value(value) when is_number(value) or is_boolean(value), do: value
+  defp stringify_metadata_value(_value), do: nil
+
+  defp stringify_metadata_list(values) when is_list(values) do
+    Enum.flat_map(values, fn
+      value when is_binary(value) -> [value]
+      value when is_atom(value) -> [Atom.to_string(value)]
+      _ -> []
+    end)
+  end
+
+  defp stringify_metadata_list(_values), do: []
 
   # ============================================================================
   # Private Helpers - Deduplication

@@ -268,12 +268,10 @@ defmodule Arbor.Memory.ContextWindow do
         base
         | ratios: Keyword.get(merged_opts, :ratios, @default_ratios),
           summarization_enabled: Keyword.get(merged_opts, :summarization_enabled, false),
-          summarization_algorithm:
-            Keyword.get(merged_opts, :summarization_algorithm, :prose),
+          summarization_algorithm: Keyword.get(merged_opts, :summarization_algorithm, :prose),
           summarization_model: Keyword.get(merged_opts, :summarization_model),
           summarization_provider: Keyword.get(merged_opts, :summarization_provider),
-          fact_extraction_enabled:
-            Keyword.get(merged_opts, :fact_extraction_enabled, false),
+          fact_extraction_enabled: Keyword.get(merged_opts, :fact_extraction_enabled, false),
           fact_extraction_model: Keyword.get(merged_opts, :fact_extraction_model),
           fact_extraction_provider: Keyword.get(merged_opts, :fact_extraction_provider),
           min_fact_confidence: Keyword.get(merged_opts, :min_fact_confidence, 0.7),
@@ -568,7 +566,10 @@ defmodule Arbor.Memory.ContextWindow do
       max: window.max_tokens,
       utilization: if(window.max_tokens > 0, do: total / window.max_tokens, else: 0.0),
       by_section: %{
-        distant: %{used: window.distant_tokens, budget: Compression.distant_summary_budget(window)},
+        distant: %{
+          used: window.distant_tokens,
+          budget: Compression.distant_summary_budget(window)
+        },
         recent: %{used: window.recent_tokens, budget: Compression.recent_summary_budget(window)},
         detail: %{used: window.detail_tokens, budget: Compression.full_detail_budget(window)},
         retrieved: %{used: window.retrieved_tokens, budget: Compression.retrieved_budget(window)}
@@ -725,7 +726,12 @@ defmodule Arbor.Memory.ContextWindow do
     # Check if recent summary needs to flow into distant
     {final_recent, final_distant, recent_toks, distant_toks} =
       if new_recent_tokens > recent_budget do
-        Compression.flow_to_distant(window, new_recent, window.distant_summary || "", new_recent_tokens)
+        Compression.flow_to_distant(
+          window,
+          new_recent,
+          window.distant_summary || "",
+          new_recent_tokens
+        )
       else
         {new_recent, window.distant_summary || "", new_recent_tokens, window.distant_tokens}
       end
@@ -740,18 +746,29 @@ defmodule Arbor.Memory.ContextWindow do
     original_tokens = Compression.tokens_for_messages(to_demote)
 
     # Emit demotion signal
-    Compression.emit_demotion_signal(window, to_demote, Compression.estimate_tokens_text(demoted_text))
+    Compression.emit_demotion_signal(
+      window,
+      to_demote,
+      Compression.estimate_tokens_text(demoted_text)
+    )
 
     # Emit fact extraction signal if facts were found
     if extracted_facts != [] do
       Compression.emit_fact_extraction_signal(window, extracted_facts)
     end
 
+    # Last mile: propose extracted facts onto the knowledge graph.
+    # `add_pending_fact/2` is the existing ingest API for auto-extracted
+    # facts awaiting approval — do not skip that gate via add_knowledge/2.
+    :ok = Compression.ingest_extracted_facts(window.agent_id, extracted_facts)
+
     # Log compression ratio
     compressed_tokens = Compression.estimate_tokens_text(demoted_text)
 
     compression_ratio =
-      if original_tokens > 0, do: Float.round(compressed_tokens / original_tokens * 100, 1), else: 0
+      if original_tokens > 0,
+        do: Float.round(compressed_tokens / original_tokens * 100, 1),
+        else: 0
 
     Logger.debug(
       "Context compression: #{original_tokens} -> #{compressed_tokens} tokens (#{compression_ratio}%)",
