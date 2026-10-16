@@ -4,6 +4,11 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
   @moduletag :fast
   import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
+  defmodule AlwaysAutoPolicy do
+    @moduledoc false
+    def effective_mode(_agent_id, _resource_uri, _opts), do: :auto
+  end
+
   setup :start_infrastructure
 
   describe "enumerate_authority/3" do
@@ -69,6 +74,57 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
       assert memory.mode == :ask
       assert memory.sources == []
       refute Map.has_key?(memory, :policy_error)
+    end
+
+    test "security regression: missing profile stays unmintable when the enforcer is on", %{
+      agent_id: agent_id
+    } do
+      # Production default is policy_enforcer_enabled: true. The missing-profile
+      # stub uses Profile.new/1 baseline :ask, and :ask is a grant decision —
+      # so an unknown no-grant agent used to look fully tooled.
+      set_policy_enforcer_enabled(true)
+      assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
+
+      {:ok, snapshot} =
+        Arbor.Trust.enumerate_authority(agent_id, [
+          "arbor://fs/read",
+          "arbor://memory/recall",
+          "arbor://shell/exec"
+        ])
+
+      assert snapshot.held_uris == []
+      assert snapshot.policy_mintable_uris == []
+      assert snapshot.effective_uris == []
+
+      for uri <- ["arbor://fs/read", "arbor://memory/recall", "arbor://shell/exec"] do
+        found = entry(snapshot, uri)
+        refute found.held
+        refute found.policy_mintable
+        assert found.sources == []
+      end
+    end
+
+    test "security regression: leftover permissive policy defaults cannot mint for an unknown agent",
+         %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+
+      previous_module = Application.get_env(:arbor_trust, :policy_module)
+      previous_permissive = Application.get_env(:arbor_trust, :allow_permissive_baseline)
+      Application.put_env(:arbor_trust, :policy_module, __MODULE__.AlwaysAutoPolicy)
+      Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+      on_exit(fn ->
+        restore_trust_env(:policy_module, previous_module)
+        restore_trust_env(:allow_permissive_baseline, previous_permissive)
+      end)
+
+      assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
+
+      {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, ["arbor://fs/read"])
+      found = entry(snapshot, "arbor://fs/read")
+      refute found.held
+      refute found.policy_mintable
+      assert snapshot.policy_mintable_uris == []
     end
 
     test "does not report policy-mintable URIs when policy enforcer is disabled", %{
@@ -172,11 +228,15 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, value)
 
     on_exit(fn ->
-      if is_nil(previous) do
-        Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
-      else
-        Application.put_env(:arbor_trust, :policy_enforcer_enabled, previous)
-      end
+      restore_trust_env(:policy_enforcer_enabled, previous)
     end)
+  end
+
+  defp restore_trust_env(key, previous) do
+    if is_nil(previous) do
+      Application.delete_env(:arbor_trust, key)
+    else
+      Application.put_env(:arbor_trust, key, previous)
+    end
   end
 end

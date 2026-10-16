@@ -98,10 +98,15 @@ defmodule Arbor.Trust.PolicyEnforcer do
 
   This is a read-only mirror of `check/3` for authority enumeration. It does not
   grant capabilities or emit grant signals.
+
+  An unknown principal (no stored trust profile) is never mintable. Policy
+  resolution otherwise substitutes a stub profile whose default baseline is
+  `:ask`, and `:ask` is a grant decision — that would expose every profiled
+  URI to a no-grant agent whenever the enforcer is on (production default).
   """
   @spec mintable?(String.t(), String.t(), keyword()) :: boolean()
   def mintable?(principal_id, resource_uri, opts \\ []) do
-    if enabled?() do
+    if enabled?() and known_trust_profile?(principal_id) do
       with {:ok, resource_uri} <-
              Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts) do
         mode = get_effective_mode(principal_id, resource_uri, opts)
@@ -223,6 +228,16 @@ defmodule Arbor.Trust.PolicyEnforcer do
   defp grant_owner do
     Application.get_env(:arbor_trust, :capability_grant_owner, CapabilityGrantOwner)
   end
+
+  defp known_trust_profile?(principal_id) when is_binary(principal_id) do
+    match?({:ok, _profile}, Arbor.Trust.Store.get_profile(principal_id))
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp known_trust_profile?(_principal_id), do: false
 
   defp get_effective_mode(principal_id, resource_uri, opts) do
     policy = Config.policy_module()
