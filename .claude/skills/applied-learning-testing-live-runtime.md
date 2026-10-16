@@ -10,434 +10,33 @@ Read this when choosing a Mix/test isolation boundary, reloading a live runtime,
 
 <!-- applied-learning: independently-rerun-delegated-verification-against-the-committed-revision -->
 <a id="applied-learning-independently-rerun-delegated-verification-against-the-committed-revision"></a>
-**Independently rerun delegated verification against the committed revision.**
-A worker's reported green run is evidence, not acceptance: it may have selected
-the wrong lines, run before the final commit, or used stale workspace state.
-After integrating a delegated slice, rerun its exact focused suite from an
-independent worktree before treating it as green (found 2026-07-25 when two
-stale Coding Plan fixture expectations survived a reported full-file pass). For copied dependencies, compare tracked source bytes and module compile-source paths with the exact reviewed ref before accepting a later compile log. Updating the fork does not refresh a private dependency copy; a sealed harness can compile fresh files while the normal build still compiles an older copy (found 2026-09-27 during media fork adoption).
-Validate every candidate source preimage before copying any member, and stop
-dependent checks if materialization fails. A partial copy mixed the new Voice
-producer with old acknowledgement fixtures on 2026-10-05; retain that failed
-attempt separately from the complete candidate's passing run.
-Normal compilation may also change a dependent module's BEAM metadata while its
-source and executable code MD5 remain identical. Bind that exact observed module
-delta instead of restoring its old BEAM or repeating a successful compile
-(2026-10-05 Voice.Session after the realtime Session struct changed).
-Normal compilation and a successful browser refresh do not prove loaded-code
-adoption when development code reloading is disabled. On 2026-10-06 Main Home
-loaded after its schema repair while still using the older module. Compare the
-loaded and disk code MD5; pinned OTP's `beam_lib.md5/1` returns
-`{:ok, {module, digest}}`. A compatible single-module update can use
-`code.atomic_load/1` with the exact checked BEAM bytes, retaining the old generation
-and refusing an occupied slot. Avoid `load_binary/3`'s implicit hard purge;
-even soft purge ignores dormant old fun references. Verify the loaded digest
-afterward instead of assuming the normal commit changed the running module.
-Before deliberately killing an owner in a lifecycle test, wait for the phase
-whose cleanup behavior is being asserted. A callback's notification can precede
-its result being adopted; on 2026-10-05 the Desk Session-death test raced audio
-send adoption. Waiting for receive entry made the custody handoff explicit
-without changing production cleanup or replacing its assertions.
-Clean dependency sources and matching loaded/on-disk BEAM MD5s do not prove that
-the artifacts were built from the current pinned ref. Explicitly rebuild changed
-dependencies and verify required option keys/exports in the restarted runtime;
-cached PortAudio BEAMs survived a managed restart and rejected the new
-`executor_identity` option before capture (2026-09-29).
-Compile each changed dependency through its owning application before compiling
-its caller. `deps.loadpaths --no-compile` followed by Dashboard compilation left
-eight Voice BEAMs stale on 2026-10-05 despite current source hashes and matching
-loaded/disk MD5s. Preserve and reject that association, rebuild Voice, and verify
-new exports and public behavior before admitting another live fixture; a module's
-compile-source pathname does not record the bytes compiled from that pathname.
-For packaged escripts, bind reviewed source SHA-256 and compare loaded, disk
-and archive OTP code MD5s, plus exact archive bytes against the disk BEAM stripped
-with the configured `Mix.Release.strip_beam/2` options. Mix removes debug and
-documentation chunks by default, so raw archive and disk SHA-256 hashes can
-differ without a code change; never claim those raw hashes are equal. The
-2026-10-04 terminal packaging check exposed that invalid assessment assumption
-and retained its failure before verifying all 46 executable code identities.
-Index artifact provenance by execution role and module together. A module-only
-map merged three shared ConversationKit modules across distinct web and terminal
-build roots in the 2026-10-04 default validator. Keep both paths and their own
-source, BEAM and code identities; never let one build silently replace the other.
-Derive override membership from the bound catalog's actual rows, not from module
-usage or presence in source. On 2026-10-05 Diagnostics was a newly observed
-supplemental module, outside the original 78-row audio catalog; assuming four
-overrides instead of the actual three caused a pre-copy refusal.
-CaptureLog's level filter does not lower a global warning threshold. For INFO
-diagnostic tests, serialize the cases, save the public module-level override,
-enable INFO for that module and restore its exact prior setting on exit. Keep
-production severity and global logger configuration unchanged (2026-10-05).
-Compare an owned reference's exact path separately from byte equality across
-copies. On 2026-10-04 a signed-relay wrapper incorrectly required two preserved
-copies with identical hashes to have the same path; review caught it before
-execution, and the successor checks ownership and content separately.
-Packaged application metadata can have explicit toolchain ownership. The actual
-2026-10-04 Breeze archive contains `elixir.app` and `logger.app` from pinned
-Elixir 1.19.5, while its other 13 applications belong to the private build. Bind
-those two exact toolchain paths, versions and hashes; do not invent nonexistent
-copies under the project build or accept a generic external-path fallback.
-Distinguish immutable source/lock inputs from operational cache outputs. Hex can
-rewrite its private registry `cache.ets` during normal `deps.get --check-locked`;
-retain the initial cache snapshot and any failed byte-equality assertion without
-restoring it just to make hashes match. On 2026-10-04 all 268 source/config and
-325 dependency-source inputs stayed exact while that registry serialization changed.
-Normal no-start Mix runs also rewrite per-application `.mix/compile.app_cache`.
-On 2026-10-04 only 21 such cache files changed before the default integration
-could start; its strict immutable guard correctly refused the mismatched packet.
-Classify only the exact operational cache paths separately, retain before/after
-hashes and file-kind confinement, and keep source, BEAM, `.app`, static, priv and
-archive bytes immutable. Refreshing the whole inventory would hide real drift.
-The locked Boundary compiler also writes module/reference ETS snapshots and a
-computed dependency view. On 2026-10-04 a normal formatter changed only the six
-`compile.boundary_modules`, `compile.boundary_references` and
-`compile.boundary_view_v2` files belonging to Kernel and KernelRuntime, with
-source and executable artifacts unchanged. Inspect and bind the actual producer
-before classifying those exact existing regular files as compiler-validation
-metadata; never exempt all `compile.*` files or an entire build directory.
-Record declared formatter source outputs before an artifact refusal, marking
-their AST unconfirmed until the parser succeeds. Otherwise the failure receipt
-can falsely describe an expected formatting change as unrelated source drift.
-Normal formatting can also rebuild changed path dependencies, and forced
-dependency compilation can invalidate the calling application's protocol
-consolidation. Record the exact produced artifacts, then normally rebuild their
-owning application; do not restore stale BEAMs or consolidation. On 2026-10-04
-normal Gateway compilation changed eight lower applications' `compile.elixir`
-records without changing their BEAMs; inspect those exact changes before accepting
-the successor inventory. Respect a proof helper's output-directory confinement
-when constructing its caller; a misplaced Auth2 packet failed before its origin
-checks, requiring a caller-path correction, not weaker proof gates.
-An asynchronous command index can report `incomplete` immediately after a new
-journal admission. Every accepted phase must wait for complete reads inside its
-existing deadline, while still checking authorization and scope on each read;
-an assertion before the await loop incorrectly failed the renewed 2026-10-04
-stream prerequisite before its observer's status branch could run.
-When source-only workers prepare immutable packet successors in parallel, give
-each writer its own output namespace and seal its result before Root consumes it.
-An exclusive-create refusal preserves an existing worker packet; inspect that
-packet instead of overwriting it. Recompute catalog count headers from the actual
-role/module rows after ownership promotions, without changing historical proofs.
-Trace each current proof schema through every consuming method. Keeping an old
-method's AST unchanged does not establish compatibility with a renewed proof:
-the 2026-10-04 recovery preflight refused a raw Trust Manager projection where
-its historical consumer expected full ownership and compile-origin fields. Bind
-the exact projection to its fresh loaded catalog instead of inventing fields.
-Interpreter aliases are a separate case from canonical metadata paths. Preserve
-the approved virtualenv executable path and pin its symlink target, resolved
-binary, executable hash and environment configuration; rejecting every alias
-would refuse the existing Python virtualenv before an actual native launch.
-Execute the preserved virtualenv path itself, not its resolved binary target:
-resolving the Python symlink bypassed the environment and failed the 2026-10-05
-browser import before launch. Verify the selected interpreter can import its
-required library and retains a virtualenv prefix before starting the controller.
-Check fault-injection callbacks against the installed library's scheduling
-context. On 2026-10-04 a synchronous Playwright page-side close from a WebSocket
-route's asyncio task spun its dispatcher/Future loop; ordinary message callbacks
-use a different EventGreenlet path. Also check browser close-code constraints:
-the injected 1012 server code was invalid for browser-initiated upstream closure.
-A failed forced owner stop is not normal native cleanup or recovery acceptance,
-even when the host acknowledges shutdown and all private descendants disappear.
-Trace the complete native bootstrap before constraining a fault relay. The signed
-Breeze CLI resolves even an exact target ID with signed HTTP before opening its
-socket; the 2026-10-04 relay rejected that valid startup because it allowed only
-chat upgrades and human login. Forward only the exact configured target's bounded
-GET through the real Gateway authorization, preserving request bytes. Record
-signed discovery separately from DeviceFlow so "no human login" does not falsely
-mean "no HTTP". A concurrent source review's destination-absent assertion may
-become obsolete when Root creates its reviewed copy; verify the exact source and
-sole authorized gate change instead of treating presence as a source defect.
-Bind browser framework assets as well as server code. The production root layout
-retained Phoenix1.8.3/LiveView1.1.21 imports after the server moved to 1.8.9/1.1.33.
-Serving installed dependency assets with versioned local URLs removes that drift;
-it does not prove the cause of an earlier intermittent click failure. Parse the
-actual rendered import map: HEEx script bodies treated a brace expression as
-literal text in the first 2026-10-04 candidate, which needed EEx output instead.
-Copied builds can also retain relative `priv` links that escape their new image.
-Resolve links against the actual `MIX_BUILD_PATH`, verify existing targets are
-image-owned, and record repairs before startup. Distinguish active artifacts
-from unused stale build trees: on 2026-10-03 all three conversation images had
-valid active `_build/lib` links but escaped leftovers in `_build/test/lib`.
-The leftovers did not invalidate the active-path evidence.
-Retain each Git dependency's checkout metadata in an offline copy. Excluding
-every `.git` directory made Mix reject three otherwise exact dependency sources
-before the predecessor test on 2026-10-04. Copy the retained metadata without
-fetching. A relocated project can normally rebuild its whole owning app; verify
-the executed producer source and code, rather than requiring a two-file compiler
-caption merely because the intended change touches two files.
-Apply the same check to copied test builds: `mix compile --force` recompiles
-umbrella applications without forcing their dependency artifacts. Rebuild a
-changed dependency explicitly with `deps.compile <name> --force` and verify its
-required exports before accepting application compilation; the private Voice
-candidate retained an older `SyncExecutor` BEAM despite clean, correctly pinned
-source defining `bind_lease/4` (2026-09-29).
-Validate dependency caches against each execution root's own lockfile before
-handing off a multi-project run. A standalone client nested under an umbrella
-can lock different versions of identically named packages. Copying umbrella
-caches into that client's private `deps` left three lock mismatches after all
-server lanes had passed; preserve the client lock and materialize its exact
-verified packages instead (2026-09-29 terminal qualification).
-Bootstrap each cold execution root's complete locked dependency graph before
-selectively forcing changed packages. `mix deps.compile <names>` compiles the
-named packages as-is unless children are explicitly included; a warm parent
-build can hide missing transitive prerequisites in a standalone project.
-The 2026-10-01 UI comparison reached the correct Jason source but had never
-compiled its ordered-object struct. Preserve the lock and decoder contract;
-repair dependency build ordering instead of changing working application code.
-For cold compilers that write into dependency directories, exclude only
-reviewed generated output paths from source inventories. A whole cache or
-tool directory exemption can hide executable input changes; the UI comparison
-retains all Erlang.mk files while exempting only known `.d` and `.app` outputs.
-For observed generated-symbol drift, bind the generator/DSL inputs and require
-capture-free local renames to reconstruct the frozen bytes exactly before
-accepting a separate reviewed verdict. Preserve the original failure and reject
-unreviewed variants; Unifex's shared counter changed only two local loop names
-after full dependency bootstrap in the 2026-10-01 UI comparison. Such evidence
-review does not require rerunning unaffected behavior or hiding generated trees.
+**Independently rerun delegated verification against the committed revision.** Treat a worker's green report as evidence, then rerun the exact focused suite in an independently owned worktree at the integrated committed revision. Bind selected source and test bytes to committed blobs, derive selectors from current test declarations, and require the intended cases to execute. Validate every source preimage before copying any member; stop dependent checks on materialization failure and preserve the failed attempt separately. Each qualified revision keeps its own source, build and result namespace.
 
-A single computed formatter output is not a fresh formatting check. Verify the
-resulting bytes with the repository's configured formatter, then confirm another
-formatting pass leaves them unchanged. On 2026-10-01, pinned Elixir 1.19.5 changed
-an `application.ex` call layout on two successive passes before stabilizing.
-A one-pass archive preflight had been treated as green; the normal Mix hook
-caught the remaining change. Bind final source hashes only after the fresh
-configured check and stable-output check.
+Trace each consumer's actual dependency declaration and lock. Matching compile-source paths, clean checkout bytes, archive hashes, or loaded/disk code MD5s do not establish freshness. Explicitly rebuild changed dependencies through their owning applications before callers, bootstrap cold transitive prerequisites, and verify required exports and public behavior through the consumer. Record provenance by execution role plus module so separate build roots cannot overwrite one another. Compilation and browser refresh do not establish loaded-code adoption: check the running code identity against the qualified artifact before accepting runtime evidence. Recheck final committed blobs against the qualified source digests; reject partial copies, stale outputs, or unexplained drift. (Trimmed 2026-10-16; first found 2026-07-25.)
 
-Verify the pinned command's argument forwarding before adding a familiar CLI
-separator. Mix 1.19.5 `run` retains a `--` placed after the script in
-`System.argv/0`; a parser expecting paired source paths would receive an odd
-argument count. Source review caught this in the 2026-10-04 form-qualification
-launcher before execution. Match the already qualified invocation grammar and
-do not count a launcher failure as a behavioral regression witness.
+<!-- applied-learning: preserve-persisted-cancellation-status-when-replaying-partial-transcripts -->
+<a id="applied-learning-preserve-persisted-cancellation-status-when-replaying-partial-transcripts"></a>
+**Preserve persisted cancellation status when replaying partial transcripts.** A retained transcript row is not proof that a turn completed. Trace its persisted semantic status through the supported window and presentation projections, retain and label partial cancelled output, and keep speech disabled on replay. Regression tests must assert that status fields are present before comparing values; two missing values can compare equal. Seed fixture statuses before the first read or append fresh persisted identities. Do not change an already cached entry's status at the same ID and ordinal or relax immutable-overlap validation merely to exercise a label. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-04.)
 
+<!-- applied-learning: require-complete-authorized-views-before-accepting-indexed-phase-evidence -->
+<a id="applied-learning-require-complete-authorized-views-before-accepting-indexed-phase-evidence"></a>
+**Require complete authorized views before accepting indexed phase evidence.** A background command index may legitimately lag its journal after admission. Retain partial observations, but evaluate phase predicates only on complete views within the original deadline. Authenticate and enforce scope on every sample; authorization, transport or owner failures are not index catch-up. Direct reads still require completeness. Read terminal command facts through the exact public command read: completed or cancelled commands can leave an active-work list. Require the exact termination predicate and use disappearance only as secondary evidence. Do not extend the deadline, weaken authorization or change the producer to accommodate an observation helper. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-04.)
 
-A private predecessor swap must trigger compilation of the changed bytes.
-Metadata-preserving copies can retain an old mtime, causing Mix to run the
-candidate BEAM instead of the swapped source. Refresh the copied file mtime,
-verify the compiler rebuilt the owning app, and bind the actual source and
-test hashes before accepting a witness. Derive a line selector from the
-current test title and verify one intended test ran; comments can shift
-hardcoded selectors to a different case (2026-10-03 native approval witnesses).
+<!-- applied-learning: execute-the-admitted-virtualenv-path-without-resolving-away-its-environment -->
+<a id="applied-learning-execute-the-admitted-virtualenv-path-without-resolving-away-its-environment"></a>
+**Execute the admitted virtualenv path without resolving away its environment.** Preserve the approved virtualenv executable path and bind its symlink target, resolved binary, executable hash and environment configuration separately. Invoke the virtualenv path itself: invoking the resolved Python binary can bypass the environment. Before launching the controlled application, verify required imports and a virtualenv prefix through that exact interpreter and its fresh scoped home, temporary, configuration and cache paths. Do not substitute system Python, install dependencies or change the product to repair a fixture that selected the wrong interpreter. Retain the failed attempt; startup and cleanup alone do not qualify the journey. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-04.)
 
-A predecessor witness must exercise an operation the frozen predecessor
-supports. The dirty starting image can already contain new APIs absent from
-HEAD; an unsupported-operation failure does not prove the intended bug.
-Qualify the old happy path first, then add the counterexample (2026-10-03:
-duplicate signed JSON keys use the committed history API rather than the
-newer window API).
+<!-- applied-learning: scope-diagnostic-log-level-overrides-to-the-tested-module -->
+<a id="applied-learning-scope-diagnostic-log-level-overrides-to-the-tested-module"></a>
+**Scope diagnostic log-level overrides to the tested module.** CaptureLog filtering does not lower the producer's global warning threshold. For INFO diagnostic assertions, serialize the tests, save the module's existing Logger override, enable INFO only for that module, and restore its exact prior setting on exit. If no override existed, delete the temporary one. Leave production severity and global logger configuration unchanged. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-05.)
 
-Keep each qualified source version in its own execution image, with versioned
-runner and binding-report destinations. A new candidate must not replace the
-source, BEAMs or referenced output of an earlier qualified packet. Check output
-paths before executing copied harnesses; the notice SDK v2 runner initially
-reused the v1 binding destination. The intermediate report was retained and the
-original v1 image and report hash were restored before separate v2 qualification
-(2026-10-03).
+<!-- applied-learning: allow-only-exact-reviewed-operational-cache-deltas -->
+<a id="applied-learning-allow-only-exact-reviewed-operational-cache-deltas"></a>
+**Allow only exact reviewed operational-cache deltas.** Separate immutable qualification inputs and executable artifacts from operational outputs. When a normal tool changes a cache or compiler-validation record, inspect its actual producer and complete artifact delta before classifying only those exact existing regular files as mutable outputs. Retain initial snapshots, before/after hashes, file-kind confinement and failed guards. Keep source, lock, BEAM, .app, static, priv and archive bytes immutable within the sealed phase; keep generator and DSL inputs bound. Never exempt all compile.* files, an entire dependency directory or a tool/cache tree, or accept unreviewed generated variants. Legitimate recompilation requires an explicitly reviewed successor inventory. Do not restore stale BEAMs, protocol consolidation, or build records merely to satisfy an old inventory. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-01.)
 
-An overlay manifest must include the runtime dependencies of its new entry
-points, even when those dependencies were already dirty before the current
-slice. A fresh worktree starts from its committed checkpoint; copying only
-the listed overlay can omit working-tree wiring. On 2026-10-03 the new notice
-image retained checkpoint Manager bytes without the command continuation used
-by the adopted MessageFacade. Its preimage guard refused before mutation.
-Preserve that checkpoint baseline, add the reviewed and tested dependency to
-the new manifest, and rebuild the image before native acceptance.
-An overlay is not necessarily a whole standalone package: baseline files in an
-untracked new client may be absent from both HEAD and the overlay. Bind those
-unchanged files to prior qualified full-source hashes, rather than copying
-current workspace bytes implicitly. The 2026-10-03 Breeze migration image
-exposed omitted Editor, runtime/config and test-helper inputs before building;
-the joined native loaded-source check must include that supplemental closure.
-Apply this to host consumers too: retain declared path dependencies, routes,
-navigation, browser hooks, authorization and transcript readers, not only the
-new backend delta. Bind unchanged required loaded sources and the intentional
-private test configuration separately. The same 2026-10-03 review found missing
-Dashboard Mix edges, window readers and UI aliases hidden by copied build
-metadata. Preserve copied builds as inputs, then build the complete source
-assembly from empty output trees before admitting the actual browser/PTY run.
-
-Provision each fixture's ordinary prerequisites explicitly. A notice test's
-temporary migrated database does not migrate a Directory test's canonical
-private database; unchanged lower tests passed only after ordinary private
-`ecto.create`/`ecto.migrate`. Likewise, provision the actual Orchestrator and
-public conversation TaskSupervisor before starting a Branch. Respect identifier
-grammar in helpers: `Integer.to_string(10, 16)` emits uppercase `A`, so a fixed
-lowercase notice ID requires case normalization. Preserve these preparation
-failures without weakening production gates (2026-10-03 native notice helper).
-
-Failure cleanup must settle an owned child independently of evidence I/O.
-A key write, drain, bounded-log failure or constructor exception can skip the
-normal terminal exit; put exact-child termination and reaping in `finally`,
-and retain forced cleanup as a failed acceptance. In paired Python regressions,
-close retained stream objects before raw descriptors: an assertion traceback
-can keep a log object alive, and its later finalizer can close a reused fd
-after descriptor-only teardown (2026-10-03 native PTY harness).
-Validate the complete launch specification before starting its child, and record
-the exact PID immediately. On 2026-10-04 a wrapper read an absent deadline field
-after `Popen`; the native owner cleaned up normally, but the wrapper could no
-longer reap its exit code. Retain that distinction instead of inferring a normal
-outer exit from the inner host's shutdown receipt.
-Validate the associations between sealed source, setup and build packets as well
-as their independent hashes. Any lifecycle exception after a journey result,
-including browser close or the browser runtime's context exit, must force a
-failed result while retaining its checks and earlier primary failure.
-Before each effect, compare the actual plan, runner and diagnostic member bytes
-with their sealed manifest rows. A manifest hash or member-list presence alone
-does not admit changed members. On 2026-10-05, a Main activation draft bound the
-manifest through review but did not verify the adoption plan's command arrays
-at execution; it was corrected before any draft ran. For checkpoint acceptance,
-compare committed blob bytes with the qualified selected-source digests, not
-only the changed-path list and matching working-tree files.
-When replacing a frozen source row, derive its hash, path and byte count from
-the final bytes together. On 2026-10-04, two qualified Breeze source rows kept
-their predecessor sizes even though every source hash was correct. Preserve
-the refused packet and fork its association metadata explicitly; unchanged
-source, BEAM, archive and loaded-code proofs keep their original attribution.
-Correcting metadata does not require rebuilding correct code or weakening the
-size check.
-Update a derived manifest's summary scope along with its actual proof references.
-A fresh host observation cannot inherit wording that says the old host proof
-was retained unchanged. Preserve the parent and unchanged module rows; correct
-the attribution in an explicit metadata fork, without rerunning correct code.
-Use the declared escript output name and an absolute executable path for a
-nested Mix smoke check; the build produced `arbor-breeze`, not `arbor_breeze`.
-Bind the outer harness interpreter as well. Reuse the exact previously accepted
-`browser-python/bin/python` for Playwright journeys and give it fresh outer
-HOME, temporary, config and cache paths; verify imports through that interpreter
-and environment before starting the host. A generic system Python changes the
-runner dependency closure. On 2026-10-04 the host exited normally with closed
-ports, but the wrapper failed to import Playwright before any UI checks.
-Preserve that initial failure and rerun the unchanged journey with the existing
-accepted interpreter and fresh scoped environment, without dependency installs
-or product changes. Startup and cleanup alone do not qualify native behavior.
-Check every automatic read a new surface adds through the real server decoder,
-dispatcher and encoder. The native notice journey loaded20 history entries and
-then correctly cleared them because Gateway lacked the SDK's notices request
-handler; a successful initial history read had hidden the unwired operation
-(2026-10-03).
-
-When a public request builder tightens validation, malformed-wire tests must
-still reach the transport gate. Construct an ordinary valid payload, deliberately
-change only the raw-wire input, and sign the final changed bytes; independently
-assert the public builder refuses that input. Two slash-command fixtures had
-started failing before Gateway dispatch, leaving its separate refusal untested
-(2026-10-03). Preserve the original fixture failures and repair the test boundary
-rather than weaken production validation.
-
-Measure the UI state actually rendered, and retain raw/computed samples before
-asserting a visual gate. After a Session completed, Current work correctly showed
-an empty-state sentence, but the notice harness required an active-row STRONG
-that no longer existed. Include the rendered empty/status sentence and measure
-all present labels; missing optional content is not a contrast defect. Retaining
-samples only after a passing assertion also discarded the diagnostic evidence
-(2026-10-03 actual browser/raw-PTY notice journey).
-
-For collapsed controls, establish their rendered state before comparing visible
-text. On 2026-10-04, actual Home reload preserved the exact URL, draft, history
-and identities, but a closed `details` returned empty `inner_text()` while
-`text_content()` retained both IDs. Capture both methods and the open state
-before the assertion. Open the real summary through native keyboard input
-before the unchanged exact identity check, then close it normally; retain the
-failed evidence and no-new-turn check. A rendered-text predicate on hidden
-content is a helper precondition failure, not evidence of lost authorization.
-Establish the viewport precondition for terminal captions too. On 2026-10-04,
-a readiness regression at 100×28 clipped the existing cancellation caption
-before reaching its intended held-read assertion. The existing public resize
-to 100×40 retained every predicate and allowed both predecessor failures to
-reach the same intended busy-state gate. Preserve the unrelated failure;
-do not count it as a causal regression witness.
-Establish semantic input preconditions before waiting for an action to become
-enabled. The 2026-10-04 native streaming helper waited for Send on an empty
-composer before filling it, so it timed out without submitting or starting the
-provider. Fill the admitted text first, then retain the same enabled-state check,
-native submit gesture and deadline; do not weaken the product's empty-input gate.
-Compare terminal frames using the capture's documented row representation.
-The 2026-10-04 streaming frame decoder trimmed row margins while the exact
-provider prefix ended in a space. Normalize only the display expectation;
-keep protocol, command identity and SQL text comparisons exact. An updated
-browser disclosure needs separate treatment: awaiting text after checking its
-open state can reveal a patch that closes it. Preserve user-owned `open` through
-the framework's attribute API while allowing content updates and authorization
-removal. Reopening it in the helper does not prove state survived the update.
-Configured formatter plugins may also run dependency loadpaths. During the
-2026-10-04 disclosure correction, normal formatting regenerated two dependency
-`compile.elixir` records while every dependency BEAM and guarded source stayed
-byte-identical. Retain the policy failure and inspect the exact producer and
-whole artifact delta before continuing; a metadata rewrite does not authorize
-a broader dependency artifact prefix or justify restoring old build records.
-Native key fixtures must use the pinned editor's actual bindings. A familiar
-shell shortcut can pass through a terminal editor as printable input: the
-Breeze fixture's Ctrl+A/Ctrl+K sequence inserted `a`/`k` instead of clearing its
-draft. Trace key decoding and editor handling, then use supported native keys
-with a finite bound for the fixture text. Preserve the transcript assertions;
-do not turn a mistaken simulated gesture into an unrequested product shortcut
-(source-confirmed on 2026-10-04).
-Observe terminal command facts through the exact public command read, not an
-active-work page. Confirmed cancellations and completed commands intentionally
-leave that page. On 2026-10-04, queued cancellation was durably confirmed as
-`queued_removed`, but the native harness waited for the removed row to reappear.
-Keep the exact termination predicate and use disappearance only as secondary
-evidence; a longer timeout or a producer change would obscure the real mismatch.
-An authenticated indexed read can intentionally report an incomplete view while
-its background projection catches up. Keep authorization strict on every sample,
-retain partial observations, and evaluate phase predicates only on complete
-views within the original deadline. Direct reads still require completeness.
-The 2026-10-04 native stream run confirmed partial-to-complete index catch-up;
-the earlier strict conjunction failed before retaining its actual sample.
-Resolve a dependency from the consumer's actual Mix declaration before tracing
-its source. The Breeze client uses reviewed `vendor/breeze`; its private image
-also retains an unused `standalone_deps/breeze` copy without the paste changes.
-Reading that inactive copy cannot explain the generated client's behavior
-(2026-10-04 terminal draft-entry diagnosis).
-Trace a private SQL observer to the setup's actual repository and supervisor.
-The recovery helper invented `ArborNoticeNativeSetup.Repo`; its public read passed
-before SQL failed because setup owns `Arbor.Persistence.Repo`. Correct only that
-fixture reference and retain fresh authorization, scope, bounds and cleanup;
-do not change persistence configuration to accommodate the helper (2026-10-04).
-
-Runtime code snapshots are not operator approvals or grants. A safety-relevant
-admission-owner field must survive every descriptor and binding projection,
-including the final facade and legacy comparison. Use normally compiled test
-actions/handlers when the gate checks BEAM identity, so a counterexample reaches
-the intended gate rather than failing on an unavailable diagnostic module.
-For a defect introduced during a feature, retain the owner-enabled intermediate
-preimage; a pre-feature baseline may lack the descriptor API and fail before the
-discarded-field check (2026-10-03 native notice admission review).
-
-Wait for a positive rendered state before the next native input. Bare Escape
-is buffered for 500 ms by the selected Breeze input router, while the raw-PTY
-helper drains for 250 ms; sending End/paste immediately can leave work controls
-focused. The actual 2026-10-04 successor waited for transcript seed rows and
-then entered and retained the draft. Do not weaken paste-owner fences to make
-a fixture succeed. Validate the consumer's exact reference schema before a
-runtime launch; correct extra producer fields rather than relaxing its gate.
-A cancelled streaming turn may intentionally retain a partial transcript.
-Trace its persisted semantic status before treating row presence as completion
-or changing retention policy. The 2026-10-04 native run confirmed worker/Engine
-termination and a stored cancelled assistant, but window/projection consumers
-dropped that status. Preserve and label it, keep speech disabled on replay, and
-require explicit field presence in the regression: two missing values can
-compare equal and hide the defect.
-A history-status UI fixture must append fresh persisted identities, or seed
-status before the first read. Changing a cached entry's status at the same id
-and ordinal correctly trips the immutable-overlap gate; do not relax that
-gate to exercise a label (2026-10-04 retained-partial presentation review).
-Platform-dependent maintenance scripts must probe required APIs before writing.
-The attempted APFS duplicate consolidation stopped on unavailable Python
-os.listxattr before cloning any file; its incomplete running receipt did not
-mean the process remained alive. Use the terminal process result and preserve
-the failure rather than restarting from a stale marker (2026-10-04).
-
-Before asserting a public runtime receipt, trace its value from the metadata
-producer through the public projection. An implementation module and a public
-backend label are different values; on 2026-10-05 a realtime control fixture
-rejected a valid session by comparing `:xai_realtime` with its module name.
-
-For library refreshes, compare each consumer's actual pinned archive runtime
-members with the intended accepted source. Clean sibling checkouts and exact
-archive hashes prove reproducibility, not freshness. Factory's 2026-10-06 cold
-consumer passed with an older ActionRuntime adapter lacking current owner-context
-checks; advance the compatible pin and prove the public behavior through the
-consumer before declaring the sync complete.
+<!-- applied-learning: verify-packaged-beam-identity-through-the-configured-transformation -->
+<a id="applied-learning-verify-packaged-beam-identity-through-the-configured-transformation"></a>
+**Verify packaged BEAM identity through the configured transformation.** For escripts, bind reviewed source SHA-256 and compare loaded, disk and archive OTP code MD5s. Compare exact archive member bytes with the disk BEAM after applying the configured Mix.Release.strip_beam options. Stripping can change raw file SHA-256 without changing executable code; never claim those raw hashes are equal. Bind packaged application metadata to its exact project or toolchain owner paths, versions and hashes; reject a generic external-path fallback. Preserve failed identity checks instead of rewriting evidence to make them pass. (Extracted 2026-10-16 from independently-rerun-delegated-verification-against-the-committed-revision; first found 2026-10-04.)
 
 <!-- applied-learning: fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety -->
 <a id="applied-learning-fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety"></a>
@@ -1102,63 +701,15 @@ VP-05D1 validation rework).
 
 <!-- applied-learning: test-facades-must-observe-production-ownership-not-reimplement-it -->
 <a id="applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it"></a>
-**Test facades must observe production ownership, not reimplement it.** A
-compatibility fake that translates a new handoff into an old one and separately
-registers, drains, or removes cleanup can duplicate effects and turn valid
-production behavior into broad failures. Once the concrete owner supports the
-canonical protocol, delete the shim: delegate lifecycle operations to the real
-owner and retain only observability and failure injection. Assert state on the
-process that actually owns it, such as a cleanup lease that outlives its
-coordinator (found 2026-08-04 reconciling Voice Session and ResourceOwner
-migrations).
+**Test facades must observe production ownership, not reimplement it.** Delegate canonical lifecycle operations to the real owner; retain observation and failure injection. Do not translate handoffs while independently registering, draining or removing cleanup. Assert state on the process that owns it, including leases that outlive coordinators. Acceptance must invoke the deployed execution owner: `LLM.generate` and `ToolLoop.run` qualify different loops. Bind the configured client, adapters, plug order, auditor and loaded owner identity. Load genuine application metadata before private overrides, configure isolated targets before owners start, retain enforcing flags, and verify effective listener configuration and public readiness before effects. Store seeding does not prove a Manager-backed read path is ready: own the real collaborators, verify exact-PID cleanup, and preserve the positive action assertion instead of returning canned success. Verify the real profile mode: retain the host restriction and capability approval constraint, using an exact finite public `:ask` rule when a permissive baseline becomes `:block`; a missing Manager fallback cannot establish that policy. Production interaction acceptance must use isolated, migrated SQL rather than disabled persistence. Assert `Arbor.Comms.durable_interaction_readiness/0` backend, namespace and durability before effects. Validate public configuration and result shapes against the serving owner. (Trimmed 2026-10-16; first found 2026-08-04.)
 
-For acceptance, invoke the same execution owner as the deployed consumer:
-`LLM.generate` and the Session's `ToolLoop.run` are different loops. Bind the
-actual configured client, adapter map, plug order, auditor, and loaded owner
-identity; source defaults alone do not describe runtime dependency injection.
-In a private production-profile boot, configure isolated targets before their
-owners start, retain enforcing flags, and verify public readiness before effects.
-A test-profile bootstrap with disabled gates proves a different claim
-(reconfirmed 2026-09-24 during hostile-document qualification).
+<!-- applied-learning: bind-tool-schema-and-executable-identity-separately -->
+<a id="applied-learning-bind-tool-schema-and-executable-identity-separately"></a>
+**Bind advertised tool schemas separately from executable owners.** Fingerprint the exact model-visible tool name, description and JSON parameter schema; exclude incidental callback-function identity that changes across node creation. Bind executable owners through separate loaded-code descriptors. Prove a fresh BEAM preserves the profile while schema or executable changes invalidate prior qualification. Never normalize an unknown executable difference merely because source bytes match. (Extracted 2026-10-16 from test-facades-must-observe-production-ownership-not-reimplement-it; first found 2026-09-24.)
 
-A genuine Store and successful profile seeding do not prove readiness of a
-facade's read path. Trace the selected action through its public facade to the
-Manager or other required process; start that real collaborator under the
-fixture's existing owner and verify public readiness and exact-PID cleanup.
-Do not weaken the positive action assertion or replace the action with a canned
-result (2026-10-04 protected profile-read acceptance).
-Once that real owner is present, validate the real profile's effective resource
-mode. A host-restricted permissive baseline becomes `:block`; a missing Manager's
-fallback `:ask` can hide the omission of a required finite URI rule. Add the exact
-fixture `:ask` rule through the public facade while retaining the host restriction
-and capability approval constraint, rather than loosening policy to clear the
-positive control.
-
-Keep receipt serialization separate from the policy identity being observed.
-Explicitly project known tagged structs, such as `%CapabilityProfile{}`, with
-`Map.from_struct/1` before recursive JSON serialization; being a map does not
-make a struct implement `Enumerable`. Refuse unknown struct types rather than silently
-flattening them, and preserve the original raw term for the authoritative policy
-fingerprint. Exercise the receipt against the actual public snapshot before
-acceptance effects (found 2026-09-24 when metadata-only capture reached real
-capability profiles).
-
-Fingerprint model-visible tool data, not incidental runtime terms: Jido tool maps
-can include callback functions whose node-creation identity changes after restart.
-Project the exact advertised JSON schema and bind executable owners separately;
-prove a fresh BEAM keeps the same profile while schema or executable changes still
-invalidate it. Do not normalize unknown code differences because source matches.
-
-Validate public configuration and result shapes against their actual owners
-before acceptance effects. A private Repo started with explicit `ConnectionPool`
-can still report Sandbox through `Repo.config/0` unless its owned configuration
-matches; fix the fixture, not migration verification. PostgreSQL
-`inet_server_addr()::text` can include `/32`; use `host(inet_server_addr())` when a gate
-expects a bare address, retaining the exact loopback check. Managed Stop returns
-`{:stopped, node_name}`; verify that tuple and separately observe the prior PID's
-absence (found 2026-09-24 during deployed qualification and cold restart).
-
-Production interaction acceptance must retain durable storage. Isolate and migrate the SQL database instead of disabling persistence, and assert the public `Arbor.Comms.durable_interaction_readiness/0` backend, namespace and durability before effects. The 2026-10-04 protected fixture initially disabled SQL interactions; a volatile choice/approval path would prove a different claim.
+<!-- applied-learning: receipt-encoding-must-preserve-authoritative-policy-identity -->
+<a id="applied-learning-receipt-encoding-must-preserve-authoritative-policy-identity"></a>
+**Keep receipt encoding separate from authoritative policy identity.** Project recognized tagged structs explicitly with `Map.from_struct/1` before recursive JSON encoding; `is_map/1` does not establish `Enumerable` support. Refuse unknown struct types rather than silently flattening them. Preserve the original raw policy term for its authoritative fingerprint instead of fingerprinting the receipt representation. Exercise receipt encoding against the actual public snapshot before acceptance effects. (Extracted 2026-10-16 from test-facades-must-observe-production-ownership-not-reimplement-it; first found 2026-09-24.)
 
 <!-- applied-learning: test-observation-helpers-must-not-acquire-authority -->
 <a id="applied-learning-test-observation-helpers-must-not-acquire-authority"></a>
@@ -1303,140 +854,15 @@ P1B-2A contained validation).
 
 <!-- applied-learning: sources-only-validation-compiles-need-git-and-a-normal-mix-compile -->
 <a id="applied-learning-sources-only-validation-compiles-need-git-and-a-normal-mix-compile"></a>
-**Sources-only validation compiles need git and a normal Mix compile.**
-`--no-deps-check` skips both lock inspection and compiling missing deps via
-`deps.loadpaths`. On a sources-only baseline (`MIX_DEPS_PATH` filled,
-`MIX_BUILD_PATH` empty) that leaves `compile.boundary` missing. Put `git` in
-`images/validation-runtime/Containerfile` so `Mix.SCM.Git.lock_status` can
-read checkout `.git`, and emit `mix compile` (plus optional
-`--warnings-as-errors`) as the candidate compile argv. Later xref/test
-children may keep `--no-deps-check` once `_build` is populated. Do not skip
-the in-unit deps compile until a pre-compiled baseline `_build/test` is
-digest-pinned (found 2026-08-26, V7-17 / run 11o; supersedes V7-15).
+**Sources-only validation compiles need Git and a normal Mix compile.** When dependency sources are populated but the build directory is empty, run ordinary `mix compile`, optionally with `--warnings-as-errors`. Supply Git in the validation image and retain dependency checkout metadata so lock inspection can succeed. `--no-deps-check` skips the dependency loading/compilation needed to make dependency-provided compilers available. Later xref/test children may use it after the build is populated. Do not omit in-unit dependency compilation unless the precompiled test baseline is digest-pinned. Keep provisioning separate from no-network validation. (Trimmed 2026-10-16; first found 2026-08-26.)
 
-Hex 2.5.1 dependency fetching creates extraction directories in its current working directory, so a read-only project mount fails with `:erofs` even when `MIX_DEPS_PATH` is writable. Use a disposable writable checkout for operator source provisioning, verify its tracked bytes and lock afterward, and keep subsequent no-network validation in a separate copy (found 2026-09-27 during VP-07B0 native admission).
+<!-- applied-learning: measure-network-exceptions-at-their-actual-socket-boundary -->
+<a id="applied-learning-measure-network-exceptions-at-their-actual-socket-boundary"></a>
+**Measure network exceptions at the actual socket boundary.** Qualify local locking with real loopback bind, connect and closure while retaining remote-download denial and Mix locking. Probe wildcard binds, non-loopback inbound traffic and non-loopback outbound denial separately; a localhost selector does not establish exclusive loopback confinement. Bind the actual listener to its reviewed loopback source. Check the installed sandbox parser and do not invent per-host SBPL admission. A reviewed remote TCP 443 exception is port-only unless separate evidence establishes hostname filtering; retain ordinary TLS hostname verification and enforcing capability/egress gates. Report only observed permissions, without inferring provider or device acceptance. When a denied transport syscall breaks delivery, use supported transport configuration while retaining outbound denial and verify exact served bytes. Preserve failed diagnostics. (Extracted 2026-10-16 from sources-only-validation-compiles-need-git-and-a-normal-mix-compile; first found 2026-10-04.)
 
-Fetching newly reachable optional dependencies can delete existing parents'
-`compile.elixir_scm` markers even when every lock record is unchanged. Inspect
-the actual finite artifact delta and the pinned Mix fetcher, then normally
-compile the marked parents with the new dependencies. Preserve successful
-resolution evidence; do not repeat fetching or restore compiler markers by hand.
-Bind legitimate compiler output changes separately while retaining source and
-native guards (found 2026-10-05 extending the original conversation UI build).
-
-Resolve umbrella dependency changes from the root, then compare every lock entry.
-Fetching from a leaf app omits sibling constraints and can float unrelated packages.
-For an exact two-package source adoption, retain only Mix-generated records for
-those packages, preserve the other original records, and require a full-root
-`deps.get --check-locked` to succeed without changing the lock (found 2026-09-27
-during the private media fork adoption).
-
-Elixir 1.19.5 Mix locks and PubSub require local TCP even in an offline build.
-A macOS `(deny network*)` profile refused `deps.get --check-locked` before
-compilation on 2026-10-04. Trace the installed implementation and verify real
-loopback bind/connect/closure plus non-loopback outbound denial; do not enable
-remote downloads or disable Mix locking. SBPL endpoint syntax accepts `localhost`,
-not a numeric host. On this Mac that selector also permitted wildcard binding
-and non-loopback inbound traffic; preserve those observed limitations and bind
-the actual Mix listener to its reviewed `127.0.0.1` source. Do not describe the
-profile as denying every remote connection.
-The same parser rejected non-loopback numeric addresses on 2026-10-05 with
-`host must be * or localhost in network address`, before any socket opened.
-Do not invent per-host SBPL admission. A reviewed private provider profile may
-allow remote TCP 443 while retaining ordinary TLS hostname verification and
-Arbor's enforcing capability/egress gates; describe that as port-only scope.
-The actual three-host TLS probe and wrong-port `:eperm` refusals prove those
-observations, not exclusive hostname filtering or provider/audio acceptance.
-Reject ambient native compiler overrides before creating the image. If the
-parent supplies an unrelated `CPPFLAGS`, remove that variable explicitly from
-the admitted invocation rather than weakening the clean-environment gate.
-
-An offline resolution check also needs the public Hex registry cache. Copied
-locked package sources can compile while `deps.get --check-locked` refuses an
-uncached registry entry. Pin only that public metadata into the private image;
-do not copy account configuration or enable networking to disguise the missing
-input. Source dependencies must carry their reviewed code and licenses in the
-execution root. Exclude nonruntime distribution metadata explicitly, preserve
-every unrelated lock record, and verify actual compiled source paths after
-forcing the changed dependencies (2026-10-03 portable terminal adoption).
-
-Compare registry requirements with original checksum-bound package metadata,
-not normalized `mix.lock` requirement text. Seven 2026-10-04 releases had
-equivalent-looking but different strings; retain exact checksum, version,
-dependency identity, repository and optionality checks, then let ordinary
-`deps.get --check-locked` decide constraint acceptance. Inspect all original
-metadata shapes before sealing a reader: legacy entries include tuple rows,
-omitted zero-dependency requirements and Poolboy's empty map. Admit an absent
-or empty-map representation only when both registry and lock prove no
-dependencies. Historical cache observations are provenance; the frozen cache
-snapshot is the execution input.
-Separate host source overlays from locked dependency assets before fresh
-assembly. Two qualified Phoenix browser assets under `deps/` caused an early
-directory collision on 2026-10-04. Obtain them from their actual locked archives
-and compare their bytes with the qualified assets; keep fresh directory creation
-and all source guards strict instead of merging or reusing failed build trees.
-For an owning DEV build, use ordinary `deps.get --only dev --check-locked`.
-In installed Mix 1.19.5, `MIX_ENV=dev` alone does not scope fetching: `deps.get`
-passes no environment unless `--only` is supplied, while `deps.compile` uses
-the current environment. An otherwise valid 135-package DEV closure failed
-fetching test-only Floki on 2026-10-04. Keep the whole lock immutable and bind
-the task/converger implementation; do not edit dependency declarations or
-claim that a DEV-only build qualifies the test environment.
-
-Valid Mix CLI syntax does not establish contained-command admission. Trace the
-exact execution-core argv matcher before preparing a live proof: `test --no-start`
-is rejected, while the existing owner-issued `run --no-start runner.exs --
-result.etf selected_tests` route is admitted. Use reviewed runner bytes and retain
-`--no-start` inside the nested test; do not silently drop it to pass the outer
-allowlist (found 2026-09-27 during the Git media live proof).
-
-Pinned launch paths and effective runtime paths can differ without a toolchain
-change. On 2026-10-04 the normal Erlang launcher prepended its exact
-`erts-16.3/bin` to PATH; Elixir reported System through `bin/../lib`. A SQL
-preflight incorrectly expected the initial launcher paths and failed before DB
-startup, while all nine storage source/BEAM/loaded-code identities matched.
-Capture labelled actual conditions first. Bind the exact effective executable
-and both the observed lexical and verified canonical System paths, hashes and
-loaded/disk code identity; keep application compile-source gates exact. Preserve
-the failed attempt and report the failing stage and bounded stack instead of an
-opaque match error.
-
-Check each Mix task's parser before forwarding compiler options. In pinned
-Elixir 1.19.5, `--no-compile` still prunes code paths, while `mix run` rejects
-compile-only `--no-prune-code-paths`. For a no-start fixture that dynamically
-starts genuine OTP providers, use the same-VM sequence
-`mix do app.config --no-compile --no-prune-code-paths + run --no-start --no-compile bootstrap.exs`.
-Completed `app.config` remains cached when `run` invokes `app.start`, preserving
-the configured code paths. Keep provider and identity checks; this does not
-prove release inclusion (2026-10-04 private DEV fixture).
-
-Do not infer `mix test` path retention from App.Config alone: Test invokes
-Compile again, and `--no-compile` re-enables Compile and Compile.All. Normal
-incremental compilation can also recompile local dependencies first. An actual
-2026-10-05 debug trace finds their internal `--no-code-path-pruning` flag does
-not match pinned Compile.All's `--no-prune-code-paths` check. For already
-qualified dependency outputs, first run public `deps.loadpaths --no-compile`
-with archive/version/lock/status checks intact, then normal
-`app.config --no-prune-code-paths`, then Test. The checked dependency task and
-normal owning Compile remain cached. A no-start comparison restores the genuine
-`os_mon` path with all producer/native hashes unchanged. Bind legitimate
-compiler-generated protocol/metadata changes explicitly; startup and path
-observations are not failing security assertions or release-inclusion proof.
-
-Load genuine `.app` metadata for an application outside the owning project's
-closure before private `Application.put_env/3` overrides. Otherwise later loading
-can replace private ports with resource defaults. Assert effective bind address
-and listener afterward. Check the locked API shape too: `Plug.Cowboy.http/3`
-takes the plug module and options separately; the plug/options tuple belongs to
-`child_spec/1` (2026-10-04 Gateway and private OIDC fixture).
-
-When sandboxed static responses have headers but truncated bodies, compare the
-exact pinned OTP sendfile syscall before changing network policy. On 2026-10-04
-the same loopback asset transferred exactly 19,172 bytes without the sandbox;
-the outbound-denied profile returned `:eperm` and zero bytes. Use the documented
-private HTTP `protocol_options: [sendfile: false]` fallback, retain outbound
-denial, and verify served asset bytes. Preserve the failed diagnostic; transport
-configuration is not device or provider acceptance.
+<!-- applied-learning: provision-exact-offline-dependency-resolution-inputs -->
+<a id="applied-learning-provision-exact-offline-dependency-resolution-inputs"></a>
+**Provision exact locked inputs for offline dependency resolution.** Resolve umbrella dependency changes from the root and compare every lock record. Retain only resolver-generated records for admitted changes, preserve unrelated records, and require full-root `deps.get --check-locked` without further lock changes. Select the resolution environment explicitly with `--only`; a DEV-only build does not qualify tests. Provision reviewed dependency code, licenses and checksum-bound public registry metadata into the private execution root; never copy account configuration or enable networking to hide missing inputs. Compare registry requirements with original package metadata rather than normalized lock requirement text. Retain exact checksum, version, dependency identity, repository and optionality checks, then let ordinary locked resolution decide constraint acceptance. Admit omitted or empty-map dependency metadata only when both registry and lock prove no dependencies. Treat the frozen cache snapshot as input. Separate source overlays from locked assets, assemble fresh trees, and verify actual compiled source paths after explicitly rebuilding changed dependencies. Preserve source and native guards. (Extracted 2026-10-16 from sources-only-validation-compiles-need-git-and-a-normal-mix-compile; first found 2026-09-27.)
 
 <!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
 <a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>
@@ -1476,64 +902,15 @@ all files so tracked paths that now match `.gitignore` are not silently dropped
 
 <!-- applied-learning: qualification-must-prove-a-named-product-or-runtime-claim -->
 <a id="applied-learning-qualification-must-prove-a-named-product-or-runtime-claim"></a>
-**Qualification must prove a named product or runtime claim.** Separate
-feature/consumer validation, broad integration, factory restart qualification,
-and distributed authority correctness. An executable protocol model is not proof
-of a future runtime; all-batch integration is not a prerequisite for every local
-feature. When a consumer is deferred, record the old experiment as incomplete and
-review any replacement scope explicitly. Never shrink an already admitted plan,
-accept a prefix, or let a worker choose tests. Prefer a small deterministic
-composition fixture for an infrastructure claim, then widen evidence where shared
-state/topology/security demands it (learned 2026-09-07 during the single-user-first
-architecture reassessment).
-When the operator explicitly makes residual bugs non-blocking, record which
-prerequisite is superseded and resume the selected milestone. Preserve unresolved
-failures and unverified observations as follow-ups instead of restarting the
-same dedicated hardening cycle (2026-10-01 conversation interface evaluation).
-Before delegating a renderer comparison, freeze its shared feature, history
-window and recovery cases in one artifact. Match those semantics before comparing
-render time or implementation effort; different defaults manufacture a winner.
-Select versions from verified published metadata before pinning a comparison;
-main-branch package manifests can describe releases that are not published.
-Bind exact selected distributions to the dependency lock, preserve every lookup
-outcome per attempt, and verify installed public exports separately from moving
-upstream source (2026-10-01 assistant-ui/Ink preparation: a source-derived core
-version returned npm 404 before installation).
-Once exact dependencies are installed, run every locally available admitted
-consumer check before returning a continuation. Include process teardown in
-renderer acceptance: successful UI assertions can precede an uncaught error
-from pending React work after DOM globals are removed. Await public renderer
-cleanup before restoring that environment (2026-10-01 released API comparison).
-Rendered focus is not input-handler readiness: Ink registers handlers in a
-passive effect after rendering the cursor. Flush public React lifecycle
-boundaries before injecting each keyboard event, keep one write per action,
-and capture both public composer state and the frame on failure. For a
-sporadic failure, require consecutive fresh-process runs that stop on any
-failure, not retries until a pass (2026-10-01 uncertainty-composer qualification).
-A renderer's decoded-event test API does not qualify its raw terminal input
-decoder. Breeze.Test ignores an ordinary multi-grapheme key; its documented batch
-flag exercises a different path. Prove Unicode edits, multiline caret scrolling
-and default focus through native fixtures, then separately exercise raw PTY
-bracketed paste before claiming paste support (2026-10-02 Breeze adoption).
-Pair each input privacy rejection with positive insertion through the actual
-interactive owner tree. Breeze.Test's local child tree can differ from the
-Server-owned tree; all rejection tests can pass while nested paste is ignored.
-Exercise intermediate-owner focus away/back and queued leaf reset as well as
-ordinary nested insertion (2026-10-03 bracketed-paste qualification).
+**Qualification must prove a named product or runtime claim.** State whether the evidence qualifies a feature/consumer, broad integration, factory restart or distributed authority. Use a deterministic composition fixture for a bounded infrastructure claim, widening coverage when shared state, topology or security requires it. A protocol model does not prove a future runtime, and broad integration is not a prerequisite for every local feature. Freeze shared features, history windows and recovery cases before comparing implementations. When claiming released-API support, verify published distributions, lock selected versions and inspect installed public exports rather than moving upstream source; preserve lookup failures. Never shrink an admitted plan, accept a prefix or let a worker choose tests. Run every locally available admitted consumer check, including teardown, before handoff. Record deferred consumer evidence as incomplete and explicitly review replacement scope. When the operator makes residual bugs non-blocking, record the superseded prerequisite, preserve unresolved failures and unverified observations as follow-ups, then resume the selected milestone. (Trimmed 2026-10-16; first found 2026-09-07.)
 
-For terminal text safety, inspect the raw native frame as well as visible
-Unicode and escaped-control markers. A helper that strips escapes again
-can hide text loss; absence of OSC alone does not prove correct rendering.
-The released Breeze renderer swallowed content after the tested ESC sequence
-rather than emitting OSC, so that predecessor proves lost prompt content,
-not terminal command execution (2026-10-03 controls qualification).
+<!-- applied-learning: inspect-raw-terminal-frames-for-text-safety -->
+<a id="applied-learning-inspect-raw-terminal-frames-for-text-safety"></a>
+**Inspect raw terminal frames when qualifying text safety.** Inspect the raw native frame together with visible Unicode and escaped-control markers. Do not run it through another escape-stripping helper that can hide lost text. Absence of OSC alone does not establish correct rendering. Distinguish lost prompt content from terminal command execution and claim only the outcome the witness actually demonstrates. (Extracted 2026-10-16 from qualification-must-prove-a-named-product-or-runtime-claim; first found 2026-10-03.)
 
-For streaming terminal framing, vary inter-chunk delay as well as chunk size.
-A fast split-marker test missed a 50ms prefix flush that replayed a delayed
-CRLF paste as Enter and admitted a real command. Assert no authoritative
-admission without explicit Enter, retain the failed timing case, and prove
-ordinary keys and a fresh post-discard turn separately (2026-10-03 native
-paste acceptance).
+<!-- applied-learning: qualify-terminal-paste-through-timed-native-owner-streams -->
+<a id="applied-learning-qualify-terminal-paste-through-timed-native-owner-streams"></a>
+**Qualify terminal paste through timed streams and real input owners.** Exercise raw PTY input and the actual server-owned interactive tree before claiming paste support; decoded-event helpers bypass the raw decoder and can use a different owner tree. Vary inter-chunk delay as well as chunk size across opening and closing delimiters, including incomplete and delayed CRLF pastes. Assert no authoritative admission without explicit Enter. Pair each privacy rejection with positive Unicode/multiline insertion through the same real owner chain; cover default focus, caret scrolling, intermediate-owner focus away/back and queued leaf resets. Prove ordinary keys and a fresh post-discard turn separately. Preserve the failed timing case instead of accepting fast split-marker coverage as equivalent. (Extracted 2026-10-16 from qualification-must-prove-a-named-product-or-runtime-claim; first found 2026-10-02.)
 
 <!-- applied-learning: trace-evidence-must-preserve-actual-effect-observations -->
 <a id="applied-learning-trace-evidence-must-preserve-actual-effect-observations"></a>

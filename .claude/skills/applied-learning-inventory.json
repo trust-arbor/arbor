@@ -5,10 +5,10 @@
   "source_captured_on": "2026-08-03",
   "admission_cutover": "2026-10-16",
   "archive_root": ".claude/applied-learning-archive",
-  "entry_count": 790,
+  "entry_count": 802,
   "always_loaded_count": 12,
   "original_entry_count": 461,
-  "post_migration_entry_count": 329,
+  "post_migration_entry_count": 341,
   "entries": [
     {
       "source_ordinal": 1,
@@ -10745,17 +10745,15 @@
       "source_session": "claude:9744da23-c083-41fa-af84-ce78ae8e4723",
       "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
       "scope": [
-        "load_binary/3",
-        "Mix.Release.strip_beam/2",
-        "bind_lease/4",
-        "System.argv/0",
-        "ArborNoticeNativeSetup.Repo",
-        "Arbor.Persistence.Repo"
+        "Arbor.Common.LoadedModuleIdentity",
+        "apps/arbor_actions/test/arbor/actions/execution_binding_security_regression_test.exs",
+        "clients/arbor_breeze/mix.exs"
       ],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "c460b9d119184bb043f7d57592d4df60421fd85b496ce1334ed7212f8f566756",
-      "always_loaded": false
+      "content_sha256": "155dd0bb32855b2b39efa52c1df0ef96d2b2b239c06f8d9fdff5f76c15ac7a85",
+      "always_loaded": false,
+      "revisit_when": null
     },
     {
       "source_ordinal": 525,
@@ -13040,14 +13038,18 @@
       "source_session": "codex:01a1461c-b6f8-7f52-adb7-6fcd858dc571",
       "source_incident": "found 2026-08-04 reconciling Voice Session and ResourceOwner migrations). Clarified 2026-09-24 during agent-stack acceptance: serialize only known tagged snapshot structs and preserve raw policy identity before acceptance effects. Clarified 2026-09-24: fingerprint normalized model-visible schemas rather than callback identity; align Repo configuration with its serving owner, distinguish PostgreSQL address representation, and verify the Stop node ACK separately from PID absence.",
       "scope": [
-        "Map.from_struct/1",
-        "Repo.config/0",
+        "Arbor.Voice.ResourceOwner",
+        "Arbor.Agent.Eval.SecurityJourney",
+        "Arbor.Orchestrator.SecurityQualification",
+        "Arbor.Trust.set_rule/3",
+        "Arbor.Trust.effective_mode/3",
         "Arbor.Comms.durable_interaction_readiness/0"
       ],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "c485a65e39ea7f464e15bb425db605fcd9cd1cf5b85e87ad131289a59f7bcc09",
-      "always_loaded": false
+      "content_sha256": "34db003891e4ac470d19631eaaad36026662fec182f3d711e8194aaab752db93",
+      "always_loaded": false,
+      "revisit_when": null
     },
     {
       "source_ordinal": 636,
@@ -14333,7 +14335,7 @@
       "source_ordinal": 697,
       "source_kind": "post-migration",
       "slug": "sources-only-validation-compiles-need-git-and-a-normal-mix-compile",
-      "title": "Sources-only validation compiles need git and a normal Mix compile.",
+      "title": "Sources-only validation compiles need Git and a normal Mix compile.",
       "topic": "testing-live-runtime",
       "class": "security-invariant",
       "status": "live",
@@ -14343,16 +14345,16 @@
       "source_session": "claude:a21fabcf-2c48-483f-96ff-7d9be288cc8e",
       "source_incident": "found 2026-08-26, V7-17 / run 11o; supersedes V7-15",
       "scope": [
-        "Mix.SCM.Git.lock_status",
-        "bin/../lib",
-        "Application.put_env/3",
-        "Plug.Cowboy.http/3",
-        "child_spec/1"
+        "Arbor.Actions.Mix.compile_argv/1",
+        "Arbor.Shell.AppleContainerExecutionCore",
+        "Arbor.Shell.OciExecutionCore",
+        "images/validation-runtime/Containerfile"
       ],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "5110acbfbf806c05ea387607bd0de9173d443c34b6d384fd65a676ba97187801",
-      "always_loaded": false
+      "content_sha256": "90ba1982d49708c13416ca515a0b6bc6d651ef895e3fb01b8a46ef934a5baa72",
+      "always_loaded": false,
+      "revisit_when": null
     },
     {
       "source_ordinal": 698,
@@ -14833,11 +14835,14 @@
       "created": "2026-09-07",
       "source_session": "codex:01a1461c-b6f8-7f52-adb7-6fcd858dc571",
       "source_incident": "learned 2026-09-07 while separating personal-agent delivery from G5E and shared-authority qualification",
-      "scope": [],
+      "scope": [
+        "Arbor.Orchestrator.SecurityQualification.EvidenceCore"
+      ],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "e378ae34407cf7cfb8c34c05b0747e01de42dae380260a52ac6250531137673e",
-      "always_loaded": false
+      "content_sha256": "01335ab7ebc3d0b738e1e51a8044a28e17defff155eb8b595c33024fbe304871",
+      "always_loaded": false,
+      "revisit_when": null
     },
     {
       "source_ordinal": 722,
@@ -16258,6 +16263,278 @@
       "confirmed_by": null,
       "revisit_when": null,
       "content_sha256": "1b319936eb1079d79f070ba8857a1a2a1f97bcd61de4dc80449c01c2835a0244",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 796,
+      "source_kind": "post-migration",
+      "slug": "verify-packaged-beam-identity-through-the-configured-transformation",
+      "title": "Verify packaged BEAM identity through the configured transformation.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-verify-packaged-beam-identity-through-the-configured-transformation",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [
+        "apps/arbor_shell/test/arbor/shell/trusted_build_beam_identity_test.exs",
+        "Arbor.Common.LoadedModuleIdentity"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "d0342c4fb385b57dbd20703c1f5212b0d988d97b277fd0a7e89ef3adee80dcab",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 797,
+      "source_kind": "post-migration",
+      "slug": "allow-only-exact-reviewed-operational-cache-deltas",
+      "title": "Allow only exact reviewed operational-cache deltas.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-allow-only-exact-reviewed-operational-cache-deltas",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [
+        "Arbor.Shell.inventory_regular_tree/1",
+        "Arbor.Shell.RegularTreeInventory"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "098b1a7b514b1cbbc4bbe894ca794209c130b9befcd1c064bd62ebafbee0ff86",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 798,
+      "source_kind": "post-migration",
+      "slug": "scope-diagnostic-log-level-overrides-to-the-tested-module",
+      "title": "Scope diagnostic log-level overrides to the tested module.",
+      "topic": "testing-live-runtime",
+      "class": "tooling",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-scope-diagnostic-log-level-overrides-to-the-tested-module",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [
+        "apps/arbor_voice/test/arbor/voice/diagnostics_test.exs"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "f1dbe3c93e2eb4d9463e7f2862893573023f44eebe2d23ca9d86eb15d885d889",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 799,
+      "source_kind": "post-migration",
+      "slug": "execute-the-admitted-virtualenv-path-without-resolving-away-its-environment",
+      "title": "Execute the admitted virtualenv path without resolving away its environment.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-execute-the-admitted-virtualenv-path-without-resolving-away-its-environment",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "fb27d26453084072a2bc073fc1a25d8f12ac74a908c687bd5bbe01c7835d8ac5",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 800,
+      "source_kind": "post-migration",
+      "slug": "require-complete-authorized-views-before-accepting-indexed-phase-evidence",
+      "title": "Require complete authorized views before accepting indexed phase evidence.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-require-complete-authorized-views-before-accepting-indexed-phase-evidence",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [
+        "Arbor.Comms.ConversationActivity",
+        "Arbor.Agent.conversation_command/4",
+        "Arbor.Agent.conversation_activity/3"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "5fc5ab8d0381192bca5dcd1b47864d771aef387b40234c5ea326f58f02d90569",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 801,
+      "source_kind": "post-migration",
+      "slug": "preserve-persisted-cancellation-status-when-replaying-partial-transcripts",
+      "title": "Preserve persisted cancellation status when replaying partial transcripts.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-preserve-persisted-cancellation-status-when-replaying-partial-transcripts",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from independently-rerun-delegated-verification-against-the-committed-revision during the 2026-10-16 trim",
+      "scope": [
+        "Arbor.Persistence.ConversationWindow",
+        "apps/arbor_dashboard/test/live/conversation_live_test.exs",
+        "packages/conversation_kit/lib/conversation_kit/snapshot.ex"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "5f10d6a80f22dcda509625e78d81bc6cd148bdefdf4c41878bc9e9a7faaab7b7",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 802,
+      "source_kind": "post-migration",
+      "slug": "provision-exact-offline-dependency-resolution-inputs",
+      "title": "Provision exact locked inputs for offline dependency resolution.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-provision-exact-offline-dependency-resolution-inputs",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from sources-only-validation-compiles-need-git-and-a-normal-mix-compile during the 2026-10-16 trim",
+      "scope": [
+        "mix.exs",
+        "Arbor.Shell.TrustedBuild.Plan",
+        "Arbor.Actions.Mix"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "4aec292285a4c233de5050cda441f97a54d0ddf15c684ec4f0f658e4d684bcb4",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 803,
+      "source_kind": "post-migration",
+      "slug": "measure-network-exceptions-at-their-actual-socket-boundary",
+      "title": "Measure network exceptions at the actual socket boundary.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-measure-network-exceptions-at-their-actual-socket-boundary",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from sources-only-validation-compiles-need-git-and-a-normal-mix-compile during the 2026-10-16 trim",
+      "scope": [],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "a01233032341c2b595436a50991a3f5b98684d63e869c0de73de3fc71c863444",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 804,
+      "source_kind": "post-migration",
+      "slug": "qualify-terminal-paste-through-timed-native-owner-streams",
+      "title": "Qualify terminal paste through timed streams and real input owners.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-qualify-terminal-paste-through-timed-native-owner-streams",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from qualification-must-prove-a-named-product-or-runtime-claim during the 2026-10-16 trim",
+      "scope": [
+        "Breeze.Test",
+        "Breeze.BracketedPaste",
+        "clients/arbor_breeze/vendor/breeze/test/paste_pipeline_test.exs"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "d47aff59a3e0b73c62e8b91525576c60db5b79214e9146d698bdb34e12910eb8",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 805,
+      "source_kind": "post-migration",
+      "slug": "inspect-raw-terminal-frames-for-text-safety",
+      "title": "Inspect raw terminal frames when qualifying text safety.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-inspect-raw-terminal-frames-for-text-safety",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from qualification-must-prove-a-named-product-or-runtime-claim during the 2026-10-16 trim",
+      "scope": [
+        "clients/arbor_breeze/test/view_test.exs"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "7d835e24423e635fb9fbb4e624fda94dbd9af59722ab9267a29299134c0236b0",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 806,
+      "source_kind": "post-migration",
+      "slug": "receipt-encoding-must-preserve-authoritative-policy-identity",
+      "title": "Keep receipt encoding separate from authoritative policy identity.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-receipt-encoding-must-preserve-authoritative-policy-identity",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from test-facades-must-observe-production-ownership-not-reimplement-it during the 2026-10-16 trim",
+      "scope": [
+        "Arbor.Contracts.Security.CapabilityProfile",
+        "Arbor.Actions.action_namespace_capability_profiles/0"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "49b3652ccdedaa23b6dcbf9fed556557896314763b0ced276f9dba0af8b15319",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 807,
+      "source_kind": "post-migration",
+      "slug": "bind-tool-schema-and-executable-identity-separately",
+      "title": "Bind advertised tool schemas separately from executable owners.",
+      "topic": "testing-live-runtime",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-bind-tool-schema-and-executable-identity-separately",
+      "created": "2026-10-16",
+      "source_session": "claude:9e504dfc-990d-45d8-a8b3-79214ae60790",
+      "source_incident": "extracted from test-facades-must-observe-production-ownership-not-reimplement-it during the 2026-10-16 trim",
+      "scope": [
+        "Arbor.Orchestrator.SecurityQualification",
+        "apps/arbor_orchestrator/test/arbor/orchestrator/security_qualification_evidence_test.exs"
+      ],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "1878af543d48403ed7c23e656d9f81c150929cb36ed396c3ebd093b7c81656e3",
       "always_loaded": false
     }
   ]
