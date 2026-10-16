@@ -7,6 +7,8 @@ defmodule Arbor.Shell.TrustedPath do
   @chunk_size 65_536
   @max_file_bytes 512 * 1024 * 1024
   @max_path_bytes 4_096
+  @acl_probe_timeout_ms 5_000
+  @acl_probe_max_output 256
 
   defmodule Identity do
     @moduledoc false
@@ -65,6 +67,7 @@ defmodule Arbor.Shell.TrustedPath do
   def pin_root_owned_regular_file(path, opts) when is_binary(path) do
     with {:ok, executable_required} <- closed_executable_option(opts),
          {:ok, canonical} <- canonicalize_absolute(path),
+         :ok <- require_no_acl(canonical),
          :ok <- trusted_path_chain(canonical),
          {:ok, before_stat} <- trusted_regular_stat(canonical, executable_required),
          :ok <- enforce_max_file_size(before_stat.size),
@@ -83,6 +86,7 @@ defmodule Arbor.Shell.TrustedPath do
   @spec pin_root_owned_directory(term()) :: {:ok, Identity.t()} | {:error, atom()}
   def pin_root_owned_directory(path) when is_binary(path) do
     with {:ok, canonical} <- canonicalize_absolute(path),
+         :ok <- require_no_acl(canonical),
          :ok <- trusted_path_chain(canonical),
          {:ok, stat} <- trusted_directory_stat(canonical) do
       {:ok, build_identity(canonical, stat, nil, false)}
@@ -105,6 +109,7 @@ defmodule Arbor.Shell.TrustedPath do
     with {:ok, executable_required} <- closed_executable_option(opts),
          {:ok, canonical} <- canonicalize_absolute(path),
          :ok <- require_canonical(path, canonical),
+         :ok <- require_no_acl(canonical),
          {:ok, euid} <- current_euid(),
          :ok <- operator_path_chain(canonical, euid),
          {:ok, before_stat} <- operator_regular_stat(canonical, executable_required, euid),
@@ -132,6 +137,7 @@ defmodule Arbor.Shell.TrustedPath do
     with {:ok, others} <- closed_directory_option(opts),
          {:ok, canonical} <- canonicalize_absolute(path),
          :ok <- require_canonical(path, canonical),
+         :ok <- require_no_acl(canonical),
          {:ok, euid} <- current_euid(),
          :ok <- operator_path_chain(canonical, euid),
          {:ok, stat} <- operator_directory_stat(canonical, euid, others) do
@@ -587,6 +593,138 @@ defmodule Arbor.Shell.TrustedPath do
 
   defp probe_euid do
     probe_euid_attempt(System.tmp_dir!(), @euid_probe_retries)
+  end
+
+  # POSIX/NFSv4/rich ACLs can grant extra principals without dirtying the
+  # traditional group/other write bits TrustedPath already checks (default
+  # ACLs on 0700 dirs; named-user access ACLs on 0755). Any ACL xattr on the
+  # target or an ancestor fails closed. Probe our launcher, never the target.
+  defp require_no_acl(path) when is_binary(path) do
+    with :ok <- validate_absolute_path(path),
+         {:ok, launcher} <- acl_launcher_path() do
+      acl_probe(launcher, path)
+    else
+      {:error, _reason} -> {:error, :untrusted_path}
+    end
+  end
+
+  defp require_no_acl(_path), do: {:error, :untrusted_path}
+
+  defp acl_launcher_path do
+    case :code.priv_dir(:arbor_shell) do
+      path when is_list(path) ->
+        launcher = Path.join(List.to_string(path), "arbor_shell_launcher")
+
+        case File.lstat(launcher, time: :posix) do
+          {:ok, %File.Stat{type: :regular}} -> {:ok, launcher}
+          _other -> {:error, :untrusted_path}
+        end
+
+      _other ->
+        {:error, :untrusted_path}
+    end
+  end
+
+  defp acl_probe(launcher, path) do
+    parent = self()
+    ref = make_ref()
+
+    pid =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        send(parent, {ref, run_acl_port(launcher, path)})
+      end)
+
+    mref = Process.monitor(pid)
+    deadline = System.monotonic_time(:millisecond) + @acl_probe_timeout_ms
+    await_acl_worker(ref, mref, pid, deadline)
+  end
+
+  defp await_acl_worker(ref, mref, pid, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^ref, result} ->
+        Process.demonitor(mref, [:flush])
+        result
+
+      {:DOWN, ^mref, :process, ^pid, _reason} ->
+        {:error, :untrusted_path}
+    after
+      remaining ->
+        Process.exit(pid, :kill)
+        Process.demonitor(mref, [:flush])
+
+        receive do
+          {^ref, _result} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, :untrusted_path}
+    end
+  end
+
+  defp run_acl_port(launcher, path) do
+    port =
+      Port.open({:spawn_executable, to_charlist(launcher)}, [
+        :binary,
+        :exit_status,
+        args: [~c"trusted-path-acl", String.to_charlist(path)]
+      ])
+
+    deadline = System.monotonic_time(:millisecond) + @acl_probe_timeout_ms
+    collect_acl_probe(port, 0, deadline)
+  catch
+    :error, _reason -> {:error, :untrusted_path}
+    :exit, _reason -> {:error, :untrusted_path}
+  end
+
+  defp collect_acl_probe(port, size, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} when is_binary(data) ->
+        next_size = size + byte_size(data)
+
+        if next_size <= @acl_probe_max_output do
+          collect_acl_probe(port, next_size, deadline)
+        else
+          close_acl_port(port)
+          {:error, :untrusted_path}
+        end
+
+      {^port, {:exit_status, 0}} ->
+        :ok
+
+      {^port, {:exit_status, _status}} ->
+        {:error, :untrusted_path}
+
+      {:EXIT, ^port, _reason} ->
+        {:error, :untrusted_path}
+    after
+      remaining ->
+        close_acl_port(port)
+        {:error, :untrusted_path}
+    end
+  end
+
+  defp close_acl_port(port) do
+    if Port.info(port) != nil do
+      try do
+        Port.close(port)
+      catch
+        :error, _reason -> :ok
+      end
+    end
+
+    receive do
+      {^port, {:exit_status, _status}} -> :ok
+      {^port, {:data, _data}} -> close_acl_port(port)
+      {:EXIT, ^port, _reason} -> :ok
+    after
+      0 -> :ok
+    end
   end
 
   defp probe_euid_attempt(_dir, 0), do: :error

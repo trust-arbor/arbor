@@ -59,14 +59,16 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
     [
       Path.join(__DIR__, "c_src/arbor_shell_launcher.c"),
       Path.join(__DIR__, "c_src/arbor_shell_archive_stat.c"),
-      Path.join(__DIR__, "c_src/arbor_shell_handle_relative_inode.c")
+      Path.join(__DIR__, "c_src/arbor_shell_handle_relative_inode.c"),
+      Path.join(__DIR__, "c_src/arbor_shell_trusted_path_acl.c")
     ]
   end
 
   def header_dependencies do
     [
       Path.join(__DIR__, "c_src/arbor_shell_archive_stat.h"),
-      Path.join(__DIR__, "c_src/arbor_shell_handle_relative_inode.h")
+      Path.join(__DIR__, "c_src/arbor_shell_handle_relative_inode.h"),
+      Path.join(__DIR__, "c_src/arbor_shell_trusted_path_acl.h")
     ]
   end
 
