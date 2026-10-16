@@ -74,6 +74,18 @@ defmodule Arbor.Orchestrator.Conformance412Test do
   end
 
   test "4.12 unregister restores fallback resolution for the type" do
+    # Unregister must restore the non-strict fallback, not the M3 default raise.
+    previous = Application.get_env(:arbor_orchestrator, :strict_unknown_handlers)
+    Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, false)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_orchestrator, :strict_unknown_handlers)
+      else
+        Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, previous)
+      end
+    end)
+
     :ok = Registry.register_fixture("custom.4_12", FirstHandler)
     :ok = Registry.unregister_fixture("custom.4_12")
 

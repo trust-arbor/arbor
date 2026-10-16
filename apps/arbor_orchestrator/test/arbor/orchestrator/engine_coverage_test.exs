@@ -1374,6 +1374,19 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
 
     @tag :fast
     test "unknown type falls back to LlmHandler" do
+      # This case is the opted-out fallback, not the M3 default. Strict
+      # unknown-handler mode is covered by RegistryStrictDefaultSecurityRegressionTest.
+      previous = Application.get_env(:arbor_orchestrator, :strict_unknown_handlers)
+      Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, false)
+
+      on_exit(fn ->
+        if is_nil(previous) do
+          Application.delete_env(:arbor_orchestrator, :strict_unknown_handlers)
+        else
+          Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, previous)
+        end
+      end)
+
       node = %Node{id: "n", attrs: %{"type" => "completely_unknown"}}
       assert Registry.resolve(node) == Arbor.Orchestrator.Handlers.LlmHandler
     end
