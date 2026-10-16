@@ -161,7 +161,7 @@ defmodule Arbor.Orchestrator do
           {:error, :native_execution_binding_refused}
 
         true ->
-          with {:ok, catalog} <- ActionCatalog.snapshot(),
+          with {:ok, catalog} <- catalog_for_native_pin(graph),
                {:ok, {manifest, digest}} <-
                  ExecutionManifest.build(graph, catalog, RunAuthorization.graph_hash(graph)) do
             {:ok,
@@ -180,6 +180,42 @@ defmodule Arbor.Orchestrator do
   end
 
   def pin_native_execution(_, _), do: {:error, :native_execution_binding_refused}
+
+  # A leftover uninspectable ActionRegistry entry fails the full catalog
+  # snapshot (inspect_actions/1 is all-or-nothing). Pin only needs the
+  # graph's exec actions, so retry with just those modules.
+  defp catalog_for_native_pin(graph) do
+    case ActionCatalog.snapshot() do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, _} ->
+        with {:ok, modules} <- graph_exec_action_modules(graph),
+             {:ok, catalog} <- ActionCatalog.snapshot(modules: modules) do
+          {:ok, catalog}
+        end
+    end
+  end
+
+  defp graph_exec_action_modules(graph) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.reduce_while({:ok, []}, fn node, {:ok, modules} ->
+      if Arbor.Orchestrator.Handlers.Registry.node_type(node) == "exec" and
+           node.attrs["target"] == "action" do
+        case Arbor.Actions.name_to_module(node.attrs["action"]) do
+          {:ok, module} -> {:cont, {:ok, [module | modules]}}
+          _ -> {:halt, {:error, :native_execution_binding_refused}}
+        end
+      else
+        {:cont, {:ok, modules}}
+      end
+    end)
+    |> case do
+      {:ok, modules} -> {:ok, Enum.uniq(modules)}
+      error -> error
+    end
+  end
 
   defp native_facade_owner_declared?(graph) do
     graph.nodes
