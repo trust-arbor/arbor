@@ -78,6 +78,10 @@ Hysun approved them on 2026-10-16.
   Hysun marks rows `approve`. `--apply <decisions.json>` executes only the approved rows, transactionally, and re-runs
   the validator. The validator warns when the pass is more than 35 days overdue.
 - **Caps** are warn-only for now (`caps_enforced: false`): 8,000 live words per topic file and 400 words per entry.
+- **Splitting.** When a topic file nears the cap, split it by theme into `applied-learning-<topic>-<theme>.md` files
+  rather than retiring rules. Use `move` rows, which keep content and digests unchanged. The original file becomes a
+  hub that indexes its sub-files, so the `CLAUDE.md` row stays the same. testing-live-runtime and acp-mcp were split
+  this way on 2026-10-16.
 
 ## What NOT to capture
 
