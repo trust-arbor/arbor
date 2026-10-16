@@ -91,6 +91,7 @@ venv/
 .claude/HANDOFF.md
 .claude/worktrees/
 .claude/brand-voice-guidelines.md
+/.claude/state/
 
 # SDLC Hand session artifacts (debug logs, session transcripts, todos)
 .claude-sdlc/debug/

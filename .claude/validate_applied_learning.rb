@@ -1,9 +1,11 @@
 #!/usr/bin/env ruby
 
-# Validates the lossless Applied Learning migration without consulting Git history.
+# Single authority for Applied Learning accounting, admission, and budgets.
 
 require "digest"
 require "json"
+require "date"
+require "set"
 
 ROOT = File.expand_path("..", __dir__)
 INVENTORY_PATH = File.join(ROOT, ".claude", "skills", "applied-learning-inventory.json")
@@ -33,7 +35,34 @@ def canonical_entry(lines)
   "#{content}\n"
 end
 
+def date?(value)
+  value.is_a?(String) && value.match?(/\A\d{4}-\d{2}-\d{2}\z/) && Date.iso8601(value)
+rescue ArgumentError
+  false
+end
+
+def title_words(title)
+  stopwords = %w[a an and are as at be by for from in is it of on or that the this to with]
+  title.downcase.scan(/[[:alnum:]]{3,}/).reject { |word| stopwords.include?(word) }.to_set
+end
+
+def jaccard(left, right)
+  union = left | right
+  union.empty? ? 0.0 : (left & right).length.to_f / union.length
+end
+
+def warn_validation(message, enforced = false)
+  fail_validation(message) if enforced
+  warn "Applied Learning validation: WARN: #{message}"
+end
+
 inventory = JSON.parse(read_required(INVENTORY_PATH))
+fail_validation("schema_version must be 2") unless inventory["schema_version"] == 2
+fail_validation("admission_cutover must be a date") unless date?(inventory["admission_cutover"])
+archive_root = inventory["archive_root"]
+fail_validation("archive_root must be a repository-relative directory") unless
+  archive_root.is_a?(String) && !archive_root.empty? && !archive_root.start_with?("/") &&
+    !archive_root.include?("..") && !archive_root.end_with?("/")
 entries = inventory.fetch("entries")
 expected_count = inventory.fetch("entry_count")
 fail_validation("entry_count does not match inventory") unless expected_count == entries.length
@@ -71,7 +100,9 @@ destination_paths.each do |relative_path|
   read_required(File.join(ROOT, relative_path))
 end
 
-candidate_paths = (["CLAUDE.md"] + Dir.glob(File.join(ROOT, ".claude", "skills", "**", "*.md")).map { |path| path.delete_prefix(ROOT + "/") }).uniq.sort
+candidate_paths = (["CLAUDE.md"] +
+  Dir.glob(File.join(ROOT, ".claude", "skills", "**", "*.md")) +
+  Dir.glob(File.join(ROOT, archive_root, "*.md"))).map { |path| path.delete_prefix(ROOT + "/") }.uniq.sort
 corpus_files = candidate_paths.to_h { |relative_path| [relative_path, read_required(File.join(ROOT, relative_path))] }
 found = Hash.new { |hash, slug| hash[slug] = [] }
 
@@ -105,6 +136,34 @@ fail_validation("un-inventoried corpus entries: #{unknown.join(", ")}") unless u
 
 entries.each do |entry|
   slug = entry.fetch("slug")
+  fail_validation("#{slug}: status must be live or retired") unless %w[live retired].include?(entry["status"])
+  fail_validation("#{slug}: invalid class") unless %w[security-invariant correctness process tooling].include?(entry["class"])
+  fail_validation("#{slug}: created must be a date") unless date?(entry["created"])
+  fail_validation("#{slug}: scope must be an array of strings") unless
+    entry["scope"].is_a?(Array) && entry["scope"].all? { |anchor| anchor.is_a?(String) }
+  fail_validation("#{slug}: source_session must be a string") unless entry["source_session"].is_a?(String)
+  fail_validation("#{slug}: last_confirmed must be null or a date") unless
+    entry.key?("last_confirmed") && (entry["last_confirmed"].nil? || date?(entry["last_confirmed"]))
+  fail_validation("#{slug}: confirmed_by must be null or a string") unless
+    entry.key?("confirmed_by") && (entry["confirmed_by"].nil? || entry["confirmed_by"].is_a?(String))
+  fail_validation("#{slug}: revisit_when must be null or a string") unless
+    entry["revisit_when"].nil? || entry["revisit_when"].is_a?(String)
+  if entry["status"] == "live"
+    fail_validation("#{slug}: live destination is in archive") if
+      entry["destination"] == archive_root || entry["destination"].start_with?(archive_root + "/")
+  else
+    fail_validation("#{slug}: retired destination must be its topic archive") unless
+      entry["destination"] == "#{archive_root}/#{entry.fetch("topic")}.md"
+    fail_validation("#{slug}: retired_on must be a date") unless date?(entry["retired_on"])
+    reasons = %w[STALE CONTRADICTED SUPERSEDED DUPLICATE ONE-OFF NEGATIVE-CLAIM TOO-NARROW MERGED DECAYED]
+    fail_validation("#{slug}: invalid retired_reason") unless reasons.include?(entry["retired_reason"])
+    replacement = entry["superseded_by"]
+    fail_validation("#{slug}: superseded_by must be null or a live slug") unless
+      entry.key?("superseded_by") && (replacement.nil? ||
+        (replacement.is_a?(String) && inventory_by_slug[replacement]&.fetch("status") == "live"))
+    fail_validation("#{slug}: MERGED requires superseded_by") if entry["retired_reason"] == "MERGED" && replacement.nil?
+    fail_validation("#{slug}: retired entry cannot be always_loaded") unless entry["always_loaded"] == false
+  end
   owned = found.fetch(slug, [])
   fail_validation("#{slug} is missing from its destination") unless owned.length == 1
 
@@ -149,8 +208,43 @@ working_set_words = working_set.split.length
 fail_validation("CLAUDE.md exceeds the 4,000-word migration ceiling: #{claude_words}") if claude_words > 4_000
 fail_validation("Applied Learning working set exceeds 950 words: #{working_set_words}") if working_set_words > 950
 
+live_entries = entries.select { |entry| entry["status"] == "live" }
+word_sets = live_entries.to_h { |entry| [entry["slug"], title_words(entry.fetch("title"))] }
+live_entries.each do |entry|
+  slug = entry.fetch("slug")
+  content = found.fetch(slug).first.fetch("content")
+  words = content.split.length
+  warn_validation("#{slug} exceeds 400 words: #{words}", inventory["caps_enforced"] == true) if words > 400
+  next if entry.fetch("created") < inventory.fetch("admission_cutover")
+
+  fail_validation("#{slug}: new entry exceeds 400 words: #{words}") if words > 400
+  paragraphs = content.split(/\n[ \t]*\n/)
+  incident_start = /\A(?:\d{4}-\d{2}-\d{2}|On 20\d\d-|\(20\d\d|Reinforced|Recurred|Also found|Reconfirmed|Re-confirmed|Updated?)/i
+  fail_validation("#{slug}: one rule per marker; later incident paragraph") if paragraphs.drop(1).any? { |paragraph| paragraph.lstrip.match?(incident_start) }
+  duplicate = live_entries.find do |other|
+    other["slug"] != slug && jaccard(word_sets.fetch(slug), word_sets.fetch(other["slug"])) >= 0.6
+  end
+  fail_validation("#{slug}: near-duplicate of #{duplicate["slug"]}: cite or extend it instead") if duplicate
+  gap = /\b(currently|not yet|until\b[^.]*\bimplemented|does not (yet )?(exist|expose))\b/i
+  fail_validation("#{slug}: gap wording requires revisit_when") if content.match?(gap) &&
+    (!entry["revisit_when"].is_a?(String) || entry["revisit_when"].strip.empty?)
+end
+live_entries.group_by { |entry| entry["destination"] }.sort.each do |destination, topic_entries|
+  next unless destination.match?(%r{\A\.claude/skills/applied-learning-[^/]+\.md\z})
+  words = topic_entries.sum { |entry| found.fetch(entry["slug"]).first.fetch("content").split.length }
+  warn_validation("#{destination} live entries exceed 8,000 words: #{words}", inventory["caps_enforced"] == true) if words > 8_000
+end
+usage_path = File.join(ROOT, ".claude/skills/applied-learning-usage.json")
+begin
+  generated_on = JSON.parse(File.read(usage_path, encoding: "UTF-8"))["generated_on"]
+rescue Errno::ENOENT, JSON::ParserError
+  generated_on = nil
+end
+warn_validation("monthly review overdue: run ruby .claude/applied_learning_review.rb --report") unless
+  date?(generated_on) && Date.iso8601(generated_on) >= Date.today - 35
+
 puts "Applied Learning validation: PASS"
-puts "entries=#{entries.length} destinations=#{destination_paths.length} owned_once=#{found.values.count { |owners| owners.length == 1 }}"
+puts "entries=#{entries.length} live=#{live_entries.length} retired=#{entries.length - live_entries.length} destinations=#{destination_paths.length} owned_once=#{found.values.count { |owners| owners.length == 1 }}"
 puts "claude_words=#{claude_words} claude_bytes=#{claude.bytesize} working_set_entries=12 working_set_words=#{working_set_words} working_set_bytes=#{working_set.bytesize}"
 topic_counts = entries.group_by { |entry| entry.fetch("topic") }.transform_values(&:length)
 puts "topics=#{topic_counts.sort.to_h}"
