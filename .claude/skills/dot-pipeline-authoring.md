@@ -264,36 +264,17 @@ so ExecHandler silently dropped the param and `DecideReview` failed with
 lookup, and regress with the exact DOT-produced parameter map (found
 2026-07-17 when binding council reducers returned invalid_review_cycle).
 
-<!-- applied-learning: schema-negative-tests-must-target-attributes-the-compiler-does-not-intentionally-normalize -->
-<a id="applied-learning-schema-negative-tests-must-target-attributes-the-compiler-does-not-intentionally-normalize"></a>
-**Schema-negative tests must target attributes the compiler does not intentionally normalize.** A reviewed-template compiler may restore mandatory parameters before schema validation, so injecting a bad value into one of those parameters proves normalization rather than rejection. Test the restored invariant separately, and use an untouched action parameter to exercise the generic schema failure path (found 2026-07-10 after making default validation warnings mandatory).
-
 <!-- applied-learning: node-action-inventory-checks-do-not-prove-graph-policy -->
 <a id="applied-learning-node-action-inventory-checks-do-not-prove-graph-policy"></a>
 **Node/action inventory checks do not prove graph policy.** A graph can retain every mandatory node and action name while rewiring conditions to bypass them. Inventory is useful Phase 4 template drift detection; publish/review/validation dominance and edge-order invariants require semantic preflight before custom or agent-authored DOT is executable (confirmed 2026-07-10 in the CodingPlan compiler review).
 
 <!-- applied-learning: static-dot-action-parameters-arrive-as-strings -->
 <a id="applied-learning-static-dot-action-parameters-arrive-as-strings"></a>
-**Static DOT action parameters preserve parser types; quoted values are strings.** An attribute
-such as `param.all="true"` reaches the action as a string even when its schema declares a boolean,
-while `param.all=true` reaches it as canonical boolean `true`. Use an unquoted literal when the
-action intentionally requires an exact JSON scalar type, and assert that exact type in both the
-compiled graph and an execution fixture; accepting `[true, "true"]` in a fake executor can mask a
-dead production branch. Normalize serialized forms only when the action contract explicitly
-accepts them (found 2026-07-10 when `git.commit` skipped staging after a successful Grok edit;
-refined 2026-07-26 when quoted validation-tree capture omitted terminal evidence).
+**Quoted DOT parameters and constant transforms arrive as strings.** `Arbor.Orchestrator.Dot.Parser` keeps a double-quoted attribute as a string and types an unquoted `true`, `false`, or number. A `constant` transform in `Arbor.Orchestrator.Handlers.TransformHandler` returns the expression string unchanged. Use an unquoted literal when the action requires that JSON scalar, or normalize only where the action contract says so. A fake that accepts both the typed value and the string hides a dead production branch. Exercise the real constructor in pipeline fixtures. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-12.)
 
 <!-- applied-learning: hot-loading-an-action-does-not-refresh-a-core-locked-actionregistry -->
 <a id="applied-learning-hot-loading-an-action-does-not-refresh-a-core-locked-actionregistry"></a>
 **Hot-loading an action does not refresh a core-locked `ActionRegistry`.** The action facade can expose a newly compiled module while the boot-populated registry still lacks it, causing CodingPlan compilation to reject the action as unknown even though runtime execution has a facade fallback. Production action-catalog discovery must reconcile dynamic/plugin registry entries with the current `Arbor.Actions.list_actions/0` core facade; treating any running registry as the sole inventory makes hot reload require a full node restart (found 2026-07-10 while dogfooding the `cross_app` coding profile).
-
-<!-- applied-learning: opaque-authority-must-stay-outside-every-action-visible-context-including-nested-option-maps -->
-<a id="applied-learning-opaque-authority-must-stay-outside-every-action-visible-context-including-nested-option-maps"></a>
-**Opaque authority must stay outside every action-visible context, including nested option maps.**
-Removing a top-level `:signing_authority` key is insufficient if `nested_engine_opts` is
-passed through `Arbor.Actions.authorize_and_execute/4`. Keep the bearer token at the
-orchestrator boundary, project only a fresh exact-resource `SignedRequest` into the
-action, and retain a process-local resign path for post-approval retries.
 
 <!-- applied-learning: jido-map-schemas-do-not-accept-dynamic-string-keyed-json-maps-and-any-is-not-an-honest-tool-schema-fallback -->
 <a id="applied-learning-jido-map-schemas-do-not-accept-dynamic-string-keyed-json-maps-and-any-is-not-an-honest-tool-schema-fallback"></a>
@@ -306,23 +287,6 @@ only the fixed root object. Exercise `validate_params/1` with atom top-level key
 top-level keys are treated as unknown passthrough fields, and assert both malformed outer types and
 the emitted `to_tool/0` schema (found 2026-07-12 with review `delta_ranges` and finding ledgers).
 
-<!-- applied-learning: dot-constant-transforms-emit-strings-even-when-the-expression-looks-numeric-or-boolean -->
-<a id="applied-learning-dot-constant-transforms-emit-strings-even-when-the-expression-looks-numeric-or-boolean"></a>
-**DOT `constant` transforms emit strings, even when the expression looks numeric or boolean.** If
-the context or downstream contract requires a typed JSON value, put it in a JSON object and extract
-it with `json_extract`, or normalize it at the action boundary. A fake executor that accepts the
-serialized string can hide a production constructor failure, so executable pipeline fixtures must
-exercise the real request/contract constructor for typed action inputs (found 2026-07-12 with
-`review_cycle`).
-
-<!-- applied-learning: pipeline-traversal-authority-is-not-resource-authority -->
-<a id="applied-learning-pipeline-traversal-authority-is-not-resource-authority"></a>
-**Pipeline traversal authority is not resource authority.** A grant such as `arbor://orchestrator/execute/**` may authorize pure graph opcodes, but it must never satisfy bare IR requirements such as `file_write` or `shell_exec`: normalizing those names under the traversal subtree turns a lobby pass into host filesystem and process authority. Map side-effecting handlers to their canonical `arbor://fs/...`, `arbor://shell/...`, or action resource and carry concrete path/task scope into Security (found 2026-07-10 during the DOT coding Phase 5 authorship audit).
-
-<!-- applied-learning: execution-identity-belongs-in-immutable-run-authority-never-mutable-graph-context -->
-<a id="applied-learning-execution-identity-belongs-in-immutable-run-authority-never-mutable-graph-context"></a>
-**Execution identity belongs in immutable run authority, never mutable graph context.** `session.agent_id` is useful context provenance, but if middleware or handlers derive the principal from it, a graph, nested run, or initial-values merge can spoof or lose authority while the signer comes from unrelated opts. Bind execution principal, caller/author provenance, task/session scope, graph hash, and fixed workdir in trusted Engine state; context may mirror those fields but must not drive authorization (found 2026-07-10 tracing direct, nested, parallel, and remote DOT execution).
-
 <!-- applied-learning: mutating-actions-must-declare-their-conservative-static-effect-class -->
 <a id="applied-learning-mutating-actions-must-declare-their-conservative-static-effect-class"></a>
 **Mutating actions must declare their conservative static `effect_class`.** `Arbor.Actions.Egress` intentionally defaults an undeclared action to `:read`; that made `git.commit` approval records claim `risk_hints.effect_class=read` even though the trust gate still asked. Declare `:local_write` for actions whose maximum mode mutates local state, including mixed read/write actions such as `Git.Branch`, and regress through the public `Egress.effect_class_for/1` projection (found 2026-07-10 during live approval inspection).
@@ -331,17 +295,9 @@ exercise the real request/contract constructor for typed action inputs (found 20
 <a id="applied-learning-multi-module-hot-reload-is-not-a-transactional-deployment-boundary"></a>
 **Multi-module hot reload is not a transactional deployment boundary.** A compiler, profile registry, semantic validator, and template can be individually current while one request still crosses a mixed old/new call path at the end of a reload window. After reloading a policy bundle, run one live compile/authorization probe that exercises the whole bundle before dispatching durable work; retry only tasks that failed before acquiring resources (found 2026-07-11 when the first post-reload security-profile dispatch saw new attestation nodes with old topology expectations).
 
-<!-- applied-learning: closed-json-schemas-need-exact-scalar-types-not-only-keys-and-loose-equality -->
-<a id="applied-learning-closed-json-schemas-need-exact-scalar-types-not-only-keys-and-loose-equality"></a>
-**Closed JSON schemas need exact scalar types, not only keys and loose equality.** Elixir considers `1 == 1.0`, so a summary cross-check using `!=` can accept float aliases for integer counters. Validate bounded integer fields explicitly and use type-strict comparisons (`!==`) when the serialized contract distinguishes numeric representations (found 2026-07-11 reviewing coding benchmark summary validation).
-
 <!-- applied-learning: do-not-put-workflow-specific-result-policy-in-a-generic-engine-handler -->
 <a id="applied-learning-do-not-put-workflow-specific-result-policy-in-a-generic-engine-handler"></a>
 **Do not put workflow-specific result policy in a generic Engine handler.** Teaching `ExecHandler` that a `git_commit` denial can become branchable success violates the handler-as-opcode invariant and creates an author-controlled denial-bypass surface. Put commit approval/deny/rework semantics in a capability-gated Jido action and let the reviewed graph branch on ordinary action data; keep handler schemas generic (found 2026-07-11 reviewing commit-approval rework).
-
-<!-- applied-learning: a-grapheme-count-limit-is-not-a-byte-or-work-limit -->
-<a id="applied-learning-a-grapheme-count-limit-is-not-a-byte-or-work-limit"></a>
-**A grapheme-count limit is not a byte or work limit.** One valid Unicode grapheme can contain arbitrarily many combining codepoints, so `String.slice(text, 0, 512)` can retain and traverse many kilobytes while claiming a 512-character bound. Resource ceilings for prompts, diagnostics, and persisted output must check bytes first and truncate on a valid UTF-8 byte boundary; add combining-sequence regressions that assert `byte_size/1` (found 2026-07-11 reviewing AI eval output bounds).
 
 <!-- applied-learning: a-bearer-stripped-from-public-views-can-still-leak-through-action-results -->
 <a id="applied-learning-a-bearer-stripped-from-public-views-can-still-leak-through-action-results"></a>
@@ -349,15 +305,15 @@ exercise the real request/contract constructor for typed action inputs (found 20
 
 <!-- applied-learning: a-nested-map-inside-action-context-is-still-action-visible-authority -->
 <a id="applied-learning-a-nested-map-inside-action-context-is-still-action-visible-authority"></a>
-**A nested map inside action context is still action-visible authority.** Moving a bearer from `context.signing_authority` to `context.nested_engine_opts.signing_authority` does not make it process-private; every Jido action receiving that context can still inspect, return, or log it. Carry secret nested-engine controls through an exact-action private facade/envelope, or expose them only to modules with an explicit facade-owned need declaration; ordinary actions must receive neither the top-level nor nested bearer (found 2026-07-11 from the full Orchestrator signing-authority regression).
+**No action-visible context may carry a signing bearer, including a nested option map.** Removing a top-level signing key is not enough when `nested_engine_opts` is passed into the action. Every action that receives that context can inspect, return, or log the bearer. Keep the bearer at the orchestrator boundary, project only a fresh exact-resource proof into the action, and keep post-approval resign on a process-local path. Nesting the bearer does not make it process-private. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-07-12.)
 
 <!-- applied-learning: every-engine-handler-must-derive-principal-identity-from-runauthorization-not-node-attributes -->
 <a id="applied-learning-every-engine-handler-must-derive-principal-identity-from-runauthorization-not-node-attributes"></a>
-**Every Engine handler must derive principal identity from `RunAuthorization`, not node attributes.** Fixing the action handler is insufficient if `ShellHandler` or `ToolHandler` still prefers author-controlled `agent_id` or falls back to `"system"`; a graph can then move authorization to a different principal. Bind all side-effecting handler branches to the immutable execution principal and reject absent authority on agent-authored runs (found 2026-07-11 reviewing the shell boundary correction).
+**Derive the execution principal only from RunAuthorization.** Every handler and middleware takes the immutable `Arbor.Orchestrator.Engine.RunAuthorization` execution principal. Do not take it from `session.agent_id`, node attributes, graph context, or a `system` fallback. `Arbor.Orchestrator.Handlers.ShellHandler` rejects principals `system` and `agent_system`. Fixing one handler is not enough if another side-effecting handler still prefers an author-controlled agent id. Context may mirror provenance, but those fields must not drive authorization. Reject absent authority on agent-authored runs. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-11.)
 
 <!-- applied-learning: a-generic-engine-node-capability-does-not-replace-the-syscall-s-exact-capability-gate -->
 <a id="applied-learning-a-generic-engine-node-capability-does-not-replace-the-syscall-s-exact-capability-gate"></a>
-**A generic Engine node capability does not replace the syscall's exact capability gate.** `ToolHandler` executing a prepared command under `arbor://orchestrator/execute/tool` still bypasses `arbor://shell/exec/<command>` if it calls the shell executor directly. Every handler branch that crosses into a side-effecting subsystem must invoke that subsystem's public authorized facade with the immutable run principal before hooks or execution (found 2026-07-11 reviewing the DOT tool-command path).
+**A generic engine capability does not replace a syscall's exact capability gate.** `arbor://orchestrator/execute` authorizes graph traversal. It does not satisfy `arbor://fs/...`, `arbor://shell/...`, or an action capability, and normalizing a filesystem or shell requirement under that prefix would turn traversal into host authority. A tool-node branch that calls the shell or filesystem executor directly skips the exact gate. Map the effect to the canonical resource, carry the concrete path or command scope, and call that subsystem's authorized facade with the immutable run principal. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-11.)
 
 <!-- applied-learning: an-action-cannot-self-declare-access-to-private-nested-authority -->
 <a id="applied-learning-an-action-cannot-self-declare-access-to-private-nested-authority"></a>
@@ -367,10 +323,6 @@ exercise the real request/contract constructor for typed action inputs (found 20
 <a id="applied-learning-do-not-let-a-diagnostic-output-pipeline-hide-the-command-under-test-s-exit-status"></a>
 **Do not let a diagnostic output pipeline hide the command under test's exit status.** Shell pipelines such as `mix test ... | tail` or `... | rg` normally report the final filter's status, so a failed Mix startup can appear as exit code 0. Enable `pipefail`, capture the producer status explicitly, or run the producer without a filter when validation success is load-bearing (found 2026-07-16 when an umbrella `:eaddrinuse` failure was masked by `tail`).
 
-<!-- applied-learning: a-reachable-distributed-node-is-not-an-application-ready-arbor-server -->
-<a id="applied-learning-a-reachable-distributed-node-is-not-an-application-ready-arbor-server"></a>
-**A reachable distributed node is not an application-ready Arbor server.** `mix arbor.start` can answer RPC while the umbrella is still starting sequentially, so a process lookup or action call may return `:noproc` / `:registry_unavailable` after the CLI already printed success. Readiness must positively verify the required application boundary (or a dedicated boot sentinel), not only `net_adm` reachability. A 2026-07-17 cold boot took about 296 seconds, so a 300-second application deadline had no operational margin; keep the short node-ping deadline separate from a measured, conservatively larger application deadline (found 2026-07-16 and remeasured 2026-07-17 after rebuilding the startup-pinned Shell launcher).
-
 <!-- applied-learning: nested-actions-that-mint-fresh-exact-resource-proofs-must-consume-the-process-local-signing-boundary -->
 <a id="applied-learning-nested-actions-that-mint-fresh-exact-resource-proofs-must-consume-the-process-local-signing-boundary"></a>
 **Nested actions that mint fresh exact-resource proofs must consume the process-local signing boundary.** An authority-signed outer action does not give a composite action the fresh nonce/signature needed for its inner syscall, and the bearer `SigningAuthority` must never enter JSON Engine context. Project an ephemeral signer only to explicitly trusted nested actions, consume it from owner-only `nested_engine_opts`, preserve malformed direct-credential fail-closed precedence, and pin the action BEAM in the execution manifest so an in-flight reload fails closed (found 2026-07-17 when `coding_reviewed_commit` validation passed but clean-HEAD adoption could not sign its nested Git resource).
@@ -379,13 +331,9 @@ exercise the real request/contract constructor for typed action inputs (found 20
 <a id="applied-learning-composite-actions-must-declare-every-nested-action-as-an-execution-dependency"></a>
 **Composite actions must declare every nested action as an execution dependency.** Pinning only the outer action BEAM lets reviewed code call a different inner syscall implementation than the compiled graph bound. Expose module-valued dependency metadata through the owning library facade, bind it into the catalog digest, expand a deterministic cycle-safe transitive closure, and strip catalog-only metadata from the final backward-compatible manifest shape; missing dependencies must fail before execution (found 2026-07-17 when `coding_reviewed_commit` invoked unbound `git_commit`).
 
-<!-- applied-learning: an-engine-ok-run-result-is-an-execution-envelope-not-a-success-verdict -->
-<a id="applied-learning-an-engine-ok-run-result-is-an-execution-envelope-not-a-success-verdict"></a>
-**An Engine `{:ok, run_result}` is an execution envelope, not a success verdict.** Nested consumers such as council adapters must inspect `final_outcome` before reading decision keys from context. When a non-nil outcome is present, admit only the explicitly supported success statuses; reject `:fail`, `:retry`, `:skipped`, unknown, and malformed outcomes before stale context can escape (found 2026-07-18 when an all-failed council fan-in was masked as `:no_decision_in_result`).
-
 <!-- applied-learning: validate-trusted-compiler-output-at-the-final-execution-boundary -->
 <a id="applied-learning-validate-trusted-compiler-output-at-the-final-execution-boundary"></a>
-**Validate trusted compiler output at the final execution boundary with the same canonical validator used by preflight.** A compiler-facing readiness check can reject tampered plan bindings while an executor's older parallel validator still accepts extra or newly versioned fields. Reuse the canonical compilation validator immediately before archiving/execution; keep focused compatibility checks only for better diagnostics, and add a public-boundary security regression for every new provenance binding (found 2026-07-22 when Coding Plan v2 bound the work-packet digest in compilation but the executor did not verify it).
+**Validate compiler output at the execution boundary with the same validator preflight uses.** Immediately before archiving or running a compiled graph, bind every compiler-produced path, provider, model, test selector, and provenance field back to the normalized authorized plan. A readiness check that accepts a binding the executor does not recheck, or an executor that accepts a binding preflight rejects, is not a gate. Keep narrower checks only as diagnostics. Add a public-boundary regression for every new provenance binding. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-22.)
 
 <!-- applied-learning: reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary -->
 <a id="applied-learning-reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary"></a>
@@ -403,11 +351,4 @@ TCB (learned 2026-09-07 while refining the plugin plan around existing DOT progr
 
 <!-- applied-learning: use-strict-value-equality-when-carrying-provenance-evidence -->
 <a id="applied-learning-use-strict-value-equality-when-carrying-provenance-evidence"></a>
-**Use strict value equality when carrying provenance evidence.** Bind inherited
-sanitization and confidence to matching producer values using `===`, not `==`.
-Numeric coercion can lend evidence from `1` to `1.0`, including inside lists
-and maps. Retain worst risk across all declared inputs, but derive evidence
-only from strictly matching inputs; an unlabeled match contributes empty,
-unverified evidence. Regress through a public graph with mixed inputs and
-numeric type changes, retaining exact-copy positive controls (found
-2026-10-06 during the Main taint backport review).
+**Use strict equality for closed counters and provenance evidence.** Elixir `==` treats `1` and `1.0` as equal, including inside lists and maps. Use `===` and `!==` when a closed schema distinguishes numeric representations and when inherited sanitization or confidence is bound to producer values. A cross-check that uses `!=` can accept a float alias for an integer counter, so validate bounded integer fields explicitly. Retain worst risk across declared inputs, but derive evidence only from strictly matching inputs. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-10-06.)

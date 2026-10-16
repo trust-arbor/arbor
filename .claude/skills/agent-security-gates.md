@@ -1252,7 +1252,7 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
-**Do not telemetry-invert distributed security state sync.** Security observability can emit `:telemetry` and let `arbor_signals` bridge it back to signals, but nonce, capability, and identity sync are load-bearing cross-node security state. `NonceCache` uses `security.nonce_seen` to block replay against peer nodes; `CapabilityStore` uses revocation signals to evict revoked grants on peers; `Identity.Registry` uses identity lifecycle signals to keep peer caches current. Telemetry is in-process and synchronous, so it cannot replace node-hop transport. B9 extraction needs an injected sync transport (likely Phoenix.PubSub or `Arbor.Signals` behind a behaviour), not a telemetry bridge, before dropping the `arbor_signals` dependency.
+**Telemetry and permanent audits are observations, not security-sync mutations.** Nonce, capability, and identity sync still require a real node-hop transport. In-process telemetry cannot replace it. A sync reducer must reject a `permanent: true` audit reflection before applying remote authority. `Arbor.Security.Identity.Registry` skips that marker, and `Arbor.Security.Identity.NonceCache` still applies remote `security.nonce_seen` as sync state. Do not let a delayed local suspension audit re-suspend an identity after resume. Keep the audit marker itself; do not add sync provenance to that payload. (Merged 2026-10-16 from 2 entries; first found 2026-07-07, last 2026-08-21.)
 
 <!-- applied-learning: template-capability-grants-may-need-runtime-uri-expansion -->
 <a id="applied-learning-template-capability-grants-may-need-runtime-uri-expansion"></a>
@@ -1270,10 +1270,6 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 <a id="applied-learning-do-not-confuse-arbor-security-keychain-with-macos-keychain-services"></a>
 **Do not confuse `Arbor.Security.Keychain` with macOS Keychain Services.** Arbor's module is an in-process cryptographic peer/session abstraction and does not invoke the macOS `security` tool or credential store. Repeating macOS prompts for a `Claude Code credentials` item can come from the Claude daemon itself; `~/.claude/daemon.log` reports `auth: no token found, will re-check keychain every 30s` when that happens. Diagnose the requesting process and daemon log before attributing a prompt to Arbor code (found 2026-07-10 while delegated tests were running).
 
-<!-- applied-learning: long-lived-agents-do-not-automatically-inherit-later-template-authority-changes -->
-<a id="applied-learning-long-lived-agents-do-not-automatically-inherit-later-template-authority-changes"></a>
-**Long-lived agents do not automatically inherit later template authority changes.** Updating a template's `required_capabilities` and trust preset fixes newly instantiated agents, but an already-running coding agent keeps its persisted grants and profile rules. Before dogfooding a newly enabled validation profile, inspect both `Arbor.Security.list_capabilities/1` and `Arbor.Trust.get_trust_profile/1`; reconcile the existing principal through the public facades or recreate it, otherwise the first profile action can fail `:unauthorized` even though the template and template tests are correct (found 2026-07-10 on the first real `cross_app` run).
-
 <!-- applied-learning: long-lived-anonymous-signer-functions-can-become-invalid-after-hot-code-purge -->
 <a id="applied-learning-long-lived-anonymous-signer-functions-can-become-invalid-after-hot-code-purge"></a>
 **Long-lived anonymous signer functions can become invalid after hot code purge.** Session and heartbeat state currently retain the closure returned by `Arbor.Security.make_signer/2`; purging that defining module makes the stored function raise `BadFunctionError`, which the authorization boundary correctly projects as `:security_unavailable`. A restart regenerates the closure but is only a workaround. Long-lived owners need a reload-stable signer reference/factory and must refresh the short-lived closure before each turn or heartbeat without placing raw private keys in orchestrator state (found 2026-07-11 after recompiling during Phase 6 dogfood).
@@ -1285,10 +1281,6 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 <!-- applied-learning: test-doubles-must-not-create-production-authorization-bypasses -->
 <a id="applied-learning-test-doubles-must-not-create-production-authorization-bypasses"></a>
 **Test doubles must not create production authorization bypasses.** Never mark a request identity-verified merely because a signer returned a noncanonical map so unit tests can use a stub. Production code must accept and verify the same typed proof it requires in reality; tests should construct a real proof or inject behind an explicitly test-only boundary that runtime input cannot select (found 2026-07-11 while reviewing the coding commit approval redesign).
-
-<!-- applied-learning: template-trust-policy-changes-do-not-retroactively-update-existing-agents -->
-<a id="applied-learning-template-trust-policy-changes-do-not-retroactively-update-existing-agents"></a>
-**Template trust-policy changes do not retroactively update existing agents.** Restarting an agent preserves its stored `Arbor.Trust` profile, so a long-lived coding coordinator can hold newly granted action capabilities while its older baseline/rules still block them. Before dogfooding a newly added template capability, compare the live stored profile with the shipped template preset and explicitly reconcile through the Trust facade; do not diagnose the resulting capability-granted/trust-denied sequence as a worker or validator failure (found 2026-07-11 when cross-app validation and council review-tree reads failed for a reused coordinator).
 
 <!-- applied-learning: a-process-dictionary-authorization-marker-is-not-an-opaque-capability -->
 <a id="applied-learning-a-process-dictionary-authorization-marker-is-not-an-opaque-capability"></a>
@@ -1336,7 +1328,7 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 
 <!-- applied-learning: agent-template-trust-changes-are-not-retroactive-for-existing-live-principals -->
 <a id="applied-learning-agent-template-trust-changes-are-not-retroactive-for-existing-live-principals"></a>
-**Agent template trust changes are not retroactive for existing live principals.** A template can declare a new action capability and trust rule while an already-created agent still has the capability but falls through to its older baseline trust mode, blocking the action at runtime. Before dogfooding a newly granted action, compare the live principal's effective trust decision with the current template and reconcile only the exact missing rules or recreate the agent; do not weaken the baseline to compensate (found 2026-07-17 when `coding_reviewed_commit` passed validation but the live coding agent retained an older `:block` profile).
+**Template capability and trust changes are not retroactive for live principals.** A template update applies to agents created after it. An existing agent keeps its stored capabilities and `Arbor.Trust` profile across restart, so it can hold a newly granted capability while an older baseline still blocks the action. Before dogfood, compare `Arbor.Security.list_capabilities/1` and `Arbor.Trust.get_trust_profile/1` with the current template. Reconcile only the missing rules through those facades, or recreate the agent. Do not weaken the baseline to compensate. (Merged 2026-10-16 from 3 entries; first found 2026-07-10, last 2026-07-17.)
 
 <!-- applied-learning: opaque-identifiers-in-capability-uris-must-not-become-uri-syntax -->
 <a id="applied-learning-opaque-identifiers-in-capability-uris-must-not-become-uri-syntax"></a>
@@ -1382,18 +1374,6 @@ owner to the renderer as well as through ordinary request replies. An unsolicite
 revocation notice must retain the unauthorized state across reconnect and reach
 the surface's private-data clearing path; classifying it as a recoverable
 protocol error loses that invariant (2026-09-30 terminal keepalive review).
-
-<!-- applied-learning: telemetry-bridged-security-audits-are-observations-not-sync-mutations -->
-<a id="applied-learning-telemetry-bridged-security-audits-are-observations-not-sync-mutations"></a>
-**Telemetry-bridged security audits are observations, not sync mutations.**
-Security lifecycle audit events are reflected onto the same restricted topics used by the
-temporary distributed-sync transport and carry `permanent: true`. A sync reducer must reject
-that marker before classifying remote authority direction; otherwise a delayed local suspension
-audit can re-suspend an identity after resume, while the corresponding authority-restoring echo
-is correctly denied and cannot repair the state. Preserve the audit payload distinction instead
-of adding sync provenance to it, which would also make observers count both the direct mutation
-and its audit reflection as sync events (found 2026-08-21 during the approval CLI Security-suite
-verification).
 
 <!-- applied-learning: preserve-the-proof-subject-when-canonicalizing-an-owner -->
 <a id="applied-learning-preserve-the-proof-subject-when-canonicalizing-an-owner"></a>
@@ -1456,29 +1436,6 @@ refuse a private send before persistence or delivery. A “graceful fallback” 
 keeps the operation successful silently changes confidentiality semantics. Test
 both the returned denial and that no plaintext message was stored (found
 2026-10-06 while closing the channel raw-private-key deputy).
-
-<!-- applied-learning: treat-genserver-from-as-untrusted-protocol-data -->
-<a id="applied-learning-treat-genserver-from-as-untrusted-protocol-data"></a>
-**Treat GenServer `from` as untrusted protocol data when mutation authority matters.**
-A normal `GenServer.call` exposes the caller PID, but any local process can send a
-raw `:"$gen_call"` with a victim PID and an attacker-owned reply alias. Exact-PID
-checks and mailbox challenge replies alone do not authenticate high-value
-mutations: `Process.info(pid, :messages)` exposes a non-sensitive victim's queued
-challenge, and temporarily setting sensitivity only protects a legitimate call
-while it is active. Use an unpredictable challenge plus a write that only the
-claimed owner can perform, such as a one-shot protected ETS table whose ownership
-is rechecked; mark long-lived privileged principals sensitive from startup as
-defense in depth. Treat reply references as untrusted too: ordinary refs and
-deactivated aliases pass `is_reference/1` but `send/2` can raise, so every reply,
-rejection, and expiry path must drop invalid destinations without crashing and
-must clear pending records and timers. `GenServer.cast` carries no caller identity,
-so it cannot establish provenance and legacy raw mutation casts must be retired.
-Trace every authority-bearing value back to its first ingress: an authenticated
-forwarder still launders attacker content when its trusted producer accepted that
-content through an unauthenticated call or cast. Regress the forged upstream hop
-and the terminal privileged effect together. Test forged raw protocol messages,
-mailbox scraping, transferred custody, and invalid reply aliases (found 2026-10-07
-closing Relay, Bus, AuditJournal, and Monitor deputies).
 
 <!-- applied-learning: retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape -->
 <a id="applied-learning-retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape"></a>

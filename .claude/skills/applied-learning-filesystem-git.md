@@ -21,13 +21,6 @@ begins with `-`, write options first and then `--`, for example
 path, while omitting `--` makes the pattern an option (found 2026-10-06 while
 tracing distribution-cookie exposure).
 
-<!-- applied-learning: do-not-use-path-as-a-zsh-loop-variable -->
-<a id="applied-learning-do-not-use-path-as-a-zsh-loop-variable"></a>
-**Do not use `path` as a zsh loop variable.** In zsh, lowercase `path` is a
-special array tied to `PATH`; assigning a worktree pathname to it replaces
-command lookup and makes tools such as `git` appear missing. Use names like
-`wt_path` or `repo_path` in portable shell loops (found 2026-07-22 during attached-worktree inventory).
-
 <!-- applied-learning: portable-directory-cleanup-must-account-for-platform-specific-errno-atoms -->
 <a id="applied-learning-portable-directory-cleanup-must-account-for-platform-specific-errno-atoms"></a>
 **Portable directory cleanup must account for platform-specific errno atoms.**
@@ -37,33 +30,9 @@ non-empty shared directory is an expected benign outcome, handle both forms
 while continuing to fail closed for other errors (found 2026-07-20 in
 benchmark artifact lease cleanup).
 
-<!-- applied-learning: inspect-formatter-diffs-before-staging-a-narrow-change -->
-<a id="applied-learning-inspect-formatter-diffs-before-staging-a-narrow-change"></a>
-**Inspect formatter diffs before staging a narrow change.** A source file may
-predate the current formatter and a one-line comment edit can trigger broad,
-unrelated layout churn. Format behavior-bearing files as required, then remove
-incidental whole-file rewrites so the review surface stays scoped (found
-2026-07-17 while correcting ACP eval-runner documentation).
-
-<!-- applied-learning: do-not-run-mix-commands-in-the-main-worktree-while-a-compiled-dot-task-is-active -->
-<a id="applied-learning-do-not-run-mix-commands-in-the-main-worktree-while-a-compiled-dot-task-is-active"></a>
-**Do not run Mix commands in the main worktree while a compiled DOT task is
-active.** Even a targeted test may recompile transitive modules on disk while
-the running server still has the previous BEAM loaded. A task whose execution
-manifest was already bound can then fail later with
-`execution_module_loaded_code_mismatch` / `handler_binding_mismatch`; if its
-retain node is rejected, owner-death cleanup can remove the dirty worktree.
-Use an isolated worktree for every Mix command while delegated pipelines are
-running, then hot-reload deliberately between tasks (found 2026-07-13 during
-Phase 6 spawn/lifecycle delegation).
-
 <!-- applied-learning: do-not-compile-or-test-the-active-checkout-while-a-subagent-is-midway-through-a-shared-file-edit -->
 <a id="applied-learning-do-not-compile-or-test-the-active-checkout-while-a-subagent-is-midway-through-a-shared-file-edit"></a>
 **Do not compile or test the active checkout while a subagent is midway through a shared-file edit.** Multi-agent commits share the parent workspace, so another focused test can observe a transient state between a new call site and its helper definitions and report unrelated compile errors. Wait for the owning worker to finish or test an isolated committed worktree (found 2026-07-10 during CodingPlan executor integration).
-
-<!-- applied-learning: isolated-worktree-formatting-needs-the-dependency-path-too -->
-<a id="applied-learning-isolated-worktree-formatting-needs-the-dependency-path-too"></a>
-**Isolated worktree formatting needs the dependency path too.** The umbrella formatter imports dependency formatter configuration (for example Phoenix), so `mix format --check-formatted` in a clean worktree fails with an unknown `:import_deps` dependency unless `MIX_DEPS_PATH` points at fetched dependencies. Use the same shared `MIX_DEPS_PATH` setup as isolated compile/test commands (found 2026-07-10 during Phase 4 verification).
 
 <!-- applied-learning: a-hashed-child-name-does-not-make-an-artifact-root-safe-from-symlinks -->
 <a id="applied-learning-a-hashed-child-name-does-not-make-an-artifact-root-safe-from-symlinks"></a>
@@ -81,10 +50,6 @@ Phase 6 spawn/lifecycle delegation).
 <a id="applied-learning-canonical-dot-serialization-must-preserve-value-types-not-just-text"></a>
 **Canonical DOT serialization must preserve value types, not just text.** A binary attribute value such as `fan_out="false"` must remain quoted when a graph is serialized; emitting bare `fan_out=false` makes the parser coerce it to boolean `false`, while runtime code may deliberately distinguish the string form. That type drift silently re-enabled fan-out, queued a protocol-repair branch, and later blocked a security-profile join on impossible fan-in predecessors. Roundtrip tests must assert parsed value types as well as canonical bytes (found 2026-07-10 while enabling the reviewed security-regression profile).
 
-<!-- applied-learning: verify-the-live-source-root-before-trusting-recompile -->
-<a id="applied-learning-verify-the-live-source-root-before-trusting-recompile"></a>
-**Verify the live source root before trusting `recompile`.** Tidewave or `arbor.recompile` may be attached to an isolated runtime snapshot such as `/private/tmp/arbor-runtime-current`, so `IEx.Helpers.recompile/0` can return `:ok` while the main checkout contains entirely new modules. Inspect both `Module.module_info(:compile)[:source]` and `:code.which/1` before interpreting behavior. When a restart would disrupt active work, hot-load only the exact reviewed source files in dependency order (nested struct definitions before modules that expand them); otherwise use the purpose-built restart. Never diagnose an old sentinel as a current-code failure until loaded identity is proven (expanded 2026-07-15 during the spawn-capable facade live proof).
-
 <!-- applied-learning: copying-a-git-repository-is-not-commit-provenance -->
 <a id="applied-learning-copying-a-git-repository-is-not-commit-provenance"></a>
 **Copying a Git repository is not commit provenance.** A clean `git status` does not cover
@@ -95,17 +60,9 @@ and after execution. Disable replacement objects for every provenance command, a
 cleanliness flags such as `--untracked-files=all`; repository-local config can otherwise make an
 unrelated commit appear ancestral or hide an untracked mutation.
 
-<!-- applied-learning: git-hooks-that-invoke-bare-mix-bypass-the-repository-wrapper -->
-<a id="applied-learning-git-hooks-that-invoke-bare-mix-bypass-the-repository-wrapper"></a>
-**Git hooks that invoke bare `mix` bypass the repository wrapper.** The local pre-commit hook runs `mix format` and `mix run`; invoking `git commit` from a nested worktree with the ambient Homebrew PATH selected Elixir 1.20.2/OTP 29 and polluted the shared `_build` even though direct project commands correctly used `./bin/mix`. Until the hook itself is installed from a tracked, wrapper-aware script, run such commits with the pinned Erlang/Elixir `bin` directories first in `PATH` and an isolated `MIX_BUILD_PATH`; do not treat a hook-side dependency compile failure as a formatting failure (found 2026-07-09 during the workspace-lease slice).
-
 <!-- applied-learning: gitignore-directory-patterns-with-a-trailing-slash-do-not-cover-worktree-symlinks -->
 <a id="applied-learning-gitignore-directory-patterns-with-a-trailing-slash-do-not-cover-worktree-symlinks"></a>
 **Gitignore directory patterns with a trailing slash do not cover worktree symlinks.** A delegated worker linked `_build` to the parent checkout; `/_build/` did not ignore the symlink, and `git add -A` committed it. Use `/_build` (and `/deps`) when both real directories and accidental symlinks must stay untracked. Also prefer the existing Mix action shared-path environment over creating links in a coding worktree (found 2026-07-09 during the workspace-lease slice).
-
-<!-- applied-learning: use-canonical-private-tmp-paths-for-isolated-macos-worktrees-that-share-absolute-mix-paths -->
-<a id="applied-learning-use-canonical-private-tmp-paths-for-isolated-macos-worktrees-that-share-absolute-mix-paths"></a>
-**Use canonical `/private/tmp` paths for isolated macOS worktrees that share absolute Mix paths.** macOS aliases `/tmp` to `/private/tmp`, but dependency and build symlinks can retain the non-canonical spelling and break when Mix compares or resolves absolute paths. Create the worktree under `/private/tmp` and keep `MIX_BUILD_PATH`, deps paths, and symlink targets in that same canonical namespace (found 2026-07-10 during the Phase 3 combined verification).
 
 <!-- applied-learning: git-status-shape-is-not-a-workspace-fingerprint -->
 <a id="applied-learning-git-status-shape-is-not-a-workspace-fingerprint"></a>
@@ -126,10 +83,6 @@ adoption stopped safely on an untracked Erlang crash dump).
 <!-- applied-learning: an-in-process-test-formatter-is-not-a-hostile-code-proof-channel -->
 <a id="applied-learning-an-in-process-test-formatter-is-not-a-hostile-code-proof-channel"></a>
 **An in-process test formatter is not a hostile-code proof channel.** Candidate ExUnit/project code shares the BEAM with a generated formatter, so it can discover or replace formatter state, forge a schema-valid artifact, mutate shared dependencies, or halt with a chosen status. A two-revision coding gate must either run only after binding review of an exact immutable tree and name that limited assurance honestly, or use a genuinely external attested runtime; a random path, custom formatter, or container alone does not establish hostile-runtime integrity (found 2026-07-10 adversarially reviewing the Phase 5 security-regression runner).
-
-<!-- applied-learning: pre-post-pathname-checks-do-not-bind-file-bytes-across-a-read -->
-<a id="applied-learning-pre-post-pathname-checks-do-not-bind-file-bytes-across-a-read"></a>
-**Pre/post pathname checks do not bind file bytes across a read.** An attacker can swap a path to alternate same-sized content for `File.read/1` and restore the original inode before the post-check. Security-sensitive source reads must open the canonical regular file once, compare the opened descriptor's identity with the authorized pathname identity, read only from that descriptor, then revalidate both descriptor and pathname before returning bytes (found 2026-07-10 after the first pipeline source-race fix still admitted a restored-path double-swap).
 
 <!-- applied-learning: file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated -->
 <a id="applied-learning-file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated"></a>
@@ -155,11 +108,7 @@ preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: canonicalize-temporary-resource-roots-before-deriving-mix-paths -->
 <a id="applied-learning-canonicalize-temporary-resource-roots-before-deriving-mix-paths"></a>
-**Canonicalize temporary resource roots before deriving Mix paths.** On macOS, `System.tmp_dir!/0` can return `/var/folders/...` while Mix and the filesystem resolve the same location as `/private/var/folders/...`. Deriving build and dependency paths from the non-canonical spelling can make Mix create broken relative `include` or `priv` symlinks, causing dependency compilation to fail before project tests start. Resolve the root once with `SafePath.resolve_real/1`, then derive every child path from that canonical root (found 2026-07-11 during security-regression validation).
-
-<!-- applied-learning: two-revision-proof-lives-only-in-the-plan-s-immutable-requested-test-paths -->
-<a id="applied-learning-two-revision-proof-lives-only-in-the-plan-s-immutable-requested-test-paths"></a>
-**Two-revision proof lives only in the plan's immutable requested test paths.** A worker may add excellent regressions elsewhere, but the security validator copies and runs only `requested_paths` against base and candidate. Put every required public behavioral proof in one of those selected files before dispatch, or steer it there before commit; extra tests remain useful coverage but do not establish the pre-fix-fails claim (found 2026-07-11 reviewing shell-bound dogfood before validation).
+**Canonicalize macOS temporary roots before deriving Mix paths.** Keep the worktree, dependency directory, build directory, and any symlink targets in one canonical namespace before a nested or Rebar-backed build. Resolve `/tmp` to `/private/tmp` and `/var` to `/private/var` with `Arbor.Common.SafePath.resolve_real/1` before exporting `MIX_DEPS_PATH` or `MIX_BUILD_PATH`. A lexical alias and its resolved spelling are different directories to tools that do not canonicalize, so a nested build can miss includes or write beside the intended tree. Apply that same spelling to every process that shares those absolute paths. (Merged 2026-10-16 from 5 entries; first found 2026-07-10, last 2026-10-09.)
 
 <!-- applied-learning: an-absolute-bin-mix-path-does-not-select-that-checkout-as-the-project-root -->
 <a id="applied-learning-an-absolute-bin-mix-path-does-not-select-that-checkout-as-the-project-root"></a>
@@ -167,7 +116,7 @@ preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: repository-git-hooks-must-use-bin-mix-not-ambient-mix -->
 <a id="applied-learning-repository-git-hooks-must-use-bin-mix-not-ambient-mix"></a>
-**Repository Git hooks must use `./bin/mix`, not ambient `mix`.** A pre-commit hook that invokes raw `mix` can select the wrong Elixir/OTP pair and contend on a different build lock than the repository wrapper; it may spend minutes compiling dependencies and never reach the commit even though the staged change is valid. Run the pinned wrapper for format/tests, and fix the hook to use the same wrapper rather than treating `--no-verify` as the normal path (found 2026-07-11 while checkpointing the signing-authority Engine slice).
+**Repository git hooks must invoke ./bin/mix, not ambient mix.** `./bin/mix` selects the toolchain pinned in `.tool-versions` and the repository's isolated `MIX_BUILD_PATH`. A hook that calls bare `mix` uses whatever Elixir is on `PATH` and can compile against the wrong build. A dependency compile started by the hook is not a format failure. The hook environment is a fresh process, so an export from the operator shell does not reach it. Do not use `--no-verify` as the normal way to commit. (Merged 2026-10-16 from 2 entries; first found 2026-07-09, last 2026-07-11.)
 
 <!-- applied-learning: arbor-s-git-facade-rejects-configured-execution-hooks-even-when-they-point-at-git-s-default-directory -->
 <a id="applied-learning-arbor-s-git-facade-rejects-configured-execution-hooks-even-when-they-point-at-git-s-default-directory"></a>
@@ -183,11 +132,11 @@ preserve the stopped setup receipt separately from product or compile failures.
 
 <!-- applied-learning: path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname -->
 <a id="applied-learning-path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname"></a>
-**Path confinement checks must bind to the opened file, not only the pathname.** `lstat`/`realpath` followed by `File.read` is still check-then-use: a leaf or ancestor can be swapped to a symlink/FIFO between calls. Finite pathname rechecks do not make the ancestor chain stable because a coordinated swap can restore each expected identity before every check. Pin the authorized root directory once, verify its identity, traverse descendants with descriptor-relative `openat` plus `O_NOFOLLOW`, and read only the resulting regular-file descriptor. The native helper that performs this privileged open must itself be bound into trusted runtime code rather than executed from an agent-writable source or build path (found 2026-07-11 reviewing benchmark artifact IO; reinforced 2026-10-07 while closing the Security FileGuard read race).
+**Path confinement must bind the opened file, not only the pathname.** Pin the authorized root, open descendants with `openat` and `O_NOFOLLOW`, and read only that regular-file descriptor. The walk lives in `apps/arbor_shell/c_src/arbor_shell_launcher.c` (`walk_openat_segments`). A pre-check and a post-check of the pathname do not bind the bytes: a swap during the read, restored afterward, passes both name checks. Revalidate the descriptor and the pathname identity before returning bytes. The native helper must live in trusted runtime code, not on an agent-writable path. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-11.)
 
 <!-- applied-learning: plain-detached-git-worktrees-do-not-inherit-ignored-dependency-directories -->
 <a id="applied-learning-plain-detached-git-worktrees-do-not-inherit-ignored-dependency-directories"></a>
-**Plain detached Git worktrees do not inherit ignored dependency directories.** A manually created proof worktree usually has no `deps/`, so an isolated `MIX_BUILD_PATH` alone fails before tests. Point `MIX_DEPS_PATH` at the trusted main checkout's dependency cache (while keeping the build path isolated), or create the same reviewed dependency links as the workspace manager (found 2026-07-11 running parent security proofs).
+**Run detached worktrees with one pinned toolchain and an explicit dependency path.** A plain detached git worktree does not inherit ignored dependency directories. Run formatting, compilation, tests, and commit hooks through `./bin/mix` with an explicit `MIX_DEPS_PATH` and an isolated `MIX_BUILD_PATH`. A pre-commit hook can invoke Mix even when compilation was not the requested command, and an earlier format command does not export that environment into the hook. When the execution root changes, confirm the formatter options resolved for that root. Formatter configs that import dependency formatter plugins, including `apps/arbor_dashboard/.formatter.exs`, fail if those plugins are absent. Do not bypass hooks, copy dependencies into the worktree, or fetch unreviewed dependencies to satisfy the hook. (Merged 2026-10-16 from 6 entries; first found 2026-07-10, last 2026-07-28.)
 
 <!-- applied-learning: temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm -->
 <a id="applied-learning-temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm"></a>
@@ -201,10 +150,6 @@ preserve the stopped setup receipt separately from product or compile failures.
 <a id="applied-learning-do-not-ship-production-callable-test-hooks-that-alter-security-observations"></a>
 **Do not ship production-callable test hooks that alter security observations.** Public `__test_*` setters backed by process dictionaries or ETS can let same-process code replace file identity, random-token, or cleanup evidence in real execution. Thread deterministic callbacks only through an explicitly test-only execution seam that the public production path rejects, or use a separately injected test owner; keep the enforcing module identical in its security decisions (found 2026-07-11 reviewing benchmark inode and run-root tests).
 
-<!-- applied-learning: canonicalize-resource-identity-before-deleting-the-resource -->
-<a id="applied-learning-canonicalize-resource-identity-before-deleting-the-resource"></a>
-**Canonicalize resource identity before deleting the resource.** Realpath behavior changes after removal: on macOS a live `/var/...` path may resolve to `/private/var/...`, then fall back to lexical `/var/...` once absent, allowing a stale Git registration to evade an exact-path comparison. Capture the canonical identity while the path and parent exist, retain it in the lease, and compare later observations against that stable identity (found 2026-07-11 reviewing verified worktree cleanup).
-
 <!-- applied-learning: long-lived-signing-roots-must-not-live-in-the-application-environment -->
 <a id="applied-learning-long-lived-signing-roots-must-not-live-in-the-application-environment"></a>
 **Long-lived signing roots must not live in the application environment.** `System.get_env/1` is readable by every module in the VM and inherited by ordinary subprocesses, so storing a private root there lets any action certify arbitrary sessions. Arbor should hold only the public key and a non-secret endpoint for an independently launched signer; remove the private value from the Arbor process environment and fail closed when the external authority is unavailable (found 2026-07-11 with a child-process execution-root probe).
@@ -217,17 +162,9 @@ preserve the stopped setup receipt separately from product or compile failures.
 <a id="applied-learning-in-tree-inode-de-duplication-cannot-detect-an-out-of-tree-hardlink"></a>
 **In-tree inode de-duplication cannot detect an out-of-tree hardlink.** A `MapSet` of device/inode pairs catches two names only when both are encountered during the same walk; a second hardlink outside the admitted root remains invisible. For immutable regular-file inputs, require the preflight link count to be exactly one and match the post-pin identity/stat fields, while retaining inode de-duplication as defense in depth for the enumerated tree (found 2026-07-14 reviewing the Linux dependency-baseline source verifier).
 
-<!-- applied-learning: isolated-worktree-commit-hooks-may-need-the-canonical-dependency-cache-explicitly -->
-<a id="applied-learning-isolated-worktree-commit-hooks-may-need-the-canonical-dependency-cache-explicitly"></a>
-**Isolated worktree commit hooks may need the canonical dependency cache explicitly.** A coding worktree without local `deps/` can pass parent-owned review builds yet fail `git commit` when hooks invoke Mix from that worktree. Run the hook-backed commit with canonical `MIX_DEPS_PATH` and an appropriate reviewer-owned `MIX_BUILD_PATH`; do not bypass the hook or copy dependencies into the worktree merely to make the commit succeed (found 2026-07-14 preserving the materializer hardening commit from a stalled ACP worker).
-
-<!-- applied-learning: do-not-parse-human-formatted-ls-output-into-build-or-environment-paths -->
-<a id="applied-learning-do-not-parse-human-formatted-ls-output-into-build-or-environment-paths"></a>
-**Do not parse human-formatted `ls` output into build or environment paths.** Interactive aliases and color settings can inject ANSI bytes into command substitution; a delegated test run then created a literal escape-prefixed directory and compiled into the wrong relative path. Use an explicit path, a shell glob array, or NUL-safe machine output such as `find -print0`, and keep generated build directories out of the staged diff (found 2026-07-14 reviewing the Actions baseline-lease correction).
-
 <!-- applied-learning: never-feed-colorized-command-output-back-into-a-filesystem-command -->
 <a id="applied-learning-never-feed-colorized-command-output-back-into-a-filesystem-command"></a>
-**Never feed colorized command output back into a filesystem command.** ANSI prefixes/suffixes are data once captured; a colored temporary path can create a literal escape-named directory tree instead of targeting the intended worktree. Disable color (`NO_COLOR=1` or the tool's never-color flag), validate the captured scalar, and canonicalize it before reuse (found 2026-07-15 when an isolated validation build path included Git/Mix color escapes).
+**Never feed colorized command output back into a filesystem command.** Disable color with `NO_COLOR` or the tool's never-color flag before capturing output. Do not parse `ls` or a colored command substitution into a path. Use an explicit path, a shell glob array, or NUL-delimited `find -print0`. Validate and canonicalize a captured path with `Arbor.Common.SafePath.resolve_real/1` before reuse. A colored glyph in captured output is data, not a separator to strip by eye. Human formatting and ANSI sequences are not a machine path format. (Merged 2026-10-16 from 2 entries; first found 2026-07-14, last 2026-07-15.)
 
 <!-- applied-learning: restart-durable-immutable-materialization-requires-an-owned-workspace -->
 <a id="applied-learning-restart-durable-immutable-materialization-requires-an-owned-workspace"></a>
@@ -239,21 +176,9 @@ evidence refs whenever downstream checkpoints promise exact-lineage recovery, an
 leave the reused directory untouched (found 2026-09-02 while reviewing G5D
 candidate materialization).
 
-<!-- applied-learning: do-not-combine-shared-source-dependencies-with-a-fresh-isolated-build-tree-blindly -->
-<a id="applied-learning-do-not-combine-shared-source-dependencies-with-a-fresh-isolated-build-tree-blindly"></a>
-**Do not combine shared source dependencies with a fresh isolated build tree blindly.** Pointing a worktree's `MIX_DEPS_PATH` at the canonical `deps/` while giving it a new `MIX_BUILD_PATH` can force rebar dependencies such as `yamerl` to recompile from an incomplete fetched-source layout and fail on missing include headers. Use the worktree harness's prepared build, or validate the integrated commit in the canonical test build; sharing source deps is not equivalent to sharing a complete build cache (found 2026-07-15 independently validating L4 worker commits).
-
-<!-- applied-learning: in-zsh-path-is-the-special-array-tied-to-path -->
-<a id="applied-learning-in-zsh-path-is-the-special-array-tied-to-path"></a>
-**In zsh, `path` is the special array tied to `PATH`.** Assigning `path=...` in a diagnostic one-liner can make later commands such as `git` and `sed` appear missing. Use a name such as `worktree_path` or `wt` for filesystem scalars (found 2026-07-15 while inspecting a retained coding worktree).
-
-<!-- applied-learning: detached-worktree-formatter-hooks-still-need-formatter-dependencies -->
-<a id="applied-learning-detached-worktree-formatter-hooks-still-need-formatter-dependencies"></a>
-**Detached worktree formatter hooks still need formatter dependencies.** A clean worktree can have no local `deps/`, while `.formatter.exs` uses `import_deps`; bare `mix format` or a pre-commit formatting hook then fails with an unknown dependency even though the files are formatted. Run the repo wrapper with the canonical `MIX_DEPS_PATH` (and an isolated build path when needed) before diagnosing formatting drift (found 2026-07-16 integrating retained-workspace restart persistence).
-
 <!-- applied-learning: keep-isolated-validation-builds-beneath-the-worktree-when-code-derives-authority-from-loaded-beam-ancestors -->
 <a id="applied-learning-keep-isolated-validation-builds-beneath-the-worktree-when-code-derives-authority-from-loaded-beam-ancestors"></a>
-**Keep isolated validation builds beneath the worktree when code derives authority from loaded BEAM ancestors.** `Arbor.Actions.Mix.resolve_mix_wrapper/0` walks upward from loaded code paths to find the reviewed source umbrella and executable `bin/mix`; an external `MIX_BUILD_PATH` severs that ancestry and makes otherwise healthy tests fail with `:mix_wrapper_unavailable`. Use an isolated path such as `$WORKTREE/_build/test` while sharing only the canonical dependency source when needed (found 2026-07-16 validating retained-workspace restart persistence).
+**Keep isolated validation builds under the checkout when authority walks loaded BEAM ancestors.** `Arbor.Actions.Mix.resolve_mix_wrapper/0` walks loaded anchors and returns `{:error, :mix_wrapper_unavailable}` when no reviewed wrapper is found. The default resolver fails closed. Put `_build` inside the worktree under test and share only `MIX_DEPS_PATH`, so the loaded beams' ancestors stay inside the checkout whose authority is being tested. An out-of-tree build path makes the walk miss the wrapper and deny the run. A hermetic test shell may supply `resolve_mix_wrapper/0`; that test seam does not widen the production resolver. (Merged 2026-10-16 from 3 entries; first found 2026-07-13, last 2026-07-18.)
 
 <!-- applied-learning: destructive-git-cas-success-requires-clean-output-and-authoritative-post-observation -->
 <a id="applied-learning-destructive-git-cas-success-requires-clean-output-and-authoritative-post-observation"></a>
@@ -265,7 +190,7 @@ candidate materialization).
 
 <!-- applied-learning: canonicalize-a-nonexistent-target-through-its-nearest-existing-ancestor -->
 <a id="applied-learning-canonicalize-a-nonexistent-target-through-its-nearest-existing-ancestor"></a>
-**Canonicalize a nonexistent target through its nearest existing ancestor.** `Path.expand/1` normalizes syntax but does not resolve an ancestor symlink or macOS's `/var` to `/private/var` alias. For authority comparisons involving a leaf that may already be gone or not yet created, resolve the nearest existing ancestor and append the missing suffix before comparing paths; otherwise aliases can bypass blockers or hide surviving registrations (found 2026-07-16 hardening retained-workspace creation and cleanup proofs).
+**Canonicalize a missing target through its nearest existing ancestor.** `Path.expand/1` does not resolve ancestor symlinks or the `/var` to `/private/var` alias. For a leaf that is not present yet, resolve the nearest existing ancestor and append the missing suffix. Capture that canonical identity while the path exists. After deletion, a realpath-style lookup falls back to a lexical form, so later comparisons must use the identity retained from before the delete. `Arbor.Common.SafePath.resolve_real/1` is the resolver for a path that exists. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-07-16.)
 
 <!-- applied-learning: parse-user-controlled-git-paths-with-nul-delimited-porcelain -->
 <a id="applied-learning-parse-user-controlled-git-paths-with-nul-delimited-porcelain"></a>
@@ -279,17 +204,13 @@ candidate materialization).
 <a id="applied-learning-trusted-git-subprocesses-must-clear-ambient-repository-control-environment"></a>
 **Trusted Git subprocesses must clear ambient repository-control environment.** `GIT_DIR`, `GIT_WORK_TREE`, replace refs, global config, and lazy-fetch settings can redirect or alter otherwise fixed Git commands. Start provenance-sensitive Git with a closed environment, explicitly disable global/system config, replacement objects, prompting, and lazy fetch, and set a deterministic locale before interpreting output (found 2026-07-16 materializing pinned coding-benchmark fixtures).
 
-<!-- applied-learning: never-run-mix-commands-concurrently-against-the-same-build-path -->
-<a id="applied-learning-never-run-mix-commands-concurrently-against-the-same-build-path"></a>
-**Never run Mix commands concurrently against the same build path.** Protocol consolidation rewrites shared files, so parallel commands can race and report missing `_build/*/consolidated/*.beam` artifacts even when both code paths are healthy. Run them sequentially or give each process a separate worktree-local build root (found 2026-07-16 validating contained Mix paths and runtime configuration).
-
 <!-- applied-learning: hex-extraction-needs-a-writable-process-cwd-even-when-its-package-destination-is-writable -->
 <a id="applied-learning-hex-extraction-needs-a-writable-process-cwd-even-when-its-package-destination-is-writable"></a>
 **Hex extraction needs a writable process CWD even when its package destination is writable.** Hex 2.5.1 creates relative `tmp_*` extraction directories and does not honor `TMPDIR` for that step, so `mix deps.get` from a read-only mounted source fails with `:erofs`. Use a writable tracked-files-only staging checkout when validating a read-only production source (found 2026-07-16 building the Linux dependency baseline in Apple Container).
 
 <!-- applied-learning: hot-reload-must-reconcile-loaded-code-with-the-code-path-beam-not-only-source-timestamps -->
 <a id="applied-learning-hot-reload-must-reconcile-loaded-code-with-the-code-path-beam-not-only-source-timestamps"></a>
-**Hot reload must reconcile loaded code with the code-path BEAM, not only source timestamps.** Remote `IEx.Helpers.recompile/0` returned `:ok` after a prior local compile had already made the shared on-disk BEAM newer, while the running module MD5 remained stale. `mix arbor.recompile` now compares loaded `module_info(:md5)` values with validated BEAM compiler MD5s for loaded `arbor_*` app modules and uses soft purge before loading exact disk bytes; verify those identities directly when behavior still appears stale (found and fixed 2026-07-16 while validating the Apple Container unit-name fix).
+**Reconcile hot reload against the code-path BEAM, not only source timestamps.** `Arbor.Common.CodeReloader` compares `module_info(:md5)` with `:beam_lib.md5/1` and then soft-purges. `mix arbor.recompile` is the reload task. Before diagnosing a closed-envelope rejection as a producer bug, compare producer and consumer source roots and the loaded beam with the beam on the code path. Reconcile reviewed modules between tasks. Preserve the consumer boundary: `Arbor.Shell.OciExecutionCore` and `Arbor.Shell.AppleContainerExecutionCore` accept read-write projections only for `:worktree`, `:home`, `:tmp`, `:build`, `:deps`, and `:validation_result`, and reject anything else with `:extra_projections`. Do not widen that closed set to match a stale producer. (Merged 2026-10-16 from 3 entries; first found 2026-07-15, last 2026-07-16.)
 
 <!-- applied-learning: use-code-compile-file-1-not-repeated-code-require-file-1-when-iterating-a-live-rpc-diagnostic-module -->
 <a id="applied-learning-use-code-compile-file-1-not-repeated-code-require-file-1-when-iterating-a-live-rpc-diagnostic-module"></a>
@@ -299,21 +220,9 @@ candidate materialization).
 <a id="applied-learning-build-a-committable-git-tree-with-bulk-object-index-operations-not-one-update-index-process-per-path"></a>
 **Build a committable Git tree with bulk object/index operations, not one `update-index` process per path.** Rewriting a growing private index for each of 2,879 files made tree binding effectively quadratic and consumed the entire validation deadline before Mix started. Capture each file through the existing descriptor/identity checks into one bounded private stage, hash the staged paths in one Git operation, and feed one NUL-delimited `update-index --index-info` stream; regress the number of Git processes as the fixture grows (found 2026-07-16 during Phase 6 cross-app dogfood).
 
-<!-- applied-learning: isolated-worktree-commit-hooks-need-access-to-the-shared-dependency-tree -->
-<a id="applied-learning-isolated-worktree-commit-hooks-need-access-to-the-shared-dependency-tree"></a>
-**Isolated worktree commit hooks need access to the shared dependency tree.** A reviewed worktree can compile and format with an explicitly shared `MIX_DEPS_PATH`, then have `git commit` fail when the hook launches Mix without that environment and the worktree has no local `deps/`. Preserve the same reviewed shared dependency path for the commit-hook process; do not bypass the hook or fetch a new unreviewed dependency tree merely to commit (found 2026-07-17 integrating the benchmark-adapter fixture split).
-
-<!-- applied-learning: keep-isolated-validation-builds-under-the-checked-out-repository-when-code-root-authority-is-under-test -->
-<a id="applied-learning-keep-isolated-validation-builds-under-the-checked-out-repository-when-code-root-authority-is-under-test"></a>
-**Keep isolated validation builds under the checked-out repository when code-root authority is under test.** `Arbor.Actions.Mix.resolve_mix_wrapper/0` intentionally derives the trusted `bin/mix` wrapper from loaded BEAM paths; moving `MIX_BUILD_PATH` to an external temporary directory severs that ancestry and makes fixture validation fail closed with `:mix_wrapper_unavailable`. A detached worktree is sufficient isolation: use its local `_build` plus an explicit shared `MIX_DEPS_PATH`, and run each umbrella app's test paths from that app when Mix path routing would otherwise skip them (found 2026-07-18 verifying the cross-app aggregate budget calibration).
-
 <!-- applied-learning: keep-fresh-isolated-mix-build-roots-inside-the-worktree -->
 <a id="applied-learning-keep-fresh-isolated-mix-build-roots-inside-the-worktree"></a>
-**Keep fresh isolated Mix build roots inside the worktree.** A detached verification using an external `/tmp/...` `MIX_BUILD_PATH` with an absolute shared `MIX_DEPS_PATH` made rebar compile `yamerl` without its `include/` headers, even though the headers existed; the same revision compiled with a worktree-local build root and with the known-good test build. Use a uniquely named worktree-local `_build_<task>` for cold verification, then remove it before commit, rather than assuming every Erlang dependency tolerates an out-of-tree build path (found 2026-07-18 independently verifying `task_216130`).
-
-<!-- applied-learning: use-one-canonical-spelling-for-an-isolated-mix-build-path -->
-<a id="applied-learning-use-one-canonical-spelling-for-an-isolated-mix-build-path"></a>
-**Use one canonical spelling for an isolated Mix build path.** On macOS, a shell can enter a worktree through `/var/...` while `pwd` canonicalizes it to `/private/var/...`; setting `MIX_BUILD_PATH` with the noncanonical prefix made rebar dependency includes resolve against a mismatched tree and produced a false `yamerl` header failure. Derive the worktree-local build path from `$(pwd)` after entering the worktree so the checkout, build, and dependency paths share one canonical prefix (found 2026-07-18 verifying the Grok 4.5 provider pin).
+**Keep a fresh isolated Mix build root inside the worktree.** A fresh `MIX_BUILD_PATH` outside the worktree, combined with shared source dependencies, can break Rebar include lookup. Use a worktree-local build directory named for that task and remove it before commit. This is separate from wrapper discovery that walks loaded BEAM ancestors: the failure here is include resolution, and the fix is still a build root inside the checkout. Do not point a clean build at an out-of-tree directory while compiling against shared in-tree deps. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-07-18.)
 
 <!-- applied-learning: a-custom-mix-build-path-must-be-environment-specific -->
 <a id="applied-learning-a-custom-mix-build-path-must-be-environment-specific"></a>
@@ -356,13 +265,9 @@ worktree, unrelated workers may modify adjacent files or introduce compile failu
 artifact boundary, normalize both through the same closed contract and reject disagreement
 instead of committing contradictory evidence (found 2026-07-21 during Phase 7A lifecycle work).
 
-<!-- applied-learning: checkpoint-proof-cache-boundaries-and-progress -->
-<a id="applied-learning-checkpoint-proof-cache-boundaries-and-progress"></a>
-**Checkpointed historical proofs are observations, never mutation authority.** Bind every reusable result to the exact repository, destination ref/OID, branch ref/OID, and proof-policy version; persist only closed, sanitized statuses; retry transient failures; and make progress count cache hits, every retry, and budget-skipped targets independently of outcome success.
-
 <!-- applied-learning: unsigned-local-checkpoint-successes-are-revalidation-hints-only -->
 <a id="applied-learning-unsigned-local-checkpoint-successes-are-revalidation-hints-only"></a>
-**Unsigned local checkpoint successes are revalidation hints, not evidence.** Owner-only file mode provides confidentiality from other users but no authenticity against same-user tampering. A cached success must consume the normal proof budget and pass the live proof boundary again before classification; only exact-scope deterministic preserve outcomes may skip work (found 2026-07-21 reviewing historical branch-audit proof caching).
+**Unsigned local checkpoint successes are revalidation hints only.** A reusable proof binds the exact repository, destination ref and OID, branch ref and OID, and policy version. An unsigned local success, including owner-only mode, establishes confidentiality of the local result, not authenticity, and must spend the normal proof budget again. Only an exact-scope deterministic preserve outcome may skip work. Persist only closed sanitized statuses. Count cache hits, retries, and budget-skipped targets separately from success. (Merged 2026-10-16 from 2 entries; first found 2026-07-21, last 2026-07-21.)
 
 <!-- applied-learning: host-maintenance-scripts-must-target-system-runtime-apis -->
 <a id="applied-learning-host-maintenance-scripts-must-target-system-runtime-apis"></a>

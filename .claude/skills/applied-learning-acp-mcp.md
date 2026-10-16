@@ -25,14 +25,7 @@ provider extensions.
 
 <!-- applied-learning: do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests -->
 <a id="applied-learning-do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests"></a>
-**Do not chain process-owned workspace leases across standalone MCP requests.**
-`coding_workspace_acquire` called through top-level `arbor_run` has no durable
-task ID, so the lease is owned by the HTTP request process; owner-death cleanup
-runs when that request ends and an immediate `mix_test` call by the same signed
-principal returns `:not_found`. Use one durable coding task to own
-acquire/use/release until Arbor exposes a principal-bound resumable lease or an
-async validation task. Never make opaque `workspace_id` alone sufficient to
-recover authority (found 2026-08-27 while proving the P1B-2A toolchain test fix).
+**Do not chain a process-owned coding workspace lease across standalone MCP requests.** `coding_workspace_acquire` through `arbor_run` has no durable task id, so the lease is owned by the HTTP request process and the next request observes `:not_found` on inspect, committed-change, or review binding. Acquire, use, and release the lease inside one durable `coding_change` task. Never treat an opaque `workspace_id` as authority to recover that lease. Use ordinary Git inspection for a retained worktree that no longer has a live owner. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-08-27.)
 
 <!-- applied-learning: bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title -->
 <a id="applied-learning-bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title"></a>
@@ -120,14 +113,7 @@ spend the MCP request window waiting on unrelated runtime services (reinforced
 
 <!-- applied-learning: compile-the-exact-structured-coding-plan-before-dispatch -->
 <a id="applied-learning-compile-the-exact-structured-coding-plan-before-dispatch"></a>
-**Compile the exact structured coding plan before dispatch.** `Plan.new/1`
-validates the interchange contract, not whether every declared feature is
-implemented by the reviewed compiler. For example, the contract accepts
-nonempty `rework.stop_conditions`, while the current compiler rejects them as
-`unsupported_v1_feature`; MCP admission then exposes only `compilation_failed`.
-Run the exact normalized plan through `CodingPlan.Compiler.compile/1` against
-the current source before dispatch, and recompile a live node before retrying
-loaded/on-disk drift (found 2026-07-29 preparing the provider-observation slice).
+**Compile the exact coding plan before dispatch.** `Arbor.Contracts.Coding.Plan.new/1` admits the interchange contract. `Arbor.Orchestrator.CodingPlan.Compiler.compile/1` is the executable gate: nonempty `overlays`, a non-nil `budgets.model_cost_usd`, and `budgets.parallelism` other than 1 fail as `{:unsupported_v1_feature, field}` before workspace allocation. Nonempty `rework.stop_conditions` is admitted, and `validation_failed` is compiled into a terminal validation edge rather than another rework. Preflight that exact normalized map. The supported-feature check lives inside `compile/1`, not a `validate_supported_v1/1` helper. A rejection before workspace acquisition is safe to correct and redispatch. MCP admission may surface only `compilation_failed`, so run `compile/1` on the dispatch map first. (Merged 2026-10-16 from 4 entries; first found 2026-07-11, last 2026-07-29.)
 
 <!-- applied-learning: keep-approval-decisions-concise-and-put-detail-in-the-artifact -->
 <a id="applied-learning-keep-approval-decisions-concise-and-put-detail-in-the-artifact"></a>
@@ -169,19 +155,9 @@ redispatching; for example, Phase 6 cross-app validation correctly recorded
 2026-07-13 reviewing retained Grok candidates; tree-authority lesson reinforced
 2026-07-28 when validation terminalized before commit).
 
-<!-- applied-learning: do-not-reuse-a-delegated-worktree-build-across-compile-time-adapter-modes -->
-<a id="applied-learning-do-not-reuse-a-delegated-worktree-build-across-compile-time-adapter-modes"></a>
-**Do not reuse a delegated worktree build across compile-time adapter modes.**
-`ARBOR_DB=postgres` compiles `:arbor_persistence, :repo_adapter` differently
-from the default SQLite test mode, and Mix will reject a later run whose runtime
-adapter no longer matches that retained build. Use a fresh named
-`MIX_BUILD_PATH` for each adapter mode (or explicitly keep `ARBOR_DB` identical)
-instead of treating a worker's `_build_*` directory as mode-agnostic (found
-2026-07-13 rerunning the lifecycle suite after Grok's Postgres validation).
-
 <!-- applied-learning: structured-coding-worktree-roots-are-policy-not-a-scratch-directory-preference -->
 <a id="applied-learning-structured-coding-worktree-roots-are-policy-not-a-scratch-directory-preference"></a>
-**Structured coding worktree roots are policy, not a scratch-directory preference.** `coding_change` dispatch validates `workspace_policy.worktree_base_dir` against configured coding roots before allocating a worker; an arbitrary `/private/tmp/...` path fails with `{:coding_path_outside_roots, :worktree_base_dir}`. Omit the field to use Arbor's configured root unless a reviewed allowed root is specifically required (found 2026-07-15 during Phase 6 supervision delegation).
+**Structured coding worktree roots are policy.** Omit `workspace_policy.worktree_base_dir` unless that override is already an admitted coding root. `Arbor.Orchestrator.CodingPlan.WorkspaceScope` rejects a guessed host temp path before a worker is allocated, as `{:invalid_coding_path, :worktree_base_dir}` or `{:coding_path_outside_roots, :worktree_base_dir}`. Both failures are preflight failures, before workspace allocation. A path that looks like a convenient scratch directory is still denied when it is outside the configured roots. The omitted field uses the configured root. Leave it unset whenever that configured root is acceptable. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-07-15.)
 
 <!-- applied-learning: flat-coding-change-dispatch-does-not-accept-the-full-composite-action-schema -->
 <a id="applied-learning-flat-coding-change-dispatch-does-not-accept-the-full-composite-action-schema"></a>
@@ -233,17 +209,9 @@ Arbor writes. Surface `{:grok_external_auth_cache_invalid, %{file, mode}}`
 instead of collapsing to `:grok_external_auth_unavailable` (found 2026-08-27,
 V7-14, Linux factory run 11l/11m).
 
-<!-- applied-learning: long-running-mcp-actions-and-canaries-need-asynchronous-owner-processes -->
-<a id="applied-learning-long-running-mcp-actions-and-canaries-need-asynchronous-owner-processes"></a>
-**Long-running MCP actions and canaries need asynchronous owner processes.** Calling `coding_produce_reviewable_change` directly through synchronous `arbor_run` can outlive the HTTP request/session teardown: a Grok ACP session started normally, then the gateway timed out stopping the request-scoped MCP session after about 11 seconds and killed the ACP client with an HTTP 500. A synchronous gateway canary can likewise lose its owner on request timeout. Start persisted coding work, or an unlinked async canary task, and publish explicit durable status before polling; do not leave a long canary owned only by the request (reproduced 2026-07-09 and 2026-07-19).
-
 <!-- applied-learning: answering-a-top-level-mcp-approval-does-not-currently-make-a-fresh-arbor-run-replay-resumable -->
 <a id="applied-learning-answering-a-top-level-mcp-approval-does-not-currently-make-a-fresh-arbor-run-replay-resumable"></a>
 **Answering a top-level MCP approval does not currently make a fresh `arbor_run` replay resumable.** `trust_propose_profile` returned a pending IRQ and `arbor_answer_approval` approved it, but calling the same action/params again created a new IRQ because the approved-invocation marker was not carried across requests. Nested owners such as `coding_produce_reviewable_change` work because they remain alive, await the IRQ, and retry with the marker themselves. Top-level gated actions need an async owner or an explicit retry token/context before "answer, then call again" can be relied on (reproduced 2026-07-09).
-
-<!-- applied-learning: custom-coding-validation-commands-must-not-assume-ignored-repo-tooling-exists-in-a-git-worktree -->
-<a id="applied-learning-custom-coding-validation-commands-must-not-assume-ignored-repo-tooling-exists-in-a-git-worktree"></a>
-**Custom coding validation commands must not assume ignored repo tooling exists in a git worktree.** `coding_produce_reviewable_change` routes recognized `mix compile` and bare `mix quality` commands through schema-bounded Mix actions, but `./bin/mix test ...` currently falls back to raw `Shell.Execute`. After approval, that command runs with the generated worktree as `cwd`; because `bin/mix` is not present there, validation fails with `{:executable_not_found, "./bin/mix"}` and no commit is produced. Route test commands through `Mix.Test` with shared host deps/build paths, or resolve the tracked checkout's wrapper explicitly before using shell fallback (reproduced 2026-07-09 with Grok ACP).
 
 <!-- applied-learning: prefer-steering-an-active-delegated-acp-worker-for-review-and-rework-reserve-cancellation-for-termination -->
 <a id="applied-learning-prefer-steering-an-active-delegated-acp-worker-for-review-and-rework-reserve-cancellation-for-termination"></a>
@@ -257,10 +225,6 @@ V7-14, Linux factory run 11l/11m).
 <a id="applied-learning-a-custom-mix-build-directory-must-still-be-ignored-before-a-coding-worker-commits"></a>
 **A custom Mix build directory must still be ignored before a coding worker commits.** Names such as `_build_test_owner_outcome` do not necessarily match the repository's ignore rules; a worker that later runs `git add -A` can stage an entire generated build tree and make workspace inspection report irrelevant changes. Prefer the standard ignored `_build`, or verify `git check-ignore` and remove the custom build output before the worker returns (found 2026-07-15 while salvaging the owner-observed outcome delegation).
 
-<!-- applied-learning: a-clean-coding-worktree-does-not-prove-the-worker-made-no-change -->
-<a id="applied-learning-a-clean-coding-worktree-does-not-prove-the-worker-made-no-change"></a>
-**A clean coding worktree does not prove the worker made no change.** ACP workers can create a commit even when asked only to edit; `git status --porcelain` is then empty while `HEAD` has advanced. `coding_produce_reviewable_change` currently misclassifies that case as `no_changes` (observed 2026-07-09 on the Grok parity-fixture delegation). Capture the acquired base commit and treat either a dirty tree or `HEAD != base_commit` as a change. Prompt the worker not to commit so the wrapper owns the review commit, but enforce correct detection in code rather than trusting that instruction.
-
 <!-- applied-learning: verify-delegated-git-refs-as-exact-opaque-values-before-invoking-the-coding-action -->
 <a id="applied-learning-verify-delegated-git-refs-as-exact-opaque-values-before-invoking-the-coding-action"></a>
 **Verify delegated Git refs as exact opaque values before invoking the coding action.** Do not reconstruct, expand, or concatenate a commit hash while relaying it through an agent prompt. Prefer a verified short hash or stable branch name when either is unambiguous, and run `git rev-parse --verify <ref>^{commit}` before dispatch. A 2026-07-09 correction delegation duplicated part of a full SHA, so `coding_produce_reviewable_change` failed before the ACP worker started.
@@ -269,17 +233,9 @@ V7-14, Linux factory run 11l/11m).
 <a id="applied-learning-do-not-send-long-newline-delimited-mcp-json-frames-through-a-canonical-pty"></a>
 **Do not send long newline-delimited MCP JSON frames through a canonical PTY.** A terminal's line buffer can truncate or reject a large JSON-RPC request before the stdio signer reads it, which looks like a malformed or missing MCP response. Use a non-TTY client or an existing MCP tool for long dispatch payloads; reserve interactive signer sessions for short diagnostic calls (found 2026-07-10 during the signed steering proof).
 
-<!-- applied-learning: accepted-queued-steering-needs-an-explicit-terminal-reconciliation-contract -->
-<a id="applied-learning-accepted-queued-steering-needs-an-explicit-terminal-reconciliation-contract"></a>
-**Accepted queued steering needs an explicit terminal reconciliation contract.** If the worker task succeeds, accepted controls can reconcile to delivered; if the provider or task fails after accepting a control, report delivery unknown or not delivered and never replay the same opaque control ID. Leaving accepted controls permanently queued, or retrying after provider delivery became ambiguous, creates either false status or duplicate instructions (found 2026-07-10 after the live Grok steering task).
-
-<!-- applied-learning: coding-worker-output-is-evidence-not-control-authority -->
-<a id="applied-learning-coding-worker-output-is-evidence-not-control-authority"></a>
-**Coding worker output is evidence, not control authority.** After a successful ACP turn, the coding pipeline must capture the provider session id for continuity and inspect the owned workspace to decide `no_changes` versus validation/review/commit. Never parse or route on a model-reported `implemented`/`declined` status in the current graph; malformed output must not discard real edits or consume a repair budget. Prompts may still require one JSON-only response for compatibility with resumed archived graphs whose old parser is immutable. Retain `protocol_retry_count=0` only as a public compatibility metric while older records age out (fixed 2026-07-15 after repeated Grok terminal-response failures hid completed commits).
-
 <!-- applied-learning: gate-acp-coding-turns-on-trusted-stop-reason-and-per-turn-owner-fingerprints -->
 <a id="applied-learning-gate-acp-coding-turns-on-trusted-stop-reason-and-per-turn-owner-fingerprints"></a>
-**Gate ACP coding turns on trusted `stop_reason` and per-turn owner fingerprints.** A successful `acp_send_message` is not enough: require explicit `stop_reason == "end_turn"` before workspace inspection; never default a missing/blank stop reason to `end_turn` at the action layer. Treat `exists != true` as `pipeline_error` with retention (never `no_changes`). Capture a bounded workspace fingerprint immediately before each implement/rework send and compare after the turn — initial no-op => `no_changes`, rework no-op => `pipeline_error` (`worker_turn_no_progress`) so a prior candidate is not re-presented. Keep prompts requesting one advisory terminal JSON object for old-graph compatibility while the live graph ignores that prose for control (hardened 2026-07-15).
+**Gate a coding turn on a trusted stop reason and a per-turn workspace fingerprint.** Require `stop_reason` equal to `end_turn` before workspace inspection. Do not default a missing or blank stop reason to `end_turn`. Treat model-reported `implemented` or `declined` JSON as advisory evidence, not as the branch the graph takes. Compare a fingerprint captured before the send: an initial no-op is `no_changes`, and a rework no-op is `worker_turn_no_progress`, so a prior candidate is not presented again as a fresh empty turn. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-07-15.)
 
 <!-- applied-learning: coding-plan-uses-reviewed-task-class-identifiers-not-informal-scope-labels -->
 <a id="applied-learning-coding-plan-uses-reviewed-task-class-identifiers-not-informal-scope-labels"></a>
@@ -303,37 +259,13 @@ reports that its required surface is absent, cancel before rework; that is a dis
 classification defect, not an instruction to fabricate an unrelated surface (found
 2026-08-31 in `task_f3f37143f3fe6646d7be9a7c4eab1dd2`).
 
-<!-- applied-learning: structured-coding-dispatch-requires-the-task-kind-envelope -->
-<a id="applied-learning-structured-coding-dispatch-requires-the-task-kind-envelope"></a>
-**Structured coding dispatch requires the task-kind envelope.** Send executable CodingPlan data through `arbor_dispatch_task` as `%{"kind" => "coding_change", "plan" => plan}`. A bare plan map is not selected by TaskStore's coding executor and instead falls through to the ordinary agent-session path, where unrelated turn-graph errors can obscure the malformed dispatch (found 2026-07-11 while retrying security-regression dogfood).
-
-<!-- applied-learning: audit-every-runtime-dispatch-branch-when-adding-a-resource-bound -->
-<a id="applied-learning-audit-every-runtime-dispatch-branch-when-adding-a-resource-bound"></a>
-**Audit every runtime dispatch branch when adding a resource bound.** A timeout or output ceiling on the primary executor does not cover an alternate backend selected by syntax, feature flag, agent context, or authorization mode. Trace the public operation through every dispatch branch and either enforce identical bounds there or disable the unbounded branch by default; an action-schema option alone can otherwise advertise protection that the live path ignores (found 2026-07-11 when compound shell commands bypassed `Arbor.Shell.Executor` through `CapShell`).
-
 <!-- applied-learning: do-not-verify-against-an-active-worker-s-mutable-worktree -->
 <a id="applied-learning-do-not-verify-against-an-active-worker-s-mutable-worktree"></a>
 **Do not verify against an active worker's mutable worktree.** A delegated coding loop can rewrite source while an external Mix command is compiling it, producing a mixed-revision build and failures that belong to neither commit. Wait for the worker's committed terminal snapshot or create a detached worktree at the exact commit, then run verification there with an isolated build path (found 2026-07-11 while Grok was applying council rework to security-attestation routing).
 
-<!-- applied-learning: the-coding-plan-data-contract-is-broader-than-the-executable-v1-feature-set -->
-<a id="applied-learning-the-coding-plan-data-contract-is-broader-than-the-executable-v1-feature-set"></a>
-**The Coding Plan data contract is broader than the executable v1 feature set.** `Arbor.Contracts.Coding.Plan.new/1` can normalize optional policy fields that the current compiler intentionally rejects as `{:unsupported_v1_feature, field}`. Before dispatching live work, use only the executable profile subset (or run a compile probe); in particular, leave `rework.stop_conditions` empty until the compiler implements it. A preflight rejection before workspace acquisition is safe to correct and redispatch (found 2026-07-11 when terminal-approval cleanup was rejected before worker startup).
-
 <!-- applied-learning: normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable -->
 <a id="applied-learning-normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable"></a>
-**Normalized Coding Plan profile ids are not proof that a profile is executable.**
-The plan contract accepts discovery ids such as `contract_change`, but the
-compiler must still find a reviewed executable profile and every promised
-enforcement action. Probe compilation or `Profiles.fetch_executable/1` before
-dispatch. On 2026-07-22, a bounded contract-only delegation failed before
-workspace acquisition with `profile_not_executable` because no registered
-action yet enforced CONTRACT_RULES preflight and consumer/API compatibility;
-redispatching under `default` was honest only because the task independently
-required focused contract tests and did not claim the missing specialized gate.
-
-<!-- applied-learning: private-per-dispatch-options-must-not-select-executable-cleanup-code -->
-<a id="applied-learning-private-per-dispatch-options-must-not-select-executable-cleanup-code"></a>
-**Private per-dispatch options must not select executable cleanup code.** A caller that can reach a low-level task store directly can supply an arbitrary MFA even when the facade normally constructs that option. Fix stable lifecycle code at the store's trusted initialization boundary (with an explicit test-only seam if needed), and let per-task descriptors carry data only. Launch deferred work with module/function/args APIs rather than storing or spawning anonymous closures (found 2026-07-11 when council review rejected the first terminal-approval cleanup implementation).
+**A normalized profile id is not proof the profile is executable.** Treat declared profile ids as discovery. Refuse execution until `Arbor.Orchestrator.CodingPlan.Profiles.fetch_executable/1` returns the profile and every claimed enforcement primitive is present. A selected `_test.exs` file does not by itself prove a security regression fails on the base and passes on the candidate. Keep such a profile undispatchable, with a precise missing-primitive reason, until both sides of that claim are enforced. (Merged 2026-10-16 from 2 entries; first found 2026-07-10, last 2026-07-22.)
 
 <!-- applied-learning: check-the-current-branch-after-a-coding-subagent-reports-completion -->
 <a id="applied-learning-check-the-current-branch-after-a-coding-subagent-reports-completion"></a>
@@ -341,32 +273,7 @@ required focused contract tests and did not claim the missing specialized gate.
 
 <!-- applied-learning: a-managed-acp-handle-lives-only-as-long-as-its-owning-action-unless-an-explicit-durable-owner-retains-it -->
 <a id="applied-learning-a-managed-acp-handle-lives-only-as-long-as-its-owning-action-unless-an-explicit-durable-owner-retains-it"></a>
-**A managed ACP handle lives only as long as its owning action unless an explicit durable owner retains it.** Calling `acp_start_session` as one standalone MCP action can return `status: "ready"` while the action's cleanup closes the worker immediately; a later standalone `acp_send_message` then returns `:not_found`. Multi-turn steering must stay inside the coding task owner (or use a deliberately pooled/durable session contract), and retained work should be resumed by a new task from an exact committed checkpoint rather than assuming the old worker handle survived (found 2026-07-11 after commit-approval rework terminated a coding pipeline).
-
-<!-- applied-learning: outer-task-liveness-does-not-imply-the-acp-worker-session-is-steerable -->
-<a id="applied-learning-outer-task-liveness-does-not-imply-the-acp-worker-session-is-steerable"></a>
-**Outer task liveness does not imply the ACP worker session is steerable.** Once the implementation node closes its managed ACP session, the task can still be waiting on commit approval while `steer_task` correctly reports `task_terminal` for the worker stage. Deliver steering while the worker session is alive; after it closes, retain or commit an exact checkpoint and start a new delegated revision rather than assuming approval-wait state preserves the ACP handle (found 2026-07-11 trying to steer validator corrections at commit approval).
-
-<!-- applied-learning: security-regression-coding-plan-requested-paths-are-test-selectors-not-source-scopes -->
-<a id="applied-learning-security-regression-coding-plan-requested-paths-are-test-selectors-not-source-scopes"></a>
-**`security_regression` coding-plan `requested_paths` are test selectors, not source scopes.** The compiler requires a non-empty list where every path ends in `_test.exs`; passing app directories or implementation files fails before workspace acquisition with `{:invalid_security_regression_paths, ...}`. Put the exact public behavioral regression test paths there and describe implementation ownership in the task prompt instead (found 2026-07-11 while dispatching the signing-authority spine correction).
-
-<!-- applied-learning: a-failed-outer-coding-task-may-still-have-produced-a-committed-branch -->
-<a id="applied-learning-a-failed-outer-coding-task-may-still-have-produced-a-committed-branch"></a>
-**A failed outer coding task may still have produced a committed branch.** Pipeline timeout, worker protocol repair failure, or terminal-result transport can occur after the worker committed. Before redispatching or declaring work lost, inspect the requested branch and retained worktree for an immutable commit; review that snapshot independently of the outer task status (found 2026-07-11 recovering cross-app and benchmark corrections).
-
-<!-- applied-learning: arbor-dispatch-task-timeout-bounds-the-whole-asynchronous-task-not-the-mcp-request -->
-<a id="applied-learning-arbor-dispatch-task-timeout-bounds-the-whole-asynchronous-task-not-the-mcp-request"></a>
-**`arbor_dispatch_task.timeout` bounds the whole asynchronous task, not the MCP request.** A
-structured coding plan already carries its worker budget in `plan.budgets.wall_clock_ms` and
-`inactivity_timeout_ms`. Omit the outer dispatch timeout for coding work unless a deliberately
-shorter task-wide cancellation is intended; setting it to 120 seconds terminated Grok during its
-first implementation turn and cleanup removed the uncommitted worktree (found 2026-07-14 in
-`task_74626`).
-
-<!-- applied-learning: a-field-accepted-by-the-coding-plan-contract-may-still-be-unsupported-by-the-v1-compiler -->
-<a id="applied-learning-a-field-accepted-by-the-coding-plan-contract-may-still-be-unsupported-by-the-v1-compiler"></a>
-**A field accepted by the coding Plan contract may still be unsupported by the v1 compiler.** Non-empty `rework.stop_conditions` and non-nil `budgets.model_cost_usd` normalize successfully but dispatch fails before workspace acquisition with `{:unsupported_v1_feature, field}`; `budgets.parallelism` is executable only at `1`. For executable v1 dispatches, check `CodingPlan.Compiler.validate_supported_v1/1`, omit unsupported fields, and use the reviewed profile plus bounded `max_cycles`, `wall_clock_ms`, and `inactivity_timeout_ms` instead (found 2026-07-11 redispatching Phase 6 corrections).
+**A managed ACP handle dies with its owning action unless a durable owner retains it.** A standalone session start can report ready and then close the worker during action cleanup, so a later standalone send does not find that session. A still-live outer task or an approval wait does not keep the worker steerable after the implementation node has closed it. Deliver steering while that session is alive. After it closes, resume from an exact committed checkpoint in a new task. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-07-11.)
 
 <!-- applied-learning: the-public-task-control-facade-remains-usable-when-a-client-has-not-exposed-a-steering-mcp-tool -->
 <a id="applied-learning-the-public-task-control-facade-remains-usable-when-a-client-has-not-exposed-a-steering-mcp-tool"></a>
@@ -376,10 +283,6 @@ first implementation turn and cleanup removed the uncommitted worktree (found 20
 <a id="applied-learning-executable-v1-coding-plans-use-workspace-policy-mode-isolated"></a>
 **Executable v1 coding plans use `workspace_policy.mode="isolated"`.** The intuitive value `"new"` is not part of the closed v1 contract and fails before workspace acquisition. The v1 compiler also requires `task_class` to match `validation_profile` (for example both `"cross_app"`); describe additional security-test obligations in the task rather than mixing profile names (found 2026-07-11 dispatching the approval-authority correction).
 
-<!-- applied-learning: a-terminal-steering-control-must-not-remain-queued -->
-<a id="applied-learning-a-terminal-steering-control-must-not-remain-queued"></a>
-**A terminal steering control must not remain `queued`.** When an executor accepts a control but the task fails or is cancelled before delivery acknowledgement, the outcome is terminally delivery-unconfirmed, not retryable queue state. Project it under an explicit terminal status and preserve the error/evidence separately; otherwise status counts imply work can still be delivered after the owner has exited (found 2026-07-11 when a queued ACP follow-up ended in `worker_protocol_invalid_json_after_retry`).
-
 <!-- applied-learning: term-serialization-bounds-must-include-integer-bit-size-before-encoding -->
 <a id="applied-learning-term-serialization-bounds-must-include-integer-bit-size-before-encoding"></a>
 **Term serialization bounds must include integer bit size before encoding.** Counting every integer as a fixed scalar lets a hostile bignum allocate megabytes in `term_to_binary/2` before a post-encode byte check can reject it. Bound signed integer magnitude/bit length during the structural walk, then encode only the already bounded term (found 2026-07-11 reviewing execution-proof payloads).
@@ -387,14 +290,6 @@ first implementation turn and cleanup removed the uncommitted worktree (found 20
 <!-- applied-learning: acp-continuity-requires-the-provider-session-id-not-only-the-managed-worker-handle -->
 <a id="applied-learning-acp-continuity-requires-the-provider-session-id-not-only-the-managed-worker-handle"></a>
 **ACP continuity requires the provider session ID, not only the managed worker handle.** `worker_session_id` (`acp_worker_*`) is an owner-scoped live registry handle; `acp_close_session` or owner death invalidates it. The ACP provider's `worker.session_id` is the durable conversation identity consumed by `load_session`. A coding graph must opt into pooled execution, preserve/project that provider ID before closing or checking in the worker, and pass it through a later authorized start to resume context. Returning only the closed managed handle is not resumability. When diagnosing an older run, recover the provider ID from the `open_worker/status.json` checkpoint if the public result dropped it (found 2026-07-12 tracing `task_167682`, whose non-pooled graph retained provider session `019f52ad-dfb1-7d33-8156-effae2a1c9fa` only in the checkpoint).
-
-<!-- applied-learning: a-durable-acp-provider-session-may-still-be-bound-to-its-original-workspace -->
-<a id="applied-learning-a-durable-acp-provider-session-may-still-be-bound-to-its-original-workspace"></a>
-**A durable ACP provider session may still be bound to its original workspace.** Reopening a valid Grok provider session from a newly allocated worktree returned `FS_NOT_FOUND` even though the provider conversation ID and both worktrees still existed. Do not equate "new worktree + resume_session_id" with continuity. Reactivate the retained original workspace for follow-up work, or use a provider protocol that explicitly supports rebinding the session cwd; otherwise classify the attempt as resume-unavailable and preserve the candidate commit before falling back to a fresh session (found 2026-07-13 when `task_37699` tried to resume the `task_35331` worker on a review-rework worktree).
-The structured coding dispatcher currently allocates a new workspace for each new slice, so omit
-Grok resume fields there unless that path has first gained explicit retained-workspace reactivation;
-reserve provider-session resume for a rework path that can reopen the original workspace (reconfirmed
-2026-07-14 by `task_74242` failing at `acp_start_session` before implementation).
 
 <!-- applied-learning: dispatch-provider-selection-must-satisfy-worker-owned-packet-operations -->
 <a id="applied-learning-dispatch-provider-selection-must-satisfy-worker-owned-packet-operations"></a>
@@ -409,33 +304,21 @@ the manager owns later validation, but route command-derived artifact generation
 to a shell-capable provider (found 2026-08-11 while freezing the SPIKE-3B
 source-coupling baseline).
 
-<!-- applied-learning: budget-agent-work-by-model-provider-but-distinguish-native-subagents-from-acp-workers -->
-<a id="applied-learning-budget-agent-work-by-model-provider-but-distinguish-native-subagents-from-acp-workers"></a>
-**Budget agent work by model/provider, but distinguish native subagents from ACP workers.** Keep the coordinating parent on architecture, delegation, integration, and final judgment; send substantial implementation to resumable ACP workers such as Grok or GPT-5.3-Codex-Spark; use a faster/cheaper native Codex subagent only for bounded mechanical work; reserve stronger agents for security review and cross-library design. Inspect `spawn_agent`'s advertised model overrides before choosing a native subagent, and inspect Arbor's ACP provider registry separately: absence from `spawn_agent` does not imply a subscription-backed model is unavailable through ACP. Limit active concurrency, close completed native agents immediately, reuse author/reviewer threads and provider session IDs with frozen ledgers, and avoid `fork_context: true` unless the worker genuinely needs the full history (adopted 2026-07-12 after repeated parent-model capacity stalls; ACP Spark lane clarified 2026-07-12).
-
-<!-- applied-learning: stable-structured-coding-plans-require-a-review-bearing-profile-and-only-their-executable-feature-subset -->
-<a id="applied-learning-stable-structured-coding-plans-require-a-review-bearing-profile-and-only-their-executable-feature-subset"></a>
-**Stable structured coding plans require a review-bearing profile and only their executable feature subset.** The compiled `coding_change` path rejects `review_profile: "none"` before workspace allocation. Use `human_required` when the local delegator will perform the binding review, or `binding` when the configured council should decide; do not use a no-review profile merely to save reviewer tokens. Also, contract-valid optional fields are not necessarily executable in v1: custom `rework.stop_conditions` currently fails preflight with `unsupported_v1_feature`, so omit it and use the compiled profile defaults until that feature is implemented (confirmed 2026-07-13 dispatching the eval DOT last-mile slice).
-
 <!-- applied-learning: preserve-a-stalled-delegated-worktree-before-starting-a-replacement-worker -->
 <a id="applied-learning-preserve-a-stalled-delegated-worktree-before-starting-a-replacement-worker"></a>
 **Preserve a stalled delegated worktree before starting a replacement worker.** When an ACP run exits with useful uncommitted changes, use `git stash create` to capture the tracked work without altering the retained worker directory, then point a named preservation branch at that commit. A correction can start from the exact preserved state while the original workspace remains available for diagnosis and provider-session recovery (adopted 2026-07-13 after the spawn-containment R10 worker transport failed).
 
 <!-- applied-learning: a-structured-coding-dispatch-has-a-closed-two-level-envelope -->
 <a id="applied-learning-a-structured-coding-dispatch-has-a-closed-two-level-envelope"></a>
-**A structured coding dispatch has a closed two-level envelope.** The outer task contains only `kind: "coding_change"` and `plan`; execution policy such as workspace, worker, review, rework, budgets, and output belongs inside the versioned plan. Validate the plan against both `Arbor.Contracts.Coding.Plan` and the current compiler subset: a field may be contract-valid yet still fail preflight as `unsupported_v1_feature` (found 2026-07-13 re-dispatching the spawn-containment correction).
+**Structured coding dispatch has a closed envelope.** `Arbor.Orchestrator.CodingPlan.Normalizer.normalize_task/1` accepts `{"kind":"coding_change","plan":...}`, whose only direct keys are `kind` and `plan`, or the legacy flat `coding_change` keys. Workspace, worker, review, rework, budgets, and output belong inside the versioned plan. A bare plan or an `{action, params}` wrapper is not that envelope: without `kind` it falls through to the chat runner, and a map with no text field fails `:missing_task_input`. `coding_produce_reviewable_change` is not a dispatch envelope. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-14.)
 
 <!-- applied-learning: the-coding-security-regression-profile-treats-requested-paths-as-test-paths -->
 <a id="applied-learning-the-coding-security-regression-profile-treats-requested-paths-as-test-paths"></a>
-**The coding `security_regression` profile treats `requested_paths` as test paths.** Its compiler requires a non-empty list containing only files ending in `_test.exs`; adding the source file produces `{:invalid_security_regression_paths, ...}` before workspace allocation. Use that profile only when candidate-selected test bytes should fail after overlay onto exact-parent production. A fixture-only repair with unchanged production should use ordinary validation: the parent passing is correct by construction, not failed evidence. A feature slice that changes source plus adversarial tests should use an executable general profile and still prove the tests fail against the candidate parent where applicable (found 2026-07-14 while continuing the Apple Container planner; fixture-only boundary clarified 2026-08-23).
+**Security-regression requested paths are test selectors.** The executable `security_regression` profile requires a non-empty `requested_paths` list of files ending in `_test.exs`. Any other selection, including an empty list, fails as `{:invalid_security_regression_paths, ...}` before workspace allocation. The validator copies and runs only those paths against the base and the candidate, so put every public behavioral proof in one of them before dispatch. Use this profile when those tests should fail on the parent. A fixture-only repair with unchanged production belongs on ordinary validation. Keep candidate-controlled stdout out of automatic rework prompts; trusted proof uses the formatter artifact. (Merged 2026-10-16 from 4 entries; first found 2026-07-11, last 2026-07-14.)
 
 <!-- applied-learning: use-the-structured-coding-envelope-for-durable-acp-delegation -->
 <a id="applied-learning-use-the-structured-coding-envelope-for-durable-acp-delegation"></a>
-**Use the structured coding envelope for durable ACP delegation.** A plain `arbor_dispatch_task` prompt goes through the target agent's ordinary task/chat path; merely naming `coding_produce_reviewable_change` does not invoke it. Conversely, running that long owner-bound composite synchronously through standalone `arbor_run` can lose its MCP request owner and tear down the ACP worker. Dispatch `{"kind":"coding_change","plan":{...}}` for coding work, use `arbor_run` only for bounded standalone actions, and use a compiled DOT node when an explicit long-running action belongs inside a durable workflow (found 2026-07-14 after the plain dispatch took the chat path and the synchronous composite lost its request owner).
-
-<!-- applied-learning: do-not-wrap-an-internal-action-invocation-inside-arbor-dispatch-task -->
-<a id="applied-learning-do-not-wrap-an-internal-action-invocation-inside-arbor-dispatch-task"></a>
-**Do not wrap an internal action invocation inside `arbor_dispatch_task`.** The MCP task boundary routes only a plain prompt or a supported task kind. A payload such as `{"action":"coding_produce_reviewable_change","params":{...}}` has no `kind`, falls through to the default chat runner, and fails with `:missing_task_input`; `coding_produce_reviewable_change` is now an internal compiled-pipeline action rather than the MCP dispatch envelope. Send the canonical `{"kind":"coding_change","plan":{...}}` shape, or the strict legacy-compatible flat `coding_change` fields while that adapter remains supported (found 2026-07-14 after two immediate false-start dispatches following a reconnect).
+**Give long coding work an asynchronous owner.** A plain `arbor_dispatch_task` prompt takes the agent's chat path, and naming a coding action does not select the coding executor. Standalone `arbor_run` makes the HTTP request the owner, so request teardown kills the worker and can return an empty failure after the worker has already started. Dispatch `{"kind":"coding_change","plan":...}` and drive status, steering, approvals, and result through the task. Use `arbor_run` only for bounded actions. Put a long action that belongs inside a workflow on a compiled DOT node. A long canary needs an unlinked async owner and durable status before polling. (Merged 2026-10-16 from 4 entries; first found 2026-07-14, last 2026-07-19.)
 
 <!-- applied-learning: distinguish-backend-availability-from-host-admission-in-structured-coding-validation -->
 <a id="applied-learning-distinguish-backend-availability-from-host-admission-in-structured-coding-validation"></a>
@@ -443,11 +326,7 @@ source-coupling baseline).
 
 <!-- applied-learning: independently-test-retained-worker-commits-with-a-fresh-build-path -->
 <a id="applied-learning-independently-test-retained-worker-commits-with-a-fresh-build-path"></a>
-**Independently test retained worker commits with a fresh build path.** A retained coding worktree may have no local `deps/`, and its `_build` can reflect the worker's compile-time environment (for example Postgres) while the reviewing test process selects another adapter (for example SQLite). Share only the canonical checkout's dependency cache through `MIX_DEPS_PATH`, use a fresh reviewer-owned `MIX_BUILD_PATH`, and keep that build outside any suite that intentionally derives repository identity from loaded BEAM paths. Reusing the worker `_build` can produce a compile-env mismatch that says nothing about the candidate source (found 2026-07-14 independently verifying the StartupEpoch extraction).
-
-<!-- applied-learning: treat-worker-resume-provider-as-a-provider-selector-not-a-boolean -->
-<a id="applied-learning-treat-worker-resume-provider-as-a-provider-selector-not-a-boolean"></a>
-**Treat `worker.resume_provider` as a provider selector, not a boolean.** In a structured coding plan it is an optional nonblank provider/session string; omit it for a fresh worker. Passing `true` fails schema validation before workspace allocation. Also use `review_profile: "binding"` for executable delegated review: although the interchange contract can describe `"none"`, the current compiler rejects that profile before execution (confirmed 2026-07-14 dispatching the Apple local-alias slices).
+**Test a retained worker commit with a fresh build path.** Share only the canonical checkout's `MIX_DEPS_PATH`. Use a fresh reviewer-owned `MIX_BUILD_PATH` for each compile-time adapter mode. A Postgres `ARBOR_DB` build and the default SQLite test mode do not share a `_build`. Reusing the worker build can fail on adapter mismatch and says nothing about the candidate source. Keep that reviewer build outside any suite that derives repository identity from loaded BEAM paths. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-14.)
 
 <!-- applied-learning: run-composition-tests-after-disjoint-delegated-contract-changes -->
 <a id="applied-learning-run-composition-tests-after-disjoint-delegated-contract-changes"></a>
@@ -455,7 +334,7 @@ source-coupling baseline).
 
 <!-- applied-learning: inspect-a-retained-coding-workspace-independently-of-the-terminal-task-verdict -->
 <a id="applied-learning-inspect-a-retained-coding-workspace-independently-of-the-terminal-task-verdict"></a>
-**Inspect a retained coding workspace independently of the terminal task verdict.** `worker_protocol_invalid_json_after_retry` describes the worker-response envelope, not necessarily the Git outcome: one Grok run left a valid committed change while another left only dirty files. Check the retained worktree's `HEAD`, status, and requested-path diff before deciding whether to cherry-pick, salvage, or re-dispatch; never infer commit durability from the wrapper status alone (found 2026-07-14 during the Apple admission slices).
+**Inspect a retained coding workspace independently of the terminal task verdict.** A clean worktree, a failed outer task, or a worker protocol error does not prove the Git outcome. A worker can commit while status is empty, and a timeout or protocol failure can happen after that commit. Capture the acquired base and treat a dirty tree or a `HEAD` that differs from that base as a change. Compare the retained worktree and requested branch before cherry-pick, salvage, or redispatch. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-14.)
 
 <!-- applied-learning: checkpoint-a-substantial-delegated-patch-before-diagnosing-test-infrastructure -->
 <a id="applied-learning-checkpoint-a-substantial-delegated-patch-before-diagnosing-test-infrastructure"></a>
@@ -477,15 +356,7 @@ happy path (2026-10-03 conversation SDK and remote adapter regressions).
 
 <!-- applied-learning: an-acp-provider-session-is-not-a-durable-workspace-continuation-by-itself -->
 <a id="applied-learning-an-acp-provider-session-is-not-a-durable-workspace-continuation-by-itself"></a>
-**An ACP provider session is not a durable workspace continuation by itself.** A retained Git commit/worktree can survive a coding task while the pooled provider session is closed or its provider-owned path state disappears; an explicit Grok `resume_session_id` then fails immediately with `FS_NOT_FOUND`. Try the exact provider resume once, but preserve progress in Git and re-dispatch a fresh conversation from that exact commit with the frozen finding ledger when restoration is unavailable. Session continuity improves context reuse; commit continuity is the recovery invariant (found 2026-07-15 correcting Engine lifecycle L3A after the original worker response protocol failed).
-
-<!-- applied-learning: standalone-mcp-action-calls-cannot-carry-a-process-owned-coding-workspace-lease-across-requests -->
-<a id="applied-learning-standalone-mcp-action-calls-cannot-carry-a-process-owned-coding-workspace-lease-across-requests"></a>
-**Standalone MCP action calls cannot carry a process-owned coding workspace lease across requests.** `coding_workspace_acquire` can return an active lease, but a later standalone `arbor_run` executes under a different request owner and `coding_workspace_inspect`, `coding_workspace_committed_change`, or council snapshot binding can return `:not_found`. Run acquisition, committed-change capture, and binding review inside one structured `coding_change` task/compiled pipeline; use ordinary Git inspection for a retained failed worktree rather than trying to reconstruct task ownership through separate MCP calls (found 2026-07-15 attempting an independent binding review of Engine lifecycle L3A).
-
-<!-- applied-learning: codingplan-schema-acceptance-does-not-imply-the-executable-v1-profile-supports-a-field -->
-<a id="applied-learning-codingplan-schema-acceptance-does-not-imply-the-executable-v1-profile-supports-a-field"></a>
-**CodingPlan schema acceptance does not imply the executable v1 profile supports a field.** The v1 contract can normalize non-empty `overlays` and `rework.stop_conditions`, while the current compiler rejects both as `{:unsupported_v1_feature, field}` before workspace allocation. Check `Compiler.validate_supported_features/1` and profile-specific preflight before adding optional plan fields to an MCP dispatch; omit unsupported fields or use their supported empty/default value. The executable `security_regression` profile also requires a non-empty `requested_paths` list containing only `*_test.exs` paths (found 2026-07-15 dispatching Engine lifecycle L3B).
+**An ACP provider session is not a durable workspace continuation.** A provider session id does not carry the worktree. Resume that returns `FS_NOT_FOUND` means the session is still bound to its original path, even when the conversation id and both worktrees exist. Try that exact resume once, then re-dispatch a fresh conversation from the retained Git commit. Do not attach a new worktree to an old Grok session unless the path can reopen the original workspace. Commit continuity is the recovery invariant. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-15.)
 
 <!-- applied-learning: a-process-started-with-start-link-through-erpc-inherits-the-short-lived-rpc-worker-s-lifetime -->
 <a id="applied-learning-a-process-started-with-start-link-through-erpc-inherits-the-short-lived-rpc-worker-s-lifetime"></a>
@@ -499,49 +370,25 @@ happy path (2026-10-03 conversation SDK and remote adapter regressions).
 <a id="applied-learning-normalize-explicit-acp-wire-aliases-never-replace-a-missing-terminal-fact"></a>
 **Normalize explicit ACP wire aliases; never replace a missing terminal fact.** ExMCP prompt results use camelCase `stopReason`, while streamed completion notifications can expose snake_case `stop_reason`. Normalize both spellings at the action boundary and regress each explicit form, but keep a genuinely missing/blank stop reason missing so the owner graph fails closed (found 2026-07-15 in the live Grok coding pipeline).
 
-<!-- applied-learning: let-coding-dispatch-choose-its-configured-worktree-root-unless-an-override-is-already-known-to-be-admitted -->
-<a id="applied-learning-let-coding-dispatch-choose-its-configured-worktree-root-unless-an-override-is-already-known-to-be-admitted"></a>
-**Let coding dispatch choose its configured worktree root unless an override is already known to be admitted.** `worktree_base_dir` is a security-sensitive coding path and must fall within the runtime's configured workspace roots; an otherwise valid task can fail preflight with `{:invalid_coding_path, :worktree_base_dir}` before allocating a worker. Omit the override to use the reviewed default rather than guessing that a convenient host temp directory is allowed (found 2026-07-15 dispatching retained-workspace remediation).
-
 <!-- applied-learning: the-mcp-task-timeout-does-not-replace-a-structured-coding-plan-s-wall-clock-budget -->
 <a id="applied-learning-the-mcp-task-timeout-does-not-replace-a-structured-coding-plan-s-wall-clock-budget"></a>
-**The MCP task timeout does not replace a structured coding plan's wall-clock budget.** `arbor_dispatch_task.timeout` bounds the outer asynchronous task, while `plan.budgets.wall_clock_ms` controls the whole compiled coding graph and defaults to 900,000 ms. The executor uses the smaller value, so a larger outer timeout cannot extend an omitted plan budget; implementation, validation, review, approval, rework, and queued same-session steering follow-ups all consume the original graph wall clock. A follow-up can therefore be killed mid-turn even while the provider session is healthy. Long-running trusted callers that historically sent a flat task must construct an explicit reviewed Plan budget below their own outer cancellation deadline; changing only the outer timeout leaves the graph at its default. Set the reviewed plan budget explicitly and reserve one complete contained-validation pass for every permitted rework cycle, plus implementation/review/approval headroom; a 20-minute graph cannot safely support two approximately 10-minute validation passes (found 2026-07-16/17 during retained-workspace remediation and benchmark-isolation dogfood; reconfirmed 2026-07-18 when a one-hour exact-candidate repair timed out during its final test-only steer and 2026-07-20 when a correct Grok rework exhausted its graph budget during second validation).
-
-<!-- applied-learning: do-not-run-long-owner-bound-coding-work-through-standalone-arbor-run -->
-<a id="applied-learning-do-not-run-long-owner-bound-coding-work-through-standalone-arbor-run"></a>
-**Do not run long owner-bound coding work through standalone `arbor_run`.** The standalone MCP HTTP request process becomes the composite action/ACP owner; if the Gateway request times out, owner death tears down the managed session and the client sees an empty HTTP 500 even though the worker briefly started. Dispatch the reviewed `coding_change` plan with `arbor_dispatch_task`, then use task status/result/steering so ownership outlives one HTTP request (found 2026-07-16 dispatching retained-workspace safety remediation).
+**The outer task timeout does not replace the plan wall clock.** `arbor_dispatch_task` timeout bounds the whole asynchronous task. `plan.budgets.wall_clock_ms` bounds the compiled coding graph and defaults to 900000 ms when omitted. `Arbor.Orchestrator.CodingTaskExecutor` uses the minimum of the plan budget and a positive outer timeout, so a larger outer timeout cannot extend an omitted plan budget, and a shorter one can cancel the graph during implementation. Omit the outer timeout unless it is intentionally tighter than the reviewed plan budget. (Merged 2026-10-16 from 3 entries; first found 2026-07-14, last 2026-07-18.)
 
 <!-- applied-learning: a-schema-valid-coding-review-profile-may-still-be-forbidden-for-the-target-agent -->
 <a id="applied-learning-a-schema-valid-coding-review-profile-may-still-be-forbidden-for-the-target-agent"></a>
-**A schema-valid coding review profile may still be forbidden for the target agent.** `review_profile: "none"` exists in the Plan contract, but the executable agent policy can reject it before workspace allocation with `coding_plan_review_profile_not_allowed`. Use the target template's reviewed profile (normally `binding`) unless its trust configuration explicitly permits bypassing council review; never treat contract normalization as authority (found 2026-07-16 retrying retained-workspace safety remediation).
-
-<!-- applied-learning: durable-coding-delegation-goes-through-structured-task-dispatch-not-standalone-arbor-run -->
-<a id="applied-learning-durable-coding-delegation-goes-through-structured-task-dispatch-not-standalone-arbor-run"></a>
-**Durable coding delegation goes through structured task dispatch, not standalone `arbor_run`.** A long `coding_produce_reviewable_change` call outlives the short-lived MCP HTTP handler that owns its ACP session; handler teardown can kill the worker and return an empty HTTP 500. Resume a coding agent and use `arbor_dispatch_task` with the versioned `coding_change` plan, then drive status, steering, approvals, and result through stable task IDs (found 2026-07-17 while validating the repaired contained toolchain).
+**A schema-valid review profile may still be forbidden for the target agent.** `review_profile` `none` can exist in `Arbor.Contracts.Coding.Plan` and still be rejected before workspace allocation as `{:coding_plan_review_profile_not_allowed, "none"}`. Contract normalization is not authority. Use the target's reviewed profile, normally `binding`, or `human_required` when the local delegator performs the binding review. Do not select `none` to avoid reviewer cost. A `security_regression` plan paired with `none` is a separate rejection, `{:security_regression_review_profile_not_allowed, "none"}`. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-16.)
 
 <!-- applied-learning: task-handles-are-currently-less-durable-than-retained-coding-workspaces -->
 <a id="applied-learning-task-handles-are-currently-less-durable-than-retained-coding-workspaces"></a>
 **Task handles are currently less durable than retained coding workspaces.** After a full server restart, an earlier task ID returned `:not_found` while its retained Git workspace evidence still existed. Until TaskStore persistence is implemented and proven, record task results before restart and use the durable workspace journal plus commit identity for recovery; do not describe the public task handle itself as crash-durable (found 2026-07-17 during Phase 6 dogfood).
 
-<!-- applied-learning: versioned-coding-plans-do-not-inherit-legacy-flat-field-aliases -->
-<a id="applied-learning-versioned-coding-plans-do-not-inherit-legacy-flat-field-aliases"></a>
-**Versioned coding plans do not inherit legacy flat-field aliases.** Every direct Plan object is closed: `branch_name` at the plan top level fails with `{:unknown_fields, ["branch_name"]}` even though the legacy flat `coding_change` envelope accepts it. Put it under `workspace_policy.branch_name`, or omit it and let Arbor generate the branch (found 2026-07-17 dispatching benchmark-isolation remediation).
-
-<!-- applied-learning: a-terminal-delivery-unconfirmed-steering-status-is-not-proof-that-the-follow-up-was-not-delivered -->
-<a id="applied-learning-a-terminal-delivery-unconfirmed-steering-status-is-not-proof-that-the-follow-up-was-not-delivered"></a>
-**A terminal `delivery_unconfirmed` steering status is not proof that the follow-up was not delivered.** A same-session Grok follow-up executed, changed the candidate, and committed while its task-control record remained unacknowledged and later reconciled to `delivery_unconfirmed` on task timeout. Inspect the ACP transcript and immutable Git evidence before retrying; the control path must durably acknowledge session acceptance so a later outer failure cannot erase known delivery (found 2026-07-17 steering benchmark-isolation remediation; reconfirmed 2026-07-18 when `task_276738` visibly applied a queued production-seam correction but terminalized with delivery unconfirmed at its graph deadline).
-
 <!-- applied-learning: structured-coding-plan-resume-fields-are-a-paired-identity-not-a-boolean-switch -->
 <a id="applied-learning-structured-coding-plan-resume-fields-are-a-paired-identity-not-a-boolean-switch"></a>
-**Structured coding-plan resume fields are a paired identity, not a boolean switch.** `worker.resume_provider` and `worker.resume_session_id` are optional nonblank strings that must either both be omitted for a fresh pooled worker or both identify the same provider/session binding. A value such as `resume_provider: false` fails plan construction before workspace acquisition (found 2026-07-17 dispatching the benchmark-adapter fixture split).
+**Coding-plan resume fields are a paired provider identity.** Omit `worker.resume_provider` and `worker.resume_session_id` together, or set both. `resume_provider` must equal `worker.provider`. `Arbor.Contracts.Coding.Plan.new/1` rejects a missing partner with `{:missing_field, ...}` and a provider mismatch with `{:invalid_field, "worker.resume_provider", {:must_match, ...}}`. A boolean fails plan construction before workspace allocation. Omit both for a fresh pooled worker. Setting only one field is a construction error, not a request to resume the latest session of that provider. (Merged 2026-10-16 from 2 entries; first found 2026-07-14, last 2026-07-17.)
 
 <!-- applied-learning: acp-rework-continuity-and-acp-tool-completion-are-separate-contracts -->
 <a id="applied-learning-acp-rework-continuity-and-acp-tool-completion-are-separate-contracts"></a>
 **ACP rework continuity and ACP tool completion are separate contracts.** A rework prompt can reach the same provider session successfully, yet a follow-up terminal tool call can end with `stop_reason: cancelled` before execution; treating every non-`end_turn` stop as an immediate pipeline error loses otherwise-valid workspace progress. Inspect the retained transcript and workspace before restarting, and keep the rework turn alive until ACP client tool execution or denial reaches a settled terminal state (found 2026-07-17 after returning a formatting-only review finding to Grok).
-
-<!-- applied-learning: steer-pre-validation-corrections-generic-action-rework-is-a-rejected-syscall -->
-<a id="applied-learning-steer-pre-validation-corrections-generic-action-rework-is-a-rejected-syscall"></a>
-**Steer pre-validation corrections; generic action `rework` is a rejected syscall.** `ActionsExecutor` intentionally returns an error when an operator answers a generic action approval with `rework`; only dedicated control actions such as `coding_reviewed_commit` project rework as a branchable success payload. At a validation approval, deliver review feedback with task steering while the managed ACP session is still alive, inspect the resulting workspace, and then approve or deny the exact action request. Answering that request with `rework` terminalizes through the action's `outcome=fail` edge and does not enter the coding graph's validation/operator rework loops (confirmed 2026-07-18 by `task_102210`).
 
 <!-- applied-learning: an-acp-pool-profile-must-be-the-single-source-of-immutable-startup-identity -->
 <a id="applied-learning-an-acp-pool-profile-must-be-the-single-source-of-immutable-startup-identity"></a>
@@ -563,10 +410,6 @@ happy path (2026-10-03 conversation SDK and remote adapter regressions).
 <a id="applied-learning-design-checkpoint-rework-can-exhaust-provider-session-continuity-before-implementation"></a>
 **Design-checkpoint rework can exhaust provider-session continuity before implementation.** A pooled worker may complete the original and revised design turns, then exit before the approved implementation prompt; recovery can terminalize as `worker_recovery_reopen_failed` with `retry: new_session` while the retained workspace is still clean. Verify the workspace and transcript, then redispatch the exact frozen packet plus accepted design corrections in a fresh session. Do not wait on the dead provider process or claim implementation progress from approved design artifacts alone (found 2026-07-30 in `task_545761ac0ba110c6da1af9365594ef18`).
 
-<!-- applied-learning: arbor-dispatch-task-timeout-is-the-asynchronous-task-deadline-not-an-mcp-call-timeout -->
-<a id="applied-learning-arbor-dispatch-task-timeout-is-the-asynchronous-task-deadline-not-an-mcp-call-timeout"></a>
-**`arbor_dispatch_task.timeout` is the asynchronous task deadline, not an MCP-call timeout.** Supplying `timeout: 60_000` on a coding dispatch terminalized the graph during `implement` after exactly one minute even though `plan.budgets.wall_clock_ms` allowed 90 minutes. For coding plans, omit the outer timeout unless it is intentionally tighter than the reviewed plan budget; use the plan's wall-clock and inactivity budgets for workflow liveness (found 2026-07-18 in `task_233474`).
-
 <!-- applied-learning: native-acp-cli-options-must-be-placed-at-the-parser-level-that-owns-them -->
 <a id="applied-learning-native-acp-cli-options-must-be-placed-at-the-parser-level-that-owns-them"></a>
 **Native ACP CLI options must be placed at the parser level that owns them.** Grok accepts `grok agent --model grok-4.5 stdio` but rejects `grok agent stdio --model grok-4.5`; Arbor's generic native-provider `args` are appended after the configured command, so a parent-command option must be embedded in `command` before the subcommand rather than supplied through `args`. Verify the exact argv with the installed CLI's `--help` before pinning a model or policy flag (found 2026-07-18 while making the Grok coding model explicit).
@@ -582,14 +425,6 @@ happy path (2026-10-03 conversation SDK and remote adapter regressions).
 <!-- applied-learning: a-persisted-agent-profile-is-not-a-running-dispatch-target -->
 <a id="applied-learning-a-persisted-agent-profile-is-not-a-running-dispatch-target"></a>
 **A persisted agent profile is not a running dispatch target.** `Arbor.Agent.list_agents/0` can include an `auto_start: false` coding profile while `arbor_dispatch_task` returns `:agent_not_found` because no runtime is registered. Check `Arbor.Agent.whereis_cluster/1` or the cluster registry and start the exact persisted principal with `Arbor.Agent.start_agent/2` before retrying; do not create a replacement identity merely to unblock dispatch (found 2026-07-18 after `task_59907`).
-
-<!-- applied-learning: acp-task-steering-is-a-durable-follow-up-not-mid-command-injection -->
-<a id="applied-learning-acp-task-steering-is-a-durable-follow-up-not-mid-command-injection"></a>
-**ACP task steering is a durable follow-up, not mid-command injection.** A control sent during an active provider turn remains queued until that turn settles, and a control submitted at a generic validation approval can be deferred because no worker turn currently owns delivery. `queued` or `deferred` does not mean the correction changed the workspace: inspect control status and Git evidence. Deliver corrections before the worker returns to validation; if a known-bad candidate is already gated, deny that exact approval and continue from retained commits in a fresh bounded task rather than approving redundant validation (found 2026-07-18 in `task_16898`).
-
-<!-- applied-learning: acp-terminal-commands-run-under-zsh-unless-the-provider-explicitly-selects-another-shell -->
-<a id="applied-learning-acp-terminal-commands-run-under-zsh-unless-the-provider-explicitly-selects-another-shell"></a>
-**ACP terminal commands run under zsh unless the provider explicitly selects another shell.** Bash-only helpers such as `mapfile` fail, and a subsequently expanded empty file array can accidentally turn a bounded test batch into the full suite. Use zsh-native line arrays such as `${(@f)$(<file)}`, a portable `while read` loop, or pass exact argv without shell reconstruction; print and verify the resulting count before launching expensive tests (found 2026-07-18 while diagnosing `task_16898`).
 
 <!-- applied-learning: provider-tool-identities-differ-across-acp-layers -->
 <a id="applied-learning-provider-tool-identities-differ-across-acp-layers"></a>
@@ -626,15 +461,7 @@ work slice has started.
 
 <!-- applied-learning: queued-control-acceptance-is-not-delivery-and-task-success-cannot-manufacture-the-acknowledgement -->
 <a id="applied-learning-queued-control-acceptance-is-not-delivery-and-task-success-cannot-manufacture-the-acknowledgement"></a>
-**Queued control acceptance is not delivery, and task success cannot manufacture the acknowledgement.** A same-session follow-up accepted by a busy ACP session may become explicitly not-delivered when that session times out before the prompt runs. Persist the exact control ID, confirm delivery only from the owner that completed that follow-up, safely retry only positive non-delivery against a recovered session, and keep unknown delivery terminally unconfirmed; an unrelated successful outer task is not evidence that the control executed (found 2026-07-20 when `control_850WVUTtkx8jirzj1khYWAVW` was marked delivered without a transcript turn).
-
-<!-- applied-learning: acp-steering-preserves-session-continuity-but-cannot-interrupt-an-active-provider-turn -->
-<a id="applied-learning-acp-steering-preserves-session-continuity-but-cannot-interrupt-an-active-provider-turn"></a>
-**ACP steering preserves session continuity but cannot interrupt an active provider turn.** Same-session follow-ups are queued behind the current ACP prompt; they inherit session context only after that prompt yields. Do not rely on steering to stop a worker looping inside one long turn. Give delegated tasks bounded checkpoints/yield points, and if correction cannot wait, preserve Git WIP, cancel the owner, and restart from the last trusted commit with the correction in the initial prompt (confirmed 2026-07-20 when three controls remained queued for more than an hour behind `task_239299`).
-
-<!-- applied-learning: treat-provider-account-exhaustion-errors-as-deterministic-routing-failures-not-transport-retries -->
-<a id="applied-learning-treat-provider-account-exhaustion-errors-as-deterministic-routing-failures-not-transport-retries"></a>
-**Treat provider account-exhaustion errors as deterministic routing failures, not transport retries.** An ACP send that returns provider-authenticated HTTP `402`/`403` with explicit team-credit or spending-limit exhaustion will fail again against a replacement session; consuming uncertain-send recovery only delays terminalization and obscures the budget signal. Classify only the exact structured provider evidence, expose it through an opt-in delivery receipt, preserve the default error contract for other callers, and route to another allowed provider or a budget wait state without replaying the logical turn. Generic permission failures and malformed or unrecognized errors must retain uncertain-send handling (found 2026-07-21 when Grok 4.5 `task_323715` exhausted both initial and recovery sends against the same xAI team limit).
+**Queued steering acceptance is not delivery.** An accepted control must not stay `queued` after its owner exits. Confirm delivery only from the owner that completed that follow-up. Unknown delivery is the terminal status `delivery_unconfirmed`, and that status is not proof the follow-up was absent, so inspect the transcript and Git before retrying. Replay only the store's bounded same-id path after positive non-delivery; do not replay an ambiguous control id, and do not treat an unrelated task success as the acknowledgement. Same-session follow-ups stay queued behind the active provider turn, so `queued` or `deferred` does not mean the workspace changed. If the correction cannot wait, cancel the owner and restart from the last trusted commit with the correction in the initial prompt. (Merged 2026-10-16 from 6 entries; first found 2026-07-10, last 2026-07-20.)
 
 <!-- applied-learning: a-provider-startup-notice-is-not-prompt-completion-evidence -->
 <a id="applied-learning-a-provider-startup-notice-is-not-prompt-completion-evidence"></a>
@@ -666,17 +493,7 @@ work slice has started.
 
 <!-- applied-learning: treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope -->
 <a id="applied-learning-treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope"></a>
-**Treat ACP streamed text as transcript evidence, not a terminal structured envelope.**
-Providers can emit progress chunks, context-compaction notices, and duplicate the
-final payload into one accumulated text field. A coding control parser must be
-domain-specific and bounded: scan for the exact envelope schema, accept one unique
-valid envelope, tolerate identical duplicates, reject conflicting valid envelopes
-or malformed fields, and preserve the raw transcript separately for audit. Treat a
-rejected balanced composite as indivisible by resuming after its closing delimiter,
-never from an inner byte; reject an unbalanced remainder instead of resynchronizing
-inside it. Do not weaken generic JSON parsing to make one provider transcript pass
-(found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid
-design checkpoint envelopes; malformed-wrapper gap closed during review).
+**Treat streamed ACP text as transcript evidence, not as the terminal control envelope.** Accept one unique structured envelope, tolerate identical duplicates, and reject conflicting or malformed envelopes. Progress chunks, compaction notices, and a duplicated final payload stay in the transcript. When the terminal result carries validated provider-canonical text, prefer that text over a concatenated chunk accumulator. A rejected balanced composite is indivisible: resume after its closing delimiter, and reject an unbalanced remainder. Do not weaken generic JSON parsing so one provider transcript passes. (Merged 2026-10-16 from 2 entries; first found 2026-07-26, last 2026-07-29.)
 
 <!-- applied-learning: durable-interaction-metadata-must-be-json-clean-before-persistence -->
 <a id="applied-learning-durable-interaction-metadata-must-be-json-clean-before-persistence"></a>
@@ -691,19 +508,7 @@ when a design-checkpoint rework answer failed as `:durable_unavailable`).
 
 <!-- applied-learning: provider-spend-limit-notices-are-not-successful-no-change-turns -->
 <a id="applied-learning-provider-spend-limit-notices-are-not-successful-no-change-turns"></a>
-**Provider spend-limit notices are not successful no-change turns.** Claude ACP can
-emit a human-readable monthly spend-limit notice as its only response and then end
-the turn without touching the workspace; the Claude CLI can simultaneously report
-raw `is_error: true`, HTTP 429, and a misleading success subtype that ExMCP
-normalizes into an ACP `end_turn`. Classifying that sequence as successful
-`no_changes` hides deterministic account exhaustion and can route more work into
-the same unavailable pool. Recognize only the exact bounded notice accompanied by
-the adapter's namespaced metadata, zero usage/cost, and a valid provider session
-ID. Classify it before recording transcript success, terminalize it as a typed
-routing failure, and preserve that session ID through delivery and terminal
-evidence. Unknown or weakly attested notices remain protocol failures rather than
-inferred success (found 2026-07-27 in `task_8195`, then proven end to end
-2026-07-28 in `task_70274`).
+**Provider account exhaustion is a typed routing failure, not a successful empty turn.** Exact provider evidence of account or spend-limit exhaustion, including HTTP 402 or 403 and a spend-limit notice that surfaces as `end_turn` with an untouched workspace, is `worker_provider_account_exhausted`. Do not spend uncertain-send recovery on that evidence, and do not record it as `no_changes`. Preserve the provider session id in the terminal evidence. Generic permission failures and unrecognized notices keep uncertain-send handling. Route to another allowed provider or a budget wait, without replaying the logical turn into the exhausted account. (Merged 2026-10-16 from 2 entries; first found 2026-07-21, last 2026-07-27.)
 
 <!-- applied-learning: validate-closed-typed-envelopes-before-generic-json-canonicalization -->
 <a id="applied-learning-validate-closed-typed-envelopes-before-generic-json-canonicalization"></a>
@@ -738,16 +543,6 @@ destination and result fingerprint but may not create a second owner (found
 2026-07-28 when adoption completed in `TaskStore` after ExMCP had already returned
 an empty HTTP 500).
 
-<!-- applied-learning: coding-plan-contract-admission-does-not-prove-template-support -->
-<a id="applied-learning-coding-plan-contract-admission-does-not-prove-template-support"></a>
-**Coding-plan contract admission does not prove template support.** Before
-dispatching a reviewed plan with an optional feature, compile that exact normalized
-plan or verify the active template advertises the feature. Plan v2 currently accepts
-nonempty `rework.stop_conditions`, while `coding-change-v1` rejects it as
-`{:unsupported_v1_feature, "rework.stop_conditions"}`. Contract success alone would
-spend a failed preflight attempt; omit unsupported optional fields without changing
-the bound work packet (found 2026-07-28 dispatching the Phase E route-input slice).
-
 <!-- applied-learning: compute-generated-artifact-digests-at-the-owned-admission-boundary -->
 <a id="applied-learning-compute-generated-artifact-digests-at-the-owned-admission-boundary"></a>
 **Compute generated-artifact digests at the owned admission boundary.** A worker
@@ -757,30 +552,6 @@ closed bounded text envelope, compute its digest inside Arbor, and bind approval
 execution to that server-owned result. Requiring model-computed integrity fields
 only creates an expensive protocol-repair failure mode (found 2026-07-28 when Grok
 returned the empty-string digest for an 8,378-byte Phase E design).
-
-<!-- applied-learning: acp-steering-contracts-must-match-the-semantic-worker-phase -->
-<a id="applied-learning-acp-steering-contracts-must-match-the-semantic-worker-phase"></a>
-**ACP steering contracts must match the semantic worker phase.** Arbor's current
-managed coding-task control is an implementation follow-up: it tells the worker to
-apply a correction in the worktree and return the advisory implementation envelope.
-Do not use that control to repair a design-checkpoint envelope, even when TaskStore's
-generic current step is named `implement`; queued controls run before the active
-`acp_send_message` call returns and can replace the response the design parser sees.
-Make controls phase-aware before steering design or review turns (found 2026-07-28
-while attempting to accelerate the Phase E design-digest repair).
-
-<!-- applied-learning: adopt-provider-refined-session-identities-before-continuity -->
-<a id="applied-learning-adopt-provider-refined-session-identities-before-continuity"></a>
-**Adopt provider-refined session identities before continuity consumers.** Some
-ACP adapters return a transient local handle from `session/new` and reveal the
-durable provider identity only in the first prompt result; Claude uses
-`claude_sdk_*` before emitting its resumable UUID in namespaced metadata.
-Validate that provider-specific transition and atomically replace both
-`session_id` and `last_session_id` before status, recovery, or the next prompt.
-Reject malformed identities and later drift, leave other providers untouched,
-and make fake clients model the transient-to-durable transition rather than a
-single static ID (found 2026-07-28 after recovery tried to resume
-`claude_sdk_179` instead of Claude's persisted UUID).
 
 <!-- applied-learning: repair-prompts-must-cover-every-admission-defect-the-retry-can-correct -->
 <a id="applied-learning-repair-prompts-must-cover-every-admission-defect-the-retry-can-correct"></a>
@@ -793,32 +564,6 @@ oversized first turn through the same worker session to a bounded admitted
 repair; a malformed-JSON-only fixture does not prove size recovery (found
 2026-07-28 after Grok reduced a 23,806-byte design only to 20,382 bytes because
 the repair prompt never disclosed Arbor's 16,384-byte limit).
-
-<!-- applied-learning: aggregate-payload-bounds-must-compose-from-admitted-component-bounds -->
-<a id="applied-learning-aggregate-payload-bounds-must-compose-from-admitted-component-bounds"></a>
-**Aggregate payload contracts must reconcile component and envelope bounds.**
-If a component accepts a 16 KB design and 256 KB work packet, a later
-interaction must not silently assume that every combination fits an unrelated
-16 KB description or 32 KB metadata cap. Either derive an envelope that admits
-the component maxima, reject incompatible combinations explicitly at the
-earliest real public boundary, or store full evidence separately and carry a
-bounded digest/reference. Keep operator prose short, retain exact evidence in
-the authoritative channel, and pass representative plus maximum admitted
-values through the real public operation. Never report caller-invalid payloads
-as backend unavailability. Per-field tests alone miss the downstream
-contradiction (found 2026-07-28 when a valid 14,324-byte Grok design parsed
-successfully but design-checkpoint Open rejected its packet-composed
-description as too large).
-
-<!-- applied-learning: approval-and-rework-notes-are-bounded-control-plane-messages -->
-<a id="applied-learning-approval-and-rework-notes-are-bounded-control-plane-messages"></a>
-**Approval and rework notes are bounded control-plane messages.** Put only the
-decision and a compact, actionable correction ledger in an approval answer;
-reference task, request, or artifact identities for longer evidence instead of
-embedding the full review. Regress both an over-limit rejection and an accepted
-bounded note so feedback cannot disappear before the delegated worker sees it
-(found 2026-07-28 when the first detailed Grok rework note was rejected because
-the approval note exceeded its maximum size).
 
 <!-- applied-learning: compute-work-packet-digests-through-the-contract -->
 <a id="applied-learning-compute-work-packet-digests-through-the-contract"></a>
@@ -833,44 +578,11 @@ attestation preflight correction).
 
 <!-- applied-learning: preflight-security-regression-selectors-before-reviewer-egress -->
 <a id="applied-learning-preflight-security-regression-selectors-before-reviewer-egress"></a>
-**Preflight security-regression selectors before reviewer egress.** For a bound
-`security_regression` review, materialize the exact candidate commit and prove
-every sorted, bounded test path exists in that commit before calling any council
-provider. Return only a bounded path-aware admission reason; discard the
-preflight material and rematerialize after a keep verdict so the final
-attestation still binds the reviewed diff. A missing selector is an Arbor
-readiness defect, not something reviewers should spend tokens discovering
-(found 2026-07-28 after a delegated security-regression candidate selected a
-test absent from its commit).
-
-<!-- applied-learning: acp-recovery-needs-reserved-budget-not-a-provider-switch -->
-<a id="applied-learning-acp-recovery-needs-reserved-budget-not-a-provider-switch"></a>
-**ACP recovery needs reserved budget, not a provider switch.** A worker can
-consume the coding stage's remaining wall-clock budget before reopen or
-follow-up delivery, producing `worker_recovery_reopen_failed` or
-`worker_recovery_send_failed` with `:budget_exhausted`. The same failure on Grok
-and Claude proves this is orchestration accounting, not provider behavior.
-The send boundary can also time out after a useful provider turn with no manual
-steering, so a terminal-delivery failure is not evidence that the candidate is
-bad. Preserve the exact terminal worktree or immutable snapshot, inspect it,
-avoid blind cross-provider retries, and reserve enough stage budget for one
-complete recovery turn plus settlement. If managed delivery itself remains the
-failure, use the provider's direct CLI against an isolated worktree rather than
-rerunning the implementation from scratch (found 2026-07-28 while completing
-the managed ACP reconciliation read model; extended 2026-08-21 after Cursor
-returned useful code before `worker_recovery_send_failed: :timeout`).
+**Preflight security-regression selectors before reviewer egress.** A `security_regression` plan must bind the exact test paths in `requested_paths`. Naming them only in required evidence does not satisfy admission. Materialize the candidate commit and prove each bounded path exists in that commit before any council call. A missing selector is an Arbor readiness defect. Return a bounded path-aware reason, discard the preflight material, and rematerialize after a keep verdict so the final attestation still binds the reviewed diff. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-07-30.)
 
 <!-- applied-learning: budget-design-required-plans-for-the-design-and-the-reserved-tail -->
 <a id="applied-learning-budget-design-required-plans-for-the-design-and-the-reserved-tail"></a>
-**Budget design-required plans for the design and the reserved tail.** The
-coding policy reserves 40% of wall-clock capacity for validation, review, and
-cleanup, so a nominal 15-minute plan can leave too little implementation or
-approval time after a substantial design turn. Give design-required packets
-enough total capacity for design, operator review, implementation, and the
-reserved tail; keep inactivity separate from wall-clock capacity. Budgets are
-immutable after admission, so preserve continuity and redispatch with a larger
-reviewed plan instead of repeatedly resuming an exhausted one (found 2026-08-02
-when three voice prerequisite packets exhausted recovery or approval capacity).
+**Budget design-required plans for the design turn and the reserved tail.** `Arbor.Orchestrator.CodingPlan.BudgetPolicy` caps the validation, approval, review, and cleanup reserve at 40 percent of the effective wall clock, so the worker phase keeps the rest. Size the plan so design, operator review, implementation, and one ACP recovery turn fit in that worker share. `worker_recovery_reopen_failed` and `worker_recovery_send_failed` with budget exhaustion are accounting outcomes, not a reason to switch providers. Budgets are fixed after admission. Preserve the terminal snapshot and redispatch a larger reviewed plan. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-08-02.)
 
 <!-- applied-learning: a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering -->
 <a id="applied-learning-a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering"></a>
@@ -885,20 +597,7 @@ absent from Grok's candidate).
 
 <!-- applied-learning: coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning -->
 <a id="applied-learning-coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning"></a>
-**Coding-plan numeric bounds are runtime contracts, not advisory tuning.**
-Read the active plan contract before dispatching optional retry or rework
-settings; plan v2 currently admits `rework.max_cycles` only from zero through
-two. An out-of-range value fails admission before a worker starts, so copying a
-plausible higher retry count into a task wastes an orchestration attempt rather
-than granting more recovery capacity. That field is also only the shared total
-ceiling: the reviewed DOT has separate category ceilings (currently one
-validation repair, one operator commit-gate repair, and two council repairs).
-Diagnose `rework_exhausted` from the terminal counters and completed path, not
-from `max_cycles` alone; a task can stop with `total_rework_count: 1` after its
-single operator repair is spent. Make the first operator ledger exhaustive or
-change the reviewed policy explicitly instead of assuming a second operator
-turn remains (found 2026-07-28 when the first Phase F pending-approval
-settlement dispatch used `max_cycles: 3`; reinforced 2026-08-26 by P1B-2A).
+**Treat coding-plan rework ceilings as runtime contracts.** `Arbor.Contracts.Coding.Plan` admits `rework.max_cycles` only from 0 through 2, and that integer is the shared total, not a per-category budget. The reviewed coding graph still allows one validation repair, one operator commit repair, and two council repairs. Diagnose `rework_exhausted` from `validation_rework_count`, `operator_rework_count`, and `review_rework_count`, not from `max_cycles` alone. Inspect the whole frozen candidate and send one exhaustive operator ledger; a second operator request can terminalize before the worker sees the note. Preserve the retained workspace and redispatch from an exact checkpoint when a later issue appears. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-08-03.)
 
 <!-- applied-learning: design-required-checkpoint-turns-must-be-observational -->
 <a id="applied-learning-design-required-checkpoint-turns-must-be-observational"></a>
@@ -934,27 +633,9 @@ bind it into implementation and every rework prompt, and inspect the rendered
 alone proves construction, not delivery (found 2026-07-29 after a Grok ledger
 worker spent its budget rediscovering constraints already present in the packet).
 
-<!-- applied-learning: prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks -->
-<a id="applied-learning-prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks"></a>
-**Prefer provider-canonical terminal text over replayed ACP stream chunks.**
-An adapter may emit incremental text deltas and then emit the complete assistant
-message again before its terminal result. When that result carries a validated
-provider-namespaced canonical text field, use it instead of concatenating the
-generic chunk accumulator; do not guess by splitting repeated halves. Regress
-the exact delta-plus-full-message sequence because ordinary streaming tests will
-not expose the duplication (found 2026-07-29 when Claude SDK responses doubled
-every coding design envelope).
-
 <!-- applied-learning: replace-advisory-payload-caps-with-one-artifact-backed-contract -->
 <a id="applied-learning-replace-advisory-payload-caps-with-one-artifact-backed-contract"></a>
-**Replace advisory payload caps with one artifact-backed contract.** When a
-complete design does not fit an approval metadata envelope, do not impose a
-smaller prose-only ceiling. Give the design body one reviewed contract limit,
-archive its exact bytes under task-and-attempt ownership, and pass only a closed
-descriptor plus digest through bounded durable interactions. Keep transport
-envelope limits separate, and verify the artifact before every terminal decision
-and implementation handoff (found 2026-07-29 after the historical arbitrary
-12,000-byte CodingPlan advice rejected a valid 17,585-byte design).
+**Envelope limits must admit the component maxima or move the bytes to an artifact.** Do not assume that a component's admitted maximum fits a smaller interaction envelope. Either derive an envelope that admits those maxima, reject the incompatible combination at the earliest public boundary, or store the full bytes in an owned artifact and pass only a closed descriptor plus digest. Verify that artifact before every terminal decision and implementation handoff. Never report a caller-invalid payload as backend unavailability. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-07-29.)
 
 <!-- applied-learning: distinguish-plan-capacity-from-operation-owned-timeout-ceilings -->
 <a id="applied-learning-distinguish-plan-capacity-from-operation-owned-timeout-ceilings"></a>
@@ -972,25 +653,7 @@ design generation but failed `coding_design_checkpoint_open` with
 
 <!-- applied-learning: route-rework-before-authorizing-validation -->
 <a id="applied-learning-route-rework-before-authorizing-validation"></a>
-**Route known rework before authorizing validation.** A `rework` answer at a
-commit checkpoint can return the same task to implementation, but a non-approve
-answer to a validation authorization denies that side effect and terminates the
-run as `validation_failed`; it is not an in-place worker rework control. When
-review exposes a defect before validation, steer it while the task is active or
-rework an earlier commit checkpoint. If the task has already reached validation,
-preserve its commit/workspace, start a follow-up from that exact commit, and
-explicitly resume the provider session when continuity is useful (found
-2026-07-30 while correcting the route-concurrency `nil` identifier edge case).
-
-<!-- applied-learning: bind-security-regression-paths-in-the-reviewed-plan -->
-<a id="applied-learning-bind-security-regression-paths-in-the-reviewed-plan"></a>
-**Bind security-regression paths in the reviewed plan.** A
-`task_class: "security_regression"` dispatch must include the exact committed
-regression test paths in `requested_paths`; naming them only in
-`required_evidence` does not satisfy compiler admission. Preflight the plan
-locally when possible so a missing path binding fails before workspace
-acquisition (found 2026-07-30 while redispatching the OAuth model-catalog
-transport).
+**Route rework before authorizing validation.** A `rework` answer at the commit checkpoint can return that task to implementation. A non-approve answer at a validation authorization denies the side effect and terminalizes as `validation_failed`. Generic action `rework` is an error from `Arbor.Orchestrator.ActionsExecutor`, not a coding-graph branch. Steer the correction while the managed session is alive, or preserve the commit and start a follow-up from that exact commit. Do not answer the validation request with `rework` and expect an in-place repair. (Merged 2026-10-16 from 2 entries; first found 2026-07-18, last 2026-07-30.)
 
 <!-- applied-learning: review-frozen-commit-approvals-before-the-interaction-deadline -->
 <a id="applied-learning-review-frozen-commit-approvals-before-the-interaction-deadline"></a>
@@ -1008,20 +671,7 @@ design checkpoint had about 223 seconds available).
 
 <!-- applied-learning: use-current-coding-plan-output-keys-and-preflight-the-normalized-plan -->
 <a id="applied-learning-use-current-coding-plan-output-keys-and-preflight-the-normalized-plan"></a>
-**Use current CodingPlan output keys and preflight the normalized plan.** The v2
-output contract accepts `commit`, `draft_pr`, and `retain_workspace`; stale
-`draft` or `retain` keys are unknown input and correctly fail admission. Run the
-exact plan map through `Arbor.Contracts.Coding.Plan.new/1` and the current
-compiler before dispatch so schema drift is caught before workspace or provider
-resources are acquired. Include nested policy bounds in that preflight: the
-current contract caps `rework.max_cycles` at `2`, so a remembered higher retry
-count fails admission before delegation begins. Treat the live constructor and
-compiler as authoritative rather than copying bounds into dispatch code. On a
-successful compile, read the `%Compilation{manifest: manifest}` field; a later
-`KeyError` from probing a nonexistent `compile_manifest` field is a diagnostic
-bug, not evidence that compilation failed (found 2026-07-30 while preparing the
-OAuth model-catalog correction, reinforced 2026-07-31 while dispatching the
-OAuth Device Code correction, and clarified 2026-08-26 during P1B-2 preflight).
+**Preflight the normalized coding plan and use its current keys.** Run the exact map through `Arbor.Contracts.Coding.Plan.new/1` and `Arbor.Orchestrator.CodingPlan.Compiler.compile/1` before dispatch. Top-level `branch_name` fails as an unknown field; put it under `workspace_policy.branch_name` or omit it. Output keys are `commit`, `draft_pr`, and `retain_workspace`. Contract admission does not prove v1 template support: nonempty `overlays`, a non-nil `budgets.model_cost_usd`, and `budgets.parallelism` other than 1 still fail as `unsupported_v1_feature`. On success, read `%Arbor.Orchestrator.CodingPlan.Compilation{manifest: manifest}`. `compile_manifest` is an artifact path, not that struct field. (Merged 2026-10-16 from 3 entries; first found 2026-07-17, last 2026-07-31.)
 
 <!-- applied-learning: acp-receiver-idleness-is-not-worker-inactivity -->
 <a id="applied-learning-acp-receiver-idleness-is-not-worker-inactivity"></a>
@@ -1056,13 +706,10 @@ the pipeline's requested/confirmed model evidence before diagnosing a model
 mismatch; both still must agree with the reviewed plan (found 2026-07-31 while
 the Phase E Claude fallback launched with `--model opus` but attested
 `model: sonnet` after dynamic selection).
+
 <!-- applied-learning: approval-notes-are-bounded-single-line-audit-fields -->
 <a id="applied-learning-approval-notes-are-bounded-single-line-audit-fields"></a>
-**Approval notes are bounded single-line audit fields, not review documents.**
-`arbor_answer_approval` rejects control characters and oversized notes. Keep the
-note to one line under 1 KB, summarize the decision and essential blockers, and
-put detailed evidence in the reviewed artifact or a separate steering message
-(found 2026-08-02 requesting lifecycle-design rework through MCP).
+**Approval notes are bounded single-line audit fields.** `Arbor.Contracts.Comms.ApprovalAnswer` rejects a note above 1024 bytes and rejects control characters, including newlines. The same bound applies to a rework note carried on an approval answer. Put the decision and a compact correction ledger in the note. Put longer evidence in the reviewed artifact or in a separate steering message. The note is an audit field, not a second review document. Regress both an over-limit rejection and an accepted bounded note so the worker still receives the feedback. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-08-02.)
 
 <!-- applied-learning: negotiate-optional-acp-resume-fields-against-advertised-capabilities -->
 <a id="applied-learning-negotiate-optional-acp-resume-fields-against-advertised-capabilities"></a>
@@ -1077,31 +724,9 @@ resume path, rather than matching provider error text or treating every resume
 failure as a missing conversation (found 2026-08-02 while recovering a voice
 packet after `design_response_invalid`).
 
-<!-- applied-learning: consolidate-candidate-findings-before-spending-the-commit-rework-budget -->
-<a id="applied-learning-consolidate-candidate-findings-before-spending-the-commit-rework-budget"></a>
-**Consolidate candidate findings before spending the commit-rework budget.** The
-operator commit gate can admit fewer rework turns than the plan's total rework
-setting suggests; after one accepted commit rework, a second request may
-terminalize as `rework_exhausted` before the worker receives its note. Inspect the
-whole frozen candidate, including cleanup and test infrastructure, and run the
-smallest decisive checks before sending one compact correction ledger. If a later
-issue still surfaces, preserve the retained workspace and finish the narrow repair
-locally or redispatch from an exact checkpoint instead of discarding good work
-(found 2026-08-03 while integrating VP-05A after a second commit correction hit
-the category budget).
-
 <!-- applied-learning: acp-adapter-bootstrap-ids-are-not-resumable-provider-identities -->
 <a id="applied-learning-acp-adapter-bootstrap-ids-are-not-resumable-provider-identities"></a>
-**ACP adapter bootstrap IDs are not resumable provider identities.** Claude's
-`session/new` can return a transient `claude_sdk_*` handle while the first
-`session/update` already carries the provider's durable UUID. Reconcile and
-validate that live update identity before processing the update, then use the
-adopted identity for inactivity accounting, cancellation, status, transcripts,
-and recovery. Ignore every update that matches neither the bound identity nor
-this permitted one-time transition before callback or text accumulation.
-Otherwise active streaming does not refresh the silence timer and timeout
-recovery retries an invalid synthetic handle (found 2026-08-03 during the Voice
-VP-05D2A0 Claude fallback).
+**Adopt the provider's durable session id before continuity consumers.** A transient adapter handle, including a `claude_sdk_` prefix from Claude `session/new`, is not the resumable id. Validate the one-time transition to the provider's durable id and replace both session id fields before status, inactivity accounting, cancellation, or resume. Ignore later updates that match neither the bound id nor that permitted transition. Reject malformed identities and later drift. Fake clients must model the transient-to-durable transition. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-08-03.)
 
 <!-- applied-learning: coding-dispatch-authority-uses-the-agent-dispatch-namespace -->
 <a id="applied-learning-coding-dispatch-authority-uses-the-agent-dispatch-namespace"></a>
@@ -1116,19 +741,7 @@ allocating a task (found 2026-08-07 while starting Voice C3I0C1).
 
 <!-- applied-learning: do-not-queue-future-stage-controls-before-the-semantic-phase-advances -->
 <a id="applied-learning-do-not-queue-future-stage-controls-before-the-semantic-phase-advances"></a>
-**Do not queue future-stage controls before the semantic worker phase advances.**
-A control targeted at `implement` may be delivered after a design provider turn
-ends but before the pipeline inspects the no-write design workspace. The retained
-agent can then write correct source while Arbor still enforces the design invariant
-and terminalize `design_turn_modified_workspace`. Wait for task status/checkpoint
-evidence that the worker phase has durably changed. This also applies to untargeted
-same-session follow-ups: while the owner action is still design-only, steering may
-refine the design but must not say to apply, edit, cherry-pick, or commit. If source
-is produced anyway, checkpoint that exact tree and continue from its commit rather
-than replaying the packet (found 2026-08-13 during PK-K0 design rework; reinforced
-2026-08-20 when an untargeted follow-up caused `design_turn_modified_workspace`;
-reconfirmed 2026-08-27 when an `implement`-targeted exact-replay steer was delivered
-before the design workspace check and caused the same fail-closed terminal).
+**Do not steer an edit before the semantic phase can accept it.** `Arbor.Orchestrator.CodingPlan.SteeringEligibilityCore` treats a nil `target_stage` as eligible during design, so an untargeted follow-up can still tell the worker to edit and terminalize `design_turn_modified_workspace`. A `target_stage` other than `design` is ineligible during design and stays queued as `:next_stage` until the phase advances. Do not use an implementation follow-up to repair a design turn. Wait for durable phase evidence before an implementation control, and checkpoint any source that was produced anyway instead of replaying the packet. (Merged 2026-10-16 from 3 entries; first found 2026-07-28, last 2026-08-30.)
 
 <!-- applied-learning: inline-load-bearing-nested-repository-context-in-delegated-work-packets -->
 <a id="applied-learning-inline-load-bearing-nested-repository-context-in-delegated-work-packets"></a>
@@ -1235,20 +848,6 @@ stable runtime; never weaken subset enforcement or request implementation rework
 without a semantic verdict (found 2026-08-24 when Packet B crossed a live
 `LlmHandler` upgrade).
 
-<!-- applied-learning: stage-targeted-controls-require-owner-enforced-delivery-eligibility -->
-<a id="applied-learning-stage-targeted-controls-require-owner-enforced-delivery-eligibility"></a>
-**Stage-targeted controls require owner-enforced delivery eligibility.** Persisting
-`target_stage` or including it in a follow-up prompt does not delay delivery. The
-task owner must compare the target with the graph's bounded semantic worker phase
-before submitting the control to the ACP session, then retain the same control ID
-and immutable payload in FIFO order until eligible. In particular, never let an
-implementation control become the next same-session prompt while a mandatory
-read-only design turn is still settling; the worker can correctly edit and still
-trip `design_turn_modified_workspace`. Until the barrier is deployed, wait for the
-explicit design checkpoint before steering implementation (found 2026-08-30 after
-the same race recurred during CrossApp G3C2 task
-`task_6d868b681794b63c997dafafd71ed1d5`).
-
 <!-- applied-learning: bound-design-retries-independently-and-carry-continuity-in-the-packet -->
 <a id="applied-learning-bound-design-retries-independently-and-carry-continuity-in-the-packet"></a>
 **Bound design retries independently and carry continuity in the packet.** A
@@ -1261,16 +860,6 @@ transport cannot restore its conversation. Freeze every accepted decision and op
 finding into the canonical packet so a fresh session can continue honestly (found
 2026-08-31 after a CrossApp materialization retry went silent under an inherited
 one-hour timeout and its predecessor's Grok session could not be loaded).
-
-<!-- applied-learning: worker-close-success-is-not-quiescence-until-cleanup-settles -->
-<a id="applied-learning-worker-close-success-is-not-quiescence-until-cleanup-settles"></a>
-**Worker-close success is not quiescence until cleanup settles.** A pooled ACP
-check-in can return successfully while provider-specific state remains able to
-write, and an idempotent replay may report `closing` while asynchronous cleanup is
-still active. Before an irreversible next effect such as immutable candidate
-materialization, force a non-pooled close and advance only on a positively settled
-`closed` or `already_closed` result; all intermediate or unknown states fail closed
-(found 2026-09-02 while reviewing the G5D descriptor route).
 
 <!-- applied-learning: disconnect-a-programmatic-mcp-client-before-stopping-its-genserver -->
 <a id="applied-learning-disconnect-a-programmatic-mcp-client-before-stopping-its-genserver"></a>

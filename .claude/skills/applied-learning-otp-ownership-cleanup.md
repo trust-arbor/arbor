@@ -23,18 +23,7 @@ closing a TLS transport does not prove remote computation or billing stopped.
 
 <!-- applied-learning: a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart -->
 <a id="applied-learning-a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart"></a>
-**A later `rest_for_one` child must not wait in `terminate/2` for an earlier crashed sibling to restart.** OTP terminates all later children before restarting the failed child, so a drain coordinator that waits for a dead Journal/Reconciler creates a supervision deadlock. Run exhaustive planned shutdown barriers from `Application.prep_stop/1` while the dependency chain is live; crash-driven turnover must exit promptly and rely on durable intent plus startup reconstruction (identified 2026-07-15 while wiring the Apple durable-unit topology).
-
-<!-- applied-learning: a-blocking-genserver-callback-also-bypasses-supervisor-exit-handling -->
-<a id="applied-learning-a-blocking-genserver-callback-also-bypasses-supervisor-exit-handling"></a>
-**A blocking GenServer callback also bypasses supervisor-exit handling.** Moving an unbounded drain out of `terminate/2` is not enough if `handle_call/3` then runs recursive `receive` / sleep loops: the GenServer loop cannot process its supervisor parent's shutdown while the callback owns the process. If an earlier `rest_for_one` sibling fails during that barrier, the parent waits for the coordinator while the coordinator waits for the sibling that cannot restart. Drive durable barriers as a nonblocking state machine, or bind and abort on the exact parent exit in every blocking path; regress an earlier-sibling crash while the barrier is actively held, not only idle turnover (found 2026-07-15 reviewing the Apple planned-shutdown barrier).
-
-<!-- applied-learning: a-timed-out-genserver-call-3-does-not-cancel-the-queued-call -->
-<a id="applied-learning-a-timed-out-genserver-call-3-does-not-cancel-the-queued-call"></a>
-**A timed-out `GenServer.call/3` does not cancel the queued call.** Security-sensitive
-acquisition/finalization protocols need request IDs plus ordered acknowledge/cancel
-messages whose late processing cannot commit after the caller has returned an error.
-Testing only a delayed initial reply misses the equally dangerous delayed-finalize race.
+**A later rest-for-one child must not wait in terminate/2 for a crashed sibling to restart.** Serialize start admission through the one trusted owner that also snapshots shutdown work. Close admission before draining, and do that drain in `Application.prep_stop/1` while dependencies are still alive. Crash termination returns promptly so durable state can be reconstructed; `terminate/2` must not block on a sibling that `rest_for_one` has not restarted. Do not derive that owner from a GenServer `from` tuple. The `from` value is untrusted protocol data. (Merged 2026-10-16 from 2 entries; first found 2026-07-14, last 2026-07-15.)
 
 <!-- applied-learning: a-cleanup-lease-needs-stable-identity-restart-semantics-and-retryable-effects -->
 <a id="applied-learning-a-cleanup-lease-needs-stable-identity-restart-semantics-and-retryable-effects"></a>
@@ -81,17 +70,9 @@ GenServer terminates before handling it. Store the payload in a ref-keyed privat
 the fresh ref, accept each ref once, and flush the outbox before every close/owner/client/terminate
 path (found 2026-07-12 in ACP timeout task-control settlement).
 
-<!-- applied-learning: killing-a-genserver-call-caller-does-not-remove-a-request-already-queued-in-the-server-mailbox -->
-<a id="applied-learning-killing-a-genserver-call-caller-does-not-remove-a-request-already-queued-in-the-server-mailbox"></a>
-**Killing a `GenServer.call` caller does not remove a request already queued in the server mailbox.** Async task cancellation must both tombstone the task at the execution boundary and reject queued work whose caller is already dead; otherwise a busy shared agent can execute cancelled work later. This surfaced on 2026-07-09 while closing the `TaskStore -> APIAgent -> Session` cancellation race.
-
 <!-- applied-learning: registry-disappearance-may-lag-synchronous-process-shutdown -->
 <a id="applied-learning-registry-disappearance-may-lag-synchronous-process-shutdown"></a>
 **Registry disappearance may lag synchronous process shutdown.** `Supervisor.stop/3` waits for the process tree to terminate, but a `Registry.lookup/2`-backed `whereis/1` can briefly retain the registration until its cleanup notification is processed. Tests that assert absence immediately after shutdown should use a short bounded eventual assertion while still checking security state such as identity suspension and capability revocation directly (found 2026-07-10 in exact-policy fail-closed cleanup tests).
-
-<!-- applied-learning: hot-loading-a-genserver-module-does-not-migrate-its-running-state -->
-<a id="applied-learning-hot-loading-a-genserver-module-does-not-migrate-its-running-state"></a>
-**Hot-loading a GenServer module does not migrate its running state or stored local function captures.** A recompiled callback can expect new struct fields while the live process still holds the old map, causing writes to fail long after code loading reports success. A local capture such as `&cleanup/1` stored in state can likewise point at purged code and raise `BadFunctionError`; represent production callback selection as data, an MFA, or a reload-stable external function reference. Before exercising a hot-loaded stateful subsystem, compare `:sys.get_state/1` keys with current expectations; use an explicit in-place state migration when semantics are clear, or restart under its supervisor only when persisted reconstruction is safe. A private state-validity certificate must also bind the loaded executable identity of every runtime module whose semantics its validator executes: a source-only owner hash remains unchanged when a dependency reloads. Recompute that bounded identity at the callback gate and fail closed when unavailable; do not memoize it across independently reloadable modules. Do not restart a memory-backed policy store casually (found 2026-07-10 when `Arbor.Trust.Store` lacked newly added durable-backend fields after hot reload; extended 2026-07-25 when retained workspace settlement failed through a stale cleanup capture and 2026-08-15 when E0B2P initially certified across a `CapabilityUri` reload).
 
 <!-- applied-learning: publish-terminal-state-before-invoking-optional-cleanup-infrastructure -->
 <a id="applied-learning-publish-terminal-state-before-invoking-optional-cleanup-infrastructure"></a>
@@ -103,15 +84,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 
 <!-- applied-learning: process-monitors-do-not-require-trapping-exits -->
 <a id="applied-learning-process-monitors-do-not-require-trapping-exits"></a>
-**Process monitors do not require trapping exits.** Use monitors for unrelated
-owner lifecycle and enable `trap_exit` only for an explicit linked-worker
-protocol. OTP treats the designated supervisor parent's exit as a system
-termination path even when the child traps exits; it calls `terminate/2`
-directly instead of delivering that parent signal to `handle_info/2`. A parent
-`{:EXIT, ...}` callback clause is therefore unreachable and must not be relied
-on for cleanup or shutdown convergence (corrected 2026-10-07 with a direct OTP
-28.4.1 supervisor probe; originally found 2026-07-11 reviewing the
-signing-authority broker).
+**Process monitors do not require trapping exits.** Use a monitor for ordinary observation. Set `trap_exit` only for an explicit linked-worker protocol. A supervisor parent's EXIT arrives as `terminate/2`, not as an ordinary `handle_info/2` EXIT tuple, so a supervised GenServer cannot defer parent shutdown from `handle_info/2`. Resolve atom ancestors stored under the "$ancestors" key. Run cleanup exactly once across the message path and `terminate/2`. Put exhaustive planned barriers in `Application.prep_stop/1` while dependencies are still alive; a finite drain inside `terminate/2` is not that barrier. Crash turnover returns promptly so the supervisor can reconstruct. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-15.)
 
 <!-- applied-learning: derived-summaries-cannot-replace-independently-recorded-cleanup-evidence -->
 <a id="applied-learning-derived-summaries-cannot-replace-independently-recorded-cleanup-evidence"></a>
@@ -133,23 +106,9 @@ a stop call. Explicitly settle that owned reader and observe DOWN, while
 preserving borrowed adapters and the shared I/O device. A forced fixture
 cleanup is not a passing normal-exit witness (2026-10-03 native Breeze exit).
 
-<!-- applied-learning: a-genserver-from-tuple-is-protocol-data-not-authenticated-process-identity -->
-<a id="applied-learning-a-genserver-from-tuple-is-protocol-data-not-authenticated-process-identity"></a>
-**A GenServer `from` tuple is protocol data, not authenticated process identity.** Any local process can send a raw `{:\"$gen_call\", from, request}` message containing another PID, so extracting `elem(from, 0)` cannot prove who submitted an admission, result, or evidence mutation. Keep security-relevant authority inside one owner process or use an opaque owner-generated reference bound to a monitored generation; never authorize from caller-supplied GenServer envelope fields (found 2026-07-11 reviewing the coding benchmark coordinator).
-
 <!-- applied-learning: a-determinate-timeout-requires-proof-that-no-later-commit-can-occur -->
 <a id="applied-learning-a-determinate-timeout-requires-proof-that-no-later-commit-can-occur"></a>
 **A determinate timeout requires proof that no later commit can occur.** Checking a deadline before a state transform, database lock, or backend mutation is insufficient: the caller can time out while the owner continues and commits afterward. Carry one absolute monotonic deadline through queueing, lock acquisition, work, and commit; post-check before publishing mutable state, use backend-side cancellation for database work, and return an indeterminate outcome whenever commit status cannot be observed exactly (found 2026-07-11 with live Agent, PostgreSQL advisory-lock, and SQLite busy-timeout EventLog probes).
-
-<!-- applied-learning: cleanup-absence-checks-must-distinguish-absent-from-unqueryable -->
-<a id="applied-learning-cleanup-absence-checks-must-distinguish-absent-from-unqueryable"></a>
-**Cleanup absence checks must distinguish absent from unqueryable.** A boolean helper that maps every failing `git show-ref` or worktree query to `false` can issue a verified receipt while the repository is unavailable. Use tri-state queries, accept only the command's exact not-found outcome as absence, and fail closed on every transport, permission, timeout, or parse error (found 2026-07-11 reviewing workspace cleanup receipts).
-Record OS PID/group signal-zero outcomes separately: `PermissionError` / `EPERM`
-means the sandbox probe is unavailable, while `ESRCH` means absence. On
-2026-10-06 UTC, usable user-terminal fixtures were unqueryable from Codex.
-The first readiness script aborted before writing success metadata; its corrected
-proof recorded `permission_denied` without an independent presence or absence
-claim.
 
 <!-- applied-learning: verified-preservation-is-not-verified-cleanup -->
 <a id="applied-learning-verified-preservation-is-not-verified-cleanup"></a>
@@ -157,41 +116,7 @@ claim.
 
 <!-- applied-learning: secret-bearing-genservers-need-explicit-status-redaction -->
 <a id="applied-learning-secret-bearing-genservers-need-explicit-status-redaction"></a>
-**Secret-bearing GenServers need explicit status redaction.** Redacted struct `Inspect` implementations do not protect a broker whose raw state map uses bearer tokens as keys or stores session/root private keys. Implement bounded `format_status/2`, keep secrets out of crash metadata and error tuples, and regress `:sys`/status formatting for every authority owner (found 2026-07-11 reviewing verified-request and execution-permit brokers).
-For framework-hosted callbacks, identify the actual OTP process module: adding a formatter to a Membrane element callback does not format its Core GenServer. Audit direct framework option/action/exception logging too before claiming PCM redaction (reinforced 2026-09-27 during bounded device preflight).
-
-Sensitive exception redaction must preserve OTP graceful exit classes. Keep exits
-with `:normal` and `:shutdown` unchanged, redact only the private payload in
-`{:shutdown, reason}`, and keep throws/errors abnormal even when their payload
-looks graceful. Regress actual component and owned-supervisor exit reasons plus
-raw Logger privacy; a sanitized normal exit must not become a failure (found
-2026-09-27 during Membrane gated startup qualification).
-
-Preserve a source-owned failure stage and closed reason class when private
-errors are collapsed. Logging only a generic refusal, then retiring the owner,
-forces another user recording to distinguish capture from provider startup.
-Allowlist both fields, never inspect collaborator terms, and keep diagnostics
-out of lifecycle decisions (found 2026-09-29 during Voice Desk diagnosis).
-OTP can append the original exception stack after the status formatter. Prevent malformed secret-bearing calls from reaching argument-bearing function-clause failures; redacting `:reason` alone is insufficient. Preserve `:log` as a list, and keep real crash-log capture active through the exact process DOWN before asserting absence of credentials (2026-09-29 standalone login review).
-Process flags are not automatically `Process.info/2` items: OTP 28 rejects
-`:sensitive` there. At an existing test-only reset point, assert the documented
-previous value returned by `Process.flag(:sensitive, false)` instead; this keeps
-the check that production enabled sensitivity without disabling the production
-flag or preventing the whole fixture from running (2026-09-29 Gateway login
-qualification).
-
-<!-- applied-learning: format-status-2-does-not-make-secret-bearing-genserver-state-private -->
-<a id="applied-learning-format-status-2-does-not-make-secret-bearing-genserver-state-private"></a>
-**`format_status/2` does not make secret-bearing GenServer state private.** It can redact crash/status formatting, but local code can still call `:sys.get_state/1` and receive the raw state. Do not retain bearer tokens or private authority in long-lived GenServer state at all; keep them in a private owner/ETS boundary or consume them entirely inside the exact request process (found 2026-07-11 probing the MCP verified-request handler).
-
-Private custody must also stay private during handoff. Enable sensitivity before
-the first acquisition or claim RPC, since its reply can queue while the caller
-is descheduled. Before sending a secret bootstrap to a newly created worker,
-wait for that exact worker's fresh sensitive-ready acknowledgment; setting the
-flag after receipt leaves an ordinary `Process.info(pid, :messages)` window.
-Regress held startup and queued replies, not only an already-claimed worker.
-This protects ordinary inspection, not hostile code execution in the same BEAM
-(2026-10-03 native notice handoff review).
+**Redact secret-bearing GenServer status on the process module itself.** Implement `format_status` on the OTP process module and redact `:state`, `:message`, `:reason`, and `:log`. Preserve `:normal` and `:shutdown`; for `{:shutdown, reason}` redact only the private payload. OTP may append the original stack after the formatter, so keep secrets out of function-clause heads. `format_status` does not hide `:sys.get_state/1`, an enabled `:sys` debug ring, or hostile code in the same BEAM. Do not retain bearer tokens in long-lived state. Set `Process.flag(:sensitive, true)` before the first secret-bearing reply, and wait for that worker's sensitive-ready acknowledgement before bootstrap. Never enable `:sys` logging on a secret owner in production. `:sensitive` is not a `Process.info` key; a test-only reset reads the previous value from `Process.flag/2`. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-14.)
 
 <!-- applied-learning: private-ets-does-not-protect-authority-from-its-owning-genserver-s-sys-callbacks -->
 <a id="applied-learning-private-ets-does-not-protect-authority-from-its-owning-genserver-s-sys-callbacks"></a>
@@ -219,16 +144,11 @@ owner qualification, 2026-09-08).
 
 <!-- applied-learning: caller-timeout-does-not-cancel-a-queued-owner-mutation -->
 <a id="applied-learning-caller-timeout-does-not-cancel-a-queued-owner-mutation"></a>
-**Caller timeout does not cancel a queued owner mutation.** A bounded `GenServer.call/3` can return timeout while its request remains in the mailbox and later consumes a permit or commits state. Put the caller's absolute deadline inside the request, check it in the owner immediately before mutation, and return indeterminate plus exact reconciliation only when the outcome cannot be proven; the call timeout alone is not the operation deadline (found 2026-07-11 suspending the execution-permit broker).
-Expiry timers are cleanup notifications, not authorization gates. A ready login handle can be redeemed ahead of its queued expiry message, and a current-authority check can block across expiry. Check the absolute deadline synchronously before and after that check, then cap the actual signed proof at the same authentication expiry (2026-09-29 terminal login review).
+**A caller timeout does not cancel a queued owner mutation.** `GenServer.call/3` timing out, or the caller dying, leaves the request in the server mailbox. Carry a request id and an absolute deadline into the mutation owner. Order acknowledgement, cancel, and finalize so a late success cannot commit after cancel. Reject queued work whose caller is already dead. An expiry timer is not an authorization gate: check the deadline before and after any blocking authority check, and cap a signed proof at the same expiry. When the outcome is unproven, stop and reconcile against the exact request id. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-13.)
 
 <!-- applied-learning: exclusive-create-failure-does-not-grant-cleanup-ownership -->
 <a id="applied-learning-exclusive-create-failure-does-not-grant-cleanup-ownership"></a>
-**Exclusive-create failure does not grant cleanup ownership.** If `File.mkdir/1` returns `:eexist`, the caller must reject or retry without deleting that path; an unconditional `after`/error cleanup can erase an attacker-created or concurrent invocation's directory even though this invocation never owned it. Carry an explicit created/owned identity into cleanup, verify that identity before removal where feasible, and regress a pre-existing path with a marker that must survive the fail-closed result (found 2026-07-13 probing the tree-binding private-root collision path).
-
-<!-- applied-learning: a-late-identity-observation-cannot-prove-exclusive-create-ownership -->
-<a id="applied-learning-a-late-identity-observation-cannot-prove-exclusive-create-ownership"></a>
-**A late identity observation cannot prove exclusive-create ownership.** After creating a cleanup root, capture its stable device/inode/type identity before doing work. If that first capture fails, leave the path in place and fail closed; recapturing an identity during cleanup can observe a replacement path and incorrectly authorize its deletion (found 2026-07-13 proving the tree-binding cleanup regression against its prior revision).
+**Exclusive-create failure does not grant cleanup ownership.** `:eexist`, or a failed capture of the original device, inode, and type, does not authorize deletion. Capture identity before doing work. If that capture fails, leave the path in place and fail closed. Do not recapture identity at cleanup time; a late observation can name a different object that reused the path. Cleanup authority begins only after exclusive acquisition and the original identity capture both succeed. Pre-existing markers must survive the failed create. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-13.)
 
 <!-- applied-learning: a-correlation-token-placed-in-a-timer-message-is-not-the-cancellation-handle -->
 <a id="applied-learning-a-correlation-token-placed-in-a-timer-message-is-not-the-cancellation-handle"></a>
@@ -237,14 +157,6 @@ Expiry timers are cleanup notifications, not authorization gates. A ready login 
 <!-- applied-learning: a-permanent-startup-pinned-child-must-not-treat-its-process-restart-as-a-new-trust-epoch -->
 <a id="applied-learning-a-permanent-startup-pinned-child-must-not-treat-its-process-restart-as-a-new-trust-epoch"></a>
 **A permanent startup-pinned child must not treat its process restart as a new trust epoch.** Under `rest_for_one`, an authority that stops on identity drift is restarted from its original child spec; naively rereading the filesystem then accepts the changed artifact as the new baseline after one failed checkout. Carry an application-generated boot epoch through the child spec, retain only the original binding fingerprint plus a poison marker across child restarts, and clear it only when the application stops. Regress both downstream owner turnover and persistent poison/no-repin behavior (found 2026-07-14 reviewing the Apple control-plane authority).
-
-<!-- applied-learning: genserver-format-status-1-cannot-sanitize-an-explicitly-enabled-sys-debug-ring -->
-<a id="applied-learning-genserver-format-status-1-cannot-sanitize-an-explicitly-enabled-sys-debug-ring"></a>
-**`GenServer.format_status/1` cannot sanitize an explicitly enabled `:sys` debug ring.** OTP passes the callback a redacted status map, but `:sys.get_status/1` also returns the raw debugger state outside that callback; after `:sys.log(pid, true)`, it can contain prior messages, replies, and GenServer states. Redact `:state`, `:message`, `:reason`, and `:log` for ordinary status/crash formatting, but do not claim this hides secrets from same-BEAM callers: they can also use `:sys.get_state/1`, tracing, or code injection at the currently conceded T4 boundary. Never enable `:sys` logging on a secret/authority owner in production diagnostics (verified 2026-07-14 while testing control-plane status redaction).
-
-<!-- applied-learning: a-genserver-owner-monitor-does-not-interrupt-a-busy-callback -->
-<a id="applied-learning-a-genserver-owner-monitor-does-not-interrupt-a-busy-callback"></a>
-**A GenServer owner monitor does not interrupt a busy callback.** A queued `:DOWN` message cannot stop a worker that is copying or hashing inside `handle_call/3`; check owner liveness and the absolute deadline inside every bounded loop. If owner-death cleanup fails, retain the worker, root identity, and retry authority until absence is proven rather than stopping and forgetting the resource (found 2026-07-14 hardening the Linux dependency-baseline materialization lease).
 
 <!-- applied-learning: cleanup-of-a-writable-leased-tree-must-unlink-without-following-and-never-fall-back-to-unverified-recursion -->
 <a id="applied-learning-cleanup-of-a-writable-leased-tree-must-unlink-without-following-and-never-fall-back-to-unverified-recursion"></a>
@@ -256,31 +168,7 @@ Expiry timers are cleanup notifications, not authorization gates. A ready login 
 
 <!-- applied-learning: an-operation-deadline-never-authorizes-abandoning-owned-cleanup -->
 <a id="applied-learning-an-operation-deadline-never-authorizes-abandoning-owned-cleanup"></a>
-**An operation deadline never authorizes abandoning owned cleanup.** Stop admitting setup or candidate work once the original absolute budget expires, but retain a supervised cleanup owner and retry bounded teardown until positive absence is proven. This may outlive the caller's operation budget, as the materializer already does; returning on the deadline while a named containment unit may remain would turn timeout into a containment bypass (confirmed 2026-07-14 designing the Apple Container unit worker).
-For native media, distinguish completed playback from resource closure. Pipeline DOWN, EOS, enqueue success or a swallowed native close error proves neither. Return a bounded pending result while retaining the device fence on uncertain close; a media failure followed by confirmed closure can release that fence (reinforced 2026-09-27 while reviewing PortAudio ownership). Serialize buffer writes with explicit native destruction: a live NIF resource reference does not prevent its internal buffer being freed. Release proven custody at the resource owner before depending on a coordinator acknowledgement, and use atomic compare-and-clear so a stale releaser cannot clear a successor. Keep public occupancy IDs separate from private completion credentials at every message hop. Before-open worker state can prove no resource exists only after revoking admission; unknown or blocked open cannot (2026-09-27 multimedia owner review).
-
-Register each effect-capable child through a public no-effect startup handshake
-and bind custody before acknowledging setup. Attach private stream correlation
-at the native producer before its first notification, including initial demand;
-wrapping uncorrelated evidence later cannot establish provenance. Completion can
-precede queued capture payload, so retain the bounded payload path until the host
-joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
-
-<!-- applied-learning: a-supervised-genserver-cannot-defer-parent-shutdown-from-handle-info-2 -->
-<a id="applied-learning-a-supervised-genserver-cannot-defer-parent-shutdown-from-handle-info-2"></a>
-**A supervised GenServer cannot defer parent shutdown from `handle_info/2`.** OTP consumes the parent-supervisor exit and enters the behavior's termination path; trapping exits does not turn that parent exit into an ordinary callback message. If children must continue their normal asynchronous lifecycle while sibling infrastructure remains alive, place a later drain coordinator in the parent supervision order: its shutdown callback requests child cleanup before their supervisor is stopped and waits for exact completion receipts. Do not hide an unbounded ownership requirement inside a finite `terminate/2` drain (found 2026-07-14 when the Apple unit worker died before its proposed `handle_info({:EXIT, ...})` cleanup path ran).
-
-<!-- applied-learning: a-bounded-cleanup-handshake-is-not-cleanup-completion -->
-<a id="applied-learning-a-bounded-cleanup-handshake-is-not-cleanup-completion"></a>
-**A bounded cleanup handshake is not cleanup completion.** A `GenServer.call` timeout or exit can mean the worker is temporarily unresponsive, died without proof, or accepted the request but lost the reply. Keep every owned worker unresolved under the same exact receipt token, retry bounded handshakes as needed, and release shutdown only on the positive-absence receipt; dropping handshake failures from the pending set turns unresponsiveness into a containment bypass (found 2026-07-14 reviewing the Apple unit drain coordinator).
-
-<!-- applied-learning: linearize-starts-through-the-owner-that-snapshots-shutdown-work -->
-<a id="applied-learning-linearize-starts-through-the-owner-that-snapshots-shutdown-work"></a>
-**Linearize starts through the owner that snapshots shutdown work.** A later drain coordinator cannot safely snapshot a `DynamicSupervisor` if another public path can add a child after that snapshot. Route production starts through the coordinator's `GenServer.call`, derive the real controller from the `from` tuple, and make reply-loss waiting children expire before they can create anything. A callback that successfully starts a child completes before supervised `terminate/2`, while calls arriving during termination cannot create late work (found 2026-07-14 closing the Apple unit shutdown race).
-
-<!-- applied-learning: a-missing-supervisor-is-not-an-empty-ownership-snapshot -->
-<a id="applied-learning-a-missing-supervisor-is-not-an-empty-ownership-snapshot"></a>
-**A missing supervisor is not an empty ownership snapshot.** Under `rest_for_one`, the failed earlier child is already dead when later drain coordinators terminate. Returning `[]` when its registry/supervisor is missing turns unknown owned work into success, and waiting on cleanup through that failed transport can deadlock the restart forever. Consult durable ownership records, use an independent recovery transport, and require positive absence receipts; never equate `:noproc`, child `DOWN`, or a failed snapshot call with no resources (found 2026-07-14 reviewing Apple unit crash recovery).
+**An operation deadline never authorizes abandoning owned cleanup.** Expiry stops new work and stops admitting new attempts. It does not drop cleanup custody. Bound retries at every nested owner, not only at the composite registry. After the retry budget is exhausted, keep destructive tokens and leases in a dormant terminal state and release them only through explicit recovery after positive absence is proven. An uncertain close — process DOWN without a receipt, end-of-stream, enqueue success, or a swallowed native close — is not closure. Compare-and-clear so a stale releaser cannot clear a successor. Public occupancy identifiers are not private completion credentials. Bind custody before acknowledging the caller, and treat a before-open absence proof as valid only after admission has been revoked. (Merged 2026-10-16 from 3 entries; first found 2026-07-14, last 2026-07-15.)
 
 <!-- applied-learning: project-lifecycle-provenance-explicitly-never-infer-it-from-a-result-payload -->
 <a id="applied-learning-project-lifecycle-provenance-explicitly-never-infer-it-from-a-result-payload"></a>
@@ -289,10 +177,6 @@ joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
 <!-- applied-learning: a-synchronous-facade-must-not-drain-and-requeue-its-caller-s-mailbox-while-waiting-for-one-owned-signal -->
 <a id="applied-learning-a-synchronous-facade-must-not-drain-and-requeue-its-caller-s-mailbox-while-waiting-for-one-owned-signal"></a>
 **A synchronous facade must not drain and requeue its caller's mailbox while waiting for one owned signal.** Catch-all receive loops reorder unrelated traffic relative to concurrently arriving messages, can retain it without bound, and violate caller ownership. Use selective receive for the exact PID/ref/id patterns and leave every unrelated message in place; after a stronger positive-absence proof, demonitor only the exact ref with `[:flush]` (found 2026-07-15 reviewing the Apple executor terminal wait).
-
-<!-- applied-learning: authenticate-resume-before-any-existence-bearing-lifecycle-lookup -->
-<a id="applied-learning-authenticate-resume-before-any-existence-bearing-lifecycle-lookup"></a>
-**Authenticate resume before any existence-bearing lifecycle lookup.** Checking RunJournal admission before checkpoint identity returned `:not_found` to an unauthenticated caller and bypassed the intended security regression. Gate resume/recovery on derived checkpoint identity first, then validate takeover status/principal, and make takeover tests supply identity so they reach the gate they claim to test (found 2026-07-15 during final L3C validation).
 
 <!-- applied-learning: engine-ownership-metadata-is-owner-issued-not-caller-selectable -->
 <a id="applied-learning-engine-ownership-metadata-is-owner-issued-not-caller-selectable"></a>
@@ -304,54 +188,15 @@ joins bytes and count (found 2026-09-27 qualifying gated Source/Sink startup).
 
 <!-- applied-learning: a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority -->
 <a id="applied-learning-a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority"></a>
-**A restartable registry must not be the sole owner of child cleanup authority.** Process-local maps disappear on registry restart, and process-bound opaque leases cannot be transferred to the replacement process. Put each multi-part validation resource under a separately supervised owner that monitors the registry, acquires/releases the opaque Shell lease itself, retains every filesystem/Git identity, and cleans on registry death; the registry keeps only an authorized handle and public projection (found 2026-07-16 reviewing validation-resource restart cleanup).
-For asynchronous credential acquisition, the worker retains cleanup custody until
-an acknowledgement after the receiver commits its adopted state. A queued result
-is not adoption. Normal owner teardown must not kill that sole cleanup worker
-before it discards an unadopted login or session; committed credentials need an
-external owner monitor because `terminate/2` does not run after `:kill`. Regress
-normal close and untrappable death on both sides of the handoff (2026-10-03
-terminal target-switch review).
-
-<!-- applied-learning: filesystem-fixture-names-must-outlive-neither-vm-local-uniqueness-nor-cleanup-ownership -->
-<a id="applied-learning-filesystem-fixture-names-must-outlive-neither-vm-local-uniqueness-nor-cleanup-ownership"></a>
-**Filesystem fixture names must outlive neither VM-local uniqueness nor cleanup ownership.** `System.unique_integer/1` restarts with a new VM, so a root that survives a failed run can collide with a later VM. Use cryptographic randomness for names that outlive one BEAM, record cleanup ownership, and remove only resources owned by that fixture (found 2026-07-16 rerunning the full Actions suite and 2026-07-19 during Grok containment work).
+**A restartable registry must not be the sole owner of child cleanup authority.** Place cleanup authority in an independently supervised owner. Monitor that owner and the registry in both directions. Retain locators from a failed acquisition so cleanup can still find the resource, without transferring the lease's authority to the finder. Transfer custody only after the receiver has committed adoption and acknowledged it. A queued result is not adoption. `terminate/2` does not run after `:kill`, so cleanup that exists only in the registry's terminate path is lost when the registry is killed or restarted. (Merged 2026-10-16 from 3 entries; first found 2026-07-15, last 2026-07-16.)
 
 <!-- applied-learning: recursive-cleanup-must-be-bounded-and-progressive -->
 <a id="applied-learning-recursive-cleanup-must-be-bounded-and-progressive"></a>
-**Recursive cleanup must be bounded and progressive.** Identity binding and symlink rejection prevent deleting the wrong root, but an attacker-controlled tree can still exhaust shutdown time or memory through depth and entry count. Give each attempt explicit entry, depth, and wall-clock budgets; delete only proven non-directory entries without following links; preserve the identity after budget exhaustion so retries make bounded forward progress (found 2026-07-15 reviewing validation-resource cleanup).
-
-<!-- applied-learning: monitor-separately-supervised-resource-owners-in-both-directions -->
-<a id="applied-learning-monitor-separately-supervised-resource-owners-in-both-directions"></a>
-**Monitor separately supervised resource owners in both directions.** A child owner monitoring its registry closes registry-crash leaks, but the registry must also monitor the owner so an isolated owner crash cannot leave stale public handles and resources. On either death, the survivor uses retained identities to converge cleanup while preserving the parent workspace (found 2026-07-15 reviewing validation-resource cleanup).
-
-<!-- applied-learning: an-arbitrary-traversal-depth-ceiling-is-not-progressive-cleanup -->
-<a id="applied-learning-an-arbitrary-traversal-depth-ceiling-is-not-progressive-cleanup"></a>
-**An arbitrary traversal-depth ceiling is not progressive cleanup.** Retrying from the root reaches the same deep branch and fails forever. Bound portable traversal by the already enforced absolute-path byte ceiling and total entry/time/memory budgets; do not introduce a directory-rename shortcut merely to reset depth, because portable rename cannot bind the expected source inode and no-replace destination atomically (found 2026-07-15 closing validation-tree cleanup liveness).
-
-<!-- applied-learning: failure-acquisition-must-return-cleanup-evidence-with-the-opaque-lease -->
-<a id="applied-learning-failure-acquisition-must-return-cleanup-evidence-with-the-opaque-lease"></a>
-**Failure acquisition must return cleanup evidence with the opaque lease.** A composite owner can retain a Shell lease after `cleanup_required` or malformed-view rollback, then die before release. Return a bounded locator from the same trusted acquisition operation and store it before replying, so the surviving registry can prove the Shell worker's root disappeared without receiving or reconstructing lease authority (found 2026-07-15 closing validation-owner crash convergence).
-
-<!-- applied-learning: fail-closed-cleanup-retries-still-need-a-dormant-terminal-state -->
-<a id="applied-learning-fail-closed-cleanup-retries-still-need-a-dormant-terminal-state"></a>
-**Fail-closed cleanup retries still need a dormant terminal state.** A deterministic identity mismatch, path ceiling, or enumeration-memory failure must retain evidence, but retrying it every few seconds forever leaks timers and consumes work without improving authority. Bound automatic attempts, preserve every destructive token and opaque lease, expose dormant status for explicit recovery, and allow manual or later supervisor cleanup to retry (found 2026-07-15 closing validation-owner cleanup churn).
-
-<!-- applied-learning: a-supervised-genserver-can-reach-terminate-2-without-handling-the-supervisor-s-exit-tuple-first -->
-<a id="applied-learning-a-supervised-genserver-can-reach-terminate-2-without-handling-the-supervisor-s-exit-tuple-first"></a>
-**A supervised GenServer can reach `terminate/2` without handling the supervisor's `EXIT` tuple first.** `DynamicSupervisor.terminate_child/2` may drive system termination directly, and named ancestors can appear as atoms in `:"$ancestors"`. Resolve named ancestors to their PID, perform bounded cleanup from both paths, and use a process-local attempted marker so the cleanup runs exactly once (found 2026-07-15 testing validation-owner dormant recovery).
-
-<!-- applied-learning: bound-retries-at-every-owner-layer-not-only-at-the-composite-registry -->
-<a id="applied-learning-bound-retries-at-every-owner-layer-not-only-at-the-composite-registry"></a>
-**Bound retries at every owner layer, not only at the composite registry.** A higher-level validation owner can become dormant correctly while its lower Shell materializer continues an independent owner-death timer loop forever. Every process that retains destructive identity must own its own bounded retry counter and dormant state; supervisor teardown or an explicit recovery surface may retry later without background churn (found 2026-07-15 reviewing nested validation cleanup ownership).
+**Bound recursive cleanup and require it to make progress.** `Arbor.Shell.OwnedTree` accepts a listing heap from 512 to 8_000_000 words and a timeout of at most 10_000 ms; any other budget returns `:invalid_cleanup_budget`. Delete only identity-bound entries and do not follow links. A fixed depth ceiling that retries the same failing walk is not progress: retain retry authority and advance with operation-specific entry, path, time, and memory budgets. Validation roots pass `listing_heap_words: 8_000_000` and `timeout_ms: 10_000` through `Arbor.Shell.remove_owned_tree/2` from `Arbor.Actions.Coding.WorkspaceLeaseRegistry`. Do not shrink those roots to the default 2_000_000-word listing heap. (Merged 2026-10-16 from 3 entries; first found 2026-07-15, last 2026-07-17.)
 
 <!-- applied-learning: a-synchronous-durability-acknowledgement-is-also-a-mailbox-boundary-not-lifecycle-authority -->
 <a id="applied-learning-a-synchronous-durability-acknowledgement-is-also-a-mailbox-boundary-not-lifecycle-authority"></a>
 **A synchronous durability acknowledgement is also a mailbox boundary, not lifecycle authority.** Controls and owner/caller exits can arrive while a GenServer waits for its evidence sink, so re-drain applicable messages against the still-active state before choosing a follow-up or replying. If archival then fails, report the combined evidence error while preserving cancellation teardown and hard/inactivity-timeout recovery plus provider settlement; evidence must never weaken the operation's terminal lifecycle (found 2026-07-16 hardening ACP prompt-turn capture).
-
-<!-- applied-learning: compiled-validation-roots-need-operation-specific-ownedtree-cleanup-bounds -->
-<a id="applied-learning-compiled-validation-roots-need-operation-specific-ownedtree-cleanup-bounds"></a>
-**Compiled validation roots need operation-specific `OwnedTree` cleanup bounds.** The generic 2,000,000-word listing budget scales down by directory depth, so an ordinary `candidate-runtime/build/lib/<app>/ebin` directory exhausted the depth-five allowance even though cleanup succeeded with the supported 8,000,000-word budget. Keep the exact pinned identity and fail-closed ordering, but call `Arbor.Shell.remove_owned_tree/2` with `listing_heap_words: 8_000_000` and the public maximum `timeout_ms: 10_000` only at the validation-root owner; larger timeout values fail with `:invalid_cleanup_budget` (found 2026-07-17 after a successful validation operation was reported as cleanup failure).
 
 <!-- applied-learning: negative-cleanup-tests-must-snapshot-and-remove-only-their-own-exact-roots -->
 <a id="applied-learning-negative-cleanup-tests-must-snapshot-and-remove-only-their-own-exact-roots"></a>
@@ -373,10 +218,6 @@ terminal target-switch review).
 <a id="applied-learning-settle-every-task-owned-resource-through-one-durable-disposition-lifecycle"></a>
 **Settle every task-owned resource through one durable disposition lifecycle.** Removing only an ephemeral worktree can leave its task-created branch, evidence ref, pooled session, approvals, or journal marker behind. Let the workflow choose policy (`discard`, `recover`, `publish`, or `adopt`), but make the owning registry persist intent before destructive effects and converge every bound resource after crashes. A terminal task is not settled until the full ownership set is settled (found 2026-07-20 auditing 490 coding branches after worktree cleanup).
 
-<!-- applied-learning: quiet-git-ref-probes-do-not-prove-exact-absence -->
-<a id="applied-learning-quiet-git-ref-probes-do-not-prove-exact-absence"></a>
-**Quiet Git ref probes do not prove exact absence.** `git rev-parse --verify --quiet` returns the same nonzero status for a missing ref and some corrupt or unreadable refs, while localized command text is not a stable error protocol. Observe an exact full ref through structured `for-each-ref` output, reject stderr/warnings and malformed records, and after a compare-and-delete failure re-read the ref: absent is an idempotent success, a different OID is a CAS mismatch, and the same OID is an operational failure (found 2026-07-20 hardening coding-branch discard settlement).
-
 <!-- applied-learning: spawned-development-tools-must-not-inherit-the-parent-mix-runtime -->
 <a id="applied-learning-spawned-development-tools-must-not-inherit-the-parent-mix-runtime"></a>
 **Spawned development tools must not inherit the parent Mix runtime.** An ACP coding CLI launched by the live `MIX_ENV=dev` Arbor node passed that variable to worker shell commands, so ordinary `./bin/mix test` booted dev configuration, collided with the live Gateway port, and attempted to claim the operator Apple-container journal. Scrub parent build/runtime selectors such as `MIX_ENV` at the process-spawn boundary while preserving explicit worker command overrides; test config cannot protect a test command that never entered the test environment (found 2026-07-20 during delegated branch-lifecycle validation).
@@ -395,22 +236,7 @@ terminal target-switch review).
 
 <!-- applied-learning: source-owner-cleanup-success-does-not-imply-convergence -->
 <a id="applied-learning-source-owner-cleanup-success-does-not-imply-convergence"></a>
-**Source-owner cleanup success does not imply convergence.** Crash-durable cleanup may remove the physical resource, fail marker deletion, install retained retry residue, and still return `{:ok, state}` because the destructive phase succeeded. Reconciliation may emit a settled receipt only when the helper succeeded and every authoritative source index proves absence; preserve helper errors and the exact returned state instead of converting partial success into settlement (found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).
-
-Positive cleanup facts must outlive the producer that observed them. A Session
-can exit after a bounded close returns pending while its cleanup lease later
-settles; preserve an exact per-operation join for source custody, authenticated
-backend retirement plus worker DOWN, and stable lease drain. Publish that
-receipt before successful cleanup acknowledgements, and never reconstruct it
-from empty supervisors or a missing Session (2026-09-29 Voice Desk).
-
-Operation expiration must deny late payloads and effects without discarding
-authenticated terminal resource-retirement evidence. Keep the logical operation
-deadline separate from one absolute physical callback-plus-retirement ceiling;
-leave that watchdog armed through close. Admit a late close acknowledgement only
-for disposal after exact worker/token authentication, then require its worker
-DOWN and independent lease settlement. Unknown or killed workers still prove no
-closure (2026-10-05 Voice configuration timeout regressions).
+**Source-owner cleanup success does not imply convergence.** A bounded handshake, a helper `:ok`, or a worker status of `closing` is intermediate evidence, not settlement. Retain the exact receipt through every retry; do not replace it with a reconstructed view from an empty supervisor or a missing Session. Publish the terminal state only after helper success, index absence, authenticated retirement, and worker DOWN have all been observed. Expiration denies late effects and still preserves authenticated terminal evidence. Take an irreversible next effect only on `closed` or `already_closed` from `Arbor.AI.AcpManaged.SessionRegistry`; any other close observation fails closed. (Merged 2026-10-16 from 3 entries; first found 2026-07-14, last 2026-09-02.)
 
 <!-- applied-learning: out-of-band-owner-updates-must-survive-stale-process-local-publication -->
 <a id="applied-learning-out-of-band-owner-updates-must-survive-stale-process-local-publication"></a>
@@ -438,27 +264,7 @@ acceptance but before return (found 2026-08-02 repairing the VP-04D1 release-ver
 
 <!-- applied-learning: do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox -->
 <a id="applied-learning-do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox"></a>
-**Do not perform large or backpressured effects in the control owner's mailbox.** A
-finite `GenServer.call` timeout bounds the caller, not the callee or its mailbox:
-synchronous PCM encoding/socket send would delay stop, owner-death, and hard-timeout
-handling. Reserve and fence the operation in the control process, hand the payload to
-a separately owned bounded effect path, keep the control mailbox responsive, and
-close external protocol state before reuse when delivery is ambiguous. Do not replace
-the GenServer callback loop with a private blocking `receive` while such a child must
-call back for authority: its `GenServer.call` arrives as raw `$gen_call` data and is
-rejected or never dispatched. Keep teardown as ordinary `handle_info` state
-transitions and defer caller replies with `GenServer.reply/2` (found 2026-08-03
-reviewing Voice VP-07 audio ownership; reinforced 2026-08-16 reviewing E0B2C2's
-fallback process owner).
-
-A pull-style protocol worker must also own socket delivery between callbacks.
-Mint's default active-once socket can send bytes while a GenServer is handling
-another operation; a generic `handle_info` then discards them before `recv` runs.
-For a pull adapter, select passive mode before HTTP upgrade and at WebSocket
-creation, retain bytes coalesced with the upgrade, and return the latest opaque
-handle when partial decoding reaches a timeout. Exercise real decoder fragments
-across timeout/next-read boundaries; a fake event queue cannot reproduce mailbox
-loss (found 2026-09-29 after Voice startup succeeded but the turn stalled).
+**Keep large or backpressured work out of the control owner's mailbox.** Do not run bulk effects, backpressured IO, or durable inventory scans inside the control or journal owner's callback. Admit that work to a bounded worker, check the worker against its deadline, and apply the result only to a conflict-checked snapshot, replying with `GenServer.reply/2`. A blocking callback also skips supervisor exit handling, and a monitor does not interrupt a callback that has already started, so lifecycle messages wait behind the scan. A socket left in active mode drops bytes while the owner is busy; set it passive before the long section. If cleanup on owner death fails, retain cleanup authority for a later attempt. (Merged 2026-10-16 from 4 entries; first found 2026-07-14, last 2026-08-26.)
 
 <!-- applied-learning: admit-effect-ownership-before-invalidating-retryable-discovery -->
 <a id="applied-learning-admit-effect-ownership-before-invalidating-retryable-discovery"></a>
@@ -514,38 +320,12 @@ for the next turn, so chunk-level checks do not spend additional allowances
 
 <!-- applied-learning: defer-ancestry-queries-until-child-startup-has-acknowledged -->
 <a id="applied-learning-defer-ancestry-queries-until-child-startup-has-acknowledged"></a>
-**Defer full-tree ancestry queries until the parent supervisor is ready.** A
-supervisor waits for each child's `init/1`, and `handle_continue/2` may run while
-that parent is still constructing later siblings, so either callback can
-deadlock or time out if it calls `Supervisor.which_children/1` on the parent.
-During an application callback, `:application_master.get_child/1` can also
-terminate the master while its child slot is still `:undefined`. Keep the child
-pending, complete cold startup through an explicit post-`Supervisor.start_link/2`
-readiness handshake using the returned supervisor PID and exact child proofs,
-and make the Application wait boundedly for readiness before exposing dependent
-children. On restarts, retry after parent convergence or use a proof that does
-not reenter the starting parent (found 2026-10-07 while qualifying the
-kernel-runtime and Security review fixes). Apply the same rule after startup:
-an authority check that queries a live supervisor must use the subsystem's
-reviewed call bound, because a tiny local timeout can turn scheduler or mailbox
-pressure into a false authorization denial. Regress this deterministically by
-suspending the supervisor beyond the retired bound, proving the public request
-remains pending, then resuming it and requiring success (reinforced 2026-10-07
-while qualifying channel authorization under full-suite load). For bounded
-cold-start hydration, measure the declared maximum inventory on an uncontended
-isolated BEAM, time fixture seeding separately, and size the readiness bound from
-that inventory with an explicit floor and cap. A constant timeout below the
-measured supported workload makes valid durable state indistinguishable from an
-unavailable authority (reinforced 2026-10-07 after 10,001 authenticated
-capability records required 21.3 seconds to hydrate).
+**Defer ancestry queries while child startup is still unacknowledged.** `Arbor.Common.SupervisedOwner.starting_application_root/3` binds a candidate to an application root whose `start/2` is still running, without asking that application's master. OTP 28 `:application_master.get_child/1` crashes the master while the child slot is `:undefined`. Do not call `Supervisor.which_children/1` on a parent that is still starting. After startup, use the normal root lookup and the subsystem's reviewed call bound; a tiny timeout on that check becomes a false authorization denial. Exercise production boot in an isolated process, because a test that sets `start_children: false` hides this failure. (Merged 2026-10-16 from 2 entries; first found 2026-10-07, last 2026-10-09.)
 
 <!-- applied-learning: proof-custody-must-protect-read-secrecy-as-well-as-write-authority -->
 <a id="applied-learning-proof-custody-must-protect-read-secrecy-as-well-as-write-authority"></a>
-**Proof custody must protect read secrecy as well as write authority.** An ETS `:protected` table prevents non-owner writes but lets every local process read the challenge, so a polling attacker can copy a legitimate caller’s proof and race an authenticated finish. Keep challenge proofs in caller-owned `:private` ETS and authenticate the VM-enforced ownership transfer to the exact server with an unguessable gift reference; reject raw transfer tuples unless the table is the exact pending proof and is actually server-owned. Never delete a server-owned custody or sentinel table based only on caller-supplied transfer metadata (found 2026-10-07 hardening `Arbor.Common.AuthenticatedCall`).
+**Proof custody must protect read secrecy as well as write authority.** Authenticate an authority-bearing call with an unpredictable challenge and a VM-checked transfer of the caller's exact `:private` ETS proof, as `Arbor.Common.AuthenticatedCall` does. Reject a raw table transfer unless the table is the exact pending proof and is server-owned. Never delete custody from caller-supplied metadata. Anchor the original custody outside replaceable callback state, because `:sys.replace_state/2` can swap the callback map. An invalid reply destination must not crash the server and must still clear the pending record and timer. A GenServer `from`, a raw `:$gen_call`, a reply alias, and a cast are untrusted protocol data. An authenticated forwarder launders content when the producer accepted it through an unauthenticated call or cast. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-10-07.)
 
-Owner, `:private`, and schema checks still do not prove that a table is the
-original custody: an attacker can prepopulate a schema-valid private table,
-give it to the server, then use `:sys.replace_state/2` to substitute its TID.
-Anchor the exact original custody identity outside replaceable callback state,
-validate that anchor on every access, and regress a transferred schema-valid
-substitution that would otherwise mint authority.
+<!-- applied-learning: record-a-shared-resource-s-prior-state-and-restore-only-the-task-s-change -->
+<a id="applied-learning-record-a-shared-resource-s-prior-state-and-restore-only-the-task-s-change"></a>
+**Record a shared resource's prior state and restore only the task's change.** Before a task starts, stops, creates or reconfigures a long-lived shared resource (a container builder, daemon, VM, service or cache), record its running or stopped state and its creation identity, not just its name. A build or setup step can recreate and start a previously stopped instance under the same name, so a familiar name does not prove the running instance predates the task. Afterwards restore only what the task changed, leave pre-existing state alone, and verify the resulting inventory. (Generalized 2026-10-16 from a 2026-09-27 container-builder incident.)

@@ -90,17 +90,9 @@ interactive sessions must keep a separate open-input protocol, and regressions
 must assert normal terminal status as well as exact bytes (found 2026-07-13 in
 `Arbor.Shell.ProcessGroup`).
 
-<!-- applied-learning: a-declared-workflow-profile-is-not-executable-until-every-claimed-invariant-is-mechanically-enforced -->
-<a id="applied-learning-a-declared-workflow-profile-is-not-executable-until-every-claimed-invariant-is-mechanically-enforced"></a>
-**A declared workflow profile is not executable until every claimed invariant is mechanically enforced.** Running a selected `_test.exs` file against the candidate does not prove a security regression fails against the base revision and passes against the candidate. Keep the profile discoverable but fail closed with a precise missing-primitive reason until both sides of the claim are enforced (found 2026-07-10 reviewing the initial `security_regression` compiler profile).
-
 <!-- applied-learning: basic-shell-sandbox-checks-the-command-string-even-after-argument-escaping -->
 <a id="applied-learning-basic-shell-sandbox-checks-the-command-string-even-after-argument-escaping"></a>
 **Basic-shell sandbox checks the command string even after argument escaping.** `ShellEscape` single-quotes dangerous commit-message text correctly, but `Arbor.Shell.Sandbox` still rejects metacharacters like backticks inside the assembled command string. Git actions that run via `Shell.execute(..., sandbox: :basic)` need to normalize user/task-derived arguments such as commit messages before constructing the shell command, or use a non-shell argv execution path.
-
-<!-- applied-learning: schema-bounded-mix-actions-must-stay-within-the-basic-shell-sandbox-s-allowed-flag-set -->
-<a id="applied-learning-schema-bounded-mix-actions-must-stay-within-the-basic-shell-sandbox-s-allowed-flag-set"></a>
-**Schema-bounded Mix actions must stay within the basic shell sandbox's allowed flag set.** `Mix.Compile` cannot expose `--force` while it runs through `Shell.execute(..., sandbox: :basic)`: the sandbox rejects that flag before Mix starts. Add flags only after checking the sandbox policy or moving the action to a non-shell argv execution path (found 2026-07-09 while routing coding-agent validation through `arbor://action/mix/compile`).
 
 <!-- applied-learning: arbor-shell-list-executions-0-returns-ok-executions-not-a-bare-list -->
 <a id="applied-learning-arbor-shell-list-executions-0-returns-ok-executions-not-a-bare-list"></a>
@@ -123,15 +115,15 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 
 <!-- applied-learning: quote-shell-search-patterns-so-documentation-backticks-stay-literal -->
 <a id="applied-learning-quote-shell-search-patterns-so-documentation-backticks-stay-literal"></a>
-**Quote shell search patterns so documentation backticks stay literal.** Backticks inside a double-quoted `zsh -c` command are command substitutions, even when they appear only in an `rg` pattern. Use a single-quoted shell pattern (or otherwise escape the backticks) when searching Markdown; otherwise a harmless source search can unexpectedly execute the documented command (found 2026-07-10 while searching for the Mix-wrapper learning).
+**Quote shell search patterns so documentation backticks stay literal.** A double-quoted shell string executes backticks. Single-quote a pattern that must stay literal. A raw Elixir sigil does not escape the quote of the outer shell: `mix arbor.rpc` evaluates the remote expression, and a backtick inside the local command line is still the shell's command substitution before Mix sees it. Prefer structured argv, such as `Arbor.Shell.execute_direct/3`, whenever inner quoting cannot protect the outer shell. Count every parser between the operator command and the program under test. (Merged 2026-10-16 from 3 entries; first found 2026-07-10, last 2026-07-18.)
 
 <!-- applied-learning: a-signed-capability-manifest-must-bind-the-exact-executable-artifact-and-inputs -->
 <a id="applied-learning-a-signed-capability-manifest-must-bind-the-exact-executable-artifact-and-inputs"></a>
 **A signed capability manifest must bind the exact executable artifact and inputs.** Signing only a list of allowed capabilities lets the same valid manifest be copied beside different DOT or reused with a different workdir/argument payload. Scheduled/custom graph attestations must cover canonical graph bytes/hash, pipeline identity, fixed workdir, and the reviewed argument contract, then recheck the hash immediately before execution (found 2026-07-10 auditing the scheduler DOT-authorship redesign).
 
-<!-- applied-learning: safepath-resolve-within-2-is-lexical-containment-not-an-existing-file-authorization-result -->
-<a id="applied-learning-safepath-resolve-within-2-is-lexical-containment-not-an-existing-file-authorization-result"></a>
-**`SafePath.resolve_within/2` is lexical containment, not an existing-file authorization result.** It normalizes `..` but does not return a symlink-resolved target. Before reading a user-selected existing file, resolve and compare the real workdir and real target, authorize the caller-visible path through the fs/FileGuard gate, and read the proven canonical target; otherwise an in-workdir symlink can redirect a read outside the workspace (found 2026-07-10 reviewing Grok's pipeline `source_file` authorization fix).
+<!-- applied-learning: read-contained-files-through-safepath-pinned-readers-not-resolve-then-read -->
+<a id="applied-learning-read-contained-files-through-safepath-pinned-readers-not-resolve-then-read"></a>
+**Read contained files through `SafePath`'s pinned readers, not resolve-then-read.** `Arbor.Common.SafePath.resolve_within/2` returns the symlink-resolved canonical target, but resolving a path and then calling `File.read/1` still leaves a window in which another process can swap the file, an ancestor, or the root. For a user-selected path, authorize the caller-visible path through the fs/`Arbor.Security.FileGuard` gate, then read with `SafePath.read_within_checked/3`: it opens the file relative to a pinned root descriptor with `O_NOFOLLOW` and runs your validator against the exact opened canonical path before any data is read. Use `SafePath.read_exact/2` when the leaf itself must not be a link, and `SafePath.bind_root/1` with `read_within_bound_checked/3` when the root must stay the same directory object across calls. To detect redirection without reading, compare `SafePath.lexical_child/2` with `SafePath.resolve_real/1`. (Replaces the 2026-07-10 lexical-containment entry; rewritten 2026-10-16 against current `safe_path.ex`.)
 
 <!-- applied-learning: a-bound-nested-graph-is-immutable-executable-input -->
 <a id="applied-learning-a-bound-nested-graph-is-immutable-executable-input"></a>
@@ -143,35 +135,19 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 
 <!-- applied-learning: module-atoms-are-executable-selectors-not-inert-descriptor-data -->
 <a id="applied-learning-module-atoms-are-executable-selectors-not-inert-descriptor-data"></a>
-**Module atoms are executable selectors, not inert descriptor data.** Moving an MFA out of a per-task record is incomplete if that record still chooses backend or audit modules that trusted cleanup code later invokes. Pin every executable module at the owner process's trusted initialization boundary; normalize per-task lifecycle descriptors to scalar provenance such as caller and trace IDs before storing them (found 2026-07-11 in the second terminal-approval cleanup council review).
+**Module atoms are executable selectors, not inert descriptor data.** Pin every executable module or MFA at the trusted owner's initialization boundary. Per-task and per-dispatch descriptors carry only validated scalar provenance. They must not carry a caller-chosen cleanup MFA or an anonymous closure. Launch deferred work with a module, function, and args chosen by the owner. Cleanup code selected by the dispatch payload runs with the owner's authority. A private option map is still an authority channel when applying it selects code. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-07-11.)
 
 <!-- applied-learning: acceptance-must-be-derived-from-evidence-never-trusted-from-a-report-summary -->
 <a id="applied-learning-acceptance-must-be-derived-from-evidence-never-trusted-from-a-report-summary"></a>
 **Acceptance must be derived from evidence, never trusted from a report summary.** A deterministic benchmark can execute nothing yet pass if `acceptance/1` reads only caller-supplied aggregate counts. Validate a closed, non-empty row/pair schema, recompute every aggregate from status-specific objective/lifecycle/artifact checks, and reject summaries that do not exactly match the derived result (found 2026-07-11 reviewing the coding conformance benchmark).
 
-<!-- applied-learning: verify-static-runtime-api-claims-against-the-pinned-toolchain-when-executable-evidence-disagrees -->
-<a id="applied-learning-verify-static-runtime-api-claims-against-the-pinned-toolchain-when-executable-evidence-disagrees"></a>
-**Verify static runtime API claims against the pinned toolchain when executable evidence disagrees.** Documentation or memory about an Erlang option can be stale across OTP releases; if a public behavioral test succeeds on the repository's pinned runtime, reproduce the disputed call directly there before redesigning around an assumed incompatibility. Treat the observed pinned behavior as evidence while still checking portability deliberately (found 2026-07-11 reviewing `:file.open` mode handling in eval persistence).
-
-<!-- applied-learning: a-command-name-policy-cannot-enforce-an-argument-sensitive-shell-safety-floor -->
-<a id="applied-learning-a-command-name-policy-cannot-enforce-an-argument-sensitive-shell-safety-floor"></a>
-**A command-name policy cannot enforce an argument-sensitive shell safety floor.** The pinned Bash `CommandPolicy` callback receives only command name and category, so it cannot see opaque payloads such as `sh -c`, `find -exec`, or `awk system(...)`, nor Arbor's dangerous flags. Do not claim capability-safe compound execution from that callback alone: add an argv-aware runtime gate or reject interpreter/wrapper and dynamically constructed forms fail closed, and keep the feature disabled while that boundary is incomplete (found 2026-07-11 reviewing CapShell resource-bound dogfood).
-
 <!-- applied-learning: disable-the-authority-mismatch-not-only-one-compound-shell-implementation -->
 <a id="applied-learning-disable-the-authority-mismatch-not-only-one-compound-shell-implementation"></a>
-**Disable the authority mismatch, not only one compound-shell implementation.** Stubbing CapShell still leaves a bypass if `ExecuteScript`, async/streaming authorization, a DOT shell handler, or `sandbox: :none` authorizes only the leading token and then executes the whole compound string. Agent-facing shell boundaries must reject compound input before authorization, approval creation, temporary files, sessions, or processes until runtime-expanded argv and process ownership can be proven; reserve unchecked compound execution for explicit trusted-system APIs (found 2026-07-11 reviewing the CapShell fail-closed correction).
-
-<!-- applied-learning: killing-a-port-owner-does-not-prove-its-descendants-stopped -->
-<a id="applied-learning-killing-a-port-owner-does-not-prove-its-descendants-stopped"></a>
-**Killing a Port owner does not prove its descendants stopped.** Timeout, cancellation, or output-limit code that sends SIGKILL only to the immediate OS PID can return while Git hooks, Mix children, helpers, or detached subprocesses continue side effects. Launch untrusted external work in an owned process group/container, terminate the whole group on every terminal path, await verified group exhaustion, and regress with delayed descendant markers (found 2026-07-11 reviewing the direct-argv shell correction).
+**Reject every agent-facing compound shell, not only one implementation.** `Arbor.Shell.CapShell` returns `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`. `Arbor.Shell.Sandbox` rejects compounds, including at sandbox `:none`, before approvals, temporary files, sessions, or processes. Apply that same fail-closed rejection to every agent-facing compound, wrapper, and dynamically expanded shell path: CapShell, script execution, async and streaming shell, and the DOT shell handler. A command-name policy cannot enforce a safety floor that depends on arguments. Unchecked compounds stay limited to explicit trusted-system APIs. Keep CapShell fail-closed. (Merged 2026-10-16 from 2 entries; first found 2026-07-11, last 2026-07-11.)
 
 <!-- applied-learning: a-port-env-option-is-an-override-list-not-an-empty-environment -->
 <a id="applied-learning-a-port-env-option-is-an-override-list-not-an-empty-environment"></a>
 **A Port `:env` option is an override list, not an empty environment.** Variables omitted from `Port.open/2` remain inherited from the Arbor VM, so passing only a pinned `PATH` still exposes ambient credentials to an authorized `printenv` child. Agent-facing sync, async, and streaming execution must force a shared deny-by-default environment that explicitly unsets inherited keys before adding the small internal allowlist; caller options and `sandbox: :none` must not disable it (found 2026-07-13 while designing the spawn-capable containment boundary).
-
-<!-- applied-learning: contained-mix-executable-not-found-can-mean-the-pinned-container-runtime-not-mix -->
-<a id="applied-learning-contained-mix-executable-not-found-can-mean-the-pinned-container-runtime-not-mix"></a>
-**Contained Mix `:executable_not_found` can mean the pinned container runtime, not Mix.** `Arbor.Actions.Mix` already resolves the reviewed repository wrapper, but spawn containment separately requires the Apple-signed `container` CLI at the fixed `/usr/local/bin/container` authority path. An unsigned Homebrew binary at `/opt/homebrew/bin/container` is intentionally rejected; do not widen the path policy or fall back to host execution merely to make validation pass. Inspect `validate/status.json` and verify code signing/runtime installation before debugging the wrapper (confirmed 2026-07-15 after both coding-fix delegations reached validation).
 
 <!-- applied-learning: apple-container-networking-must-request-the-reserved-none-network-explicitly -->
 <a id="applied-learning-apple-container-networking-must-request-the-reserved-none-network-explicitly"></a>
@@ -201,10 +177,6 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 <a id="applied-learning-structured-argv-does-not-require-whitespace-free-filesystem-paths"></a>
 **Structured argv does not require whitespace-free filesystem paths.** Apple Container's default application root is `~/Library/Application Support/com.apple.container`; rejecting whitespace in an otherwise canonical absolute path makes the stock service impossible to admit and does not add injection resistance when the path remains one argv/environment value. Bound byte length before UTF-8 or `Path` work, reject NUL/control bytes and non-canonical segments, and preserve valid spaces (found 2026-07-14 reviewing the Apple control-plane admission core against the 1.1.0 source).
 
-<!-- applied-learning: single-quote-shell-search-patterns-that-contain-backticks -->
-<a id="applied-learning-single-quote-shell-search-patterns-that-contain-backticks"></a>
-**Single-quote shell search patterns that contain backticks.** Backticks still perform command substitution inside double quotes, including in an `rg` pattern. Use single quotes or escape each backtick so a diagnostic search cannot execute fragments from the pattern (found 2026-07-14 while auditing Apple Container source references).
-
 <!-- applied-learning: a-trapped-process-that-runs-external-commands-will-receive-ordinary-port-exits -->
 <a id="applied-learning-a-trapped-process-that-runs-external-commands-will-receive-ordinary-port-exits"></a>
 **A trapped process that runs external commands will receive ordinary Port exits.** A broad `{:EXIT, _from, reason}` shutdown handler can mistake a completed `System.cmd/3` port for supervisor teardown and destroy live state mid-operation. Bind shutdown handling to the actual supervisor ancestor and ignore Port exits; monitor-based resource-owner death remains a separate message path (found 2026-07-16 implementing validation-resource crash cleanup).
@@ -213,26 +185,13 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 <a id="applied-learning-repository-reconstruction-must-handle-safe-relative-symlinks-without-weakening-containment"></a>
 **Repository reconstruction must handle safe relative symlinks without weakening containment.** Real repositories can contain links such as `AGENTS.md -> CLAUDE.md` or `.agents/skills -> ../.claude/skills`. Recreate only relative links whose normalized target stays inside the fixture root and outside `.git`; reject absolute targets, escapes, and Git-metadata targets rather than banning all symlinks or following them during copy (found 2026-07-16 preparing real Arbor benchmark fixtures).
 
-<!-- applied-learning: prime-apple-container-s-builder-explicitly-on-first-use -->
-<a id="applied-learning-prime-apple-container-s-builder-explicitly-on-first-use"></a>
-**Prime Apple Container's builder explicitly on first use.** Inspect `container system property list`, pull the configured builder image with bounded download concurrency, then run `container builder start` before the first build. Otherwise the automatic pull/start path can look like a missing BuildKit runtime or a hung build (found 2026-07-16 provisioning the standalone Apple Container 1.1.0 runtime).
-Record the builder's running/stopped state and creation identity before a build,
-not just its name. A build can recreate and start a previously stopped instance;
-the pre-existing name does not make that newly running instance unrelated to the
-task. Restore only the task's change after the build and verify the resulting
-inventory (found 2026-09-27 during native Git baseline renewal).
-
 <!-- applied-learning: a-trusted-bootstrap-cli-that-forks-needs-a-closed-process-tree-primitive-not-a-generic-no-fork-bypass -->
 <a id="applied-learning-a-trusted-bootstrap-cli-that-forks-needs-a-closed-process-tree-primitive-not-a-generic-no-fork-bypass"></a>
-**A trusted bootstrap CLI that forks needs a closed process-tree primitive, not a generic no-fork bypass.** Arbor's generic direct executor deliberately denies `fork`/`clone`; routing the signed Apple `container system status` probe through it returned `EPERM` before admission even though the exact command succeeded with an empty environment. Keep generic Shell and agent execution childless, and give only the pinned control-plane executable plus exact read-only argv shapes a bounded descendant-tracking runner with the same identity, deadline, output, and teardown guarantees (found 2026-07-16 during the Slice 2D live matrix).
+**A forking trusted CLI needs a closed process-tree primitive.** `Arbor.Shell.execute_direct/3` is childless. Killing the port owner does not prove that descendants stopped. Grant descendant execution only through `execute_spawn_capable/3` for an exact reviewed executable and argv, and prove that requirement per subcommand before widening fork authority. Do not lift the generic no-fork rule to accommodate one probe. Every terminal path — timeout, cancellation, launcher failure, and owner loss — must show bounded, escape-resistant exhaustion of that whole process tree. (Merged 2026-10-16 from 3 entries; first found 2026-07-11, last 2026-07-16.)
 
 <!-- applied-learning: apple-container-1-1-virtiofs-bind-sources-must-be-directories -->
 <a id="applied-learning-apple-container-1-1-virtiofs-bind-sources-must-be-directories"></a>
 **Apple Container 1.1 virtiofs bind sources must be directories.** Mounting the reviewed `bin/mix` file directly made `container create` fail with `path '.../bin/mix' is not a directory`. Keep Actions/tool authority bound to the exact wrapper file, then derive its canonical non-root parent at the pure execution-to-plan boundary and mount that directory read-only at `/arbor/bin`; the fixed entrypoint remains `/arbor/bin/mix` (found 2026-07-16 during the Slice 2D live matrix).
-
-<!-- applied-learning: prove-descendant-requirements-per-exact-cli-subcommand-before-expanding-fork-authority -->
-<a id="applied-learning-prove-descendant-requirements-per-exact-cli-subcommand-before-expanding-fork-authority"></a>
-**Prove descendant requirements per exact CLI subcommand before expanding fork authority.** Apple `container system status` fails under the generic no-fork runner, but the exact reviewed `list`, corrected `create`, and `start --attach` argv all succeeded through that same generic runner. A shared executable does not imply shared process behavior; reproduce the exact command before adding another fork-permitting launcher mode (found 2026-07-16 during the Slice 2D live matrix).
 
 <!-- applied-learning: one-shot-stdin-must-make-progress-concurrently-with-child-stdout -->
 <a id="applied-learning-one-shot-stdin-must-make-progress-concurrently-with-child-stdout"></a>
@@ -240,11 +199,7 @@ inventory (found 2026-09-27 during native Git baseline renewal).
 
 <!-- applied-learning: a-contained-mix-guest-must-own-every-executable-tool-it-needs -->
 <a id="applied-learning-a-contained-mix-guest-must-own-every-executable-tool-it-needs"></a>
-**A contained Mix guest must own every executable tool it needs.** `AppleContainerPlanCore` reconstructs a closed guest environment, so a host `MIX_ARCHIVES` value does not cross the boundary. A materialized dependency tree alone is insufficient when Mix cannot load Hex/Rebar or a dependency falls back to native compilation/download. Put Hex, Rebar, Linux build tools and headers, and checksum-verified precompiled NIF archives in the immutable Linux image; expose only fixed guest `MIX_HOME`, `MIX_ARCHIVES`, and `ELIXIR_MAKE_CACHE_DIR` values; then prove an empty-build compile with networking disabled (found 2026-07-16/17 during Phase 6 cross-app dogfood).
-Manual admission smoke tests must project all three fixed environment values too:
-omitting `ELIXIR_MAKE_CACHE_DIR` makes an available precompiled NIF look absent
-and causes a misleading network fallback (clarified 2026-08-26 while refreshing
-the `ex_mcp 1.1.0` baseline).
+**A contained Mix guest must own every executable it will run.** Install Hex, Rebar, build tools, and checksum-bound native assets in the immutable image. `HEX_OFFLINE=1` in `Arbor.Shell.TrustedBuild.Plan` does not disable dependency runtime networking by itself. Export only the fixed guest `MIX_HOME`, `MIX_ARCHIVES`, and `ELIXIR_MAKE_CACHE_DIR` (`Arbor.Shell.AppleContainerPlanCore`); omitting the cache directory makes a precompiled NIF look missing. Use a private writable build parent, not one child of a shared parent. `System.cmd("kill")` requires an image executable, not a shell builtin. `File.chmod/2` strips sticky bits; set them with the OS chmod sticky-bit mode and check with `stat`. Disable runtime network refresh before application startup, assert those workers are absent, and keep seed data frozen. (Merged 2026-10-16 from 2 entries; first found 2026-07-16, last 2026-09-08.)
 
 <!-- applied-learning: smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed -->
 <a id="applied-learning-smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed"></a>
@@ -262,25 +217,13 @@ the `ex_mcp 1.1.0` baseline).
 <a id="applied-learning-prove-container-mounts-under-a-read-only-root"></a>
 **Prove container mounts under a read-only root.** A writable image directory can make an invalid or ignored mount option appear successful. Verify the exact CLI argv with a read-only root, inspect `/proc/mounts`, confirm the expected mode, and perform a write; Apple Container 1.1.0 accepts `--tmpfs /tmp` as a path-only pair, while Docker-style `:size=...,mode=...` text leaves `/tmp` read-only (found 2026-07-17 while correcting the guest tmpfs planner).
 
-<!-- applied-learning: exact-security-inventories-should-be-batched-before-expensive-contained-execution -->
-<a id="applied-learning-exact-security-inventories-should-be-batched-before-expensive-contained-execution"></a>
-**Exact security inventories should be batched before expensive contained execution.** Git tracked/untracked enumeration plus segment/path/lstat verification is the authorization boundary; one container per verified file is merely an execution strategy and can make a bounded stage structurally impossible. Preserve the exact verified argv entries, then partition them by closed file-count and argument-byte limits so each child remains bounded while container startup is amortized (found 2026-07-17 when per-file Apple Container lifecycle overhead exhausted a 20-minute stage after only a small fraction of 511 files).
-
 <!-- applied-learning: mix-run-retains-the-script-argument-in-system-argv-0 -->
 <a id="applied-learning-mix-run-retains-the-script-argument-in-system-argv-0"></a>
 **`mix run` retains the script-argument `--` in `System.argv/0`.** For `mix run --no-start runner.exs -- result.etf tests...`, strip exactly one leading separator, validate and store the owner-issued result path before `Mix.Task.run/2`, and never reread argv from an ExUnit completion callback because the nested Mix task may replace it (found 2026-07-18 repairing the two-revision security-regression harness).
 
-<!-- applied-learning: a-raw-elixir-sigil-does-not-escape-the-outer-shell-quote -->
-<a id="applied-learning-a-raw-elixir-sigil-does-not-escape-the-outer-shell-quote"></a>
-**A raw Elixir sigil does not escape the outer shell quote.** When the whole `arbor.rpc` expression is enclosed in shell single quotes, an apostrophe anywhere inside the `~S|...|` message still terminates the shell argument before Elixir sees it. Either keep the message apostrophe-free, or construct the argv without a shell-quoted expression; raw sigils solve Elixir quoting only (found 2026-07-18 steering the security-regression test-seam follow-up).
-
 <!-- applied-learning: a-hermetic-mix-shell-seam-must-own-wrapper-resolution-as-well-as-execution -->
 <a id="applied-learning-a-hermetic-mix-shell-seam-must-own-wrapper-resolution-as-well-as-execution"></a>
 **A hermetic Mix shell seam must own wrapper resolution as well as execution.** Replacing `:mix_shell_module` alone is insufficient when projection construction resolves the production wrapper before the configured shell runs. Let the same trusted named shell optionally resolve the exact wrapper it accepts, validate that result at the action boundary, and thread one validated identity through both filesystem projections and execution; keep the public production resolver code-root-only (found 2026-07-18 in `task_1992`).
-
-<!-- applied-learning: the-working-grok-no-shell-boundary-is-an-attested-arbor-owned-profile -->
-<a id="applied-learning-the-working-grok-no-shell-boundary-is-an-attested-arbor-owned-profile"></a>
-**The working Grok no-shell boundary is an attested Arbor-owned profile.** Stage a private `0600` `--agent-profile` with exact bytes, path, type, and mode attested at launch and reconnect; expose native file tools while disallowing `run_terminal_cmd`, `task`, `get_task_output`, and `kill_task`. The proof must be capability-backed and include both a denied terminal marker and a successful native edit (found 2026-07-19 during Grok ACP containment work).
 
 <!-- applied-learning: classify-validation-capacity-only-from-trusted-shell-termination-flags -->
 <a id="applied-learning-classify-validation-capacity-only-from-trusted-shell-termination-flags"></a>
@@ -292,16 +235,6 @@ closed JSON-clean termination envelope, and otherwise preserve the ordinary
 compile failure. Route trusted capacity terminals directly to owner recovery
 without consuming worker rework (found 2026-07-28 after a default compile hit
 its exact stage deadline and was incorrectly treated as a code defect).
-
-<!-- applied-learning: do-not-print-full-process-command-lines-during-diagnostics -->
-<a id="applied-learning-do-not-print-full-process-command-lines-during-diagnostics"></a>
-**Do not print full process command lines during diagnostics.** Provider CLIs,
-BEAM launchers, and wrapper processes can carry credentials or signed material
-in argv. Inspect bounded fields such as PID, elapsed time, executable name
-(`comm`), working directory, and task telemetry instead of `ps ... command`;
-redact any unavoidable argv evidence before it reaches logs or conversation
-output (found 2026-07-28 while checking whether delegated validation was still
-active).
 
 <!-- applied-learning: inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled -->
 <a id="applied-learning-inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled"></a>
@@ -341,14 +274,7 @@ dependency baseline).
 
 <!-- applied-learning: secrets-must-not-be-passed-or-printed-in-process-argv -->
 <a id="applied-learning-secrets-must-not-be-passed-or-printed-in-process-argv"></a>
-**Secrets must not be passed or printed in process argv.** Command lines are
-visible to routine same-user diagnostics and may be system-visible; Arbor's
-Erlang distribution cookie carries remote code-execution authority. Deliver
-secrets through a permissioned file or protected post-spawn channel, construct
-child argv structurally instead of interpolating shell text, and let attach
-commands reuse the protected source without echoing its value. A secret being
-operator-controlled does not make argv exposure or shell interpolation safe
-(found 2026-08-02 while validating managed lifecycle identity).
+**Secrets must not be passed or printed in process argv.** An Erlang distribution cookie in argv is remote-code-execution authority, including when an operator supplied it. Deliver secrets through a permissioned file or a post-spawn channel, and construct argv structurally with `Arbor.Shell.execute_direct/3` rather than a shell string. Diagnostics record bounded metadata — pid, elapsed time, command name, cwd, and task telemetry — and never the full command line. Redact argv when a diagnostic cannot avoid holding it. (Merged 2026-10-16 from 2 entries; first found 2026-07-28, last 2026-08-02.)
 
 <!-- applied-learning: validation-readiness-must-exercise-the-final-admission-boundary -->
 <a id="applied-learning-validation-readiness-must-exercise-the-final-admission-boundary"></a>
@@ -384,17 +310,6 @@ must reject local aliases in the policy source; writing derived state back into
 policy conflates trust planes and makes a valid provisioned image inadmissible
 (found 2026-08-28 when baseline promotion installed a `127.0.0.1:0` workload
 alias as `image_policy.image`).
-
-<!-- applied-learning: propagate-nested-readiness-deadlines-to-spawn-capable-probes -->
-<a id="applied-learning-propagate-nested-readiness-deadlines-to-spawn-capable-probes"></a>
-**Propagate nested readiness deadlines to spawn-capable probes.** A readiness
-callback cannot safely invoke a probe with a 300-second default underneath a
-20-second callback and 30-second transport. Give the full probe an explicit
-readiness-owned subdeadline, leave bounded headroom for the enclosing
-projection, and keep the transport strictly larger so each layer returns its
-own timeout and contains its children (found 2026-08-28 when full Apple
-Container admission took 26 seconds and coding readiness killed it at 20 and
-then 25 seconds).
 
 <!-- applied-learning: final-publication-proofs-must-reassert-frozen-security-invariants -->
 <a id="applied-learning-final-publication-proofs-must-reassert-frozen-security-invariants"></a>
@@ -455,12 +370,7 @@ calling the host ready. For provisioning, DHCP success is not internet admission
 upstream virtual-MAC allowlists need owner approval, not a NAT bypass. Rootless
 Podman may additionally need the newly installed user dbus.socket started. Record
 these separately from candidate validation or journey acceptance (2026-09-07).
+
 <!-- applied-learning: provision-and-probe-through-the-same-pinned-container-installation -->
 <a id="applied-learning-provision-and-probe-through-the-same-pinned-container-installation"></a>
-**Provision and probe through the same pinned container installation.** Use the
-exact admitted CLI and install root for service lifecycle commands, not whichever
-binary leads PATH. Different installations can register their API server under
-the same launchd label and app root. Compare CLI/API versions, launchd program
-and install root before changing a strict parser; restore the intended service
-when those disagree (found 2026-09-27 when Homebrew Container 1.4.1 provisioning
-replaced the service used by Arbor's root-owned 1.1.0 CLI).
+**Provision and probe through the same pinned container installation.** The Apple container CLI is pinned at `/usr/local/bin/container` in `config/config.exs` and `Arbor.Shell.ExecutablePolicy`. Unsigned Homebrew builds are rejected. `:executable_not_found` can mean that pinned runtime is absent, not that Mix is absent inside a guest. Different installs can share a launchd label. Diagnose the executable and the install identity before changing a parser or a containment policy. Do not widen the path allowlist, and do not fall back to a host copy, to make a probe pass. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-09-27.)

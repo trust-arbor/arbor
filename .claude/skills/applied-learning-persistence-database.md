@@ -90,11 +90,7 @@ connection while another connection holds the writer lock. An implicit
 
 <!-- applied-learning: injected-storage-identity-must-thread-through-every-operation-not-only-capability-probes -->
 <a id="applied-learning-injected-storage-identity-must-thread-through-every-operation-not-only-capability-probes"></a>
-**Injected storage identity must thread through every operation, not only capability probes.** Accepting `server:` or backend options for a durability check while later discovery, claim, settlement, or recovery calls silently use the global default creates a split-brain workflow. Carry one normalized store target through every read and mutation, and regress with a non-default store whose global peer contains conflicting data (found 2026-07-13 reviewing RunJournal recovery wiring).
-
-<!-- applied-learning: a-worktree-changes-relative-durable-store-identity -->
-<a id="applied-learning-a-worktree-changes-relative-durable-store-identity"></a>
-**A worktree changes relative durable-store identity.** Arbor Security's JSONFile backend resolves `.arbor/security` from the server process CWD, so a server launched from a disposable worktree sees a new empty identity/capability/signing-key universe even when it uses the normal master key. For an intentional recovery runtime, explicitly bind the canonical project security store before startup; do not weaken signed-request auth or recreate agent authority piecemeal (found 2026-07-13 recovering the Phase 6 delegator runtime).
+**Thread injected storage identity through every operation, not only capability probes.** One normalized authorized store is the target of every internal read and mutation. Public resume drops caller-selected `:journal_opts`, `:server`, `:store`, `:store_name`, `:store_opts`, and `:checkpoint_store_opts` in `sanitize_public_resume_opts/1`. A caller-selected journal or store on the public resume API must not move claim or execution off the canonical target the probe used. A capability probe that succeeds against one store does not authorize a mutation against another. Lookup, claim, and mutation stay on that same authority. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-15.)
 
 <!-- applied-learning: a-single-genserver-is-not-a-cross-beam-durable-store-lock -->
 <a id="applied-learning-a-single-genserver-is-not-a-cross-beam-durable-store-lock"></a>
@@ -107,10 +103,6 @@ connection while another connection holds the writer lock. An implicit
 <!-- applied-learning: a-node-keyed-checkpoint-entry-is-not-proof-of-one-execution-visit -->
 <a id="applied-learning-a-node-keyed-checkpoint-entry-is-not-proof-of-one-execution-visit"></a>
 **A node-keyed checkpoint entry is not proof of one execution visit.** DOT nodes can repeat, so a later visit can overwrite the same outcome/digest key and accidentally make an older pending intent look applied. Bind recovery evidence to the exact owner-issued `execution_id` plus `input_hash`, outcome status, timestamp, and result digest; compare the visit identity before using node progress or settling an effect (found 2026-07-15 implementing Engine lifecycle L3C).
-
-<!-- applied-learning: a-public-resume-must-claim-and-mutate-the-same-canonical-journal-target -->
-<a id="applied-learning-a-public-resume-must-claim-and-mutate-the-same-canonical-journal-target"></a>
-**A public resume must claim and mutate the same canonical journal target.** Sanitizing alternate-journal lookup is insufficient if caller-provided `journal_opts` or `server` values still reach Engine after the default record is claimed. Remove internal journal-target selectors at the public boundary and regress that an alternate target remains untouched (found 2026-07-15 reviewing Engine lifecycle L3C public settlement).
 
 <!-- applied-learning: terminal-checkpoint-fast-paths-must-pass-through-canonical-recovery -->
 <a id="applied-learning-terminal-checkpoint-fast-paths-must-pass-through-canonical-recovery"></a>
@@ -130,11 +122,7 @@ connection while another connection holds the writer lock. An implicit
 
 <!-- applied-learning: preserve-missing-checkpoint-ordering-without-accepting-an-unverified-checkpoint -->
 <a id="applied-learning-preserve-missing-checkpoint-ordering-without-accepting-an-unverified-checkpoint"></a>
-**Preserve missing-checkpoint ordering without accepting an unverified checkpoint.** On an established public resume surface that already reports `:checkpoint_not_found` before the Engine identity gate, deriving credentials before checking durable presence changes the API contract and can break compatibility tests. In the no-secret branch only, perform the exact Config-owned fetch without HMAC solely to distinguish genuine absence; if a payload exists, discard it and return `:identity_required_for_resume` before claim. Authenticated callers still perform one HMAC-verified fetch, and no unverified payload may reach execution (found 2026-07-15 reviewing L4 public durable resume).
-
-<!-- applied-learning: a-distributed-test-must-restore-the-controller-s-original-distribution-state -->
-<a id="applied-learning-a-distributed-test-must-restore-the-controller-s-original-distribution-state"></a>
-**A distributed test must restore the controller's original distribution state.** `LocalCluster.start/0` can turn the test runner into a named distributed node; leaving that state behind changes `node()` and makes later local-only claim tests fail as cross-node operations. Record whether the suite started distribution, stop every member, and stop LocalCluster/net_kernel only when the suite owns that transition (found 2026-07-15 composing the L4 proof with the fenced-claim suite).
+**Preserve missing-checkpoint ordering without accepting an unverified checkpoint.** Require identity before Engine resume. The public facade's only exception is a bounded presence probe: `Arbor.Orchestrator.Engine.Checkpoint.fetch_persisted/2` without an HMAC. If a payload exists, return `:identity_required_for_resume` and discard that payload before any claim or execution. If none exists, return `:checkpoint_not_found`. Do not turn the probe into a lifecycle lookup that reveals or applies unverified contents. A missing checkpoint and an unverified checkpoint are different answers; the probe must not collapse them. Authenticate before any other existence-bearing resume step. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-07-15.)
 
 <!-- applied-learning: boot-lifecycle-normalization-must-publish-durable-authority-before-hot-state -->
 <a id="applied-learning-boot-lifecycle-normalization-must-publish-durable-authority-before-hot-state"></a>
@@ -150,52 +138,21 @@ followed by unconditional put can overwrite a newer revocation. Regress the held
 writer/restarted reader and lazy/bulk migration races against real storage
 (2026-10-03 Profile notice authority review).
 
-<!-- applied-learning: disable-production-durable-stores-before-the-test-application-starts-do-not-tear-them-down-in-test-helper-exs -->
-<a id="applied-learning-disable-production-durable-stores-before-the-test-application-starts-do-not-tear-them-down-in-test-helper-exs"></a>
-**Disable production durable stores before the test application starts; do not tear them down in `test_helper.exs`.** A test-helper teardown runs only after the application-owned child may already have opened and hydrated real operator state, and deleting the child can make an incorrect test configuration appear isolated. Set the test-environment child config to disabled, inject temporary roots into focused tests, and assert the production child was never started (found 2026-07-16 reviewing retained-workspace restart persistence).
-
-<!-- applied-learning: durable-evidence-limits-must-be-symmetric-on-write-and-reload-and-a-cache-must-detect-backing-store-drift -->
-<a id="applied-learning-durable-evidence-limits-must-be-symmetric-on-write-and-reload-and-a-cache-must-detect-backing-store-drift"></a>
-**Durable evidence limits must be symmetric on write and reload, and a cache must detect backing-store drift.** A journal that enforces aggregate bytes or exact inventory only at startup can accept writes that poison its next restart; a cache-only `list` can also hide added, deleted, or corrupted evidence from a fail-closed allocation probe. Bind a bounded on-disk snapshot (exact names, raw sizes/digests, root identity), revalidate it before security decisions and mutations, and apply the same capacity math to replacement writes and hydration (found 2026-07-16 reviewing retained-workspace restart durability).
-
 <!-- applied-learning: durable-creation-intent-must-precede-the-create-side-effect-durable-ownership-must-precede-acquisition-success -->
 <a id="applied-learning-durable-creation-intent-must-precede-the-create-side-effect-durable-ownership-must-precede-acquisition-success"></a>
 **Durable creation intent must precede the create side effect; durable ownership must precede acquisition success.** If a newly created workspace exists only in a GenServer map, a registry/BEAM crash erases its task/principal binding and a later acquisition can treat the surviving path as reusable work, reset it, and destroy dirty evidence. Reserve a bounded non-authoritative `creating` marker before Git may create, then replace it with an identity-bearing `active` marker before replying success. An unresolved intent blocks adoption but grants no deletion authority; settle it only after both path and Git registration are proven absent (found 2026-07-16 reviewing retained-workspace restart durability).
 
 <!-- applied-learning: a-durable-writer-and-restart-reader-must-enforce-the-same-closed-schema -->
 <a id="applied-learning-a-durable-writer-and-restart-reader-must-enforce-the-same-closed-schema"></a>
-**A durable writer and restart reader must enforce the same closed schema.** Accepting task and principal as independently optional on write while requiring them as a pair on restore lets the system write a marker that poisons its own next boot. Validate paired fields and all structural limits on both encode and decode paths, preferably before the side effect that would require the record (found 2026-07-16 reviewing retained-workspace restart durability).
-
-<!-- applied-learning: identifiers-used-as-durable-filenames-need-one-canonical-case-stable-grammar -->
-<a id="applied-learning-identifiers-used-as-durable-filenames-need-one-canonical-case-stable-grammar"></a>
-**Identifiers used as durable filenames need one canonical, case-stable grammar.** Distinct logical IDs such as `ws_A` and `ws_a` can alias on the default case-insensitive macOS filesystem even when they are separate map keys. Validate filename-backed IDs to one case before any path construction, and reject non-canonical forms rather than normalizing an authority-bearing identifier after the fact (found 2026-07-16 reviewing retained-workspace restart durability).
+**A durable writer and its restart reader must enforce the same closed schema.** Apply the same closed structural schema and the same aggregate capacity before a write and during hydration. A cache of that store revalidates the bounded backing inventory — names, sizes or digests, and root identity — before any security decision or mutation. Drift between the cache and the backing store fails closed. A limit that exists only on the write path, or only on reload, is not a limit. (Merged 2026-10-16 from 2 entries; first found 2026-07-16, last 2026-07-16.)
 
 <!-- applied-learning: a-retention-ttl-starts-when-ownership-becomes-retainable-not-when-the-active-lease-was-acquired -->
 <a id="applied-learning-a-retention-ttl-starts-when-ownership-becomes-retainable-not-when-the-active-lease-was-acquired"></a>
 **A retention TTL starts when ownership becomes retainable, not when the active lease was acquired.** An active marker may legitimately outlive the eventual retention window; when a prior-runtime active marker is first converted to retained evidence, give it exactly one fresh bounded TTL and persist that conversion. Later restarts consume the persisted remaining lifetime instead of refreshing it again (found 2026-07-16 reviewing retained-workspace restart durability).
 
-<!-- applied-learning: a-durable-store-and-its-json-mirror-can-preserve-different-scalar-representations -->
-<a id="applied-learning-a-durable-store-and-its-json-mirror-can-preserve-different-scalar-representations"></a>
-**A durable store and its JSON mirror can preserve different scalar representations.** Arbor's checkpoint store keeps known outcome-status atoms while `checkpoint.json` encodes them as strings; recursively normalizing map keys does not normalize scalar values. Decode closed enums from both trusted atom and JSON string forms, fail closed on unknown values, and regress both store-backed resume and file round-trips so one path cannot silently turn `:fail` into `:success` (found 2026-07-16 exposing validation failures after terminal recovery).
-
-For atom-keyed settings APIs, accept persisted string keys without creating atoms,
-and remove both key forms on update/delete. Test a real cold-store reload:
-the live cache can hide unreadable reverse indexes and duplicate JSON keys
-(found 2026-09-28 when identity resolution survived restart but alias listing
-reported no linked identities).
-
-Normalize producer-owned closed enum values before a strict durable JSON
-boundary; key normalization alone does not convert atom values. Preserve the
-codec's rejection of arbitrary non-JSON values. On 2026-10-04, real protected
-conversation denial reached its public answer path but failed before commit:
-the producer emitted `decision: :deny`, and the durable codec correctly rejected
-that atom. Cover deny and rework independently, including recovered human,
-resource and decision evidence; an approved positive uses different metadata
-and cannot prove rejection persistence.
-
 <!-- applied-learning: a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome -->
 <a id="applied-learning-a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome"></a>
-**A checkpoint receipt digest must cover a losslessly rehydratable Outcome.** `EffectOwner` hashes the complete `%Outcome{}`, so `Checkpoint.deserialize/1` must restore every non-transient hashed field in its original closed type. Dropping `output_taint` changed a valid settled receipt after JSON reload and made same-run recovery fail with `:result_digest_mismatch`; never hide that defect by clearing `current_effect` or resetting its generation in a test fixture. Regress atom and full-struct taint through both file and configured-store loading whenever the persisted Outcome shape changes (found 2026-07-16 repairing stale checkpoint-resume tests).
+**A checkpoint receipt digest must cover a losslessly rehydratable outcome.** `Arbor.Orchestrator.Engine.EffectOwner.outcome_result_digest/1` hashes the complete `%Outcome{}` with `:erlang.term_to_binary/2` and `[:deterministic]`, omitting only an empty legacy `input_taint`. Every other digest-bearing field, including defaults, is part of the schema: adding or dropping one changes the receipt. A durable store and a JSON mirror can preserve different scalar forms, so normalize only closed key and scalar representations and restore them losslessly. `Arbor.Orchestrator.Engine.Checkpoint` parses `output_taint` as both the closed atom and its string. Do not copy the empty-`input_taint` omission onto any other owner. Load persisted checkpoints with `Checkpoint.fetch_persisted/2`. (Merged 2026-10-16 from 3 entries; first found 2026-07-16, last 2026-10-06.)
 
 <!-- applied-learning: no-start-checkpoint-diagnostics-must-select-file-only-persistence-explicitly -->
 <a id="applied-learning-no-start-checkpoint-diagnostics-must-select-file-only-persistence-explicitly"></a>
@@ -203,11 +160,11 @@ and cannot prove rejection persistence.
 
 <!-- applied-learning: generated-durable-identifiers-need-one-shared-contract-from-creation-through-recovery -->
 <a id="applied-learning-generated-durable-identifiers-need-one-shared-contract-from-creation-through-recovery"></a>
-**Generated durable identifiers need one shared contract from creation through recovery.** The Apple Container executor generated DNS-safe `a<hex>` names while the journal and recovery cores admitted only `arbor-v1-<32 lowercase hex>`, so every live workload failed at journal reservation with `:invalid_unit_name` despite passing executor preflight. Put versioned identifier construction and validation in one pure module, exercise the generated value through the downstream durable cores, and use the same validator in leaked-resource inventories so a stale test regex cannot hide cleanup failures (found 2026-07-16 during the Slice 2D live matrix).
+**Generated durable identifiers need one shared contract from creation through recovery.** Use one versioned, case-stable constructor and validator for creation, filenames, journal codecs, recovery, and inventory. Reject a noncanonical authority-bearing form. Do not silently rename it: a case-insensitive filesystem treats the renamed spelling as the same file and hides a collision. Apply the same constructor at recovery that was used at creation, including when the identifier is also a filename. The grammar is part of the authority check, not a display preference. (Merged 2026-10-16 from 2 entries; first found 2026-07-16, last 2026-07-16.)
 
 <!-- applied-learning: test-vms-must-not-inherit-durable-operator-runtime-configuration -->
 <a id="applied-learning-test-vms-must-not-inherit-durable-operator-runtime-configuration"></a>
-**Test VMs must not inherit durable operator runtime configuration.** A spawned `MIX_ENV=test` process inherited the live server's `ARBOR_APPLE_CONTAINER_CONFIG_PATH`, started the production unit journal, and failed on the live journal lock before tests ran. Runtime loaders for operator-owned durable state must be explicitly disabled under `config_env() == :test`; test fixtures should opt into isolated configuration themselves (found 2026-07-17 during contained cross-app validation).
+**Test VMs must not inherit durable operator runtime configuration.** Disable inherited operator loaders and production durable children before the test application starts. Do not tear those stores down from `test_helper.exs` after boot; that races a child that has already opened the operator root. Fixtures opt into private configured roots. A helper that stops or deletes a production store after the application has started can destroy operator data the test VM inherited. Assert that the real operator state was never opened. (Merged 2026-10-16 from 2 entries; first found 2026-07-16, last 2026-07-17.)
 
 <!-- applied-learning: a-failed-durable-transition-must-preserve-truthful-residue-even-without-a-prior-hot-record -->
 <a id="applied-learning-a-failed-durable-transition-must-preserve-truthful-residue-even-without-a-prior-hot-record"></a>
@@ -230,16 +187,7 @@ when durable interaction hydration committed its claim but discarded the receipt
 
 <!-- applied-learning: process-local-monotonic-ids-cannot-name-durable-resources -->
 <a id="applied-learning-process-local-monotonic-ids-cannot-name-durable-resources"></a>
-**Process-local monotonic IDs cannot name durable resources.** BEAM
-`System.unique_integer/1` is unique only inside one VM lifetime. Reusing its
-short decimal output for task IDs after restart can collide with retained
-artifacts, approvals, capabilities, or other durable provenance from an older
-run. Use the shared cryptographically random identifier primitive for every ID
-that crosses a restart boundary, replace every public fallback that can mint
-that ID, and reject an explicit duplicate before spawning or replacing an
-in-memory owner. Keep immutable stores fail closed on same-name/different-content
-reuse as the final cross-restart backstop (found 2026-07-28 when live
-`task_58178` collided with a retained 2026-07-19 coding artifact).
+**Process-local monotonic ids cannot name durable resources.** `System.unique_integer/1` is unique only inside one VM. Durable resource ids, and fixture names that can outlive that VM, use `Arbor.Identifiers.generate_id/1`, which draws `:crypto.strong_rand_bytes(16)`. Reject a duplicate ownership claim before replacing the existing record. An immutable store fails closed when the same name arrives with different content. Cleanup deletes only the exact owned fixture identity captured at creation, not a name regenerated after restart. (Merged 2026-10-16 from 2 entries; first found 2026-07-16, last 2026-07-28.)
 
 <!-- applied-learning: negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence -->
 <a id="applied-learning-negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence"></a>
@@ -273,33 +221,11 @@ while legacy unknown lineage is admitted only to cleanup recovery (found
 
 <!-- applied-learning: shared-durable-storage-does-not-make-hot-projections-cluster-global -->
 <a id="applied-learning-shared-durable-storage-does-not-make-hot-projections-cluster-global"></a>
-**Shared durable storage does not make hot projections cluster-global.** A GenServer that replays a shared EventLog on startup and after local writes will not observe another node's append until it replays again. Describe the implemented guarantee as restart durability, add an explicit bounded reconciliation or cluster-owned authority for live convergence, and use signals only as latency hints rather than control-plane truth (found 2026-07-31 reviewing provider-route evidence before Phase E rollout).
+**Shared durable storage does not make hot projections cluster-global.** Startup rehydration is not runtime discovery of a remote owner. Refresh remote durable changes with a bounded runtime reconciliation, and do not boot-normalize a live remote owner. Keep a local pid only while the durable ownership and status still match that pid. Do not delete on a missing hot projection. A shared database row is not a live process registration on every node. Signals are latency hints, not control-plane truth. (Merged 2026-10-16 from 2 entries; first found 2026-07-15, last 2026-07-31.)
 
-<!-- applied-learning: durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections -->
-<a id="applied-learning-durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections"></a>
-**Durable inventory scans must not run inside journal-owner critical sections.**
-Full list/fetch/decode scans grow with history and can exceed ordinary GenServer
-call timeouts, starving effect-receipt writes and turning successful execution
-into `:journal_unavailable`. Collect and validate in a bounded worker, keep the
-owner responsive, then apply conflict-safely against a hot-state snapshot so
-concurrent durable-first writes win; regress both responsiveness and stale
-overwrite (found 2026-08-26 when a 29,034-row RunJournal refresh took about 5.8
-seconds and terminalized P1B-2A).
 <!-- applied-learning: bound-active-audit-work-separately-from-durable-history -->
 <a id="applied-learning-bound-active-audit-work-separately-from-durable-history"></a>
 **Bound active audit work separately from durable history.** A finite outbox or recovery working-set budget must not become a lifetime event quota when completed-operation fingerprints accumulate. Keep durable history and duplicate/conflict evidence in scalable storage, reclaim hot admission capacity only after verified durable transfer, and qualify sustained operation beyond the hot bound as well as outage/restart behavior. An empty pending queue does not prove sustainable admission. Do not declare rollout ready while terminal retirement remains deferred (user challenge and live security-journal exhaustion, 2026-09-27).
-
-<!-- applied-learning: treat-default-struct-fields-as-receipt-schema-changes -->
-<a id="applied-learning-treat-default-struct-fields-as-receipt-schema-changes"></a>
-**Treat default struct fields as receipt schema changes.** When receipts hash
-a struct using deterministic Erlang external term format, adding an empty
-default field changes the digest even if its JSON representation is additive.
-Preserve each owner's accepted digest schema; normalize only the exact legacy
-default where compatibility requires it, while hashing every nonempty or
-malformed value. Prove recovery with independently retained signed checkpoints
-and actual predecessor receipts, plus changed-evidence rejection. Do not copy
-one owner's normalization into another whose current schema already includes
-the field (found 2026-10-06 while backporting Workflow input taint into Main).
 
 <!-- applied-learning: durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity -->
 <a id="applied-learning-durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity"></a>
