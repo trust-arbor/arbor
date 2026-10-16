@@ -1890,8 +1890,10 @@ defmodule Arbor.Security do
   Validate an imported skill map through reflex screening.
 
   Checks the skill name as command context and the skill body as URL
-  context via `Arbor.Security.Reflex.check/1`. Warnings are admissible;
-  blocks reject. Reflex operational failures become `:reflex_unavailable`.
+  context via `Arbor.Security.Reflex.check/1`, after normalizing rot13,
+  base64, and hex views. Dense encoded blobs that will not decode are
+  rejected. Warnings are admissible; blocks reject. Reflex operational
+  failures become `:reflex_unavailable`.
   """
   @spec validate_imported_skill(map()) ::
           :ok
@@ -1900,11 +1902,7 @@ defmodule Arbor.Security do
   def validate_imported_skill(skill) when is_map(skill) do
     name = imported_skill_text(skill, :name)
     body = imported_skill_text(skill, :body)
-
-    with :ok <- check_imported_skill_context(%{command: name}),
-         :ok <- check_imported_skill_context(%{url: body}) do
-      :ok
-    end
+    Arbor.Security.ImportedSkillScreen.validate(name, body)
   end
 
   def validate_imported_skill(_skill), do: {:error, :invalid_skill}
@@ -1915,21 +1913,6 @@ defmodule Arbor.Security do
       _ -> ""
     end
   end
-
-  defp check_imported_skill_context(context) do
-    context
-    |> Reflex.check()
-    |> normalize_imported_skill_reflex()
-  rescue
-    _ -> {:error, :reflex_unavailable}
-  catch
-    _, _ -> {:error, :reflex_unavailable}
-  end
-
-  defp normalize_imported_skill_reflex(:ok), do: :ok
-  defp normalize_imported_skill_reflex({:warned, _warnings}), do: :ok
-  defp normalize_imported_skill_reflex({:blocked, _reflex, _message}), do: {:error, :blocked}
-  defp normalize_imported_skill_reflex(_other), do: {:error, :malformed_reflex_result}
 
   @doc """
   Standalone egress authorization for callers WITHOUT an operation capability
