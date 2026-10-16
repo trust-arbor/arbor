@@ -155,6 +155,12 @@ defmodule Arbor.AI.AcpTaskControlTest do
         client_opts: Keyword.put_new(client_opts, :test_pid, self())
       )
 
+    # start_link returns after init; :start_client still runs in handle_continue.
+    # send_message while status is :starting replies {:error, {:not_ready, :starting}}
+    # and never calls FakeClient.prompt — a ~50% 100ms assert_receive miss.
+    # await_ready is a GenServer.call, so it waits for continue to finish.
+    assert :ok = AcpSession.await_ready(session)
+
     on_exit(fn -> close_session(session) end)
     session
   end
