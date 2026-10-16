@@ -874,6 +874,22 @@ defmodule Arbor.AI.AcpSessionTest do
       Agent.get(:sys.get_state(session).client, & &1.opts)
     end
 
+    test "security regression: explicit shell pre-allow options cannot skip the permission callback" do
+      session =
+        start_adapter_session(ExMCP.ACP.Adapters.ClaudeSDK,
+          permission_mode: :default,
+          allowed_tools: ["Read", "Bash", "Bash(*)", "exec_command", "*"]
+        )
+
+      allowed =
+        session
+        |> started_client_opts()
+        |> Keyword.fetch!(:adapter_opts)
+        |> Keyword.fetch!(:allowed_tools)
+
+      assert allowed == ["Read", "mcp__arbor-tools"]
+    end
+
     test "Claude gets the ToolServer through a private --mcp-config file, strict, pre-allowed" do
       session =
         start_adapter_session(ExMCP.ACP.Adapters.ClaudeSDK, [permission_mode: :default],

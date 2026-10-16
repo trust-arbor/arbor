@@ -6,6 +6,13 @@ defmodule Arbor.AI.AcpSession.ToolProfileCoreTest do
 
   defp modes(map), do: fn uri -> Map.get(map, uri, :deny) end
 
+  test "security regression: shell tools stay askable even when their ACP policy is auto" do
+    profile = Core.derive(["arbor://acp/tool/Bash", "arbor://acp/tool/Read"], fn _ -> :auto end)
+    assert profile.allowed_tools == ["Read"]
+    assert profile.gated_tools == ["Bash"]
+    refute "Bash" in Core.adapter_opts(profile)[:allowed_tools]
+  end
+
   test "no tool capabilities → nothing allowed, everything unlisted denied" do
     profile =
       Core.derive(["arbor://memory/write", "arbor://orchestrator/execute"], fn _ -> :auto end)
