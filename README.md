@@ -66,14 +66,40 @@ it prefers those instead.
 Use `./bin/mix` so Mix runs under the pinned toolchain. `ARBOR_DB=postgres` is
 opt-in, not the getting-started path.
 
+## Testing
+
 ```bash
 ./bin/mix test
 ./bin/mix quality
 ```
 
-Isolated Git worktrees need extra harness setup (`deps/` symlink, `TMPDIR`
-outside the checkout, no `.env` symlink). See
-[Isolated worktree harness](docs/arbor/TEST_TAGGING.md#isolated-worktree-harness).
+Tagging, adapter lanes, and the full test-run matrix live in
+[TEST_TAGGING.md](docs/arbor/TEST_TAGGING.md).
+
+### Isolated Git worktrees
+
+A Git worktree is tracked files only. Three harness artifacts then fail
+suites on an unchanged `main` (observed 2026-10-15 on bases `56e45390b`
+and `642239593`):
+
+1. **Missing `deps/`.** `MIX_DEPS_PATH` can point at the canonical checkout,
+   but `_build/test/lib/<dep>/priv` are relative symlinks and dangle.
+   Cascade: LLMDB `LoadError :enoent`, then
+   `{:no_provider_supports_runtime, :acp}` — about 30 failures across
+   `arbor_ai`, `arbor_orchestrator`, and `arbor_agent`. Workaround:
+   `ln -s <canonical>/deps deps` inside the worktree (or materialize
+   `deps/` before compiling).
+2. **`TMPDIR` inside the checkout.** Tests' "outside the repo" fixtures
+   land inside the worktree (`file_read` of an outside path succeeds;
+   `git_root_outside_root`; containment finds the worktree `bin/mix`;
+   Grok `:grok_repository_root_required`). Export `TMPDIR` to a directory
+   **outside** the checkout before `mix test`.
+3. **`.env` symlinked into the worktree.** Provider API keys leak into the
+   test VM, so `unified_llm_test.exs` sees `default_provider == "google"`.
+   Do not symlink the canonical `.env` into a test worktree.
+
+See [Isolated worktree harness](docs/arbor/TEST_TAGGING.md#isolated-worktree-harness)
+and `docs/arbor/CODING_TASK_DISPATCH.md` (working inside the task workspace).
 
 ## License
 

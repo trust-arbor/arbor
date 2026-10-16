@@ -148,6 +148,11 @@ mix test --only behavioral
 mix test apps/arbor_agent/test/behavioral/memory_e2e_test.exs --include llm
 ```
 
+Isolated Git worktrees need extra harness setup before those commands
+(missing `deps/` symlink, `TMPDIR` inside the checkout, symlinked `.env`).
+See [Isolated worktree harness](#isolated-worktree-harness). The same
+findings and workarounds are summarized in the root `README.md`.
+
 ## Behavioral Tests
 
 Behavioral tests use `Arbor.Test.BehavioralCase` which starts the full process tree
