@@ -368,8 +368,11 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       assert is_list(beam_path)
       abs_path = beam_path |> List.to_string() |> String.replace_suffix(".beam", "")
 
+      # Swap versions in one load. A purge/delete/load sequence leaves a window
+      # with no current Arbor.Security; any live caller (e.g. the 25 ms
+      # Historian AuthorityAuditPuller) autoloads it there and this load then
+      # fails with :not_purged.
       :code.purge(Arbor.Security)
-      :code.delete(Arbor.Security)
       assert {:module, Arbor.Security} = :code.load_abs(String.to_charlist(abs_path))
 
       secret_after = Engine.derive_checkpoint_hmac_secret(signing_authority: authority)

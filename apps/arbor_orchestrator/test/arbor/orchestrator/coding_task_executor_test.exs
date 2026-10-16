@@ -809,8 +809,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       beam_path = :code.which(Arbor.Security)
       true = is_list(beam_path)
       abs_path = beam_path |> List.to_string() |> String.replace_suffix(".beam", "")
+      # Swap versions in one load. A purge/delete/load sequence leaves a window
+      # with no current Arbor.Security; any live caller (e.g. the 25 ms
+      # Historian AuthorityAuditPuller) autoloads it there and this load then
+      # fails with :not_purged.
       :code.purge(Arbor.Security)
-      :code.delete(Arbor.Security)
       {:module, Arbor.Security} = :code.load_abs(String.to_charlist(abs_path))
       :ok
     end
