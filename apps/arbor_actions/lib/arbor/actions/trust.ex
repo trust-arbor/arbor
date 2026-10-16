@@ -312,20 +312,19 @@ defmodule Arbor.Actions.Trust do
         |> Enum.map(fn {uri, mode} -> {uri, parse_mode(mode)} end)
         |> Enum.into(%{})
 
-      case update_trust_profile(agent_id, baseline, rules, context) do
-        {:ok, _profile} ->
-          Logger.info("[InterviewAgent] Applied trust profile changes for #{agent_id}")
-          emit_profile_changed(agent_id, baseline, rules, context)
+      with {:ok, _profile} <- update_trust_profile(agent_id, baseline, rules, context),
+           :ok <- emit_profile_change(:trust_profile_changed, agent_id, baseline, rules, context) do
+        Logger.info("[InterviewAgent] Applied trust profile changes for #{agent_id}")
 
-          {:ok,
-           %{
-             agent_id: agent_id,
-             status: :applied,
-             baseline: baseline,
-             rules: rules,
-             message: "Trust profile updated successfully."
-           }}
-
+        {:ok,
+         %{
+           agent_id: agent_id,
+           status: :applied,
+           baseline: baseline,
+           rules: rules,
+           message: "Trust profile updated successfully."
+         }}
+      else
         {:error, :trust_unavailable} ->
           {:error,
            "Trust system is not available. It may still be starting up — try again in a moment."}
@@ -355,32 +354,45 @@ defmodule Arbor.Actions.Trust do
 
         Code.ensure_loaded?(Arbor.Trust) and
             function_exported?(Arbor.Trust, :ensure_trust_profile, 2) ->
-          Arbor.Trust.ensure_trust_profile(agent_id, baseline: baseline, rules: rules)
+          # Audit admission precedes the authority change. This is an intent,
+          # not a claim that the mutation completed; restricted durable-write
+          # refusals must leave both existing and absent profiles unchanged.
+          with :ok <-
+                 emit_profile_change(
+                   :trust_profile_change_requested,
+                   agent_id,
+                   baseline,
+                   rules,
+                   context
+                 ) do
+            Arbor.Trust.ensure_trust_profile(agent_id, baseline: baseline, rules: rules)
+          end
 
         true ->
           {:error, :trust_unavailable}
       end
     end
 
-    # Durably audit the trust-profile mutation. A trust-profile change is a change to who-can-do-what
-    # — security-critical — yet it was previously recorded only in ephemeral Logger output, leaving no
-    # durable audit trail (audit-trail-gaps 2026-07-04, Gap 2). Emit to the security stream with the
-    # acting agent (actor) and the applied baseline/rules (the diff). Mirrors taint_events.ex.
-    defp emit_profile_changed(agent_id, baseline, rules, context) do
-      # Direct call, not a `function_exported?` guard: arbor_actions hard-deps arbor_signals, and
-      # `function_exported?/3` returns false when the module isn't loaded yet — which silently skipped
-      # the audit emit. A direct call also triggers module loading.
-      Arbor.Signals.durable_emit(
-        :security,
-        :trust_profile_changed,
-        %{
-          agent_id: agent_id,
-          baseline: baseline,
-          rules: rules,
-          actor: Map.get(context, :agent_id)
-        },
-        stream_id: "security:events"
-      )
+    defp emit_profile_change(type, agent_id, baseline, rules, context) do
+      case Arbor.Signals.durable_emit(
+             :security,
+             type,
+             %{
+               agent_id: agent_id,
+               baseline: baseline,
+               rules: rules,
+               actor: Map.get(context, :agent_id)
+             },
+             stream_id: "security:events"
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:audit_unavailable, reason}}
+        _ -> {:error, {:audit_unavailable, :invalid_acknowledgement}}
+      end
+    rescue
+      _ -> {:error, {:audit_unavailable, :emission_failed}}
+    catch
+      _, _ -> {:error, {:audit_unavailable, :emission_failed}}
     end
 
     defp parse_mode(mode) when is_atom(mode), do: mode

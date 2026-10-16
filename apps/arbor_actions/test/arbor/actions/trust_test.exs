@@ -129,24 +129,18 @@ defmodule Arbor.Actions.TrustTest do
   end
 
   describe "ApplyProfile" do
-    test "applies confirmed profile changes", %{agent_id: agent_id} do
+    test "confirmed profile changes wait for durable security auditing", %{agent_id: agent_id} do
       rules = %{"arbor://code/read" => "auto", "arbor://shell" => "block"}
+      {:ok, before} = Arbor.Trust.get_trust_profile(agent_id)
 
-      assert {:ok, result} =
+      assert {:error, message} =
                ApplyProfile.run(
                  %{agent_id: agent_id, baseline: "ask", rules: rules},
                  %{}
                )
 
-      assert result.status == :applied
-      assert result.baseline == :ask
-      assert result.rules["arbor://code/read"] == :auto
-      assert result.rules["arbor://shell"] == :block
-
-      # Verify it was actually persisted
-      {:ok, profile} = Arbor.Trust.get_trust_profile(agent_id)
-      assert profile.baseline == :ask
-      assert profile.rules["arbor://code/read"] == :auto
+      assert message =~ "restricted_durable_encryption_unavailable"
+      assert {:ok, ^before} = Arbor.Trust.get_trust_profile(agent_id)
     end
 
     test "security regression (F-005): an agent cannot apply a trust profile to itself",
@@ -169,22 +163,14 @@ defmodule Arbor.Actions.TrustTest do
   end
 
   describe "ApplyProfile — durable audit (security regression)" do
-    # Regression for audit-trail-gaps 2026-07-04, Gap 2: applying a trust profile is a change to
-    # who-can-do-what — security-critical — but it was recorded only in ephemeral Logger output,
-    # leaving no durable audit trail (Actions.Trust had zero emit/Historian calls). ApplyProfile now
-    # emits a durable :trust_profile_changed security event with the actor + applied baseline/rules.
-    # This fails on the pre-fix code (no emit) and passes now.
-    test "applying a profile records a durable trust_profile_changed security event", %{
+    # A realtime security signal is not a durable acknowledgement. Restricted
+    # durable writes are currently refused, so no authority may change.
+    test "applying a profile refuses unavailable durable security encryption", %{
       agent_id: agent_id
     } do
-      # NOTE: :security is a restricted topic, so signal payloads are ENCRYPTED at rest
-      # (protect_restricted_signal → TopicKeys.encrypt). In the test env TopicKeys isn't running, so
-      # the payload falls back to %{__redacted__, reason: :encryption_unavailable}. We therefore
-      # assert the audit EVENT is recorded (in prod the full agent_id/baseline/rules/actor is
-      # encrypted + retained, retrievable for incident response with the topic key), not its contents.
-      before = trust_profile_signal_count()
+      {:ok, before} = Arbor.Trust.get_trust_profile(agent_id)
 
-      assert {:ok, _result} =
+      assert {:error, message} =
                ApplyProfile.run(
                  %{
                    agent_id: agent_id,
@@ -194,24 +180,8 @@ defmodule Arbor.Actions.TrustTest do
                  %{agent_id: "agent_actor_under_test"}
                )
 
-      assert wait_for_signal_count_above(before),
-             "expected a new :trust_profile_changed security event to be recorded"
-    end
-  end
-
-  defp trust_profile_signal_count do
-    {:ok, signals} =
-      Arbor.Signals.recent(limit: 100, category: :security, type: :trust_profile_changed)
-
-    length(signals)
-  end
-
-  # Signals persist asynchronously; poll until the count grows (or time out).
-  defp wait_for_signal_count_above(before, retries \\ 40) do
-    cond do
-      trust_profile_signal_count() > before -> true
-      retries > 0 -> Process.sleep(50) && wait_for_signal_count_above(before, retries - 1)
-      true -> false
+      assert message =~ "restricted_durable_encryption_unavailable"
+      assert {:ok, ^before} = Arbor.Trust.get_trust_profile(agent_id)
     end
   end
 
@@ -264,7 +234,8 @@ defmodule Arbor.Actions.TrustTest do
   end
 
   describe "propose-then-apply workflow" do
-    test "full workflow: propose preset, review, apply", %{agent_id: agent_id} do
+    test "propose and review cannot bypass durable audit refusal", %{agent_id: agent_id} do
+      {:ok, before} = Arbor.Trust.get_trust_profile(agent_id)
       # Step 1: Propose balanced preset
       assert {:ok, proposal} =
                ProposeProfile.run(
@@ -280,7 +251,7 @@ defmodule Arbor.Actions.TrustTest do
         |> Enum.map(fn {uri, mode} -> {uri, to_string(mode)} end)
         |> Enum.into(%{})
 
-      assert {:ok, applied} =
+      assert {:error, message} =
                ApplyProfile.run(
                  %{
                    agent_id: agent_id,
@@ -290,12 +261,8 @@ defmodule Arbor.Actions.TrustTest do
                  %{}
                )
 
-      assert applied.status == :applied
-
-      # Step 3: Verify the profile matches what was proposed
-      assert {:ok, final} = ReadProfile.run(%{agent_id: agent_id}, %{})
-      assert final.baseline == proposal.proposed.baseline
-      assert final.rules == proposal.proposed.rules
+      assert message =~ "restricted_durable_encryption_unavailable"
+      assert {:ok, ^before} = Arbor.Trust.get_trust_profile(agent_id)
     end
   end
 
