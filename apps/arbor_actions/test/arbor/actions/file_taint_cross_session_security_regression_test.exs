@@ -101,5 +101,7 @@ defmodule Arbor.Actions.FileTaintCrossSessionSecurityRegressionTest do
   end
 
   defp restore_security_module(nil), do: Application.delete_env(:arbor_actions, :security_module)
-  defp restore_security_module(module), do: Application.put_env(:arbor_actions, :security_module, module)
+
+  defp restore_security_module(module),
+    do: Application.put_env(:arbor_actions, :security_module, module)
 end

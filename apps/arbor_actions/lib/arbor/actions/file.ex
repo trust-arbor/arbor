@@ -264,13 +264,13 @@ defmodule Arbor.Actions.File do
       }
     end
 
-    # Provenance (taint-tracking-rebuild Phase 1): file content is untrusted when
-    # read from a foreign/shared/sensitive location (/tmp, downloads, secrets);
-    # workspace reads assert no provenance (nil) rather than laundering to trusted.
+    # Provenance: foreign/shared/sensitive paths are untrusted; workspace files
+    # restore the durable sidecar written with the file. Missing sidecar stays
+    # unlabeled (`nil`) rather than trusted; unverifiable sidecar fails closed.
     # Params may arrive with string OR atom keys (pre/post schema atomization).
     @doc false
     def output_taint(params),
-      do: Arbor.Actions.Taint.path_provenance(params[:path] || params["path"])
+      do: Arbor.Actions.FileProvenance.resolve_path(params[:path] || params["path"])
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -285,12 +285,14 @@ defmodule Arbor.Actions.File do
 
             case Arbor.Actions.File.read_authorized_file(context, safe_path) do
               {:ok, content, opened_path} ->
+                taint = Arbor.Actions.FileProvenance.resolve(opened_path, content)
                 content = maybe_decode_content(content, encoding)
 
                 result = %{
                   path: opened_path,
                   content: content,
-                  size: byte_size(content)
+                  size: byte_size(content),
+                  taint: taint
                 }
 
                 Actions.emit_completed(__MODULE__, %{
@@ -424,18 +426,37 @@ defmodule Arbor.Actions.File do
 
         case result do
           :ok ->
-            result = %{
-              path: safe_path,
-              bytes_written: byte_size(content)
-            }
+            case persist_write_provenance(safe_path, context, mode) do
+              :ok ->
+                result = %{
+                  path: safe_path,
+                  bytes_written: byte_size(content)
+                }
 
-            Actions.emit_completed(__MODULE__, result)
-            {:ok, result}
+                Actions.emit_completed(__MODULE__, result)
+                {:ok, result}
+
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+
+                {:error,
+                 "Failed to persist file provenance for '#{safe_path}': #{inspect(reason)}"}
+            end
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
             {:error, "Failed to write file '#{safe_path}': #{format_posix_error(reason)}"}
         end
+      end
+    end
+
+    defp persist_write_provenance(safe_path, context, mode) do
+      case File.read(safe_path) do
+        {:ok, stored} ->
+          Arbor.Actions.FileProvenance.persist(safe_path, stored, context, mode)
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
 
@@ -1004,11 +1025,10 @@ defmodule Arbor.Actions.File do
 
     alias Arbor.Actions
 
-    # Provenance (taint-tracking-rebuild Phase 1): search matches are file
-    # content from disk — untrusted when the searched path is foreign/shared.
+    # Provenance: search matches inherit the durable file sidecar when present.
     @doc false
     def output_taint(params),
-      do: Arbor.Actions.Taint.path_provenance(params[:path] || params["path"])
+      do: Arbor.Actions.FileProvenance.resolve_path(params[:path] || params["path"])
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
