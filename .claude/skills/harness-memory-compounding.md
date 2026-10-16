@@ -28,7 +28,7 @@ migrate into Arbor (learning loop + memory import) as those land.
 3. **Cap and demote:** Applied Learning holds exactly 12 entries, ≤ 950
    words. Overflow and entries stale >3 months demote into the relevant skill
    file (procedure) or decision doc (rationale). CLAUDE.md is a working set,
-   not a journal.
+   not a journal. Skill-file entries leave through the lifecycle below.
 4. **Skill graduation:** 2+ Applied Learning entries about one subsystem →
    merge into a skill file (the `agent-security-gates.md` pattern,
    generalized).
@@ -43,6 +43,41 @@ unenforced from 2026-07 until 2026-08-06 and was silently red the whole time —
 three different word budgets were in circulation (3,500/600 here, 4,000/950 in
 the validator, a hand-written "938" in CLAUDE.md). If you want a different
 budget, change the validator; do not restate a number in prose.
+
+## Applied Learning lifecycle (adopted 2026-10-16)
+
+The skill files used to be append-only. The 2026-10-16 audit found the same lesson re-learned up to seven times. It
+also found that no session had opened the corpus with the Read tool from 2026-08 to 2026-10, and that only 2 entries
+had ever been cited by name. The audit and design are in `.arbor/roadmap/0-inbox/applied-learning-audit-2026-10-16.md`.
+Hysun approved them on 2026-10-16.
+
+- **Metadata.** Every inventory entry carries `class` (`security-invariant` / `correctness` / `process` / `tooling`),
+  `status` (`live` / `retired`), `created`, `scope` (code anchors), `source_session`, and
+  `last_confirmed`/`confirmed_by`. Usage counts live in the generated `.claude/skills/applied-learning-usage.json`.
+  Nobody hand-edits that file.
+- **Recording use.**
+  - Cite an entry as `[AL:<slug>]` when it changes what you do, or `[AL:<slug>!]` when you re-verified it against code.
+  - A `PostToolUse` hook (`.claude/hooks/al-exposure.sh`) logs reads of these files to the gitignored
+    `.claude/state/al-exposure.jsonl`.
+  - The review pass harvests citations and exposures from Claude transcripts, Codex rollouts, the hook log and
+    `git log`.
+- **Admission.** For entries created on or after 2026-10-16, the validator requires:
+  - ≤ 400 words, and one rule per marker (no appended dated or "reinforced" paragraphs);
+  - no near-duplicate titles;
+  - `revisit_when` for gap-shaped wording such as "currently", "not yet" or "until … implemented".
+- **Retirement, not deletion.** Retired text moves to `.claude/applied-learning-archive/<topic>.md` with its marker and
+  anchor. The inventory row stays, with `retired_on`, `retired_reason` and `superseded_by`. A retired slug that gets
+  cited again shows up as a broken citation, which is the revive signal.
+- **Monthly pass.** `ruby .claude/applied_learning_review.rb --report` writes a ranked inbox report and a decisions
+  JSON. It proposes:
+  - decay retirements: non-security, ≥ 90 days old, uncited, never re-learned, not confirmed in 90 days, past a 30-day
+    grace;
+  - `reconfirm` rows when a scope anchor disappears. A grep miss is a review trigger, never a delete;
+  - merges, and retirements under cap pressure.
+
+  Hysun marks rows `approve`. `--apply <decisions.json>` executes only the approved rows, transactionally, and re-runs
+  the validator. The validator warns when the pass is more than 35 days overdue.
+- **Caps** are warn-only for now (`caps_enforced: false`): 8,000 live words per topic file and 400 words per entry.
 
 ## What NOT to capture
 

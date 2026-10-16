@@ -1,0 +1,5431 @@
+{
+  "generated_on": "2026-10-16",
+  "window_days": 90,
+  "sources": {
+    "claude_sessions": 318,
+    "codex_sessions": 32,
+    "hook_events": 0,
+    "commits": 2808
+  },
+  "broken_citations": [],
+  "entries": {
+    "a-baseline-is-only-valid-on-a-pinned-tree": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-bearer-stripped-from-public-views-can-still-leak-through-action-results": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-bound-composite-action-that-launches-a-nested-dot-graph-needs-authority-propagation-declared-child-bindings-and-exact-child-action-capabilities": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-bound-nested-graph-is-immutable-executable-input": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-candidate-cannot-validate-a-change-to-the-running-validation-substrate-until-that-substrate-is-reloaded": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-cas-takeover-claim-elects-a-survivor-it-does-not-fence-an-old-partitioned-owner": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-checkpoint-receipt-digest-must-cover-a-losslessly-rehydratable-outcome": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-cleanup-lease-needs-stable-identity-restart-semantics-and-retryable-effects": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-coding-task-s-public-result-may-omit-the-actionable-validation-failure": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-complete-test-artifact-does-not-overrule-process-capacity-exhaustion": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-conformance-harness-is-not-a-gate-until-production-adapters-and-failure-exit-semantics-exist": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-contained-mix-guest-must-own-every-executable-tool-it-needs": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-correlation-token-placed-in-a-timer-message-is-not-the-cancellation-handle": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-custom-mix-build-directory-must-still-be-ignored-before-a-coding-worker-commits": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-custom-mix-build-path-must-be-environment-specific": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-declared-validation-budget-must-reach-resource-setup-as-well-as-the-child-command": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-determinate-timeout-requires-proof-that-no-later-commit-can-occur": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-durable-artifact-reader-must-reuse-the-writer-s-exact-key-and-envelope-contract": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-durable-writer-and-restart-reader-must-enforce-the-same-closed-schema": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-failed-durable-transition-must-preserve-truthful-residue-even-without-a-prior-hot-record": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-feature-that-never-worked-hides-every-bug-downstream-of-it": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-fixed-internal-operation-that-needs-a-generically-blocked-flag-belongs-behind-a-closed-facade-primitive": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-frozen-work-packet-is-not-delegated-until-every-worker-facing-prompt-binds-it": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-gate-regression-must-prove-it-reached-the-intended-gate": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-generic-engine-node-capability-does-not-replace-the-syscall-s-exact-capability-gate": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-genserver-wrapper-does-not-make-a-named-dets-table-private": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-green-exunit-exit-must-include-a-nonzero-intended-test-count": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-hashed-child-name-does-not-make-an-artifact-root-safe-from-symlinks": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-hermetic-mix-shell-seam-must-own-wrapper-resolution-as-well-as-execution": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-hermetic-test-must-replace-the-runner-seam-the-code-actually-consumes": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-hex-lock-does-not-attest-compile-time-native-downloads": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-jido-action-schema-is-not-automatic-runtime-validation-for-direct-arbor-execution": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-key-owning-broker-must-authenticate-lease-acquisition-not-only-lease-use": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-later-rest-for-one-child-must-not-wait-in-terminate-2-for-an-earlier-crashed-sibling-to-restart": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-linux-containment-guest-cannot-reuse-an-unfiltered-macos-dependency-snapshot": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-local-acp-worker-handle-is-not-provider-continuity-identity": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-managed-acp-handle-lives-only-as-long-as-its-owning-action-unless-an-explicit-durable-owner-retains-it": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-mismatched-reference-regression-does-not-cover-an-exactly-copied-internal-message": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-mix-task-s-compile-claim-needs-an-explicit-compile-requirement": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-nested-map-inside-action-context-is-still-action-visible-authority": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-no-clobber-publication-needs-an-explicit-linearization-marker-not-file-rename-2": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-node-keyed-checkpoint-entry-is-not-proof-of-one-execution-visit": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-one-pass-green-race-regression-is-not-evidence-of-stability": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-per-command-timeout-is-not-an-overall-operation-deadline": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-permanent-startup-pinned-child-must-not-treat-its-process-restart-as-a-new-trust-epoch": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-persisted-agent-profile-is-not-a-running-dispatch-target": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-persisted-fingerprint-marker-is-not-proof-of-persisted-content": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-platform-label-is-not-native-artifact-architecture-evidence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-port-env-option-is-an-override-list-not-an-empty-environment": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-private-ets-table-is-not-an-access-control-boundary-if-a-genserver-relays-its-rows": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-process-dictionary-authorization-marker-is-not-an-opaque-capability": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-process-started-with-start-link-through-erpc-inherits-the-short-lived-rpc-worker-s-lifetime": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-provider-startup-notice-is-not-prompt-completion-evidence": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-public-helper-that-accepts-arbitrary-paths-is-an-authority-surface": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-public-trust-anchor-is-security-critical-mutable-state-even-though-it-is-not-secret": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-restartable-registry-must-not-be-the-sole-owner-of-child-cleanup-authority": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-retention-ttl-starts-when-ownership-becomes-retainable-not-when-the-active-lease-was-acquired": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-rework-loop-must-gate-clean-self-commits-as-well-as-dirty-worktrees": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-rotating-oauth-refresh-token-family-must-have-exactly-one-owner": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-schema-valid-coding-review-profile-may-still-be-forbidden-for-the-target-agent": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-security-regression-must-reach-the-exact-field-that-was-vulnerable": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-semantic-retry-ceiling-must-pin-the-whole-counter-dataflow": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-shared-dependency-cache-can-drift-from-the-branch-lock": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "a-shutdown-cleanup-budget-must-be-shared-across-every-nested-operation": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-signed-capability-manifest-must-bind-the-exact-executable-artifact-and-inputs": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-silent-macos-say-probe-needs-a-real-audio-file-suffix": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-single-genserver-is-not-a-cross-beam-durable-store-lock": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-strict-cwd-sandbox-cannot-use-linked-worktree-git-storage-without-a-separate-read-grant": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-struct-pattern-is-not-hostile-term-shape-validation": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-structured-coding-dispatch-has-a-closed-two-level-envelope": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-synchronous-durability-acknowledgement-is-also-a-mailbox-boundary-not-lifecycle-authority": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-synchronous-facade-must-not-drain-and-requeue-its-caller-s-mailbox-while-waiting-for-one-owned-signal": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-trapped-process-that-runs-external-commands-will-receive-ordinary-port-exits": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "a-trusted-bootstrap-cli-that-forks-needs-a-closed-process-tree-primitive-not-a-generic-no-fork-bypass": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "a-userspace-deadline-check-cannot-hard-bound-a-later-blocking-kernel-commit": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "acceptance-must-be-derived-from-evidence-never-trusted-from-a-report-summary": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "acp-adapter-bootstrap-ids-are-not-resumable-provider-identities": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "acp-continuity-requires-the-provider-session-id-not-only-the-managed-worker-handle": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 1,
+      "score": 2
+    },
+    "acp-http-mcp-descriptors-must-use-the-standard-wire-shape": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "acp-launch-isolation-must-include-arbor-home-not-only-cwd-build-paths": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "acp-mcpservers-is-additive-not-a-provider-config-override": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "acp-receiver-idleness-is-not-worker-inactivity": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "acp-rework-continuity-and-acp-tool-completion-are-separate-contracts": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "admission-ceilings-must-be-supported-by-every-lower-execution-layer": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "admit-effect-ownership-before-invalidating-retryable-discovery": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "agent-template-trust-changes-are-not-retroactive-for-existing-live-principals": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "aggregate-failure-excerpts-must-anchor-within-a-structured-failed-child": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "always-search-for-all-occurrences-before-using-replace-all-true": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "an-absolute-bin-mix-path-does-not-select-that-checkout-as-the-project-root": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "an-absolute-deadline-needs-an-owner-stamped-completion-time": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "an-acp-pool-profile-must-be-the-single-source-of-immutable-startup-identity": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "an-acp-provider-session-is-not-a-durable-workspace-continuation-by-itself": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "an-action-cannot-self-declare-access-to-private-nested-authority": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "an-aggregate-council-accept-can-still-contain-a-real-major-finding": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "an-immutable-apple-container-image-reference-is-not-a-no-pull-guarantee": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "an-in-process-test-formatter-is-not-a-hostile-code-proof-channel": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "an-operation-deadline-never-authorizes-abandoning-owned-cleanup": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "anchor-manual-patches-with-unique-surrounding-context": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "answering-a-top-level-mcp-approval-does-not-currently-make-a-fresh-arbor-run-replay-resumable": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "apple-container-1-1-virtiofs-bind-sources-must-be-directories": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "apple-container-create-treats-tokens-after-the-image-as-init-process-arguments": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "apple-container-networking-must-request-the-reserved-none-network-explicitly": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "apple-container-virtiofs-bind-mounts-do-not-provide-stable-inode-identity": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-completion-does-not-preserve-caller-authority-or-executable-code-identity": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-escalation-requires-a-running-interaction-tracker-not-just-loaded-comms-modules": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-notes-are-bounded-single-line-audit-fields": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-retries-must-carry-exact-one-shot-authority-never-mint-a-clean-standing-capability": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-rework-must-remain-distinct-from-denial-across-nested-action-waits": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "approval-waiters-must-subscribe-before-making-a-request-externally-visible": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "arbitrary-integers-bypass-fixed-scalar-cost-estimates": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "arbor-is-its-own-git-repository": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "arbor-s-git-facade-rejects-configured-execution-hooks-even-when-they-point-at-git-s-default-directory": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "arbor-shell-list-executions-0-returns-ok-executions-not-a-bare-list": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "arm-owner-timeouts-at-the-terminal-authority-before-waiting": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "async-generated-exunit-tests-must-compile-shared-helper-modules-in-setup-all": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "atom-interning-regressions-must-check-the-candidate-atom-not-the-vm-global-count": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "attest-dynamic-acp-models-from-session-state-not-process-arguments": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "authenticate-the-control-plane-service-not-only-its-cli": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "authoritative-signal-mutations-must-deny-ambiguous-publisher-config": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "authority-key-scanners-must-distinguish-executable-control-data-from-declarative-schemas": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "avoid-brew-cat-for-read-only-formula-inspection": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "avoid-compiler-reserved-attributes-for-test-matrix-values": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "avoid-escaped-map-key-syntax-inside-interpolated-mix-run-e-snippets": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "backend-specific-responses-usage-extensions-must-be-bounded-and-discarded": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "background-evidence-refresh-must-start-before-its-freshness-deadline": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "basic-shell-sandbox-checks-the-command-string-even-after-argument-escaping": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "beam-monotonic-timestamps-may-be-negative": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "beam-references-are-correlation-identifiers-not-bearer-secrets": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "bind-cold-storage-proofs-to-the-declared-backend": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "bind-ex-mcp-acp-pending-request-timeouts-at-client-start": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "binding-reviewers-need-scoped-source-evidence-not-ambient-repository-authority": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "boot-lifecycle-normalization-must-publish-durable-authority-before-hot-state": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "bound-active-audit-work-separately-from-durable-history": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "bound-design-retries-independently-and-carry-continuity-in-the-packet": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "bound-producer-output-before-it-enters-application-memory": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "bounded-prompt-payloads-must-remain-structurally-valid": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "budget-design-required-plans-for-the-design-and-the-reserved-tail": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "budget-multi-leg-action-timeouts-against-the-enclosing-wall-clock": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "build-a-committable-git-tree-with-bulk-object-index-operations-not-one-update-index-process-per-path": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "build-structured-coding-work-packet-digests-with-the-contract-helper": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "callback-validation-must-not-depend-on-incidental-module-preload": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "caller-configurable-resource-bounds-need-a-system-enforced-ceiling": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "caller-timeout-does-not-cancel-a-queued-owner-mutation": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "caller-writable-ets-is-not-independent-evidence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "cancellation-and-verification-must-not-reuse-mutating-scope-allocators": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "cancellation-tests-must-synchronize-on-the-cancellable-phase": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "canonical-dot-serialization-must-preserve-value-types-not-just-text": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "canonical-model-ids-are-not-provider-wire-model-ids": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "canonical-runtime-fixtures-should-restore-rather-than-release-global-children": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "canonicalize-a-nonexistent-target-through-its-nearest-existing-ancestor": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "canonicalize-temporary-resource-roots-before-deriving-mix-paths": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "carry-destructive-object-identity-through-the-final-owning-facade": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "changing-a-reviewed-nested-dot-action-requires-updating-every-action-catalog": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "check-conversation-authority-before-allowance-effects-and-again-before-publication": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "check-the-current-branch-after-a-coding-subagent-reports-completion": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "checked-artifacts-must-survive-their-containing-commit": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "checkpoint-a-substantial-delegated-patch-before-diagnosing-test-infrastructure": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "claimed-formatting-is-not-review-evidence": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "classify-validation-capacity-only-from-trusted-shell-termination-flags": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "claude-acp-resume-is-launch-bound-and-model-aliases-need-live-attestation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "cleanup-of-a-writable-leased-tree-must-unlink-without-following-and-never-fall-back-to-unverified-recursion": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "cleanup-time-cancel-must-not-rewrite-a-completed-start-phase-candidate": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "clear-pending-liveview-stream-inserts-when-revoking-private-state": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "coding-dispatch-authority-uses-the-agent-dispatch-namespace": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "coding-plan-uses-reviewed-task-class-identifiers-not-informal-scope-labels": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "coding-task-adoption-is-post-integration-settlement-not-git-integration": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "cold-mix-env-test-compilation-is-not-app-test-execution-budget": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "collection-reducers-must-fail-on-malformed-members-not-return-the-accumulator": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "compare-native-and-package-manager-git-before-diagnosing-a-lan-outage": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "compile-an-edited-custom-mix-task-before-its-behavior-smoke-test": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "compile-env-reads-must-target-the-exact-runtime-invariant": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "compile-selected-test-modules-before-declaring-a-candidate-review-ready": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "compile-the-exact-structured-coding-plan-before-dispatch": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "composite-actions-must-declare-every-nested-action-as-an-execution-dependency": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "compute-generated-artifact-digests-at-the-owned-admission-boundary": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "compute-node-usage-must-attribute-the-resolved-request-route-not-session-defaults": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "compute-work-packet-digests-through-the-contract": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "conclude-interface-comparisons-with-one-delivery-choice-per-surface": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "configure-a-replacement-test-process-before-an-observer-can-discover-it": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "conformance-proof-scanners-must-parse-test-syntax-not-regex-source-text": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "contained-durable-store-fixtures-need-a-private-trusted-parent": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "contained-mix-requires-pinned-runtime-roots-as-well-as-project-paths": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "contained-validation-must-execute-the-reviewed-host-mix-wrapper-not-a-candidate-controlled-wrapper": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "copying-a-git-repository-is-not-commit-provenance": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "corroborated-council-findings-still-need-independent-factual-verification": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "council-reviewchange-must-preflight-a-bound-review-launch-mode": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "crash-reconstructable-role-authority-must-survive-the-role-process-pid": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "crash-recovery-state-must-be-resumable-at-every-effect-boundary": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "crash-safe-competing-effects-need-a-permanent-pre-io-winner": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "cross-app-closure-size-is-part-of-task-scoping-not-a-reason-to-weaken-validation": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "cross-worktree-provider-resume-needs-provider-native-root-compatibility": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "dbconnection-timeout-does-not-bound-time-already-spent-in-the-pool-queue": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "defer-ancestry-queries-until-child-startup-has-acknowledged": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "deferred-lifecycle-messages-need-state-owned-unforgeable-settlement-records": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "degraded-inventory-views-must-preserve-the-requested-scope": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "delegate-from-candidate-commits-via-base-ref-not-linked-repo-roots": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "derive-coding-commit-subjects-from-reviewed-plan-data": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "derive-integration-fixture-roots-from-source-locations-not-mix-working-directory": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "derive-loop-counters-from-their-prior-control-value": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "derived-summaries-cannot-replace-independently-recorded-cleanup-evidence": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "design-checkpoint-rework-can-exhaust-provider-session-continuity-before-implementation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "design-council-veto-seat-error-is-unavailability-not-rework": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "design-required-checkpoint-turns-must-be-observational": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "destructive-git-cas-success-requires-clean-output-and-authoritative-post-observation": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "direct-engine-fixtures-must-seed-owner-computed-budget-context": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "direct-mix-test-subprocesses-must-set-mix-env-test-explicitly": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "disable-the-authority-mismatch-not-only-one-compound-shell-implementation": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "disconnect-a-programmatic-mcp-client-before-stopping-its-genserver": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "discover-progressively-disclosed-arbor-mcp-tools-before-declaring-them-unavailable": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "dispatch-provider-selection-must-satisfy-worker-owned-packet-operations": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "distinguish-backend-availability-from-host-admission-in-structured-coding-validation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "distinguish-live-runtime-binding-drift-from-a-nested-manifest-defect": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "distinguish-plan-capacity-from-operation-owned-timeout-ceilings": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "distribution-readiness-is-not-application-readiness": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-broaden-closed-production-identity-gates-to-make-integration-tests-faster": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-compile-or-test-the-active-checkout-while-a-subagent-is-midway-through-a-shared-file-edit": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-confuse-arbor-security-keychain-with-macos-keychain-services": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-duplicate-the-native-launcher-s-final-executable-identity-check-in-executablepolicy": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-fake-a-tool-home-by-changing-home-and-then-calling-path-expand": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-follow-a-linearized-intermediate-observation-with-a-negative-receive-window": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-inspect-an-active-factory-worktree-after-approving-a-git-mutation": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-launch-long-lived-services-from-disposable-validation-build-roots": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-let-a-diagnostic-output-pipeline-hide-the-command-under-test-s-exit-status": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-make-optional-runtime-packaging-directories-a-test-prerequisite": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-project-an-ownership-parent-beside-its-typed-child-mounts": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-put-workflow-specific-result-policy-in-a-generic-engine-handler": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-queue-future-stage-controls-before-the-semantic-phase-advances": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-redefine-built-in-elixir-typespec-names": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-rely-on-posix-scalar-word-splitting-in-zsh": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-run-real-process-setup-deadline-tests-under-asynchronous-suite-load": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "do-not-send-long-newline-delimited-mcp-json-frames-through-a-canonical-pty": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-ship-production-callable-test-hooks-that-alter-security-observations": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "do-not-telemetry-invert-distributed-security-state-sync": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "do-not-verify-against-an-active-worker-s-mutable-worktree": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "dominance-over-named-success-terminals-does-not-gate-the-side-effects-that-precede-them": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "don-t-prematurely-cap-max-tokens": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "dot-comment-stripping-must-be-quote-aware": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "dot-context-keys-must-match-the-exact-context-keys-producers-emit": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "durable-creation-intent-must-precede-the-create-side-effect-durable-ownership-must-precede-acquisition-success": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "durable-identity-schema-upgrades-must-cross-every-lifecycle-adapter": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "durable-interaction-metadata-must-be-json-clean-before-persistence": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "durable-oauth-login-must-request-the-provider-s-refresh-grant-scope": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "durable-security-fences-must-align-encoding-locking-and-bootstrap-with-declared-capacity": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "elixir-is-list-1-recognizes-cons-cells-including-improper-lists": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "elixir-keyword-apis-require-atom-keys": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "elixir-typespecs-cannot-express-singleton-binary-map-keys": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "enforce-the-narrowest-byte-limit-before-calling-a-broader-hashing-helper": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "engine-ownership-metadata-is-owner-issued-not-caller-selectable": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "enumerate-candidate-tests-from-the-working-tree-not-the-index-alone": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "ephemeral-workspace-teardown-must-settle-task-scoped-pooled-sessions-first": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "erlang-receive-tracing-proves-delivery-not-selective-receive-consumption": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "escape-backticks-inside-javascript-template-literals-used-for-tool-orchestration": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "every-checkpoint-resumable-resource-consumer-must-reacquire-ownership": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "every-engine-handler-must-derive-principal-identity-from-runauthorization-not-node-attributes": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "every-owner-initiated-acp-session-stop-must-preserve-terminate-2-cleanup": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "every-persistence-migration-must-run-on-every-supported-development-adapter": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "exclude-sentinel-atoms-before-normalizing-optional-protocol-fields": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "exclusive-create-failure-does-not-grant-cleanup-ownership": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "executable-v1-coding-plans-use-workspace-policy-mode-isolated": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "exercise-native-input-and-browser-hooks-not-only-framework-events": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "exunit-s-per-test-timeout-is-a-third-validation-budget-layer": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "exunit-setup-callbacks-cannot-dynamically-skip-a-test": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "fail-closed-bulk-audits-still-need-closed-useful-error-categories": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "file-cp-r-2-preserves-symlink-targets-a-copied-tree-is-not-automatically-isolated": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "file-ls-1-materializes-the-entire-directory-before-an-entry-budget-can-fire": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "file-tools-need-both-exposure-and-fileguard-scope-grants": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "final-publication-proofs-must-reassert-frozen-security-invariants": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "flat-coding-change-dispatch-does-not-accept-the-full-composite-action-schema": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "for-local-diagnostic-mix-tasks-start-the-narrow-app-not-the-whole-umbrella": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "forced-tool-choice-is-not-provider-compliance-proof": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "format-only-scoped-paths-in-an-inherited-or-dirty-worktree": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "gate-acp-coding-turns-on-trusted-stop-reason-and-per-turn-owner-fingerprints": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "generated-durable-identifiers-need-one-shared-contract-from-creation-through-recovery": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "generated-elixir-source-needs-a-behavioral-compile-test": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "git-apply-three-way-updates-the-index": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "git-checkout-double-dash-restores-from-the-index-not-head": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "git-head-does-not-identify-an-uncommitted-candidate": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "git-pathspec-wildcards-do-not-enforce-directory-depth": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "git-porcelain-is-not-a-cleanliness-proof-until-hidden-index-flags-are-neutralized": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "git-ref-cas-and-worktree-checkout-protection-are-distinct-invariants": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "git-status-shape-is-not-a-workspace-fingerprint": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "gitignore-directory-patterns-with-a-trailing-slash-do-not-cover-worktree-symlinks": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "glob-is-a-file-read-and-must-have-an-authorized-base": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "grok-written-files-inside-a-verified-private-home-must-not-require-umask-022": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "hardened-git-can-reject-repositories-that-ordinary-git-accepts": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "hermetic-readiness-canaries-must-inject-reviewed-toolchain-evidence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "hex-extraction-needs-a-writable-process-cwd-even-when-its-package-destination-is-writable": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "host-generated-grok-sandbox-profiles-in-runtime-grok-home": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "host-maintenance-scripts-must-target-system-runtime-apis": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "hot-loading-an-action-does-not-refresh-a-core-locked-actionregistry": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "hot-reload-must-reconcile-loaded-code-with-the-code-path-beam-not-only-source-timestamps": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "hot-reload-updates-modules-not-running-child-processes": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "idempotent-side-effects-must-reconstruct-their-full-durable-receipt": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "image-policy-stores-provisioning-references-not-derived-execution-aliases": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "implicit-action-directory-context-must-be-schema-bound": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "in-elixir-map-literals-place-every-key-value-entry-before-keyword-style-atom-entries": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "in-tree-inode-de-duplication-cannot-detect-an-out-of-tree-hardlink": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "in-zsh-harness-scripts-never-use-path-as-a-scalar-variable": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "in-zsh-harness-scripts-never-use-status-as-a-scratch-variable": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "independently-rerun-delegated-verification-against-the-committed-revision": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "independently-test-retained-worker-commits-with-a-fresh-build-path": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "initial-explicit-acp-resume-needs-its-own-reviewed-fallback-binding": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "injected-storage-identity-must-thread-through-every-operation-not-only-capability-probes": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "inline-load-bearing-nested-repository-context-in-delegated-work-packets": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "inspect-a-retained-coding-workspace-independently-of-the-terminal-task-verdict": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "inspect-generated-command-helpers-before-execution": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "integration-examples-using-mix-test-need-the-validation-test-runtime": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "isolate-bounded-admission-budgets-between-test-cases": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "isolate-mix-build-roots-by-revision-and-environment": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "isolate-the-git-index-for-snapshot-checks": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "jido-map-schemas-do-not-accept-dynamic-string-keyed-json-maps-and-any-is-not-an-honest-tool-schema-fallback": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "keep-a-recovery-coordinator-s-first-tick-separate-from-its-steady-state-cadence": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "keep-approval-decisions-concise-and-put-detail-in-the-artifact": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "keep-fresh-isolated-mix-build-roots-inside-the-worktree": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "keep-isolated-validation-builds-beneath-the-worktree-when-code-derives-authority-from-loaded-beam-ancestors": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "keyset-pagination-must-bound-the-base-relation-before-expensive-joins-or-sorts": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "label-every-security-regression-with-the-assurance-layer-it-proves": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "label-trusted-control-fixtures-before-durable-checkpointing": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "launch-bound-acp-models-must-be-attested-not-inferred-from-method-not-found": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "line-oriented-native-protocols-must-reject-delimiter-bytes-at-both-boundaries": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "linked-worktree-git-storage-authority-must-come-from-the-active-lease": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "live-dogfood-proves-only-the-code-actually-loaded-on-the-node": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "llm-usage-cost-may-be-a-nested-breakdown-map-not-a-number": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "load-modules-before-installing-erlang-call-trace-patterns": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "local-oidc-http-issuers-need-allow-http-wired-through-runtime-config": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "long-acp-tool-operations-must-publish-liveness-before-the-inactivity-deadline": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "long-lived-anonymous-signer-functions-can-become-invalid-after-hot-code-purge": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "long-lived-provider-processes-can-outlive-cli-upgrades-and-oauth-relogin": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "long-lived-signing-roots-must-not-live-in-the-application-environment": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "make-loopback-listener-lifetime-explicit": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "make-model-generated-test-edge-semantics-explicit": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "make-multi-agent-rework-monotonic-with-a-frozen-finding-ledger": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "managed-lifecycle-commands-must-bind-to-the-persisted-running-node-identity": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "map-decoding-can-erase-duplicate-json-members-before-closed-schema-validation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "match-the-exact-split-shape-when-a-delimiter-proves-structure": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "mcp-approval-answering-is-explicit-capability-authority-not-trust-profile-graduation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "missing-attested-native-baselines-must-defer-validation-not-trigger-host-discovery": {
+      "exposures_90d": 32,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "mix-app-optional-applications-overlap-applications": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "mix-arbor-rpc-accepts-one-positional-elixir-expression-and-no-timeout-flag": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "mix-release-strip-beams-keeps-attr-lease-paths": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "mix-run-retains-the-script-argument-in-system-argv-0": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "model-budgeting-is-a-portfolio-problem-not-a-single-dollar-counter": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "module-atoms-are-executable-selectors-not-inert-descriptor-data": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "multi-module-hot-reload-is-not-a-transactional-deployment-boundary": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "mutating-actions-must-declare-their-conservative-static-effect-class": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "native-acp-cli-options-must-be-placed-at-the-parser-level-that-owns-them": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "native-acp-session-access-and-native-tool-authority-are-separate-gates": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "native-hermes-acp-edit-approval-can-fail-before-arbor-validation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "native-security-harnesses-must-compile-in-every-validation-guest": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "negative-cleanup-tests-must-snapshot-and-remove-only-their-own-exact-roots": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "negative-start-link-tests-must-trap-linked-init-failures": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "negotiate-optional-acp-resume-fields-against-advertised-capabilities": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "nested-actions-that-mint-fresh-exact-resource-proofs-must-consume-the-process-local-signing-boundary": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "nested-llm-tool-calls-need-the-exact-child-runauthorization-not-only-its-flattened-manifest-fields": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "network-destination-policy-is-operator-authority-not-a-request-option": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "networkless-peer-tests-need-out-of-band-boot-control": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "never-downgrade-protected-content-to-plaintext-when-key-authority-is-unavailable": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "never-feed-colorized-command-output-back-into-a-filesystem-command": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "never-hide-prior-exposure-by-chmod-repairing-an-existing-evidence-root-at-startup": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "never-mutate-a-live-retention-journal-from-a-second-beam": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "never-recursively-search-credential-or-provider-session-roots": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "no-start-checkpoint-diagnostics-must-select-file-only-persistence-explicitly": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "node-action-inventory-checks-do-not-prove-graph-policy": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "normalize-explicit-acp-wire-aliases-never-replace-a-missing-terminal-fact": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "normalize-forced-reqllm-tool-choices-at-the-adapter-boundary": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "oauth-readiness-must-separate-local-validity-from-remote-acceptance": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "offline-git-operator-tasks-need-the-minimal-shell-direct-runtime": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "one-shot-protocol-safety-requires-an-uncontaminated-session": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "one-shot-stdin-must-make-progress-concurrently-with-child-stdout": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "one-shot-stdin-needs-an-explicit-eof-and-tests-must-assert-termination": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "opaque-identifiers-in-capability-uris-must-not-become-uri-syntax": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "opaque-ids-become-paths-when-they-are-used-as-filenames": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "optional-deadline-controls-must-preserve-legacy-clock-sampling-order": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "out-of-band-owner-updates-must-survive-stale-process-local-publication": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "outer-protocol-deadlines-must-exceed-owned-inner-callback-budgets": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "owner-death-must-preserve-coding-workspaces-even-when-currently-pristine": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "parenthesize-do-block-expressions-assigned-to-module-attributes": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "parse-user-controlled-git-paths-with-nul-delimited-porcelain": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "path-confinement-checks-must-bind-to-the-opened-file-not-only-the-pathname": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "persistence-record-logical-ids-are-global-across-the-shared-records-table": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "phoenix-tracker-is-a-distributed-projection-not-a-first-writer-cas": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "pin-the-absolute-namespace-of-nested-policy-test-modules": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "pin-thread-counts-for-git-plumbing-inside-constrained-guests": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "pinned-action-bindings-should-fail-after-a-live-beam-implementation-reload": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "pinned-otp-file-timestamps-may-be-too-coarse-to-prove-same-read-stability": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "plain-detached-git-worktrees-do-not-inherit-ignored-dependency-directories": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "portable-directory-cleanup-must-account-for-platform-specific-errno-atoms": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "portable-file-mode-probes-must-try-gnu-stat-before-bsd-stat": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "prefer-steering-an-active-delegated-acp-worker-for-review-and-rework-reserve-cancellation-for-termination": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "prefer-the-retained-candidate-verifier-over-implementation-replay": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "preflight-database-migrations-before-a-clean-server-restart-after-persistence-schema-changes": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "preflight-security-regression-selectors-before-reviewer-egress": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "preflight-the-exact-council-question-and-read-the-full-consultation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "preserve-a-destructive-token-before-returning-a-post-create-failure": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "preserve-a-stalled-delegated-worktree-before-starting-a-replacement-worker": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "preserve-missing-checkpoint-ordering-without-accepting-an-unverified-checkpoint": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "preserve-resumable-evidence-outside-os-temporary-roots": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "preserve-retained-worker-trees-without-mutating-the-source-owned-workspace": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "preserve-the-formatter-api-s-newline-contract": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "preserve-the-proof-subject-when-canonicalizing-an-owner": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "private-ets-does-not-protect-authority-from-its-owning-genserver-s-sys-callbacks": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "privileged-approval-must-not-execute-mutable-user-owned-inputs": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "process-local-monotonic-ids-cannot-name-durable-resources": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "process-monitors-do-not-require-trapping-exits": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "process-output-is-arbitrary-bytes-until-proven-otherwise": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "project-lifecycle-provenance-explicitly-never-infer-it-from-a-result-payload": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "prompt-data-fencing-must-reuse-one-nonce-across-the-system-preamble-and-every-tool-result": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "proof-custody-must-protect-read-secrecy-as-well-as-write-authority": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "protocol-cancellation-must-finish-before-eager-transport-teardown": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "prove-app-boundaries-by-running-from-the-child-project-with-a-fresh-build": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "prove-container-mounts-under-a-read-only-root": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "prove-resource-absence-positively-do-not-reinterpret-an-arbitrary-lookup-failure-as-absence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "prove-responses-store-false-by-retrieve-and-resume-failure-not-the-outbound-flag": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "provider-registration-is-independent-of-credential-readiness": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "provider-security-flags-must-be-proven-on-the-exact-transport": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "provider-spend-limit-notices-are-not-successful-no-change-turns": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "provider-startup-defaults-are-not-acknowledged-operation-formats": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "provider-tool-identities-differ-across-acp-layers": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "provision-and-probe-through-the-same-pinned-container-installation": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "publish-terminal-state-before-invoking-optional-cleanup-infrastructure": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "put-ripgrep-filters-before-the-option-terminator": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "qualification-must-prove-a-named-product-or-runtime-claim": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "qualify-fresh-factories-through-actual-worker-startup-not-just-cli-discovery": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "quarantine-recovery-must-preserve-identity-and-parent-child-convergence": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "queued-control-acceptance-is-not-delivery-and-task-success-cannot-manufacture-the-acknowledgement": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "quote-shell-search-patterns-so-documentation-backticks-stay-literal": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "raw-sql-mutation-receipts-must-match-orm-record-contracts": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "read-contained-files-through-safepath-pinned-readers-not-resolve-then-read": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "read-progressively-disclosed-mcp-tool-schemas-before-calling": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "readiness-and-execution-must-share-the-same-canonicalizer": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reassert-acp-provider-launch-ceilings-after-every-raw-configuration-seam": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "record-a-shared-resource-s-prior-state-and-restore-only-the-task-s-change": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "recovery-of-an-uncertain-send-must-preserve-the-logical-turn-s-original-baseline": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "recursive-cleanup-must-be-bounded-and-progressive": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "registry-disappearance-may-lag-synchronous-process-shutdown": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "rehydrate-stdio-mcp-proxies-after-upstream-session-loss": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "release-provider-audio-only-for-the-exact-guarded-final-text": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "relocating-only-mix-exs-does-not-relocate-an-umbrella-project-coherently": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "remember-that-the-elixir-pipe-inserts-the-first-argument": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "repair-prompts-must-cover-every-admission-defect-the-retry-can-correct": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "replace-advisory-payload-caps-with-one-artifact-backed-contract": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reply-first-genserver-cleanup-still-has-to-resolve-every-supported-server-reference": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "repository-git-hooks-must-use-bin-mix-not-ambient-mix": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "repository-reconstruction-must-handle-safe-relative-symlinks-without-weakening-containment": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reproduce-a-suspected-runtime-failure-before-steering-a-security-fix": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "required-evidence-is-intent-not-an-executable-validation-program": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "resource-bounds-belong-at-the-public-facade-not-only-one-adapter": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "restart-durable-immutable-materialization-requires-an-owned-workspace": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "restart-recovery-regressions-must-pass-cold-and-standalone": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "retain-compiled-beam-binaries-when-loading-exs-diagnostic-modules-remotely": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "retain-conversation-authority-through-final-publication": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "retire-positive-tests-for-unauthenticated-mailbox-shapes-with-the-shape": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reused-detached-worktree-build-paths-can-retain-stale-priv-symlinks": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "review-frozen-commit-approvals-before-the-interaction-deadline": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "review-pure-authority-cores-at-their-actual-trust-boundary": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reviewed-pipeline-assets-belong-to-the-lowest-library-that-owns-their-business-operation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "reviewer-evidence-must-not-truncate-below-admitted-ledger-size": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "reviewer-failure-evidence-must-be-bounded-at-first-projection-and-survive-rework-feedback": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "rotating-oauth-refresh-is-a-provider-keyed-single-flight-publication": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "route-rework-before-authorizing-validation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "route-specific-proof-minting-must-refine-generic-authentication-not-replace-it": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "rsync-accepts-one-destination-per-invocation": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "run-authorization-test-fixtures-must-cross-the-ir-compilation-boundary": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "run-composition-tests-after-disjoint-delegated-contract-changes": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "run-directly-changed-app-tests-before-downstream-tests": {
+      "exposures_90d": 32,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "run-focused-umbrella-tests-one-application-at-a-time-when-the-live-server-is-up": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "run-postgres-specific-tests-with-the-postgres-test-adapter": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "run-the-full-dot-contract-test-file-after-changing-packaged-graph-bindings": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "schema-bounded-mix-test-paths-require-an-explicit-argv-delimiter": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "search-every-direct-wire-shape-match-when-centralizing-a-response-contract": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "secret-bearing-genservers-need-explicit-status-redaction": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "secrets-must-not-be-passed-or-printed-in-process-argv": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "security-regression-parent-overlays-must-reach-a-test-body": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "select-acp-models-through-the-provider-s-advertised-protocol-surface": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "separate-admission-acknowledgement-from-refresh-and-clear-only-the-acknowledged-draft": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "separate-chat-routing-from-embedding-egress-and-refresh-both-provider-caches": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "separate-end-state-architecture-from-current-delivery-constraints": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "separate-jido-action-names-from-plugin-registry-aliases": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "separate-source-of-truth-commit-from-derived-state-synchronization": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "separate-stateful-authorization-from-non-consuming-continuation-checks": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "sequential-readiness-observers-need-a-bounded-capture-time-skew": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "serialize-mix-commands-within-each-worktree": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "settle-every-task-owned-resource-through-one-durable-disposition-lifecycle": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "shared-durable-storage-does-not-make-hot-projections-cluster-global": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "signal-test-callbacks-must-not-assume-serialized-delivery": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "signed-mcp-coding-dispatch-requires-the-canonical-coding-envelope": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "simulate-owner-outages-by-stopping-the-owner": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "source-corpus-tests-must-not-require-ambient-git-metadata": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "source-owner-cleanup-success-does-not-imply-convergence": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "sources-only-validation-compiles-need-git-and-a-normal-mix-compile": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "spawned-development-tools-must-not-inherit-the-parent-mix-runtime": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "spawned-processes-do-not-inherit-process-dictionaries-and-shared-fakes-require-cleanup-convergence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "stable-review-finding-ids-cannot-include-candidate-identity-or-mutable-prose": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "stacked-candidate-adoption-requires-preserving-the-exact-base-ancestry": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "stage-owned-paths-and-reconcile-duplicate-terminal-evidence": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "static-dot-action-parameters-arrive-as-strings": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "stdio-mcp-servers-must-keep-stdout-json-rpc-clean-during-startup": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "stop-test-started-distribution-after-each-case": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "structured-acp-workspace-plans-are-a-live-pool-contract": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "structured-argv-does-not-require-whitespace-free-filesystem-paths": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "structured-coding-plan-resume-fields-are-a-paired-identity-not-a-boolean-switch": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "structured-coding-worktree-roots-are-policy-not-a-scratch-directory-preference": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "structured-terminal-output-needs-a-tool-contract-not-prompt-only-json": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "synchronous-mcp-mutations-must-converge-before-the-transport-deadline": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "sys-suspend-does-not-hold-external-exit-signal-retirement": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "target-every-post-worktree-git-mutation-explicitly": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "task-and-principal-ids-are-provenance-labels-not-operation-authority": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "task-handles-are-currently-less-durable-than-retained-coding-workspaces": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "task-history-observations-need-a-storage-barrier-and-monotonic-event-order": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "template-capability-grants-may-need-runtime-uri-expansion": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "temporary-test-roots-must-be-collision-safe-across-beam-invocations-not-only-within-one-vm": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "term-serialization-bounds-must-include-integer-bit-size-before-encoding": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "terminal-checkpoint-fast-paths-must-pass-through-canonical-recovery": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "terminal-task-cleanup-must-resolve-approvals-by-exact-task-provenance": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "test-applications-can-be-running-while-required-children-are-deliberately-absent": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "test-doubles-must-not-create-production-authorization-bypasses": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "test-downstream-config-guards-with-values-that-survive-the-config-accessor": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "test-durable-authority-with-owned-fixtures-and-real-consumers": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "test-facades-must-observe-production-ownership-not-reimplement-it": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "test-observation-helpers-must-not-acquire-authority": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "test-vms-must-not-inherit-durable-operator-runtime-configuration": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "tests-must-explicitly-own-security-children-disabled-by-test-config": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "tests-must-never-move-or-rename-live-credential-stores-to-simulate-missing-credentials": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "the-coding-security-regression-profile-treats-requested-paths-as-test-paths": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "the-mcp-task-timeout-does-not-replace-a-structured-coding-plan-s-wall-clock-budget": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "the-public-task-control-facade-remains-usable-when-a-client-has-not-exposed-a-steering-mcp-tool": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "the-recurring-arbor-bug-pattern-is-built-but-unwired-not-broken": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "trace-evidence-must-preserve-actual-effect-observations": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "trace-the-actual-external-process-owner-on-every-execution-branch-before-claiming-tree-cleanup": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "trace-the-exact-reviewed-symbol-before-closing-a-finding": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "transient-authority-capacity-failures-are-not-integrity-drift": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "treat-official-acp-registry-membership-as-protocol-discovery-not-executable-provenance": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "trust-policy-rules-match-by-uri-prefix-not-glob-never-write": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "trust-the-store-s-advertised-durability-class-not-its-configured-backend": {
+      "exposures_90d": 4,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "trusted-build-deps-are-writable-after-compile": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "trusted-git-subprocesses-must-clear-ambient-repository-control-environment": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "unsigned-local-checkpoint-successes-are-revalidation-hints-only": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "uri-prefix-checks-must-be-segment-aware-never-raw-string-starts-with-2": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "use-a-raw-elixir-sigil-for-quote-bearing-arbor-rpc-steering-messages": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "use-absolute-dates-in-docs-never-relative-time-anchors": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "use-bin-mix-not-ad-hoc-mise-exec-for-project-mix-commands": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "use-code-compile-file-1-not-repeated-code-require-file-1-when-iterating-a-live-rpc-diagnostic-module": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "use-current-coding-plan-output-keys-and-preflight-the-normalized-plan": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "use-lstat-to-reject-a-symlink-leaf-without-rejecting-canonicalized-system-ancestors": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "use-strict-value-equality-when-carrying-provenance-evidence": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "use-the-structured-coding-envelope-for-durable-acp-delegation": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "validate-closed-typed-envelopes-before-generic-json-canonicalization": {
+      "exposures_90d": 10,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "validate-security-scanner-bounds-against-the-production-corpus": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "validate-trusted-compiler-output-at-the-final-execution-boundary": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "validation-batches-must-not-cross-app-test-root-boundaries": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "validation-readiness-must-exercise-the-final-admission-boundary": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "validation-rework-evidence-must-identify-the-exact-failing-test-and-bounded-reason": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "verified-preservation-is-not-verified-cleanup": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "verify-delegated-git-refs-as-exact-opaque-values-before-invoking-the-coding-action": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "verify-effective-file-selectors-before-accepting-scoped-lint-evidence": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "verify-named-ets-authority-owners-against-real-supervision": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "verify-producer-payloads-against-current-consumer-contracts": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "verify-requested-deletions-are-git-deletions-not-empty-tracked-files": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "verify-retained-candidate-ancestry-before-defining-a-replay-range": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "verify-source-escapes-remain-text-after-agent-edits": {
+      "exposures_90d": 24,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    },
+    "verify-the-pinned-mix-wrapper-from-inside-the-actual-delegated-worktree": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "verify-the-running-checkout-before-live-mcp-dogfood": {
+      "exposures_90d": 9,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "verify-the-shipped-credential-envelope-not-only-provider-auth-documentation": {
+      "exposures_90d": 8,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "verify-x-doesn-t-exist-claims-in-roadmap-docs-against-source-before-designing": {
+      "exposures_90d": 0,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "when-a-supervised-child-gains-a-prerequisite-update-every-manual-test-stack-in-dependency-order": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "when-changing-every-mix-exs-shape-exercise-static-consumers-of-mix-project-source": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "when-work-moves-into-a-shared-loader-remove-obsolete-outer-processing-passes": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 0
+    },
+    "worktree-cleanup-is-idempotent-only-after-both-filesystem-and-git-registration-absence-are-proven": {
+      "exposures_90d": 5,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": 1
+    },
+    "zsh-command-substitution-does-not-split-newline-path-lists": {
+      "exposures_90d": 31,
+      "citations_90d": 0,
+      "citations_total": 0,
+      "last_cited": null,
+      "confirmations_90d": 0,
+      "relearned": 0,
+      "score": -1
+    }
+  }
+}

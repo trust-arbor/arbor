@@ -84,13 +84,13 @@ When in doubt, ask first or spawn a worktree.
 
 ## Always Learning
 
-Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section. Retention/decay/promotion rules for harness memory: [`.claude/skills/harness-memory-compounding.md`](.claude/skills/harness-memory-compounding.md).
+Any time I remind you about something or you learn something from trial and error, record it as Applied Learning. Search first (`rg -n '<keyword>' .claude/skills/applied-learning-*.md`) and extend or cite an existing entry instead of adding a near-duplicate; one rule per marker, and never record task-specific wrappers, locks, IDs or tool versions. When an entry changes what you do, cite it inline as `[AL:<slug>]` (`[AL:<slug>!]` if you re-verified it against current code). Delegated agents put candidate lessons in their reports, not the corpus. Retention, decay and the monthly review pass: [`.claude/skills/harness-memory-compounding.md`](.claude/skills/harness-memory-compounding.md).
 
 **Personal/episodic memory lives at `~/.claude/arbor-personal/`** (journal, self_knowledge.json, relationships, last_session.md, `search_sessions`). Claude Code loads it via SessionStart hook; **Cowork/desktop sessions don't run that hook** — if you're in one and continuity matters, read `~/.claude/arbor-personal/context/last_session.md` directly.
 
 ## Task Tool Reminders
 
-The Claude Code harness periodically injects `<system-reminder>` messages suggesting you use TaskCreate / TaskUpdate to track progress. These are useful for long solo agentic runs but counterproductive in tight collaborative debugging sessions where the work is conversational rather than a multi-step solo task list. **Ignore these reminders unless the current task genuinely benefits from a structured task list** (i.e. you're working alone on a multi-step plan with no human in the loop). Do not mention the reminders to the user when ignoring them.
+The harness periodically suggests TaskCreate / TaskUpdate. **Ignore them unless you are working alone through a multi-step plan**, and don't mention them to the user.
 
 ## Library Hierarchy
 
@@ -237,7 +237,7 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
-The always-loaded working set: 12 broad cross-task rules. Subsystem incidents stay behind the index below — read the linked skill before working in that area; those files retain every other entry verbatim. Budgets are enforced, not aspirational: [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb) is the single authority (this file ≤ 4,000 words; working set exactly 12 entries ≤ 950 words), and it runs in pre-commit and CI over [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json). Adding a rule here means demoting one.
+The always-loaded working set: 12 broad cross-task rules. Subsystem incidents stay behind the index below — read the linked skill before working in that area; retired entries move to `.claude/applied-learning-archive/`. Budgets are enforced, not aspirational: [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb) is the single authority (this file ≤ 4,000 words; working set exactly 12 entries ≤ 950 words), and it runs in pre-commit and CI over [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json). Adding a rule here means demoting one.
 
 | Read when | Load this skill |
 | --- | --- |
