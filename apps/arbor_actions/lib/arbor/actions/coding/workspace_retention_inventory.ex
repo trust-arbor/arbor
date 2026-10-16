@@ -191,7 +191,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionInventory do
   defp validate_record_count(records, opts) do
     max_entries = Keyword.get(opts, :max_entries, Core.max_records())
 
-    if is_integer(max_entries) and max_entries > 0 and max_entries <= Core.max_records() and
+    if is_integer(max_entries) and max_entries > 0 and
+         max_entries <= Core.inventory_record_ceiling() and
          length(records) <= max_entries,
        do: :ok,
        else: {:error, :retention_inventory_oversized}

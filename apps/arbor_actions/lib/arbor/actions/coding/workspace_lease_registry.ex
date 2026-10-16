@@ -5852,7 +5852,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp require_marker_capacity(records, :new_marker) do
-    if length(records) < RetentionJournal.max_records() do
+    if length(records) < Config.workspace_retention_max_records() do
       :ok
     else
       {:error, :retention_record_limit_exceeded}

@@ -45,7 +45,6 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: Core
   alias Arbor.Common.SafePath
 
-  @max_entries Core.max_records()
   @max_inventory_names Core.max_records() * 4
   @max_value_bytes Core.max_snapshot_bytes()
   @max_aggregate_inventory_bytes Core.max_aggregate_inventory_bytes()
@@ -772,7 +771,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
   end
 
   defp bound_record_names(records) do
-    if length(records) > @max_entries do
+    if length(records) > Core.inventory_record_ceiling() do
       {:error, :retention_record_limit_exceeded}
     else
       :ok
@@ -819,7 +818,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
     next_total = state.total_bytes - existing_size + new_size
 
     cond do
-      not Map.has_key?(state.inventory, key) and map_size(state.inventory) >= @max_entries ->
+      not Map.has_key?(state.inventory, key) and
+          map_size(state.inventory) >= Core.inventory_record_ceiling() ->
         {:error, {:retention_capacity_exceeded, :store_full}}
 
       next_total > @max_aggregate_inventory_bytes ->

@@ -1,3 +1,15 @@
+# Mix prunes unused OTP apps from the code path. ProviderGate needs os_mon
+# (and its sasl dependency) after Application.ensure_all_started/1, including
+# --no-start child-app runs.
+lib_dir = :code.lib_dir() |> List.to_string()
+
+for app <- ["sasl", "os_mon"] do
+  lib_dir
+  |> Path.join(app <> "-*/ebin")
+  |> Path.wildcard()
+  |> Enum.each(&Code.append_path/1)
+end
+
 # Add children to the empty app supervisors (start_children: false leaves them empty)
 # arbor_actions tests need shell, persistence, and signal processes
 
@@ -33,6 +45,10 @@ memory_authority_opts =
 # rewire. Production Application starts the registry with Arbor.Shell; tests
 # replace that child with the same module, configured only via start opts.
 _ = Arbor.Actions.TestLinuxBaselineMaterializer.start_link()
+
+unless Process.whereis(Arbor.Actions.Supervisor) do
+  {:ok, _} = Application.ensure_all_started(:arbor_actions)
+end
 
 case Supervisor.terminate_child(
        Arbor.Actions.Supervisor,

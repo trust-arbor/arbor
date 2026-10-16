@@ -52,6 +52,31 @@ defmodule Arbor.Actions.Config do
   def workspace_retention_max_ttl_ms, do: @workspace_retention_max_ms
 
   @doc """
+  Operator-configurable write-side retained-record limit.
+
+  Defaults to `WorkspaceRetentionJournalCore.max_records/0`. Decode/load uses
+  the higher inventory ceiling so existing live evidence is not dropped. The
+  configured write limit cannot exceed that ceiling.
+  """
+  @spec workspace_retention_max_records(keyword()) :: pos_integer()
+  def workspace_retention_max_records(opts \\ []) do
+    default = Arbor.Actions.Coding.WorkspaceRetentionJournalCore.max_records()
+    ceiling = Arbor.Actions.Coding.WorkspaceRetentionJournalCore.inventory_record_ceiling()
+
+    configured =
+      Keyword.get(
+        opts,
+        :max_records,
+        Application.get_env(:arbor_actions, :workspace_retention_max_records, default)
+      )
+
+    configured
+    |> normalize_positive_integer(default)
+    |> min(ceiling)
+    |> max(1)
+  end
+
+  @doc """
   Absolute directory for the node-restart durable retained-workspace journal.
 
   Defaults to `$ARBOR_HOME/workspace_retention` (or `~/.arbor/workspace_retention`

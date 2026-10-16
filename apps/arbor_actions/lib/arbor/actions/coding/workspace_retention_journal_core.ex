@@ -27,6 +27,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
 
   @schema_version 1
   @max_records 256
+  # Operational default remains `@max_records`. Decode/load admits every live
+  # retained record up to this DoS ceiling so a hard 256 cap cannot drop
+  # evidence that still needs retention. Compaction rotates expired rows.
+  @inventory_record_ceiling 8_192
   @max_string_bytes 4_096
   @max_workspace_id_bytes 128
   @max_id_bytes 256
@@ -114,9 +118,13 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
 
-  @doc "Maximum retained durable records admitted from a store."
+  @doc "Default operational retained-record target used for write-side capacity."
   @spec max_records() :: pos_integer()
   def max_records, do: @max_records
+
+  @doc "Hard decode/load ceiling. Live retained records are kept up to this bound."
+  @spec inventory_record_ceiling() :: pos_integer()
+  def inventory_record_ceiling, do: @inventory_record_ceiling
 
   @doc "Maximum encoded snapshot/record payload bytes."
   @spec max_snapshot_bytes() :: pos_integer()
@@ -395,6 +403,31 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   end
 
   def decode_inventory(_keys, _values), do: {:error, :invalid_retention_inventory}
+
+  @doc """
+  Rotate expired inventory while keeping every record that still needs retention.
+
+  `opts[:now]` is a required injected UTC `DateTime` (CRC purity). Records with
+  `expires_at <= now` are dropped. Invalid expiry is kept as evidence. Live
+  creating/active/retained/discarding records that are still within expiry are
+  kept even when the kept set exceeds `max_records/0`.
+  """
+  @spec compact_inventory([durable_record()], keyword()) ::
+          {:ok, %{kept: [durable_record()], dropped: [durable_record()]}} | {:error, term()}
+  def compact_inventory(records, opts \\ [])
+
+  def compact_inventory(records, opts) when is_list(records) and is_list(opts) do
+    case Keyword.get(opts, :now) do
+      %DateTime{} = now ->
+        {dropped, kept} = Enum.split_with(records, &expired_for_compaction?(&1, now))
+        {:ok, %{kept: kept, dropped: dropped}}
+
+      _ ->
+        {:error, :invalid_compaction_now}
+    end
+  end
+
+  def compact_inventory(_records, _opts), do: {:error, :invalid_retention_inventory}
 
   @doc """
   Decide whether a decoded durable record may enter hot retained state.
@@ -866,9 +899,18 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
 
   # -- inventory / key validation -------------------------------------
 
+  defp expired_for_compaction?(%{expires_at: iso}, %DateTime{} = now) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, expires, _offset} -> DateTime.compare(expires, now) != :gt
+      _ -> false
+    end
+  end
+
+  defp expired_for_compaction?(_record, _now), do: false
+
   defp validate_key_list(keys) do
     cond do
-      length(keys) > @max_records * 4 ->
+      length(keys) > @inventory_record_ceiling * 4 ->
         {:error, :retention_inventory_oversized}
 
       Enum.any?(keys, &(not retained_key?(&1))) ->
@@ -883,7 +925,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   end
 
   defp validate_record_count(keys) do
-    if length(keys) > @max_records do
+    if length(keys) > @inventory_record_ceiling do
       {:error, :retention_record_limit_exceeded}
     else
       :ok
