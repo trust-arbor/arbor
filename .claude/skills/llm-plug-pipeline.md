@@ -174,6 +174,15 @@ validation. A lazy stream can be partially consumed, abandoned, or cancelled,
 so it needs an explicit normal-completion contract before it can emit terminal
 usage; do not infer billing from an intermediate metadata chunk.
 
+**Compare classification policy before adding an outbound sensitivity gate
+(2026-10-15).** `SensitiveData.scan_all/1` returns detection labels, not a
+clearance decision. Common's classifier and orchestrator TaintCheck currently
+map API keys and financial PII to different sensitivity levels. Establish the
+mapping and join recorded sensitivity as a floor before reusing a classifier
+for admission; a caller-supplied public label must not suppress scanning. Trace
+OAuth, owned/custom adapters, ACP and retry effects separately before claiming
+a ReqLLM plug covers every outbound call (FINDING-011 design audit).
+
 ## Anti-patterns
 
 - **Don't bypass the pipeline for "just one quick concern."** Each one-off bypass is the seed of the next mode-flag mess this pattern was meant to replace. If the concern doesn't fit a plug, that's a design signal to rethink — not to bypass.

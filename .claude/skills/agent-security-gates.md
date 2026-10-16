@@ -62,6 +62,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   `Identity.Registry`, or `NonceCache` through their normal public Security flows;
   do not synthesize them from an agent, action, or observability process.
 
+## 1B. Restricted realtime signals are not durable audit acknowledgements (2026-10-15)
+
+- **What:** `Signals.durable_emit/4` refuses restricted categories with
+  `:restricted_durable_encryption_unavailable` until restart-safe encryption
+  exists, even when realtime delivery succeeds. A signal in `Signals.recent/1`
+  proves only realtime retention.
+- **Symptom:** an authority mutation succeeds although its purported durable
+  security record was refused; a ring-buffer assertion still passes.
+- **Action:** check the audit acknowledgement before changing authority, record
+  a requested change as an intent rather than a completed change, and propagate
+  refusals. Regression tests must assert unchanged authority on refusal. Do not
+  remove restricted-topic protection to make an audit write succeed. Found while
+  reviewing ApplyProfile's ignored emission result on 2026-10-15.
+
 ## 2. `arbor://shell/exec` is structurally `:ask` (always-locked ceiling)
 
 - **What:** shell is deliberately un-autonomous: it has an always-on `:ask` **ceiling**
