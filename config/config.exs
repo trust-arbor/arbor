@@ -689,6 +689,13 @@ config :arbor_commands,
     "apple_container" => "/usr/local/bin/container"
   }
 
+# OAuth credential storage. Default is a 0600 JSON file at
+# ~/.arbor/oauth/<provider>.json. Optional backends: :keyring (macOS Keychain /
+# Linux libsecret) and :encrypted_file (AES-GCM file whose DEK lives in the
+# keyring). Runtime override: ARBOR_OAUTH_STORAGE=file|keyring|encrypted_file.
+# See docs/arbor/OAUTH_CREDENTIAL_STORAGE.md.
+config :arbor_llm, oauth_storage_backend: :file
+
 # Advisory council: resolve each seat's preferred route against this host
 # (same rule as the binding council) through the arbor_llm route probe.
 config :arbor_consensus,

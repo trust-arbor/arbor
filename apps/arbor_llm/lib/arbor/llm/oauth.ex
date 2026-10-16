@@ -141,8 +141,11 @@ defmodule Arbor.LLM.OAuth do
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
   backends (ChatGPT/Codex, xAI/Grok) rather than metered API keys.
 
-  Tokens are held in a versioned Arbor credential envelope
-  (`~/.arbor/oauth/<provider>.json`, 0600). Only an explicitly Arbor-owned family acquired by an
+  Tokens are held in a versioned Arbor credential envelope. The default storage backend writes
+  `~/.arbor/oauth/<provider>.json` at mode 0600. Operators may opt into `:keyring` (macOS
+  Keychain via `security`, Linux libsecret via `secret-tool`) or `:encrypted_file` (AES-GCM
+  file whose data-encryption key lives in the keyring). See
+  `docs/arbor/OAUTH_CREDENTIAL_STORAGE.md`. Only an explicitly Arbor-owned family acquired by an
   Arbor login may be refreshed or published. Legacy ownerless stores are intentionally refused and
   left byte-for-byte unchanged; operators must relogin once an independent Arbor login flow exists.
   Codex/Grok CLI credentials are never imported, copied, refreshed, or modified. An explicitly
@@ -182,6 +185,7 @@ defmodule Arbor.LLM.OAuth do
   alias Arbor.LLM.OAuth.JwtPayload
   alias Arbor.LLM.OAuth.ProviderPolicy
   alias Arbor.LLM.OAuth.RecoveryProofStore
+  alias Arbor.LLM.OAuth.Storage
   alias Arbor.Contracts.LLM.AuthProvenance
   alias Arbor.Contracts.LLM.OAuthHealth
 
@@ -200,7 +204,6 @@ defmodule Arbor.LLM.OAuth do
   # Cover one concurrent refresh (~20s) plus margin; lock is released on owner death.
   @refresh_lock_retries 20
   @max_proof_ttl_ms 900_000
-  @default_store_dir "~/.arbor/oauth"
   @default_openai_source_file "~/.codex/auth.json"
 
   # Keep the "*_oauth" provider atoms alive so callers that String.to_existing_atom a provider
@@ -665,11 +668,22 @@ defmodule Arbor.LLM.OAuth do
   defp normalize_oauth_provider(_provider), do: {:error, :invalid_oauth_provider}
 
   defp read_credential(key) do
-    case read_json(store_path(key)) do
-      {:ok, %{} = json} -> decode_credential(key, json)
-      {:ok, _other} -> {:error, :oauth_credential_invalid}
-      {:error, {:token_file_unreadable, :enoent}} -> {:error, :oauth_login_required}
-      {:error, reason} -> {:error, {:oauth_token_store_read_failed, reason}}
+    case Storage.fetch(key) do
+      {:ok, body} when is_binary(body) ->
+        case decode_stored_json(body) do
+          {:ok, %{} = json} -> decode_credential(key, json)
+          {:ok, _other} -> {:error, :oauth_credential_invalid}
+          {:error, reason} -> {:error, {:oauth_token_store_read_failed, reason}}
+        end
+
+      {:error, :not_found} ->
+        {:error, :oauth_login_required}
+
+      {:error, {:token_file_unreadable, :enoent}} ->
+        {:error, :oauth_login_required}
+
+      {:error, reason} ->
+        {:error, {:oauth_token_store_read_failed, reason}}
     end
   end
 
@@ -791,18 +805,6 @@ defmodule Arbor.LLM.OAuth do
     max_map_keys: 2_000,
     max_list_items: 10_000
   ]
-  defp store_dir do
-    case Application.get_env(:arbor_llm, :oauth_store_dir) do
-      dir when is_binary(dir) and byte_size(dir) > 0 ->
-        Path.expand(dir)
-
-      _ ->
-        Path.expand(@default_store_dir)
-    end
-  end
-
-  defp store_path(key), do: Path.join(store_dir(), "#{key}.json")
-
   defp credential_receipt(key, config, %{owner: "arbor_owned"} = credential) do
     case usable_access_token(credential.tokens, config) do
       {:ok, token} ->
@@ -1379,52 +1381,15 @@ defmodule Arbor.LLM.OAuth do
 
   defp next_generation(_generation), do: {:error, :oauth_generation_exhausted}
 
-  # Persist tokens to Arbor's local store via atomic same-directory publication.
-  # Encode first; exclusive temp (mode 0600 before content); write + fsync; rename over target;
-  # fsync the parent directory so the directory entry is crash-durable; ensure final mode 0600.
-  # Never delete the old target before rename. Pre-rename failures clean the temp and leave the
-  # prior target byte-for-byte unchanged. A post-rename failure (fsync_directory/ensure_final_mode)
-  # means the new content is ALREADY the durable target -- tagged distinctly (never inferred from
-  # error shape, which is ambiguous: ensure_final_mode/1 can also surface a raw reason
-  # structurally identical to a pre-rename failure) so callers cannot mistake it for "nothing
-  # changed".
+  # Persist tokens through the configured storage backend. The default `:file`
+  # backend keeps atomic same-directory publication (exclusive 0600 temp, fsync,
+  # rename, directory fsync, final mode 0600). `:keyring` and `:encrypted_file`
+  # never leave a plaintext refresh_token or access_token on disk.
   defp write_stored(key, credential) do
     with {:ok, envelope} <- encode_credential(key, credential),
          {:ok, json} <- encode_token_json(envelope) do
-      path = store_path(key)
-      dir = Path.dirname(path)
-
-      with :ok <- ensure_store_dir(dir),
-           {:ok, tmp} <- create_temp_path(dir, key),
-           :ok <- write_temp_token_file(tmp, json) do
-        case perform_rename(tmp, path) do
-          :ok ->
-            case post_rename_finalize(dir, path) do
-              :ok -> :ok
-              {:error, inner} -> {:error, {:token_store_post_commit_failed, inner}}
-            end
-
-          {:error, reason} ->
-            _ = File.rm(tmp)
-            {:error, {:token_store_write_failed, reason}}
-        end
-      end
+      Storage.store(key, json)
     end
-  end
-
-  # Test seam: Application env `:oauth_rename_fun` (arity 2) replaces the rename call so tests
-  # can force a deterministic pre-commit failure against the real target/store_dir without
-  # redirecting it elsewhere. Production never sets this; real behavior is File.rename/2,
-  # unchanged.
-  defp perform_rename(tmp, path) do
-    case Application.get_env(:arbor_llm, :oauth_rename_fun) do
-      fun when is_function(fun, 2) -> fun.(tmp, path)
-      _ -> File.rename(tmp, path)
-    end
-  end
-
-  defp post_rename_finalize(dir, path) do
-    with :ok <- fsync_directory(dir), :ok <- ensure_final_mode(path), do: :ok
   end
 
   defp encode_credential(key, credential) do
@@ -1454,48 +1419,6 @@ defmodule Arbor.LLM.OAuth do
     end
   end
 
-  # Directory fsync makes the rename durable across crash/power loss on filesystems
-  # that only guarantee directory-entry durability after sync of the parent dir.
-  # OTP requires the :directory mode; plain [:raw, :read] returns :eisdir.
-  #
-  # Test seam: Application env `:oauth_fsync_dir_fun` (arity 1) replaces the raw directory-sync
-  # step so tests can force a deterministic post-commit (post-rename) failure against the real
-  # target. The seam shares do_fsync_directory/1's own RAW contract -- `:ok | {:error, reason}`
-  # with reason already inner-tagged (`{:dir_fsync_failed, _}` / `{:dir_open_failed, _}`) exactly
-  # like a real failure would be -- and the outer `{:token_store_write_failed, _}` wrap below is
-  # applied exactly once, here, to whichever source ran. Neither path can double-wrap, and the
-  # seam never has to know write_stored/2's error taxonomy beyond that one inner tag. Production
-  # never sets this; real behavior is do_fsync_directory/1, unchanged.
-  defp fsync_directory(dir) do
-    result =
-      case Application.get_env(:arbor_llm, :oauth_fsync_dir_fun) do
-        fun when is_function(fun, 1) -> fun.(dir)
-        _ -> do_fsync_directory(dir)
-      end
-
-    case result do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:token_store_write_failed, reason}}
-    end
-  end
-
-  defp do_fsync_directory(dir) when is_binary(dir) do
-    case :file.open(dir, [:raw, :read, :directory]) do
-      {:ok, io} ->
-        try do
-          case :file.sync(io) do
-            :ok -> :ok
-            {:error, reason} -> {:error, {:dir_fsync_failed, reason}}
-          end
-        after
-          _ = close_io_silent(io)
-        end
-
-      {:error, reason} ->
-        {:error, {:dir_open_failed, reason}}
-    end
-  end
-
   defp encode_token_json(tokens) when is_map(tokens) do
     case Jason.encode(tokens) do
       {:ok, json} when is_binary(json) and byte_size(json) <= @max_token_json_bytes ->
@@ -1511,95 +1434,9 @@ defmodule Arbor.LLM.OAuth do
 
   defp encode_token_json(_tokens), do: {:error, {:token_store_write_failed, :invalid_tokens}}
 
-  defp ensure_store_dir(dir) do
-    case File.mkdir_p(dir) do
-      :ok ->
-        # Best-effort private directory; content publication still enforces file mode 0600.
-        _ = File.chmod(dir, 0o700)
-        :ok
-
-      {:error, reason} ->
-        {:error, {:token_store_write_failed, reason}}
-    end
-  end
-
-  defp create_temp_path(dir, key) do
-    suffix =
-      Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-
-    tmp =
-      Path.join(dir, ".#{key}.#{System.unique_integer([:positive])}.#{suffix}.tmp")
-
-    {:ok, tmp}
-  end
-
-  defp write_temp_token_file(tmp, json) do
-    # Exclusive create so concurrent writers never share a temp path.
-    case :file.open(tmp, [:raw, :binary, :write, :exclusive]) do
-      {:ok, io} ->
-        try do
-          # Mode 0600 BEFORE writing credential bytes.
-          with :ok <- :file.change_mode(tmp, 0o600),
-               :ok <- :file.write(io, json),
-               :ok <- :file.sync(io),
-               :ok <- :file.close(io) do
-            :ok
-          else
-            {:error, reason} ->
-              _ = close_io_silent(io)
-              _ = File.rm(tmp)
-              {:error, {:token_store_write_failed, reason}}
-          end
-        rescue
-          e ->
-            _ = close_io_silent(io)
-            _ = File.rm(tmp)
-            {:error, {:token_store_write_failed, Exception.message(e)}}
-        catch
-          kind, reason ->
-            _ = close_io_silent(io)
-            _ = File.rm(tmp)
-            {:error, {:token_store_write_failed, {kind, reason}}}
-        end
-
-      {:error, reason} ->
-        _ = File.rm(tmp)
-        {:error, {:token_store_write_failed, reason}}
-    end
-  end
-
-  defp ensure_final_mode(path) do
-    case File.chmod(path, 0o600) do
-      :ok ->
-        case File.stat(path) do
-          {:ok, %{mode: mode}} when Bitwise.band(mode, 0o777) == 0o600 ->
-            :ok
-
-          {:ok, _} ->
-            {:error, {:token_store_write_failed, :insecure_mode}}
-
-          {:error, reason} ->
-            {:error, {:token_store_write_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, {:token_store_write_failed, reason}}
-    end
-  end
-
-  defp close_io_silent(io) do
-    try do
-      :file.close(io)
-    catch
-      _, _ -> :ok
-    end
-  end
-
-  defp read_json(path) do
-    with {:ok, body} <- File.read(Path.expand(path)),
-         {:ok, json} <- Arbor.LLM.ResponseBudget.decode_json(body, @token_json_limits) do
-      {:ok, json}
-    else
+  defp decode_stored_json(body) when is_binary(body) do
+    case Arbor.LLM.ResponseBudget.decode_json(body, @token_json_limits) do
+      {:ok, json} -> {:ok, json}
       {:error, reason} -> {:error, {:token_file_unreadable, reason}}
     end
   end

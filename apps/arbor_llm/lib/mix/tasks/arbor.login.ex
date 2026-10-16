@@ -36,6 +36,10 @@ defmodule Mix.Tasks.Arbor.Login do
 
   This task calls only the public `Arbor.LLM` facade. `Arbor.LLM.OAuth.Login`
   never launches a browser.
+
+  Credential storage defaults to a 0600 JSON file under `~/.arbor/oauth`.
+  Set `ARBOR_OAUTH_STORAGE=keyring` or `encrypted_file` to keep tokens out of
+  plaintext files. See `docs/arbor/OAUTH_CREDENTIAL_STORAGE.md`.
   """
 
   use Mix.Task

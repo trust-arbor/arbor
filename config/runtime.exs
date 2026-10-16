@@ -1200,3 +1200,24 @@ if config_env() != :test do
       raise "ARBOR_OWNED_DIGEST_ENABLED must be true or false"
   end
 end
+
+# OAuth credential storage. Tests set Application env explicitly and must not
+# inherit an operator ARBOR_OAUTH_STORAGE from the host.
+if config_env() != :test do
+  case System.get_env("ARBOR_OAUTH_STORAGE") do
+    unset when unset in [nil, ""] ->
+      :ok
+
+    "file" ->
+      config :arbor_llm, oauth_storage_backend: :file
+
+    "keyring" ->
+      config :arbor_llm, oauth_storage_backend: :keyring
+
+    "encrypted_file" ->
+      config :arbor_llm, oauth_storage_backend: :encrypted_file
+
+    _other ->
+      raise "ARBOR_OAUTH_STORAGE must be file, keyring, or encrypted_file"
+  end
+end

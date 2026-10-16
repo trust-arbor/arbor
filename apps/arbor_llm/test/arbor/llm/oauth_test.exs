@@ -12,7 +12,10 @@ defmodule Arbor.LLM.OAuthTest do
     :oauth_cli_files,
     :oauth_source_files,
     :oauth_rename_fun,
-    :oauth_fsync_dir_fun
+    :oauth_fsync_dir_fun,
+    :oauth_storage_backend,
+    :oauth_keyring_adapter,
+    :oauth_keyring_cmd_fun
   ]
 
   setup do
@@ -35,6 +38,9 @@ defmodule Arbor.LLM.OAuthTest do
     Application.delete_env(:arbor_llm, :oauth_source_files)
     Application.delete_env(:arbor_llm, :oauth_rename_fun)
     Application.delete_env(:arbor_llm, :oauth_fsync_dir_fun)
+    Application.put_env(:arbor_llm, :oauth_storage_backend, :file)
+    Application.delete_env(:arbor_llm, :oauth_keyring_adapter)
+    Application.delete_env(:arbor_llm, :oauth_keyring_cmd_fun)
 
     on_exit(fn ->
       Enum.each(prior, fn
