@@ -10,7 +10,9 @@ defmodule Arbor.Gateway.DevEvalSecurityRegressionTest do
   fails on the pre-fix router (status 200, message delivered) and passes after
   HTTP eval is refused and the loader call is gone from the module AST.
   """
-  use ExUnit.Case, async: true
+  # Not async: setup toggles the global :dev_endpoints app env, and another
+  # module flips it too, so a concurrent on_exit restore races the request.
+  use ExUnit.Case, async: false
 
   @moduletag :fast
   @moduletag :security

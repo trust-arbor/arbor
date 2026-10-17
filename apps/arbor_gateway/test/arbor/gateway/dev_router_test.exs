@@ -1,5 +1,7 @@
 defmodule Arbor.Gateway.Dev.RouterTest do
-  use ExUnit.Case, async: true
+  # Not async: setup toggles the global :dev_endpoints app env, and another
+  # module flips it too, so a concurrent on_exit restore races the request.
+  use ExUnit.Case, async: false
   @moduletag :fast
   import Plug.Test
   import Plug.Conn
