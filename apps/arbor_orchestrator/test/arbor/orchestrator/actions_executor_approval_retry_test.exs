@@ -172,7 +172,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
     second_request = await_pending_request(agent_id)
     refute second_request.request_id == first_request.request_id
-    assert :ok = Arbor.Comms.InteractionRouter.respond(second_request.request_id, :denied)
+    assert :ok = Arbor.Comms.InteractionRouter.respond(second_request.request_id, :rejected)
 
     assert {:error, message} = Task.await(second, 3_000)
     assert message =~ "denied by the operator"
