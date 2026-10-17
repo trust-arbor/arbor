@@ -61,7 +61,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
     Map.merge(base, %{
       "session.messages" => messages_with_input,
       "session.input" => input,
-      "session.query" => input
+      "session.query" => input,
+      # User-initiated turns have a waiting human. ModeSelect defaults this to
+      # false, which selected reflection (no goals) or plan_execution (goals,
+      # no intents) on ordinary chat turns.
+      "session.user_waiting" => true
     })
   end
 
@@ -90,6 +94,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     base
     |> Map.put("session.messages", [])
     |> Map.put("session.is_heartbeat", true)
+    |> Map.put("session.user_waiting", false)
     |> Map.put("session.goals", goals)
     |> Map.put("session.working_memory", wm)
     |> Map.put("session.knowledge_graph", knowledge_graph)

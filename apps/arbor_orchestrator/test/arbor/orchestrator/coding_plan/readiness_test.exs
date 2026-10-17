@@ -298,6 +298,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
 
     assert report["status"] == "blocked"
     assert blocked_code(report) == "dependency_baseline_mismatch"
+    diagnostic = diagnostic(report, "dependency_baseline")
+
+    assert diagnostic["remediation"] =~ "mix arbor.baseline.build"
+    assert diagnostic["remediation"] =~ "mix arbor.baseline.activate <digest>"
+
+    refute diagnostic["remediation"] =~
+             "Rebuild the Linux dependency baseline for this commit before dispatch."
+
     assert_received {:baseline_called, _repo, ^base_commit}
     refute_received :acp_called
     refute_received :toolchain_called
