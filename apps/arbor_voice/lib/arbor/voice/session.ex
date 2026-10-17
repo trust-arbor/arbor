@@ -24,6 +24,7 @@ defmodule Arbor.Voice.Session do
   alias Arbor.Voice.Session.AudioTurnCore
   alias Arbor.Voice.Session.Settlement
   alias Arbor.Voice.Session.ToolTaskCore
+  alias Arbor.Voice.Session.ToolWaveCore
   alias Arbor.Voice.Session.TurnCore
   alias Arbor.Voice.ToolCallOwner
 
@@ -1521,7 +1522,9 @@ defmodule Arbor.Voice.Session do
         # Sole outstanding-tool authority (not TurnCore).
         pending: %{},
         # One-dispatch slot + at most one receipt (VP-05D1 / VOICE-10).
-        dispatch: ManagedDispatchCore.new()
+        dispatch: ManagedDispatchCore.new(),
+        # One provider continuation per completed tool wave.
+        tool_waves: ToolWaveCore.new()
       }
 
       active_state = %{state | turn: turn, turn_generation: generation}
@@ -1634,6 +1637,7 @@ defmodule Arbor.Voice.Session do
         lease: Redacted.new(lease),
         pending: %{},
         dispatch: ManagedDispatchCore.new(),
+        tool_waves: ToolWaveCore.new(),
         ticket: nil,
         request_id: nil,
         audio_phase: :sending
@@ -1720,6 +1724,7 @@ defmodule Arbor.Voice.Session do
           |> Map.put(:core, core)
           |> Map.put(:first_audio_ms, nil)
           |> Map.delete(:held_terminal)
+          |> Map.update!(:tool_waves, &ToolWaveCore.close/1)
 
         enqueue_poll(%{state | turn: next}, turn.generation)
 
@@ -1729,6 +1734,7 @@ defmodule Arbor.Voice.Session do
           |> Map.put(:core, core)
           |> Map.put(:first_audio_ms, nil)
           |> Map.delete(:held_terminal)
+          |> Map.update!(:tool_waves, &ToolWaveCore.admit(&1, call.id))
 
         admit_and_route_tool(%{state | turn: next}, next, call)
 
@@ -2092,17 +2098,16 @@ defmodule Arbor.Voice.Session do
   end
 
   defp poll_turn(state, %{kind: :audio, audio_phase: :receiving, request_id: nil} = turn) do
-    result =
-      with true <- audio_turn_current?(state, turn),
-           do:
-             state.resource_owner.recv_audio_request(
-               state.owner,
-               turn.ticket,
-               state.poll_window_ms
-             )
-
-    case result do
-      {:ok, request_id} -> %{state | turn: %{turn | request_id: request_id}}
+    with {:ok, state, turn} <- request_ready_tool_responses(state, turn),
+         true <- audio_turn_current?(state, turn),
+         {:ok, request_id} <-
+           state.resource_owner.recv_audio_request(
+             state.owner,
+             turn.ticket,
+             state.poll_window_ms
+           ) do
+      %{state | turn: %{turn | request_id: request_id}}
+    else
       _ -> finish_audio_error(state, turn, :turn_failed)
     end
   catch
@@ -2112,6 +2117,58 @@ defmodule Arbor.Voice.Session do
   defp poll_turn(state, %{kind: :audio}), do: state
 
   defp poll_turn(state, turn) do
+    case request_ready_tool_responses(state, turn) do
+      {:ok, state, turn} -> recv_turn_event(state, turn)
+      {:error, _reason} -> finish_turn_error(state, turn, :turn_failed)
+    end
+  end
+
+  # A tool wave closes on its tool-bearing turn_done. Once none of its calls
+  # is still pending, every output was sent: ask the provider to continue,
+  # exactly once per wave. Runs before each receive so every output path
+  # (owner result, refusal, capacity, timeout) is covered.
+  defp request_ready_tool_responses(state, turn) do
+    {ready, waves} = ToolWaveCore.take_ready(turn.tool_waves, Map.keys(turn.pending || %{}))
+    turn = %{turn | tool_waves: waves}
+    state = %{state | turn: turn}
+
+    if ready > 0 and request_tool_responses(state, ready) != :ok,
+      do: {:error, :turn_failed},
+      else: {:ok, state, turn}
+  end
+
+  defp request_tool_responses(state, count) do
+    Enum.reduce_while(1..count, :ok, fn _wave, :ok ->
+      case safe_request_response(state) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp safe_request_response(%{turn: %{kind: :audio}} = state) do
+    with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+         {:ok, _request_id} <- state.resource_owner.request_response_request(state.owner) do
+      :ok
+    else
+      _ -> {:error, :turn_failed}
+    end
+  catch
+    _kind, _reason -> {:error, :turn_failed}
+  end
+
+  defp safe_request_response(state) do
+    with :ok <- ConversationAuthority.recheck(state.conversation_binding),
+         :ok <- state.resource_owner.request_response(state.owner) do
+      :ok
+    else
+      _ -> {:error, :turn_failed}
+    end
+  catch
+    _kind, _reason -> {:error, :turn_failed}
+  end
+
+  defp recv_turn_event(state, turn) do
     case safe_recv(state) do
       {:ok, event} ->
         apply_turn_event(state, turn, event)
@@ -2180,12 +2237,22 @@ defmodule Arbor.Voice.Session do
       {:cycle_reset, core} ->
         # Intermediate provider boundary: pre-tool text already cleared in core.
         # Never complete from this event regardless of pending emptiness.
-        next_turn = turn |> Map.put(:core, core) |> Map.delete(:held_terminal)
+        next_turn =
+          turn
+          |> Map.put(:core, core)
+          |> Map.delete(:held_terminal)
+          |> Map.update!(:tool_waves, &ToolWaveCore.close/1)
+
         enqueue_poll(%{state | turn: next_turn}, turn.generation)
 
       {:admit_tool, core, call} ->
         # A new tool wave invalidates any terminal held from an earlier wave.
-        next_turn = turn |> Map.put(:core, core) |> Map.delete(:held_terminal)
+        next_turn =
+          turn
+          |> Map.put(:core, core)
+          |> Map.delete(:held_terminal)
+          |> Map.update!(:tool_waves, &ToolWaveCore.admit(&1, call.id))
+
         admit_and_route_tool(%{state | turn: next_turn}, next_turn, call)
 
       {:error, :protocol_error} ->

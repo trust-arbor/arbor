@@ -89,7 +89,8 @@ defmodule Arbor.Voice.ResourceOwner do
     configure: [:configure],
     send_text: [:text_item, :text_response],
     send_audio: [:audio_append, :audio_commit, :audio_response],
-    send_tool_result: [:tool_result_item, :tool_result_response],
+    send_tool_result: [:tool_result_item],
+    request_response: [:tool_result_response],
     recv: [],
     meta: [],
     close: []
@@ -311,6 +312,31 @@ defmodule Arbor.Voice.ResourceOwner do
 
   def send_tool_result_request(_owner, _call_id, _output),
     do: {:error, :owner_unavailable}
+
+  @doc """
+  Asks the backend to continue after a completed tool wave (one provider
+  `response.create` for all of that response's tool outputs).
+  """
+  @spec request_response(GenServer.server()) :: :ok | {:error, atom()}
+  def request_response(owner), do: call(owner, {:backend, :request_response, []})
+
+  @doc """
+  Enqueues `request_response/1` without blocking the Session owner, ordered
+  after earlier `send_tool_result_request/3` requests by mailbox order.
+  """
+  @spec request_response_request(GenServer.server()) ::
+          {:ok, :gen_server.request_id()} | {:error, atom()}
+  def request_response_request(owner) when is_pid(owner) do
+    with {:ok, request} <- authenticated_request(owner, {:backend, :request_response, []}) do
+      {:ok, :gen_server.send_request(owner, request)}
+    end
+  rescue
+    _exception -> {:error, :owner_unavailable}
+  catch
+    _kind, _reason -> {:error, :owner_unavailable}
+  end
+
+  def request_response_request(_owner), do: {:error, :owner_unavailable}
 
   @spec recv(GenServer.server(), timeout()) ::
           {:ok, Arbor.Voice.RealtimeBackend.event()} | {:error, atom()}
@@ -739,7 +765,7 @@ defmodule Arbor.Voice.ResourceOwner do
          _from,
          %{audio_active: %AudioOperation{}} = state
        )
-       when operation not in [:send_tool_result, :meta],
+       when operation not in [:send_tool_result, :request_response, :meta],
        do: {:reply, {:error, :owner_busy}, state}
 
   defp dispatch_owner_request({:backend, :configure, [config]}, from, state) do
@@ -1924,7 +1950,9 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp validate_backend_module(module) do
-    callbacks = RealtimeBackend.behaviour_info(:callbacks)
+    callbacks =
+      RealtimeBackend.behaviour_info(:callbacks) --
+        RealtimeBackend.behaviour_info(:optional_callbacks)
 
     if Code.ensure_loaded?(module) and
          Enum.all?(callbacks, fn {name, arity} -> function_exported?(module, name, arity) end) do
@@ -1964,7 +1992,10 @@ defmodule Arbor.Voice.ResourceOwner do
        when is_binary(call_id) and is_binary(output),
        do: :ok
 
-  defp validate_operation_args(operation, [], _config) when operation in [:meta, :close], do: :ok
+  defp validate_operation_args(operation, [], _config)
+       when operation in [:request_response, :meta, :close],
+       do: :ok
+
   defp validate_operation_args(_operation, _args, _config), do: {:error, :invalid_operation}
 
   defp resolve_supervisor(name, kind) when is_atom(name) and not is_nil(name) do

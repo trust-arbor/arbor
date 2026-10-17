@@ -42,11 +42,12 @@ defmodule Arbor.Voice.BackendWorker do
     :send_text,
     :send_audio,
     :send_tool_result,
+    :request_response,
     :recv,
     :meta,
     :close
   ]
-  @send_operations [:send_text, :send_audio, :send_tool_result]
+  @send_operations [:send_text, :send_audio, :send_tool_result, :request_response]
   @public_error_reasons [
     :operation_timeout,
     :backend_callback_fault,
@@ -342,6 +343,7 @@ defmodule Arbor.Voice.BackendWorker do
           | :send_text
           | :send_audio
           | :send_tool_result
+          | :request_response
           | :recv
           | :meta
           | :close
@@ -815,6 +817,16 @@ defmodule Arbor.Voice.BackendWorker do
     invoke_and_normalize(state, fn -> state.backend_module.open(backend_opts) end)
   end
 
+  # request_response/1 is an optional backend callback: a backend without a
+  # separate continuation step completes it as a no-op with no effects.
+  defp execute_operation(%{operation: :request_response} = state) do
+    session = Redacted.value(state.session)
+
+    if function_exported?(state.backend_module, :request_response, 1),
+      do: invoke_and_normalize(state, fn -> state.backend_module.request_response(session) end),
+      else: invoke_and_normalize(state, fn -> {:ok, session} end)
+  end
+
   defp execute_operation(%{operation: operation} = state) do
     session = Redacted.value(state.session)
     args = operation_args(state)
@@ -1097,6 +1109,8 @@ defmodule Arbor.Voice.BackendWorker do
     do:
       bounded_utf8?(call_id, @max_tool_id_bytes) and
         bounded_utf8?(output, @max_tool_output_bytes)
+
+  defp valid_operation_args?(:request_response, []), do: true
 
   defp valid_operation_args?(:recv, [timeout]),
     do: timeout == :infinity or (is_integer(timeout) and timeout >= 0)
@@ -1429,7 +1443,15 @@ defmodule Arbor.Voice.BackendWorker do
   end
 
   defp valid_public_outcome?(operation, :ok)
-       when operation in [:open, :configure, :send_text, :send_audio, :send_tool_result, :close],
+       when operation in [
+              :open,
+              :configure,
+              :send_text,
+              :send_audio,
+              :send_tool_result,
+              :request_response,
+              :close
+            ],
        do: true
 
   defp valid_public_outcome?(:recv, {:ok, event}) do

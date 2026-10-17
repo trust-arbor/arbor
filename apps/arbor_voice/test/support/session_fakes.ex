@@ -632,6 +632,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def send_tool_result(owner, call_id, output),
       do: Arbor.Voice.ResourceOwner.send_tool_result(owner, call_id, output)
 
+    def request_response(owner), do: Arbor.Voice.ResourceOwner.request_response(owner)
+
     def recv(owner, timeout), do: Arbor.Voice.ResourceOwner.recv(owner, timeout)
 
     def register_cleanup(owner, key, fun) do

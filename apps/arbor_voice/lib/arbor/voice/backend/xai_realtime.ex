@@ -132,14 +132,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defmodule Session do
     @moduledoc false
-    @derive {Inspect,
-             except: [
-               :transport_state,
-               :effect_authorizer,
-               :acc,
-               :pending_audio,
-               :pending_tool_call_ids
-             ]}
+    @derive {Inspect, except: [:transport_state, :effect_authorizer, :acc, :pending_audio]}
     @enforce_keys [:transport_mod, :transport_state, :clock_fun, :effect_authorizer]
     defstruct [
       :transport_mod,
@@ -153,10 +146,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       diagnostic_transcript: false,
       diagnostic_response: false,
       pending_audio: <<>>,
-      acc: "",
-      pending_tool_call_ids: MapSet.new(),
-      tool_wave_open: false,
-      tool_wave_complete: false
+      acc: ""
     ]
   end
 
@@ -553,74 +543,14 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       "item" => %{"type" => "function_call_output", "call_id" => call_id, "output" => output}
     }
 
-    session = note_tool_output(session, call_id)
-    create? = create_after_tool_output?(session)
-
-    frames =
-      if create? do
-        [
-          {:tool_result_item, frame},
-          {:tool_result_response, %{"type" => "response.create"}}
-        ]
-      else
-        [{:tool_result_item, frame}]
-      end
-
-    case send_frames(session, frames) do
-      {:ok, sent} -> {:ok, if(create?, do: close_tool_wave(sent), else: sent)}
-      error -> error
-    end
+    send_frames(session, [{:tool_result_item, frame}])
   end
 
-  defp track_tool_call(session, call_id) when is_binary(call_id) and call_id != "" do
-    %{
-      session
-      | pending_tool_call_ids: MapSet.put(session.pending_tool_call_ids, call_id),
-        tool_wave_open: true
-    }
-  end
-
-  defp track_tool_call(session, _call_id), do: session
-
-  defp note_tool_output(session, call_id) when is_binary(call_id) do
-    %{session | pending_tool_call_ids: MapSet.delete(session.pending_tool_call_ids, call_id)}
-  end
-
-  defp note_tool_output(session, _call_id), do: session
-
-  # Untracked single-shot outputs keep the historical create. A tracked wave
-  # waits until response.done and every pending output of that response.
-  defp create_after_tool_output?(%Session{tool_wave_open: false}), do: true
-
-  defp create_after_tool_output?(%Session{
-         tool_wave_open: true,
-         tool_wave_complete: true,
-         pending_tool_call_ids: pending
-       }),
-       do: MapSet.size(pending) == 0
-
-  defp create_after_tool_output?(_session), do: false
-
-  defp close_tool_wave(session) do
-    %{
-      session
-      | pending_tool_call_ids: MapSet.new(),
-        tool_wave_open: false,
-        tool_wave_complete: false
-    }
-  end
-
-  defp maybe_flush_tool_wave_create(%Session{} = session) do
-    if session.tool_wave_open and session.tool_wave_complete and
-         MapSet.size(session.pending_tool_call_ids) == 0 do
-      case send_frames(session, [{:tool_result_response, %{"type" => "response.create"}}]) do
-        {:ok, sent} -> {:ok, close_tool_wave(sent)}
-        error -> error
-      end
-    else
-      {:ok, session}
-    end
-  end
+  # xAI expects one response.create after all function_call_output items of a
+  # response, not one per output. The Session decides when a wave is complete.
+  @impl true
+  def request_response(%Session{} = session),
+    do: send_frames(session, [{:tool_result_response, %{"type" => "response.create"}}])
 
   # Once at least one physical frame succeeds, retain the latest opaque
   # backend session in a private third tuple element. ResourceOwner consumes
@@ -782,18 +712,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
             recv_loop(session, deadline)
 
           {:ok, session, event} ->
-            case maybe_flush_tool_wave_create(session) do
-              {:ok, session} ->
-                {:ok, session, event}
-
-              {:error, reason} ->
-                close(session)
-                {:error, reason}
-
-              {:error, reason, latest} ->
-                close(latest)
-                {:error, reason}
-            end
+            {:ok, session, event}
 
           {:error, reason} ->
             # recv advanced the opaque transport handle. Close that exact handle
@@ -876,7 +795,6 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   defp map_event(session, %{"type" => "response.function_call_arguments.done"} = frame) do
     name = frame["name"]
     call_id = frame["call_id"]
-    session = track_tool_call(session, call_id)
 
     case decode_tool_arguments(frame["arguments"]) do
       {:ok, args} -> {:ok, session, {:tool_call, %{id: call_id, name: name, arguments: args}}}
@@ -886,9 +804,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defp map_event(session, %{"type" => "response.done"}) do
     text = String.trim(session.acc)
-
-    {:ok, %{session | acc: "", tool_wave_complete: session.tool_wave_open},
-     {:turn_done, %{text: text}}}
+    {:ok, %{session | acc: ""}, {:turn_done, %{text: text}}}
   end
 
   defp map_event(session, %{"type" => "error"} = frame) do

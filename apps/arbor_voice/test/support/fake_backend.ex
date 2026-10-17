@@ -26,6 +26,9 @@ defmodule Arbor.Voice.Test.FakeBackend do
   def send_tool_result(session, _call_id, _output), do: {:ok, session}
 
   @impl true
+  def request_response(session), do: {:ok, session}
+
+  @impl true
   # Nonblank terminal so VP-04E1 TurnCore admits a complete turn (blank
   # terminal + blank accumulator is protocol_error).
   def recv(session, _timeout), do: {:ok, session, {:turn_done, %{text: "ok"}}}

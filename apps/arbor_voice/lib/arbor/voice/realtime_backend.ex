@@ -154,6 +154,21 @@ defmodule Arbor.Voice.RealtimeBackend do
               send_result()
 
   @doc """
+  Asks the provider to continue after a completed tool wave. The voice
+  Session calls this exactly once per tool-bearing response, after that
+  response finished and every one of its tool outputs was sent, because a
+  provider may need one continuation for all parallel outputs, not one per
+  output. `send_tool_result/3` therefore sends only the output item.
+
+  Optional: backends without a separate continuation step omit it, and the
+  owner treats the operation as a no-op. External-route backends that
+  omit it fail closed on the owner's declared `:tool_result_response` effect.
+  """
+  @callback request_response(session()) :: send_result()
+
+  @optional_callbacks request_response: 1
+
+  @doc """
   Blocks up to `timeout` milliseconds for the next backend event. Callers
   are expected to call this in a receive loop for the session's lifetime.
 
