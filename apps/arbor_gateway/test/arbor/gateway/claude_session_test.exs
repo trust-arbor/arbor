@@ -2,12 +2,40 @@ defmodule Arbor.Gateway.Bridge.ClaudeSessionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Gateway.Bridge.ClaudeSession
+  alias Arbor.Security
 
   @moduletag :fast
 
   defmodule UnavailableTrust do
     def get_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
     def create_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+  end
+
+  defmodule RecordingTrust do
+    use Agent
+
+    def start_link(_opts), do: Agent.start_link(fn -> %{} end, name: __MODULE__)
+    def reset, do: Agent.update(__MODULE__, fn _ -> %{} end)
+
+    def get_trust_profile(id) do
+      Agent.get(__MODULE__, fn profiles ->
+        case Map.fetch(profiles, id) do
+          {:ok, profile} -> {:ok, profile}
+          :error -> {:error, :not_found}
+        end
+      end)
+    end
+
+    def create_trust_profile(id) do
+      Agent.get_and_update(__MODULE__, fn profiles ->
+        if Map.has_key?(profiles, id) do
+          {{:error, :already_exists}, profiles}
+        else
+          profile = %{agent_id: id}
+          {{:ok, profile}, Map.put(profiles, id, profile)}
+        end
+      end)
+    end
   end
 
   setup do
@@ -154,7 +182,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSessionTest do
     test "raises exit when trust service is unavailable" do
       # authorize_tool calls Arbor.Trust.get_trust_profile via GenServer.call,
       # which exits when the process doesn't exist. This verifies fail-closed behavior.
-      # The Bridge Router catches this exit and returns a deny decision.
+      # Fail-closed: an unavailable Trust process exits rather than authorizing.
       assert catch_exit(
                ClaudeSession.authorize_tool(
                  "test-session",
@@ -272,6 +300,23 @@ defmodule Arbor.Gateway.Bridge.ClaudeSessionTest do
   describe "ensure_registered/2" do
     test "exits when trust service is unavailable" do
       assert catch_exit(ClaudeSession.ensure_registered("test-session", "/tmp"))
+    end
+
+    test "security regression: ambient bridge registration cannot mint a session" do
+      case start_supervised(RecordingTrust) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> RecordingTrust.reset()
+      end
+
+      Application.put_env(:arbor_gateway, :trust_module, RecordingTrust)
+      session_id = "ambient-denied-#{System.unique_integer([:positive])}"
+      agent_id = ClaudeSession.to_agent_id(session_id)
+
+      assert {:error, :capability_mutation_unauthorized} =
+               ClaudeSession.ensure_registered(session_id, "/tmp")
+
+      assert {:error, :not_found} = RecordingTrust.get_trust_profile(agent_id)
+      assert {:ok, []} = Security.list_capabilities(agent_id)
     end
   end
 end

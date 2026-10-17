@@ -60,12 +60,6 @@ config :arbor_security,
       registered_name: Arbor.Agent.SystemLifecycleAuthority,
       purposes: [:system_lifecycle]
     },
-    gateway_bridge_owner: %{
-      application: :arbor_gateway,
-      path: [Arbor.Gateway.Bridge.RegistrationAuthority],
-      registered_name: Arbor.Gateway.Bridge.RegistrationAuthority,
-      purposes: [:gateway_claude_bridge]
-    },
     gateway_lifecycle_owner: %{
       application: :arbor_gateway,
       path: [Arbor.Gateway.Chat.LifecycleAuthority],

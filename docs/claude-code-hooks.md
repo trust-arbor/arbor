@@ -91,37 +91,13 @@ Modify the tool parameters before execution:
 }
 ```
 
-## Example: Authorization Hook
+## Authorization Hook (removed)
 
-```bash
-#!/bin/bash
-# Check authorization and return decision
-
-INPUT=$(cat)
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
-
-# Call authorization service
-RESPONSE=$(curl -s http://localhost:4000/api/bridge/authorize_tool \
-  -H "Content-Type: application/json" \
-  -d "$INPUT")
-
-DECISION=$(echo "$RESPONSE" | jq -r '.decision')
-
-case "$DECISION" in
-  "allow")
-    echo '{"permissionBehavior": "allow"}'
-    exit 0
-    ;;
-  "deny")
-    echo '{"permissionBehavior": "deny", "systemMessage": "Blocked by security policy"}'
-    exit 2
-    ;;
-  *)
-    echo '{"permissionBehavior": "passthrough"}'
-    exit 0
-    ;;
-esac
-```
+`POST /api/bridge/authorize_tool` was an unused HTTP PreToolUse side door.
+The hook (`.claude/hooks/arbor_bridge_authorize.sh`) was removed 2026-08-26
+after it failed open on every tool call once `/api/*` gained auth (2026-02-07).
+The route itself was removed 2026-10-15. Harness tool authorization is the
+signed-MCP / ACP path, never this HTTP endpoint.
 
 ## Team/Swarm Features (Hidden)
 
@@ -158,4 +134,4 @@ Feature-gated by `tengu_brass_pebble` flag. Not yet rolled out.
 ## References
 
 - Source: `/Users/azmaveth/node_modules/@anthropic-ai/claude-code/cli.js`
-- Arbor integration: `.claude/hooks/arbor_bridge_authorize.sh`
+- Arbor integration: signed-MCP / ACP (the HTTP `/api/bridge/authorize_tool` PreToolUse hook was removed)
