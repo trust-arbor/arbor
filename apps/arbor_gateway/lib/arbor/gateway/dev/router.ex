@@ -2,16 +2,18 @@ defmodule Arbor.Gateway.Dev.Router do
   @moduledoc """
   Development tools HTTP router.
 
-  Provides endpoints for runtime inspection and code evaluation.
-  Mounted at `/api/dev` by the main Gateway router.
+  Provides endpoints for runtime inspection. Mounted at `/api/dev` by the
+  main Gateway router only in `:dev` and `:test` builds.
 
   All endpoints are restricted to:
-  - Development environment only (`Mix.env() == :dev`)
+  - Explicit opt-in (`config :arbor_gateway, dev_endpoints: true`)
   - Localhost requests only
 
   ## Endpoints
 
-  - `POST /eval` — evaluate Elixir code in the running VM
+  - `POST /eval` — **refused**. HTTP request bodies must not reach
+    `Code.eval_string`. Operators use `mix arbor.rpc` (cookie-gated);
+    agents use `Arbor.Sandbox.authorize_eval/4` (Dune).
   - `POST /recompile` — recompile the project
   - `GET /info` — runtime information (processes, memory, apps)
   - `GET /config/:app` — application configuration
@@ -25,23 +27,18 @@ defmodule Arbor.Gateway.Dev.Router do
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason, pass: ["*/*"])
   plug(:dispatch)
 
-  # POST /api/dev/eval — Evaluate Elixir code
-  #
-  # Request body: {"code": "Enum.map(1..5, & &1 * 2)"}
-  # Response: {"result": "[2, 4, 6, 8, 10]", "status": "ok"}
+  # POST /api/dev/eval — refused. Untrusted HTTP bodies must not reach
+  # Code.eval_string (2026-10-15). The route stays so callers get a
+  # closed-form 403 instead of a silent 404, and so the regression can
+  # POST a payload that would have executed on the old router.
   post "/eval" do
     with :ok <- check_dev_environment(),
          :ok <- check_localhost(conn) do
-      code = conn.body_params["code"] || ""
-      Logger.info("Dev eval request", code: String.slice(code, 0, 100))
-
-      case safe_eval(code) do
-        {:ok, result} ->
-          json_response(conn, 200, %{status: "ok", result: inspect(result, pretty: true)})
-
-        {:error, error} ->
-          json_response(conn, 422, %{status: "error", error: error})
-      end
+      json_response(conn, 403, %{
+        status: "forbidden",
+        reason:
+          "HTTP eval of request bodies is disabled. Operators use mix arbor.rpc; agents use Arbor.Sandbox.authorize_eval/4."
+      })
     else
       {:error, reason} ->
         json_response(conn, 403, %{status: "forbidden", reason: reason})
@@ -115,17 +112,24 @@ defmodule Arbor.Gateway.Dev.Router do
 
   # Private helpers
 
-  # M1: Require explicit :dev_endpoints flag AND dev environment check.
-  # The flag defaults to false — dev endpoints are opt-in even in dev/test builds.
+  # M1: Require explicit :dev_endpoints flag. Prod builds compile a closed
+  # clause so even a direct `Dev.Router.call/2` cannot enable the endpoints.
+  # The flag defaults to false — opt-in even in dev/test builds.
   # Set `config :arbor_gateway, dev_endpoints: true` to enable.
-  defp check_dev_environment do
-    explicitly_enabled = Application.get_env(:arbor_gateway, :dev_endpoints, false)
+  if Mix.env() in [:dev, :test] do
+    defp check_dev_environment do
+      explicitly_enabled = Application.get_env(:arbor_gateway, :dev_endpoints, false)
 
-    if explicitly_enabled do
-      :ok
-    else
-      {:error,
-       "Dev endpoints require explicit opt-in via config :arbor_gateway, dev_endpoints: true"}
+      if explicitly_enabled do
+        :ok
+      else
+        {:error,
+         "Dev endpoints require explicit opt-in via config :arbor_gateway, dev_endpoints: true"}
+      end
+    end
+  else
+    defp check_dev_environment do
+      {:error, "Dev endpoints are not compiled into this build"}
     end
   end
 
@@ -139,19 +143,6 @@ defmodule Arbor.Gateway.Dev.Router do
       {:error, "Dev endpoints are restricted to localhost"}
     end
   end
-
-  # credo:disable-for-next-line Credo.Check.Warning.UnsafeExec
-  defp safe_eval(code) when is_binary(code) and byte_size(code) > 0 do
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-    {result, _bindings} = Code.eval_string(code)
-    {:ok, result}
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    kind, reason -> {:error, "#{kind}: #{inspect(reason)}"}
-  end
-
-  defp safe_eval(_), do: {:error, "No code provided"}
 
   defp safe_get_config(app_name) when is_binary(app_name) do
     # Only allow known arbor apps

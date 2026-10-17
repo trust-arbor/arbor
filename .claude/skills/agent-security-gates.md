@@ -1188,6 +1188,24 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   Decision: `.arbor/decisions/2026-10-01-invocation-receipt-payload-v2.md`.
   Regression: `apps/arbor_security/test/arbor/security/invocation_receipt_security_regression_test.exs`.
 
+## 37. Untrusted input must not reach host `Code.eval*` (2026-10-15)
+
+- **What:** HTTP bodies, LLM output, and agent-provided files must not reach
+  `Code.eval_string` / `Code.compile_string` in the Arbor VM. `POST /api/dev/eval`
+  used to eval the JSON `code` field; that route now returns 403. Agents eval
+  through `Arbor.Sandbox.authorize_eval/4` (Dune, `arbor://sandbox/eval`).
+  Operators inspect the live node with `mix arbor.rpc` (cookie-gated, not HTTP).
+  Remaining host loaders are allowlisted in
+  `docs/security/code-eval-inventory.md` and
+  `apps/arbor_kernel/test/arbor/contracts/code_loader_sites_lint_test.exs`.
+- **Symptom:** a localhost POST of Elixir to `/api/dev/eval` used to run in the
+  Gateway process (`send(self(), ...)` delivered). After the fix it 403s and
+  the message is not received.
+- **Action:** do not add `Code.eval_string` of request or model text. Use Dune
+  (`authorize_eval/4`), parse-only `Code.string_to_quoted`, or an allowlisted
+  AST. If a new host loader is truly required, add it to the inventory
+  allowlist on purpose.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a
