@@ -130,9 +130,9 @@ defmodule Arbor.Actions.WebPrincipalSecurityRegressionTest do
   test "security regression: authorized Web actions use existing implementation and do not call Shell.authorize_and_execute",
        %{agent_id: agent_id} do
     authorized_runs = [
-      {Web.Browse, "arbor://net/http", %{url: "http://169.254.169.254/latest/meta-data/"}},
+      {Web.Browse, "arbor://net/http/**", %{url: "http://169.254.169.254/latest/meta-data/"}},
       {Web.Search, "arbor://net/search", %{query: "p1d-e"}},
-      {Web.Snapshot, "arbor://net/http", %{url: "http://127.0.0.1:8080/admin"}},
+      {Web.Snapshot, "arbor://net/http/**", %{url: "http://127.0.0.1:8080/admin"}},
       {Web.ExaSearch, "arbor://net/search", %{query: "p1d-e"}},
       {Web.TinyfishSearch, "arbor://net/search", %{query: "p1d-e"}}
     ]
@@ -166,7 +166,7 @@ defmodule Arbor.Actions.WebPrincipalSecurityRegressionTest do
   @tag spec: "KSEC-013"
   test "security regression: authorized Browse propagates invalid UTF-8 as an action error",
        %{agent_id: agent_id} do
-    authorize_agent(agent_id, "arbor://net/http")
+    authorize_agent(agent_id, "arbor://net/http/**")
 
     transport = fn _request, _finch_name, _finch_options ->
       {:ok, %Finch.Response{status: 200, body: <<0xFF>>, headers: [], trailers: []}}

@@ -164,6 +164,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     File.write!(harness, replace_environ_harness_source())
     archive = Path.join(c_src, "arbor_shell_archive_stat.c")
     handle_relative_inode = Path.join(c_src, "arbor_shell_handle_relative_inode.c")
+    trusted_path_acl = Path.join(c_src, "arbor_shell_trusted_path_acl.c")
 
     {output, status} =
       System.cmd(
@@ -180,6 +181,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
           harness,
           archive,
           handle_relative_inode,
+          trusted_path_acl,
           "-o",
           out
         ],

@@ -1193,7 +1193,9 @@ defmodule Arbor.AI.AcpSession do
       result =
         with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
              {:ok, client_opts} <-
-               RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider),
+               RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider,
+                 agent_id: Keyword.get(state.opts, :agent_id)
+               ),
              {:ok, client_opts} <-
                bind_adapter_mcp_servers(client_opts, runtime_home_cleanup, state.mcp_servers),
              :ok <- stage_provider_runtime(state.provider, runtime_home_cleanup) do
@@ -2501,7 +2503,9 @@ defmodule Arbor.AI.AcpSession do
     result =
       with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
            {:ok, client_opts} <-
-             RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider),
+             RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider,
+               agent_id: Keyword.get(state.opts, :agent_id)
+             ),
            {:ok, client_opts} <-
              bind_adapter_mcp_servers(
                client_opts,

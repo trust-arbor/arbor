@@ -37,6 +37,7 @@
 
 #include "arbor_shell_archive_stat.h"
 #include "arbor_shell_handle_relative_inode.h"
+#include "arbor_shell_trusted_path_acl.h"
 
 extern char **environ;
 
@@ -3167,6 +3168,9 @@ int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "kill") == 0) return run_kill(argc, argv);
   if (argc >= 2 && strcmp(argv[1], "handle-relative-inode") == 0) {
     return arbor_shell_handle_relative_inode_main(argc, argv);
+  }
+  if (argc >= 2 && strcmp(argv[1], "trusted-path-acl") == 0) {
+    return arbor_shell_trusted_path_acl_main(argc, argv);
   }
   return 2;
 }

@@ -33,7 +33,7 @@ defmodule Arbor.Agent.ExternalRegistration do
         %{resource: "arbor://shell/exec/find"},
         %{resource: "arbor://shell/exec/curl"},
         %{resource: "arbor://agent/spawn"},
-        %{resource: "arbor://net/http/"},
+        %{resource: "arbor://net/http/**"},
         %{resource: "arbor://tool/use/"}
       ]
     },

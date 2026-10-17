@@ -42,28 +42,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "stdio"
   ]
 
-  @expected_agent_profile """
-  ---
-  name: arbor-no-shell
-  description: Arbor ACP coding profile with native file tools and no process execution.
-  prompt_mode: full
-  permission_mode: default
-  agents_md: true
-  tools:
-    - read_file
-    - search_replace
-    - grep
-    - list_dir
-  disallowedTools:
-    - run_terminal_cmd
-    - task
-    - get_task_output
-    - kill_task
-  ---
-
-  Use native file tools for reading and editing.
-  Process execution and subagents are unavailable by design.
-  """
+  @expected_agent_profile Arbor.AI.AcpSession.GrokAgentProfileCore.render([])
 
   defmodule ProbeAcpClient do
     def start_link(opts) do
@@ -947,8 +926,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
              profile_path,
              String.replace(
                @expected_agent_profile,
-               "  - grep\n  - list_dir",
-               "  - list_dir\n  - grep"
+               "  - task\n  - get_task_output",
+               "  - get_task_output\n  - task"
              )
            )
          end},

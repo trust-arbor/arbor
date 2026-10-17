@@ -57,7 +57,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
     # Agent spawning - limited
     %{resource_uri: "arbor://agent/spawn", constraints: %{rate_limit: 10}},
     # Network access - limited
-    %{resource_uri: "arbor://net/http/", constraints: %{rate_limit: 30}},
+    %{resource_uri: "arbor://net/http/**", constraints: %{rate_limit: 30}},
     %{resource_uri: "arbor://net/search", constraints: %{rate_limit: 20}},
     # Generic tool access (MCP tools, etc.)
     %{resource_uri: "arbor://tool/use/", constraints: %{rate_limit: 50}}
@@ -270,7 +270,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   end
 
   defp do_authorize(agent_id, "WebFetch", %{"url" => url} = tool_input, _cwd) do
-    resource_uri = "arbor://net/http/#{URI.encode(url)}"
+    resource_uri = "arbor://net/http/#{URI.encode(url, &URI.char_unreserved?/1)}"
     authorize_resource(agent_id, resource_uri, :read, tool_input)
   end
 
