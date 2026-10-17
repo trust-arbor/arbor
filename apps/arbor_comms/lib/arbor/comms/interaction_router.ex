@@ -137,30 +137,41 @@ defmodule Arbor.Comms.InteractionRouter do
   def respond(request_id, response, metadata \\ %{}) when is_binary(request_id) do
     metadata = if is_map(metadata), do: metadata, else: %{}
 
-    request_id
-    |> InteractionRegistry.resolve(response: response, metadata: metadata)
-    |> publish_response(request_id, response, metadata)
+    with :ok <- reject_non_canonical_approval_response(request_id, response) do
+      request_id
+      |> InteractionRegistry.resolve(response: response, metadata: metadata)
+      |> publish_response(request_id, response, metadata)
+    end
   end
 
   @doc false
   def respond_authenticated(request_id, response, metadata, actor_id, session_token)
       when is_binary(request_id) and is_map(metadata) do
-    request_id
-    |> InteractionRegistry.resolve_authenticated(response, metadata, actor_id, session_token)
-    |> publish_response(request_id, response, metadata)
+    with :ok <- reject_non_canonical_approval_response(request_id, response) do
+      request_id
+      |> InteractionRegistry.resolve_authenticated(response, metadata, actor_id, session_token)
+      |> publish_response(request_id, response, metadata)
+    end
   end
 
   @doc false
   def publish_conversation_response(%Interaction{} = interaction, response, metadata) do
-    publish_response({:ok, interaction}, interaction.request_id, response, metadata)
+    with :ok <- reject_non_canonical_approval(interaction, response) do
+      publish_response({:ok, interaction}, interaction.request_id, response, metadata)
+    end
   end
 
   defp publish_response(result, request_id, response, metadata) do
     case result do
       {:ok, interaction} ->
-        emit_signal(:resolved, interaction, %{response: response, metadata: metadata})
-        broadcast_response(interaction, response, metadata)
-        :ok
+        case emit_signal(:resolved, interaction, %{response: response, metadata: metadata}) do
+          :ok ->
+            broadcast_response(interaction, response, metadata)
+            :ok
+
+          {:error, _reason} = error ->
+            error
+        end
 
       {:error, {:already_terminal, status}} ->
         Logger.debug("[InteractionRouter] respond/3: request_id #{request_id} already #{status}")
@@ -817,52 +828,105 @@ defmodule Arbor.Comms.InteractionRouter do
   @max_task_id_bytes 256
 
   defp emit_signal(event, %Interaction{} = interaction, extra) do
-    data =
-      %{
-        request_id: interaction.request_id,
-        kind: interaction.kind,
-        agent_id: interaction.agent_id,
-        user_id: interaction.user_id,
-        urgency: interaction.urgency,
-        event_sequence: System.unique_integer([:monotonic, :positive])
-      }
-      |> Map.merge(safe_signal_extra(interaction.kind, extra))
+    case safe_signal_extra(interaction.kind, extra) do
+      {:ok, extra_data} ->
+        data =
+          %{
+            request_id: interaction.request_id,
+            kind: interaction.kind,
+            agent_id: interaction.agent_id,
+            user_id: interaction.user_id,
+            urgency: interaction.urgency,
+            event_sequence: System.unique_integer([:monotonic, :positive])
+          }
+          |> Map.merge(extra_data)
 
-    opts =
-      case interaction_task_id(interaction) do
-        nil -> []
-        task_id -> [correlation_id: task_id]
-      end
+        opts =
+          case interaction_task_id(interaction) do
+            nil -> []
+            task_id -> [correlation_id: task_id]
+          end
 
-    try do
-      # Approval accounting queries these events as soon as the owner action
-      # returns. Store synchronously so request/response wake-up cannot race the
-      # audit observation; subscriber delivery remains asynchronous.
-      Arbor.Signals.emit(:interaction, event, data, Keyword.put(opts, :async, false))
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
+        try do
+          # Approval accounting queries these events as soon as the owner action
+          # returns. Store synchronously so request/response wake-up cannot race the
+          # audit observation; subscriber delivery remains asynchronous.
+          Arbor.Signals.emit(:interaction, event, data, Keyword.put(opts, :async, false))
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
+
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error(
+          "[InteractionRouter] #{event} refused for #{interaction.request_id}: " <>
+            "#{inspect(reason)}"
+        )
+
+        error
     end
+  end
 
-    :ok
+  defp reject_non_canonical_approval_response(request_id, response) do
+    case InteractionRegistry.get(request_id) do
+      {:ok, %Interaction{} = interaction} ->
+        reject_non_canonical_approval(interaction, response)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp reject_non_canonical_approval(%Interaction{kind: :approval} = interaction, response) do
+    case canonical_approval_response(response) do
+      {:ok, _canonical} ->
+        :ok
+
+      {:error, _reason} = error ->
+        Logger.error(
+          "[InteractionRouter] non-canonical approval response rejected for " <>
+            "#{interaction.request_id}: #{bounded_response_reason(response)}"
+        )
+
+        error
+    end
+  end
+
+  defp reject_non_canonical_approval(%Interaction{}, _response), do: :ok
+
+  defp canonical_approval_response(value) when value in [:approved, "approved"],
+    do: {:ok, :approved}
+
+  defp canonical_approval_response(value) when value in [:rejected, "rejected"],
+    do: {:ok, :rejected}
+
+  defp canonical_approval_response(other),
+    do: {:error, {:non_canonical_approval_response, other}}
+
+  defp bounded_response_reason(response) do
+    response
+    |> inspect(limit: 8, printable_limit: 64)
+    |> String.slice(0, 128)
   end
 
   defp safe_signal_extra(:approval, %{response: response} = extra) when is_map(extra) do
-    base =
-      case response do
-        value when value in [:approved, "approved"] -> %{response: :approved}
-        value when value in [:rejected, "rejected"] -> %{response: :rejected}
-        _other -> %{}
-      end
+    with {:ok, canonical} <- canonical_approval_response(response) do
+      base = %{response: canonical}
 
-    case rework_flag(Map.get(extra, :metadata) || Map.get(extra, "metadata")) do
-      nil -> base
-      rework? -> Map.put(base, :rework, rework?)
+      extra =
+        case rework_flag(Map.get(extra, :metadata) || Map.get(extra, "metadata")) do
+          nil -> base
+          rework? -> Map.put(base, :rework, rework?)
+        end
+
+      {:ok, extra}
     end
   end
 
-  defp safe_signal_extra(_kind, _extra), do: %{}
+  defp safe_signal_extra(_kind, _extra), do: {:ok, %{}}
 
   defp rework_flag(metadata) when is_map(metadata) do
     case map_get(metadata, :rework) || map_get(metadata, :decision) do

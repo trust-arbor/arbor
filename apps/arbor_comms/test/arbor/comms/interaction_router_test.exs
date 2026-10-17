@@ -21,6 +21,8 @@ defmodule Arbor.Comms.InteractionRouterTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  import ExUnit.CaptureLog
+
   alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
@@ -629,6 +631,38 @@ defmodule Arbor.Comms.InteractionRouterTest do
       assert terminal.status == :responded
       assert terminal.decision == nil
       assert terminal.response == {:text, "main"}
+    end
+
+    test "security regression: non-canonical approval responses fail visibly instead of being dropped" do
+      assert {:ok, request_id} =
+               InteractionRouter.request(
+                 %{
+                   kind: :approval,
+                   agent_id: "test_agent",
+                   user_id: "no_presence_user",
+                   description: "Approve the exact change?"
+                 },
+                 adapter_map: %{}
+               )
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:non_canonical_approval_response, :acknowledged}} =
+                   InteractionRouter.respond(request_id, :acknowledged)
+
+          assert {:error, {:non_canonical_approval_response, {:text, "yes"}}} =
+                   InteractionRouter.respond(request_id, {:text, "yes"})
+
+          assert {:error, {:non_canonical_approval_response, "approve"}} =
+                   InteractionRouter.respond(request_id, "approve")
+        end)
+
+      assert log =~ "non-canonical approval response"
+      assert {:ok, %Interaction{kind: :approval}} = InteractionRegistry.get(request_id)
+      refute_received {:interaction_response, %{request_id: ^request_id}}
+
+      assert :ok = InteractionRouter.respond(request_id, :approved)
+      assert :not_found = InteractionRegistry.get(request_id)
     end
   end
 
