@@ -6,6 +6,10 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
 
   @moduletag :fast
 
+  # setfacl/getfacl manage Linux POSIX ACLs and do not exist on macOS, which
+  # uses `chmod +a` ACEs (the Darwin describe below).
+  @setfacl_skip :os.type() == {:unix, :darwin}
+
   describe "grant-write ACL fail-closed; deny-only stays trusted" do
     test "security regression: Darwin deny-only ACE stays trusted and grant-write ACE to another principal is untrusted" do
       {handle, harness} = compile_acl_classifier_harness!()
@@ -19,6 +23,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: POSIX named-user read ACL stays trusted when mode bits stay trusted" do
       {dir, _file} = operator_fixture("acl-access-read-755")
       File.chmod!(dir, 0o755)
@@ -38,6 +43,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: launcher probe admits deny-equivalent read ACL and rejects grant-write default ACL" do
       {read_dir, _read_file} = operator_fixture("acl-probe-read")
       {write_dir, _write_file} = operator_fixture("acl-probe-write")
@@ -69,6 +75,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: default ACL write grant on a 0700 operator directory is untrusted" do
       {dir, _file} = operator_fixture("acl-default-dir")
 
@@ -86,6 +93,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: default ACL write grant on an ancestor rejects the operator file pin" do
       {dir, file} = operator_fixture("acl-ancestor-write")
 
@@ -104,6 +112,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: deny-only / read-only default ACL on an ancestor stays trusted" do
       {dir, file} = operator_fixture("acl-ancestor-read")
 
@@ -121,6 +130,7 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
       end
     end
 
+    @tag skip: @setfacl_skip
     test "security regression: post-pin default write ACL fails verify_pinned" do
       {dir, _file} = operator_fixture("acl-verify")
 
@@ -135,6 +145,100 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
         File.rm_rf!(dir)
       end
     end
+  end
+
+  describe "Darwin ACEs set with chmod +a" do
+    @describetag skip: :os.type() != {:unix, :darwin}
+
+    test "security regression: a Darwin everyone-deny-delete ACE stays trusted" do
+      {dir, file} = operator_fixture("darwin-deny-delete")
+
+      try do
+        add_darwin_ace!(dir, "everyone deny delete")
+
+        assert probe_status(dir) == 0
+        assert {:ok, %Identity{}} = TrustedPath.pin_operator_owned_directory(dir)
+        assert {:ok, %Identity{}} = TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        remove_darwin_fixture!(dir)
+      end
+    end
+
+    # writesecurity rewrites the ACL or mode and chown changes the owner; either
+    # lets the holder grant itself write, so both untrust like write itself.
+    for perm <- ["write", "writesecurity", "chown"] do
+      test "security regression: a Darwin #{perm} grant to another user is untrusted" do
+        {dir, file} = operator_fixture("darwin-allow-#{unquote(perm)}")
+
+        try do
+          assert {:ok, %Identity{}} = TrustedPath.pin_operator_owned_directory(dir)
+
+          add_darwin_ace!(dir, "user:nobody allow #{unquote(perm)}")
+
+          assert probe_status(dir) == 1
+          assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_directory(dir)
+          assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_regular_file(file)
+        after
+          remove_darwin_fixture!(dir)
+        end
+      end
+    end
+
+    # `everyone deny readsecurity` hides the ACL from its owner. On macOS it
+    # also makes lstat fail with EACCES, so the probe and path resolution both
+    # refuse the path; this guards that the hiding trick stays closed.
+    test "security regression: an everyone-deny-readsecurity ACE cannot hide a write grant" do
+      {dir, file} = operator_fixture("darwin-unreadable")
+
+      try do
+        add_darwin_ace!(dir, "user:nobody allow write")
+        add_darwin_ace!(dir, "everyone deny readsecurity")
+
+        assert probe_status(dir) == 2
+        assert {:error, _reason} = TrustedPath.pin_operator_owned_directory(dir)
+        assert {:error, _reason} = TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        remove_darwin_fixture!(dir)
+      end
+    end
+
+    # The probe used to treat every NULL from acl_get_link_np as "no ACL". Only
+    # ENOENT means that; any other read error must fail closed. No ACE makes
+    # the read fail while lstat succeeds, so the harness links the real probe
+    # against a failing acl_get_link_np and walks a real path.
+    test "security regression: an ACL read error other than ENOENT fails closed" do
+      {dir, _file} = operator_fixture("darwin-read-error")
+
+      {handle, harness} =
+        compile_acl_harness!("acl_read_error_harness", acl_read_error_harness_source())
+
+      try do
+        {output, status} = System.cmd(harness, [dir], stderr_to_stdout: true)
+        assert status == 0, output
+        assert output == "ENOENT=0 EACCES=2 ENOTSUP=2 ENOMEM=2\n"
+      after
+        File.rm_rf!(handle)
+        remove_darwin_fixture!(dir)
+      end
+    end
+  end
+
+  defp add_darwin_ace!(path, entry) do
+    {output, status} = System.cmd("/bin/chmod", ["+a", entry, path], stderr_to_stdout: true)
+    assert status == 0, output
+  end
+
+  # An unreadable ACL also blocks rm's directory walk; clear it first.
+  defp remove_darwin_fixture!(dir) do
+    _ = System.cmd("/bin/chmod", ["-N", dir], stderr_to_stdout: true)
+    File.rm_rf!(dir)
+  end
+
+  defp probe_status(path) do
+    {_output, status} =
+      System.cmd(acl_launcher!(), ["trusted-path-acl", path], stderr_to_stdout: true)
+
+    status
   end
 
   defp operator_fixture(tag) do
@@ -201,12 +305,16 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
   end
 
   defp compile_acl_classifier_harness! do
+    compile_acl_harness!("acl_classifier_harness", acl_classifier_harness_source())
+  end
+
+  defp compile_acl_harness!(name, source) do
     root = Path.join(System.tmp_dir!(), "arbor-acl-class-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
-    out = Path.join(root, "acl_classifier_harness")
+    out = Path.join(root, name)
     c_src = Path.expand("../../../c_src", __DIR__)
-    harness = Path.join(root, "acl_classifier_harness.c")
-    File.write!(harness, acl_classifier_harness_source())
+    harness = Path.join(root, "#{name}.c")
+    File.write!(harness, source)
 
     {output, status} =
       System.cmd(
@@ -314,6 +422,50 @@ defmodule Arbor.Shell.TrustedPathAclSecurityRegressionTest do
 
       if (rc != 0) return 1;
       fputs("ok\\n", stdout);
+      return 0;
+    }
+    """
+  end
+
+  # Defined in an object file, this acl_get_link_np wins over libSystem at link
+  # time, so the probe walk sees the chosen read error on every path.
+  defp acl_read_error_harness_source do
+    """
+    #define _DARWIN_C_SOURCE
+    #include "arbor_shell_trusted_path_acl.h"
+
+    #include <errno.h>
+    #include <stdio.h>
+    #include <sys/acl.h>
+
+    static int stub_errno;
+
+    acl_t acl_get_link_np(const char *path, acl_type_t type) {
+      (void)path;
+      (void)type;
+      errno = stub_errno;
+      return NULL;
+    }
+
+    static int probe(const char *path, int err) {
+      char *args[] = {"arbor_shell_launcher", "trusted-path-acl", (char *)path, NULL};
+      stub_errno = err;
+      return arbor_shell_trusted_path_acl_main(3, args);
+    }
+
+    int main(int argc, char **argv) {
+      int not_found;
+      int denied;
+      int unsupported;
+      int no_memory;
+
+      if (argc != 2) return 3;
+      not_found = probe(argv[1], ENOENT);
+      denied = probe(argv[1], EACCES);
+      unsupported = probe(argv[1], ENOTSUP);
+      no_memory = probe(argv[1], ENOMEM);
+      printf("ENOENT=%d EACCES=%d ENOTSUP=%d ENOMEM=%d\\n", not_found, denied, unsupported,
+             no_memory);
       return 0;
     }
     """

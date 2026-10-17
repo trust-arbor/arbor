@@ -201,37 +201,29 @@ static int path_acl_verdict(const char *path) {
 #include <sys/types.h>
 #include <uuid/uuid.h>
 
-static int apple_permset_grants_write(acl_permset_t perms) {
-  int grants = 0;
-  int got;
+/* Darwin's ACL permission and tag names are enum members, not macros, so this
+ * branch must not test them with #ifdef (that compiled every check out).
+ * WRITE_SECURITY (rewrite the ACL or mode) and CHANGE_OWNER (chown) count as
+ * write: either lets the holder grant itself write. ADD_FILE and
+ * ADD_SUBDIRECTORY share bits with WRITE_DATA and APPEND_DATA. */
+static const acl_perm_t apple_write_equivalent_perms[] = {
+    ACL_WRITE_DATA,       ACL_ADD_FILE,     ACL_APPEND_DATA,
+    ACL_ADD_SUBDIRECTORY, ACL_DELETE_CHILD, ACL_WRITE_SECURITY,
+    ACL_CHANGE_OWNER,
+};
 
-#ifdef ACL_WRITE_DATA
-  got = acl_get_perm_np(perms, ACL_WRITE_DATA);
-  if (got < 0) return -1;
-  if (got == 1) grants = 1;
-#endif
-#ifdef ACL_ADD_FILE
-  got = acl_get_perm_np(perms, ACL_ADD_FILE);
-  if (got < 0) return -1;
-  if (got == 1) grants = 1;
-#endif
-#ifdef ACL_APPEND_DATA
-  got = acl_get_perm_np(perms, ACL_APPEND_DATA);
-  if (got < 0) return -1;
-  if (got == 1) grants = 1;
-#endif
-#ifdef ACL_ADD_SUBDIRECTORY
-  got = acl_get_perm_np(perms, ACL_ADD_SUBDIRECTORY);
-  if (got < 0) return -1;
-  if (got == 1) grants = 1;
-#endif
-#ifdef ACL_DELETE_CHILD
-  got = acl_get_perm_np(perms, ACL_DELETE_CHILD);
-  if (got < 0) return -1;
-  if (got == 1) grants = 1;
-#endif
-  (void)perms;
-  return grants;
+static int apple_permset_grants_write(acl_permset_t perms) {
+  size_t i;
+
+  for (i = 0; i < sizeof(apple_write_equivalent_perms) /
+                      sizeof(apple_write_equivalent_perms[0]);
+       i++) {
+    int got = acl_get_perm_np(perms, apple_write_equivalent_perms[i]);
+
+    if (got < 0) return -1;
+    if (got == 1) return 1;
+  }
+  return 0;
 }
 
 static int apple_acl_untrusted(acl_t acl, uint32_t owner) {
@@ -251,17 +243,11 @@ static int apple_acl_untrusted(acl_t acl, uint32_t owner) {
     int is_user;
 
     if (acl_get_tag_type(entry, &tag) != 0) return ACL_PROBE_FAIL;
-#ifdef ACL_EXTENDED_ALLOW
     if (tag == ACL_EXTENDED_ALLOW) {
       is_allow = 1;
-    } else
-#endif
-#ifdef ACL_EXTENDED_DENY
-        if (tag == ACL_EXTENDED_DENY) {
+    } else if (tag == ACL_EXTENDED_DENY) {
       is_allow = 0;
-    } else
-#endif
-    {
+    } else {
       return ACL_PROBE_FAIL;
     }
 
@@ -296,40 +282,25 @@ static int apple_acl_untrusted(acl_t acl, uint32_t owner) {
   return ACL_OK;
 }
 
-static int apple_type_verdict(const char *path, acl_type_t type,
-                              uint32_t owner) {
-  acl_t acl;
-  int r;
-
-  acl = acl_get_link_np(path, type);
-  if (acl == NULL) return ACL_OK;
-  r = apple_acl_untrusted(acl, owner);
-  acl_free(acl);
-  return r;
-}
-
+/* Darwin keeps one ACL per path, ACL_TYPE_EXTENDED; ACCESS and DEFAULT always
+ * fail with EINVAL. A missing ACL is NULL with ENOENT. Any other failure fails
+ * closed: an `everyone deny readsecurity` entry makes the read fail with
+ * EACCES, which would otherwise hide a grant-write entry next to it. */
 static int path_acl_verdict(const char *path) {
   struct stat st;
   uint32_t owner;
+  acl_t acl;
   int r;
 
   if (lstat(path, &st) != 0) return ACL_PROBE_FAIL;
   owner = (uint32_t)st.st_uid;
 
-#ifdef ACL_TYPE_EXTENDED
-  r = apple_type_verdict(path, ACL_TYPE_EXTENDED, owner);
-  if (r != ACL_OK) return r;
-#endif
-#ifdef ACL_TYPE_ACCESS
-  r = apple_type_verdict(path, ACL_TYPE_ACCESS, owner);
-  if (r != ACL_OK) return r;
-#endif
-#ifdef ACL_TYPE_DEFAULT
-  r = apple_type_verdict(path, ACL_TYPE_DEFAULT, owner);
-  if (r != ACL_OK) return r;
-#endif
-  (void)path;
-  return ACL_OK;
+  errno = 0;
+  acl = acl_get_link_np(path, ACL_TYPE_EXTENDED);
+  if (acl == NULL) return errno == ENOENT ? ACL_OK : ACL_PROBE_FAIL;
+  r = apple_acl_untrusted(acl, owner);
+  acl_free(acl);
+  return r;
 }
 
 #else

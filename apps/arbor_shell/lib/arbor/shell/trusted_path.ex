@@ -597,10 +597,11 @@ defmodule Arbor.Shell.TrustedPath do
 
   # POSIX/NFSv4/rich ACLs and Darwin ACEs can grant extra principals write
   # without dirtying traditional group/other bits (default ACLs on 0700 dirs).
-  # Only GRANT write/append/add_file/delete_child to a principal other than
-  # the owner or root is untrusting. Deny-only ACEs (macOS `group:everyone
-  # deny delete` on ~/Desktop) stay trusted. Probe our launcher, never the
-  # target. Unparsed nfs4/richacl xattrs still fail closed.
+  # Only GRANT write/append/add_file/delete_child (and, on macOS,
+  # writesecurity/chown) to a principal other than the owner or root is
+  # untrusting. Deny-only ACEs (macOS `group:everyone deny delete` on
+  # ~/Desktop) stay trusted. Probe our launcher, never the target. Unparsed
+  # nfs4/richacl xattrs and ACLs the probe cannot read fail closed.
   defp require_no_acl(path) when is_binary(path) do
     with :ok <- validate_absolute_path(path),
          {:ok, launcher} <- acl_launcher_path() do
