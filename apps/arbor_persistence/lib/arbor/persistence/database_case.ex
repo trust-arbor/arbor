@@ -153,7 +153,12 @@ defmodule Arbor.Persistence.DatabaseCase do
     :ok
   end
 
-  defp sqlite_repo?, do: Arbor.Persistence.Repo.__adapter__() == Ecto.Adapters.SQLite3
+  # Repo.__adapter__/0 is a compile-time constant. Comparing it directly to
+  # Ecto.Adapters.SQLite3 is a typing violation under ARBOR_DB=postgres
+  # (always-false disjoint types) and fails `compile --warnings-as-errors`.
+  defp sqlite_repo? do
+    Atom.to_string(Arbor.Persistence.Repo.__adapter__()) == "Elixir.Ecto.Adapters.SQLite3"
+  end
 
   defp ensure_sqlite_writer_lock_table! do
     repo = Arbor.Persistence.Repo

@@ -79,9 +79,12 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       end
     end
 
-    test "unknown types still default to LlmHandler" do
+    test "unknown types raise in strict mode (M3)" do
       node = %Node{id: "unknown", attrs: %{"type" => "nonexistent.type"}}
-      assert Registry.resolve(node) == Arbor.Orchestrator.Handlers.LlmHandler
+
+      assert_raise ArgumentError, ~r/Unknown handler type.*strict mode \(M3\)/, fn ->
+        Registry.resolve(node)
+      end
     end
 
     test "shape-based resolution unchanged" do
@@ -229,11 +232,12 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       assert updated_node.attrs["purpose"] == "custom"
     end
 
-    test "unknown types fall through to LlmHandler" do
+    test "unknown types raise in strict mode (M3)" do
       node = %Node{id: "n", attrs: %{"type" => "nonexistent"}}
-      {handler, returned_node} = Registry.resolve_with_attrs(node)
-      assert handler == Arbor.Orchestrator.Handlers.LlmHandler
-      assert returned_node == node
+
+      assert_raise ArgumentError, ~r/Unknown handler type.*strict mode \(M3\)/, fn ->
+        Registry.resolve_with_attrs(node)
+      end
     end
   end
 

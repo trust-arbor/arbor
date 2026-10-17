@@ -11,6 +11,11 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security
 
+  defmodule AlwaysAutoPolicy do
+    @moduledoc false
+    def effective_mode(_agent_id, _resource_uri, _opts), do: :auto
+  end
+
   setup do
     {:ok, identity} = Identity.generate(name: "tool-exposure-test")
     agent_id = identity.agent_id
@@ -36,6 +41,39 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
       # Exposure follows the enforcer. A neighbor that left it on would mint
       # the default profile and this agent would look fully tooled.
       set_policy_enforcer_enabled(false)
+      assert Arbor.Actions.tool_modules_for_agent(agent_id) == []
+    end
+
+    test "security regression: no-grant unprofiled agent sees [] even with the enforcer on",
+         %{agent_id: agent_id} do
+      # Production default is policy_enforcer_enabled: true. enumerate_authority
+      # used the missing-profile stub (baseline :ask) and treated every profiled
+      # URI as mintable, so a fresh no-grant agent saw the whole tool list.
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+
+      assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
+      {:ok, caps} = Security.list_capabilities(agent_id)
+      assert caps == []
+      assert Arbor.Actions.tool_modules_for_agent(agent_id) == []
+    end
+
+    test "security regression: leftover permissive policy defaults cannot expose tools to an unknown agent",
+         %{agent_id: agent_id} do
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+
+      previous_module = Application.get_env(:arbor_trust, :policy_module)
+      previous_permissive = Application.get_env(:arbor_trust, :allow_permissive_baseline)
+      Application.put_env(:arbor_trust, :policy_module, __MODULE__.AlwaysAutoPolicy)
+      Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+      on_exit(fn ->
+        restore_trust_env(:policy_module, previous_module)
+        restore_trust_env(:allow_permissive_baseline, previous_permissive)
+      end)
+
+      assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
       assert Arbor.Actions.tool_modules_for_agent(agent_id) == []
     end
 
@@ -252,11 +290,15 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, value)
 
     on_exit(fn ->
-      if is_nil(previous) do
-        Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
-      else
-        Application.put_env(:arbor_trust, :policy_enforcer_enabled, previous)
-      end
+      restore_trust_env(:policy_enforcer_enabled, previous)
     end)
+  end
+
+  defp restore_trust_env(key, previous) do
+    if is_nil(previous) do
+      Application.delete_env(:arbor_trust, key)
+    else
+      Application.put_env(:arbor_trust, key, previous)
+    end
   end
 end

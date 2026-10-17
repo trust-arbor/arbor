@@ -1837,18 +1837,27 @@ defmodule Arbor.Actions.Coding.Workspace do
       Actions.emit_started(__MODULE__, %{repo_path: repo_path})
       {task_id, principal_id} = resume_identity(context)
 
+      acquire_opts =
+        case Workspace.registry_caller(context, %{}) do
+          %{server: server} -> [server: server]
+          _ -> []
+        end
+
       with {:ok, repo_root} <- Workspace.resolve_repo_root(repo_path),
            {:ok, branch_name} <- Workspace.resolve_branch_name(params),
            {:ok, lease} <-
-             WorkspaceLeaseRegistry.acquire(%{
-               repo_path: repo_root,
-               branch: branch_name,
-               base_ref: get_param(params, :base_ref),
-               worktree_base_dir: get_param(params, :worktree_base_dir),
-               task: get_param(params, :task),
-               task_id: task_id,
-               principal_id: principal_id
-             }) do
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 repo_path: repo_root,
+                 branch: branch_name,
+                 base_ref: get_param(params, :base_ref),
+                 worktree_base_dir: get_param(params, :worktree_base_dir),
+                 task: get_param(params, :task),
+                 task_id: task_id,
+                 principal_id: principal_id
+               },
+               acquire_opts
+             ) do
         Actions.emit_completed(__MODULE__, %{
           workspace_id: lease.workspace_id,
           ownership: lease.ownership

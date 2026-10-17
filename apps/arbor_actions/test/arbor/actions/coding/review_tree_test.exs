@@ -425,7 +425,11 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
               byte_offset: 0,
               byte_limit: 16
             },
-            %{task_id: fixture.task_id, agent_id: "agent_other"}
+            %{
+              task_id: fixture.task_id,
+              agent_id: "agent_other",
+              server: fixture.context.server
+            }
           )
         end)
 
@@ -749,7 +753,8 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       parent = self()
       task_id = "task_auth_#{System.unique_integer([:positive])}"
       principal_id = "agent_auth_#{System.unique_integer([:positive])}"
-      context = %{task_id: task_id, agent_id: principal_id}
+      server = start_review_registry()
+      context = %{task_id: task_id, agent_id: principal_id, server: server}
       repo = create_git_repo(Path.join(tmp_dir, "auth_repo"))
 
       File.mkdir_p!(Path.join(repo, "lib"))
@@ -796,7 +801,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
 
       # Opaque snapshot id alone is never authority (this process is not owner).
       assert {:error, :not_authorized} =
-               WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{})
+               WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{server: server})
 
       assert {:error, :not_authorized} =
                ReviewTree.Read.run(
@@ -805,7 +810,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
                    revision: "candidate",
                    path: "lib/related.ex"
                  },
-                 %{}
+                 %{server: server}
                )
 
       assert {:error, :not_authorized} =
@@ -815,34 +820,38 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
                    revision: "candidate",
                    query: "RELATED"
                  },
-                 %{}
+                 %{server: server}
                )
 
       # Cross-task denied.
       assert {:error, :not_authorized} =
                WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{
                  task_id: "other_task",
-                 principal_id: principal_id
+                 principal_id: principal_id,
+                 server: server
                })
 
       # Cross-principal denied.
       assert {:error, :not_authorized} =
                WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{
                  task_id: task_id,
-                 principal_id: "agent_other"
+                 principal_id: "agent_other",
+                 server: server
                })
 
       # Task without principal denied.
       assert {:error, :not_authorized} =
                WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{
-                 task_id: task_id
+                 task_id: task_id,
+                 server: server
                })
 
       # Matching task+principal authorizes resume from this process.
       assert {:ok, _} =
                WorkspaceLeaseRegistry.resolve_review_snapshot(snap_id, %{
                  task_id: task_id,
-                 principal_id: principal_id
+                 principal_id: principal_id,
+                 server: server
                })
 
       send(owner, :hold)
@@ -908,7 +917,8 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       parent = self()
       task_id = "task_owner_death_#{System.unique_integer([:positive])}"
       principal_id = "agent_owner_death_#{System.unique_integer([:positive])}"
-      context = %{task_id: task_id, agent_id: principal_id}
+      server = start_review_registry()
+      context = %{task_id: task_id, agent_id: principal_id, server: server}
       repo = create_git_repo(Path.join(tmp_dir, "owner_death_repo"))
       base = git!(repo, ["rev-parse", "HEAD"])
 
@@ -1567,8 +1577,9 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
          %{
            tmp_dir: tmp_dir
          } do
-      fixture_a = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_a")
-      fixture_b = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_b")
+      server = start_review_registry()
+      fixture_a = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_a", server: server)
+      fixture_b = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_b", server: server)
       opts_a = Map.put(fixture_a.context, :candidate_source, "immutable_object")
       opts_b = Map.put(fixture_b.context, :candidate_source, "immutable_object")
       before_a = worktree_identity(fixture_a.lease.worktree_path)
@@ -1666,7 +1677,8 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
 
     task_id = "task_#{prefix}_#{System.unique_integer([:positive])}"
     principal_id = "agent_#{prefix}_#{System.unique_integer([:positive])}"
-    context = %{task_id: task_id, agent_id: principal_id}
+    server = Keyword.get_lazy(opts, :server, &start_review_registry/0)
+    context = %{task_id: task_id, agent_id: principal_id, server: server}
 
     assert {:ok, lease} =
              Workspace.Acquire.run(
@@ -1742,6 +1754,22 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
     String.trim(output)
   end
 
+  defp start_review_registry do
+    server = :"review_tree_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       [
+         name: server,
+         retention_journal: :disabled,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+       ]},
+      id: server
+    )
+
+    server
+  end
+
   defp build_immutable_review_fixture(tmp_dir, opts \\ []) do
     prefix = Keyword.get(opts, :prefix, "imm_review")
     pin? = Keyword.get(opts, :pin?, true)
@@ -1770,7 +1798,8 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
 
     task_id = "task_#{prefix}_#{System.unique_integer([:positive])}"
     principal_id = "agent_#{prefix}_#{System.unique_integer([:positive])}"
-    context = %{task_id: task_id, agent_id: principal_id}
+    server = Keyword.get_lazy(opts, :server, &start_review_registry/0)
+    context = %{task_id: task_id, agent_id: principal_id, server: server}
 
     assert {:ok, lease} =
              Workspace.Acquire.run(

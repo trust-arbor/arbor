@@ -148,6 +148,11 @@ mix test --only behavioral
 mix test apps/arbor_agent/test/behavioral/memory_e2e_test.exs --include llm
 ```
 
+Isolated Git worktrees need extra harness setup before those commands
+(missing `deps/` symlink, `TMPDIR` inside the checkout, symlinked `.env`).
+See [Isolated worktree harness](#isolated-worktree-harness). The same
+findings and workarounds are summarized in the root `README.md`.
+
 ## Behavioral Tests
 
 Behavioral tests use `Arbor.Test.BehavioralCase` which starts the full process tree
@@ -161,6 +166,34 @@ Behavioral tests use `Arbor.Test.BehavioralCase` which starts the full process t
 Available assertion helpers from `Arbor.Test.LLMAssertions`:
 - `assert_llm_response/1` — validates response struct shape
 - `assert_has_text/1` — confirms non-empty text field
+
+## Isolated worktree harness
+
+A Git worktree of Arbor is tracked files only. Several suites then fail for
+harness reasons that reproduce on an unchanged `main`. Observed 2026-10-15
+on bases `56e45390b` and `642239593`:
+
+1. **No `deps/` in the worktree.** `MIX_DEPS_PATH` points at the canonical
+   checkout, but `_build/test/lib/<dep>/priv` are relative symlinks and
+   dangle. Cascade: LLMDB `LoadError :enoent`, then
+   `{:no_provider_supports_runtime, :acp}` — about 30 failures across
+   `arbor_ai` (dispatch, embed boundary), `arbor_orchestrator`, and
+   `arbor_agent` (`host_memory_ownership_test`). Workaround:
+   `ln -s <canonical>/deps deps` inside the worktree (or materialize
+   `deps/` before compiling).
+2. **`TMPDIR` inside the worktree.** Tests' "outside the repo" fixtures
+   land inside a checkout: `actions_executor_file_workspace_test.exs`
+   (`file_read` 'outside the workdir' succeeds),
+   `coding_plan/readiness_test.exs` (`git_root_outside_root`),
+   `mix_spawn_containment_slice1_test.exs` (finds the worktree's
+   `bin/mix`), `acp_session_test.exs` (`:grok_repository_root_required`).
+   Export `TMPDIR` to a directory **outside** the checkout before `mix test`.
+3. **`.env` symlinked into the worktree.** Provider API keys leak into the
+   test VM, so `unified_llm_test.exs` sees `default_provider == "google"`.
+   Do not symlink the canonical `.env` into a test worktree.
+
+See also `docs/arbor/CODING_TASK_DISPATCH.md` (working inside the task
+workspace) for `MIX_DEPS_PATH` / `MIX_BUILD_PATH`.
 
 ## Guidelines
 

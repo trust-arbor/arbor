@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
 
   alias Arbor.Common.ActionRegistry
   alias Arbor.Contracts.Security.{Identity, SignedRequest}
+  alias Arbor.Orchestrator.CodingPlan.ActionCatalog
   alias Arbor.Security
 
   @action "native_resource_probe"
@@ -458,6 +459,22 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
     assert taint_denied.final_outcome.status == :fail
     assert taint_denied.final_outcome.failure_reason =~ "taint_blocked"
     refute_received {:native_resource_probe_ran, _}
+  end
+
+  test "security regression: leftover uninspectable registry entries do not refuse native pin",
+       c do
+    grant!(c, @resource)
+    assert {:ok, graph} = Arbor.Orchestrator.compile(facade_dot())
+    opts = Keyword.delete(c.opts, :conversation_source)
+
+    # A neighbor can leave a plugin entry that fails ActionCatalog.inspect_action/1.
+    # snapshot/0 is all-or-nothing, so pin used to refuse every facade-owner graph.
+    name = "uninspectable_poison_#{System.unique_integer([:positive])}"
+    assert :ok = ActionRegistry.register(name, Arbor.Actions.TestFixtures.RaisingAction)
+    assert {:error, {:action_uninspectable, _, _}} = ActionCatalog.snapshot()
+
+    assert {:ok, pinned} = Arbor.Orchestrator.pin_native_execution(graph, opts)
+    assert is_map(Keyword.fetch!(pinned, :execution_manifest))
   end
 
   defp pinned_facade_opts!(opts) do

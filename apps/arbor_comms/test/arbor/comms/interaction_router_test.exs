@@ -252,6 +252,31 @@ defmodule Arbor.Comms.InteractionRouterTest do
     assert {:ok, ^evidence} = Arbor.Comms.get_answered_approval(id)
   end
 
+  test "security regression: answered approval is read from the local authority when Tracker discovery misses" do
+    attrs = %{
+      kind: :approval,
+      agent_id: "agent_evidence_tracker_miss",
+      user_id: "human_target",
+      resource_uri: "arbor://code/write/exact/file.ex",
+      description: "Approve after tracker untrack"
+    }
+
+    assert {:ok, id} = InteractionRouter.request(attrs, adapter_map: %{})
+    assert :ok = Arbor.Comms.respond_to_interaction(id, :approved, %{decision: :approve})
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+
+    authority = Process.whereis(Arbor.Comms.InteractionRegistry.Authority)
+    assert is_pid(authority)
+
+    for topic <- ["interactions", "interactions:resolved"] do
+      _ = Phoenix.Tracker.untrack(InteractionRegistry, authority, topic, id)
+    end
+
+    assert {:ok, ^evidence} = Arbor.Comms.get_answered_approval(id)
+    assert evidence.decision == :approve
+    assert evidence.request_id == id
+  end
+
   test "abandoned and non-approval interactions cannot become approval evidence" do
     for kind <- [:approval, :clarification] do
       assert {:ok, id} =

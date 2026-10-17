@@ -133,4 +133,10 @@ end
 :ok = Arbor.Security.TestBootstrap.start!()
 :ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
+# Suite-owned ConfirmationTracker. Module-scoped start_supervised! in
+# reviewed_validation / reviewed_commit died when that module ended, so a
+# later file under --seed 678971 saw :approval_evidence_unavailable after a
+# successful InteractionRouter approve.
+Arbor.Actions.ConfirmationTrackerFixture.ensure!()
+
 ExUnit.start(exclude: [:isolated_repo, :llm, :llm_local])

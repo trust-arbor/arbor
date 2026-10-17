@@ -35,14 +35,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
     {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
 
-    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
-      start_supervised!({Arbor.Trust.ConfirmationTracker, test_isolated_owner: true})
-    end
-
+    Arbor.Actions.ConfirmationTrackerFixture.ensure!()
     :ok
   end
 
   setup do
+    Arbor.Actions.ConfirmationTrackerFixture.ensure!()
+
     previous = %{
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
@@ -366,7 +365,11 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              })
 
     # Nested Mix.Compile may fail on a temp path; the attempt is still counted.
-    _result = Task.await(task, 10_000)
+    result = Task.await(task, 10_000)
+
+    refute result == {:error, :approval_evidence_unavailable},
+           "public_run lost the InteractionRouter answer: #{inspect(result)}"
+
     # Actions.execute_action/3 and Mix.Compile.run/2 each emit one started
     # signal. Exactly two proves one nested invocation; four would expose a
     # duplicate execution.
@@ -548,7 +551,11 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
                decision: :approve
              })
 
-    _ = Task.await(task, 10_000)
+    result = Task.await(task, 10_000)
+
+    refute result == {:error, :approval_evidence_unavailable},
+           "public_run lost the InteractionRouter answer: #{inspect(result)}"
+
     assert_receive {:nested_started, 1_111}, 5_000
     assert_receive {:nested_started, 1_111}, 5_000
     refute_receive {:nested_started, _}, 200
@@ -575,28 +582,32 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     parent = self()
 
     assert {:ok, sub_id} =
-             Arbor.Signals.subscribe("action.started", fn signal ->
-               name = signal.data[:action] || signal.data["action"]
+             Arbor.Signals.subscribe(
+               "action.started",
+               fn signal ->
+                 name = signal.data[:action] || signal.data["action"]
 
-               if name == "coding_security_regression_validate" do
-                 params = signal.data[:params] || signal.data["params"] || %{}
-                 stage = params[:stage_timeout] || params["stage_timeout"]
+                 if name == "coding_security_regression_validate" do
+                   params = signal.data[:params] || signal.data["params"] || %{}
+                   stage = params[:stage_timeout] || params["stage_timeout"]
 
-                 # execute_action emits full nested params (including stage_timeout);
-                 # the action's own started signal only carries attestation id.
-                 if not is_nil(stage) do
-                   :counters.add(nested_attempts, 1, 1)
+                   # execute_action emits full nested params (including stage_timeout);
+                   # the action's own started signal only carries attestation id.
+                   if not is_nil(stage) do
+                     :counters.add(nested_attempts, 1, 1)
 
-                   if :counters.get(nested_attempts, 1) == 1 do
-                     Agent.update(seen, fn _ -> stage end)
+                     if :counters.get(nested_attempts, 1) == 1 do
+                       Agent.update(seen, fn _ -> stage end)
+                     end
+
+                     send(parent, {:nested_stage_timeout, stage})
                    end
-
-                   send(parent, {:nested_stage_timeout, stage})
                  end
-               end
 
-               :ok
-             end)
+                 :ok
+               end,
+               async: false
+             )
 
     on_exit(fn -> Arbor.Signals.unsubscribe(sub_id) end)
 
@@ -623,7 +634,11 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
                decision: :approve
              })
 
-    _ = Task.await(task, 10_000)
+    result = Task.await(task, 10_000)
+
+    refute result == {:error, :approval_evidence_unavailable},
+           "public_run lost the InteractionRouter answer: #{inspect(result)}"
+
     assert_receive {:nested_stage_timeout, 222_222}, 5_000
     refute_receive {:nested_stage_timeout, _}, 200
     assert Agent.get(seen, & &1) == 222_222
@@ -925,16 +940,20 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     parent = self()
 
     assert {:ok, sub_id} =
-             Arbor.Signals.subscribe("action.started", fn signal ->
-               name = signal.data[:action] || signal.data["action"]
+             Arbor.Signals.subscribe(
+               "action.started",
+               fn signal ->
+                 name = signal.data[:action] || signal.data["action"]
 
-               if name == action_name do
-                 :counters.add(counter, 1, 1)
-                 send(parent, {:nested_attempt, name})
-               end
+                 if name == action_name do
+                   :counters.add(counter, 1, 1)
+                   send(parent, {:nested_attempt, name})
+                 end
 
-               :ok
-             end)
+                 :ok
+               end,
+               async: false
+             )
 
     on_exit(fn -> Arbor.Signals.unsubscribe(sub_id) end)
     sub_id

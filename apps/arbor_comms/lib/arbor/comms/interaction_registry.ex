@@ -383,9 +383,19 @@ defmodule Arbor.Comms.InteractionRegistry do
   @doc "Read original approval scope and its retained winning answer from the authority."
   @spec get_answered_approval(String.t()) :: {:ok, map()} | :not_found
   def get_answered_approval(request_id) when is_binary(request_id) do
-    case with_authority(request_id, :answered_approval, [request_id]) do
-      {:ok, %{} = evidence} -> {:ok, evidence}
-      _ -> :not_found
+    # Tracker is an eventually-consistent mirror. Under parallel test/load it
+    # can miss or report an extra node, so authority_for/1 returns :not_found
+    # or :ambiguous_authority while the local owner still has the answer.
+    # Read the canonical GenServer first; discovery is only the fallback.
+    case local_authority_call(:answered_approval, [request_id]) do
+      {:ok, %{} = evidence} ->
+        {:ok, evidence}
+
+      _ ->
+        case with_authority(request_id, :answered_approval, [request_id]) do
+          {:ok, %{} = evidence} -> {:ok, evidence}
+          _ -> :not_found
+        end
     end
   end
 
@@ -497,6 +507,18 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   @impl true
   def handle_diff(_diff, state), do: {:ok, state}
+
+  defp local_authority_call(function, args) do
+    if Process.whereis(Authority) do
+      apply(Authority, function, args)
+    else
+      :not_found
+    end
+  rescue
+    _ -> :not_found
+  catch
+    :exit, _ -> :not_found
+  end
 
   defp with_authority(request_id, function, args) do
     case authority_for(request_id) do

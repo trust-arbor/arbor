@@ -28,14 +28,13 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
-    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
-      start_supervised!({Arbor.Trust.ConfirmationTracker, test_isolated_owner: true})
-    end
-
+    Arbor.Actions.ConfirmationTrackerFixture.ensure!()
     :ok
   end
 
   setup do
+    Arbor.Actions.ConfirmationTrackerFixture.ensure!()
+
     previous = %{
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
