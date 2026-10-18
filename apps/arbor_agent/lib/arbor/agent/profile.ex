@@ -113,13 +113,43 @@ defmodule Arbor.Agent.Profile do
   # that happens to be an existing atom (e.g. "description", "source") would break
   # callers/tests that read those by string. Add a key here when a new metadata
   # flag is read via an atom key after a restore.
-  @known_metadata_keys [:external_agent, :agent_type, :registered_via, :created_by, :owner_id]
+  @known_metadata_keys [
+    :external_agent,
+    :agent_type,
+    :registered_via,
+    :created_by,
+    :owner_id,
+    :last_model_config
+  ]
+
+  # Inner keys written by put_model_config_value/3 and Manager persist. JSON
+  # persistence stringifies them; atomize at this same deserialize boundary so
+  # writers and readers share one key shape.
+  @known_model_config_keys [
+    :id,
+    :label,
+    :provider,
+    :runtime,
+    :module,
+    :name,
+    :start_opts,
+    :model,
+    :fallback_chain
+  ]
 
   defp normalize_metadata(meta) when is_map(meta) do
-    SafeAtom.atomize_keys(meta, @known_metadata_keys)
+    meta
+    |> SafeAtom.atomize_keys(@known_metadata_keys)
+    |> normalize_last_model_config()
   end
 
   defp normalize_metadata(_), do: %{}
+
+  defp normalize_last_model_config(%{last_model_config: config} = meta) when is_map(config) do
+    %{meta | last_model_config: SafeAtom.atomize_keys(config, @known_model_config_keys)}
+  end
+
+  defp normalize_last_model_config(meta), do: meta
 
   @doc """
   Encode profile to JSON string.

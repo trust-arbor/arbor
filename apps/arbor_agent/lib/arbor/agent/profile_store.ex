@@ -135,9 +135,20 @@ defmodule Arbor.Agent.ProfileStore do
       when is_binary(agent_id) and is_atom(key) do
     with {:ok, profile} <- load_profile(agent_id) do
       metadata = profile.metadata || %{}
-      last_config = Map.get(metadata, :last_model_config) || %{}
+
+      last_config =
+        case Map.get(metadata, :last_model_config) || Map.get(metadata, "last_model_config") do
+          %{} = config -> config
+          _ -> %{}
+        end
+
       new_last_config = Map.put(last_config, key, value)
-      updated_metadata = Map.put(metadata, :last_model_config, new_last_config)
+
+      updated_metadata =
+        metadata
+        |> Map.delete("last_model_config")
+        |> Map.put(:last_model_config, new_last_config)
+
       updated_profile = %{profile | metadata: updated_metadata}
       store_profile(updated_profile)
     end

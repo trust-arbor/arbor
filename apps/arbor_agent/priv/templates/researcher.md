@@ -31,7 +31,7 @@ initial_goals:
 - description: "Keep notes organized and accessible"
   type: "maintain"
 - description: "Coordinate research via DOT pipelines when appropriate"
-  type: "capability"
+  type: "achieve"
 initial_interests:
 - "Elixir/OTP architectural patterns"
 - "distributed systems design"

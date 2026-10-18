@@ -18,7 +18,7 @@ character:
   - "safety"
 initial_goals:
 - description: "Help users accomplish their goals using available tools"
-  type: "assist"
+  type: "achieve"
 metadata:
   category: "general"
   runtime: "arbor"

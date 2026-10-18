@@ -119,6 +119,30 @@ defmodule Arbor.Agent.ProfileTest do
       assert restored.metadata[:agent_type] == "claude_code"
     end
 
+    test "deserialize atomizes last_model_config after JSON strings the keys" do
+      # last_model_config is written with atom keys (put_model_config_value/3,
+      # Manager persist). JSON persistence stringifies both the outer metadata
+      # key and the inner model-config keys. Without last_model_config on the
+      # known-key list, atom-key readers (and put_model_config_value/3) miss
+      # the persisted map and write a parallel atom-keyed sibling.
+      original = %Profile{
+        agent_id: "lmc-1",
+        character: @character,
+        identity: %{agent_id: "agent_x"},
+        metadata: %{last_model_config: %{id: "haiku", runtime: :arbor, model: "haiku"}},
+        created_at: DateTime.utc_now()
+      }
+
+      {:ok, json} = Jason.encode(Profile.serialize(original))
+      {:ok, serialized} = Jason.decode(json)
+      {:ok, restored} = Profile.deserialize(serialized)
+
+      assert restored.metadata[:last_model_config][:id] == "haiku"
+      assert restored.metadata[:last_model_config][:runtime] == "arbor"
+      assert restored.metadata[:last_model_config][:model] == "haiku"
+      refute Map.has_key?(restored.metadata, "last_model_config")
+    end
+
     test "serialize excludes private keys" do
       profile = %Profile{
         agent_id: "scout-1",
