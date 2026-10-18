@@ -127,6 +127,9 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "drift_detect" =>
       {"compose",
        %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/drift-detect.dot"}},
+    # Authoring entry point for specs/pipelines/stdlib/retry-escalate.dot.
+    # Session turn/heartbeat graphs keep their own retry policy; do not
+    # inject this alias there.
     "retry.escalate" =>
       {"compose",
        %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/retry-escalate.dot"}},
