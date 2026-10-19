@@ -269,7 +269,7 @@ defmodule Arbor.AI.AcpSession.Config do
   #   * an endpoint-native model name (e.g. `granite3.1-moe:1b`), NOT a Claude
   #     model id — set via `adapter_opts[:model]` → `--model`.
   #   * a lean tool surface (`--tools ""`) and no local settings
-  #     (`--setting-sources ""`), because small local models can't drive the
+  #     (`--setting-sources=`), because small local models can't drive the
   #     full agent tool loop in reasonable time.
   #
   # Driven entirely by env / config so CI can opt in without code changes and
@@ -300,7 +300,7 @@ defmodule Arbor.AI.AcpSession.Config do
         base_adapter
         |> Keyword.put(:env, env)
         |> Keyword.put_new(:tools, "")
-        |> Keyword.put_new(:extra_args, ["--setting-sources", ""])
+        |> Keyword.put_new(:extra_args, ["--setting-sources="])
         |> maybe_put_model(model)
 
       opts

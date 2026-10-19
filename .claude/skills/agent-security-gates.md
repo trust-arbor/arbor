@@ -1222,6 +1222,23 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   refuses ambient session minting without actor authority.
   Regression: `bridge_authorize_tool_route_security_regression_test.exs`.
 
+## 39. ACP CLI argv values must not start with `-` (CVE-2026-96620, 2026-10-19)
+
+- **What:** Claude Code treats a token after an optional-value flag (`--resume`,
+  `--session-id`, `--model`, `--add-dir`, `--cwd` via adapter opts,
+  `--resume-session-at`) as a new option when it starts with `-`. A caller
+  `session_id` of `--mcp-config=/tmp/x.json` (or `-x`, or `" -x"`) becomes a
+  second CLI flag. Arbor rejects that class of value before any provider
+  process is launched. Claude caller resume/session IDs must also match the
+  provider UUID. Arbor-built extra args use `--flag=value`.
+- **Symptom:** `{:invalid_provider_session_id, :leading_dash}`,
+  `{:invalid_provider_session_id, :claude_session_uuid}`, or
+  `{:invalid_cli_argv_value, :leading_dash}` from `Acp.StartSession` /
+  `acp_managed_start_session` with no child process.
+- **Action:** pass a Claude session UUID to resume; never pass a dash-leading
+  model, cwd, add-dir, or resume token. Do not "fix" this by forwarding the
+  value as a following argv token.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

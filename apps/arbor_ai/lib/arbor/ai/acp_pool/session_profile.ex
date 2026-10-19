@@ -381,6 +381,9 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       not String.valid?(trimmed) ->
         {:error, {:invalid, :model, :invalid_utf8}}
 
+      String.starts_with?(trimmed, "-") ->
+        {:error, {:invalid, :model, :leading_dash}}
+
       true ->
         {:ok, trimmed}
     end
@@ -558,6 +561,9 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
       not String.valid?(trimmed) ->
         {:error, {:invalid, field, :invalid_utf8}}
+
+      String.starts_with?(trimmed, "-") ->
+        {:error, {:invalid, field, :leading_dash}}
 
       true ->
         try do

@@ -64,7 +64,9 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
          %{
            base
            | file: {path, contents},
-             adapter_append: [extra_args: ["--mcp-config", path]],
+             # `--flag=value` so a path that started with `-` cannot become a
+             # new Claude CLI option (CVE-2026-96620). Arbor owns this path.
+             adapter_append: [extra_args: ["--mcp-config=#{path}"]],
              allow_tools:
                claude_servers |> Map.keys() |> Enum.sort() |> Enum.map(&("mcp__" <> &1))
          }}

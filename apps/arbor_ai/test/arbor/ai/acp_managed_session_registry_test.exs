@@ -8,6 +8,9 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
   @moduletag :fast
 
+  @claude_resume_uuid "a226df5e-bc82-412c-9870-1fc52d036763"
+  @claude_resume_uuid_other "b337ef6f-cd93-523d-a981-2ed63e147874"
+
   # -- Fakes ----------------------------------------------------------------
 
   defmodule FakeSession do
@@ -1700,7 +1703,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     test "non-pooled: sibling adapter_opts are preserved", ctx do
-      sid = "sess_sibling_preserved"
+      sid = @claude_resume_uuid
 
       assert {:ok, _meta} =
                start_managed(
@@ -1718,7 +1721,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     test "non-pooled: identical caller-supplied resume is accepted", ctx do
-      sid = "sess_identical_resume"
+      sid = @claude_resume_uuid
 
       assert {:ok, _meta} =
                start_managed(:claude, [session_id: sid, adapter_opts: [resume: sid]], ctx)
@@ -1731,7 +1734,10 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert {:error, {:invalid, :adapter_opts, :conflicting_resume}} =
                start_managed(
                  :claude,
-                 [session_id: "requested-id", adapter_opts: [resume: "other-id"]],
+                 [
+                   session_id: @claude_resume_uuid,
+                   adapter_opts: [resume: @claude_resume_uuid_other]
+                 ],
                  ctx
                )
 
@@ -1743,7 +1749,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert {:error, {:invalid, :adapter_opts, :bad_type}} =
                start_managed(
                  :claude,
-                 [session_id: "requested-id", adapter_opts: %{resume: "bad-shape"}],
+                 [session_id: @claude_resume_uuid, adapter_opts: %{resume: "bad-shape"}],
                  ctx
                )
 
@@ -1786,7 +1792,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
     test "pooled: sibling adapter_opts survive checkout", ctx do
       start_fake_pool()
-      sid = "sess_pool_sibling"
+      sid = @claude_resume_uuid
 
       assert {:ok, _meta} =
                start_managed(
@@ -1815,8 +1821,8 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                  [
                    use_pool: true,
                    pool_module: FakePool,
-                   session_id: "requested-id",
-                   adapter_opts: [resume: "other-id"]
+                   session_id: @claude_resume_uuid,
+                   adapter_opts: [resume: @claude_resume_uuid_other]
                  ],
                  ctx
                )
@@ -1827,7 +1833,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
   describe "Claude launch-bound resume (explicit nested client_opts)" do
     test "non-pooled: resume reaches nested client_opts adapter_opts", ctx do
-      sid = "sess_client_opts_nested"
+      sid = @claude_resume_uuid
 
       assert {:ok, meta} =
                start_managed(
@@ -1846,7 +1852,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     test "non-pooled: sibling nested adapter_opts are preserved", ctx do
-      sid = "sess_client_opts_sibling"
+      sid = @claude_resume_uuid
 
       assert {:ok, _meta} =
                start_managed(
@@ -1867,7 +1873,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     test "non-pooled: identical nested resume is accepted", ctx do
-      sid = "sess_client_opts_identical"
+      sid = @claude_resume_uuid
 
       assert {:ok, _meta} =
                start_managed(
@@ -1886,8 +1892,8 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                start_managed(
                  :claude,
                  [
-                   session_id: "requested-id",
-                   client_opts: [adapter_opts: [resume: "other-id"]]
+                   session_id: @claude_resume_uuid,
+                   client_opts: [adapter_opts: [resume: @claude_resume_uuid_other]]
                  ],
                  ctx
                )
@@ -1900,7 +1906,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert {:error, {:invalid, :client_opts, :bad_type}} =
                start_managed(
                  :claude,
-                 [session_id: "requested-id", client_opts: %{adapter_opts: []}],
+                 [session_id: @claude_resume_uuid, client_opts: %{adapter_opts: []}],
                  ctx
                )
 
@@ -1912,7 +1918,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert {:error, {:invalid, :client_opts, :bad_adapter_opts}} =
                start_managed(
                  :claude,
-                 [session_id: "requested-id", client_opts: [adapter_opts: %{resume: "x"}]],
+                 [session_id: @claude_resume_uuid, client_opts: [adapter_opts: %{resume: "x"}]],
                  ctx
                )
 
@@ -1922,7 +1928,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
     test "pooled: nested resume reaches checkout and child", ctx do
       start_fake_pool()
-      sid = "sess_pool_client_opts"
+      sid = @claude_resume_uuid
 
       assert {:ok, meta} =
                start_managed(

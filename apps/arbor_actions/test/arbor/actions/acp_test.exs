@@ -135,6 +135,8 @@ defmodule Arbor.Actions.AcpTest do
 
   @moduletag :fast
 
+  @claude_resume_uuid "a226df5e-bc82-412c-9870-1fc52d036763"
+
   setup do
     original_ai = Application.get_env(:arbor_actions, :ai_module)
 
@@ -446,7 +448,7 @@ defmodule Arbor.Actions.AcpTest do
                    permission_mode: "default",
                    allowed_tools: ["Read"],
                    use_pool: "true",
-                   session_id: "provider-session-resume-1",
+                   session_id: @claude_resume_uuid,
                    timeout: 60_000
                  },
                  %{
@@ -464,7 +466,7 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :model) == "sonnet"
       assert Keyword.get(opts, :cwd) == "/repo"
       assert Keyword.get(opts, :use_pool) == true
-      assert Keyword.get(opts, :session_id) == "provider-session-resume-1"
+      assert Keyword.get(opts, :session_id) == @claude_resume_uuid
       assert result.continuity == "resumed"
 
       adapter_opts = Keyword.fetch!(opts, :adapter_opts)
@@ -510,7 +512,7 @@ defmodule Arbor.Actions.AcpTest do
                    provider: "claude",
                    model: "sonnet",
                    cwd: "/repo",
-                   session_id: "provider_sess_old",
+                   session_id: @claude_resume_uuid,
                    use_pool: "true",
                    fallback_to_fresh_on_resume_unavailable: "true",
                    permission_mode: "default",
@@ -531,7 +533,7 @@ defmodule Arbor.Actions.AcpTest do
       assert_receive {:managed_start, :claude, second_opts}
       refute_receive {:managed_start, :claude, _opts}
 
-      assert Keyword.get(first_opts, :session_id) == "provider_sess_old"
+      assert Keyword.get(first_opts, :session_id) == @claude_resume_uuid
       assert Keyword.get(first_opts, :create_session) == nil
       assert Keyword.get(first_opts, :use_pool) == true
       assert Keyword.get(first_opts, :agent_id) == "agent_recovery"
@@ -703,7 +705,7 @@ defmodule Arbor.Actions.AcpTest do
                Acp.StartSession.run(
                  %{
                    provider: "claude",
-                   session_id: "provider_sess_old",
+                   session_id: @claude_resume_uuid,
                    fallback_to_fresh_on_resume_unavailable: false
                  },
                  %{}
@@ -758,7 +760,7 @@ defmodule Arbor.Actions.AcpTest do
                  Acp.StartSession.run(
                    %{
                      provider: "claude",
-                     session_id: "provider_sess_old",
+                     session_id: @claude_resume_uuid,
                      fallback_to_fresh_on_resume_unavailable: true
                    },
                    %{}
@@ -792,7 +794,7 @@ defmodule Arbor.Actions.AcpTest do
                    provider: "claude",
                    cwd: "/repo",
                    use_pool: true,
-                   session_id: "provider-session-missing",
+                   session_id: @claude_resume_uuid,
                    fallback_to_fresh_on_resume_unavailable: true
                  },
                  %{agent_id: "agent_start", task_id: "task_start"}
@@ -801,7 +803,7 @@ defmodule Arbor.Actions.AcpTest do
       assert result.continuity == "fresh_recovery"
       assert_receive {:managed_start, :claude, first_opts}
       assert_receive {:managed_start, :claude, fallback_opts}
-      assert Keyword.get(first_opts, :session_id) == "provider-session-missing"
+      assert Keyword.get(first_opts, :session_id) == @claude_resume_uuid
       refute Keyword.has_key?(fallback_opts, :session_id)
       assert Keyword.get(fallback_opts, :create_session) == true
     end

@@ -425,6 +425,7 @@ defmodule Arbor.Actions.Acp do
            {:ok, params} <- normalize_permission_mode_param(params),
            :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
+           :ok <- validate_cli_launch_params(provider, params),
            {:ok, grok_sandbox_authority} <-
              bind_authorized_grok_workspace(provider, params, agent_id, task_id, context),
            {:ok, meta, continuity} <-
@@ -771,6 +772,19 @@ defmodule Arbor.Actions.Acp do
 
     defp non_empty_string(value) when is_binary(value) and value != "", do: value
     defp non_empty_string(_), do: nil
+
+    # Fail closed before RecordingAI / managed start so dash-leading session_id,
+    # model, and cwd cannot become Claude optional-value CLI tokens
+    # (CVE-2026-96620 / GHSA-h4mw-j7qp-8mwm).
+    defp validate_cli_launch_params(provider, params) do
+      opts =
+        []
+        |> maybe_add(:session_id, non_empty_string(Acp.param(params, :session_id)))
+        |> maybe_add(:model, Acp.param(params, :model))
+        |> maybe_add(:cwd, Acp.param(params, :cwd))
+
+      Arbor.AI.acp_validate_cli_launch(provider, opts)
+    end
 
     defp put_normalized_use_pool(params, value) do
       case normalize_use_pool(value) do

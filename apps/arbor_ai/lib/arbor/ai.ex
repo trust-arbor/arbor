@@ -1514,6 +1514,13 @@ defmodule Arbor.AI do
   end
 
   @doc false
+  @spec acp_validate_cli_launch(atom(), keyword()) :: :ok | {:error, term()}
+  def acp_validate_cli_launch(provider, opts \\ [])
+      when is_atom(provider) and is_list(opts) do
+    AcpSession.validate_cli_launch(provider, opts)
+  end
+
+  @doc false
   @spec bind_grok_worktree(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
   def bind_grok_worktree(repository_root, worktree_root) do
     Arbor.AI.AcpSession.GrokSandbox.bind(repository_root, worktree_root)

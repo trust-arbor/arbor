@@ -43,7 +43,7 @@ defmodule Arbor.AI.AcpManaged do
 
     with {:ok, opts, _timeout} <-
            Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
-         :ok <- validate_resume_option(opts),
+         :ok <- AcpSession.validate_cli_launch(provider, opts),
          {:ok, opts} <- bind_claude_managed_resume(provider, opts) do
       use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
@@ -814,19 +814,6 @@ defmodule Arbor.AI.AcpManaged do
 
   # -- Helpers --------------------------------------------------------
 
-  defp validate_resume_option(opts) do
-    case Keyword.fetch(opts, :session_id) do
-      :error ->
-        :ok
-
-      {:ok, session_id} ->
-        case AcpSession.validate_provider_session_id(session_id) do
-          {:ok, _session_id} -> :ok
-          {:error, _reason} = error -> error
-        end
-    end
-  end
-
   # Claude Code continuity is launch-bound: post-start session/load can replay
   # metadata, but it cannot rebind an already-running CLI subprocess. Bind the
   # exact requested provider session before pool checkout or child startup.
@@ -838,7 +825,8 @@ defmodule Arbor.AI.AcpManaged do
         {:ok, opts}
 
       {:ok, session_id} ->
-        with {:ok, session_id} <- AcpSession.validate_provider_session_id(session_id) do
+        with {:ok, session_id} <-
+               AcpSession.validate_caller_resume_session_id(session_id, :claude) do
           case Keyword.get(opts, :client_opts) do
             nil -> merge_claude_launch_resume(opts, session_id)
             client_opts -> merge_claude_client_opts_resume(opts, client_opts, session_id)

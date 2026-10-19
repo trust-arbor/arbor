@@ -30,7 +30,7 @@ defmodule Arbor.AI.AcpSession.McpLaunchCoreTest do
                }
              } = Jason.decode!(contents)
 
-      assert plan.adapter_append == [extra_args: ["--mcp-config", path]]
+      assert plan.adapter_append == [extra_args: ["--mcp-config=#{path}"]]
       assert plan.adapter_put == [strict_mcp_config: true]
       assert :mcp_servers in plan.adapter_delete
       assert plan.allow_tools == ["mcp__arbor-tools"]
@@ -60,7 +60,7 @@ defmodule Arbor.AI.AcpSession.McpLaunchCoreTest do
       assert {:ok, opts} =
                McpLaunchCore.apply_adapter_opts([extra_args: ["--setting-sources", ""]], plan)
 
-      assert opts[:extra_args] == ["--setting-sources", "", "--mcp-config", path]
+      assert opts[:extra_args] == ["--setting-sources", "", "--mcp-config=#{path}"]
     end
 
     test "translates stdio servers and their env" do

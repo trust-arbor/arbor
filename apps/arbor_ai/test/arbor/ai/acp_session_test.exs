@@ -906,7 +906,7 @@ defmodule Arbor.AI.AcpSessionTest do
       refute Keyword.has_key?(opts, :arbor_mcp_allow_tools)
 
       assert adapter_opts[:strict_mcp_config] == true
-      assert ["--mcp-config", path] = Enum.take(adapter_opts[:extra_args], -2)
+      assert ["--mcp-config=" <> path] = Enum.take(adapter_opts[:extra_args], -1)
       assert Path.dirname(path) == :sys.get_state(session).runtime_home_cleanup.path
 
       assert {:ok, %File.Stat{type: :regular, mode: mode}} = File.lstat(path)
@@ -927,7 +927,7 @@ defmodule Arbor.AI.AcpSessionTest do
 
       {_exe, argv} = ExMCP.ACP.Adapters.ClaudeSDK.Protocol.command(adapter_opts)
       assert "--strict-mcp-config" in argv
-      assert "--mcp-config" in argv
+      assert Enum.any?(argv, &String.starts_with?(&1, "--mcp-config="))
       refute Enum.any?(argv, &String.contains?(&1, @token))
     end
 
@@ -1205,7 +1205,11 @@ defmodule Arbor.AI.AcpSessionTest do
         {"id" <> <<0>> <> "tail", :nul_byte},
         {"id\n-tail", :control_character},
         {"id" <> <<0xC2, 0x85>>, :control_character},
-        {String.duplicate("x", 513), :too_long}
+        {String.duplicate("x", 513), :too_long},
+        {"--mcp-config=/tmp/x.json", :leading_dash},
+        {"-x", :leading_dash},
+        {" -x", :leading_dash},
+        {"\t-x", :leading_dash}
       ]
 
       for {id, reason} <- invalid_ids do
@@ -1261,6 +1265,31 @@ defmodule Arbor.AI.AcpSessionTest do
 
       assert AcpSession.status(session) == before
       refute_receive {:fake_load_session_opts, _opts}, 100
+      assert :ok = AcpSession.close(session)
+    end
+
+    test "security regression: Claude resume rejects a dash-leading id before load_session" do
+      install_fake_progress_client(100)
+      {:ok, session} = start_fake_progress_session(provider: :claude)
+      assert {:ok, _} = AcpSession.create_session(session, timeout: 1_000)
+      before = AcpSession.status(session)
+
+      for session_id <- ["--mcp-config=/tmp/x.json", "-x", " -x"] do
+        assert {:error, {:invalid_provider_session_id, reason}} =
+                 AcpSession.resume_session(session, session_id, timeout: 1_000)
+
+        assert reason in [:leading_dash, :claude_session_uuid]
+        assert AcpSession.status(session) == before
+        refute_receive {:fake_load_session_opts, _opts}, 50
+      end
+
+      uuid = "a226df5e-bc82-412c-9870-1fc52d036763"
+
+      assert {:ok, %{"sessionId" => ^uuid}} =
+               AcpSession.resume_session(session, uuid, timeout: 1_000)
+
+      assert %{status: :ready, session_id: ^uuid} = AcpSession.status(session)
+      assert_receive {:fake_load_session_opts, _opts}, 1_000
       assert :ok = AcpSession.close(session)
     end
   end

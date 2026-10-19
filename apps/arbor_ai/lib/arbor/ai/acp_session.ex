@@ -132,6 +132,41 @@ defmodule Arbor.AI.AcpSession do
   @provider_session_id_aliases ["sessionId", :sessionId, "session_id", :session_id]
   @claude_transient_session_prefix "claude_sdk_"
   @claude_provider_session_id_pattern ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
+  # Caller-supplied values that ClaudeSDK.Protocol.command/1 (and siblings) turn
+  # into a following argv token. A token starting with `-` is parsed as a new
+  # flag (CVE-2026-96620 / GHSA-h4mw-j7qp-8mwm).
+  @cli_argv_value_keys [
+    :model,
+    :cwd,
+    :resume,
+    :resume_session_at,
+    :session_id,
+    :add_dir,
+    :add_dirs,
+    :additional_directories,
+    :fallback_model,
+    :agent,
+    :effort,
+    :cli_path
+  ]
+  @optional_value_cli_flags [
+    "--resume",
+    "--session-id",
+    "--resume-session-at",
+    "--model",
+    "--fallback-model",
+    "--add-dir",
+    "--mcp-config",
+    "--setting-sources",
+    "--effort",
+    "--max-turns",
+    "--max-budget-usd",
+    "--agent",
+    "--permission-mode",
+    "--tools",
+    "--output-format",
+    "--input-format"
+  ]
   @callback_cleanup_timeout_ms 250
   @client_initialize_cleanup_grace_ms 1_000
   @task_control_stream_id "agent:task_steering"
@@ -336,6 +371,9 @@ defmodule Arbor.AI.AcpSession do
       String.trim(id) == "" ->
         {:error, {:invalid_provider_session_id, :blank}}
 
+      leading_dash_cli_token?(id) ->
+        {:error, {:invalid_provider_session_id, :leading_dash}}
+
       String.contains?(id, <<0>>) ->
         {:error, {:invalid_provider_session_id, :nul_byte}}
 
@@ -349,6 +387,39 @@ defmodule Arbor.AI.AcpSession do
 
   def validate_provider_session_id(_id),
     do: {:error, {:invalid_provider_session_id, :must_be_string}}
+
+  @doc false
+  @spec validate_caller_resume_session_id(term(), term()) ::
+          {:ok, String.t()} | {:error, term()}
+  def validate_caller_resume_session_id(id, provider) do
+    with {:ok, id} <- validate_provider_session_id(id) do
+      require_claude_caller_session_uuid(id, provider)
+    end
+  end
+
+  @doc false
+  @spec validate_cli_launch(term(), keyword()) :: :ok | {:error, term()}
+  def validate_cli_launch(provider, opts) when is_list(opts) do
+    with :ok <- validate_caller_resume_opt(provider, opts),
+         :ok <- validate_cli_argv_opts(opts) do
+      :ok
+    end
+  end
+
+  def validate_cli_launch(_provider, _opts), do: {:error, {:invalid_cli_argv_value, :bad_opts}}
+
+  @doc false
+  @spec validate_cli_argv_opts(term()) :: :ok | {:error, term()}
+  def validate_cli_argv_opts(opts) when is_list(opts) do
+    with :ok <- validate_cli_argv_keyword(opts),
+         :ok <- validate_cli_argv_keyword(Keyword.get(opts, :adapter_opts)),
+         :ok <- validate_client_opts_adapter(opts) do
+      :ok
+    end
+  end
+
+  def validate_cli_argv_opts(nil), do: :ok
+  def validate_cli_argv_opts(_opts), do: :ok
 
   @doc false
   @spec validate_resume_session_response(term(), term()) :: :ok | {:error, term()}
@@ -420,6 +491,7 @@ defmodule Arbor.AI.AcpSession do
 
     with {:ok, mcp_servers} <- normalize_bound_mcp_servers(Keyword.get(opts, :mcp_servers)),
          :ok <- Config.validate_requested_model(provider, Keyword.get(opts, :model)),
+         :ok <- validate_cli_launch(provider, opts),
          {:ok, usage_ledger} <- resolve_usage_ledger(opts) do
       {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
       # Drop ledger target from retained opts so it cannot leak into client launch.
@@ -565,7 +637,8 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:create_session, opts}, _from, state) do
-    with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+    with :ok <- Arbor.AI.Timeout.ensure_active(opts),
+         :ok <- validate_cli_argv_opts(opts) do
       do_create_session(opts, state)
     else
       {:error, :timeout} -> {:reply, {:error, :timeout}, state}
@@ -587,8 +660,9 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:resume_session, session_id, opts}, _from, state) do
-    with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
-      case validate_provider_session_id(session_id) do
+    with :ok <- Arbor.AI.Timeout.ensure_active(opts),
+         :ok <- validate_cli_argv_opts(opts) do
+      case validate_caller_resume_session_id(session_id, state.provider) do
         {:ok, session_id} -> do_resume_session(session_id, opts, state)
         {:error, reason} -> {:reply, {:error, reason}, state}
       end
@@ -4628,6 +4702,131 @@ defmodule Arbor.AI.AcpSession do
   defp control_codepoint?(codepoint),
     do: codepoint < 0x20 or codepoint == 0x7F or codepoint in 0x80..0x9F
 
+  # Optional-value CLI flags do not bind a following token that starts with `-`
+  # (CVE-2026-96620). Trim first so `" -x"` / `"\t-x"` cannot sneak past.
+  defp leading_dash_cli_token?(value) when is_binary(value) do
+    case String.trim(value) do
+      <<?-, _rest::binary>> -> true
+      _ -> false
+    end
+  end
+
+  defp leading_dash_cli_token?(_value), do: false
+
+  defp require_claude_caller_session_uuid(id, provider)
+       when provider in [:claude, "claude"] do
+    if valid_claude_provider_session_id?(id) do
+      {:ok, id}
+    else
+      {:error, {:invalid_provider_session_id, :claude_session_uuid}}
+    end
+  end
+
+  defp require_claude_caller_session_uuid(id, _provider), do: {:ok, id}
+
+  defp validate_caller_resume_opt(provider, opts) do
+    case Keyword.fetch(opts, :session_id) do
+      :error ->
+        :ok
+
+      {:ok, session_id} ->
+        case validate_caller_resume_session_id(session_id, provider) do
+          {:ok, _session_id} -> :ok
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp validate_client_opts_adapter(opts) do
+    case Keyword.get(opts, :client_opts) do
+      nil ->
+        :ok
+
+      client_opts when is_list(client_opts) ->
+        validate_cli_argv_keyword(Keyword.get(client_opts, :adapter_opts))
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp validate_cli_argv_keyword(nil), do: :ok
+
+  defp validate_cli_argv_keyword(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      Enum.reduce_while(@cli_argv_value_keys ++ [:extra_args], :ok, fn
+        :extra_args, :ok ->
+          case validate_extra_args(Keyword.get(opts, :extra_args)) do
+            :ok -> {:cont, :ok}
+            error -> {:halt, error}
+          end
+
+        key, :ok ->
+          case Keyword.fetch(opts, key) do
+            :error ->
+              {:cont, :ok}
+
+            {:ok, value} ->
+              case validate_cli_argv_value(value) do
+                :ok -> {:cont, :ok}
+                error -> {:halt, error}
+              end
+          end
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp validate_cli_argv_keyword(_opts), do: :ok
+
+  defp validate_cli_argv_value(nil), do: :ok
+
+  defp validate_cli_argv_value(value) when is_binary(value) do
+    if leading_dash_cli_token?(value) do
+      {:error, {:invalid_cli_argv_value, :leading_dash}}
+    else
+      :ok
+    end
+  end
+
+  defp validate_cli_argv_value(values) when is_list(values) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case validate_cli_argv_value(value) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_cli_argv_value(_value), do: :ok
+
+  defp validate_extra_args(nil), do: :ok
+  defp validate_extra_args([]), do: :ok
+
+  defp validate_extra_args(args) when is_list(args) do
+    args
+    |> Enum.map(&to_string/1)
+    |> validate_extra_args_tokens()
+  end
+
+  defp validate_extra_args(_args), do: :ok
+
+  defp validate_extra_args_tokens([]), do: :ok
+
+  defp validate_extra_args_tokens([flag, value | rest]) do
+    if flag in @optional_value_cli_flags do
+      case validate_cli_argv_value(value) do
+        :ok -> validate_extra_args_tokens(rest)
+        error -> error
+      end
+    else
+      validate_extra_args_tokens([value | rest])
+    end
+  end
+
+  defp validate_extra_args_tokens([_flag]), do: :ok
+
   defp resume_identity_failure(reason, state) do
     error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
     emit_signal(:acp_session_error, error_state, %{error: reason, phase: :resume})
@@ -5120,7 +5319,8 @@ defmodule Arbor.AI.AcpSession do
   defp validate_model_string(model)
        when is_binary(model) and byte_size(model) > 0 and byte_size(model) <= 256 do
     if String.valid?(model) and String.trim(model) != "" and
-         not Regex.match?(~r/[\x00-\x1F\x7F]/, model) do
+         not Regex.match?(~r/[\x00-\x1F\x7F]/, model) and
+         not leading_dash_cli_token?(model) do
       :ok
     else
       {:error, {:model_not_confirmed, :invalid_requested_model}}

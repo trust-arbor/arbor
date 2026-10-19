@@ -249,7 +249,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
       adapter_opts = Keyword.fetch!(opts, :adapter_opts)
 
       assert Keyword.get(adapter_opts, :tools) == ""
-      assert Keyword.get(adapter_opts, :extra_args) == ["--setting-sources", ""]
+      assert Keyword.get(adapter_opts, :extra_args) == ["--setting-sources="]
     end
 
     test "a per-call Claude model id (from the pool) does not win over the Ollama model" do
