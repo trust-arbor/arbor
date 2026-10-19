@@ -7,15 +7,17 @@ defmodule Arbor.Orchestrator.Authorization do
   `Arbor.Security.authorize/4` when the security subsystem is present.
 
   ## Policy (see Arbor.Orchestrator.Config)
-  - `security_required?: true` (default) → any unavailable or error during
-    check → `{:error, :security_unavailable}` (fail-closed, no execution).
+  - `security_required?: true` (default) → security subsystem unavailable →
+    `{:error, :security_unavailable}` (fail-closed, no execution).
   - `security_required?: false` → only for intentional standalone use without
-    arbor_security; permits when subsystem missing.
+    arbor_security; permits when the subsystem is reported unavailable.
 
   ## No fail-open on errors
   Unlike previous duplicated implementations, there is no broad `rescue _ -> :ok`.
-  Exceptions or exits during the authorize call (e.g. CapabilityStore down
-  mid-check) are logged and result in denial when required.
+  Exceptions or exits during the check (e.g. CapabilityStore down mid-check, a
+  crashing signer) are logged and always deny with
+  `{:error, :security_unavailable}`. A crash is not "security not configured",
+  so `security_required?: false` never turns it into `:ok`.
 
   ## Credentials
   Accepts either:
@@ -153,13 +155,16 @@ defmodule Arbor.Orchestrator.Authorization do
       end
     end
   rescue
+    # A crash during the check is not "security not configured": always deny,
+    # independent of `security_required?` (that escape hatch is the explicit
+    # unavailable branch above only).
     error ->
       Logger.warning(
         "[Authorization] Orchestrator gate check raised (failing closed): #{inspect(error)}",
         agent_id: agent_id
       )
 
-      if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
+      {:error, :security_unavailable}
   catch
     :exit, reason ->
       Logger.warning(
@@ -167,7 +172,7 @@ defmodule Arbor.Orchestrator.Authorization do
         agent_id: agent_id
       )
 
-      if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
+      {:error, :security_unavailable}
   end
 
   # Fixed Security facade path — never consults Config.security_module /
