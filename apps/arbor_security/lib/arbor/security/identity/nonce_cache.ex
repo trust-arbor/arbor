@@ -31,7 +31,7 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   @cleanup_interval_ms 60_000
   @nonce_bytes 16
-  @signal_type "nonce_seen"
+  @signal_type :nonce_seen
   @signal_events [:nonce_seen]
 
   # Client API
@@ -182,7 +182,9 @@ defmodule Arbor.Security.Identity.NonceCache do
     _, _ -> :ok
   end
 
-  defp record_remote_nonce(signal, state) do
+  # Only the atom type is owner-pinned by the Bus. A string "nonce_seen" still
+  # matches this subscription's pattern, but any local process may publish it.
+  defp record_remote_nonce(%{type: @signal_type} = signal, state) do
     data = Map.get(signal, :data, %{})
     origin_node = data[:origin_node] || data["origin_node"]
 
@@ -211,6 +213,8 @@ defmodule Arbor.Security.Identity.NonceCache do
       Logger.warning("[NonceCache] failed to record remote nonce: #{inspect(reason)}")
       state
   end
+
+  defp record_remote_nonce(_signal, state), do: state
 
   defp bounded_remote_expiry(expiry, now) when is_integer(expiry) and expiry > now do
     max_ttl = Config.nonce_ttl_seconds()

@@ -121,9 +121,9 @@ defmodule Arbor.Security.SignalSyncUndecryptableDeliverySecurityRegressionTest d
 
     nonce = :crypto.strong_rand_bytes(16)
 
-    # NonceCache emits its type as the string "nonce_seen", which misses the
-    # Signals portable-sync exemption, so a peer's nonce_seen is encrypted under
-    # that peer's node-local topic key. Model exactly that producer.
+    # Before the nonce_seen type fix, NonceCache emitted the string "nonce_seen",
+    # which missed the Signals portable-sync exemption, so a peer still running
+    # that code sends it encrypted under its node-local topic key. Model it.
     signal =
       peer_encrypted_signal("nonce_seen", %{
         nonce_hex: Base.encode16(nonce, case: :lower),
