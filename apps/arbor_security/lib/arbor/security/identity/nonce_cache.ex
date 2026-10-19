@@ -131,7 +131,7 @@ defmodule Arbor.Security.Identity.NonceCache do
   # A peer node recorded a nonce — record it locally so a replay aimed at
   # THIS node is rejected. Never re-emits (no propagation loop).
   def handle_info({:signal_received, delivery_ref, signal}, state) do
-    if SignalSync.authenticated_delivery?(state.signal_sync, delivery_ref) do
+    if SignalSync.admit_delivery?(state.signal_sync, delivery_ref, signal) do
       {:noreply, record_remote_nonce(signal, state)}
     else
       {:noreply, state}

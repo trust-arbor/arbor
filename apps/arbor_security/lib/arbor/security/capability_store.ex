@@ -1310,7 +1310,7 @@ defmodule Arbor.Security.CapabilityStore do
   # Handle distributed capability signals from other nodes
   @impl true
   def handle_info({:signal_received, delivery_ref, signal}, state) do
-    if SignalSync.authenticated_delivery?(state.signal_sync, delivery_ref) do
+    if SignalSync.admit_delivery?(state.signal_sync, delivery_ref, signal) do
       case migrate_state(state) do
         {:ok, state} ->
           exec_signal_received(signal, state)

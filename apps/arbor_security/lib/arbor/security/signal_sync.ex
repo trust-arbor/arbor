@@ -1,6 +1,8 @@
 defmodule Arbor.Security.SignalSync do
   @moduledoc false
 
+  require Logger
+
   alias Arbor.Security.PrivateState
   alias Arbor.Signals
 
@@ -83,16 +85,52 @@ defmodule Arbor.Security.SignalSync do
 
   def handle_info(_message, _sync), do: :unhandled
 
-  @spec authenticated_delivery?(t() | nil, term()) :: boolean()
-  def authenticated_delivery?(%__MODULE__{} = sync, delivery_ref)
-      when is_reference(delivery_ref) do
+  # The single admission gate for `{:signal_received, delivery_ref, signal}`.
+  # Forged deliveries (no authenticated ref) are dropped silently. An
+  # authenticated delivery the Bus could not decrypt is rejected and
+  # surfaced: the mutation it carried is lost on this node.
+  @spec admit_delivery?(t() | nil, term(), term()) :: boolean()
+  def admit_delivery?(sync, delivery_ref, signal) do
+    authenticated_delivery?(sync, delivery_ref) and decryptable_delivery?(sync, signal)
+  end
+
+  defp authenticated_delivery?(%__MODULE__{} = sync, delivery_ref)
+       when is_reference(delivery_ref) do
     case delivery_refs(sync) do
       {:ok, refs} -> MapSet.member?(refs, delivery_ref)
       {:error, _reason} -> false
     end
   end
 
-  def authenticated_delivery?(_sync, _delivery_ref), do: false
+  defp authenticated_delivery?(_sync, _delivery_ref), do: false
+
+  # The Bus delivers a restricted payload it cannot decrypt (a peer's
+  # node-local topic key) as this bare marker. It carries none of the event's
+  # fields, so read as data it is an empty revocation list, a nil agent_id or
+  # an empty nonce, and the mutation would be dropped without a trace.
+  defp decryptable_delivery?(sync, %{data: %{__decryption_failed__: true}} = signal) do
+    report_undecryptable_delivery(sync, signal)
+    false
+  end
+
+  defp decryptable_delivery?(_sync, _signal), do: true
+
+  defp report_undecryptable_delivery(%__MODULE__{role: role}, signal) do
+    type = Map.get(signal, :type)
+    origin_node = Map.get(signal, :origin_node)
+
+    Logger.warning(
+      "[SignalSync] Rejected undecryptable security-sync delivery for #{role}: " <>
+        "type=#{inspect(type)} origin=#{inspect(origin_node)}; " <>
+        "the mutation it carried was not applied on this node"
+    )
+
+    :telemetry.execute(
+      [:arbor, :security, :signal_sync, :rejected],
+      %{count: 1},
+      %{role: role, type: type, origin_node: origin_node, reason: :decryption_failed}
+    )
+  end
 
   @spec release(t() | nil) :: :ok
   def release(nil), do: :ok

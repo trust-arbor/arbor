@@ -1854,7 +1854,7 @@ defmodule Arbor.Security.Identity.Registry do
   @impl true
   def handle_info({:signal_received, delivery_ref, signal}, state) do
     if state.initialization == :ready and
-         SignalSync.authenticated_delivery?(state.signal_sync, delivery_ref) do
+         SignalSync.admit_delivery?(state.signal_sync, delivery_ref, signal) do
       {:noreply, handle_distributed_signal(signal, state)}
     else
       {:noreply, state}
