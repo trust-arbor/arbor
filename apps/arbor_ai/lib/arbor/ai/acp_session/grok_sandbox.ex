@@ -185,6 +185,13 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
           {:ok, term()}
           | {:error, term()}
           | {:error, {:grok_sandbox_cleanup_failed, term()}, term()}
+  def with_launch(provider, client_opts, cwd, _authority, _owner, _mcp_servers, fun)
+      when provider in [:codex, :pi] and is_list(client_opts) and is_function(fun, 1) do
+    with :ok <- reject_provider_project_config(provider, cwd) do
+      {:ok, fun.(client_opts)}
+    end
+  end
+
   def with_launch(provider, client_opts, _cwd, _authority, _owner, _mcp_servers, fun)
       when provider != :grok and is_list(client_opts) and is_function(fun, 1) do
     {:ok, fun.(client_opts)}
@@ -430,6 +437,105 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
         _other -> {:halt, {:error, :grok_ambient_mcp_configuration_forbidden}}
       end
     end)
+  end
+
+  # Codex CLI walks from the git project root to cwd loading every
+  # `.codex/config.toml` (openai/codex `load_project_layers` in
+  # `codex-rs/core/src/config_loader/mod.rs`; docs:
+  # https://learn.chatgpt.com/docs/config-file/config-advanced).
+  # `CODEX_HOME` isolates only the user layer; project layers still load
+  # when the worktree is trusted. Fail closed on those files.
+  #
+  # Pi (`ExMCP.ACP.Adapters.Pi.Settings`) reads `{cwd}/.pi/settings.json`
+  # and uses `settings["piCommand"]` as the spawn executable unless
+  # `:cli_path`, `:pi_command`, or `PI_ACP_PI_COMMAND` is set.
+  defp reject_provider_project_config(_provider, cwd) when cwd in [nil, ""], do: :ok
+
+  defp reject_provider_project_config(provider, cwd) when is_binary(cwd) do
+    with {:ok, root} <- launch_cwd(cwd) do
+      case provider do
+        :codex -> reject_codex_project_config(root)
+        :pi -> reject_pi_project_command(root)
+      end
+    end
+  end
+
+  defp reject_provider_project_config(_provider, _cwd), do: {:error, :invalid_acp_worktree}
+
+  defp launch_cwd(cwd) do
+    with true <- valid_path_string?(cwd),
+         {:ok, canonical} <- SafePath.resolve_real(Path.expand(cwd)),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(canonical) do
+      {:ok, canonical}
+    else
+      _other -> {:error, :invalid_acp_worktree}
+    end
+  end
+
+  defp reject_codex_project_config(root) do
+    root
+    |> ancestor_dirs_to_git_root()
+    |> Enum.reduce_while(:ok, fn dir, :ok ->
+      case File.lstat(Path.join([dir, ".codex", "config.toml"])) do
+        {:error, :enoent} -> {:cont, :ok}
+        _other -> {:halt, {:error, :codex_project_config_forbidden}}
+      end
+    end)
+  end
+
+  defp reject_pi_project_command(root) do
+    path = Path.join([root, ".pi", "settings.json"])
+
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular, links: 1}} ->
+        case File.read(path) do
+          {:ok, raw} ->
+            case Jason.decode(raw) do
+              {:ok, %{"piCommand" => command}} when not is_nil(command) ->
+                {:error, :pi_project_command_forbidden}
+
+              {:ok, _other} ->
+                :ok
+
+              {:error, _reason} ->
+                :ok
+            end
+
+          {:error, _reason} ->
+            {:error, :pi_project_command_forbidden}
+        end
+
+      _other ->
+        {:error, :pi_project_command_forbidden}
+    end
+  end
+
+  # Codex walks ancestors until the project root (typically `.git`). When
+  # there is no git marker, only the session cwd is checked so a stray
+  # `/tmp/.codex/config.toml` cannot refuse an unrelated worktree.
+  defp ancestor_dirs_to_git_root(root) do
+    walk_ancestors_to_git(root, [])
+  end
+
+  defp walk_ancestors_to_git(dir, acc) do
+    acc = acc ++ [dir]
+
+    case File.lstat(Path.join(dir, ".git")) do
+      {:error, :enoent} ->
+        parent = Path.dirname(dir)
+
+        if parent == dir do
+          [hd(acc)]
+        else
+          walk_ancestors_to_git(parent, acc)
+        end
+
+      _other ->
+        acc
+    end
   end
 
   defp reject_unexpected_authority(nil), do: :ok

@@ -388,8 +388,17 @@ read-only workloads on exact read/list/search child capabilities.
   its debug fallback includes complete unsupported notification payloads.
 - **Claude sessions are strict (2026-09-27).** Every ClaudeSDK launch gets
   `--strict-mcp-config`, so servers from the user's own Claude configuration
-  never join, even when the bound list is empty (see gate 28). Codex still reads
-  `~/.codex/config.toml`; RuntimeHome has no private Codex home yet.
+  never join, even when the bound list is empty (see gate 28). Codex and Pi
+  sessions (2026-10-19) get a private `CODEX_HOME` / `PI_CODING_AGENT_DIR`
+  under the ACP runtime home, and Arbor refuses a worktree
+  `.codex/config.toml` or `.pi/settings.json` with `piCommand` before launch.
+  Isolating `CODEX_HOME` does **not** stop Codex project layers: the CLI walks
+  from the git root to cwd loading every `.codex/config.toml`
+  (`load_project_layers` in openai/codex `codex-rs/core/src/config_loader/mod.rs`;
+  https://learn.chatgpt.com/docs/config-file/config-advanced). Pi merges
+  `{cwd}/.pi/settings.json` and will spawn `settings["piCommand"]` unless
+  `:pi_command` / `PI_ACP_PI_COMMAND` is pinned
+  (`ExMCP.ACP.Adapters.Pi.Settings`).
 
 ## 13. Cluster security-sync is optional until subscribers are configured
 

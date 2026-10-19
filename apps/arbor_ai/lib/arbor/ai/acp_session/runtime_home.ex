@@ -12,6 +12,8 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
   @kiro_home_directory "kiro"
+  @codex_home_directory "codex"
+  @pi_home_directory "pi"
   @antigravity_home_directory "antigravity-acp"
   @antigravity_token_filename "acp_token.json"
   @antigravity_settings_filename "settings.json"
@@ -618,6 +620,26 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
+  defp inject_provider_home(client_opts, runtime_home, :codex, _opts) do
+    isolate_adapter_cli_home(
+      client_opts,
+      Path.join(runtime_home, @codex_home_directory),
+      :codex_runtime_home_unavailable,
+      [{"CODEX_HOME", :home}],
+      []
+    )
+  end
+
+  defp inject_provider_home(client_opts, runtime_home, :pi, _opts) do
+    isolate_adapter_cli_home(
+      client_opts,
+      Path.join(runtime_home, @pi_home_directory),
+      :pi_runtime_home_unavailable,
+      [{"PI_CODING_AGENT_DIR", :home}, {"PI_ACP_PI_COMMAND", "pi"}],
+      [{:agent_dir, :home}, {:pi_command, "pi"}]
+    )
+  end
+
   defp inject_provider_home(client_opts, runtime_home, :antigravity, _opts) do
     if Keyword.get(client_opts, :command) != ["antigravity-acp"] or
          Enum.any?(@antigravity_forbidden_client_keys, &Keyword.has_key?(client_opts, &1)) do
@@ -640,6 +662,43 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   defp inject_provider_home(client_opts, _runtime_home, _provider, _opts), do: {:ok, client_opts}
+
+  defp isolate_adapter_cli_home(client_opts, home, failure_reason, env_spec, adapter_puts) do
+    values = Enum.map(env_spec, fn {key, value} -> {key, substitute_home(value, home)} end)
+
+    adapter_puts =
+      Enum.map(adapter_puts, fn {key, value} -> {key, substitute_home(value, home)} end)
+
+    with :ok <- ensure_private_provider_home(home, failure_reason) do
+      if Keyword.has_key?(client_opts, :adapter) or Keyword.has_key?(client_opts, :adapter_opts) do
+        case Keyword.get(client_opts, :adapter_opts, []) do
+          adapter_opts when is_list(adapter_opts) ->
+            if Keyword.keyword?(adapter_opts) do
+              with {:ok, env} <- put_env_values(Keyword.get(adapter_opts, :env), values) do
+                adapter_opts =
+                  adapter_opts
+                  |> Keyword.put(:env, env)
+                  |> Keyword.merge(adapter_puts)
+
+                {:ok, Keyword.put(client_opts, :adapter_opts, adapter_opts)}
+              end
+            else
+              {:error, :invalid_acp_adapter_options}
+            end
+
+          _other ->
+            {:error, :invalid_acp_adapter_options}
+        end
+      else
+        with {:ok, env} <- put_env_values(Keyword.get(client_opts, :env), values) do
+          {:ok, Keyword.put(client_opts, :env, env)}
+        end
+      end
+    end
+  end
+
+  defp substitute_home(:home, home), do: home
+  defp substitute_home(value, _home), do: value
 
   defp ensure_private_provider_home(path, failure_reason) do
     case File.lstat(path) do
