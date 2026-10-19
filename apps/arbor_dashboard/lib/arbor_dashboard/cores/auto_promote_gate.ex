@@ -2,11 +2,13 @@ defmodule Arbor.Dashboard.Cores.AutoPromoteGate do
   @moduledoc """
   H13 security gate for the "Always Allow" trust-profile mutation.
 
-  The dashboard's always-allow flow calls `Trust.Store.always_allow/2`, which
-  permanently sets the agent's trust profile to `:auto` for a resource. Without
-  a capability check, any actor that can click "Always Allow" could silently
-  escalate any agent's trust on any resource. The H13 fix gates the mutation
-  behind the `arbor://trust/auto_promote/<target_agent_id>` capability.
+  The dashboard's always-allow flow used to call `Trust.Store.always_allow/2`,
+  which permanently set the agent's trust profile to `:auto` for a resource
+  prefix. That unused Store API was deleted on 2026-10-19 (it granted
+  prefix-wide `:auto` and had no remaining callers). Without a capability
+  check, any actor that can click "Always Allow" could silently escalate any
+  agent's trust on any resource. The H13 fix gates the mutation behind the
+  `arbor://trust/auto_promote/<target_agent_id>` capability.
 
   This module is the single source of truth for the gate. `ConsensusLive`
   delegates to it (the gate was previously inlined there; the retired ChatLive

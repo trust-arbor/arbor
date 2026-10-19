@@ -466,4 +466,18 @@ defmodule Arbor.Trust.StoreTest do
 
     # Events tracking removed — events now live in EventStore exclusively
   end
+
+  describe "always_allow/2 removal (Arbor Exposure Check)" do
+    test "security regression: Store does not export a blanket always_allow/2" do
+      # Grep across the umbrella (2026-10-19) found no callers of
+      # Trust.Store.always_allow/2 or revoke_always_allow/2 — only the
+      # definitions and historical H13 comments. The function truncated a
+      # resource URI to arbor://domain/operation and wrote :auto, which is a
+      # prefix-wide grant rather than an exact URI. Unused surface that can
+      # grant blanket allow is deleted rather than narrowed.
+      refute function_exported?(Store, :always_allow, 2)
+      refute function_exported?(Store, :revoke_always_allow, 2)
+      refute function_exported?(Trust, :always_allow, 2)
+    end
+  end
 end
