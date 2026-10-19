@@ -3748,11 +3748,20 @@ defmodule Arbor.Actions do
   defp truncate_value(value), do: value
 
   @doc """
-  Authorize a facade-level operation when an agent_id is in context.
+  Authorize a facade-level operation for the explicit principal in context.
 
   Used by action modules that don't have a dedicated facade with `authorize_and_*`
-  functions. Calls `Security.authorize/3` with the given canonical URI when
-  an agent_id is available. Passes through for system-level calls (no agent_id).
+  functions. Calls `Arbor.Trust.authorize/4` with the given canonical URI for
+  `context.agent_id`.
+
+  A missing principal or missing authority never means system permission:
+
+    * a missing, empty or non-binary `:agent_id`, or a non-map context, is
+      `{:error, :invalid_authorization_principal}`;
+    * unavailable Trust or Security authorization, or a raise or exit during
+      the check, is `{:error, :authorization_unavailable}`;
+    * an unexpected Trust result is `{:error, :invalid_authorization_result}`;
+    * pending approval stays a refusal, `{:error, {:pending_approval, id}}`.
 
   ## Examples
 
@@ -3761,33 +3770,44 @@ defmodule Arbor.Actions do
       end
   """
   @spec authorize_facade_op(map(), String.t()) :: :ok | {:error, term()}
-  def authorize_facade_op(context, resource_uri) do
-    if context[:agent_id] do
-      agent_id = context[:agent_id]
-
-      if agent_id && trust_authorization_available?() do
-        case Arbor.Trust.authorize(
-               agent_id,
-               resource_uri,
-               :execute,
-               auth_opts_from_context(context)
-             ) do
-          {:ok, :authorized} -> :ok
-          {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
-          {:error, reason} -> {:error, {:unauthorized, reason}}
-        end
-      else
-        :ok
+  def authorize_facade_op(context, resource_uri) when is_map(context) do
+    with agent_id when is_binary(agent_id) <- Map.get(context, :agent_id),
+         :ok <- validate_authorization_principal(agent_id),
+         true <- trust_authorization_available?() do
+      case Arbor.Trust.authorize(
+             agent_id,
+             resource_uri,
+             :execute,
+             auth_opts_from_context(context)
+           ) do
+        {:ok, :authorized} -> :ok
+        {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+        {:error, reason} -> {:error, {:unauthorized, reason}}
+        _other -> {:error, :invalid_authorization_result}
       end
     else
-      :ok
+      false -> {:error, :authorization_unavailable}
+      _invalid_principal -> {:error, :invalid_authorization_principal}
     end
+  rescue
+    _ -> {:error, :authorization_unavailable}
+  catch
+    _, _ -> {:error, :authorization_unavailable}
   end
 
+  def authorize_facade_op(_context, _resource_uri), do: {:error, :invalid_authorization_principal}
+
+  # The Security facade comes from the Config seam (default `Arbor.Security`),
+  # so a test can model an unavailable capability store without stopping the
+  # shared one. Anything but a literal `true` counts as unavailable.
   defp trust_authorization_available? do
+    security = Config.security_module()
+
     Code.ensure_loaded?(Arbor.Trust) and
       function_exported?(Arbor.Trust, :authorize, 4) and
-      Arbor.Security.capability_authorization_available?()
+      is_atom(security) and Code.ensure_loaded?(security) and
+      function_exported?(security, :capability_authorization_available?, 0) and
+      security.capability_authorization_available?() == true
   end
 
   defp auth_opts_from_context(context) when is_map(context) do
