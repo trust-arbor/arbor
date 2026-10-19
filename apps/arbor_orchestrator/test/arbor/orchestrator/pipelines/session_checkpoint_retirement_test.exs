@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
 
   @moduletag :fast
   @moduletag :integration
+  @agent_id "agent_checkpoint_retirement"
   @turn_path Path.expand("../../../../specs/pipelines/session/turn.dot", __DIR__)
 
   defmodule ActionExecutor do
@@ -23,9 +24,12 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
         when action in ["session_memory.update", "session_memory.checkpoint"] do
       {:ok, module} = Arbor.Actions.name_to_module(action)
 
+      # The public facade authorizes this principal (granted in setup); these
+      # graph syscalls are pipeline-internal, as an Engine exec node runs them.
       context = %{
         agent_id: Keyword.fetch!(opts, :agent_id),
-        memory_write_policy: Keyword.get(opts, :memory_write_policy)
+        memory_write_policy: Keyword.get(opts, :memory_write_policy),
+        allow_pipeline_internal: true
       }
 
       case Arbor.Actions.execute_action(module, params, context) do
@@ -47,6 +51,11 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
 
     on_exit(fn -> File.rm_rf!(root) end)
 
+    on_exit(fn -> Arbor.Security.revoke_all_fixture(@agent_id) end)
+
+    {:ok, _capability} =
+      Arbor.Security.grant_fixture(principal: @agent_id, resource: "arbor://orchestrator/execute")
+
     opts = [
       logs_root: root,
       resumable: false,
@@ -54,7 +63,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
       actions_executor: ActionExecutor,
       memory_write_policy: :deny,
       initial_values: %{
-        "session.agent_id" => "agent_checkpoint_retirement",
+        "session.agent_id" => @agent_id,
         "session.session_id" => "session_checkpoint_retirement",
         "session.turn_count" => 5,
         "session.input" => "blocked test input"

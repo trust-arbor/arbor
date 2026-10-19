@@ -17,7 +17,7 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
           branch_name: fields["branch_name"],
           worktree_base_dir: fields["worktree_base_dir"]
         },
-        %{agent_id: principal_id, task_id: task_id}
+        %{agent_id: principal_id, task_id: task_id, allow_pipeline_internal: true}
       )
     end
 
@@ -25,7 +25,7 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
       Actions.execute_action(
         Arbor.Actions.Coding.Workspace.Release,
         %{mode: "retain", workspace_id: workspace_id},
-        %{agent_id: principal_id, task_id: task_id}
+        %{agent_id: principal_id, task_id: task_id, allow_pipeline_internal: true}
       )
     end
 
@@ -33,7 +33,7 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
       Actions.execute_action(
         Arbor.Actions.Coding.Workspace.Inspect,
         %{workspace_id: workspace_id},
-        %{agent_id: principal_id, task_id: task_id}
+        %{agent_id: principal_id, task_id: task_id, allow_pipeline_internal: true}
       )
     end
   end
@@ -288,6 +288,28 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
     end
 
     def cancel_task(_principal_id, _context), do: :ok
+  end
+
+  # WorkspaceActions go through the public Actions facade, which authorizes the
+  # benchmark principal like a production coding pipeline's exec nodes. Revoke
+  # only the grants this module adds: the principal is shared.
+  setup do
+    :ok = Arbor.Security.TestBootstrap.start!()
+    :ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
+
+    capabilities =
+      for verb <- ~w(acquire release inspect) do
+        assert {:ok, capability} =
+                 Arbor.Security.grant_fixture(
+                   principal: "agent_benchmark",
+                   resource: "arbor://action/coding/workspace/#{verb}"
+                 )
+
+        capability
+      end
+
+    on_exit(fn -> Enum.each(capabilities, &Arbor.Security.revoke_fixture(&1.id)) end)
+    :ok
   end
 
   defp start_acp_pool! do

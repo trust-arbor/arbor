@@ -119,6 +119,8 @@ defmodule Arbor.Actions.TestFixtures.BoundLineageCompositeAction do
     nested_context = Map.fetch!(context, :nested_execution_binding_context)
     nested_action = Map.fetch!(context, :nested_action_module)
 
+    # A nested call to a different action is not admitted by this action's
+    # frame: the public facade authorizes it as nested_context.agent_id.
     invoke = fn ->
       Arbor.Actions.execute_action(nested_action, %{}, nested_context)
     end

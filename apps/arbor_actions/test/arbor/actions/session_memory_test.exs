@@ -110,12 +110,26 @@ defmodule Arbor.Actions.SessionMemoryTest do
 
   describe "Checkpoint — run" do
     test "checkpoint retirement regression: public dispatch cannot claim a successful checkpoint" do
-      assert {:error, :session_checkpoint_retired} =
-               Arbor.Actions.execute_action(
-                 SessionMemory.Checkpoint,
-                 %{session_id: "sess_1", turn_count: 5, snapshot: %{}},
-                 %{}
+      params = %{session_id: "sess_1", turn_count: 5, snapshot: %{}}
+
+      assert {:error, :invalid_authorization_principal} =
+               Arbor.Actions.execute_action(SessionMemory.Checkpoint, params, %{})
+
+      # Even an authorized, pipeline-pinned dispatch reaches only the retired action.
+      agent_id = "agent_session_checkpoint_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Arbor.Security.revoke_all_fixture(agent_id) end)
+
+      assert {:ok, _capability} =
+               Arbor.Security.grant_fixture(
+                 principal: agent_id,
+                 resource: "arbor://orchestrator/execute"
                )
+
+      assert {:error, :session_checkpoint_retired} =
+               Arbor.Actions.execute_action(SessionMemory.Checkpoint, params, %{
+                 agent_id: agent_id,
+                 allow_pipeline_internal: true
+               })
     end
 
     test "retired direct action fails explicitly even without legacy parameters" do

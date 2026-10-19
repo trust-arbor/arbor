@@ -304,15 +304,18 @@ defmodule Arbor.Agent.AgentSeed do
 
   @doc """
   Execute an action through capability-based authorization.
+
+  There is no unauthorized path. The retired `:bypass_auth` option is refused
+  with `{:error, {:unsupported_option, :bypass_auth}}` whatever its value:
+  hosts forward caller opts unchanged, so a caller relying on it gets a loud
+  error instead of a silent change of authorization path.
   """
   @spec execute_seed_action(String.t(), module(), map(), keyword()) ::
           {:ok, any()} | {:ok, :pending_approval, String.t()} | {:error, term()}
   def execute_seed_action(agent_id, action_module, params, opts \\ []) do
-    bypass_auth = Keyword.get(opts, :bypass_auth, false)
-
     result =
-      if bypass_auth do
-        execute_action_direct(action_module, params)
+      if Keyword.has_key?(opts, :bypass_auth) do
+        {:error, {:unsupported_option, :bypass_auth}}
       else
         execute_action_authorized(agent_id, action_module, params)
       end
@@ -691,16 +694,6 @@ defmodule Arbor.Agent.AgentSeed do
   defp execute_action_authorized(agent_id, action_module, params) do
     if actions_available?() do
       Arbor.Actions.authorize_and_execute(agent_id, action_module, params)
-    else
-      {:error, :actions_unavailable}
-    end
-  rescue
-    e -> {:error, {:action_exception, Exception.message(e)}}
-  end
-
-  defp execute_action_direct(action_module, params) do
-    if actions_available?() do
-      Arbor.Actions.execute_action(action_module, params)
     else
       {:error, :actions_unavailable}
     end

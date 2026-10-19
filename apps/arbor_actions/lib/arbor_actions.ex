@@ -1936,7 +1936,7 @@ defmodule Arbor.Actions do
     # actions such as Shell.Execute; it does not opt out of this envelope.
     with_action_authorization(agent_id, action_module, context, fn authorized_context ->
       with :ok <- Arbor.Security.admit_invocation_effect() do
-        execute_action(action_module, params, authorized_context)
+        execute_admitted_action(action_module, params, authorized_context)
       end
     end)
   end
@@ -2261,12 +2261,36 @@ defmodule Arbor.Actions do
 
   defp execution_binding_json_clean?(_value), do: false
 
-  @doc false
-  # Internal: Execute an action without authorization.
-  # Only for system-level callers (e.g., AgentSeed bootstrapping).
-  # External callers MUST use authorize_and_execute/4 instead.
-  @spec execute_action(module(), map(), map()) :: {:ok, any()} | {:error, term()}
-  def execute_action(action_module, params, context \\ %{}) do
+  @doc """
+  Execute an action through action admission.
+
+  Only the currently active, process-owned action frame (the admission
+  envelope `authorize_and_execute/4` issues for this exact action module and
+  principal) enters the already-authorized implementation directly.
+  Every other call, including a nested call from inside a running action, goes
+  through `authorize_and_execute/4` as `context.agent_id`. A missing principal
+  or a non-map context is refused before any action code runs.
+  """
+  @spec execute_action(module(), map(), map()) ::
+          {:ok, any()} | {:ok, :pending_approval, String.t()} | {:error, term()}
+  def execute_action(action_module, params, context \\ %{})
+
+  def execute_action(action_module, params, context) when is_map(context) do
+    case authorized_principal(context, action_module) do
+      {:ok, _principal} ->
+        execute_admitted_action(action_module, params, context)
+
+      {:error, _reason} ->
+        authorize_and_execute(Map.get(context, :agent_id), action_module, params, context)
+    end
+  end
+
+  def execute_action(_action_module, _params, _context),
+    do: {:error, :invalid_authorization_principal}
+
+  # Runs an action that admission already authorized: either the frame
+  # execute_authorized_action/4 just issued, or the active frame above.
+  defp execute_admitted_action(action_module, params, context) do
     with :ok <- MemoryWritePolicy.check(action_module, params, context) do
       with_execution_binding(action_module, context, fn ->
         do_execute_action(action_module, params, context)

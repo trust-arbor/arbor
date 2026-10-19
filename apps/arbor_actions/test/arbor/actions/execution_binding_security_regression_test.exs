@@ -4,6 +4,23 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
   @moduletag :fast
   @moduletag :security_regression
 
+  # Public execute_action/3 goes through authorize_and_execute/4, so every
+  # binding check here runs as a real principal holding the fixture actions'
+  # capabilities. Binding rejection still happens before authorization.
+  @principal "agent_execution_binding_fixture"
+
+  setup do
+    on_exit(fn -> Arbor.Security.revoke_all_fixture(@principal) end)
+
+    assert {:ok, _capability} =
+             Arbor.Security.grant_fixture(
+               principal: @principal,
+               resource: "arbor://action/test_fixtures/**"
+             )
+
+    :ok
+  end
+
   alias Arbor.Actions.TestFixtures.{
     BoundBatchCompositeAction,
     BoundCompositeAction,
@@ -238,7 +255,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
       |> Map.put("beam_sha256", String.duplicate("0", 64))
       |> then(&binding_context(%{&1["name"] => &1}))
       |> put_lineage(child_digest, parent_digest)
-      |> Map.merge(%{agent_id: "system", test_pid: self()})
+      |> Map.merge(%{agent_id: @principal, test_pid: self()})
 
     parent_context =
       [BoundLineageCompositeAction, BoundNestedInnerAction]
@@ -282,7 +299,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
             {:execution_binding_rejected,
              {:action_binding_mismatch, "bound_nested_inner_action", fields}}} =
              Arbor.Actions.authorize_and_execute(
-               "system",
+               @principal,
                BoundNestedInnerAction,
                %{},
                context
@@ -311,7 +328,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
 
       for invoke <- [
             fn -> Arbor.Actions.execute_action(module, %{}, context) end,
-            fn -> Arbor.Actions.authorize_and_execute("system", module, %{}, context) end
+            fn -> Arbor.Actions.authorize_and_execute(@principal, module, %{}, context) end
           ] do
         assert {:error,
                 {:execution_binding_rejected,
@@ -375,7 +392,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
 
     bindings
     |> binding_context()
-    |> Map.merge(%{agent_id: "system", test_pid: self()})
+    |> Map.merge(%{agent_id: @principal, test_pid: self()})
   end
 
   defp lineage_bound_context(modules, binding_digest, parent_binding_digest) do
@@ -401,6 +418,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
     {:ok, bindings_digest} = Arbor.Actions.execution_binding_digest(bindings)
 
     %{
+      agent_id: @principal,
       execution_manifest: manifest,
       execution_manifest_digest: manifest_digest,
       pinned_action_bindings: bindings,

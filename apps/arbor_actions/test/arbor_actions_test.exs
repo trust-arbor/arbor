@@ -175,7 +175,18 @@ defmodule Arbor.ActionsTest do
       assert {:ok, manifest_digest} = Actions.execution_binding_digest(manifest)
       assert {:ok, bindings_digest} = Actions.execution_binding_digest(bindings)
 
+      # execute_action/3 authorizes its principal; grant only the bound action.
+      agent_id = "agent_legacy_binding_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Arbor.Security.revoke_all_fixture(agent_id) end)
+
+      assert {:ok, _capability} =
+               Arbor.Security.grant_fixture(
+                 principal: agent_id,
+                 resource: "arbor://action/test_fixtures/bound_nested_inner_action"
+               )
+
       context = %{
+        agent_id: agent_id,
         execution_manifest: manifest,
         execution_manifest_digest: manifest_digest,
         pinned_action_bindings: bindings,
