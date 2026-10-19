@@ -152,6 +152,29 @@ defmodule Arbor.Persistence.Ecto.EventLogSchema do
   @spec migration_versions() :: [integer()]
   def migration_versions, do: Enum.map(@migration_files, &elem(&1, 0))
 
+  @doc false
+  # Pure check of one `pg_get_triggerdef/2` rendering of the fence trigger.
+  @spec operation_trigger_definition?(String.t(), String.t()) :: boolean()
+  def operation_trigger_definition?(definition, schema)
+      when is_binary(definition) and is_binary(schema) do
+    quoted_schema = quote_identifier(schema)
+
+    # PostgreSQL schema-qualifies the trigger function when its schema is not
+    # on search_path. verify_operation_trigger/4 checks the function's
+    # namespace, exact body and security flags independently, so both
+    # renderings name the same verified function.
+    Enum.any?(
+      [@operation_trigger_function, "#{quoted_schema}.#{@operation_trigger_function}"],
+      fn function_name ->
+        normalize_sql(definition) ==
+          normalize_sql(
+            "CREATE TRIGGER #{@operation_trigger} BEFORE INSERT ON #{quoted_schema}.events " <>
+              "FOR EACH ROW EXECUTE FUNCTION #{function_name}()"
+          )
+      end
+    )
+  end
+
   defp migration_statements(migration_file, quoted_schema, metadata_type) do
     metadata_json = metadata_json_expression(metadata_type, "events.metadata")
     new_metadata_json = metadata_json_expression(metadata_type, "NEW.metadata")
@@ -494,10 +517,6 @@ defmodule Arbor.Persistence.Ecto.EventLogSchema do
       AND NOT triggers.tgisinternal
     """
 
-    expected_trigger =
-      "CREATE TRIGGER #{@operation_trigger} BEFORE INSERT ON #{schema}.events " <>
-        "FOR EACH ROW EXECUTE FUNCTION #{@operation_trigger_function}()"
-
     expected_source = expected_trigger_source(schema, metadata_type)
 
     case query!(conn, sql, [schema, @operation_trigger], timeout).rows do
@@ -516,7 +535,7 @@ defmodule Arbor.Persistence.Ecto.EventLogSchema do
           ""
         ]
       ] ->
-        if normalize_sql(trigger_definition) == normalize_sql(expected_trigger) and
+        if operation_trigger_definition?(trigger_definition, schema) and
              normalize_sql(source) == normalize_sql(expected_source),
            do: :ok,
            else: {:error, :operation_trigger_invalid}
