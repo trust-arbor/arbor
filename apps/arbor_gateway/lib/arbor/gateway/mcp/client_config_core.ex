@@ -28,7 +28,15 @@ defmodule Arbor.Gateway.MCP.ClientConfigCore do
   # key; unknown string keys are dropped rather than atomized.
   @known_keys [:transport, :command, :env, :url, :server, :name, :auto_discover, :agent_id]
 
-  @spec normalize(String.t(), map()) :: {:ok, map()} | {:error, {:invalid_mcp_config, atom()}}
+  # Process-injection keys. Approval of the MCP server does not make these
+  # executable — env is part of the program (CVE-2026-111091 / CVE-2026-88755).
+  # Keep this list aligned with Arbor.AI.AcpSession.McpLaunchCore.
+  @forbidden_mcp_env_exact MapSet.new(~w(NODE_OPTIONS PYTHONPATH PYTHONSTARTUP BASH_ENV))
+  @forbidden_mcp_env_prefixes ~w(LD_ DYLD_)
+
+  @spec normalize(String.t(), map()) ::
+          {:ok, map()}
+          | {:error, {:invalid_mcp_config, atom()} | {:forbidden_mcp_env, String.t()}}
   def normalize(server_name, config) when is_binary(server_name) and is_map(config) do
     known = Map.new(@known_keys, &{&1, fetch(config, &1)})
 
@@ -99,8 +107,42 @@ defmodule Arbor.Gateway.MCP.ClientConfigCore do
   end
 
   # ClientConnection passes the map through to the stdio transport; only the
-  # shape it relies on is checked here.
+  # shape it relies on is checked here. Process-injection keys fail closed
+  # even when the server itself is approved. There is no operator override
+  # for this denylist (searched 2026-10-19); do not add one without a
+  # dedicated audit.
   defp valid_env(nil), do: :ok
-  defp valid_env(env) when is_map(env), do: :ok
+
+  defp valid_env(env) when is_map(env) do
+    Enum.reduce_while(env, :ok, fn {key, _value}, :ok ->
+      case env_key_string(key) do
+        {:ok, name} ->
+          if forbidden_mcp_env?(name) do
+            {:halt, {:error, {:forbidden_mcp_env, name}}}
+          else
+            {:cont, :ok}
+          end
+
+        :error ->
+          {:halt, {:error, {:invalid_mcp_config, :env}}}
+      end
+    end)
+  end
+
   defp valid_env(_env), do: {:error, {:invalid_mcp_config, :env}}
+
+  defp env_key_string(key) when is_binary(key) and key != "", do: {:ok, key}
+
+  defp env_key_string(key) when is_atom(key) and not is_nil(key) do
+    {:ok, Atom.to_string(key)}
+  end
+
+  defp env_key_string(_key), do: :error
+
+  defp forbidden_mcp_env?(name) when is_binary(name) do
+    upper = String.upcase(name)
+
+    MapSet.member?(@forbidden_mcp_env_exact, upper) or
+      Enum.any?(@forbidden_mcp_env_prefixes, &String.starts_with?(upper, &1))
+  end
 end

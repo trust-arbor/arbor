@@ -77,6 +77,20 @@ defmodule Arbor.AI.AcpSession.McpLaunchCoreTest do
                Jason.decode!(contents)["mcpServers"]
     end
 
+    test "security regression: process-injection env on a bound stdio server is refused" do
+      for name <-
+            ~w(NODE_OPTIONS PYTHONPATH PYTHONSTARTUP BASH_ENV LD_PRELOAD DYLD_INSERT_LIBRARIES) do
+        stdio = %{
+          "name" => "local",
+          "command" => "/bin/tool",
+          "env" => [%{"name" => name, "value" => "/tmp/not-loaded"}]
+        }
+
+        assert {:error, {:forbidden_mcp_env, ^name}} =
+                 McpLaunchCore.plan(@claude, [stdio], @home)
+      end
+    end
+
     test "rejects malformed, duplicate, and oddly named servers" do
       [server] = entry()
 

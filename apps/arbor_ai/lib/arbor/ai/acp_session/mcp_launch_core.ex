@@ -32,6 +32,9 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
   @trusted_list_adapters [ExMCP.ACP.Adapters.Codex, ExMCP.ACP.Adapters.ZCode]
   @claude_mcp_config_basename "claude-mcp-config.json"
   @server_name_pattern ~r/\A[A-Za-z0-9_-]{1,64}\z/
+  # Keep aligned with Arbor.Gateway.MCP.ClientConfigCore.
+  @forbidden_mcp_env_exact MapSet.new(~w(NODE_OPTIONS PYTHONPATH PYTHONSTARTUP BASH_ENV))
+  @forbidden_mcp_env_prefixes ~w(LD_ DYLD_)
 
   @type plan :: %{
           file: {String.t(), binary()} | nil,
@@ -180,7 +183,11 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
     Enum.reduce_while(pairs, {:ok, %{}}, fn
       %{"name" => name, "value" => value}, {:ok, acc}
       when is_binary(name) and name != "" and is_binary(value) and not is_map_key(acc, name) ->
-        {:cont, {:ok, Map.put(acc, name, value)}}
+        if forbidden_mcp_env?(name) do
+          {:halt, {:error, {:forbidden_mcp_env, name}}}
+        else
+          {:cont, {:ok, Map.put(acc, name, value)}}
+        end
 
       _pair, _acc ->
         {:halt, {:error, :invalid_acp_mcp_server}}
@@ -188,4 +195,11 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
   end
 
   defp pairs_to_map(_pairs), do: {:error, :invalid_acp_mcp_server}
+
+  defp forbidden_mcp_env?(name) when is_binary(name) do
+    upper = String.upcase(name)
+
+    MapSet.member?(@forbidden_mcp_env_exact, upper) or
+      Enum.any?(@forbidden_mcp_env_prefixes, &String.starts_with?(upper, &1))
+  end
 end
