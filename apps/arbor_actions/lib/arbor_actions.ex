@@ -1839,6 +1839,7 @@ defmodule Arbor.Actions do
       |> Keyword.put(:approval_action, action_module_to_name(action_module))
       |> maybe_put_conversation_source()
       |> maybe_put_approved_invocation(clean_context)
+      |> maybe_put_request_id(clean_context)
       |> Keyword.put(
         :approval_context,
         approval_context_for_action(
@@ -3821,6 +3822,26 @@ defmodule Arbor.Actions do
   end
 
   defp maybe_put_approved_invocation(opts, _context), do: opts
+
+  defp maybe_put_request_id(opts, context) when is_map(context) do
+    case context_value(context, :request_id) ||
+           receipt_request_id(Keyword.get(opts, :approved_invocation)) do
+      request_id when is_binary(request_id) and request_id != "" ->
+        Keyword.put(opts, :request_id, request_id)
+
+      _ ->
+        opts
+    end
+  end
+
+  defp maybe_put_request_id(opts, _context), do: opts
+
+  defp receipt_request_id(%{request_id: request_id}) when is_binary(request_id), do: request_id
+
+  defp receipt_request_id(%{"request_id" => request_id}) when is_binary(request_id),
+    do: request_id
+
+  defp receipt_request_id(_receipt), do: nil
 
   # Parent authorize_and_execute marks AuthContext via mark_verified/1 before
   # calling run/2. Nested authorize_and_execute calls must honor that mark so

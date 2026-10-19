@@ -4360,12 +4360,32 @@ defmodule Arbor.Security do
         action,
         argument_digest
       ) do
+    confirm_consumed_approval_receipt(
+      receipt,
+      principal_id,
+      resource_uri,
+      action,
+      argument_digest,
+      receipt_request_id(receipt)
+    )
+  end
+
+  @doc false
+  def confirm_consumed_approval_receipt(
+        receipt,
+        principal_id,
+        resource_uri,
+        action,
+        argument_digest,
+        request_id
+      ) do
     ApprovalReceiptBroker.confirm_security_consumed(
       receipt,
       principal_id,
       resource_uri,
       action,
-      argument_digest
+      argument_digest,
+      request_id
     )
   end
 
@@ -4396,6 +4416,18 @@ defmodule Arbor.Security do
                 ),
                 to: ApprovalReceiptBroker,
                 as: :consume
+
+    @doc false
+    defdelegate consume_approval_receipt_fixture(
+                  receipt,
+                  principal_id,
+                  resource_uri,
+                  action,
+                  argument_digest,
+                  request_id
+                ),
+                to: ApprovalReceiptBroker,
+                as: :consume
   end
 
   defp admit_approval_receipt(principal_id, resource_uri, action, opts) do
@@ -4411,9 +4443,18 @@ defmodule Arbor.Security do
         {:ok, :none, stripped}
 
       {[receipt], [digest]} when is_binary(digest) ->
-        case ApprovalReceiptBroker.verify(receipt, principal_id, resource_uri, action, digest) do
+        request_id = incoming_request_id(stripped, receipt)
+
+        case ApprovalReceiptBroker.verify(
+               receipt,
+               principal_id,
+               resource_uri,
+               action,
+               digest,
+               request_id
+             ) do
           :ok ->
-            {:ok, %{receipt: receipt, digest: digest},
+            {:ok, %{receipt: receipt, digest: digest, request_id: request_id},
              Keyword.put(stripped, :approved_invocation, :security_verified)}
 
           {:error, _reason} ->
@@ -4429,7 +4470,31 @@ defmodule Arbor.Security do
     _, _ -> {:error, :invalid_approval_receipt}
   end
 
+  defp incoming_request_id(opts, receipt) do
+    case Keyword.fetch(opts, :request_id) do
+      {:ok, request_id} when is_binary(request_id) -> request_id
+      {:ok, _invalid} -> ""
+      :error -> receipt_request_id(receipt)
+    end
+  end
+
+  defp receipt_request_id(%{request_id: request_id}) when is_binary(request_id), do: request_id
+
+  defp receipt_request_id(%{"request_id" => request_id}) when is_binary(request_id),
+    do: request_id
+
+  defp receipt_request_id(_receipt), do: ""
+
   defp consume_approval_receipt(:none, _principal, _resource, _action), do: :ok
+
+  defp consume_approval_receipt(
+         %{receipt: receipt, digest: digest, request_id: request_id},
+         principal,
+         resource,
+         action
+       ) do
+    ApprovalReceiptBroker.consume(receipt, principal, resource, action, digest, request_id)
+  end
 
   defp consume_approval_receipt(
          %{receipt: receipt, digest: digest},

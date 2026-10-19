@@ -32,6 +32,11 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
   @trusted_list_adapters [ExMCP.ACP.Adapters.Codex, ExMCP.ACP.Adapters.ZCode]
   @claude_mcp_config_basename "claude-mcp-config.json"
   @server_name_pattern ~r/\A[A-Za-z0-9_-]{1,64}\z/
+  # Keep aligned with Arbor.Gateway.MCP.ClientConfigCore and draft PR #24.
+  # Codex/ZCode take the ACP list as `trusted_mcp_servers` and skip Claude's
+  # pairs_to_map translation, so they must be screened here.
+  @forbidden_mcp_env_exact MapSet.new(~w(NODE_OPTIONS PYTHONPATH PYTHONSTARTUP BASH_ENV))
+  @forbidden_mcp_env_prefixes ~w(LD_ DYLD_)
 
   @type plan :: %{
           file: {String.t(), binary()} | nil,
@@ -74,12 +79,14 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
 
   def plan(adapter, servers, _runtime_home)
       when adapter in @trusted_list_adapters and is_list(servers) do
-    {:ok,
-     %{
-       noop()
-       | adapter_put: [trusted_mcp_servers: servers],
-         adapter_delete: [:authorize_mcp_server]
-     }}
+    with :ok <- reject_forbidden_mcp_env(servers) do
+      {:ok,
+       %{
+         noop()
+         | adapter_put: [trusted_mcp_servers: servers],
+           adapter_delete: [:authorize_mcp_server]
+       }}
+    end
   end
 
   def plan(_adapter, [], _runtime_home), do: {:ok, noop()}
@@ -188,4 +195,52 @@ defmodule Arbor.AI.AcpSession.McpLaunchCore do
   end
 
   defp pairs_to_map(_pairs), do: {:error, :invalid_acp_mcp_server}
+
+  defp reject_forbidden_mcp_env(servers) when is_list(servers) do
+    Enum.reduce_while(servers, :ok, fn server, :ok ->
+      case forbidden_env_in_server(server) do
+        nil -> {:cont, :ok}
+        name -> {:halt, {:error, {:forbidden_mcp_env, name}}}
+      end
+    end)
+  end
+
+  defp forbidden_env_in_server(server) when is_map(server) do
+    env = Map.get(server, "env") || Map.get(server, :env) || []
+
+    env
+    |> env_names()
+    |> Enum.find(&forbidden_mcp_env?/1)
+  end
+
+  defp forbidden_env_in_server(_server), do: nil
+
+  defp env_names(pairs) when is_list(pairs) do
+    Enum.flat_map(pairs, fn
+      %{"name" => name} when is_binary(name) -> [name]
+      %{name: name} when is_binary(name) -> [name]
+      {name, _value} when is_binary(name) -> [name]
+      {name, _value} when is_atom(name) and not is_nil(name) -> [Atom.to_string(name)]
+      _other -> []
+    end)
+  end
+
+  defp env_names(env) when is_map(env) do
+    Enum.flat_map(Map.to_list(env), fn
+      {name, _value} when is_binary(name) -> [name]
+      {name, _value} when is_atom(name) and not is_nil(name) -> [Atom.to_string(name)]
+      _other -> []
+    end)
+  end
+
+  defp env_names(_env), do: []
+
+  defp forbidden_mcp_env?(name) when is_binary(name) do
+    upper = String.upcase(name)
+
+    MapSet.member?(@forbidden_mcp_env_exact, upper) or
+      Enum.any?(@forbidden_mcp_env_prefixes, &String.starts_with?(upper, &1))
+  end
+
+  defp forbidden_mcp_env?(_name), do: false
 end

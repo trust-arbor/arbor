@@ -1089,7 +1089,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
              params
            ),
          retry_context =
-           Map.put(context, :approved_invocation, approval_receipt),
+           context
+           |> Map.put(:approved_invocation, approval_receipt)
+           |> Map.put(:request_id, request_id),
          # The signed request that drove the escalated authorize is single-use.
          {:ok, retry_context} <- resign_for_retry(retry_context, resource, boundary),
          :ok <- verify_retry_workdir(retry_context) do

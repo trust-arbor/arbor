@@ -74,21 +74,77 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
   @spec verify(term(), String.t(), String.t(), atom() | nil, String.t()) ::
           :ok | {:error, :invalid_approval_receipt}
   def verify(receipt, principal_id, resource_uri, action, argument_digest) do
-    safe_call({:verify, receipt, principal_id, resource_uri, action, argument_digest})
+    verify(
+      receipt,
+      principal_id,
+      resource_uri,
+      action,
+      argument_digest,
+      receipt_request_id(receipt)
+    )
+  end
+
+  @spec verify(term(), String.t(), String.t(), atom() | nil, String.t(), String.t()) ::
+          :ok | {:error, :invalid_approval_receipt}
+  def verify(receipt, principal_id, resource_uri, action, argument_digest, request_id) do
+    safe_call({:verify, receipt, principal_id, resource_uri, action, argument_digest, request_id})
     |> normalize_verification()
   end
 
   @spec consume(term(), String.t(), String.t(), atom() | nil, String.t()) ::
           :ok | {:error, :invalid_approval_receipt}
   def consume(receipt, principal_id, resource_uri, action, argument_digest) do
-    safe_call({:consume, receipt, principal_id, resource_uri, action, argument_digest})
+    consume(
+      receipt,
+      principal_id,
+      resource_uri,
+      action,
+      argument_digest,
+      receipt_request_id(receipt)
+    )
+  end
+
+  @spec consume(term(), String.t(), String.t(), atom() | nil, String.t(), String.t()) ::
+          :ok | {:error, :invalid_approval_receipt}
+  def consume(receipt, principal_id, resource_uri, action, argument_digest, request_id) do
+    safe_call(
+      {:consume, receipt, principal_id, resource_uri, action, argument_digest, request_id}
+    )
     |> normalize_verification()
   end
 
   @spec confirm_security_consumed(term(), String.t(), String.t(), atom() | nil, String.t()) ::
           :ok | {:error, :invalid_approval_receipt}
   def confirm_security_consumed(receipt, principal_id, resource_uri, action, argument_digest) do
-    safe_call({:confirm, receipt, principal_id, resource_uri, action, argument_digest})
+    confirm_security_consumed(
+      receipt,
+      principal_id,
+      resource_uri,
+      action,
+      argument_digest,
+      receipt_request_id(receipt)
+    )
+  end
+
+  @spec confirm_security_consumed(
+          term(),
+          String.t(),
+          String.t(),
+          atom() | nil,
+          String.t(),
+          String.t()
+        ) :: :ok | {:error, :invalid_approval_receipt}
+  def confirm_security_consumed(
+        receipt,
+        principal_id,
+        resource_uri,
+        action,
+        argument_digest,
+        request_id
+      ) do
+    safe_call(
+      {:confirm, receipt, principal_id, resource_uri, action, argument_digest, request_id}
+    )
     |> normalize_verification()
   end
 
@@ -181,7 +237,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
   end
 
   defp dispatch_authenticated_call(
-         {operation, receipt, principal, resource, action, digest},
+         {operation, receipt, principal, resource, action, digest, request_id},
          _from,
          state
        )
@@ -197,6 +253,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
            resource,
            action,
            digest,
+           request_id,
            operation,
            now
          ) do
@@ -358,6 +415,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
          resource,
          action,
          digest,
+         request_id,
          operation,
          now
        )
@@ -371,6 +429,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
          true <- receipt.resource_uri == resource,
          true <- receipt.action == action,
          true <- receipt.argument_digest == digest,
+         true <- valid_request_id?(request_id) and receipt.request_id == request_id,
          true <- secure_equal?(signature, sign(key, Map.delete(receipt, :signature))),
          %{receipt: stored, status: status, expires_at_ms: ^expires_at} <- Map.get(entries, token),
          true <- stored == receipt,
@@ -381,8 +440,20 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
     end
   end
 
-  defp validate_receipt(_, _, _, _, _, _, _, _, _),
+  defp validate_receipt(_, _, _, _, _, _, _, _, _, _),
     do: {:error, :invalid_approval_receipt}
+
+  defp valid_request_id?(request_id) when is_binary(request_id),
+    do: byte_size(request_id) in 1..256
+
+  defp valid_request_id?(_request_id), do: false
+
+  defp receipt_request_id(%{request_id: request_id}) when is_binary(request_id), do: request_id
+
+  defp receipt_request_id(%{"request_id" => request_id}) when is_binary(request_id),
+    do: request_id
+
+  defp receipt_request_id(_receipt), do: ""
 
   defp valid_status?(:verify, :issued), do: true
   defp valid_status?(:consume, :issued), do: true

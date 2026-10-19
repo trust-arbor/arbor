@@ -109,6 +109,25 @@ defmodule Arbor.AI.AcpSession.McpLaunchCoreTest do
         assert plan.file == nil
       end
     end
+
+    test "security regression: process-injection env on a trusted stdio server is refused" do
+      # Overlaps draft PR #24 (ClientConfigCore / Claude pairs_to_map). Codex
+      # and ZCode take the ACP list as `trusted_mcp_servers` without that
+      # Claude translation, so they bypass #24 unless screened here.
+      for {adapter, name} <- [
+            {@codex, "NODE_OPTIONS"},
+            {ExMCP.ACP.Adapters.ZCode, "LD_PRELOAD"}
+          ] do
+        stdio = %{
+          "name" => "local",
+          "command" => "/bin/tool",
+          "env" => [%{"name" => name, "value" => "/tmp/not-loaded"}]
+        }
+
+        assert {:error, {:forbidden_mcp_env, ^name}} =
+                 McpLaunchCore.plan(adapter, [stdio], @home)
+      end
+    end
   end
 
   describe "other adapters and native commands" do

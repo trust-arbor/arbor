@@ -224,6 +224,7 @@ defmodule Arbor.Trust.ApprovalGuard do
     receipt = opt(opts, :approved_invocation)
     digest = opt(opts, :argument_digest)
     action = receipt_action(opts)
+    request_id = incoming_request_id(opts, receipt)
 
     is_map(receipt) and is_binary(digest) and
       Arbor.Security.confirm_consumed_approval_receipt(
@@ -231,7 +232,8 @@ defmodule Arbor.Trust.ApprovalGuard do
         principal_id,
         resource_uri,
         action,
-        digest
+        digest,
+        request_id
       ) == :ok
   rescue
     _ -> false
@@ -255,6 +257,21 @@ defmodule Arbor.Trust.ApprovalGuard do
         end
     end
   end
+
+  defp incoming_request_id(opts, receipt) do
+    case opt(opts, :request_id) do
+      request_id when is_binary(request_id) -> request_id
+      nil -> receipt_request_id(receipt)
+      _invalid -> ""
+    end
+  end
+
+  defp receipt_request_id(%{request_id: request_id}) when is_binary(request_id), do: request_id
+
+  defp receipt_request_id(%{"request_id" => request_id}) when is_binary(request_id),
+    do: request_id
+
+  defp receipt_request_id(_receipt), do: ""
 
   defp opt(opts, key) when is_list(opts) do
     case Keyword.fetch(opts, key) do

@@ -50,6 +50,35 @@ defmodule Arbor.Security.McpServerApprovalCoreTest do
     refute uri!("other-name", base) == uri
   end
 
+  test "security regression: changing cwd or the env policy requires a new approval" do
+    base = %{
+      transport: :stdio,
+      command: ["gh-server"],
+      env: %{"T" => "1"},
+      cwd: "/approved/workdir",
+      environment_policy: :isolated
+    }
+
+    uri = uri!("gh", base)
+
+    refute uri!("gh", %{base | cwd: "/other/workdir"}) == uri,
+           "changed cwd must require re-approval"
+
+    refute uri!("gh", %{base | environment_policy: :inherit}) == uri,
+           "changed env policy must require re-approval"
+
+    refute uri!("gh", Map.delete(base, :cwd)) == uri
+    refute uri!("gh", Map.delete(base, :environment_policy)) == uri
+
+    assert uri!("gh", %{
+             "transport" => "stdio",
+             "command" => ["gh-server"],
+             "env" => %{"T" => "1"},
+             "cd" => "/approved/workdir",
+             "env_policy" => "isolated"
+           }) == uri
+  end
+
   test "the server name is hashed, so it can never become URI syntax" do
     for name <- ["**", "a/b", "../x", "x y"] do
       uri = uri!(name, %{command: ["x"]})

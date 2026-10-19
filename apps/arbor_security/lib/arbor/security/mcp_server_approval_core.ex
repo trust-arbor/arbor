@@ -16,17 +16,19 @@ defmodule Arbor.Security.McpServerApprovalCore do
   - The name is hashed so a caller-chosen server name can never become URI
     syntax (`*`, `/`, `..`).
   - The projection covers only what determines what runs or where it
-    connects (`transport`, `command`, `env`, `url`, `server`). Key form (atom
-    or string), a bare command string vs a one-element list, and the `:stdio`
-    default all normalize to the same digest. Changing any of those fields
-    changes the digest, so edited metadata no longer matches its approval.
+    connects (`transport`, `command`, `env`, `url`, `server`, `cwd`,
+    `environment_policy`). `cwd`/`cd` and `environment_policy`/`env_policy`
+    are aliases. Key form (atom or string), a bare command string vs a
+    one-element list, and the `:stdio` default all normalize to the same
+    digest. Changing any of those fields changes the digest, so edited
+    metadata no longer matches its approval.
   - A dedicated `mcp_server` domain keeps the grant out of reach of existing
     `arbor://mcp/<server>/<tool>` tool-call grants and `arbor://agent/...`
     wildcards.
   """
 
   @prefix "arbor://mcp_server/connect"
-  @fields [:transport, :command, :env, :url, :server]
+  @fields [:transport, :command, :env, :url, :server, :cwd, :environment_policy]
 
   @doc "The registered URI prefix every approval lives under."
   @spec prefix() :: String.t()
@@ -45,11 +47,31 @@ defmodule Arbor.Security.McpServerApprovalCore do
 
   def resource_uri(_name, _config), do: {:error, :invalid_mcp_server}
 
+  defp fetch(config, :cwd), do: fetch_first(config, [:cwd, "cwd", :cd, "cd"])
+
+  defp fetch(config, :environment_policy) do
+    fetch_first(config, [
+      :environment_policy,
+      "environment_policy",
+      :env_policy,
+      "env_policy"
+    ])
+  end
+
   defp fetch(config, field) do
     case Map.fetch(config, field) do
       {:ok, value} -> value
       :error -> Map.get(config, Atom.to_string(field))
     end
+  end
+
+  defp fetch_first(config, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.fetch(config, key) do
+        {:ok, value} -> value
+        :error -> nil
+      end
+    end)
   end
 
   defp normalize(:transport, nil), do: "stdio"
@@ -58,6 +80,8 @@ defmodule Arbor.Security.McpServerApprovalCore do
 
   defp normalize(:env, env) when is_map(env),
     do: env |> Enum.map(fn {key, value} -> {to_string(key), value} end) |> Enum.sort()
+
+  defp normalize(:environment_policy, policy) when is_atom(policy), do: Atom.to_string(policy)
 
   defp normalize(_field, value), do: value
 
