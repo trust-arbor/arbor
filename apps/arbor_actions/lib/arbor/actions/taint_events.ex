@@ -57,7 +57,7 @@ defmodule Arbor.Actions.TaintEvents do
       taint_level: taint_level,
       taint_source: get_in_context(context, :taint_source),
       agent_id: Map.get(context, :agent_id),
-      taint_policy: Map.get(context, :taint_policy, :permissive),
+      taint_policy: taint_policy_from_context(context),
       blocked_value_preview: nil
     }
 
@@ -114,7 +114,7 @@ defmodule Arbor.Actions.TaintEvents do
       taint_level: taint_level,
       taint_source: get_in_context(context, :taint_source),
       agent_id: Map.get(context, :agent_id),
-      taint_policy: Map.get(context, :taint_policy, :permissive)
+      taint_policy: taint_policy_from_context(context)
     })
   end
 
@@ -175,4 +175,16 @@ defmodule Arbor.Actions.TaintEvents do
   end
 
   defp get_in_context(_, _), do: nil
+
+  defp taint_policy_from_context(context) when is_map(context) do
+    case Map.fetch(context, :taint_policy) do
+      {:ok, policy} when policy in [:strict, :permissive, :audit_only] ->
+        policy
+
+      _ ->
+        Arbor.Actions.TaintEnforcement.configured_policy()
+    end
+  end
+
+  defp taint_policy_from_context(_context), do: Arbor.Actions.TaintEnforcement.configured_policy()
 end

@@ -8,9 +8,14 @@ defmodule Arbor.Actions.TaintEnforcement do
   remains the backward-compatible fallback and operation-level label. Three
   policy modes are supported:
 
-  - `:permissive` (default) — uses standard `Taint.check_params/3`, allows derived data
+  - `:permissive` — uses standard `Taint.check_params/3`, allows derived data
   - `:audit_only` — logs violations but never blocks execution
   - `:strict` — blocks any non-trusted taint on control parameters
+
+  When `context` omits `:taint_policy`, the check uses `configured_policy/0`
+  (application env, never a hard-coded `:permissive` fallback). Missing or
+  invalid env fails closed to `:strict` in production and `:audit_only`
+  otherwise.
 
   After execution, emits taint propagation signals so downstream consumers
   know the output taint level.
@@ -18,6 +23,29 @@ defmodule Arbor.Actions.TaintEnforcement do
 
   alias Arbor.Actions.Taint
   alias Arbor.Actions.TaintEvents
+
+  @policies [:strict, :permissive, :audit_only]
+
+  @doc """
+  Configured default taint policy.
+
+  Reads `:arbor_actions, :default_taint_policy`. A missing or invalid value
+  fails closed to `:strict` when the runtime is production, otherwise
+  `:audit_only` (the committed dev default). Never falls back to
+  `:permissive`.
+  """
+  @spec configured_policy() :: :strict | :permissive | :audit_only
+  @spec configured_policy(keyword()) :: :strict | :permissive | :audit_only
+  def configured_policy(opts \\ []) when is_list(opts) do
+    case Application.fetch_env(:arbor_actions, :default_taint_policy) do
+      {:ok, policy} when policy in @policies ->
+        policy
+
+      _ ->
+        env = Keyword.get(opts, :env) || runtime_env()
+        if env == :prod, do: :strict, else: :audit_only
+    end
+  end
 
   @doc """
   Check if action parameters comply with taint policy.
@@ -29,7 +57,7 @@ defmodule Arbor.Actions.TaintEnforcement do
   def check(action_module, params, context) do
     case extract_param_taint(context) do
       {:ok, param_taint} ->
-        policy = Map.get(context, :taint_policy, :permissive)
+        policy = policy_from_context(context)
         check_param_taint_with_policy(action_module, params, param_taint, policy, context)
 
       :none ->
@@ -75,8 +103,39 @@ defmodule Arbor.Actions.TaintEnforcement do
         :ok
 
       %{taint: taint_level} ->
-        policy = Map.get(context, :taint_policy, :permissive)
+        policy = policy_from_context(context)
         check_with_policy(action_module, params, taint_level, policy, context)
+    end
+  end
+
+  defp policy_from_context(context) when is_map(context) do
+    case Map.fetch(context, :taint_policy) do
+      {:ok, policy} when policy in @policies -> policy
+      _ -> configured_policy()
+    end
+  end
+
+  defp policy_from_context(_context), do: configured_policy()
+
+  defp runtime_env do
+    case Application.get_env(:arbor_actions, :taint_policy_runtime_env) do
+      env when env in [:prod, :dev, :test] ->
+        env
+
+      _ ->
+        case System.get_env("MIX_ENV") do
+          "prod" ->
+            :prod
+
+          "dev" ->
+            :dev
+
+          "test" ->
+            :test
+
+          _ ->
+            if function_exported?(Mix, :env, 0), do: Mix.env(), else: :prod
+        end
     end
   end
 
@@ -150,8 +209,9 @@ defmodule Arbor.Actions.TaintEnforcement do
   end
 
   defp check_with_policy(action_module, params, taint, _permissive, context) do
-    # Permissive (default): use standard check from Taint module
-    # This blocks untrusted/hostile on control, but allows derived
+    # Permissive: use standard check from Taint module.
+    # This blocks untrusted/hostile on control, but allows derived.
+    # Not a missing-policy fallback — callers resolve policy via configured_policy/0.
     case Taint.check_params(action_module, params, %{taint: taint}) do
       :ok ->
         # If derived was used on control params, emit audit signal

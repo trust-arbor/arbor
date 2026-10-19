@@ -64,6 +64,23 @@ defmodule Arbor.Actions.File do
     end
   end
 
+  @doc false
+  def provenance_opts(params, context) when is_map(params) do
+    context = if is_map(context), do: context, else: %{}
+
+    workspace =
+      Map.get(context, :agent_workspace) ||
+        Map.get(context, "agent_workspace") ||
+        Map.get(context, :workspace) ||
+        Map.get(context, "workspace") ||
+        params[:workspace] ||
+        params["workspace"]
+
+    [workspace: workspace]
+  end
+
+  def provenance_opts(_params, _context), do: []
+
   # Capability URIs are minted from the workspace spelling owned by the
   # caller. Preserve that spelling after the real-path containment check so a
   # platform alias such as macOS `/var` -> `/private/var` does not make the
@@ -270,7 +287,11 @@ defmodule Arbor.Actions.File do
     # Params may arrive with string OR atom keys (pre/post schema atomization).
     @doc false
     def output_taint(params),
-      do: Arbor.Actions.FileProvenance.resolve_path(params[:path] || params["path"])
+      do:
+        Arbor.Actions.FileProvenance.resolve_path(
+          params[:path] || params["path"],
+          Arbor.Actions.File.provenance_opts(params, %{})
+        )
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -285,7 +306,13 @@ defmodule Arbor.Actions.File do
 
             case Arbor.Actions.File.read_authorized_file(context, safe_path) do
               {:ok, content, opened_path} ->
-                taint = Arbor.Actions.FileProvenance.resolve(opened_path, content)
+                taint =
+                  Arbor.Actions.FileProvenance.resolve(
+                    opened_path,
+                    content,
+                    Arbor.Actions.File.provenance_opts(params, context)
+                  )
+
                 content = maybe_decode_content(content, encoding)
 
                 result = %{
@@ -1028,7 +1055,11 @@ defmodule Arbor.Actions.File do
     # Provenance: search matches inherit the durable file sidecar when present.
     @doc false
     def output_taint(params),
-      do: Arbor.Actions.FileProvenance.resolve_path(params[:path] || params["path"])
+      do:
+        Arbor.Actions.FileProvenance.resolve_path(
+          params[:path] || params["path"],
+          Arbor.Actions.File.provenance_opts(params, %{})
+        )
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}

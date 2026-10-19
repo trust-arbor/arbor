@@ -145,7 +145,8 @@ defmodule Arbor.Actions.Taint do
          "/proc/",
          "/Downloads/",
          "/downloads/",
-         ".arbor-taint"
+         ".arbor-taint",
+         ".arbor-foreign-root"
        ]) do
       :untrusted
     else

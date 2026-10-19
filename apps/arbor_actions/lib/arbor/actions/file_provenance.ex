@@ -10,14 +10,19 @@ defmodule Arbor.Actions.FileProvenance do
   Fail-closed:
   - an agent write with unknown taint persists `:untrusted`
   - a present but unverifiable sidecar is `:hostile`, never `nil` / `:trusted`
-  - missing sidecar falls back to `Arbor.Actions.Taint.path_provenance/1`
-    so user-created workspace files stay unlabeled rather than trusted
+  - missing sidecar on an ordinary in-workspace file falls back to
+    `Arbor.Actions.Taint.path_provenance/1` so user-created workspace files
+    stay unlabeled rather than trusted
+  - cloned repos, linked worktrees, and paths outside the agent's workspace
+    are `:untrusted` even with no sidecar (TrojanForge / repository poisoning)
   """
 
   alias Arbor.Actions.Taint, as: ActionTaint
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
 
   @sidecar_suffix ".arbor-taint"
+  @foreign_root_marker ".arbor-foreign-root"
+  @git_metadata_marker "arbor-foreign-root"
   @levels [:trusted, :derived, :untrusted, :hostile]
 
   @doc "Sidecar path beside `file_path` (hidden from default directory listings)."
@@ -51,27 +56,63 @@ defmodule Arbor.Actions.FileProvenance do
 
   def persist(_path, _content, _context, _mode), do: {:error, :provenance_persist_failed}
 
+  @doc """
+  Persist a tree-level untrusted marker on a foreign root.
+
+  Individual cloned files have no per-file sidecar. Markers go into git
+  metadata (`.git/arbor-foreign-root` or the worktree gitdir) so they do
+  not dirty the checkout; non-git trees keep `.arbor-foreign-root` at the
+  root. Leased coding worktrees are **not** marked this way — writing into
+  the gitdir breaks object-backed snapshot identity. Clones, linked
+  worktrees that are not this process's checkout, nested git trees inside
+  a provided workspace, and paths outside the workspace are labeled by
+  structural detection instead.
+  """
+  @spec mark_foreign_root(String.t(), String.t()) :: :ok | {:error, atom()}
+  def mark_foreign_root(root, source) when is_binary(root) and is_binary(source) do
+    payload = %{"level" => "untrusted", "source" => source}
+
+    with {:ok, json} <- Jason.encode(payload),
+         :ok <- File.write(write_marker_path(root), json) do
+      :ok
+    else
+      _ -> {:error, :foreign_root_marker_failed}
+    end
+  rescue
+    _ -> {:error, :foreign_root_marker_failed}
+  catch
+    _, _ -> {:error, :foreign_root_marker_failed}
+  end
+
+  def mark_foreign_root(_root, _source), do: {:error, :foreign_root_marker_failed}
+
   @doc "Resolve the durable level for `path` plus on-disk (or supplied) bytes."
   @spec resolve(String.t(), binary() | nil) :: Taint.level() | nil
-  def resolve(path, content) when is_binary(path) do
+  @spec resolve(String.t(), binary() | nil, keyword()) :: Taint.level() | nil
+  def resolve(path, content, opts \\ [])
+
+  def resolve(path, content, opts) when is_binary(path) and is_list(opts) do
     cond do
-      sidecar_path?(path) ->
+      sidecar_path?(path) or foreign_root_marker_path?(path) ->
         :untrusted
 
       is_binary(content) ->
-        resolve_candidates([path], content)
+        resolve_candidates([path], content, opts)
 
       true ->
-        resolve_path(path)
+        resolve_path(path, opts)
     end
   end
 
-  def resolve(_path, _content), do: :untrusted
+  def resolve(_path, _content, _opts), do: :untrusted
 
   @doc "Resolve provenance from a read-path param, trying expanded spellings."
   @spec resolve_path(term()) :: Taint.level() | nil
-  def resolve_path(path) when is_binary(path) and path != "" do
-    if sidecar_path?(path) do
+  @spec resolve_path(term(), keyword()) :: Taint.level() | nil
+  def resolve_path(path, opts \\ [])
+
+  def resolve_path(path, opts) when is_binary(path) and path != "" and is_list(opts) do
+    if sidecar_path?(path) or foreign_root_marker_path?(path) do
       :untrusted
     else
       candidates =
@@ -81,29 +122,233 @@ defmodule Arbor.Actions.FileProvenance do
 
       case candidates do
         [] ->
-          ActionTaint.path_provenance(path)
+          unlabeled_fallback(path, opts)
 
         [found | _] ->
           case File.read(found) do
-            {:ok, content} -> resolve_candidates([found | candidates], content)
+            {:ok, content} -> resolve_candidates([found | candidates], content, opts)
             _ -> :untrusted
           end
       end
     end
   end
 
-  def resolve_path(path), do: ActionTaint.path_provenance(path)
+  def resolve_path(path, opts) when is_list(opts), do: unlabeled_fallback(path, opts)
 
-  defp resolve_candidates(paths, content) do
-    Enum.reduce_while(paths, ActionTaint.path_provenance(List.first(paths)), fn path, fallback ->
+  defp resolve_candidates(paths, content, opts) do
+    Enum.reduce_while(paths, unlabeled_fallback(List.first(paths), opts), fn path, fallback ->
       case lookup_sidecar(path, content) do
         :missing ->
-          {:cont, fallback || ActionTaint.path_provenance(path)}
+          {:cont, fallback || unlabeled_fallback(path, opts)}
 
         {:ok, level} ->
           {:halt, level}
       end
     end)
+  end
+
+  defp unlabeled_fallback(path, opts) when is_binary(path) do
+    workspace = provenance_workspace(opts)
+
+    cond do
+      foreign_root?(path) -> :untrusted
+      git_foreign?(path) -> :untrusted
+      nested_git?(path, workspace) -> :untrusted
+      outside_workspace?(path, workspace) -> :untrusted
+      true -> ActionTaint.path_provenance(path)
+    end
+  end
+
+  defp unlabeled_fallback(path, _opts), do: ActionTaint.path_provenance(path)
+
+  defp provenance_workspace(opts) when is_list(opts) do
+    case Keyword.get(opts, :workspace) do
+      workspace when is_binary(workspace) and workspace != "" -> workspace
+      _ -> nil
+    end
+  end
+
+  defp outside_workspace?(_path, nil), do: false
+
+  defp outside_workspace?(path, workspace) when is_binary(path) and is_binary(workspace) do
+    expanded_path = Path.expand(path)
+    expanded_ws = Path.expand(workspace)
+
+    not (expanded_path == expanded_ws or
+           String.starts_with?(expanded_path, expanded_ws <> "/"))
+  end
+
+  # Linked worktrees are always foreign. A clone with a remote is foreign
+  # unless it *is* this process's checkout — otherwise every file in the
+  # agent's own workspace git would be labeled untrusted and would break
+  # the sidecar-missing-stays-unlabeled contract from the file-taint PR.
+  # Nested clones inside a provided workspace are handled separately.
+  defp git_foreign?(path) when is_binary(path) do
+    case enclosing_git(path) do
+      {:worktree, _root} ->
+        true
+
+      {:repo, root} ->
+        git_has_remote?(root) and not same_git_root?(root, process_git_root())
+
+      :none ->
+        false
+    end
+  end
+
+  defp git_foreign?(_), do: false
+
+  defp nested_git?(path, workspace) when is_binary(path) and is_binary(workspace) do
+    case enclosing_git(path) do
+      {kind, root} when kind in [:repo, :worktree] ->
+        expanded_root = Path.expand(root)
+        expanded_ws = Path.expand(workspace)
+
+        expanded_root != expanded_ws and
+          String.starts_with?(expanded_root, expanded_ws <> "/")
+
+      :none ->
+        false
+    end
+  end
+
+  defp nested_git?(_path, _workspace), do: false
+
+  defp process_git_root do
+    enclosing_git(File.cwd!())
+  rescue
+    _ -> :none
+  end
+
+  defp same_git_root?(root, {:repo, cwd_root}),
+    do: Path.expand(root) == Path.expand(cwd_root)
+
+  defp same_git_root?(root, {:worktree, cwd_root}),
+    do: Path.expand(root) == Path.expand(cwd_root)
+
+  defp same_git_root?(_root, :none), do: false
+
+  defp enclosing_git(path) do
+    start = if dir_exists?(path), do: path, else: Path.dirname(path)
+    walk_git(Path.expand(start))
+  end
+
+  defp walk_git(dir) do
+    git = Path.join(dir, ".git")
+
+    cond do
+      regular_file?(git) ->
+        {:worktree, dir}
+
+      dir_exists?(git) ->
+        {:repo, dir}
+
+      true ->
+        parent = Path.dirname(dir)
+
+        if parent == dir do
+          :none
+        else
+          walk_git(parent)
+        end
+    end
+  end
+
+  defp git_has_remote?(repo_root) when is_binary(repo_root) do
+    config = Path.join([repo_root, ".git", "config"])
+
+    case File.read(config) do
+      {:ok, body} -> String.contains?(body, "[remote ")
+      _ -> false
+    end
+  end
+
+  defp foreign_root?(path) when is_binary(path) do
+    start = if dir_exists?(path), do: path, else: Path.dirname(path)
+    walk_foreign_root(Path.expand(start))
+  end
+
+  defp foreign_root?(_), do: false
+
+  defp walk_foreign_root(dir) do
+    if regular_file?(Path.join(dir, @foreign_root_marker)) or git_metadata_marker?(dir) do
+      true
+    else
+      parent = Path.dirname(dir)
+
+      if parent == dir do
+        false
+      else
+        walk_foreign_root(parent)
+      end
+    end
+  end
+
+  defp git_metadata_marker?(dir) do
+    git = Path.join(dir, ".git")
+
+    cond do
+      dir_exists?(git) ->
+        regular_file?(Path.join(git, @git_metadata_marker))
+
+      regular_file?(git) ->
+        case worktree_gitdir(git) do
+          {:ok, gitdir} -> regular_file?(Path.join(gitdir, @git_metadata_marker))
+          :error -> false
+        end
+
+      true ->
+        false
+    end
+  end
+
+  defp write_marker_path(root) do
+    git = Path.join(root, ".git")
+
+    cond do
+      regular_file?(git) ->
+        case worktree_gitdir(git) do
+          {:ok, gitdir} -> Path.join(gitdir, @git_metadata_marker)
+          :error -> Path.join(root, @foreign_root_marker)
+        end
+
+      dir_exists?(git) ->
+        Path.join(git, @git_metadata_marker)
+
+      true ->
+        Path.join(root, @foreign_root_marker)
+    end
+  end
+
+  defp worktree_gitdir(git_file) do
+    case File.read(git_file) do
+      {:ok, body} ->
+        case Regex.run(~r/^gitdir:\s*(.+)$/m, body) do
+          [_, gitdir] ->
+            path = gitdir |> String.trim() |> Path.expand(Path.dirname(git_file))
+            if dir_exists?(path), do: {:ok, path}, else: :error
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp foreign_root_marker_path?(path) when is_binary(path) do
+    name = Path.basename(path)
+    name in [@foreign_root_marker, @git_metadata_marker]
+  end
+
+  defp dir_exists?(path) do
+    case File.dir?(path) do
+      true -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp lookup_sidecar(path, content) do

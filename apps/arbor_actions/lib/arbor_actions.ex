@@ -2392,8 +2392,7 @@ defmodule Arbor.Actions do
       end)
 
     %{
-      default_taint_policy:
-        Application.get_env(:arbor_actions, :default_taint_policy, :permissive),
+      default_taint_policy: TaintEnforcement.configured_policy(),
       implementations: implementations
     }
   end
@@ -3801,13 +3800,12 @@ defmodule Arbor.Actions do
 
   # P0-1: Inject default taint policy from config when not already in context.
   # TaintEnforcement.check reads :taint_policy from context — this ensures
-  # the configured default (e.g. :audit_only) is used instead of always :permissive.
+  # the configured default is used instead of a hard-coded :permissive fallback.
   defp maybe_inject_taint_policy(context) when is_map(context) do
     if Map.has_key?(context, :taint_policy) do
       context
     else
-      default = Application.get_env(:arbor_actions, :default_taint_policy, :permissive)
-      Map.put(context, :taint_policy, default)
+      Map.put(context, :taint_policy, TaintEnforcement.configured_policy())
     end
   end
 
