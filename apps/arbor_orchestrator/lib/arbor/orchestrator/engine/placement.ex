@@ -37,11 +37,23 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   - `tag=NAME` — has a capability tag
   - `strategy:NAME` — scheduling strategy (first_match, least_loaded, most_resources, round_robin)
   - `node:NAME` — explicit node target (bypasses scheduler)
+
+  ## Peer Policy
+
+  Remote placement is deny-by-default. A remote node is used only when it is
+  listed in `Arbor.Orchestrator.Config.placement_peers/0` (default `[]`);
+  `Node.self()` is always allowed. The policy is checked when `resolve/1`
+  picks a connected node (explicit or scheduler-selected) and again in
+  `remote_execute/6` before any RPC. A denial is
+  `{:error, {:placement_peer_denied, node}}` from `resolve/1` and a failed
+  `Outcome` from `remote_execute/6`, and it is never downgraded to local
+  execution.
   """
 
   require Logger
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Engine.Outcome
 
   @type parsed :: %{
@@ -76,6 +88,8 @@ defmodule Arbor.Orchestrator.Engine.Placement do
 
   Returns `{:ok, node}` where node may be `Node.self()` (local execution),
   `{:error, reason}` if no matching node found, or `nil` if no placement.
+  A connected remote node that is not an allowed placement peer returns
+  `{:error, {:placement_peer_denied, node}}`.
   """
   @spec resolve(parsed() | nil) :: {:ok, node()} | {:error, term()} | nil
   def resolve(nil), do: nil
@@ -87,7 +101,7 @@ defmodule Arbor.Orchestrator.Engine.Placement do
 
   def resolve(%{node: node}) when not is_nil(node) do
     if node in [Node.self() | Node.list()] do
-      {:ok, node}
+      with :ok <- authorize_peer(node), do: {:ok, node}
     else
       {:error, {:node_unreachable, node}}
     end
@@ -97,7 +111,12 @@ defmodule Arbor.Orchestrator.Engine.Placement do
     scheduler = Arbor.Cartographer.Scheduler
 
     if Code.ensure_loaded?(scheduler) do
-      apply(scheduler, :select_node, [[requirements: requirements, strategy: strategy]])
+      # Scheduler selection is capability metadata, not authority: check the
+      # selected peer like an explicit one.
+      case apply(scheduler, :select_node, [[requirements: requirements, strategy: strategy]]) do
+        {:ok, target} -> with :ok <- authorize_peer(target), do: {:ok, target}
+        other -> other
+      end
     else
       # No scheduler available — execute locally
       {:ok, Node.self()}
@@ -112,6 +131,18 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   """
   @spec remote_execute(node(), module(), term(), term(), term(), keyword()) :: Outcome.t()
   def remote_execute(target_node, handler, node, context, graph, opts) do
+    # Checked before any RPC: a denied peer never receives the handler call,
+    # node, context or graph.
+    case authorize_peer(target_node) do
+      :ok ->
+        do_remote_execute(target_node, handler, node, context, graph, opts)
+
+      {:error, reason} ->
+        %Outcome{status: :fail, failure_reason: "placement denied: #{inspect(reason)}"}
+    end
+  end
+
+  defp do_remote_execute(target_node, handler, node, context, graph, opts) do
     Logger.info("Placement: executing #{node.id} on #{target_node}")
 
     # Strip non-serializable opts (functions can't cross RPC boundary)
@@ -166,6 +197,23 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   end
 
   # --- Private ---
+
+  # Deny-by-default peer policy: only the local node and explicitly listed
+  # placement peers may run a placed handler.
+  defp authorize_peer(target) do
+    if target == Node.self() or (is_atom(target) and placement_peer?(target)) do
+      :ok
+    else
+      Logger.warning("Placement: remote peer #{inspect(target)} denied — not in :placement_peers")
+
+      {:error, {:placement_peer_denied, target}}
+    end
+  end
+
+  defp placement_peer?(target) do
+    name = Atom.to_string(target)
+    Enum.any?(Config.placement_peers(), &(&1 == target or &1 == name))
+  end
 
   defp parse_part("node:" <> node_str, acc) do
     # Node names must contain "@" — validate before creating atom

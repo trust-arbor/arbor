@@ -230,6 +230,32 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   # ===========================================================================
+  # Distributed placement peer policy (deny-by-default)
+  # ===========================================================================
+
+  @doc """
+  Remote BEAM nodes that a DOT node's `placement` attribute may dispatch
+  handler execution to (`Arbor.Orchestrator.Engine.Placement`).
+
+  Remote placement RPCs the handler, node, context and graph to another node,
+  which changes where code runs and where the run's context goes. It is
+  therefore deny-by-default: the default `[]` admits only `Node.self()`.
+  Entries are node names, as atoms (`:"worker@host"`) or strings
+  (`"worker@host"`). Any value other than a list denies every remote peer.
+
+  This is an outbound policy only. It does not make connected peers
+  trustworthy (Erlang distribution grants cookie holders cluster-root
+  authority), and authorized runs still refuse remote placement independently.
+  """
+  @spec placement_peers() :: [node() | String.t()]
+  def placement_peers do
+    case Application.get_env(@app, :placement_peers, []) do
+      peers when is_list(peers) -> peers
+      _ -> []
+    end
+  end
+
+  # ===========================================================================
   # Timeouts (prevent indefinite hangs)
   # ===========================================================================
 

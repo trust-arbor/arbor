@@ -131,6 +131,11 @@ defmodule Arbor.Orchestrator.Engine.Executor do
           end
         end
 
+      {:error, {:placement_peer_denied, _peer} = reason} ->
+        # A peer-policy denial is never downgraded to local execution, even
+        # without placement_required: that would silently change where code runs.
+        {:error, reason}
+
       {:error, reason} ->
         if Keyword.get(opts, :placement_required, false) do
           {:error, reason}
