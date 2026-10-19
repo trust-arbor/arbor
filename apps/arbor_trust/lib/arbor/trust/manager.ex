@@ -197,23 +197,7 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_call({:create_trust_profile, agent_id}, _from, state) do
-    # Use Authority.new_profile to create with default preset rules.
-    profile = Authority.new_profile(agent_id)
-    Store.store_profile(profile)
-
-    {:ok, event} =
-      Event.new(
-        agent_id: agent_id,
-        event_type: :profile_created
-      )
-
-    record_event(event, state)
-
-    Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
-
-    broadcast_trust_event(agent_id, :profile_created, %{})
-
-    {:reply, {:ok, profile}, state}
+    {:reply, create_profile(agent_id, state), state}
   end
 
   @impl true
@@ -274,41 +258,78 @@ defmodule Arbor.Trust.Manager do
 
   # Private functions
 
+  # Synchronous creation and event-driven auto-creation share this local
+  # operation. A callback must never call its own GenServer, and a profile is
+  # never announced until the Store has acknowledged its authoritative write.
+  defp create_profile(agent_id, state) do
+    # Use Authority.new_profile to create with default preset rules.
+    profile = Authority.new_profile(agent_id)
+
+    with :ok <- Store.store_profile(profile) do
+      {:ok, event} =
+        Event.new(
+          agent_id: agent_id,
+          event_type: :profile_created
+        )
+
+      record_event(event, state)
+
+      Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
+
+      broadcast_trust_event(agent_id, :profile_created, %{})
+
+      {:ok, profile}
+    end
+  end
+
   defp handle_trust_event(agent_id, event_type, metadata, state) do
     case Store.get_profile(agent_id) do
       {:ok, _profile} ->
-        case Event.new(
-               agent_id: agent_id,
-               event_type: event_type,
-               metadata: metadata
-             ) do
-          {:ok, event} ->
-            record_event(event, state)
+        apply_trust_event(agent_id, event_type, metadata, state)
 
-            # Broadcast event
-            broadcast_trust_event(agent_id, event_type, metadata)
+      {:error, :not_found} ->
+        Logger.debug("Trust event for unknown agent #{agent_id}, creating profile")
 
-            # NOTE: trust events are audit/observability only — they don't mutate
-            # the profile. Authorization reads `baseline` + `rules`. There is no
-            # trust tier band.
-
-            # Check circuit breaker for negative events
-            maybe_trigger_circuit_breaker(event, agent_id, state)
+        # Auto-create profile for unknown agents, then apply the event once.
+        case create_profile(agent_id, state) do
+          {:ok, _profile} ->
+            apply_trust_event(agent_id, event_type, metadata, state)
 
           {:error, reason} ->
-            Logger.warning("Trust event ignored due to invalid event type",
+            Logger.warning("Trust event ignored: profile creation failed",
               agent_id: agent_id,
               event_type: event_type,
               reason: inspect(reason)
             )
         end
+    end
+  end
 
-      {:error, :not_found} ->
-        Logger.debug("Trust event for unknown agent #{agent_id}, creating profile")
-        # Auto-create profile for unknown agents
-        {:ok, _profile} = create_trust_profile(agent_id)
-        # Retry the event
-        handle_trust_event(agent_id, event_type, metadata, state)
+  defp apply_trust_event(agent_id, event_type, metadata, state) do
+    case Event.new(
+           agent_id: agent_id,
+           event_type: event_type,
+           metadata: metadata
+         ) do
+      {:ok, event} ->
+        record_event(event, state)
+
+        # Broadcast event
+        broadcast_trust_event(agent_id, event_type, metadata)
+
+        # NOTE: trust events are audit/observability only — they don't mutate
+        # the profile. Authorization reads `baseline` + `rules`. There is no
+        # trust tier band.
+
+        # Check circuit breaker for negative events
+        maybe_trigger_circuit_breaker(event, agent_id, state)
+
+      {:error, reason} ->
+        Logger.warning("Trust event ignored due to invalid event type",
+          agent_id: agent_id,
+          event_type: event_type,
+          reason: inspect(reason)
+        )
     end
   end
 

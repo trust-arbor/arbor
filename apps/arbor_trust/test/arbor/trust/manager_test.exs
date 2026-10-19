@@ -11,6 +11,11 @@ defmodule Arbor.Trust.ManagerTest do
     def delete(_key, _opts), do: {:error, :simulated_delete_failure}
   end
 
+  defmodule FailingPutBackend do
+    def put(_key, _record, _opts), do: {:error, :simulated_put_failure}
+    def get(_key, _opts), do: {:error, :not_found}
+  end
+
   setup do
     # Start EventStore
     start_supervised!({EventStore, []})
@@ -46,6 +51,71 @@ defmodule Arbor.Trust.ManagerTest do
       {:ok, profile} = Manager.create_trust_profile("agent_ts")
       assert %DateTime{} = profile.created_at
       assert %DateTime{} = profile.updated_at
+    end
+  end
+
+  describe "security regression: profile creation requires an acknowledged Store write" do
+    setup do
+      # Trust tests do not run the application PubSub, so give the Manager a
+      # private one to broadcast on and restore the configured name afterwards.
+      pubsub = :"trust_manager_test_pubsub_#{System.unique_integer([:positive])}"
+      start_supervised!({Phoenix.PubSub, name: pubsub})
+      previous = Application.fetch_env(:arbor_trust, :pubsub)
+      Application.put_env(:arbor_trust, :pubsub, pubsub)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_trust, :pubsub, value)
+          :error -> Application.delete_env(:arbor_trust, :pubsub)
+        end
+      end)
+
+      :ok = Phoenix.PubSub.subscribe(pubsub, "trust:events")
+
+      :sys.replace_state(Store, fn state ->
+        %{
+          state
+          | persistence_mode: :durable,
+            durable_backend: FailingPutBackend,
+            durable_backend_opts: [],
+            durable_collection: "trust_profiles"
+        }
+      end)
+
+      :ok
+    end
+
+    test "a failed Store write returns the error without recording or broadcasting creation" do
+      agent_id = "agent_create_write_failure"
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_put_failure}} =
+               Manager.create_trust_profile(agent_id)
+
+      assert {:error, :not_found} = Manager.get_trust_profile(agent_id)
+      assert {:ok, events} = Manager.get_events(agent_id)
+      refute Enum.any?(events, &(&1.event_type == :profile_created))
+      refute_received {:trust_event, ^agent_id, :profile_created, _}
+
+      # Positive control: the same channel carries creation once a write succeeds.
+      :sys.replace_state(Store, &%{&1 | persistence_mode: :memory, durable_backend: nil})
+      assert {:ok, _profile} = Manager.create_trust_profile(agent_id)
+      assert_received {:trust_event, ^agent_id, :profile_created, _}
+    end
+
+    test "a trust event for an unknown agent whose profile write fails is dropped without a crash" do
+      agent_id = "agent_event_write_failure"
+      manager = Process.whereis(Manager)
+      ref = Process.monitor(manager)
+
+      :ok = Manager.record_trust_event(agent_id, :action_success, %{})
+
+      # This call queues behind the cast, so it observes the cast's outcome.
+      assert {:error, :not_found} = Manager.get_trust_profile(agent_id)
+      refute_received {:DOWN, ^ref, :process, ^manager, _}
+
+      assert {:ok, events} = Manager.get_events(agent_id)
+      assert events == []
+      refute_received {:trust_event, ^agent_id, _, _}
     end
   end
 
@@ -118,17 +188,25 @@ defmodule Arbor.Trust.ManagerTest do
   # record_trust_event/3 - auto-creates profile for unknown agent
   # ---------------------------------------------------------------------------
 
-  describe "record_trust_event/3 auto-creation" do
-    @tag :skip
+  describe "security regression: record_trust_event/3 auto-creation without a Manager self-call" do
     test "auto-creates profile for unknown agent on event" do
-      # Note: This test is skipped because record_trust_event is a GenServer.cast,
-      # and the auto-create path calls create_trust_profile which does a
-      # GenServer.call back to itself, causing a deadlock within the cast handler.
-      :ok = Manager.record_trust_event("agent_auto", :action_success, %{})
-      Process.sleep(200)
+      # The cast handler used to call create_trust_profile/1, a GenServer.call
+      # back into the Manager itself, which exits with :calling_self.
+      manager = Process.whereis(Manager)
+      ref = Process.monitor(manager)
 
+      :ok = Manager.record_trust_event("agent_auto", :action_success, %{})
+
+      # This call queues behind the cast, so it observes the cast's outcome.
       assert {:ok, profile} = Manager.get_trust_profile("agent_auto")
       assert profile.agent_id == "agent_auto"
+      refute_received {:DOWN, ^ref, :process, ^manager, _}
+      assert Process.whereis(Manager) == manager
+
+      assert {:ok, events} = Manager.get_events("agent_auto")
+      event_types = Enum.map(events, & &1.event_type)
+      assert :profile_created in event_types
+      assert :action_success in event_types
     end
   end
 
