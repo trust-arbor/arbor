@@ -17,12 +17,19 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
 
   The connection maintains a cached tool list that is refreshed on connect
   and can be manually refreshed via `refresh_tools/1`.
+
+  First discovery auto-pins each tool's SHA-256 fingerprint (`name`,
+  `description`, `inputSchema`) and presents it. A later refresh or
+  `notifications/tools/list_changed` that changes a pinned tool quarantines
+  it until `approve_tool_fingerprint/2` re-pins the observed definition.
+  See `Arbor.Gateway.MCP.ToolFingerprintCore`.
   """
 
   use GenServer
 
   alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Gateway.MCP.CallOutcome
+  alias Arbor.Gateway.MCP.ToolFingerprintCore
 
   require Logger
 
@@ -38,6 +45,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     :agent_id,
     connection_status: :disconnected,
     tools: [],
+    tool_pins: %{},
+    quarantined_tools: [],
     resources: [],
     server_info: nil,
     last_error: nil,
@@ -93,9 +102,12 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   def call_tool(pid, tool_name, arguments, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
-    case checkout_client(pid) do
+    case checkout_tool(pid, tool_name) do
       {:ok, client_pid, server_name} ->
         invoke_tool(client_pid, server_name, tool_name, arguments, timeout)
+
+      {:error, {:fingerprint_changed, _name}, server_name} ->
+        {:error, CallOutcome.fingerprint_changed(server_name, tool_name)}
 
       {:error, {:not_connected, status}, server_name} ->
         {:error, CallOutcome.not_connected(server_name, tool_name, status)}
@@ -106,9 +118,25 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     end
   end
 
-  @doc "Refresh the cached tool list from the server."
+  @doc """
+  Refresh the cached tool list from the server.
+
+  Newly seen names are auto-pinned (first-discovery). A pinned tool whose
+  name, description, or inputSchema changed is quarantined and omitted from
+  the returned list until `approve_tool_fingerprint/2`.
+  """
   @spec refresh_tools(pid()) :: {:ok, [map()]} | {:error, term()}
   def refresh_tools(pid), do: GenServer.call(pid, :refresh_tools)
+
+  @doc """
+  Re-approve a quarantined tool, pinning its currently observed definition.
+
+  This is the re-approval hook for a fingerprint mismatch. Existing
+  server-connect approval and tool-call capabilities are unchanged.
+  """
+  @spec approve_tool_fingerprint(pid(), String.t()) :: {:ok, map()} | {:error, term()}
+  def approve_tool_fingerprint(pid, tool_name) when is_binary(tool_name),
+    do: GenServer.call(pid, {:approve_tool_fingerprint, tool_name})
 
   @doc "List discovered resources from the connected MCP server."
   @spec list_resources(pid()) :: {:ok, [map()]} | {:error, term()}
@@ -160,6 +188,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       connection_status: state.connection_status,
       tool_count: length(state.tools),
       tools: Enum.map(state.tools, & &1["name"]),
+      quarantined_tools: Enum.map(state.quarantined_tools, & &1["name"]),
       resource_count: length(state.resources),
       resources: Enum.map(state.resources, & &1["name"]),
       server_info: state.server_info,
@@ -196,6 +225,23 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     {:reply, {:error, {:not_connected, state.connection_status}, state.server_name}, state}
   end
 
+  def handle_call(
+        {:checkout_tool, tool_name},
+        _from,
+        %{connection_status: :connected, client_pid: client_pid} = state
+      )
+      when is_pid(client_pid) and is_binary(tool_name) do
+    if quarantined_name?(state, tool_name) do
+      {:reply, {:error, {:fingerprint_changed, tool_name}, state.server_name}, state}
+    else
+      {:reply, {:ok, client_pid, state.server_name}, state}
+    end
+  end
+
+  def handle_call({:checkout_tool, _tool_name}, _from, state) do
+    {:reply, {:error, {:not_connected, state.connection_status}, state.server_name}, state}
+  end
+
   def handle_call(:list_resources, _from, %{connection_status: :connected} = state) do
     {:reply, {:ok, state.resources}, state}
   end
@@ -221,7 +267,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   def handle_call(:refresh_tools, _from, %{connection_status: :connected} = state) do
     case discover_tools(state.client_pid) do
       {:ok, tools} ->
-        {:reply, {:ok, tools}, %{state | tools: tools}}
+        {state, admitted} = apply_tool_discovery(state, tools)
+        {:reply, {:ok, admitted}, state}
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -230,6 +277,33 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
 
   def handle_call(:refresh_tools, _from, state) do
     {:reply, {:error, {:not_connected, state.connection_status}}, state}
+  end
+
+  def handle_call({:approve_tool_fingerprint, tool_name}, _from, state)
+      when is_binary(tool_name) do
+    case Enum.find(state.quarantined_tools, &(&1["name"] == tool_name)) do
+      nil ->
+        {:reply, {:error, :not_quarantined}, state}
+
+      tool ->
+        case ToolFingerprintCore.approve(state.tool_pins, tool) do
+          {:ok, result} ->
+            interpret_effects(result.effects, state)
+
+            state = %{
+              state
+              | tool_pins: result.pins,
+                tools: state.tools ++ [result.tool],
+                quarantined_tools:
+                  Enum.reject(state.quarantined_tools, &(&1["name"] == tool_name))
+            }
+
+            {:reply, {:ok, result.tool}, state}
+
+          {:error, _} = error ->
+            {:reply, error, state}
+        end
+    end
   end
 
   def handle_call(:disconnect, _from, state) do
@@ -293,6 +367,17 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     {:noreply, state}
   end
 
+  def handle_info({:notification, "notifications/tools/list_changed", _params}, state) do
+    {:noreply, refresh_discovered_tools(state)}
+  end
+
+  def handle_info(
+        {:ex_mcp_subscription, _subscription, "notifications/tools/list_changed", _params},
+        state
+      ) do
+    {:noreply, refresh_discovered_tools(state)}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("[MCP:#{state.server_name}] Unexpected message: #{inspect(msg)}")
     {:noreply, state}
@@ -318,7 +403,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
         Process.monitor(pid)
 
         # Discover tools if auto_discover is enabled (default: true)
-        tools =
+        discovered_tools =
           if Map.get(state.config, :auto_discover, true) do
             case discover_tools(pid) do
               {:ok, tools} -> tools
@@ -327,6 +412,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
           else
             []
           end
+
+        {state, tools} = apply_tool_discovery(state, discovered_tools)
 
         # Discover resources if auto_discover is enabled
         resources =
@@ -405,7 +492,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
         {:ok, Enum.map(tools, &normalize_tool/1)}
 
       {:ok, %{"tools" => tools}} when is_list(tools) ->
-        {:ok, tools}
+        {:ok, Enum.map(tools, &normalize_tool/1)}
 
       {:ok, _other} ->
         {:ok, []}
@@ -444,6 +531,51 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     GenServer.call(pid, :checkout_client, @checkout_timeout)
   catch
     :exit, reason -> {:exit, reason}
+  end
+
+  defp checkout_tool(pid, tool_name) do
+    GenServer.call(pid, {:checkout_tool, tool_name}, @checkout_timeout)
+  catch
+    :exit, reason -> {:exit, reason}
+  end
+
+  defp apply_tool_discovery(state, tools) do
+    decision = ToolFingerprintCore.admit(state.tool_pins, tools)
+    interpret_effects(decision.effects, state)
+
+    state = %{
+      state
+      | tools: decision.admitted,
+        tool_pins: decision.pins,
+        quarantined_tools: decision.quarantined
+    }
+
+    {state, decision.admitted}
+  end
+
+  defp refresh_discovered_tools(%{connection_status: :connected, client_pid: pid} = state)
+       when is_pid(pid) do
+    case discover_tools(pid) do
+      {:ok, tools} ->
+        {state, _admitted} = apply_tool_discovery(state, tools)
+        state
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  defp refresh_discovered_tools(state), do: state
+
+  defp quarantined_name?(state, tool_name) do
+    Enum.any?(state.quarantined_tools, &(&1["name"] == tool_name))
+  end
+
+  defp interpret_effects(effects, state) do
+    Enum.each(effects, fn
+      {:emit, type, data} ->
+        safe_emit(type, Map.put(data, :server_name, state.server_name))
+    end)
   end
 
   defp do_read_resource(client_pid, uri, timeout) do
