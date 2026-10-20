@@ -1011,7 +1011,7 @@ defmodule Arbor.Actions.File do
       do: Arbor.Actions.Taint.path_provenance(params[:path] || params["path"])
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | :search_timeout}
     def run(%{pattern: pattern, path: path} = params, context) do
       max_results = params[:max_results] || 50
       ctx_lines = params[:context_lines] || 2
@@ -1044,6 +1044,16 @@ defmodule Arbor.Actions.File do
     end
 
     @max_pattern_length 500
+    # Whole-search wall clock for the BEAM :re fallback. Configurable via
+    # Application env; tests may override per-process. Clamp to a hard ceiling
+    # so a huge config value cannot stall the caller indefinitely.
+    @default_beam_search_timeout_ms 5_000
+    @max_beam_search_timeout_ms 60_000
+    # OTP :re default match_limit is 10_000_000. A nested-quantifier pattern
+    # such as (a+)+$ burns that budget (~100ms+) then Regex.match?/2 treats
+    # the exhaustion as :nomatch. A lower limit plus :report_errors fails
+    # closed as :search_timeout instead of a silent empty result.
+    @default_beam_re_match_limit 1_000_000
 
     defp compile_pattern(pattern, false) do
       if String.length(pattern) > @max_pattern_length do
@@ -1291,12 +1301,80 @@ defmodule Arbor.Actions.File do
     # ── BEAM-native strategy (fallback) ────────────────────────────
 
     defp beam_search(files, pattern, ctx_lines, max_results) do
-      matches =
-        files
-        |> Enum.flat_map(fn file -> search_file(file, pattern, ctx_lines) end)
-        |> Enum.take(max_results)
+      task =
+        Task.async(fn ->
+          do_beam_search(files, pattern, ctx_lines, max_results)
+        end)
 
-      {:ok, matches}
+      # Unlink so a timeout kill (or a match-time crash) cannot take down the
+      # calling Session. Task.yield/shutdown still wait on the monitor.
+      _ = Process.unlink(task.pid)
+
+      case Task.yield(task, beam_search_timeout_ms()) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} -> result
+        {:exit, :killed} -> {:error, :search_timeout}
+        nil -> {:error, :search_timeout}
+        {:exit, _reason} -> {:error, :search_timeout}
+      end
+    end
+
+    defp do_beam_search(files, pattern, ctx_lines, max_results) do
+      result =
+        Enum.reduce_while(files, [], fn file, acc ->
+          case search_file(file, pattern, ctx_lines) do
+            {:error, :search_timeout} ->
+              {:halt, :search_timeout}
+
+            file_matches ->
+              {:cont, [file_matches | acc]}
+          end
+        end)
+
+      case result do
+        :search_timeout ->
+          {:error, :search_timeout}
+
+        nested ->
+          # Nested File.List exists in this namespace, so do not call List.flatten/1.
+          matches =
+            nested
+            |> Enum.reverse()
+            |> Enum.concat()
+            |> Enum.take(max_results)
+
+          {:ok, matches}
+      end
+    end
+
+    defp beam_search_timeout_ms do
+      chosen =
+        case Process.get(:__arbor_file_search_timeout_ms__) do
+          n when is_integer(n) and n > 0 ->
+            n
+
+          _ ->
+            Application.get_env(
+              :arbor_actions,
+              :file_search_timeout_ms,
+              @default_beam_search_timeout_ms
+            )
+        end
+
+      case chosen do
+        n when is_integer(n) and n > 0 -> min(n, @max_beam_search_timeout_ms)
+        _ -> @default_beam_search_timeout_ms
+      end
+    end
+
+    defp beam_re_match_limit do
+      case Application.get_env(
+             :arbor_actions,
+             :file_search_match_limit,
+             @default_beam_re_match_limit
+           ) do
+        n when is_integer(n) and n > 0 -> n
+        _ -> @default_beam_re_match_limit
+      end
     end
 
     # Used when a shell strategy fails mid-search — compile the regex
@@ -1316,17 +1394,50 @@ defmodule Arbor.Actions.File do
 
           lines
           |> Enum.with_index(1)
-          |> Enum.filter(fn {line, _idx} -> Regex.match?(pattern, line) end)
-          |> Enum.map(fn {_line, idx} ->
-            %{
-              file: file,
-              line: idx,
-              content: get_context(lines, idx, context_lines)
-            }
+          |> Enum.reduce_while([], fn {line, idx}, acc ->
+            case regex_line_match(pattern, line) do
+              true ->
+                match = %{
+                  file: file,
+                  line: idx,
+                  content: get_context(lines, idx, context_lines)
+                }
+
+                {:cont, [match | acc]}
+
+              false ->
+                {:cont, acc}
+
+              :timeout ->
+                {:halt, :search_timeout}
+            end
           end)
+          |> case do
+            :search_timeout -> {:error, :search_timeout}
+            matches -> Enum.reverse(matches)
+          end
 
         {:error, _} ->
           []
+      end
+    end
+
+    # Regex.match?/2 maps {:error, :match_limit} to false. Use :re.run with
+    # :report_errors so match-limit exhaustion is a timeout, not a miss.
+    defp regex_line_match(%Regex{re_pattern: compiled}, line) when is_binary(line) do
+      opts = [
+        {:capture, :none},
+        {:match_limit, beam_re_match_limit()},
+        {:match_limit_recursion, beam_re_match_limit()},
+        :report_errors
+      ]
+
+      case :re.run(line, compiled, opts) do
+        :match -> true
+        :nomatch -> false
+        {:error, :match_limit} -> :timeout
+        {:error, :match_limit_recursion} -> :timeout
+        {:error, _reason} -> :timeout
       end
     end
 
