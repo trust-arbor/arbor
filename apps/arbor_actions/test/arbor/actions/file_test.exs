@@ -717,6 +717,34 @@ defmodule Arbor.Actions.FileTest do
       assert is_map(tool)
       assert tool[:name] == "file_search"
     end
+
+    # GHSA-cg3c-5x66-h9cc class: compile_pattern only caps pattern length, then
+    # the BEAM :re fallback (forced when rg/grep are absent) can backtrack on a
+    # nested-quantifier regex. Fail closed with :search_timeout instead of
+    # treating match-limit exhaustion as "no matches".
+    @tag timeout: 10_000
+    test "security regression: BEAM fallback returns :search_timeout for catastrophic regex",
+         %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "redos.txt", String.duplicate("a", 40) <> "!")
+
+      Process.put(:__arbor_file_search_force_strategy__, :beam)
+      Process.put(:__arbor_file_search_timeout_ms__, 500)
+
+      started_ms = System.monotonic_time(:millisecond)
+
+      result =
+        try do
+          FileActions.Search.run(%{pattern: "(a+)+$", path: path, regex: true}, %{})
+        after
+          Process.delete(:__arbor_file_search_force_strategy__)
+          Process.delete(:__arbor_file_search_timeout_ms__)
+        end
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+
+      assert result == {:error, :search_timeout}
+      assert elapsed_ms < 2_000
+    end
   end
 
   # Strategy parity — `File.Search` dispatches to ripgrep, grep, or
