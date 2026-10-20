@@ -1152,19 +1152,21 @@ defmodule Arbor.Actions.File do
     def ripgrep_args(files, pattern, use_regex) do
       # `-n --no-heading` → uniform `file:line:content` output
       # `--color=never`   → no ANSI noise
-      # `-F` or `-e`      → literal vs regex matching
-      pattern_flag = if use_regex, do: "-e", else: "-F"
+      # `-F`              → literal matching (mode flag; does not take a value)
+      # `-e PATTERN`      → bind the pattern as an option value in both modes
+      #                     so a leading dash cannot be parsed as an rg flag
+      #                     (CWE-88 / GHSA-62c8-mmw9-rq5w, `--pre=<cmd>`).
+      # `--`              → remaining argv are file paths
+      pattern_flags =
+        if use_regex do
+          ["-e", pattern]
+        else
+          ["-F", "-e", pattern]
+        end
 
-      [
-        "-n",
-        "--no-heading",
-        "--color=never",
-        "--with-filename",
-        pattern_flag,
-        pattern,
-        "--"
-        | files
-      ]
+      ["-n", "--no-heading", "--color=never", "--with-filename"] ++
+        pattern_flags ++
+        ["--" | files]
     end
 
     defp ripgrep_search(files, pattern, use_regex, ctx_lines, max_results) do
