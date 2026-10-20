@@ -1146,13 +1146,16 @@ defmodule Arbor.Actions.File do
 
     # ── ripgrep strategy ───────────────────────────────────────────
 
-    defp ripgrep_search(files, pattern, use_regex, ctx_lines, max_results) do
-      # `-N --no-heading` → uniform `file:line:content` output
+    # Pure argv builder so tests can assert a leading-dash pattern is
+    # never parsed as an `rg` flag (CWE-88 / GHSA-62c8-mmw9-rq5w).
+    @doc false
+    def ripgrep_args(files, pattern, use_regex) do
+      # `-n --no-heading` → uniform `file:line:content` output
       # `--color=never`   → no ANSI noise
       # `-F` or `-e`      → literal vs regex matching
       pattern_flag = if use_regex, do: "-e", else: "-F"
 
-      args = [
+      [
         "-n",
         "--no-heading",
         "--color=never",
@@ -1162,6 +1165,10 @@ defmodule Arbor.Actions.File do
         "--"
         | files
       ]
+    end
+
+    defp ripgrep_search(files, pattern, use_regex, ctx_lines, max_results) do
+      args = ripgrep_args(files, pattern, use_regex)
 
       try do
         case System.cmd("rg", args, stderr_to_stdout: false) do

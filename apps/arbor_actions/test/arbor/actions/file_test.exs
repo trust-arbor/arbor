@@ -712,6 +712,30 @@ defmodule Arbor.Actions.FileTest do
       assert "search" in FileActions.Search.tags()
     end
 
+    # CWE-88 / GHSA-62c8-mmw9-rq5w: a literal-mode pattern such as
+    # `--pre=/bin/echo` is a positional before `--`, so `rg` parses it
+    # as a flag and can run a preprocessor. The pattern must be an
+    # `-e`/`--regexp` value or come after `--`.
+    @dash_flag_pattern "--pre=/bin/echo"
+
+    test "security regression: literal-mode dash-leading pattern is not an rg flag" do
+      args = FileActions.Search.ripgrep_args(["/tmp/example.txt"], @dash_flag_pattern, false)
+
+      assert "-F" in args
+
+      assert rg_pattern_binding(args, @dash_flag_pattern) in [:option_value, :after_double_dash],
+             "literal-mode pattern #{inspect(@dash_flag_pattern)} must be an -e/--regexp value or follow --; got #{inspect(rg_pattern_binding(args, @dash_flag_pattern))} in #{inspect(args)}"
+    end
+
+    test "security regression: regex-mode dash-leading pattern is not an rg flag" do
+      args = FileActions.Search.ripgrep_args(["/tmp/example.txt"], @dash_flag_pattern, true)
+
+      refute "-F" in args
+
+      assert rg_pattern_binding(args, @dash_flag_pattern) in [:option_value, :after_double_dash],
+             "regex-mode pattern #{inspect(@dash_flag_pattern)} must be an -e/--regexp value or follow --; got #{inspect(rg_pattern_binding(args, @dash_flag_pattern))} in #{inspect(args)}"
+    end
+
     test "generates tool schema" do
       tool = FileActions.Search.to_tool()
       assert is_map(tool)
@@ -883,4 +907,45 @@ defmodule Arbor.Actions.FileTest do
       end
     end
   end
+
+  # How `rg` treats `pattern` in argv. A leading-dash token before `--`
+  # that is not the value of `-e`/`--regexp` is a flag (CWE-88).
+  defp rg_pattern_binding(args, pattern) do
+    do_rg_pattern_binding(args, pattern)
+  end
+
+  defp do_rg_pattern_binding(["--" | rest], pattern) do
+    if pattern in rest, do: :after_double_dash, else: :absent
+  end
+
+  defp do_rg_pattern_binding(["-e", value | rest], pattern) do
+    if value == pattern, do: :option_value, else: do_rg_pattern_binding(rest, pattern)
+  end
+
+  defp do_rg_pattern_binding(["--regexp", value | rest], pattern) do
+    if value == pattern, do: :option_value, else: do_rg_pattern_binding(rest, pattern)
+  end
+
+  defp do_rg_pattern_binding([token | rest], pattern) do
+    cond do
+      String.starts_with?(token, "--regexp=") and
+          String.trim_leading(token, "--regexp=") == pattern ->
+        :option_value
+
+      token != "-e" and String.starts_with?(token, "-e") and
+          String.trim_leading(token, "-e") == pattern ->
+        :option_value
+
+      token == pattern and String.starts_with?(pattern, "-") ->
+        :flag
+
+      token == pattern ->
+        :positional
+
+      true ->
+        do_rg_pattern_binding(rest, pattern)
+    end
+  end
+
+  defp do_rg_pattern_binding([], _pattern), do: :absent
 end
