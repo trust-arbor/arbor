@@ -39,6 +39,7 @@ defmodule Arbor.Actions.Web do
   are blocked by default.
   """
 
+  alias Arbor.Actions.Web.HiddenContent
   alias Arbor.Common.Sanitizers
 
   @max_http_url_bytes 4_096
@@ -147,16 +148,26 @@ defmodule Arbor.Actions.Web do
   def fetch_page(_url, _request_opts, _context), do: {:error, :invalid_web_request}
 
   @doc false
-  def page_content(body, :html) when is_binary(body), do: body
-  def page_content(body, format) when is_binary(body) and format in [:markdown, :text], do: body
+  def page_content(body, format) when is_binary(body) and format in [:html, :markdown, :text] do
+    {content, _meta} = extract_page_content(body, format)
+    content
+  end
+
+  @doc false
+  @spec extract_page_content(binary(), atom()) :: {String.t(), map()}
+  def extract_page_content(body, format)
+      when is_binary(body) and format in [:html, :markdown, :text] do
+    HiddenContent.strip(body)
+  end
 
   @doc false
   def snapshot_result(url, body, params) when is_binary(body) do
+    {visible, hidden_meta} = HiddenContent.strip(body)
     max_length = Map.get(params, :max_content_length, 50_000)
 
     content =
       if is_integer(max_length) and max_length > 0,
-        do: String.slice(body, 0, max_length),
+        do: String.slice(visible, 0, max_length),
         else: ""
 
     %{
@@ -166,9 +177,10 @@ defmodule Arbor.Actions.Web do
       links: if(Map.get(params, :include_links, true), do: [], else: nil),
       forms: if(Map.get(params, :include_forms, true), do: [], else: nil),
       headings: if(Map.get(params, :include_headings, true), do: [], else: nil),
-      meta: %{},
+      meta: hidden_meta,
       status: "success"
     }
+    |> Map.merge(hidden_meta)
   end
 
   defp do_fetch_page(_url, _request_opts, _context, redirects_left, _deadline)
@@ -382,8 +394,10 @@ defmodule Arbor.Actions.Web do
 
             case Web.fetch_page(url, [receive_timeout: 60_000], context) do
               {:ok, page} ->
-                content = Web.page_content(page.body, format)
-                result = %{url: page.url, content: content, format: format}
+                {content, hidden_meta} = Web.extract_page_content(page.body, format)
+
+                result =
+                  Map.merge(%{url: page.url, content: content, format: format}, hidden_meta)
 
                 Actions.emit_completed(__MODULE__, %{
                   url: page.url,

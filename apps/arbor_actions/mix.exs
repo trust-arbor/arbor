@@ -56,6 +56,7 @@ defmodule Arbor.Actions.MixProject do
       {:jido_action, "~> 2.0", override: true},
       {:jido_browser, "~> 1.0"},
       {:zoi, "~> 0.17"},
+      {:floki, "~> 0.37"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end

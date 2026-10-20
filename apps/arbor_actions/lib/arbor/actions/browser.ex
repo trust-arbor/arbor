@@ -52,6 +52,7 @@ defmodule Arbor.Actions.Browser do
   """
 
   alias Arbor.Actions
+  alias Arbor.Actions.Web.HiddenContent
 
   @doc """
   Extract browser session from context.
@@ -96,4 +97,8 @@ defmodule Arbor.Actions.Browser do
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(%{message: msg}) when is_binary(msg), do: msg
   def format_error(reason), do: "Browser action failed: #{inspect(reason)}"
+
+  @doc false
+  @spec sanitize_extracted(term()) :: term()
+  def sanitize_extracted(result), do: HiddenContent.sanitize_result(result)
 end

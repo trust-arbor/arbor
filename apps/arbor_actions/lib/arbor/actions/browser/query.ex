@@ -24,6 +24,11 @@ defmodule Arbor.Actions.Browser.Query do
 
   def taint_roles, do: %{selector: :control, limit: :data}
 
+  # Provenance (taint-tracking-rebuild Phase 1): queried page content crosses
+  # the trust boundary — it is untrusted regardless of what it contains.
+  @doc false
+  def output_taint, do: :untrusted
+
   @impl true
   def run(%{selector: selector} = params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->
@@ -32,6 +37,8 @@ defmodule Arbor.Actions.Browser.Query do
 
         case JidoBrowser.Actions.Query.run(Map.put(params, :session, session), %{}) do
           {:ok, result} ->
+            result = Browser.sanitize_extracted(result)
+
             Actions.emit_completed(__MODULE__, %{
               selector: selector,
               count: length(result[:elements] || [])
@@ -74,6 +81,11 @@ defmodule Arbor.Actions.Browser.GetText do
 
   def taint_roles, do: %{selector: :control, all: :data}
 
+  # Provenance (taint-tracking-rebuild Phase 1): extracted page text crosses
+  # the trust boundary — it is untrusted regardless of what it contains.
+  @doc false
+  def output_taint, do: :untrusted
+
   @impl true
   def run(%{selector: selector} = params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->
@@ -82,6 +94,7 @@ defmodule Arbor.Actions.Browser.GetText do
 
         case JidoBrowser.Actions.GetText.run(Map.put(params, :session, session), %{}) do
           {:ok, result} ->
+            result = Browser.sanitize_extracted(result)
             Actions.emit_completed(__MODULE__, %{selector: selector})
             {:ok, result}
 
