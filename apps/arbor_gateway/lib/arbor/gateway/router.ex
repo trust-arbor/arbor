@@ -37,7 +37,13 @@ defmodule Arbor.Gateway.Router do
     server_info: %{name: "arbor", version: "0.1.0"},
     protocol_mode: :legacy_only,
     sse_enabled: true,
-    cors_enabled: false
+    cors_enabled: false,
+    # Bind Streamable HTTP / legacy SSE sessions to the authenticated caller.
+    # ExMCP.HttpPlug.resolve_identity_value/5 accepts a 1/2/3-arity fun, an
+    # MFA of (conn, request, token_info | args), or a static binary. Without
+    # this, session.principal_id stays nil and session_identity_matches?/2
+    # accepts any later authenticated caller (GHSA-953h-535j-jg2v class).
+    principal_id: {__MODULE__, :mcp_principal_id, []}
   ]
 
   plug(Plug.Logger)
@@ -115,6 +121,50 @@ defmodule Arbor.Gateway.Router do
 
   @doc false
   def mcp_http_init_opts, do: @mcp_http_init_opts
+
+  @doc """
+  Resolves the MCP session principal for `ExMCP.HttpPlug`.
+
+  Preference order:
+
+  1. `conn.assigns[:agent_id]` from SignedRequest or JWT auth
+  2. SHA-256 fingerprint of the presented API key (`apikey:<hex>`), never the
+     raw key
+  3. `nil` only when neither is present (the auth pipeline should have halted)
+  """
+  @spec mcp_principal_id(Plug.Conn.t(), map() | term(), term()) :: String.t() | nil
+  def mcp_principal_id(%Plug.Conn{} = conn, _request, _token_info) do
+    case conn.assigns[:agent_id] do
+      id when is_binary(id) and id != "" -> id
+      _ -> api_key_fingerprint(conn)
+    end
+  end
+
+  defp api_key_fingerprint(conn) do
+    case presented_api_key(conn) do
+      {:ok, key} ->
+        "apikey:" <> Base.encode16(:crypto.hash(:sha256, key), case: :lower)
+
+      :error ->
+        nil
+    end
+  end
+
+  # Mirror Arbor.Gateway.Auth header extraction so a successful API-key
+  # request can be bound without the plug assigning agent_id. The raw key
+  # is hashed immediately and never stored on the session.
+  defp presented_api_key(conn) do
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> key] ->
+        {:ok, String.trim(key)}
+
+      _ ->
+        case get_req_header(conn, "x-api-key") do
+          [key] -> {:ok, String.trim(key)}
+          _ -> :error
+        end
+    end
+  end
 
   # Try SignedRequest auth before JWT — non-destructive passthrough.
   # External agents (Claude Code, etc.) authenticate per-request via Ed25519
