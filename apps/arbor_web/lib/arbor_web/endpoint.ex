@@ -40,6 +40,12 @@ defmodule Arbor.Web.Endpoint do
     quote do
       use Phoenix.Endpoint, otp_app: unquote(otp_app)
       @before_compile Arbor.Web.Endpoint
+      @arbor_web_otp_app unquote(otp_app)
+
+      # Reject DNS-rebinding Host headers before Tidewave or any later plug.
+      # Phoenix socket dispatch also runs before ordinary plugs, so call/2
+      # (below) applies the same gate to LiveView upgrades.
+      plug(Arbor.Web.LoopbackHost, otp_app: unquote(otp_app))
 
       # LiveView socket
       socket("/live", Phoenix.LiveView.Socket,
@@ -118,14 +124,21 @@ defmodule Arbor.Web.Endpoint do
 
   # Phoenix's socket dispatch runs before ordinary endpoint plugs. Wrap its
   # generated call so raw proxy headers are inspected before :x_headers filters
-  # them, while keeping the websocket and normal dashboard routes available.
+  # them, and so a rebound Host is 403'd before LiveView or Tidewave run.
   @doc false
-  defmacro __before_compile__(_env) do
+  defmacro __before_compile__(env) do
+    otp_app = Module.get_attribute(env.module, :arbor_web_otp_app)
+
     quote do
       defoverridable call: 2
 
       def call(conn, opts) do
-        super(Arbor.Web.Endpoint.prepare_voice_connection(conn), opts)
+        conn = Arbor.Web.Endpoint.prepare_voice_connection(conn)
+
+        case Arbor.Web.LoopbackHost.call(conn, otp_app: unquote(otp_app)) do
+          %{halted: true} = denied -> denied
+          conn -> super(conn, opts)
+        end
       end
     end
   end

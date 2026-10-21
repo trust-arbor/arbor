@@ -30,6 +30,6 @@ defmodule Arbor.Dashboard.ConnCase do
     # deterministically open-access regardless of how it got flipped.
     Application.put_env(:arbor_dashboard, :require_auth, false)
 
-    {:ok, conn: Phoenix.ConnTest.build_conn()}
+    {:ok, conn: Phoenix.ConnTest.build_conn() |> Map.put(:host, "localhost")}
   end
 end

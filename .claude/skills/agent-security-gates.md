@@ -1258,6 +1258,15 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 - **The dashboard binds loopback (F-001).** `ARBOR_DASHBOARD_BIND_IP=0.0.0.0` is the
   explicit LAN opt-in; set `DASHBOARD_USER`/`DASHBOARD_PASS` (now actually mounted,
   F-012) before doing so.
+- **Dev no-auth Host/Origin is loopback-only (2026-10-21 DNS rebinding).** A page
+  that rebinds its own name to `127.0.0.1:4001` used to become `human_dashboard`
+  because `check_origin` was `false` and nothing inspected Host. No-auth now
+  returns 403 for any Host other than `localhost` / `127.0.0.1` / `[::1]`
+  (before Tidewave) and restricts LiveView origins to those loopback URLs.
+  **Symptom:** a LAN or rebound hostname gets 403, or a LiveView socket from a
+  non-loopback Origin is refused. **Action:** browse `http://localhost:4001`,
+  or set `ARBOR_DEV_ALLOW_ANY_HOST=1` / `ARBOR_DEV_ALLOWED_HOSTS=host` when you
+  really want LAN access. Production (`require_auth: true`) is unchanged.
 - **Dashboard mutations require the browser subject's real session proof
   (2026-10-15, F-020).** Proposal accept/reject/defer authorizes
   `arbor://memory/write/<target>`; channel creation authorizes

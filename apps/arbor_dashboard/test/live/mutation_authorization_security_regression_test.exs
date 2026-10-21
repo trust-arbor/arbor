@@ -64,6 +64,7 @@ defmodule Arbor.Dashboard.Live.MutationAuthorizationSecurityRegressionTest do
 
     conn =
       Phoenix.ConnTest.build_conn()
+      |> Map.put(:host, "localhost")
       |> Plug.Test.init_test_session(%{
         "agent_id" => @subject,
         "session_token" => token,

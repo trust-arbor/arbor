@@ -166,7 +166,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   end
 
   defp request(session) do
-    Plug.Test.conn(:get, "/chat?agent_id=agent_target")
+    Plug.Test.conn(:get, "http://localhost/chat?agent_id=agent_target")
     |> Plug.Test.init_test_session(session)
     |> OidcAuth.call([])
   end

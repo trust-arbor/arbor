@@ -281,6 +281,12 @@ one back with `mix arbor.agent resume river`, or run
   provider (OIDC or another configured authenticator) and `require_auth: true`.
   A missing provider with auth required returns 503 — it does not invent a
   local operator.
+- **Dev dashboard Host/Origin check.** In no-auth mode the dashboard rejects
+  any Host other than `localhost`, `127.0.0.1`, or `[::1]` with 403, and
+  LiveView `check_origin` is the matching loopback list. Binding to loopback
+  is not enough: a page can rebind its own name to `127.0.0.1:4001`. For LAN
+  use set `ARBOR_DEV_ALLOW_ANY_HOST=1` or `ARBOR_DEV_ALLOWED_HOSTS=my-host.local`
+  and bind with `ARBOR_DASHBOARD_BIND_IP`.
 - **Private keys.** `~/.arbor/identity.key` and `~/.arbor/operator.key` are
   plaintext, mode `0600`. Never enable `auto_save_external_agent_keys` on a
   shared host.

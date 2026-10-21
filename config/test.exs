@@ -231,7 +231,12 @@ config :arbor_kernel,
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   http: [port: 4002],
   server: false,
-  secret_key_base: String.duplicate("test_secret_", 8)
+  secret_key_base: String.duplicate("test_secret_", 8),
+  check_origin: [
+    "http://localhost:4002",
+    "http://127.0.0.1:4002",
+    "http://[::1]:4002"
+  ]
 
 # Disable checkpoint integration in tests (module may not be available).
 # Use OpenAuthorizer — tests don't have the security kernel running.

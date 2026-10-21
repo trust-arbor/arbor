@@ -602,7 +602,10 @@ config :arbor_gateway, port: arbor_gateway_port
 # Bind address: loopback unless ARBOR_DASHBOARD_BIND_IP names an interface
 # (e.g. "0.0.0.0" or "10.42.42.6"). The dashboard has no authentication in the
 # dev profile, so LAN exposure is an explicit operator decision, never the
-# default (2026-10-11 cross-library review F-001).
+# default (2026-10-11 cross-library review F-001). Bind alone does not stop
+# DNS rebinding; no-auth also requires a loopback Host/Origin (see the
+# non-prod check_origin block below). Use ARBOR_DEV_ALLOW_ANY_HOST=1 or
+# ARBOR_DEV_ALLOWED_HOSTS when you really want LAN Host headers.
 arbor_dashboard_bind_ip =
   case System.get_env("ARBOR_DASHBOARD_BIND_IP") do
     nil ->
@@ -637,7 +640,7 @@ if config_env() == :prod do
   # enforcement actually fires.
   config :arbor_actions, default_taint_policy: :strict
 
-  # M14: Enforce check_origin in production (override dev's check_origin: false)
+  # M14: Enforce check_origin in production against the public dashboard host
   dashboard_host = System.get_env("DASHBOARD_HOST") || "localhost"
   dashboard_port = to_string(arbor_dashboard_port)
 
@@ -649,6 +652,35 @@ if config_env() == :prod do
 
   # H5: Require dashboard auth in production
   config :arbor_dashboard, require_auth: true
+else
+  # No-auth (dev/test): pin LiveView origins to loopback (plus any operator
+  # allowlist) so a DNS-rebinding page cannot open a socket. Prod above keeps
+  # its own DASHBOARD_HOST list. ARBOR_DEV_ALLOW_ANY_HOST=1 is the LAN opt-out.
+  allow_any_host? =
+    System.get_env("ARBOR_DEV_ALLOW_ANY_HOST") in ["1", "true", "TRUE", "yes"]
+
+  extra_dev_hosts =
+    (System.get_env("ARBOR_DEV_ALLOWED_HOSTS") || "")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+
+  config :arbor_web,
+    dev_allow_any_host: allow_any_host?,
+    dev_allowed_hosts: extra_dev_hosts
+
+  if allow_any_host? do
+    config :arbor_dashboard, Arbor.Dashboard.Endpoint, check_origin: false
+  else
+    dashboard_port = to_string(arbor_dashboard_port)
+
+    check_origin =
+      Enum.map(["localhost", "127.0.0.1", "[::1]"] ++ extra_dev_hosts, fn host ->
+        "http://#{host}:#{dashboard_port}"
+      end)
+
+    config :arbor_dashboard, Arbor.Dashboard.Endpoint, check_origin: check_origin
+  end
 end
 
 # Dashboard auth credentials (any environment)

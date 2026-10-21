@@ -143,17 +143,21 @@ config :phoenix_live_view,
 # `Arbor.Consensus.Authorizers.CapabilityAuthorizer` for in-VM callers too.
 config :arbor_consensus, require_authorizer: false
 
-# Security (2026-10-11 cross-library review F-001): bind the operator UI to
-# loopback. The dashboard has no authentication in the dev profile (every
-# request becomes `human_dashboard`), so an unbound listener exposes every
-# agent's memory, goals and proposal review to the LAN. Override with
-# ARBOR_DASHBOARD_BIND_IP in runtime.exs when you really want LAN access.
+# Security (2026-10-11 F-001, 2026-10-21 DNS rebinding): bind the operator UI
+# to loopback AND reject non-loopback Host/Origin. Loopback bind is not
+# enough — a page can rebind its own name to 127.0.0.1:4001 and the browser
+# will send Host: evil.example. Override bind with ARBOR_DASHBOARD_BIND_IP,
+# and Host/Origin with ARBOR_DEV_ALLOW_ANY_HOST=1 or ARBOR_DEV_ALLOWED_HOSTS.
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4001],
   secret_key_base: String.duplicate("arbor_dashboard_dev_secret_", 4),
   debug_errors: true,
   code_reloader: false,
-  check_origin: false,
+  check_origin: [
+    "http://localhost:4001",
+    "http://127.0.0.1:4001",
+    "http://[::1]:4001"
+  ],
   server: true
 
 # Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)

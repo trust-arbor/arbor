@@ -27,7 +27,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   describe "when OIDC is not configured" do
     test "establishes a stable local-dev operator session when require_auth is false" do
       conn =
-        conn(:get, "/")
+        conn(:get, "http://localhost/")
         |> init_test_session(%{})
         |> OidcAuth.call(@opts)
 
@@ -40,7 +40,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
 
     test "reuses an existing session principal instead of replacing it" do
       conn =
-        conn(:get, "/")
+        conn(:get, "http://localhost/")
         |> init_test_session(%{"agent_id" => "human_existing", "user_display_name" => "Ada"})
         |> OidcAuth.call(@opts)
 
@@ -146,7 +146,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   describe "session-based auth pass-through" do
     test "assigns current_agent_id from the local-dev operator when OIDC is unset" do
       conn =
-        conn(:get, "/")
+        conn(:get, "http://localhost/")
         |> init_test_session(%{})
         |> OidcAuth.call(@opts)
 

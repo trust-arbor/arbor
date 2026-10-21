@@ -15,7 +15,8 @@ defmodule Arbor.Dashboard.OidcAuth do
   - If OIDC is configured and user has no session → redirect to `/auth/login`
   - If OIDC is configured and user has session → pass through with `current_agent_id` assign
   - If OIDC is not configured and `require_auth` is false → establish a stable
-    local-dev operator session so External Agents registration has a principal
+    local-dev operator session **only when Host is loopback** (or the operator
+    set `ARBOR_DEV_ALLOW_ANY_HOST` / `ARBOR_DEV_ALLOWED_HOSTS`)
   - If OIDC is not configured and `require_auth` is true → fail closed (503)
   """
 
@@ -73,7 +74,9 @@ defmodule Arbor.Dashboard.OidcAuth do
         else
           # OIDC not configured and auth is not required — local-dev operator
           # session so dashboard actions that need a principal (External Agents)
-          # work without inventing a second identity facade.
+          # work without inventing a second identity facade. Only mint it when
+          # the Host is loopback (or the operator opted out); a rebound
+          # Host: evil.example must not become human_dashboard.
           maybe_establish_local_dev_operator(conn, opts)
         end
 
@@ -357,7 +360,7 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp maybe_establish_local_dev_operator(conn, opts) do
-    if local_dev_operator?(opts) do
+    if local_dev_operator?(opts) and loopback_operator_host?(conn) do
       conn = fetch_session(conn)
       agent_id = get_session(conn, "agent_id") || @local_dev_operator_id
       display_name = get_session(conn, "user_display_name") || @local_dev_operator_name
@@ -372,6 +375,10 @@ defmodule Arbor.Dashboard.OidcAuth do
     else
       conn
     end
+  end
+
+  defp loopback_operator_host?(conn) do
+    Arbor.Web.LoopbackHost.allow_any_host?() or Arbor.Web.LoopbackHost.allowed_host?(conn)
   end
 
   @doc """
