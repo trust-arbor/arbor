@@ -424,17 +424,12 @@ defmodule Arbor.Consensus.Coordinator do
         # Extract perspectives from evaluators
         perspectives = Voting.resolve_perspectives_from_evaluators(evaluators)
 
-        # Recalculate quorum based on actual perspectives available
-        # This prevents mismatches where resolved quorum exceeds available perspectives
+        # Recalculate the topic rule against the seats that will actually vote.
+        # Never cap a stricter rule (supermajority / unanimous / integer) down
+        # to simple majority — that silently weakens the topic (group P /
+        # arxiv.org/abs/2610.29178).
         quorum =
-          if proposal.mode == :advisory do
-            nil
-          else
-            council_size = length(perspectives)
-            # Use the minimum of resolved quorum or simple majority of actual perspectives
-            # This ensures quorum is achievable while respecting topic rules when possible
-            min(resolved_quorum, div(council_size, 2) + 1)
-          end
+          TopicRouting.effective_quorum(proposal, length(perspectives), resolved_quorum)
 
         # Emit evaluation started event
         EventEmitter.evaluation_started(

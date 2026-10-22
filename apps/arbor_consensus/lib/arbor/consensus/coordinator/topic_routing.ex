@@ -75,7 +75,8 @@ defmodule Arbor.Consensus.Coordinator.TopicRouting do
   end
 
   @doc """
-  Get quorum for a proposal by recalculating from its topic.
+  Get quorum for a proposal by applying the topic rule to the seats that
+  will actually vote. Never silently caps a stricter rule to majority.
   """
   def get_proposal_quorum(state, proposal_id) do
     case Map.get(state.proposals, proposal_id) do
@@ -83,8 +84,50 @@ defmodule Arbor.Consensus.Coordinator.TopicRouting do
         nil
 
       proposal ->
-        {_evaluators, quorum} = resolve_council_config(proposal, state.config)
-        quorum
+        {resolved_evaluators, resolved_quorum} =
+          resolve_council_config(proposal, state.config)
+
+        evaluators = runtime_evaluators(state, resolved_evaluators)
+        perspectives = Voting.resolve_perspectives_from_evaluators(evaluators)
+        effective_quorum(proposal, length(perspectives), resolved_quorum)
+    end
+  end
+
+  @doc """
+  Numeric decision quorum for `council_size` seats.
+
+  Honors the topic rule (`:majority`, `:supermajority`, `:unanimous`, or a
+  positive integer). A stricter-than-majority rule is kept as-is; it is
+  never silently capped to `div(council_size, 2) + 1`.
+  """
+  @spec effective_quorum(Proposal.t(), non_neg_integer(), pos_integer() | nil) ::
+          pos_integer() | nil
+  def effective_quorum(%{mode: :advisory}, _council_size, _resolved_quorum), do: nil
+
+  def effective_quorum(proposal, council_size, resolved_quorum)
+      when is_integer(council_size) and council_size > 0 do
+    case topic_rule(proposal.topic) do
+      {:ok, rule} -> TopicRule.quorum_to_number(rule.min_quorum, council_size)
+      :error -> resolved_quorum
+    end
+  end
+
+  def effective_quorum(_proposal, _council_size, resolved_quorum), do: resolved_quorum
+
+  defp topic_rule(topic) do
+    case TopicRegistry.get(topic) do
+      {:ok, rule} -> {:ok, rule}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp runtime_evaluators(state, resolved_evaluators) do
+    if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
+      [state.evaluator_backend]
+    else
+      resolved_evaluators
     end
   end
 

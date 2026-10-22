@@ -124,9 +124,11 @@ defmodule Arbor.Consensus.TrustModelTest do
 
       {:ok, decision} = Coordinator.get_decision(proposal_id, coord)
 
-      # Decision should use system quorum, not the proposed one
-      # Governance changes require 6/7 quorum
-      assert decision.required_quorum >= 5
+      # Decision should use the system-computed quorum, not the proposed one.
+      # :governance_change is not a registered topic, so the routed rule is
+      # applied to the seats that actually vote (AlwaysApproveBackend: 7).
+      refute decision.required_quorum == 1
+      assert decision.required_quorum >= div(7, 2) + 1
     end
 
     test "proposal cannot bypass evaluator independence", %{coordinator: coord} do
