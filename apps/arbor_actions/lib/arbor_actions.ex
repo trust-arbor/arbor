@@ -1745,9 +1745,10 @@ defmodule Arbor.Actions do
     # receives neither the session authority nor the one-use request envelope.
     clean_context = Map.delete(context, :capability_grant_request)
 
-    # P0-1: Inject default taint policy from config if not already set in context.
-    # Ensures taint enforcement is active even when callers don't explicitly set policy.
-    clean_context = maybe_inject_taint_policy(clean_context)
+    # Resolve taint policy after capability lookup: configured default when
+    # omitted, Capability.taint_policy as a floor, and in prod a context
+    # policy cannot go below the configured default.
+    clean_context = maybe_inject_taint_policy(clean_context, agent_id, params)
 
     # Use canonical facade URI when available; otherwise use the canonical
     # singular action namespace (`arbor://action/<category>/<name>`).
@@ -3798,18 +3799,80 @@ defmodule Arbor.Actions do
 
   defp auth_opts_from_context(_context), do: []
 
-  # P0-1: Inject default taint policy from config when not already in context.
-  # TaintEnforcement.check reads :taint_policy from context — this ensures
-  # the configured default is used instead of a hard-coded :permissive fallback.
-  defp maybe_inject_taint_policy(context) when is_map(context) do
-    if Map.has_key?(context, :taint_policy) do
+  # Resolve the effective taint policy onto context. A caller-supplied
+  # :permissive is kept only when it is not below a capability floor or,
+  # in production, the configured default.
+  defp maybe_inject_taint_policy(context, agent_id, params) when is_map(context) do
+    context
+    |> maybe_attach_authorizing_capability(agent_id, params)
+    |> then(&Map.put(&1, :taint_policy, TaintEnforcement.resolve_policy(&1)))
+  end
+
+  defp maybe_inject_taint_policy(context, _agent_id, _params), do: context
+
+  defp maybe_attach_authorizing_capability(context, agent_id, params)
+       when is_binary(agent_id) and is_map(params) do
+    if match?(%Arbor.Contracts.Security.Capability{}, Map.get(context, :capability)) do
       context
     else
-      Map.put(context, :taint_policy, TaintEnforcement.configured_policy())
+      case authorizing_capability(agent_id, context, params) do
+        {:ok, cap} -> Map.put(context, :capability, cap)
+        :none -> context
+      end
     end
   end
 
-  defp maybe_inject_taint_policy(context), do: context
+  defp maybe_attach_authorizing_capability(context, _agent_id, _params), do: context
+
+  defp authorizing_capability(agent_id, context, params) do
+    resource = Map.get(context, @action_authorization_resource_key)
+
+    if is_binary(resource) do
+      match_uri = authorization_match_uri(resource, params)
+
+      case Arbor.Security.list_capabilities(agent_id) do
+        {:ok, caps} when is_list(caps) ->
+          caps
+          |> Enum.filter(&(TaintEnforcement.explicit_capability_policy(&1) != :none))
+          |> Enum.filter(&Arbor.Security.capability_authorizes?(&1, match_uri))
+          |> most_restrictive_capability()
+
+        _other ->
+          :none
+      end
+    else
+      :none
+    end
+  rescue
+    _ -> :none
+  end
+
+  defp authorization_match_uri(resource, params) do
+    opts =
+      case extract_fs_path(resource, params) do
+        nil -> []
+        path -> [file_path: path]
+      end
+
+    case Arbor.Security.normalize_authorization_resource_uri(resource, opts) do
+      {:ok, uri} -> uri
+      _error -> resource
+    end
+  end
+
+  defp most_restrictive_capability([]), do: :none
+
+  defp most_restrictive_capability(caps) do
+    rank = %{audit_only: 0, permissive: 1, strict: 2}
+
+    {:ok,
+     Enum.max_by(caps, fn cap ->
+       case TaintEnforcement.explicit_capability_policy(cap) do
+         {:ok, policy} -> Map.fetch!(rank, policy)
+         :none -> 0
+       end
+     end)}
+  end
 
   defp maybe_put_approved_invocation(opts, context) when is_map(context) do
     case Map.get(context, :approved_invocation) || Map.get(context, "approved_invocation") do

@@ -262,14 +262,14 @@ defmodule Arbor.Actions.TaintEnforcementTest do
       assert :ok = TaintEnforcement.check(MockExtendedControlAction, params, context)
     end
 
-    test "an empty per-parameter map does not fall back to the aggregate" do
+    test "an empty per-parameter map applies the untrusted aggregate" do
       context = %{
         taint: taint(:untrusted),
         param_taint: %{},
         taint_policy: :permissive
       }
 
-      assert :ok =
+      assert {:error, {:taint_blocked, :sandbox, :untrusted, :control}} =
                TaintEnforcement.check(MockExtendedControlAction, %{sandbox: "basic"}, context)
     end
   end

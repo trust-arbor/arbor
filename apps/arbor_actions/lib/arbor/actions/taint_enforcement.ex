@@ -17,14 +17,24 @@ defmodule Arbor.Actions.TaintEnforcement do
   invalid env fails closed to `:strict` in production and `:audit_only`
   otherwise.
 
+  Resolved policy is the requested context policy raised to any floor:
+  an explicit `Capability.taint_policy/1` constraint, and in production
+  the configured default. A context `:permissive` cannot weaken `:strict`.
+
+  Under `:strict`, a `:control` param with a nil, missing, or empty label
+  is treated as `:untrusted`. An empty `:param_taint` map does not hide
+  the aggregate label.
+
   After execution, emits taint propagation signals so downstream consumers
   know the output taint level.
   """
 
   alias Arbor.Actions.Taint
   alias Arbor.Actions.TaintEvents
+  alias Arbor.Contracts.Security.Capability
 
   @policies [:strict, :permissive, :audit_only]
+  @policy_rank %{audit_only: 0, permissive: 1, strict: 2}
 
   @doc """
   Configured default taint policy.
@@ -45,6 +55,25 @@ defmodule Arbor.Actions.TaintEnforcement do
         env = Keyword.get(opts, :env) || runtime_env()
         if env == :prod, do: :strict, else: :audit_only
     end
+  end
+
+  @doc """
+  Resolve the effective taint policy for an execution context.
+
+  Starts from a valid `context[:taint_policy]` or `configured_policy/1`.
+  Raises that value to the most restrictive floor among:
+
+  - an explicit `Capability.taint_policy/1` on `context[:capability]`
+    (absent constraint is not a floor — the contract default
+    `:permissive` must not block `:audit_only`)
+  - in production, `configured_policy/1`
+  """
+  @spec resolve_policy(map() | nil) :: :strict | :permissive | :audit_only
+  @spec resolve_policy(map() | nil, keyword()) :: :strict | :permissive | :audit_only
+  def resolve_policy(context, opts \\ []) when is_list(opts) do
+    requested = requested_policy(context)
+    floors = policy_floors(context, opts)
+    Enum.reduce(floors, requested, &raise_to_floor/2)
   end
 
   @doc """
@@ -93,29 +122,81 @@ defmodule Arbor.Actions.TaintEnforcement do
   # ============================================================================
 
   defp check_legacy_aggregate(action_module, params, context) do
+    policy = policy_from_context(context)
+
     case extract_taint_context(context) do
-      nil ->
-        # No taint metadata — backward compatible, allow execution
-        :ok
-
-      %{taint: nil} ->
-        # Taint context exists but no taint level — allow execution
-        :ok
-
-      %{taint: taint_level} ->
-        policy = policy_from_context(context)
+      %{taint: taint_level} when not is_nil(taint_level) ->
         check_with_policy(action_module, params, taint_level, policy, context)
+
+      _missing ->
+        # No usable aggregate label. Under :strict an unlabeled control
+        # param is untrusted; otherwise keep the pre-strict allow.
+        maybe_deny_unlabeled_legacy(action_module, params, policy)
     end
   end
 
-  defp policy_from_context(context) when is_map(context) do
+  defp maybe_deny_unlabeled_legacy(action_module, params, :strict) do
+    check_strict_taint(params, Taint.roles_for(action_module), :untrusted)
+  end
+
+  defp maybe_deny_unlabeled_legacy(_action_module, _params, _policy), do: :ok
+
+  defp policy_from_context(context), do: resolve_policy(context)
+
+  defp requested_policy(context) when is_map(context) do
     case Map.fetch(context, :taint_policy) do
       {:ok, policy} when policy in @policies -> policy
       _ -> configured_policy()
     end
   end
 
-  defp policy_from_context(_context), do: configured_policy()
+  defp requested_policy(_context), do: configured_policy()
+
+  defp policy_floors(context, opts) do
+    env = Keyword.get(opts, :env) || runtime_env()
+
+    []
+    |> maybe_put_floor(capability_policy_floor(context))
+    |> maybe_put_configured_prod_floor(env, opts)
+  end
+
+  defp maybe_put_floor(floors, {:ok, policy}) when policy in @policies, do: [policy | floors]
+  defp maybe_put_floor(floors, _none), do: floors
+
+  defp maybe_put_configured_prod_floor(floors, :prod, opts),
+    do: [configured_policy(opts) | floors]
+
+  defp maybe_put_configured_prod_floor(floors, _env, _opts), do: floors
+
+  defp raise_to_floor(floor, current) do
+    if Map.fetch!(@policy_rank, floor) > Map.fetch!(@policy_rank, current) do
+      floor
+    else
+      current
+    end
+  end
+
+  defp capability_policy_floor(context) when is_map(context) do
+    explicit_capability_policy(Map.get(context, :capability))
+  end
+
+  defp capability_policy_floor(_context), do: :none
+
+  # Capability.taint_policy/1 defaults to :permissive when the constraint is
+  # absent. That default is not a floor — applying it would raise :audit_only
+  # on every ordinary grant. Only an explicit constraint is load-bearing.
+  @doc false
+  @spec explicit_capability_policy(term()) :: {:ok, :strict | :permissive | :audit_only} | :none
+  def explicit_capability_policy(%Capability{constraints: constraints} = cap)
+      when is_map(constraints) do
+    if Map.has_key?(constraints, :taint_policy) or Map.has_key?(constraints, "taint_policy") do
+      {:ok, Capability.taint_policy(cap)}
+    else
+      :none
+    end
+  end
+
+  def explicit_capability_policy(_cap), do: :none
 
   defp runtime_env do
     case Application.get_env(:arbor_actions, :taint_policy_runtime_env) do
@@ -139,8 +220,8 @@ defmodule Arbor.Actions.TaintEnforcement do
     end
   end
 
-  # A present map, including an empty map, selects per-parameter enforcement.
-  # The aggregate label must not contaminate parameters omitted from this map.
+  # A non-empty map selects per-parameter enforcement. An empty map must not
+  # hide the aggregate label — fall through to the legacy path.
   defp extract_param_taint(nil), do: :none
   defp extract_param_taint(context) when not is_map(context), do: :none
 
@@ -148,16 +229,19 @@ defmodule Arbor.Actions.TaintEnforcement do
     nested_context = Map.get(context, :taint_context)
 
     cond do
-      is_map(Map.get(context, :param_taint)) ->
+      nonempty_param_taint?(Map.get(context, :param_taint)) ->
         {:ok, Map.fetch!(context, :param_taint)}
 
-      is_map(nested_context) and is_map(Map.get(nested_context, :param_taint)) ->
+      is_map(nested_context) and nonempty_param_taint?(Map.get(nested_context, :param_taint)) ->
         {:ok, Map.fetch!(nested_context, :param_taint)}
 
       true ->
         :none
     end
   end
+
+  defp nonempty_param_taint?(map) when is_map(map) and map_size(map) > 0, do: true
+  defp nonempty_param_taint?(_), do: false
 
   # Extract taint context from the context map.
   # Looks for :taint key directly or in :taint_context sub-map.
@@ -258,7 +342,7 @@ defmodule Arbor.Actions.TaintEnforcement do
     Enum.reduce_while(params, :ok, fn {param_name, value}, :ok ->
       case fetch_param_taint(param_taint, param_name) do
         {:ok, nil} ->
-          {:cont, :ok}
+          halt_or_cont(unlabeled_strict_control(roles, param_name))
 
         {:ok, taint} ->
           role = Map.get(roles, param_name, :data)
@@ -270,13 +354,10 @@ defmodule Arbor.Actions.TaintEnforcement do
               Taint.check_params(action_module, %{param_name => value}, %{taint: taint})
             end
 
-          case result do
-            :ok -> {:cont, :ok}
-            error -> {:halt, error}
-          end
+          halt_or_cont(result)
 
         :error ->
-          {:cont, :ok}
+          halt_or_cont(unlabeled_strict_control(roles, param_name))
       end
     end)
   end
@@ -319,6 +400,19 @@ defmodule Arbor.Actions.TaintEnforcement do
       end
     end)
   end
+
+  defp unlabeled_strict_control(roles, param_name) do
+    role = Map.get(roles, param_name, :data)
+
+    if control_role?(role) do
+      {:error, {:taint_blocked, param_name, :untrusted, :control}}
+    else
+      :ok
+    end
+  end
+
+  defp halt_or_cont(:ok), do: {:cont, :ok}
+  defp halt_or_cont(error), do: {:halt, error}
 
   # Strict mode: any non-trusted taint on control params is blocked
   defp check_strict_taint(params, roles, level) do

@@ -103,8 +103,10 @@ defmodule Arbor.Actions.TaintStrictUnlabeledFloorSecurityRegressionTest do
     assert {:error, {:taint_blocked, :mode, :untrusted, :control}} =
              TaintEnforcement.check(FileActions.Write, params, nil_label)
 
-    assert {:error, {:taint_blocked, :mode, :untrusted, :control}} =
+    assert {:error, {:taint_blocked, unlabeled, :untrusted, :control}} =
              TaintEnforcement.check(FileActions.Write, params, no_metadata)
+
+    assert unlabeled in [:path, :mode]
 
     assert {:error, {:taint_blocked, :command, :untrusted, :control}} =
              TaintEnforcement.check(
@@ -184,7 +186,7 @@ defmodule Arbor.Actions.TaintStrictUnlabeledFloorSecurityRegressionTest do
     workspace: workspace,
     strict_capability: strict_capability
   } do
-    target = Path.join(workspace, "strict-cap", "cap-floor.txt")
+    target = Path.join([workspace, "strict-cap", "cap-floor.txt"])
     File.mkdir_p!(Path.dirname(target))
     derived = derived_path_taint()
 

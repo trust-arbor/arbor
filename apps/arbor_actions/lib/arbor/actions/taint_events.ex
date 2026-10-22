@@ -176,15 +176,6 @@ defmodule Arbor.Actions.TaintEvents do
 
   defp get_in_context(_, _), do: nil
 
-  defp taint_policy_from_context(context) when is_map(context) do
-    case Map.fetch(context, :taint_policy) do
-      {:ok, policy} when policy in [:strict, :permissive, :audit_only] ->
-        policy
-
-      _ ->
-        Arbor.Actions.TaintEnforcement.configured_policy()
-    end
-  end
-
-  defp taint_policy_from_context(_context), do: Arbor.Actions.TaintEnforcement.configured_policy()
+  defp taint_policy_from_context(context),
+    do: Arbor.Actions.TaintEnforcement.resolve_policy(context)
 end
