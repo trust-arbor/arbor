@@ -54,10 +54,13 @@ defmodule Arbor.Gateway.Router do
   # RAW request body and bound to exactly what downstream routes consume. The
   # plug caches the raw body in `assigns[:raw_body]`; :conditional_parsers then
   # reuses it via the cached body_reader (so the stream isn't consumed twice).
+  # Q: unsigned non-/mcp requests authenticate before JSON parsing so a 401
+  # never decodes an untrusted body. Signed reads and Plug.Parsers share the
+  # 1 MiB cap (ExMCP's body_limit class).
   plug(:try_signed_request_auth)
-  plug(:conditional_parsers)
   plug(:try_jwt_auth)
   plug(:require_auth_unless_health)
+  plug(:conditional_parsers)
   plug(:dispatch)
 
   get "/health" do
@@ -93,13 +96,16 @@ defmodule Arbor.Gateway.Router do
   defp rate_limit_unless_health(conn, _opts), do: Arbor.Gateway.RateLimiter.call(conn, [])
 
   # Skip body parsing for MCP routes (ExMCP handles its own parsing).
-  # body_reader reuses the raw body already read+cached by SignedRequestAuth so
-  # the request stream isn't consumed twice (and the parsed body is exactly the
-  # bytes whose signature was verified). When no signature was present, raw_body
-  # is absent and the reader falls back to reading the stream normally.
+  # Runs after auth so an unauthenticated non-/mcp request is 401 without
+  # JSON-decoding the body. body_reader reuses the raw body already
+  # read+cached by SignedRequestAuth so the stream isn't consumed twice
+  # (and the parsed body is exactly the bytes whose signature was verified).
+  # When no signature was present, raw_body is absent and the reader falls
+  # back to reading the stream with the same 1 MiB cap.
   @parsers_opts Plug.Parsers.init(
                   parsers: [:json],
                   json_decoder: Jason,
+                  length: Arbor.Gateway.SignedRequestAuth.max_body_bytes(),
                   body_reader: {__MODULE__, :cached_body_reader, []}
                 )
   defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn

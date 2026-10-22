@@ -72,6 +72,14 @@ defmodule Arbor.Gateway.SignedRequestAuth do
 
   @behaviour Plug
 
+  # Match ExMCP.HttpPlug's 1 MiB body cap so a signed request cannot buffer
+  # Plug's 8 MB default ahead of the MCP transport limit.
+  @max_body_bytes 1_048_576
+
+  @doc "Maximum signed-request body size, in bytes (1 MiB)."
+  @spec max_body_bytes() :: pos_integer()
+  def max_body_bytes, do: @max_body_bytes
+
   @impl true
   def init(opts), do: opts
 
@@ -142,6 +150,9 @@ defmodule Arbor.Gateway.SignedRequestAuth do
       |> assign(:signed_request, signed_request)
       |> assign(:signed_request_authenticated, true)
     else
+      {:error, {:body_too_large, conn}} ->
+        reject_too_large(conn)
+
       {:error, reason} ->
         Logger.debug("[SignedRequestAuth] Verification failed: #{inspect(reason)}")
         # Non-destructive passthrough — let downstream auth try.
@@ -250,18 +261,25 @@ defmodule Arbor.Gateway.SignedRequestAuth do
   # --- Body read with caching ---
 
   defp read_and_cache_body(conn) do
-    case read_body(conn) do
+    case read_body(conn, length: @max_body_bytes) do
       {:ok, body, conn} ->
         {:ok, body, assign(conn, :raw_body, body)}
 
-      {:more, _partial, _conn} ->
-        # Body too large to read in one shot. We don't try to support
-        # streamed bodies for signed requests — sign once, send once.
-        {:error, :body_too_large}
+      {:more, _partial, conn} ->
+        # Stop at the first oversize chunk. Do not keep reading — that would
+        # buffer past the 1 MiB cap that ExMCP already enforces.
+        {:error, {:body_too_large, conn}}
 
       {:error, reason} ->
         {:error, {:read_body_failed, reason}}
     end
+  end
+
+  defp reject_too_large(conn) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(413, Jason.encode!(%{error: "Payload Too Large"}))
+    |> halt()
   end
 
   # --- Payload binding ---
