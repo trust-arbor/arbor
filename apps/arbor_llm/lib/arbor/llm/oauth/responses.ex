@@ -248,11 +248,13 @@ defmodule Arbor.LLM.OAuth.Responses do
   def complete_text(provider, messages, opts \\ []) do
     with :ok <- validate_text_messages(messages) do
       instructions =
-        messages |> Enum.filter(&(&1.role == :system)) |> Enum.map_join("\n\n", & &1.content)
+        messages
+        |> Enum.filter(&(&1.role in [:system, :summary]))
+        |> Enum.map_join("\n\n", & &1.content)
 
       input =
         messages
-        |> Enum.reject(&(&1.role == :system))
+        |> Enum.reject(&(&1.role in [:system, :summary]))
         |> Enum.map(fn m ->
           %{
             "role" => to_string(m.role),

@@ -797,6 +797,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       :developer ->
         ReqLLM.Context.system(reqllm_text_content(content))
 
+      :summary ->
+        ReqLLM.Context.system(reqllm_text_content(content))
+
       :tool ->
         # ReqLLM.Context doesn't expose a tool/1 helper; the tool_call_id
         # lives in the Arbor message metadata. Build the ReqLLM.Message

@@ -21,6 +21,7 @@ defmodule Arbor.Agent.ContextSummarizer do
 
   require Logger
 
+  alias Arbor.Agent.CompactionAttribution
   alias Arbor.Agent.SummaryCache
 
   @type summary_tier :: :recent | :tier_1 | :tier_2
@@ -240,13 +241,18 @@ defmodule Arbor.Agent.ContextSummarizer do
     """
   end
 
-  defp format_messages_for_summary(messages) do
+  @doc """
+  Format messages for a summarization prompt.
+
+  Role and content stay structured JSON fields so a tool result containing a
+  spoofed `\\n[user]` header cannot become a user-attributed instruction.
+  """
+  @spec format_messages_for_summary([map()]) :: String.t()
+  def format_messages_for_summary(messages) when is_list(messages) do
     Enum.map_join(messages, "\n", fn msg ->
-      role = msg[:role] || "unknown"
-      content = msg[:content] || ""
-      # Truncate individual messages to avoid prompt explosion
+      content = Map.get(msg, :content) || Map.get(msg, "content") || ""
       truncated = String.slice(to_string(content), 0, 500)
-      "[#{role}]: #{truncated}"
+      CompactionAttribution.format_turn(msg, text: truncated)
     end)
   end
 

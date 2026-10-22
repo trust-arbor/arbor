@@ -267,6 +267,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert translated.role == :system
     end
 
+    test "translates :summary role to :system on the req_llm side" do
+      msgs = [Message.new(:summary, "context summary of earlier conversation")]
+      [translated] = Adapter.translate_messages(msgs)
+      assert translated.role == :system
+      assert Arbor.LLM.Message.provider_role(:summary) == :system
+    end
+
     test "translates :tool role with metadata-supplied tool_call_id" do
       msg = %Message{
         role: :tool,

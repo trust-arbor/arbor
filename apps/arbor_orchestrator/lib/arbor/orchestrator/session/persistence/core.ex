@@ -19,7 +19,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @assistant_tool_context_keys ["session.tool_calls"]
   @partial_statuses [:interrupted, :cancelled, :failed]
   @partial_evidence_keys [:kind, :user_content, :user_taint]
-  @prompt_roles ~w(system user assistant tool)
+  @prompt_roles ~w(system user assistant tool summary)
   @checkpoint_message_keys ["envelope", "payload", "status"]
   @checkpoint_message_domain "arbor.session.checkpoint.message.v2"
   @checkpoint_manifest_keys ["envelope", "payload"]

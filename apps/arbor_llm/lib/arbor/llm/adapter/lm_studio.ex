@@ -226,7 +226,10 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   end
 
   defp message(%{role: role, content: content}) do
-    %{"role" => to_string(role), "content" => content_field(content)}
+    %{
+      "role" => role |> Arbor.LLM.Message.provider_role() |> to_string(),
+      "content" => content_field(content)
+    }
   end
 
   # Multimodal user content → OpenAI content-parts (text + image_url); plain string stays a string.

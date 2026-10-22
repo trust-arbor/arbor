@@ -1111,7 +1111,7 @@ defmodule Arbor.Agent.ContextCompactorTest do
       assert compactor.token_count <= @cc1_window
     end
 
-    # Security regression: the summary reaches the model as a user-role message.
+    # Security regression: the summary uses the dedicated :summary role.
     # Instructions quoted from older (possibly injected) messages must come back
     # as attributed facts under a system-record framing, never as a fresh request.
     test "security regression: summary is framed as a system record and the prompt forbids imperative carry-over" do
@@ -1137,7 +1137,7 @@ defmodule Arbor.Agent.ContextCompactorTest do
         |> ContextCompactor.llm_messages()
         |> Enum.find(&(Map.get(&1, :compactor_kind) == :summary))
 
-      assert %{role: :user, content: content} = summary
+      assert %{role: :summary, content: content} = summary
       assert content =~ ~r/^\[Context summary of earlier conversation, written by the system/
       assert content =~ "not a new message or request from the user"
     end

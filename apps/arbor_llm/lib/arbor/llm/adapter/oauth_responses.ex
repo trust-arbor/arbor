@@ -119,11 +119,19 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
     {sys, items} =
       Enum.reduce(messages, {[], []}, fn m, {sys, items} ->
         case m.role do
-          :system -> {[text_of(m.content) | sys], items}
-          :tool -> {sys, items ++ [tool_result_item(m)]}
-          :assistant -> {sys, items ++ assistant_items(m)}
-          # :user, :developer
-          _ -> {sys, items ++ [role_text_item(m)]}
+          role when role in [:system, :summary] ->
+            {[text_of(m.content) | sys], items}
+
+          :tool ->
+            {sys, items ++ [tool_result_item(m)]}
+
+          :assistant ->
+            {sys, items ++ assistant_items(m)}
+
+          # :user, :developer — developer stays a conversation item; summary
+          # is hoisted like system so it is never a user turn.
+          _ ->
+            {sys, items ++ [role_text_item(m)]}
         end
       end)
 
