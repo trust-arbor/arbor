@@ -219,6 +219,29 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
+  describe "approval_policy_digest/2" do
+    setup :start_infrastructure
+
+    test "tightening a rule changes the digest bound onto approval receipts", %{
+      agent_id: agent_id
+    } do
+      resource = "arbor://code/read/policy_digest"
+      create_profile_with_rules(agent_id, :ask, %{resource => :ask})
+
+      issued = Policy.approval_policy_digest(agent_id, resource)
+      assert issued =~ ~r/\A[0-9a-f]{64}\z/
+      assert issued == Policy.approval_policy_digest(agent_id, resource)
+
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | rules: Map.put(profile.rules || %{}, resource, :block)}
+      end)
+
+      tightened = Policy.approval_policy_digest(agent_id, resource)
+      assert tightened =~ ~r/\A[0-9a-f]{64}\z/
+      refute tightened == issued
+    end
+  end
+
   describe "egress_mode/2 (2026-06-14 egress standing)" do
     setup :start_infrastructure
 

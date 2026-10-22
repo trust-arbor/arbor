@@ -276,6 +276,42 @@ defmodule Arbor.Trust.Policy do
     end
   end
 
+  @policy_digest_domain "arbor.trust.approval_policy.v1\0"
+
+  @doc """
+  Digest of the effective trust policy for a principal and resource.
+
+  Approval receipts stamp this at issue and reject consume after the
+  effective policy changes (for example, a rule tightens from `:ask` to
+  `:block`).
+  """
+  @spec approval_policy_digest(String.t(), String.t()) :: String.t()
+  def approval_policy_digest(agent_id, resource_uri)
+      when is_binary(agent_id) and is_binary(resource_uri) do
+    explanation = explain(agent_id, resource_uri)
+    profile = profile_or_stub(agent_id)
+
+    snapshot = %{
+      baseline: Map.get(profile, :baseline, :ask),
+      rules: canonicalize_rules(Map.get(profile, :rules, %{})),
+      effective_mode: Map.get(explanation, :effective_mode, :block),
+      security_ceiling: Map.get(explanation, :security_ceiling)
+    }
+
+    bytes = @policy_digest_domain <> :erlang.term_to_binary(snapshot, [:deterministic])
+    Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+  end
+
+  def approval_policy_digest(_agent_id, _resource_uri), do: ""
+
+  defp canonicalize_rules(rules) when is_map(rules) do
+    rules
+    |> Enum.map(fn {key, mode} -> {to_string(key), mode} end)
+    |> Enum.sort()
+  end
+
+  defp canonicalize_rules(_rules), do: []
+
   @doc """
   Explain the trust resolution chain for debugging.
 

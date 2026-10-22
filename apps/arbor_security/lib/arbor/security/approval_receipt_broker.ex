@@ -27,6 +27,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
                   :resource_uri,
                   :action,
                   :argument_digest,
+                  :policy_digest,
                   :expires_at_ms,
                   :signature
                 ])
@@ -390,20 +391,25 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
     if Map.has_key?(entries, token) do
       mint(key, principal, resource, action, digest, request_id, now, entries, attempts - 1)
     else
-      unsigned = %{
-        v: @version,
-        token: token,
-        request_id: request_id,
-        principal_id: principal,
-        resource_uri: resource,
-        action: action,
-        argument_digest: digest,
-        expires_at_ms: now + @ttl_ms
-      }
+      with {:ok, policy_digest} <- current_policy_digest(principal, resource) do
+        unsigned = %{
+          v: @version,
+          token: token,
+          request_id: request_id,
+          principal_id: principal,
+          resource_uri: resource,
+          action: action,
+          argument_digest: digest,
+          policy_digest: policy_digest,
+          expires_at_ms: now + @ttl_ms
+        }
 
-      signature = sign(key, unsigned)
-      receipt = Map.put(unsigned, :signature, signature)
-      {:ok, receipt, %{receipt: receipt, status: :issued, expires_at_ms: unsigned.expires_at_ms}}
+        signature = sign(key, unsigned)
+        receipt = Map.put(unsigned, :signature, signature)
+
+        {:ok, receipt,
+         %{receipt: receipt, status: :issued, expires_at_ms: unsigned.expires_at_ms}}
+      end
     end
   end
 
@@ -430,6 +436,7 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
          true <- receipt.action == action,
          true <- receipt.argument_digest == digest,
          true <- valid_request_id?(request_id) and receipt.request_id == request_id,
+         true <- valid_policy_binding?(receipt, principal, resource),
          true <- secure_equal?(signature, sign(key, Map.delete(receipt, :signature))),
          %{receipt: stored, status: status, expires_at_ms: ^expires_at} <- Map.get(entries, token),
          true <- stored == receipt,
@@ -447,6 +454,30 @@ defmodule Arbor.Security.ApprovalReceiptBroker do
     do: byte_size(request_id) in 1..256
 
   defp valid_request_id?(_request_id), do: false
+
+  defp valid_policy_binding?(receipt, principal, resource) do
+    case current_policy_digest(principal, resource) do
+      {:ok, current} ->
+        is_binary(receipt.policy_digest) and secure_equal?(receipt.policy_digest, current)
+
+      _invalid ->
+        false
+    end
+  end
+
+  defp current_policy_digest(principal, resource) do
+    digest = Config.approval_policy_digest(principal, resource)
+
+    if valid_digest?(digest) do
+      {:ok, digest}
+    else
+      {:error, :invalid_approval_policy_digest}
+    end
+  rescue
+    _ -> {:error, :invalid_approval_policy_digest}
+  catch
+    _, _ -> {:error, :invalid_approval_policy_digest}
+  end
 
   defp receipt_request_id(%{request_id: request_id}) when is_binary(request_id), do: request_id
 

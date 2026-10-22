@@ -1346,6 +1346,65 @@ defmodule Arbor.Security.Config do
     end
   end
 
+  @default_approval_policy_digest Base.encode16(
+                                    :crypto.hash(
+                                      :sha256,
+                                      "arbor.security.approval_policy.default.v1"
+                                    ),
+                                    case: :lower
+                                  )
+
+  @doc false
+  @spec approval_policy_digest(String.t(), String.t()) :: String.t()
+  def approval_policy_digest(principal_id, resource_uri)
+      when is_binary(principal_id) and is_binary(resource_uri) do
+    case Application.get_env(@app, :approval_policy_digest) do
+      fun when is_function(fun, 2) ->
+        normalize_approval_policy_digest(
+          safe_approval_policy_digest(fn -> fun.(principal_id, resource_uri) end)
+        )
+
+      {mod, fun} when is_atom(mod) and is_atom(fun) ->
+        normalize_approval_policy_digest(
+          safe_approval_policy_digest(fn -> apply(mod, fun, [principal_id, resource_uri]) end)
+        )
+
+      _absent ->
+        trust_or_default_approval_policy_digest(principal_id, resource_uri)
+    end
+  end
+
+  def approval_policy_digest(_principal_id, _resource_uri), do: ""
+
+  defp trust_or_default_approval_policy_digest(principal_id, resource_uri) do
+    policy = Module.concat(["Arbor", "Trust", "Policy"])
+
+    if Code.ensure_loaded?(policy) and function_exported?(policy, :approval_policy_digest, 2) do
+      normalize_approval_policy_digest(
+        safe_approval_policy_digest(fn ->
+          apply(policy, :approval_policy_digest, [principal_id, resource_uri])
+        end)
+      )
+    else
+      @default_approval_policy_digest
+    end
+  end
+
+  defp safe_approval_policy_digest(fun) do
+    fun.()
+  rescue
+    _ -> :invalid
+  catch
+    _, _ -> :invalid
+  end
+
+  defp normalize_approval_policy_digest(digest)
+       when is_binary(digest) and byte_size(digest) == 64 do
+    if Regex.match?(~r/\A[0-9a-f]{64}\z/, digest), do: digest, else: ""
+  end
+
+  defp normalize_approval_policy_digest(_digest), do: ""
+
   defp enforcement_toggle(key, default) do
     case installed_enforcement_toggle_snapshot() do
       {:ok, %{^key => value}} -> value
