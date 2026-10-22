@@ -19,7 +19,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReviewPanel do
     with {:ok, source} <- council_source(),
          {:ok, graph} <- Arbor.Orchestrator.parse(source) do
       {specific, generic} = fallback_config()
-      {:ok, ReviewPanelCore.assess(seats(graph), availability_fun(), specific, generic)}
+
+      {:ok,
+       ReviewPanelCore.assess(
+         seats(graph),
+         availability_fun(),
+         specific,
+         generic,
+         min_distinct_provider_models: min_binding_provider_models()
+       )}
     end
   rescue
     error -> {:error, {:review_panel_failed, Exception.message(error)}}
@@ -51,6 +59,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ReviewPanel do
       Application.get_env(:arbor_orchestrator, :llm_provider_fallbacks, %{}),
       Application.get_env(:arbor_orchestrator, :llm_fallback_providers, [])
     )
+  end
+
+  @doc """
+  Minimum distinct `provider:model` seats required for a binding panel.
+
+  Reads `:arbor_orchestrator, :min_binding_provider_models` (default 2).
+  A panel below this floor, or any degraded panel, returns a non-binding
+  decision only.
+  """
+  @spec min_binding_provider_models() :: pos_integer()
+  def min_binding_provider_models do
+    case Application.get_env(
+           :arbor_orchestrator,
+           :min_binding_provider_models,
+           ReviewPanelCore.default_min_distinct_provider_models()
+         ) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> ReviewPanelCore.default_min_distinct_provider_models()
+    end
   end
 
   @doc "Availability predicate; overridable for tests via `:llm_provider_availability`."

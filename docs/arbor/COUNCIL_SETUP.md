@@ -53,10 +53,21 @@ The ten existing seats still read `review.prompt` (branch, intent, files, and
 diff). Only `design_conformance` reads `review.prompt_conformance`: that same
 shared body plus bounded Approved design and Packet constraints sections.
 
-That is five models across three providers. Diversity is a quality choice
-baked into the reviewed graph, not a hard requirement of the reducer. A
-new host that only has one working provider should remap every seat to
-that provider rather than shipping half-abstaining reviews.
+That is five models across three providers. Binding decisions require a
+minimum number of distinct `provider:model` seats after fallback
+resolution. The stock default is `2`, configured as:
+
+```elixir
+# config/config.exs
+config :arbor_orchestrator, min_binding_provider_models: 2
+```
+
+A panel that collapses onto one model, or that is `:degraded` because any
+seat fell back or would abstain, still votes — but the decision is
+**not binding** (see [Correlated Failures of AI Approval Monitors](https://arxiv.org/abs/2610.29178)).
+Raise the floor only when this host can honour it. A new host that only
+has one working provider should remap seats across at least two models
+before treating reviews as binding.
 
 Each seat has `use_tools=true` and must finish by calling
 `coding_submit_review_report` exactly once (`vote`, `finding_updates`,
@@ -183,10 +194,12 @@ node can opt out with `llm_fallback="false"`; if nothing in the chain is
 available the seat keeps its preferred route and abstains with that
 provider's own error. Live coding readiness (`mix arbor.coding.check
 --live`, `arbor_coding_dispatch_readiness`) has a `review_panel` plane:
-`passed` when every seat runs on its preferred provider, `degraded` (never
-blocked) when any seat falls back or would abstain, with the seat ids and
-the number of distinct providers that will vote. Fallback keeps the vote
-alive; it does not restore model diversity — remap seats for that.
+`passed` when every seat runs on its preferred provider and at least
+`:min_binding_provider_models` distinct `provider:model` seats vote
+(default 2), `degraded` when any seat falls back or would abstain or the
+resolved seats fail that diversity floor. Dispatch is not blocked.
+Fallback keeps the vote alive; it does not restore model diversity or
+binding authority — remap seats for that.
 
 ### Capabilities
 

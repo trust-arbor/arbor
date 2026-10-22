@@ -690,6 +690,11 @@ config :arbor_consensus,
   advisory_provider_fallbacks: %{}
 
 config :arbor_orchestrator,
+  # Binding code-review decisions require this many distinct provider:model
+  # seats after fallback resolution. Default 2: a panel that collapses onto
+  # one model is correlated (arxiv.org/abs/2610.29178) and may only return
+  # a non-binding decision. Raise this only when the host can honour it.
+  min_binding_provider_models: 2,
   llm_fallback_providers: [
     {"openai_oauth", "gpt-5.6-sol"},
     {"xai_oauth", "grok-4.6"}

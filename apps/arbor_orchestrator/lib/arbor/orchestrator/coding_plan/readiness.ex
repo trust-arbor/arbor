@@ -391,9 +391,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   end
 
   # Review panel: can the council seats in the reviewed graph be called from
-  # this host, directly or via the configured provider fallback? Never blocks
-  # (a single available seat still votes); degraded when any seat falls back or
-  # is unresolvable, so the operator learns before dispatch that the "council"
+  # this host, directly or via the configured provider fallback? Dispatch is
+  # not blocked (a degraded or single-model panel still votes), but those
+  # votes are non-binding. Degraded when any seat falls back or is
+  # unresolvable, so the operator learns before dispatch that the "council"
   # is smaller than the graph says (2026-08-27: 8 of 10 seats abstained on a
   # host without Ollama while readiness said READY).
   defp observe_review_panel(plan, observed_at) do
@@ -412,6 +413,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
     diagnostic =
       case panel_result do
+        {:ok, %{status: :passed, binding: false} = panel} ->
+          ReadinessCore.diagnostic(
+            "review_panel",
+            "preflight",
+            "degraded",
+            "review_panel_degraded",
+            observed_at,
+            clip_text(ReviewPanelCore.message(panel)),
+            clip_text(ReviewPanelCore.remedy(panel)),
+            "council"
+          )
+
         {:ok, %{status: :passed} = panel} ->
           passed_with_evidence(
             "review_panel",
