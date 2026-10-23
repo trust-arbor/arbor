@@ -25,8 +25,57 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
     alias Arbor.Memory.Embedding
 
     @table :code_pattern_delete_derived_closure_records
+    @control :code_pattern_delete_derived_closure_control
 
-    def start, do: :ets.new(@table, [:named_table, :public, :set])
+    def start do
+      ensure_table(@table)
+      ensure_table(@control)
+      :ets.delete_all_objects(@table)
+      :ets.insert(@control, {:fail_delete, false})
+      :ets.insert(@control, {:hang, :off})
+    end
+
+    defp ensure_table(table) do
+      case :ets.whereis(table) do
+        :undefined -> :ets.new(table, [:named_table, :public, :set])
+        _tid -> table
+      end
+    end
+
+    def fail_next_delete do
+      :ets.insert(@control, {:fail_delete, true})
+    end
+
+    def arm_write_fetch_hang(tester \\ self()) when is_pid(tester) do
+      :ets.insert(@control, {:hang, {:armed, tester}})
+    end
+
+    def await_write_fetch_hang(timeout \\ 2_000) do
+      receive do
+        {:code_pattern_embed_hang, ref, blocked_pid}
+        when is_reference(ref) and is_pid(blocked_pid) ->
+          {:ok, ref, blocked_pid}
+      after
+        timeout -> {:error, :hang_timeout}
+      end
+    end
+
+    def release_write_fetch_hang do
+      case :ets.lookup(@control, :hang) do
+        [{:hang, {:holding, waiters}}] ->
+          :ets.insert(@control, {:hang, :off})
+
+          Enum.each(waiters, fn {pid, ref} ->
+            if is_pid(pid) and Process.alive?(pid), do: send(pid, {:code_pattern_embed_go, ref})
+          end)
+
+          :ok
+
+        _ ->
+          :ets.insert(@control, {:hang, :off})
+          :ok
+      end
+    end
 
     def encode_operation(input), do: Embedding.encode_strict_operation(input)
     def encode_batch(inputs), do: Embedding.encode_strict_batch(inputs)
@@ -42,8 +91,15 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
     end
 
     def execute(_agent, %{kind: :delete, record: record} = operation, _opts) do
-      :ets.delete(@table, {record.agent_id, record.source_namespace, record.source_key})
-      {:ok, %{kind: operation.kind, record: record}}
+      case :ets.lookup(@control, :fail_delete) do
+        [{:fail_delete, true}] ->
+          :ets.insert(@control, {:fail_delete, false})
+          {:error, :conflict}
+
+        _ ->
+          :ets.delete(@table, {record.agent_id, record.source_namespace, record.source_key})
+          {:ok, %{kind: operation.kind, record: record}}
+      end
     end
 
     def execute(_agent, operation, _opts) do
@@ -56,6 +112,7 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
 
     def fetch(agent, namespace, key, opts) do
       include_tombstone? = Keyword.get(opts, :include_tombstone, false)
+      if include_tombstone?, do: maybe_hang_write_fetch()
 
       case :ets.lookup(@table, {agent, namespace, key}) do
         [{_, record}] ->
@@ -71,6 +128,39 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
 
         [] ->
           {:error, :not_found}
+      end
+    end
+
+    defp maybe_hang_write_fetch do
+      blocked_pid = self()
+
+      park =
+        case :ets.lookup(@control, :hang) do
+          [{:hang, {:armed, tester}}] ->
+            ref = make_ref()
+            send(tester, {:code_pattern_embed_hang, ref, blocked_pid})
+            :ets.insert(@control, {:hang, {:holding, [{blocked_pid, ref}]}})
+            {:park, ref}
+
+          [{:hang, {:holding, waiters}}] ->
+            ref = make_ref()
+            :ets.insert(@control, {:hang, {:holding, [{blocked_pid, ref} | waiters]}})
+            {:park, ref}
+
+          _ ->
+            :cont
+        end
+
+      case park do
+        {:park, ref} ->
+          receive do
+            {:code_pattern_embed_go, ^ref} -> :ok
+          after
+            30_000 -> :ok
+          end
+
+        :cont ->
+          :ok
       end
     end
 
@@ -183,6 +273,144 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
     refute Map.has_key?(exported.nodes, derived_id)
     assert Map.has_key?(exported.nodes, source_id)
     assert Map.has_key?(exported.nodes, survivor_id)
+  end
+
+  test "security regression: delete_code surfaces embedding cleanup failure", %{
+    agent_id: agent_id
+  } do
+    assert {:ok, nil} =
+             Memory.init_for_agent(agent_id,
+               index_enabled: false,
+               graph_enabled: true,
+               auto_embed: false
+             )
+
+    assert {:ok, entry} =
+             Memory.store_code(agent_id, %{
+               code: "fn cleanup -> :fail end",
+               language: "elixir",
+               purpose: "embedding cleanup failure"
+             })
+
+    await_embedding!(agent_id, "#{agent_id}:#{entry.id}")
+    wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id)) end)
+
+    RecordStore.fail_next_delete()
+
+    assert {:error, _reason} = Memory.delete_code(agent_id, entry.id)
+  end
+
+  test "security regression: delete_code surfaces graph cleanup failure", %{agent_id: agent_id} do
+    assert {:ok, nil} =
+             Memory.init_for_agent(agent_id,
+               index_enabled: false,
+               graph_enabled: true,
+               auto_embed: false
+             )
+
+    assert {:ok, entry} =
+             Memory.store_code(agent_id, %{
+               code: "fn graph -> :fail end",
+               language: "elixir",
+               purpose: "graph cleanup failure"
+             })
+
+    await_embedding!(agent_id, "#{agent_id}:#{entry.id}")
+    wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id)) end)
+
+    assert {:ok, source_id} =
+             Memory.add_knowledge(agent_id, %{
+               type: :fact,
+               content: "source #{entry.id}",
+               metadata: %{"code_pattern_id" => entry.id}
+             })
+
+    assert {:ok, derived_id} =
+             Memory.add_knowledge(agent_id, %{
+               type: :insight,
+               content: "derived #{entry.id}",
+               metadata: %{"name" => "derived"}
+             })
+
+    assert :ok = Memory.link_knowledge(agent_id, derived_id, source_id, :derived_from)
+
+    stop_knowledge_graph_store!()
+
+    assert {:error, _reason} = Memory.delete_code(agent_id, entry.id)
+  after
+    restart_knowledge_graph_store!()
+  end
+
+  test "security regression: a racing embedding write does not survive delete_code",
+       %{agent_id: agent_id} do
+    assert {:ok, nil} =
+             Memory.init_for_agent(agent_id,
+               index_enabled: false,
+               graph_enabled: true,
+               auto_embed: false
+             )
+
+    RecordStore.arm_write_fetch_hang()
+
+    store_task =
+      Task.async(fn ->
+        Memory.store_code(agent_id, %{
+          code: "fn race -> race end",
+          language: "elixir",
+          purpose: "racing embedding write"
+        })
+      end)
+
+    assert {:ok, _ref, _pid} = RecordStore.await_write_fetch_hang()
+    assert {:ok, entry} = Task.await(store_task)
+    logical_key = "#{agent_id}:#{entry.id}"
+
+    delete_result = Memory.delete_code(agent_id, entry.id)
+    RecordStore.release_write_fetch_hang()
+    wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id)) end)
+
+    assert delete_result == :ok or match?({:error, _}, delete_result)
+    assert {:error, :not_found} = Memory.get_code(agent_id, entry.id)
+    assert {:error, :not_found} = RecordStore.fetch(agent_id, @namespace, logical_key, [])
+  end
+
+  defp stop_knowledge_graph_store! do
+    case Process.whereis(Arbor.Memory.KnowledgeGraphStore) do
+      pid when is_pid(pid) ->
+        ref = Process.monitor(pid)
+
+        :ok =
+          Supervisor.terminate_child(Arbor.Memory.Supervisor, Arbor.Memory.KnowledgeGraphStore)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          1_000 -> :ok
+        end
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp restart_knowledge_graph_store! do
+    case Supervisor.restart_child(Arbor.Memory.Supervisor, Arbor.Memory.KnowledgeGraphStore) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, :running} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :not_found} -> start_knowledge_graph_store!()
+      {:error, _reason} -> start_knowledge_graph_store!()
+    end
+  end
+
+  defp start_knowledge_graph_store! do
+    case Supervisor.start_child(Arbor.Memory.Supervisor, {Arbor.Memory.KnowledgeGraphStore, []}) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :already_present} -> restart_knowledge_graph_store!()
+    end
   end
 
   defp await_embedding!(agent_id, logical_key) do

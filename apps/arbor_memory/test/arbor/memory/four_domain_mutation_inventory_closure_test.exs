@@ -185,6 +185,8 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
                            {"code_store.ex", {:delete, 2}, {:ets, :insert, 2}},
                            {"code_store.ex", {:delete, 2},
                             {Arbor.Memory.MemoryStore, :delete, 2}},
+                           {"code_store.ex", {:revoke_pattern_embedding_writes, 2},
+                            {Arbor.Memory.MemoryStore, :revoke_embedding_writes, 3}},
                            {"code_store.ex", {:delete_pattern_embedding, 2},
                             {Arbor.Memory.MemoryStore, :delete_embedding, 3}},
                            {"code_store.ex", {:remove_derived_from_nodes, 2},
@@ -1013,7 +1015,8 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
                :delete,
                :delete_by_prefix,
                :delete_tainted_authoritative,
-               :delete_embedding
+               :delete_embedding,
+               :revoke_embedding_writes
              ] ->
           {:ok, {Arbor.Memory.MemoryStore, fun, arity}}
 

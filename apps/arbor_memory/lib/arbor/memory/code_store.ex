@@ -229,12 +229,16 @@ defmodule Arbor.Memory.CodeStore do
 
   Also removes the pattern's MemoryStore embedding and any knowledge-graph
   nodes with an outgoing `:derived_from` edge to the pattern source.
+
+  Embedding-write revocation is recorded before the durable embedding delete so
+  a still-running `embed_confirmed` worker cannot persist after this returns.
+  Cleanup failures propagate as `{:error, :store_unavailable}`.
   """
   @spec delete(String.t(), String.t()) :: :ok | {:error, :store_unavailable}
   def delete(agent_id, entry_id) do
-    result =
-      case MutationAdmission.acquire(agent_id) do
-        {:ok, lease} ->
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        embed_result =
           try do
             entries =
               get_agent_entries(agent_id)
@@ -242,23 +246,25 @@ defmodule Arbor.Memory.CodeStore do
 
             :ets.insert(@ets_table, {agent_id, entries})
             MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
-            _ = delete_pattern_embedding(agent_id, entry_id)
-            :ok
+
+            with :ok <- revoke_pattern_embedding_writes(agent_id, entry_id),
+                 :ok <- delete_pattern_embedding(agent_id, entry_id) do
+              :ok
+            end
           after
             _ = MutationAdmission.release(lease)
           end
 
-        {:error, _reason} ->
-          {:error, :store_unavailable}
-      end
+        graph_result = remove_derived_from_nodes(agent_id, entry_id)
 
-    case result do
-      :ok ->
-        _ = remove_derived_from_nodes(agent_id, entry_id)
-        :ok
+        case {embed_result, graph_result} do
+          {:ok, :ok} -> :ok
+          {{:error, _reason} = error, _} -> error
+          {_, {:error, _reason}} -> {:error, :store_unavailable}
+        end
 
-      {:error, _reason} = error ->
-        error
+      {:error, _reason} ->
+        {:error, :store_unavailable}
     end
   end
 
@@ -383,34 +389,59 @@ defmodule Arbor.Memory.CodeStore do
     end
   end
 
+  defp revoke_pattern_embedding_writes(agent_id, entry_id) do
+    case MemoryStore.revoke_embedding_writes(@namespace, "#{agent_id}:#{entry_id}",
+           agent_id: agent_id
+         ) do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
+  end
+
   defp delete_pattern_embedding(agent_id, entry_id) do
     case MemoryStore.delete_embedding(@namespace, "#{agent_id}:#{entry_id}", agent_id: agent_id) do
       :ok ->
         :ok
 
-      {:error, reason} ->
-        Logger.debug(
-          "code pattern embedding delete failed for #{agent_id}/#{entry_id}: #{inspect(reason)}"
-        )
-
-        :ok
+      {:error, _reason} ->
+        {:error, :store_unavailable}
     end
   end
 
   defp remove_derived_from_nodes(agent_id, entry_id) do
     case GraphOps.get_graph(agent_id) do
       {:ok, graph} ->
-        graph
-        |> derived_from_node_ids(entry_id)
-        |> Enum.each(fn node_id ->
-          _ = GraphOps.remove_knowledge(agent_id, node_id)
-        end)
+        remove_derived_nodes(agent_id, derived_from_node_ids(graph, entry_id))
 
+      {:error, :graph_not_initialized} ->
         :ok
 
       {:error, _reason} ->
-        :ok
+        if graph_cleanup_required?() do
+          {:error, :store_unavailable}
+        else
+          :ok
+        end
     end
+  end
+
+  # KnowledgeGraphStore down means derived-node cleanup cannot be confirmed.
+  # A live store that reports anything other than a graph is treated as
+  # absence (`:graph_not_initialized` or no durable snapshot).
+  defp graph_cleanup_required? do
+    is_nil(Process.whereis(Arbor.Memory.KnowledgeGraphStore))
+  end
+
+  defp remove_derived_nodes(agent_id, node_ids) do
+    Enum.reduce_while(node_ids, :ok, fn node_id, :ok ->
+      case GraphOps.remove_knowledge(agent_id, node_id) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} -> {:halt, {:error, :store_unavailable}}
+      end
+    end)
   end
 
   defp derived_from_node_ids(graph, entry_id) do
