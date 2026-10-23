@@ -27,6 +27,11 @@ defmodule Arbor.Actions.Browser.Evaluate do
 
   def taint_roles, do: %{script: {:control, requires: [:command_injection]}, timeout: :data}
 
+  # Provenance (taint-tracking-rebuild Phase 1): JS evaluation results come
+  # from the page and cross the trust boundary — they are untrusted.
+  @doc false
+  def output_taint, do: :untrusted
+
   @impl true
   def run(%{script: _script} = params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->

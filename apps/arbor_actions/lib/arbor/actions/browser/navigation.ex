@@ -241,6 +241,11 @@ defmodule Arbor.Actions.Browser.GetTitle do
   alias Arbor.Actions
   alias Arbor.Actions.Browser
 
+  # Provenance (taint-tracking-rebuild Phase 1): the page title is site-
+  # controlled ingress and is untrusted regardless of what it contains.
+  @doc false
+  def output_taint, do: :untrusted
+
   @impl true
   def run(params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->

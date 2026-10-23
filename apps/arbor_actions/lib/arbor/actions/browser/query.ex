@@ -133,6 +133,11 @@ defmodule Arbor.Actions.Browser.GetAttribute do
 
   def taint_roles, do: %{selector: :control, attribute: :control}
 
+  # Provenance (taint-tracking-rebuild Phase 1): attribute values from the
+  # page cross the trust boundary — they are untrusted regardless of content.
+  @doc false
+  def output_taint, do: :untrusted
+
   @impl true
   def run(%{selector: selector} = params, context) do
     Browser.with_authorized_principal(context, __MODULE__, fn ->
