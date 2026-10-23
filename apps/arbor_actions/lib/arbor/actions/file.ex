@@ -115,45 +115,51 @@ defmodule Arbor.Actions.File do
       # Facade-level auth: check capability for the specific file operation.
       # Identity was already verified at the action layer — skip re-verification
       # to avoid nonce replay on signed_request.
-      resource_uri = "arbor://fs/#{operation}"
-
-      # If AuthContext is available and identity is verified, we can be explicit
-      # about why we skip identity verification. Either way, facade auth never
-      # re-verifies identity (that's the action layer's job).
-      auth_opts =
-        context
-        |> Arbor.Actions.auth_scope()
-        |> Keyword.merge(file_path: path, verify_identity: false)
-
-      case security_module().authorize(
-             context[:agent_id],
-             resource_uri,
-             :execute,
-             auth_opts
-           ) do
-        {:ok, :authorized, resolved_path} ->
-          {:ok, resolved_path}
-
-        {:ok, :authorized} ->
-          {:ok, path}
-
-        # Escalation: the op needs human approval and is NOT yet authorized.
-        # This facade has no approval-wait, so DENY — never let it through.
-        {:ok, :pending_approval, proposal_id} ->
-          {:error, {:unauthorized, {:requires_approval, proposal_id}}}
-
-        {:error, reason} ->
-          {:error, {:unauthorized, reason}}
-
-        # FAIL CLOSED on any unexpected shape. The previous `_ -> {:ok, path}`
-        # default swallowed {:ok, :pending_approval, _} (and anything else) into
-        # an allow — an approval bypass (2026-06-09 Sentinel finding).
-        other ->
-          {:error, {:unauthorized, {:unexpected_authz_result, other}}}
+      with :ok <- Arbor.Actions.RoutineEffect.require_file(context, operation, path) do
+        authorize_file_op_capability(context, path, operation)
       end
     else
       # No agent_id — system-level call, pass through
       {:ok, path}
+    end
+  end
+
+  defp authorize_file_op_capability(context, path, operation) do
+    resource_uri = "arbor://fs/#{operation}"
+
+    # If AuthContext is available and identity is verified, we can be explicit
+    # about why we skip identity verification. Either way, facade auth never
+    # re-verifies identity (that's the action layer's job).
+    auth_opts =
+      context
+      |> Arbor.Actions.auth_scope()
+      |> Keyword.merge(file_path: path, verify_identity: false)
+
+    case security_module().authorize(
+           context[:agent_id],
+           resource_uri,
+           :execute,
+           auth_opts
+         ) do
+      {:ok, :authorized, resolved_path} ->
+        {:ok, resolved_path}
+
+      {:ok, :authorized} ->
+        {:ok, path}
+
+      # Escalation: the op needs human approval and is NOT yet authorized.
+      # This facade has no approval-wait, so DENY — never let it through.
+      {:ok, :pending_approval, proposal_id} ->
+        {:error, {:unauthorized, {:requires_approval, proposal_id}}}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+
+      # FAIL CLOSED on any unexpected shape. The previous `_ -> {:ok, path}`
+      # default swallowed {:ok, :pending_approval, _} (and anything else) into
+      # an allow — an approval bypass (2026-06-09 Sentinel finding).
+      other ->
+        {:error, {:unauthorized, {:unexpected_authz_result, other}}}
     end
   end
 

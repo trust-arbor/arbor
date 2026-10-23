@@ -102,6 +102,9 @@ defmodule Arbor.Scheduler do
   @doc "Cancel the authenticated owner's exact stored job. Previously admitted effects are not rolled back."
   defdelegate cancel_owned_routine(id, proof), to: Arbor.Scheduler.OwnedRoutines, as: :cancel
 
+  @doc "Canonical action URI admitted by the owned-routine catalog."
+  defdelegate catalog_action_uri(), to: Arbor.Scheduler.RoutineCatalog, as: :action_uri
+
   @doc false
   defdelegate authorize_routine_effect(token, effect), to: Arbor.Scheduler.RunLease
 

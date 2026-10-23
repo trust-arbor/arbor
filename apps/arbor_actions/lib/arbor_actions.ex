@@ -1553,7 +1553,8 @@ defmodule Arbor.Actions do
          {:ok, bound_context} <- bind_authenticated_principal(context, agent_id),
          :ok <- require_authenticated_principal(action_module, agent_id, bound_context),
          {:ok, bound_context} <-
-           bind_action_authorization_resource(action_module, params, bound_context) do
+           bind_action_authorization_resource(action_module, params, bound_context),
+         :ok <- Arbor.Actions.RoutineEffect.require_catalog_enter(agent_id, bound_context) do
       with_execution_binding(action_module, bound_context, fn ->
         do_authorize_and_execute(agent_id, action_module, params, bound_context)
       end)
