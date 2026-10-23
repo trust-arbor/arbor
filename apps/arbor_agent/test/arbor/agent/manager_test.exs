@@ -909,6 +909,47 @@ defmodule Arbor.Agent.ManagerTest do
       refute Map.has_key?(profile.metadata || %{}, :mcp_servers)
       assert approvals(agent_id) == []
     end
+
+    test "security regression: unpinned npx is refused and nothing is stored or granted", %{
+      agent_id: agent_id,
+      authority: authority
+    } do
+      unpinned = %{
+        name: "github",
+        transport: :stdio,
+        command: ["npx", "-y", "@modelcontextprotocol/server-filesystem"]
+      }
+
+      assert {:error, {:unpinned_mcp_package, message}} =
+               Manager.set_mcp_config(agent_id, [unpinned], actor_authority: authority)
+
+      assert message =~ ~r/exact|x\.y\.z|version/i
+
+      {:ok, profile} = ProfileStore.load_profile(agent_id)
+      refute Map.has_key?(profile.metadata || %{}, :mcp_servers)
+      assert approvals(agent_id) == []
+    end
+
+    test "security regression: archived server-github is refused with its replacement", %{
+      agent_id: agent_id,
+      authority: authority
+    } do
+      archived = %{
+        name: "github",
+        transport: :stdio,
+        command: ["npx", "@modelcontextprotocol/server-github@0.6.2"]
+      }
+
+      assert {:error, {:archived_mcp_package, message}} =
+               Manager.set_mcp_config(agent_id, [archived], actor_authority: authority)
+
+      assert message =~ "server-github"
+      assert message =~ "ghcr.io/github/github-mcp-server"
+
+      {:ok, profile} = ProfileStore.load_profile(agent_id)
+      refute Map.has_key?(profile.metadata || %{}, :mcp_servers)
+      assert approvals(agent_id) == []
+    end
   end
 
   describe "connect_mcp_servers/1" do
