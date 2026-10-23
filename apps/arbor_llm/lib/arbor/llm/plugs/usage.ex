@@ -6,23 +6,29 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   Also enforces a configurable accumulated spend budget per agent
   (`provider_usage_context.principal_id`) and, when an API key is present on
-  the request, per SHA-256 fingerprint of that key. Exceeding either budget
+  the request, per SHA-256 fingerprint of that key. Callers with neither
+  identity share one unidentified/global bucket. Exceeding an explicit budget
   halts the call with `{:error, :budget_exceeded}` so later mutating plugs
   (including Dispatch) do not spend more provider credits.
 
   `@max_cost_usd` remains an observation sanitizer for a single usage payload.
-  The spend cap is separate and defaults to `$25` per identity for this VM
-  lifetime (ETS; resets on restart). Operators may raise, lower, or disable it:
+  The spend cap is separate and defaults to `$0` — money is never spent by
+  accident. With no configured cap, this plug halts with
+  `{:error, {:budget_not_configured, message}}` and the message names the
+  config key and env var that set a cap. The ledger is in-memory (ETS) and
+  resets when the VM restarts; a persistent budget is a follow-up.
 
       config :arbor_llm, Arbor.LLM.Plugs.Usage,
         default_max_cost_usd: 25.0,
+        unidentified_max_cost_usd: 1.0,
         agent_max_cost_usd: %{"agent_special" => 5.0},
         key_max_cost_usd: %{"<sha256 hex of api_key>" => 10.0}
 
-  `default_max_cost_usd: nil` disables the default cap; per-agent / per-key
-  overrides still apply when set. Invalid overrides fail closed (treated as
-  `$0`). Unattributed calls (no principal and no API key) are not gated, so
-  existing callers without identity keep working.
+  Or set `ARBOR_LLM_USAGE_BUDGET_USD` (attributed callers, and the fallback
+  for unidentified callers) and `ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD`
+  (callers with no agent id and no API key). These are distinct from
+  `ARBOR_DAILY_BUDGET` in `arbor_ai`. `nil` does not disable the cap.
+  Invalid overrides fail closed (treated as `$0`).
 
   Place this plug **before** Dispatch to refuse over-budget calls before they
   hit a provider. The default pipeline includes it at both ends: admit first,
@@ -63,7 +69,6 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   @max_token_count 1_000_000_000
   @max_cost_usd 1_000_000.0
-  @default_spend_budget_usd 25.0
   @max_string_bytes 128
   @max_event_id_bytes 64
   @recognized_operations [:complete, :embed_cloud, :embed_local]
@@ -74,11 +79,11 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   def call(%Call{} = call) do
     case admit_budget(call) do
-      {:error, :budget_exceeded} ->
-        Call.halt(%{call | result: {:error, :budget_exceeded}})
-
       :ok ->
         observe_usage(call)
+
+      {:error, reason} ->
+        Call.halt(%{call | result: {:error, reason}})
     end
   end
 
@@ -410,19 +415,24 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   defp admit_budget(call) do
     Enum.reduce_while(budget_identities(call), :ok, fn identity, :ok ->
-      if over_budget?(identity),
-        do: {:halt, {:error, :budget_exceeded}},
-        else: {:cont, :ok}
+      case budget_decision(identity) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
     end)
   end
 
-  defp over_budget?(identity) do
-    case budget_for(identity) do
-      nil ->
-        false
+  defp budget_decision(identity) do
+    case budget_source(identity) do
+      :unset ->
+        {:error, {:budget_not_configured, not_configured_message(identity)}}
 
-      budget ->
-        CostLedger.micros(identity) >= CostLedger.to_micros(budget)
+      {:explicit, budget} ->
+        if CostLedger.micros(identity) >= CostLedger.to_micros(budget) do
+          {:error, :budget_exceeded}
+        else
+          :ok
+        end
     end
   end
 
@@ -440,13 +450,18 @@ defmodule Arbor.LLM.Plugs.Usage do
     []
     |> maybe_put_agent(Map.get(metadata, :principal_id))
     |> maybe_put_key(request_api_key(request))
+    |> or_unidentified()
   end
 
   defp identities_from_provenance(provenance) when is_map(provenance) do
     []
     |> maybe_put_agent(Map.get(provenance, :principal_id))
     |> maybe_put_key_fingerprint(Map.get(provenance, :budget_key_fingerprint))
+    |> or_unidentified()
   end
+
+  defp or_unidentified([]), do: [{:unidentified, :global}]
+  defp or_unidentified(identities), do: identities
 
   defp maybe_put_agent(identities, principal_id)
        when is_binary(principal_id) and byte_size(principal_id) > 0 and
@@ -498,27 +513,84 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   defp find_api_key(_improper, _count), do: nil
 
-  defp budget_for({:agent, id}), do: override_or_default(:agent_max_cost_usd, id)
-  defp budget_for({:key, id}), do: override_or_default(:key_max_cost_usd, id)
+  defp budget_source({:agent, id}), do: override_or_default(:agent_max_cost_usd, id)
+  defp budget_source({:key, id}), do: override_or_default(:key_max_cost_usd, id)
+  defp budget_source({:unidentified, :global}), do: unidentified_budget_source()
 
   defp override_or_default(key, id) do
     case Map.fetch(config_map(key), id) do
-      {:ok, value} -> normalize_budget(value, 0.0)
-      :error -> default_budget()
+      {:ok, value} -> explicit_budget(value)
+      :error -> default_budget_source()
     end
   end
 
-  defp default_budget do
-    configured = Keyword.get(plug_config(), :default_max_cost_usd, @default_spend_budget_usd)
-    normalize_budget(configured, @default_spend_budget_usd)
+  defp unidentified_budget_source do
+    case env_budget("ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD") do
+      {:ok, value} ->
+        {:explicit, value}
+
+      :unset ->
+        case Keyword.fetch(plug_config(), :unidentified_max_cost_usd) do
+          {:ok, value} -> explicit_budget(value)
+          :error -> default_budget_source()
+        end
+    end
   end
 
-  defp normalize_budget(nil, _fallback), do: nil
+  defp default_budget_source do
+    case env_budget("ARBOR_LLM_USAGE_BUDGET_USD") do
+      {:ok, value} ->
+        {:explicit, value}
 
-  defp normalize_budget(value, _fallback) when is_number(value) and value >= 0,
-    do: value * 1.0
+      :unset ->
+        case Keyword.fetch(plug_config(), :default_max_cost_usd) do
+          {:ok, value} -> explicit_budget(value)
+          :error -> :unset
+        end
+    end
+  end
 
-  defp normalize_budget(_invalid, fallback), do: fallback
+  defp explicit_budget(value) do
+    case normalize_budget(value) do
+      {:ok, amount} -> {:explicit, amount}
+      :invalid -> {:explicit, 0.0}
+    end
+  end
+
+  defp normalize_budget(value) when is_number(value) and value >= 0, do: {:ok, value * 1.0}
+  defp normalize_budget(_invalid), do: :invalid
+
+  defp env_budget(var) do
+    case System.get_env(var) do
+      nil ->
+        :unset
+
+      raw ->
+        trimmed = String.trim(raw)
+
+        cond do
+          trimmed == "" ->
+            :unset
+
+          true ->
+            case Float.parse(trimmed) do
+              {value, remainder} when value >= 0 ->
+                if String.trim(remainder) == "", do: {:ok, value * 1.0}, else: {:ok, 0.0}
+
+              _ ->
+                {:ok, 0.0}
+            end
+        end
+    end
+  end
+
+  defp not_configured_message({:unidentified, :global}) do
+    "LLM spend is refused until a budget is configured. Set config :arbor_llm, Arbor.LLM.Plugs.Usage, :unidentified_max_cost_usd or env ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD (or the global :default_max_cost_usd / ARBOR_LLM_USAGE_BUDGET_USD)."
+  end
+
+  defp not_configured_message(_identity) do
+    "LLM spend is refused until a budget is configured. Set config :arbor_llm, Arbor.LLM.Plugs.Usage, :default_max_cost_usd or env ARBOR_LLM_USAGE_BUDGET_USD."
+  end
 
   defp plug_config do
     case Application.get_env(:arbor_llm, __MODULE__, []) do

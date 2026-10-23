@@ -4,7 +4,7 @@ defmodule Arbor.LLM.Plugs.Usage.CostLedger do
   @table __MODULE__
   @scale 1_000_000
 
-  @type identity :: {:agent, String.t()} | {:key, String.t()}
+  @type identity :: {:agent, String.t()} | {:key, String.t()} | {:unidentified, :global}
 
   @spec micros(identity()) :: non_neg_integer()
   def micros(identity) do

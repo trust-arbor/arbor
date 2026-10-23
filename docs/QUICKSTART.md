@@ -144,6 +144,29 @@ new agents. You can switch a running agent's model at any time from chat with
 `/model <model-id>` (`/model list` shows what is available); `mix arbor.agent
 status <name>` shows what it is currently using.
 
+Priced LLM calls through the usage plug are refused until you set a cap. The
+default is `$0` so money is never spent by accident. The ledger is in-memory
+(ETS) and resets when Arbor restarts.
+
+```bash
+# Global default for attributed callers, and fallback for unidentified callers
+ARBOR_LLM_USAGE_BUDGET_USD=25
+
+# Optional: callers with no agent id and no API key (also defaults to $0)
+# ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD=1
+```
+
+These are not `ARBOR_DAILY_BUDGET` (that one is `arbor_ai`). Per-agent and
+per-key caps go in config:
+
+```elixir
+config :arbor_llm, Arbor.LLM.Plugs.Usage,
+  default_max_cost_usd: 25.0,
+  unidentified_max_cost_usd: 1.0,
+  agent_max_cost_usd: %{"agent_<id>" => 5.0},
+  key_max_cost_usd: %{"<sha256 hex of api_key>" => 10.0}
+```
+
 ## 4. Start Arbor
 
 ```bash
