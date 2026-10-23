@@ -44,6 +44,7 @@ The supported named composition is the default pipeline, in this order:
 
 ```elixir
 [
+  Arbor.LLM.Plugs.Usage,
   Arbor.LLM.Plugs.ResponseLimit,
   Arbor.LLM.Plugs.EvalReplay,
   Arbor.LLM.Plugs.Dispatch,

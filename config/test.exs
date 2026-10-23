@@ -171,6 +171,14 @@ config :arbor_ai,
 config :arbor_llm,
   default_provider: System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter"
 
+# Production default for the usage-plug spend ceiling is $0 (refuse until an
+# operator sets a cap). Tests that do not configure a budget themselves need
+# an explicit suite-wide allowance so observation/streaming suites still run.
+# Do not copy these non-zero values into config/dev.exs or config/runtime.exs.
+config :arbor_llm, Arbor.LLM.Plugs.Usage,
+  default_max_cost_usd: 1_000.0,
+  unidentified_max_cost_usd: 1_000.0
+
 config :arbor_consensus, start_children: false
 # The Coordinator's code default is now fail-closed (`require_authorizer: true`,
 # 2026-10-11 cross-library review F-016). Tests that exercise the deny branch
