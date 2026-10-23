@@ -3613,34 +3613,40 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     if length(files) > @max_changed_files do
       {:error, :too_many_changed_files}
     else
-      normalized =
-        files
-        |> Enum.map(&normalize_path/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.uniq()
-        |> Enum.sort()
+      classified = Enum.map(files, &classify_changed_path/1)
+      dropped = for {:error, entry} <- classified, do: entry
 
-      if Enum.any?(normalized, &(byte_size(&1) > 1_024)) do
-        {:error, :changed_file_path_too_long}
+      if dropped != [] do
+        {:error, {:dropped_changed_files, dropped}}
       else
-        {:ok, normalized}
+        normalized =
+          classified
+          |> Enum.map(fn {:ok, path} -> path end)
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        if Enum.any?(normalized, &(byte_size(&1) > 1_024)) do
+          {:error, :changed_file_path_too_long}
+        else
+          {:ok, normalized}
+        end
       end
     end
   end
 
-  defp normalize_path(path) when is_binary(path) do
+  defp classify_changed_path(path) when is_binary(path) do
     trimmed = String.trim(path)
 
     cond do
-      trimmed == "" -> nil
-      String.contains?(trimmed, <<0>>) -> nil
-      String.starts_with?(trimmed, "/") -> nil
-      String.contains?(trimmed, "..") -> nil
-      true -> trimmed
+      trimmed == "" -> {:error, %{path: path, reason: :empty}}
+      String.contains?(trimmed, <<0>>) -> {:error, %{path: path, reason: :nul}}
+      String.starts_with?(trimmed, "/") -> {:error, %{path: path, reason: :absolute}}
+      String.contains?(trimmed, "..") -> {:error, %{path: path, reason: :parent_traversal}}
+      true -> {:ok, trimmed}
     end
   end
 
-  defp normalize_path(_), do: nil
+  defp classify_changed_path(path), do: {:error, %{path: path, reason: :not_a_string}}
 
   defp empty_topology_change do
     %{

@@ -422,6 +422,29 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.select(["apps/ghost/lib/x.ex"], graph)
   end
 
+  test "security regression: normalize_path reports dropped changed-file paths instead of silently omitting them" do
+    assert {:ok, graph} = Core.build_graph([%{dir: "alpha", app: "alpha", deps: []}])
+
+    assert {:error, {:dropped_changed_files, dropped}} =
+             Core.select(
+               [
+                 "apps/alpha/lib/alpha.ex",
+                 "",
+                 "/tmp/apps/alpha/lib/abs.ex",
+                 "apps/alpha/lib/../secret.ex",
+                 "apps/alpha/lib/nul" <> <<0>> <> ".ex"
+               ],
+               graph
+             )
+
+    reasons = Map.new(dropped, &{&1.reason, true})
+    assert reasons[:empty]
+    assert reasons[:absolute]
+    assert reasons[:parent_traversal]
+    assert reasons[:nul]
+    assert Enum.all?(dropped, &is_binary(&1.path))
+  end
+
   test "diff_blob_manifests reports adds, deletes, and mode/oid edits only" do
     base = [
       %{path: "apps/alpha/lib/a.ex", mode: "100644", oid: String.duplicate("a", 40)},
