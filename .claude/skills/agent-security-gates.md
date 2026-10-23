@@ -388,8 +388,13 @@ read-only workloads on exact read/list/search child capabilities.
   its debug fallback includes complete unsupported notification payloads.
 - **Claude sessions are strict (2026-09-27).** Every ClaudeSDK launch gets
   `--strict-mcp-config`, so servers from the user's own Claude configuration
-  never join, even when the bound list is empty (see gate 28). Codex still reads
-  `~/.codex/config.toml`; RuntimeHome has no private Codex home yet.
+  never join, even when the bound list is empty (see gate 28). Codex sessions
+  get a private `CODEX_HOME` under the runtime-home root (0700), seeded with a
+  copied 0600 `auth.json` when one is configured and `mcp_servers = {}`. Arbor
+  also sets adapter `extra_args` `["-c", "mcp_servers={}"]`;
+  `ExMCP.ACP.Adapters.Codex.command/1` currently ignores those args and must
+  prepend them before `app-server` so a project `.codex/config.toml` cannot
+  reintroduce servers.
 
 ## 13. Cluster security-sync is optional until subscribers are configured
 

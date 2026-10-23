@@ -12,6 +12,15 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
   @kiro_home_directory "kiro"
+  @codex_home_directory "codex"
+  @codex_auth_filename "auth.json"
+  @codex_config_filename "config.toml"
+  @codex_isolated_config """
+  # Arbor session-private Codex home. Ambient ~/.codex/config.toml is not loaded.
+  mcp_servers = {}
+  """
+  @codex_mcp_override_args ["-c", "mcp_servers={}"]
+  @max_codex_auth_bytes 65_536
   @antigravity_home_directory "antigravity-acp"
   @antigravity_token_filename "acp_token.json"
   @antigravity_settings_filename "settings.json"
@@ -618,6 +627,14 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
+  defp inject_provider_home(client_opts, runtime_home, :codex, _opts) do
+    if Keyword.has_key?(client_opts, :adapter) do
+      isolate_codex_home(client_opts, runtime_home)
+    else
+      {:error, :codex_runtime_adapter_transport_required}
+    end
+  end
+
   defp inject_provider_home(client_opts, runtime_home, :antigravity, _opts) do
     if Keyword.get(client_opts, :command) != ["antigravity-acp"] or
          Enum.any?(@antigravity_forbidden_client_keys, &Keyword.has_key?(client_opts, &1)) do
@@ -640,6 +657,222 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   defp inject_provider_home(client_opts, _runtime_home, _provider, _opts), do: {:ok, client_opts}
+
+  # Codex app-server reads $CODEX_HOME/config.toml (default ~/.codex). Isolate
+  # each session under the runtime-home root and copy auth.json as a regular
+  # 0600 file — never a symlink — so a later `codex mcp add` cannot persist
+  # into the operator tree or a later session.
+  defp isolate_codex_home(client_opts, runtime_home) do
+    case Keyword.get(client_opts, :adapter_opts, []) do
+      adapter_opts when is_list(adapter_opts) ->
+        if Keyword.keyword?(adapter_opts) do
+          codex_home = Path.join(runtime_home, @codex_home_directory)
+          incoming_env = Keyword.get(adapter_opts, :env)
+
+          with :ok <-
+                 ensure_private_provider_home(codex_home, :codex_runtime_home_unavailable),
+               :ok <- stage_codex_config(codex_home),
+               :ok <- stage_codex_auth(codex_home, incoming_env),
+               {:ok, env} <- put_env_values(incoming_env, [{"CODEX_HOME", codex_home}]),
+               {:ok, adapter_opts} <-
+                 put_codex_mcp_override_args(Keyword.put(adapter_opts, :env, env)) do
+            adapter_opts = Keyword.put(adapter_opts, :environment_policy, :isolated)
+            {:ok, Keyword.put(client_opts, :adapter_opts, adapter_opts)}
+          end
+        else
+          {:error, :invalid_acp_adapter_options}
+        end
+
+      _other ->
+        {:error, :invalid_acp_adapter_options}
+    end
+  end
+
+  defp stage_codex_config(codex_home) do
+    stage_codex_private_file(
+      Path.join(codex_home, @codex_config_filename),
+      @codex_isolated_config
+    )
+  end
+
+  defp stage_codex_auth(codex_home, env) do
+    dest = Path.join(codex_home, @codex_auth_filename)
+
+    case codex_auth_source(env) do
+      :none ->
+        :ok
+
+      {:optional, source} ->
+        case File.lstat(source) do
+          {:error, :enoent} -> :ok
+          _other -> copy_codex_auth(source, dest)
+        end
+
+      {:required, source} ->
+        copy_codex_auth(source, dest)
+    end
+  end
+
+  defp copy_codex_auth(source, dest) do
+    with {:ok, bytes} <- read_codex_auth(source) do
+      stage_codex_private_file(dest, bytes)
+    end
+  end
+
+  defp codex_auth_source(env) do
+    case Application.get_env(:arbor_ai, :codex_auth_file) do
+      path when is_binary(path) and path != "" ->
+        {:required, path}
+
+      _other ->
+        case System.get_env("ARBOR_CODEX_AUTH_FILE") do
+          path when is_binary(path) and path != "" ->
+            {:required, path}
+
+          _missing ->
+            case implicit_codex_auth_path(env) do
+              nil -> :none
+              path -> {:optional, path}
+            end
+        end
+    end
+  end
+
+  defp implicit_codex_auth_path(env) do
+    cond do
+      home = env_string(env, "CODEX_HOME") ->
+        Path.join(home, @codex_auth_filename)
+
+      home = System.get_env("CODEX_HOME") ->
+        if is_binary(home) and home != "", do: Path.join(home, @codex_auth_filename)
+
+      home = System.user_home() ->
+        if is_binary(home) and home != "",
+          do: Path.join([home, ".codex", @codex_auth_filename])
+
+      true ->
+        nil
+    end
+  end
+
+  defp env_string(env, key) when is_map(env), do: env_string(Map.to_list(env), key)
+
+  defp env_string(env, key) when is_list(env) and is_binary(key) do
+    Enum.find_value(env, fn
+      {name, value} when is_binary(value) and value != "" ->
+        case normalize_env_key(name) do
+          {:ok, ^key} -> value
+          _other -> nil
+        end
+
+      _other ->
+        nil
+    end)
+  end
+
+  defp env_string(_env, _key), do: nil
+
+  defp read_codex_auth(path) do
+    with {:ok, before} <- codex_auth_identity(path),
+         {:ok, bytes} <-
+           map_codex_auth_read(Arbor.LLM.read_bounded_regular_file(path, @max_codex_auth_bytes)),
+         true <- byte_size(bytes) == before.size or {:error, :codex_auth_changed},
+         {:ok, after_stat} <- codex_auth_identity(path),
+         true <-
+           grok_file_identity(before) == grok_file_identity(after_stat) or
+             {:error, :codex_auth_changed} do
+      {:ok, bytes}
+    else
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _other -> {:error, :codex_auth_unavailable}
+    end
+  end
+
+  defp codex_auth_identity(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = stat}
+      when (mode &&& 0o7777) == 0o600 and size > 0 and size <= @max_codex_auth_bytes ->
+        {:ok, stat}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :codex_auth_symlink}
+
+      {:ok, %File.Stat{type: :regular, links: links}} when links != 1 ->
+        {:error, :codex_auth_hardlinked}
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} when (mode &&& 0o7777) != 0o600 ->
+        {:error, :codex_auth_insecure}
+
+      {:ok, %File.Stat{type: :regular, size: 0}} ->
+        {:error, :codex_auth_unavailable}
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, :codex_auth_too_large}
+
+      {:ok, _other} ->
+        {:error, :codex_auth_nonregular}
+
+      {:error, :enoent} ->
+        {:error, :codex_auth_missing}
+
+      {:error, _reason} ->
+        {:error, :codex_auth_unavailable}
+    end
+  end
+
+  defp map_codex_auth_read({:ok, bytes}), do: {:ok, bytes}
+  defp map_codex_auth_read({:error, :symlink_rejected}), do: {:error, :codex_auth_symlink}
+  defp map_codex_auth_read({:error, :hardlink_rejected}), do: {:error, :codex_auth_hardlinked}
+
+  defp map_codex_auth_read({:error, :file_changed_during_read}),
+    do: {:error, :codex_auth_changed}
+
+  defp map_codex_auth_read({:error, {:file_bytes_exceeded, _maximum}}),
+    do: {:error, :codex_auth_too_large}
+
+  defp map_codex_auth_read({:error, _reason}), do: {:error, :codex_auth_unavailable}
+
+  defp stage_codex_private_file(path, content) do
+    case write_private_file(path, content, :codex_runtime_home_unavailable) do
+      :ok -> :ok
+      {:error, :already_exists} -> verify_codex_private_file(path, content)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp verify_codex_private_file(path, content) do
+    with {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size}} <- File.lstat(path),
+         true <- (mode &&& 0o7777) == 0o600,
+         true <- size == byte_size(content),
+         {:ok, ^content} <- Arbor.LLM.read_bounded_regular_file(path, byte_size(content)) do
+      :ok
+    else
+      _other -> {:error, :codex_runtime_home_unavailable}
+    end
+  end
+
+  defp put_codex_mcp_override_args(adapter_opts) do
+    case Keyword.get(adapter_opts, :extra_args, []) do
+      existing when is_list(existing) ->
+        extra_args =
+          if extra_args_include_codex_mcp_override?(existing) do
+            existing
+          else
+            existing ++ @codex_mcp_override_args
+          end
+
+        {:ok, Keyword.put(adapter_opts, :extra_args, extra_args)}
+
+      _other ->
+        {:error, :invalid_acp_adapter_options}
+    end
+  end
+
+  defp extra_args_include_codex_mcp_override?(args) do
+    args
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.any?(&(&1 == @codex_mcp_override_args))
+  end
 
   defp ensure_private_provider_home(path, failure_reason) do
     case File.lstat(path) do
