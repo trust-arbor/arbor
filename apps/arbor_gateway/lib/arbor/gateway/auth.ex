@@ -13,6 +13,8 @@ defmodule Arbor.Gateway.Auth do
   import Plug.Conn
   @behaviour Plug
 
+  alias Arbor.Gateway.CommittedDevKey
+
   @impl true
   def init(opts), do: opts
 
@@ -32,19 +34,25 @@ defmodule Arbor.Gateway.Auth do
         |> halt()
 
       expected_key ->
-        case extract_key(conn) do
-          {:ok, presented_key} ->
-            # M4: pattern-match on ^expected_key is NOT constant-time and
-            # leaks the key character-by-character through timing analysis.
-            # Plug.Crypto.secure_compare/2 is constant-time (XOR-based).
-            if Plug.Crypto.secure_compare(presented_key, expected_key) do
-              conn
-            else
-              reject(conn, "Invalid API key")
-            end
+        case CommittedDevKey.admit(api_key: expected_key) do
+          {:error, message} ->
+            refuse_committed_dev_key(conn, message)
 
-          :error ->
-            reject(conn, no_key_message(conn))
+          :ok ->
+            case extract_key(conn) do
+              {:ok, presented_key} ->
+                # M4: pattern-match on ^expected_key is NOT constant-time and
+                # leaks the key character-by-character through timing analysis.
+                # Plug.Crypto.secure_compare/2 is constant-time (XOR-based).
+                if Plug.Crypto.secure_compare(presented_key, expected_key) do
+                  conn
+                else
+                  reject(conn, "Invalid API key")
+                end
+
+              :error ->
+                reject(conn, no_key_message(conn))
+            end
         end
     end
   end
@@ -112,6 +120,19 @@ defmodule Arbor.Gateway.Auth do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(401, Jason.encode!(%{error: "Unauthorized", detail: message}))
+    |> halt()
+  end
+
+  defp refuse_committed_dev_key(conn, message) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(
+      503,
+      Jason.encode!(%{
+        error: "Committed development API key refused",
+        detail: message
+      })
+    )
     |> halt()
   end
 end

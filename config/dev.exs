@@ -263,7 +263,8 @@ config :arbor_kernel, signals: [allow_open_authorizer: true]
 # Monitor — short suppression window for demo (30 seconds instead of 30 minutes)
 config :arbor_kernel, monitor: [suppression_window_ms: :timer.seconds(30)]
 
-# Gateway — dev API key for local MCP access
+# Gateway — dev API key for local MCP access. Arbor.Gateway.CommittedDevKey
+# refuses this literal outside MIX_ENV=dev or when bind_ip is not loopback.
 config :arbor_gateway, api_key: "arbor-dev-key"
 
 # ACP Pool — allow more concurrent Claude CLI sessions in dev

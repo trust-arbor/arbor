@@ -1258,6 +1258,11 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 - **The dashboard binds loopback (F-001).** `ARBOR_DASHBOARD_BIND_IP=0.0.0.0` is the
   explicit LAN opt-in; set `DASHBOARD_USER`/`DASHBOARD_PASS` (now actually mounted,
   F-012) before doing so.
+- **Committed `arbor-dev-key` is loopback `:dev` only (2026-10-23, group X).**
+  `config/dev.exs` ships that literal for local MCP. Outside `MIX_ENV=dev`, or
+  when `:bind_ip` is not loopback, Gateway boot fails and Auth returns 503.
+  **Symptom:** `"Committed development API key refused"`. **Action:** set a
+  unique `ARBOR_GATEWAY_API_KEY` and keep the listener on `127.0.0.1`.
 - **Dashboard mutations require the browser subject's real session proof
   (2026-10-15, F-020).** Proposal accept/reject/defer authorizes
   `arbor://memory/write/<target>`; channel creation authorizes

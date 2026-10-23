@@ -17,6 +17,7 @@ defmodule Arbor.Gateway.CommittedDevKeySecurityRegressionTest do
   import Plug.Conn
 
   alias Arbor.Gateway.Auth
+  alias Arbor.Gateway.CommittedDevKey
 
   @moduletag :fast
 
@@ -97,6 +98,86 @@ defmodule Arbor.Gateway.CommittedDevKeySecurityRegressionTest do
 
     conn = authenticate("unique-prod-like-key")
     refute conn.halted
+  end
+
+  test "security regression: :dev plus loopback is the only admission for arbor-dev-key" do
+    assert :ok =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :dev,
+               bind_ip: {127, 0, 0, 1}
+             )
+
+    assert {:error, not_prod} =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :prod,
+               bind_ip: {127, 0, 0, 1}
+             )
+
+    assert not_prod =~ "arbor-dev-key"
+    assert not_prod =~ ":prod"
+
+    assert {:error, not_test} =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :test,
+               bind_ip: {127, 0, 0, 1}
+             )
+
+    assert not_test =~ ":test"
+
+    assert {:error, any_iface} =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :dev,
+               bind_ip: {0, 0, 0, 0}
+             )
+
+    assert any_iface =~ "non-loopback"
+    assert any_iface =~ "arbor-dev-key"
+
+    assert {:error, lan} =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :dev,
+               bind_ip: {10, 0, 0, 5}
+             )
+
+    assert lan =~ "non-loopback"
+
+    assert :ok =
+             CommittedDevKey.admit(
+               api_key: "unique-prod-like-key",
+               env: :prod,
+               bind_ip: {0, 0, 0, 0}
+             )
+  end
+
+  test "security regression: boot_check fails prod-like config with arbor-dev-key" do
+    assert {:error, {:committed_dev_key_refused, message}} =
+             CommittedDevKey.boot_check(
+               api_key: @dev_key,
+               env: :prod,
+               bind_ip: {127, 0, 0, 1}
+             )
+
+    assert message =~ "arbor-dev-key"
+    assert message =~ "ARBOR_GATEWAY_API_KEY"
+
+    assert :ok =
+             CommittedDevKey.boot_check(
+               api_key: "unique-prod-like-key",
+               env: :prod,
+               bind_ip: {0, 0, 0, 0}
+             )
+
+    assert :ok =
+             CommittedDevKey.boot_check(
+               api_key: @dev_key,
+               env: :dev,
+               bind_ip: {127, 0, 0, 1}
+             )
   end
 
   defp authenticate(key) do
