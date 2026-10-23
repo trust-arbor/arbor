@@ -472,15 +472,15 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   defp remove_redaction_filter do
-    case :logger.remove_handler_filter(:default, :api_key_redaction) do
+    case :logger.remove_primary_filter(:api_key_redaction) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
   end
 
   defp logger_filter_ids do
-    case :logger.get_handler_config(:default) do
-      {:ok, %{filters: filters}} -> Enum.map(filters, fn {id, _filter} -> id end)
+    case :logger.get_primary_config() do
+      %{filters: filters} when is_list(filters) -> Enum.map(filters, fn {id, _filter} -> id end)
       _ -> []
     end
   end

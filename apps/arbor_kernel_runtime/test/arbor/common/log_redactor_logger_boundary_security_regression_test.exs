@@ -1,11 +1,11 @@
 defmodule Arbor.Common.LogRedactorLoggerBoundarySecurityRegressionTest do
   @moduledoc """
-  Exercises redaction through OTP Logger's handler-filter boundary.
+  Exercises redaction through OTP Logger's filter boundary.
 
   The lower-level walker tests remain useful, but a production regression can
   also come from failing to install or invoke that walker for real Logger
   events. This handler observes the event only after OTP has applied the same
-  filter tuple installed on the default handler by Arbor.Common.Application.
+  filter tuple installed as a primary filter by Arbor.Common.Application.
   """
 
   use ExUnit.Case, async: false
@@ -65,7 +65,7 @@ defmodule Arbor.Common.LogRedactorLoggerBoundarySecurityRegressionTest do
 
   @tag spec: "KSEC-014"
   test "security regression: real Logger events redact chardata, format args, and metadata" do
-    assert default_handler_uses_redaction_filter?()
+    assert primary_filter_uses_redaction?()
 
     chardata_secret = "xai-" <> String.duplicate("a", 24)
     metadata_secret = "gsk_" <> String.duplicate("b", 24)
@@ -147,18 +147,20 @@ defmodule Arbor.Common.LogRedactorLoggerBoundarySecurityRegressionTest do
     receive_loop.(receive_loop)
   end
 
-  defp default_handler_uses_redaction_filter? do
-    with {:ok, %{filters: filters}} <- :logger.get_handler_config(:default) do
-      Enum.any?(filters, fn
-        {:api_key_redaction, {filter, :log}} when is_function(filter, 2) ->
-          :erlang.fun_info(filter, :module) == {:module, LogRedactor} and
-            :erlang.fun_info(filter, :name) == {:name, :filter}
+  defp primary_filter_uses_redaction? do
+    case :logger.get_primary_config() do
+      %{filters: filters} when is_list(filters) ->
+        Enum.any?(filters, fn
+          {:api_key_redaction, {filter, :log}} when is_function(filter, 2) ->
+            :erlang.fun_info(filter, :module) == {:module, LogRedactor} and
+              :erlang.fun_info(filter, :name) == {:name, :filter}
 
-        _other ->
-          false
-      end)
-    else
-      _other -> false
+          _other ->
+            false
+        end)
+
+      _other ->
+        false
     end
   end
 

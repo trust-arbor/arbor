@@ -236,6 +236,20 @@ defmodule Arbor.Common.SensitiveDataTest do
       assert String.contains?(redacted, ~s("public":"keep"))
     end
 
+    @tag :security_regression
+    test "security regression: redacts Bearer values of any length" do
+      text = "Authorization: Bearer abc"
+      findings = SensitiveData.scan_secrets(text)
+      redacted = SensitiveData.redact_secrets(text)
+
+      assert Enum.any?(findings, fn {label, match} ->
+               label == "Bearer Token" and String.contains?(match, "abc")
+             end)
+
+      refute String.contains?(redacted, "abc")
+      assert String.contains?(redacted, "[REDACTED]")
+    end
+
     test "security regression: redacts high entropy secret findings" do
       blob = "mF9aQ2rX8vL4nP6sT1uW3yZ5bC7dE9gH0jK2lM4oP6qR8sT0"
       redacted = SensitiveData.redact_secrets("payload=#{blob}")

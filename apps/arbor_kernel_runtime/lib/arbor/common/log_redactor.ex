@@ -83,7 +83,7 @@ defmodule Arbor.Common.LogRedactor do
     %{log_event | msg: {:string, otp_report_string(label, report)}}
   end
 
-  # Logger's primary translator filter runs BEFORE this handler filter. When
+  # Logger's primary translator filter runs BEFORE this redaction filter. When
   # it understands a report it keeps `{:report, report}` but adds the rendered
   # text under `:elixir_translation` and points `meta.report_cb` at a callback
   # that prints only that key. A gen_server/gen_statem terminate report is a

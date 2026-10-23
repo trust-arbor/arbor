@@ -107,6 +107,8 @@ defmodule Arbor.Common.SensitiveData do
   @pgp_private_key_pattern ~r/-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----(?:.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----)?/s
   @openai_key_pattern ~r/sk-(?!ant-)(?:proj-|svcacct-)?[a-zA-Z0-9_-]{20,}/
   @cookie_argument_pattern ~r/(?:-setcookie|--cookie)\s+[^\s]+/
+  # Any non-empty token. Short Bearer values (e.g. "Bearer abc") are still secrets.
+  @bearer_token_pattern ~r/Bearer\s+[a-zA-Z0-9\-._~+\/]+/
 
   @doc false
   def secret_patterns do
@@ -132,7 +134,7 @@ defmodule Arbor.Common.SensitiveData do
       ~r/glpat-[a-zA-Z0-9\-_]{20,}/,
       ~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/,
       ~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/,
-      ~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/
+      @bearer_token_pattern
     ]
   end
 
@@ -160,7 +162,7 @@ defmodule Arbor.Common.SensitiveData do
       {@pgp_private_key_pattern, "PGP Private Key"},
       {~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/, "JWT Token"},
       {~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/, "Database Connection String"},
-      {~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/, "Bearer Token"},
+      {@bearer_token_pattern, "Bearer Token"},
       {~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']{8,}["']/, "Password in Config"},
       {~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
        "API Key/Token"}

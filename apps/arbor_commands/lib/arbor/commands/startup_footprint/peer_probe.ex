@@ -233,10 +233,9 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
 
   defp logger_filter_count do
     filters =
-      case :logger.get_handler_config(:default) do
-        {:ok, %{filters: filters}} when is_list(filters) -> filters
-        {:ok, config} when is_map(config) -> Map.get(config, :filters, [])
-        {:ok, config} when is_list(config) -> Keyword.get(config, :filters, [])
+      case :logger.get_primary_config() do
+        %{filters: filters} when is_list(filters) -> filters
+        config when is_map(config) -> Map.get(config, :filters, [])
         _ -> []
       end
 
