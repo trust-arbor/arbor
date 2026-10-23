@@ -51,6 +51,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
           | {:reinforce, String.t(), String.t(), DateTime.t()}
           | {:approve_pending, String.t(), String.t(), String.t(), DateTime.t()}
           | {:reject_pending, String.t(), String.t()}
+          | {:remove_node, String.t(), String.t()}
           | {:cascade_recall, String.t(), String.t(), number(), keyword(), DateTime.t()}
           | {:consolidate, String.t(), :basic | :enhanced, keyword(), DateTime.t()}
           | {:ack_maintenance_effect, String.t()}
@@ -136,6 +137,16 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @spec reject_pending(String.t()) :: {:ok, t()} | {:error, atom()}
   def reject_pending(pending_id) do
     validate_new({:reject_pending, stable_operation_id("reject_pending", pending_id), pending_id})
+  end
+
+  @spec remove_node(String.t()) :: {:ok, t()} | {:error, atom()}
+  def remove_node(node_id) do
+    validate_new({:remove_node, stable_operation_id("remove_node", node_id), node_id})
+  end
+
+  @spec remove_node(String.t(), String.t()) :: {:ok, t()} | {:error, atom()}
+  def remove_node(operation_id, node_id) do
+    validate_new({:remove_node, operation_id, node_id})
   end
 
   @spec cascade_recall(String.t(), String.t(), number(), keyword()) ::
@@ -330,6 +341,10 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   def validate({:reject_pending, operation_id, pending_id}) do
     with :ok <- validate_identifier(operation_id), do: validate_identifier(pending_id)
+  end
+
+  def validate({:remove_node, operation_id, node_id}) do
+    with :ok <- validate_identifier(operation_id), do: validate_identifier(node_id)
   end
 
   def validate({:cascade_recall, operation_id, node_id, boost_amount, opts, %DateTime{}}) do
@@ -541,6 +556,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     end
   end
 
+  defp apply_once({:remove_node, _operation_id, node_id}, graph) do
+    case KnowledgeGraph.remove_node(graph, node_id) do
+      {:ok, graph} -> {:ok, graph, :ok}
+      {:error, :not_found} -> {:ok, graph, :ok}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp apply_once(
          {:cascade_recall, _operation_id, node_id, boost_amount, opts, occurred_at},
          graph
@@ -606,6 +629,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   defp logical_operation({:reject_pending, operation_id, pending_id}),
     do: {:ok, operation_id, "reject_pending", {:reject_pending, pending_id}}
 
+  defp logical_operation({:remove_node, operation_id, node_id}),
+    do: {:ok, operation_id, "remove_node", {:remove_node, node_id}}
+
   defp logical_operation(
          {:cascade_recall, operation_id, node_id, boost_amount, opts, _occurred_at}
        ),
@@ -649,7 +675,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
        do: {:ok, node_id}
 
   defp receipt_result(kind, :ok)
-       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending"],
+       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending", "remove_node"],
        do: {:ok, "ok"}
 
   defp receipt_result("cascade_recall", result) when is_map(result), do: {:ok, "ok"}
@@ -710,7 +736,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   defp replay_result(_operation_id, kind, "ok", graph)
-       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending"],
+       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending", "remove_node"],
        do: {:ok, graph, :ok, :replayed}
 
   defp replay_result(_operation_id, "cascade_recall", "ok", graph),

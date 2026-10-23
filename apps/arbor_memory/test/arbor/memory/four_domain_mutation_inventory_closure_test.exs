@@ -185,6 +185,12 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
                            {"code_store.ex", {:delete, 2}, {:ets, :insert, 2}},
                            {"code_store.ex", {:delete, 2},
                             {Arbor.Memory.MemoryStore, :delete, 2}},
+                           {"code_store.ex", {:delete_pattern_embedding, 2},
+                            {Arbor.Memory.MemoryStore, :delete_embedding, 3}},
+                           {"code_store.ex", {:remove_derived_from_nodes, 2},
+                            {Arbor.Memory.GraphOps, :get_graph, 1}},
+                           {"code_store.ex", {:remove_derived_from_nodes, 2},
+                            {Arbor.Memory.GraphOps, :remove_knowledge, 2}},
                            {"code_store.ex", {:clear, 1},
                             {Arbor.Memory.MutationAdmission, :acquire, 1}},
                            {"code_store.ex", {:clear, 1},
@@ -1006,9 +1012,14 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
                :cancel_async,
                :delete,
                :delete_by_prefix,
-               :delete_tainted_authoritative
+               :delete_tainted_authoritative,
+               :delete_embedding
              ] ->
           {:ok, {Arbor.Memory.MemoryStore, fun, arity}}
+
+        Arbor.Memory.GraphOps
+        when fun in [:get_graph, :remove_knowledge] ->
+          {:ok, {Arbor.Memory.GraphOps, fun, arity}}
 
         Arbor.Persistence
         when fun in [

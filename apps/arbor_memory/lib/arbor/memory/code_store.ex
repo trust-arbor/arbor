@@ -28,6 +28,7 @@ defmodule Arbor.Memory.CodeStore do
   use GenServer
 
   alias Arbor.Contracts.Security.TaintedValue
+  alias Arbor.Memory.GraphOps
   alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.MutationAdmission
 
@@ -225,25 +226,39 @@ defmodule Arbor.Memory.CodeStore do
 
   @doc """
   Delete a specific code pattern.
+
+  Also removes the pattern's MemoryStore embedding and any knowledge-graph
+  nodes with an outgoing `:derived_from` edge to the pattern source.
   """
   @spec delete(String.t(), String.t()) :: :ok | {:error, :store_unavailable}
   def delete(agent_id, entry_id) do
-    case MutationAdmission.acquire(agent_id) do
-      {:ok, lease} ->
-        try do
-          entries =
-            get_agent_entries(agent_id)
-            |> Enum.reject(&(&1.id == entry_id))
+    result =
+      case MutationAdmission.acquire(agent_id) do
+        {:ok, lease} ->
+          try do
+            entries =
+              get_agent_entries(agent_id)
+              |> Enum.reject(&(&1.id == entry_id))
 
-          :ets.insert(@ets_table, {agent_id, entries})
-          MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
-          :ok
-        after
-          _ = MutationAdmission.release(lease)
-        end
+            :ets.insert(@ets_table, {agent_id, entries})
+            MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
+            _ = delete_pattern_embedding(agent_id, entry_id)
+            :ok
+          after
+            _ = MutationAdmission.release(lease)
+          end
 
-      {:error, _reason} ->
-        {:error, :store_unavailable}
+        {:error, _reason} ->
+          {:error, :store_unavailable}
+      end
+
+    case result do
+      :ok ->
+        _ = remove_derived_from_nodes(agent_id, entry_id)
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -366,6 +381,63 @@ defmodule Arbor.Memory.CodeStore do
       [{^agent_id, entries}] -> entries
       [] -> []
     end
+  end
+
+  defp delete_pattern_embedding(agent_id, entry_id) do
+    case MemoryStore.delete_embedding(@namespace, "#{agent_id}:#{entry_id}", agent_id: agent_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug(
+          "code pattern embedding delete failed for #{agent_id}/#{entry_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp remove_derived_from_nodes(agent_id, entry_id) do
+    case GraphOps.get_graph(agent_id) do
+      {:ok, graph} ->
+        graph
+        |> derived_from_node_ids(entry_id)
+        |> Enum.each(fn node_id ->
+          _ = GraphOps.remove_knowledge(agent_id, node_id)
+        end)
+
+        :ok
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp derived_from_node_ids(graph, entry_id) do
+    source_ids =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(&pattern_source_node?(&1, entry_id))
+      |> MapSet.new(& &1.id)
+      |> MapSet.put(entry_id)
+
+    graph.edges
+    |> Enum.flat_map(fn {source_id, edges} ->
+      if Enum.any?(edges, &derived_from_source?(&1, source_ids)),
+        do: [source_id],
+        else: []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp pattern_source_node?(node, entry_id) do
+    node.id == entry_id or
+      Map.get(node.metadata || %{}, :code_pattern_id) == entry_id or
+      Map.get(node.metadata || %{}, "code_pattern_id") == entry_id
+  end
+
+  defp derived_from_source?(edge, source_ids) do
+    edge.relationship == :derived_from and MapSet.member?(source_ids, edge.target_id)
   end
 
   defp generate_id do
