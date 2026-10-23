@@ -1,10 +1,9 @@
 defmodule Arbor.LLM.Plugs.UsageBudgetSecurityRegressionTest do
   @moduledoc """
-  Security regression: accumulated LLM spend must be gated per agent.
+  Security regression: LLM spend is refused until an operator sets a cap.
 
-  `@max_cost_usd 1_000_000.0` in `Arbor.LLM.Plugs.Usage` is only an observation
-  sanitizer for a single usage payload. Without a real spend cap, a stolen
-  agent identity or runaway loop can burn provider credits indefinitely.
+  The default budget is `$0`. Unconfigured and unidentified callers must not
+  reach a provider. A configured cap admits spend only up to that limit.
   """
 
   use ExUnit.Case, async: false
@@ -47,7 +46,53 @@ defmodule Arbor.LLM.Plugs.UsageBudgetSecurityRegressionTest do
       end
     end)
 
+    Usage.reset_cost_ledger()
     :ok
+  end
+
+  test "security regression: an unconfigured caller is refused before the provider" do
+    clear_usage_budget_config()
+
+    blocked =
+      Call.new(:complete, {model(), [], []})
+      |> Call.put_metadata(%{principal_id: unique_agent("unconfigured")})
+      |> Usage.call()
+
+    assert blocked.halted
+    assert {:error, {:budget_not_configured, message}} = blocked.result
+    assert message =~ "config :arbor_llm, Arbor.LLM.Plugs.Usage, :default_max_cost_usd"
+    assert message =~ "ARBOR_LLM_USAGE_BUDGET_USD"
+    assert is_nil(blocked.metadata[:usage_emitted])
+  end
+
+  test "security regression: an unidentified caller is refused before the provider" do
+    clear_usage_budget_config()
+
+    blocked = Usage.call(Call.new(:complete, {model(), [], []}))
+
+    assert blocked.halted
+    assert {:error, {:budget_not_configured, message}} = blocked.result
+    assert message =~ "config :arbor_llm, Arbor.LLM.Plugs.Usage, :unidentified_max_cost_usd"
+    assert message =~ "ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD"
+    assert is_nil(blocked.metadata[:usage_emitted])
+  end
+
+  test "security regression: a configured cap allows spend up to the limit" do
+    agent_id = unique_agent("limit")
+    first = Usage.call(attributed_call(agent_id, 0.6))
+    second = Usage.call(attributed_call(agent_id, 0.4))
+    blocked = Usage.call(attributed_call(agent_id, 0.1))
+
+    refute first.halted
+    assert first.metadata.usage_emitted
+    refute match?({:error, :budget_exceeded}, first.result)
+    refute match?({:error, {:budget_not_configured, _}}, first.result)
+
+    refute second.halted
+    assert second.metadata.usage_emitted
+
+    assert blocked.halted
+    assert blocked.result == {:error, :budget_exceeded}
   end
 
   test "security regression: an agent past its configured budget is blocked with a budget error" do
@@ -106,12 +151,20 @@ defmodule Arbor.LLM.Plugs.UsageBudgetSecurityRegressionTest do
     assert blocked.result == {:error, :budget_exceeded}
   end
 
-  test "security regression: unattributed callers remain ungated" do
-    call = Usage.call(anonymous_call(0.4))
+  test "security regression: unidentified callers stay gated even when a result is already present" do
+    clear_usage_budget_config()
+    blocked = Usage.call(anonymous_call(0.4))
 
-    refute call.halted
-    refute match?({:error, :budget_exceeded}, call.result)
-    assert call.metadata.usage_emitted
+    assert blocked.halted
+    assert {:error, {:budget_not_configured, message}} = blocked.result
+    assert message =~ ":unidentified_max_cost_usd"
+    refute Map.get(blocked.metadata, :usage_emitted, false)
+  end
+
+  defp clear_usage_budget_config do
+    Application.delete_env(:arbor_llm, Usage)
+    System.delete_env("ARBOR_LLM_USAGE_BUDGET_USD")
+    System.delete_env("ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD")
   end
 
   defp unique_agent(label) do
