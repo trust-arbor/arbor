@@ -89,21 +89,9 @@ defmodule Arbor.Security.FileGuard do
   @spec authorize(String.t(), String.t(), operation()) :: authorize_result()
   def authorize(agent_id, requested_path, operation) when operation in @fs_operations do
     with {:ok, capability} <- find_fs_capability(agent_id, operation, requested_path),
-         :ok <- check_expiration(capability) do
-      if wildcard_capability?(capability) do
-        # Wildcard fs capability (arbor://fs/**) — grants all operations on all paths.
-        # Skip root-based path validation since there is no root constraint.
-        # Still resolve to absolute path to prevent relative path tricks.
-        {:ok, Path.expand(requested_path)}
-      else
-        with {:ok, root} <- extract_root_from_capability(capability),
-             {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
-             :ok <- check_pattern_constraints(resolved, capability.constraints),
-             :ok <- check_exclude_constraints(resolved, capability.constraints),
-             :ok <- check_depth_constraints(resolved, root, capability.constraints) do
-          {:ok, resolved}
-        end
-      end
+         :ok <- check_expiration(capability),
+         {:ok, resolved} <- resolve_authorized_path(requested_path, capability) do
+      {:ok, resolved}
     end
   end
 
@@ -138,18 +126,9 @@ defmodule Arbor.Security.FileGuard do
           {:ok, String.t(), Capability.t()} | {:error, term()}
   def authorize_with_capability(agent_id, requested_path, operation) do
     with {:ok, capability} <- find_fs_capability(agent_id, operation, requested_path),
-         :ok <- check_expiration(capability) do
-      if wildcard_capability?(capability) do
-        {:ok, Path.expand(requested_path), capability}
-      else
-        with {:ok, root} <- extract_root_from_capability(capability),
-             {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
-             :ok <- check_pattern_constraints(resolved, capability.constraints),
-             :ok <- check_exclude_constraints(resolved, capability.constraints),
-             :ok <- check_depth_constraints(resolved, root, capability.constraints) do
-          {:ok, resolved, capability}
-        end
-      end
+         :ok <- check_expiration(capability),
+         {:ok, resolved} <- resolve_authorized_path(requested_path, capability) do
+      {:ok, resolved, capability}
     end
   end
 
@@ -595,6 +574,34 @@ defmodule Arbor.Security.FileGuard do
     end
   end
 
+  # `arbor://fs/**` still has no directory root, so we expand rather than
+  # bound-check. Pattern, exclude, and depth constraints must still apply —
+  # the pre-2026-10-23 shortcut returned Path.expand/1 and skipped them.
+  # Depth is measured from filesystem root, matching extract_root_from_capability/1.
+  defp resolve_authorized_path(requested_path, capability) do
+    if wildcard_capability?(capability) do
+      resolved = Path.expand(requested_path)
+
+      with :ok <- apply_path_constraints(resolved, "/", capability.constraints) do
+        {:ok, resolved}
+      end
+    else
+      with {:ok, root} <- extract_root_from_capability(capability),
+           {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
+           :ok <- apply_path_constraints(resolved, root, capability.constraints) do
+        {:ok, resolved}
+      end
+    end
+  end
+
+  defp apply_path_constraints(resolved_path, root, constraints) do
+    with :ok <- check_pattern_constraints(resolved_path, constraints),
+         :ok <- check_exclude_constraints(resolved_path, constraints),
+         :ok <- check_depth_constraints(resolved_path, root, constraints) do
+      :ok
+    end
+  end
+
   defp resolve_and_validate_path(requested_path, root) do
     # H2: pre-fix, FileGuard relied only on SafePath.resolve_within/2 — string
     # normalization that does NOT follow symlinks. A symlink inside the
@@ -735,7 +742,8 @@ defmodule Arbor.Security.FileGuard do
          _operation,
          _requested_path
        ) do
-    # Wildcard capability grants all operations on all paths
+    # Coverage only: the URI matches every fs path and operation.
+    # Pattern, exclude, and depth still run in resolve_authorized_path/2.
     true
   end
 
