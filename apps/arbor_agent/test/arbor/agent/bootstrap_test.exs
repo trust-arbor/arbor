@@ -339,8 +339,8 @@ defmodule Arbor.Agent.BootstrapTest do
       ProfileStore.store_profile(profile)
 
       servers = [
-        %{name: "github", transport: :stdio, command: ["npx", "@mcp/server-github"]},
-        %{name: "filesystem", transport: :stdio, command: ["npx", "@mcp/server-fs", "/ws"]}
+        %{name: "github", transport: :stdio, command: ["npx", "@mcp/server-github@1.0.0"]},
+        %{name: "filesystem", transport: :stdio, command: ["npx", "@mcp/server-fs@1.0.0", "/ws"]}
       ]
 
       assert :ok = Manager.set_mcp_config(agent_id, servers, actor_authority: authority)

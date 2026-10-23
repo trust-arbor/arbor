@@ -20,6 +20,10 @@ defmodule Arbor.Security.McpServerApprovalCore do
     or string), a bare command string vs a one-element list, and the `:stdio`
     default all normalize to the same digest. Changing any of those fields
     changes the digest, so edited metadata no longer matches its approval.
+    Package-runner pins (`pkg@x.y.z`) live in `command`, so the version is
+    part of the digest. `Arbor.Security.admit_mcp_server_config/2` refuses
+    unpinned npx/uvx/bunx/pnpm-dlx specs and archived reference servers
+    before this URI is granted.
   - A dedicated `mcp_server` domain keeps the grant out of reach of existing
     `arbor://mcp/<server>/<tool>` tool-call grants and `arbor://agent/...`
     wildcards.

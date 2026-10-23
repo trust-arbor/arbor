@@ -81,6 +81,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Keychain
   alias Arbor.Security.KeyFile
+  alias Arbor.Security.McpServerPackagePolicy
   alias Arbor.Security.Reflex
   alias Arbor.Security.RevocationFence
   alias Arbor.Security.SigningAuthorityBroker
@@ -2052,6 +2053,99 @@ defmodule Arbor.Security do
   @doc "The registered prefix of every MCP server approval URI."
   @spec mcp_server_approval_prefix() :: String.t()
   def mcp_server_approval_prefix, do: Arbor.Security.McpServerApprovalCore.prefix()
+
+  @doc """
+  Admit an MCP server config for operator approval.
+
+  Package-runner commands (`npx`, `uvx`, `bunx`, `pnpm dlx`) must pin an exact
+  `pkg@x.y.z`. Archived `@modelcontextprotocol/server-*` reference servers are
+  refused. An optional injectable `npm view` deprecation check is off by
+  default in tests; `:warn` logs and admits, `:reject` refuses, and a missing
+  network fails safe.
+
+  `Arbor.Agent.set_mcp_config/3` calls this before granting
+  `mcp_server_approval_uri/2`.
+  """
+  @spec admit_mcp_server_config(map(), keyword()) :: :ok | {:error, {atom(), String.t()}}
+  def admit_mcp_server_config(config, opts \\ [])
+
+  def admit_mcp_server_config(config, opts) when is_map(config) and is_list(opts) do
+    inspected = McpServerPackagePolicy.inspect_command(config)
+    mode = mcp_package_deprecation_mode(opts)
+    status = mcp_package_deprecation_status(inspected, mode, opts)
+
+    case McpServerPackagePolicy.admit(inspected,
+           deprecation_mode: mode,
+           deprecation_status: status
+         ) do
+      :ok ->
+        :ok
+
+      {:warn, message} ->
+        Logger.warning(message)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def admit_mcp_server_config(_config, _opts), do: {:error, :invalid_mcp_server}
+
+  defp mcp_package_deprecation_mode(opts) do
+    case Keyword.get(opts, :deprecation_mode) do
+      mode when mode in [:off, :warn, :reject] -> mode
+      _unset -> Config.mcp_package_deprecation_mode()
+    end
+  end
+
+  defp mcp_package_deprecation_status({:package, name, version}, mode, opts)
+       when is_binary(name) and is_binary(version) and mode in [:warn, :reject] do
+    check = mcp_package_deprecation_check_fun(opts)
+    invoke_mcp_package_deprecation_check(check, name, version)
+  end
+
+  defp mcp_package_deprecation_status(_inspected, _mode, _opts), do: :unchecked
+
+  defp mcp_package_deprecation_check_fun(opts) do
+    case Keyword.get(opts, :deprecation_check) do
+      fun when is_function(fun, 2) -> fun
+      _unset -> Config.mcp_package_deprecation_check() || (&npm_view_deprecated/2)
+    end
+  end
+
+  defp invoke_mcp_package_deprecation_check(fun, name, version) do
+    try do
+      case fun.(name, version) do
+        :ok -> :ok
+        {:deprecated, message} when is_binary(message) -> {:deprecated, message}
+        {:error, :unavailable} -> :unavailable
+        _other -> :unavailable
+      end
+    rescue
+      _ -> :unavailable
+    catch
+      _, _ -> :unavailable
+    end
+  end
+
+  defp npm_view_deprecated(package, version) do
+    task =
+      Task.async(fn ->
+        System.cmd("npm", ["view", "#{package}@#{version}", "deprecated"], stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} ->
+        case String.trim(output) do
+          empty when empty in ["", "undefined", "null"] -> :ok
+          message -> {:deprecated, message}
+        end
+
+      _unavailable ->
+        {:error, :unavailable}
+    end
+  end
 
   @doc """
   Mint a new interactive disclosure capability (VP-05D2A0). See

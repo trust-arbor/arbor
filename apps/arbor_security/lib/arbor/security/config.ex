@@ -150,10 +150,35 @@ defmodule Arbor.Security.Config do
   @json_file_env Arbor.Security.Store.JSONFile
   @config_env Mix.env()
   @default_invocation_audit_mode if(@config_env == :test, do: :disabled, else: :required)
+  @default_mcp_package_deprecation if(@config_env == :test, do: :off, else: :warn)
 
   @doc "Host-owned invocation admission policy. Required mode refuses effects when durable evidence cannot be admitted."
   def invocation_audit_mode,
     do: Application.get_env(@app, :invocation_audit_mode, @default_invocation_audit_mode)
+
+  @doc """
+  Optional `npm view <pkg>@<ver> deprecated` check at MCP package approval.
+
+  `:off` (the test default) never consults the registry. `:warn` logs and
+  admits. `:reject` refuses a deprecated package. Network or `npm` failures
+  fail safe (admit) in every mode.
+  """
+  @spec mcp_package_deprecation_mode() :: :off | :warn | :reject
+  def mcp_package_deprecation_mode do
+    case Application.get_env(@app, :mcp_package_deprecation, @default_mcp_package_deprecation) do
+      mode when mode in [:off, :warn, :reject] -> mode
+      _invalid -> @default_mcp_package_deprecation
+    end
+  end
+
+  @doc "Injectable `(package, version -> :ok | {:deprecated, String.t()} | {:error, :unavailable})`."
+  @spec mcp_package_deprecation_check() :: (String.t(), String.t() -> term()) | nil
+  def mcp_package_deprecation_check do
+    case Application.get_env(@app, :mcp_package_deprecation_check) do
+      fun when is_function(fun, 2) -> fun
+      _ -> nil
+    end
+  end
 
   @doc "Upward runtime seam: sink implements persist_security_invocation/1 and acknowledges the exact event id only after durable append."
   def invocation_audit_sink,

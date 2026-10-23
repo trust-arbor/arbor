@@ -790,8 +790,8 @@ defmodule Arbor.Agent.ManagerTest do
       ProfileStore.store_profile(profile)
 
       servers = [
-        %{name: "github", transport: :stdio, command: ["npx", "github-server"]},
-        %{name: "fs", transport: :stdio, command: ["npx", "fs-server", "/tmp"]}
+        %{name: "github", transport: :stdio, command: ["npx", "github-server@1.0.0"]},
+        %{name: "fs", transport: :stdio, command: ["npx", "fs-server@1.0.0", "/tmp"]}
       ]
 
       assert :ok = Manager.set_mcp_config(agent_id, servers, actor_authority: authority)
@@ -878,15 +878,15 @@ defmodule Arbor.Agent.ManagerTest do
       agent_id: agent_id,
       authority: authority
     } do
-      github = %{name: "github", transport: :stdio, command: ["npx", "github-server"]}
-      fs = %{name: "fs", transport: :stdio, command: ["npx", "fs-server", "/tmp"]}
+      github = %{name: "github", transport: :stdio, command: ["npx", "github-server@1.0.0"]}
+      fs = %{name: "fs", transport: :stdio, command: ["npx", "fs-server@1.0.0", "/tmp"]}
 
       assert :ok =
                Manager.set_mcp_config(agent_id, [github, fs], actor_authority: authority)
 
       assert approvals(agent_id) == Enum.sort([approval_uri(github), approval_uri(fs)])
 
-      edited = %{github | command: ["npx", "github-server", "--extra"]}
+      edited = %{github | command: ["npx", "github-server@1.0.0", "--extra"]}
       assert :ok = Manager.set_mcp_config(agent_id, [edited], actor_authority: authority)
       assert approvals(agent_id) == [approval_uri(edited)]
 

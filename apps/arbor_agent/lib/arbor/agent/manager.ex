@@ -478,6 +478,13 @@ defmodule Arbor.Agent.Manager do
   edited afterwards) does not connect (Imp review D7, 2026-09-28). Every server
   needs a non-empty `:name`.
 
+  Package-runner commands (`npx`, `uvx`, `bunx`, `pnpm dlx`) must pin an exact
+  `pkg@x.y.z` — that pin is part of the approval digest. Archived
+  `@modelcontextprotocol` reference servers (github, slack, postgres, …) are
+  refused. Pin stdio servers to an exact package or image version. GitHub's
+  maintained server is `ghcr.io/github/github-mcp-server` (verified current at
+  v2.0.3 on 2026-10-21). Do not use unpinned `npx -y`.
+
   ## Server Config
 
   Each server spec is a map with:
@@ -493,8 +500,24 @@ defmodule Arbor.Agent.Manager do
       Manager.set_mcp_config(
         agent_id,
         [
-          %{name: "github", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-github"]},
-          %{name: "filesystem", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]}
+          %{
+            name: "github",
+            transport: :stdio,
+            command: [
+              "docker",
+              "run",
+              "-i",
+              "--rm",
+              "-e",
+              "GITHUB_PERSONAL_ACCESS_TOKEN",
+              "ghcr.io/github/github-mcp-server:v2.0.3"
+            ]
+          },
+          %{
+            name: "filesystem",
+            transport: :stdio,
+            command: ["npx", "-y", "@modelcontextprotocol/server-filesystem@1.0.0", "/workspace"]
+          }
         ],
         actor_authority: operator_authority
       )
@@ -510,6 +533,7 @@ defmodule Arbor.Agent.Manager do
 
     with {:ok, profile} <- ProfileStore.load_profile(agent_id),
          false <- is_nil(actor_authority),
+         :ok <- admit_mcp_server_packages(servers, opts),
          {:ok, approval_uris} <- mcp_server_approval_uris(servers),
          :ok <- reconcile_mcp_server_approvals(agent_id, approval_uris, actor_authority) do
       metadata = Map.put(profile.metadata || %{}, :mcp_servers, servers)
@@ -518,6 +542,18 @@ defmodule Arbor.Agent.Manager do
       true -> {:error, :capability_mutation_unauthorized}
       {:error, _} = error -> error
     end
+  end
+
+  defp admit_mcp_server_packages(servers, opts) do
+    admit_opts = Keyword.take(opts, [:deprecation_mode, :deprecation_check])
+
+    Enum.reduce_while(servers, :ok, fn server, :ok ->
+      case is_map(server) && Arbor.Security.admit_mcp_server_config(server, admit_opts) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+        false -> {:halt, {:error, {:invalid_mcp_server, server}}}
+      end
+    end)
   end
 
   defp mcp_server_approval_uris(servers) do

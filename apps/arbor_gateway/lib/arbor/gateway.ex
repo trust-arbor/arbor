@@ -31,11 +31,25 @@ defmodule Arbor.Gateway do
 
   ## MCP Client Usage
 
+  Pin stdio servers to an exact package or image version. GitHub's maintained
+  server is `ghcr.io/github/github-mcp-server` (verified current at v2.0.3 on
+  2026-10-21). Do not use unpinned `npx -y`.
+
       # Connect to an external MCP server
       {:ok, pid} = Arbor.Gateway.connect_mcp_server("github", %{
         transport: :stdio,
-        command: ["npx", "-y", "@modelcontextprotocol/server-github"],
-        env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}
+        command: [
+          "docker",
+          "run",
+          "-i",
+          "--rm",
+          "-e",
+          "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "ghcr.io/github/github-mcp-server:v2.0.3"
+        ],
+        env: %{
+          "GITHUB_PERSONAL_ACCESS_TOKEN" => System.get_env("GITHUB_PERSONAL_ACCESS_TOKEN")
+        }
       })
 
       # List tools from all connected servers

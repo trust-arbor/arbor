@@ -974,6 +974,27 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `mcp_server_approval_security_regression_test.exs` (gateway) and the
   `set_mcp_config/2 is the MCP server approval` block in `manager_test.exs`.
 
+## 30A. Agent-bound MCP package runners need an exact pin (2026-10-23)
+
+- **What:** `set_mcp_config/3` used to approve `npx @scope/pkg` with no
+  version. The digest covered the command string, so the grant was exact for
+  that unpinned spec — and at spawn time npm could serve anything, including
+  archived `@modelcontextprotocol/server-*` packages. Approval now calls
+  `Arbor.Security.admit_mcp_server_config/2` first: npx/uvx/bunx/pnpm-dlx
+  must pin `pkg@x.y.z` (that pin is part of the command digest), the
+  archived reference-server denylist is refused, and an optional injectable
+  `npm view <pkg>@<ver> deprecated` check is off by default in tests
+  (`:warn` / `:reject` via `config :arbor_security, :mcp_package_deprecation`).
+  A missing network fails safe (admit).
+- **Symptom:** `set_mcp_config/3` returns
+  `{:error, {:unpinned_mcp_package, message}}` or
+  `{:error, {:archived_mcp_package, message}}`. The archived GitHub message
+  points at `ghcr.io/github/github-mcp-server`.
+- **Action:** pin an exact version or use a versioned image. Do not copy
+  unpinned `npx -y @modelcontextprotocol/server-github` from training data.
+  Regressions: `mcp_server_package_approval_security_regression_test.exs`
+  and the package-pin cases on `set_mcp_config/3` in `manager_test.exs`.
+
 ## 31. MCP bridges deny when the security subsystem is unavailable (2026-09-27)
 
 - **What:** `Arbor.Gateway.MCP.ToolBridge.authorize/3` and
