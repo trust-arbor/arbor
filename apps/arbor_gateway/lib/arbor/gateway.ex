@@ -35,7 +35,8 @@ defmodule Arbor.Gateway do
       {:ok, pid} = Arbor.Gateway.connect_mcp_server("github", %{
         transport: :stdio,
         command: ["npx", "-y", "@modelcontextprotocol/server-github"],
-        env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}
+        env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")},
+        actor_authority: operator_authority
       })
 
       # List tools from all connected servers
@@ -106,12 +107,17 @@ defmodule Arbor.Gateway do
     agent to hold the exact approval capability for this config
     (`Arbor.Security.mcp_server_approval_uri/2`, granted by
     `Arbor.Agent.set_mcp_config/2`); otherwise `{:error, :mcp_server_not_approved}`.
-    Operator connections without `:agent_id` are not gated here.
+  - `:actor_authority` — required when `:agent_id` is omitted. Same caller-owned
+    signing authority `Arbor.Agent.set_mcp_config/3` requires. A connect with
+    no agent binding and no live authority returns `{:error, :unauthorized}`.
   """
   @spec connect_mcp_server(String.t(), map()) :: {:ok, pid()} | {:error, term()}
   def connect_mcp_server(server_name, config) do
     with :ok <- authorize_mcp_server_connect(server_name, config) do
-      ClientSupervisor.start_connection(server_name, config)
+      ClientSupervisor.start_connection(
+        server_name,
+        Map.drop(config, [:actor_authority, "actor_authority"])
+      )
     end
   end
 
@@ -394,19 +400,39 @@ defmodule Arbor.Gateway do
   defp authorize_mcp_server_connect(server_name, config) do
     case Map.get(config, :agent_id) || Map.get(config, "agent_id") do
       nil ->
-        :ok
+        authorize_operator_mcp_connect(config)
 
       agent_id when is_binary(agent_id) and agent_id != "" ->
-        with {:ok, uri} <- Arbor.Security.mcp_server_approval_uri(server_name, config),
-             {:ok, :authorized} <-
-               Arbor.Security.authorize(agent_id, uri, :execute, verify_identity: false) do
-          :ok
-        else
-          _denied -> {:error, :mcp_server_not_approved}
-        end
+        authorize_agent_mcp_connect(server_name, config, agent_id)
 
       _malformed ->
         {:error, :mcp_server_not_approved}
+    end
+  end
+
+  # FAIL CLOSED: a missing :agent_id is not an implicit operator bypass.
+  # The only unscoped connect is a live caller-owned SigningAuthority, the
+  # same :actor_authority gate Arbor.Agent.set_mcp_config/3 requires.
+  defp authorize_operator_mcp_connect(config) do
+    authority = Map.get(config, :actor_authority) || Map.get(config, "actor_authority")
+
+    case Arbor.Security.signing_authority_principal(authority) do
+      {:ok, principal} when is_binary(principal) and principal != "" -> :ok
+      _ -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp authorize_agent_mcp_connect(server_name, config, agent_id) do
+    with {:ok, uri} <- Arbor.Security.mcp_server_approval_uri(server_name, config),
+         {:ok, :authorized} <-
+           Arbor.Security.authorize(agent_id, uri, :execute, verify_identity: false) do
+      :ok
+    else
+      _denied -> {:error, :mcp_server_not_approved}
     end
   rescue
     _ -> {:error, :mcp_server_not_approved}

@@ -25,13 +25,11 @@ defmodule Arbor.GatewayFacadeTest do
   # -- MCP Client (no ClientSupervisor running) --
 
   describe "connect_mcp_server/2" do
-    test "returns error when ClientSupervisor is not running" do
-      # DynamicSupervisor not started => exit
-      # A valid config, so the call reaches the (absent) supervisor. An invalid
-      # one is now refused before that (ClientConfigCore, Imp review D7).
-      assert catch_exit(
+    test "refuses a connect with no agent_id and no operator authority" do
+      # Fail closed: omitting :agent_id is not an implicit operator bypass.
+      # Authorization runs before ClientSupervisor is consulted.
+      assert {:error, :unauthorized} =
                Gateway.connect_mcp_server("test", %{transport: :stdio, command: ["mcp-server"]})
-             )
     end
   end
 

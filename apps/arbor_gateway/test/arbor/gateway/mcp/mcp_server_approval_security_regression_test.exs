@@ -82,8 +82,8 @@ defmodule Arbor.Gateway.MCP.McpServerApprovalSecurityRegressionTest do
              })
   end
 
-  test "operator connections without an agent binding are not gated here" do
-    assert {:ok, _pid} =
+  test "operator connections without an agent binding require actor_authority" do
+    assert {:error, :unauthorized} =
              Arbor.Gateway.connect_mcp_server("operator", %{
                transport: :test,
                server: mock_server()

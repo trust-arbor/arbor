@@ -20,7 +20,30 @@ defmodule Arbor.Gateway.MCP.ClientConfigRegressionTest do
 
   setup do
     start_supervised!(ClientSupervisor)
-    :ok
+    %{authority: operator_authority!()}
+  end
+
+  defp operator_authority! do
+    {:ok, identity} = Arbor.Security.generate_identity(name: "mcp-config-operator")
+    :ok = Arbor.Security.register_identity_fixture(identity)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: :mcp_operator_connect,
+        owner: self()
+      )
+
+    {:ok, authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, identity.private_key)
+
+    on_exit(fn ->
+      _ = Arbor.Security.close_signing_authority(authority)
+      _ = Arbor.Security.deregister_identity_fixture(identity.agent_id)
+    end)
+
+    authority
   end
 
   defp mock_server do
@@ -48,14 +71,17 @@ defmodule Arbor.Gateway.MCP.ClientConfigRegressionTest do
     end
   end
 
-  test "a string-keyed config (profile metadata shape) connects with its transport" do
+  test "a string-keyed config (profile metadata shape) connects with its transport", %{
+    authority: authority
+  } do
     server = mock_server()
 
     assert {:ok, _pid} =
              Arbor.Gateway.connect_mcp_server("strkeys", %{
                "transport" => "test",
                "server" => server,
-               "auto_discover" => true
+               "auto_discover" => true,
+               "actor_authority" => authority
              })
 
     wait_for_status("strkeys", :connected)
@@ -64,20 +90,36 @@ defmodule Arbor.Gateway.MCP.ClientConfigRegressionTest do
              Enum.map(Arbor.Gateway.list_mcp_tools("strkeys"), & &1.name)
   end
 
-  test "a config missing its transport's required field is refused before starting" do
+  test "a config missing its transport's required field is refused before starting", %{
+    authority: authority
+  } do
     assert {:error, {:invalid_mcp_config, :url}} =
-             Arbor.Gateway.connect_mcp_server("nourl", %{"transport" => "http"})
+             Arbor.Gateway.connect_mcp_server("nourl", %{
+               "transport" => "http",
+               "actor_authority" => authority
+             })
 
     assert {:error, {:invalid_mcp_config, :command}} =
-             Arbor.Gateway.connect_mcp_server("nocmd", %{"transport" => "stdio"})
+             Arbor.Gateway.connect_mcp_server("nocmd", %{
+               "transport" => "stdio",
+               "actor_authority" => authority
+             })
 
     assert {:error, :not_found} = Arbor.Gateway.mcp_server_status("nourl")
   end
 
-  test "one disconnected server does not break listing for the connected ones" do
+  test "one disconnected server does not break listing for the connected ones", %{
+    authority: authority
+  } do
     server = mock_server()
 
-    {:ok, _} = Arbor.Gateway.connect_mcp_server("live", %{transport: :test, server: server})
+    {:ok, _} =
+      Arbor.Gateway.connect_mcp_server("live", %{
+        transport: :test,
+        server: server,
+        actor_authority: authority
+      })
+
     wait_for_status("live", :connected)
 
     # A server whose process is already gone stays :disconnected and retries.
@@ -85,7 +127,13 @@ defmodule Arbor.Gateway.MCP.ClientConfigRegressionTest do
     ref = Process.monitor(dead)
     assert_receive {:DOWN, ^ref, :process, ^dead, _}, 1_000
 
-    {:ok, _} = Arbor.Gateway.connect_mcp_server("dead", %{transport: :test, server: dead})
+    {:ok, _} =
+      Arbor.Gateway.connect_mcp_server("dead", %{
+        transport: :test,
+        server: dead,
+        actor_authority: authority
+      })
+
     wait_for_status("dead", :disconnected)
 
     assert ["mcp.live.sample_tool"] = Enum.map(Arbor.Gateway.list_mcp_tools(), & &1.name)
