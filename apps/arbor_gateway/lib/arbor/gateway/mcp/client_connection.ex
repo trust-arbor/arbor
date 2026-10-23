@@ -19,10 +19,13 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   and can be manually refreshed via `refresh_tools/1`.
 
   First discovery auto-pins each tool's SHA-256 fingerprint (`name`,
-  `description`, `inputSchema`) and presents it. A later refresh or
-  `notifications/tools/list_changed` that changes a pinned tool quarantines
-  it until `approve_tool_fingerprint/2` re-pins the observed definition.
-  See `Arbor.Gateway.MCP.ToolFingerprintCore`.
+  `description`, `inputSchema`) and presents it. Accepted pins are stored
+  under the server's approved config identity and reloaded on process
+  restart. A later refresh, `notifications/tools/list_changed`, or restart
+  that changes a pinned tool quarantines it until
+  `approve_tool_fingerprint/2` re-pins the observed definition.
+  See `Arbor.Gateway.MCP.ToolFingerprintCore` and
+  `Arbor.Gateway.MCP.ToolPinStore`.
   """
 
   use GenServer
@@ -30,6 +33,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   alias Arbor.Contracts.Tool.CallFailure
   alias Arbor.Gateway.MCP.CallOutcome
   alias Arbor.Gateway.MCP.ToolFingerprintCore
+  alias Arbor.Gateway.MCP.ToolPinStore
 
   require Logger
 
@@ -46,6 +50,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     connection_status: :disconnected,
     tools: [],
     tool_pins: %{},
+    pin_identity: nil,
+    pin_store: :ok,
     quarantined_tools: [],
     resources: [],
     server_info: nil,
@@ -131,8 +137,9 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   @doc """
   Re-approve a quarantined tool, pinning its currently observed definition.
 
-  This is the re-approval hook for a fingerprint mismatch. Existing
-  server-connect approval and tool-call capabilities are unchanged.
+  This is the re-approval hook for a fingerprint mismatch. The new pin is
+  written to `ToolPinStore` so a restart keeps the accepted definition.
+  Existing server-connect approval and tool-call capabilities are unchanged.
   """
   @spec approve_tool_fingerprint(pid(), String.t()) :: {:ok, map()} | {:error, term()}
   def approve_tool_fingerprint(pid, tool_name) when is_binary(tool_name),
@@ -169,10 +176,16 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     # Trap exits so linked ExMCP.Client crashes don't kill this GenServer
     Process.flag(:trap_exit, true)
 
+    identity = ToolPinStore.identity(config.server_name, config)
+    {pins, pin_store} = load_pins(identity, config)
+
     state = %__MODULE__{
       server_name: config.server_name,
       config: config,
-      agent_id: Map.get(config, :agent_id)
+      agent_id: Map.get(config, :agent_id),
+      tool_pins: pins,
+      pin_identity: identity,
+      pin_store: pin_store
     }
 
     # Connect asynchronously to avoid blocking supervisor
@@ -290,13 +303,14 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
           {:ok, result} ->
             interpret_effects(result.effects, state)
 
-            state = %{
-              state
-              | tool_pins: result.pins,
-                tools: state.tools ++ [result.tool],
-                quarantined_tools:
-                  Enum.reject(state.quarantined_tools, &(&1["name"] == tool_name))
-            }
+            state =
+              persist_pins(%{
+                state
+                | tool_pins: result.pins,
+                  tools: state.tools ++ [result.tool],
+                  quarantined_tools:
+                    Enum.reject(state.quarantined_tools, &(&1["name"] == tool_name))
+              })
 
             {:reply, {:ok, result.tool}, state}
 
@@ -539,18 +553,66 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     :exit, reason -> {:exit, reason}
   end
 
-  defp apply_tool_discovery(state, tools) do
-    decision = ToolFingerprintCore.admit(state.tool_pins, tools)
+  defp apply_tool_discovery(%{pin_store: :unreadable} = state, tools) do
+    decision = ToolFingerprintCore.admit(state.tool_pins, tools, unknown: :quarantine)
     interpret_effects(decision.effects, state)
 
     state = %{
       state
       | tools: decision.admitted,
-        tool_pins: decision.pins,
         quarantined_tools: decision.quarantined
     }
 
     {state, decision.admitted}
+  end
+
+  defp apply_tool_discovery(state, tools) do
+    decision = ToolFingerprintCore.admit(state.tool_pins, tools)
+    interpret_effects(decision.effects, state)
+
+    state =
+      persist_pins(%{
+        state
+        | tools: decision.admitted,
+          tool_pins: decision.pins,
+          quarantined_tools: decision.quarantined
+      })
+
+    {state, decision.admitted}
+  end
+
+  defp load_pins(identity, config) do
+    case ToolPinStore.load(identity, pin_store_opts(config)) do
+      {:ok, pins} ->
+        {pins, :ok}
+
+      {:error, :unreadable} ->
+        Logger.error(
+          "[MCP:#{config.server_name}] Tool pin store unreadable; refusing first-discovery"
+        )
+
+        {%{}, :unreadable}
+    end
+  end
+
+  defp persist_pins(%{pin_identity: identity, pin_store: :ok} = state) when is_binary(identity) do
+    case ToolPinStore.save(identity, state.tool_pins, pin_store_opts(state.config)) do
+      :ok ->
+        state
+
+      {:error, reason} ->
+        Logger.error("[MCP:#{state.server_name}] Failed to persist tool pins: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp persist_pins(state), do: state
+
+  defp pin_store_opts(config) do
+    case Map.get(config, :pin_store_dir) || Map.get(config, "pin_store_dir") do
+      dir when is_binary(dir) and dir != "" -> [dir: dir]
+      _other -> []
+    end
   end
 
   defp refresh_discovered_tools(%{connection_status: :connected, client_pid: pid} = state)

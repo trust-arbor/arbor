@@ -22,7 +22,11 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
   description is still gated.
 
   A rename is a new name and follows first-discovery. There is no stable
-  MCP tool id other than `name`.
+  MCP tool id other than `name`. There is no stricter first-seen mode in
+  this repo; a brand-new name on an already-pinned server is pinned on
+  first sight. Pass `unknown: :quarantine` only when the pin store is
+  unreadable so a restart cannot re-trust by treating a load failure as
+  an empty pin map.
   """
 
   @type tool :: map()
@@ -69,9 +73,14 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
   rug-pull.
   """
   @spec admit(pin_map(), [tool()]) :: decision()
-  def admit(pins, tools) when is_map(pins) and is_list(tools) do
+  def admit(pins, tools), do: admit(pins, tools, [])
+
+  @spec admit(pin_map(), [tool()], keyword()) :: decision()
+  def admit(pins, tools, opts) when is_map(pins) and is_list(tools) and is_list(opts) do
+    unknown = Keyword.get(opts, :unknown, :pin)
+
     {admitted, quarantined, pins, changes} =
-      Enum.reduce(tools, {[], [], pins, []}, &admit_one/2)
+      Enum.reduce(tools, {[], [], pins, []}, &admit_one(&1, &2, unknown))
 
     changes = Enum.reverse(changes)
     quarantined = Enum.reverse(quarantined)
@@ -112,14 +121,14 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
     end
   end
 
-  defp admit_one(tool, {admitted, quarantined, pins, changes}) do
+  defp admit_one(tool, {admitted, quarantined, pins, changes}, unknown) do
     case tool_name(tool) do
       {:ok, name} ->
         hash = fingerprint(tool)
 
         case Map.fetch(pins, name) do
           :error ->
-            {[tool | admitted], quarantined, Map.put(pins, name, hash), changes}
+            admit_unknown(tool, name, hash, {admitted, quarantined, pins, changes}, unknown)
 
           {:ok, ^hash} ->
             {[tool | admitted], quarantined, pins, changes}
@@ -133,6 +142,14 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
       :error ->
         {admitted, [tool | quarantined], pins, changes}
     end
+  end
+
+  defp admit_unknown(tool, name, hash, {admitted, quarantined, pins, changes}, :pin) do
+    {[tool | admitted], quarantined, Map.put(pins, name, hash), changes}
+  end
+
+  defp admit_unknown(tool, _name, _hash, {admitted, quarantined, pins, changes}, :quarantine) do
+    {admitted, [tool | quarantined], pins, changes}
   end
 
   defp change_effects([]), do: []
