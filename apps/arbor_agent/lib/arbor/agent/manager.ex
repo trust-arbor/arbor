@@ -488,13 +488,33 @@ defmodule Arbor.Agent.Manager do
   - `:env` — environment variables map
   - `:auto_discover` — discover tools/resources on connect (default: true)
 
+  Pin stdio servers to an exact package or image version. GitHub's maintained
+  server is `ghcr.io/github/github-mcp-server` (verified current at v2.0.3 on
+  2026-10-21). Do not use unpinned `npx -y`.
+
   ## Example
 
       Manager.set_mcp_config(
         agent_id,
         [
-          %{name: "github", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-github"]},
-          %{name: "filesystem", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]}
+          %{
+            name: "github",
+            transport: :stdio,
+            command: [
+              "docker",
+              "run",
+              "-i",
+              "--rm",
+              "-e",
+              "GITHUB_PERSONAL_ACCESS_TOKEN",
+              "ghcr.io/github/github-mcp-server:v2.0.3"
+            ]
+          },
+          %{
+            name: "filesystem",
+            transport: :stdio,
+            command: ["npx", "-y", "@modelcontextprotocol/server-filesystem@1.0.0", "/workspace"]
+          }
         ],
         actor_authority: operator_authority
       )

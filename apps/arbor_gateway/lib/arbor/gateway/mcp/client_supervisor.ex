@@ -7,11 +7,19 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
 
   ## Usage
 
-      # Connect to an MCP server
+      # Connect to an MCP server (pin the image or package to an exact version)
       {:ok, pid} = ClientSupervisor.start_connection("github", %{
         transport: :stdio,
-        command: ["npx", "-y", "@modelcontextprotocol/server-github"],
-        env: %{"GITHUB_TOKEN" => token}
+        command: [
+          "docker",
+          "run",
+          "-i",
+          "--rm",
+          "-e",
+          "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "ghcr.io/github/github-mcp-server:v2.0.3"
+        ],
+        env: %{"GITHUB_PERSONAL_ACCESS_TOKEN" => token}
       })
 
       # List active connections
