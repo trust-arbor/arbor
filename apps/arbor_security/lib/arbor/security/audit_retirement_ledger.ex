@@ -37,9 +37,11 @@ defmodule Arbor.Security.AuditRetirementLedger do
   returning, so a handle that the owner keeps after an unpublished attempt can
   never leak a descriptor or hold a stale one.
 
-  Single-writer is assumed (the journal owner), not enforced. Does not claim
-  hostile same-UID tamper resistance or host power-loss durability beyond the
-  journal's own claims. Crash window (the same one the journal's compaction
+  Single-writer is assumed (the journal owner), not enforced. The ledger is
+  hash-linked (CRC + SHA-256) like the journal: it detects accidental
+  corruption and is unkeyed and unsigned, so a same-UID writer can rewrite
+  frames and recompute the hashes. Does not claim hostile same-UID tamper
+  resistance or host power-loss durability beyond the journal's own claims. Crash window (the same one the journal's compaction
   candidate has): the ledger is created with the process umask and chmodded
   to 0600 immediately after; a BEAM crash between the two leaves an empty
   non-0600 ledger that the next open classifies `:mismatch`

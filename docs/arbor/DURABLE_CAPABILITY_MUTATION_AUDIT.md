@@ -419,13 +419,40 @@ Remote grant hydration is a projection of an existing stored record, and the
 existing security-signal transport retains its independent guarantees. No
 cluster-wide commit transaction is introduced.
 
-The local journal's digest chain detects corruption, reordering and interior
-deletion relative to a trusted retained tip. It is not a keyed attestation against
-an offline writer able to replace the journal and its local anchor. JSONFile's
-documented local-node durability applies; unsupported directory sync does not
-become a host power-loss guarantee. Ephemeral test mode makes no node-restart
-claim. There is no claim of automatic reconstruction of effects performed during
-a complete journal outage.
+The local journal is a hash-linked (CRC + SHA-256) audit journal that detects
+accidental corruption, reordering, and interior deletion relative to a trusted
+retained tip. It is unkeyed and unsigned, so it does not resist tampering by a
+process running as the same user: a same-UID writer can rewrite entries and
+recompute the hashes. That is a documented non-goal, not a keyed attestation.
+JSONFile's documented local-node durability applies; unsupported directory sync
+does not become a host power-loss guarantee. Ephemeral test mode makes no
+node-restart claim. There is no claim of automatic reconstruction of effects
+performed during a complete journal outage.
+
+## Keyed audit checkpoints (optional, deferred)
+
+Official roadmap items live in `.arbor/roadmap/`. That nested repository is not
+present in this checkout (`.arbor/` is gitignored from the parent). This section
+is the tracked parent-repo copy of the deferred item; the standalone write-up is
+[keyed-audit-checkpoints.md](roadmap/keyed-audit-checkpoints.md).
+
+Status: deferred. Severity: low. Currently a documented non-goal.
+
+Motivation: [PerMIT](https://arxiv.org/abs/2610.28987) (Jiang et al., 2026)
+treats logged, content-bound verdicts as the integrity surface for persistent
+agent memory. Arbor's journal already hash-links authority-mutation records; it
+does not yet bind the chain head to a key the journal writer cannot read.
+
+If this is ever taken up:
+
+- Periodically sign or HMAC the journal's chain head with a key the journal
+  writer cannot read (for example the OS keyring or a separate signer process).
+- Let a verifier detect any rewrite since the last checkpoint.
+- Carry checkpoint anchors across compaction
+  (`AuditJournalCore.compact/2` and `compact/3`, around lines 342 and 367;
+  `AuditJournalFile.compact/2`, around lines 232–251) and retirement
+  (`AuditJournal.admit_retirement_batch/1` / retirement-batch contract).
+- Optionally bind memory integrity too.
 
 ## Applied Learning
 

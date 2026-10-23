@@ -2,6 +2,10 @@ defmodule Arbor.Security.AuditJournalCore do
   @moduledoc """
   Pure CRC reducer for the v1 Security authority-mutation audit journal.
 
+  Record fingerprints are unkeyed SHA-256 of canonical bytes. The journal
+  detects accidental corruption; it is not keyed or signed, so a same-UID
+  writer can rewrite entries and recompute the hashes.
+
   Folds admitted append records, enforces prepared -> effect_applied -> delivered
   or prepared -> effect_rejected, exact duplicate/conflict semantics, static-floor
   capacity accounting, and pure snapshot compact/restore.

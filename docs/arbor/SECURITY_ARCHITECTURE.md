@@ -38,10 +38,13 @@ Arbor treats an agent operation as a chain of questions:
 6. **Who cleans up?** Worktrees, ACP sessions, and containment units have owners and
    monitored registries. Cleanup does not depend only on a final graph node.
 7. **What evidence remains?** Signed requests, immutable run bindings, checkpoints,
-   journals, and bounded artifacts help attribute and recover supported operations.
-   They are not one complete, tamper-proof audit or incident-response system. Some
-   approval state is intentionally volatile, and distributed security synchronization
-   is asynchronous rather than a consensus protocol.
+   hash-linked journals, and bounded artifacts help attribute and recover supported
+   operations. The Security authority-mutation audit journal is hash-linked
+   (CRC + SHA-256) and detects accidental corruption; it is not keyed or signed, so
+   it does not resist tampering by a process running as the same user. These
+   mechanisms are not one complete, tamper-proof audit or incident-response system.
+   Some approval state is intentionally volatile, and distributed security
+   synchronization is asynchronous rather than a consensus protocol.
 
 In plain language, one lock is not trusted to do every job. Identity, permission,
 path checks, information-flow checks, approval, code binding, and operating-system
@@ -417,6 +420,18 @@ Authoritative code: [`CapabilityStore`](../../apps/arbor_security/lib/arbor/secu
 The following boundaries are important because their names can otherwise sound more
 complete than their current implementation.
 
+### Authority-mutation audit journal
+
+The Security authority-mutation audit journal (`AuditJournalCore`,
+`AuditJournalFile`) is a hash-linked (CRC + SHA-256) log. It detects accidental
+corruption, reordering, and interior deletion relative to a trusted retained tip.
+It is unkeyed and unsigned: a same-UID writer can rewrite entries and recompute
+the hashes. That is a documented non-goal today. Optional keyed checkpoints
+(HMAC or signature of the chain head with a key the journal writer cannot read)
+are deferred; see
+[Keyed audit checkpoints](DURABLE_CAPABILITY_MUTATION_AUDIT.md#keyed-audit-checkpoints-optional-deferred)
+and [docs/arbor/roadmap/keyed-audit-checkpoints.md](roadmap/keyed-audit-checkpoints.md).
+
 ### Signing and identity boundaries
 
 - The reload-stable signing-authority broker is the intended owner of long-lived signing
@@ -526,6 +541,9 @@ features.
 
 - [`docs/arbor-security-design.md`](../arbor-security-design.md) - action authorization
   risks and remaining hardening context.
+- [`Durable capability mutation audit`](DURABLE_CAPABILITY_MUTATION_AUDIT.md) -
+  hash-linked (not keyed or signed) authority-mutation journal and the deferred
+  keyed-checkpoint item.
 - [`Agent security gates`](../../.claude/skills/agent-security-gates.md) - gate-by-gate
   operational checklist.
 - [`CONTRACT_RULES.md`](./CONTRACT_RULES.md) - facade and dependency-boundary rules.

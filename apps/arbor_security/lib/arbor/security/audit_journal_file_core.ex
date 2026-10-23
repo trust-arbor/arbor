@@ -2,9 +2,12 @@ defmodule Arbor.Security.AuditJournalFileCore do
   @moduledoc """
   Pure CRC core for the v1 Security authority-mutation audit file log.
 
-  Closed binary framing, SHA-256 predecessor+header+payload digests,
+  Closed binary framing, unkeyed SHA-256 predecessor+header+payload digests,
   torn-tail vs corruption classification, record-only and snapshot-first
   replay into AuditJournalCore, and publication decision helpers.
+
+  Digests detect accidental corruption. They are not keyed or signed, so a
+  same-UID writer can rewrite frames and recompute the chain.
 
   Returns data and errors only. No IO, time, randomness, processes, ETS,
   logging, signals, or store/facade calls.

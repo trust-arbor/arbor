@@ -32,8 +32,11 @@ defmodule Arbor.Security.AuditJournalFile do
   adopted only from the replayed published snapshot.
 
   Not a GenServer and not a generic store. Single-writer is assumed, not
-  enforced. Does not claim hostile same-UID tamper resistance, host power-loss
-  durability, or distributed linearizability.
+  enforced. The log is hash-linked (CRC + SHA-256) and detects accidental
+  corruption; it is unkeyed and unsigned, so it does not resist tampering by a
+  process running as the same user (a same-UID writer can rewrite entries and
+  recompute the hashes). Does not claim hostile same-UID tamper resistance, host
+  power-loss durability, or distributed linearizability.
   """
 
   import Arbor.Security.AuditJournalFileProofs

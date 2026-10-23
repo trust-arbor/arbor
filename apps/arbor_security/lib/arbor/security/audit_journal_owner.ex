@@ -2,6 +2,10 @@ defmodule Arbor.Security.AuditJournalOwner do
   @moduledoc """
   Supervised single-writer owner for the v1 Security authority-mutation audit journal.
 
+  The journal is hash-linked (CRC + SHA-256) and detects accidental
+  corruption; it is not keyed or signed, so it does not resist tampering by a
+  process running as the same user.
+
   Serializes every append over `AuditJournalCore` and, in durable mode,
   `AuditJournalFile`. Reconstructs from the durable log before serving.
   Production callers outside this library use `Arbor.Security` status and

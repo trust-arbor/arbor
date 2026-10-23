@@ -3,6 +3,10 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   Security-owned authority-mutation intent, append-record, snapshot and
   retirement-batch contracts.
 
+  Identities and fingerprints are unkeyed SHA-256 of canonical bytes. The
+  journal that stores these records is hash-linked and detects accidental
+  corruption; it is not keyed or signed against same-UID rewrite.
+
   Wire kinds:
   - intent: `arbor.security.authority_mutation_intent.v1`, `.v2`, `.v3`
   - record: `arbor.security.authority_mutation_record.v1`

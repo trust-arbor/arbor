@@ -5567,6 +5567,10 @@ defmodule Arbor.Security do
   @doc """
   Bounded JSON-clean status of the Security authority-mutation audit journal.
 
+  The journal is hash-linked (CRC + SHA-256) and detects accidental
+  corruption; it is unkeyed and unsigned, so it does not resist tampering by a
+  process running as the same user.
+
   Returns mode, durability, availability, a closed dormant/degraded reason,
   a redacted last-error code, counts, pending age, and capacity. Never returns
   file handles, PIDs, paths, reducer internals, capability payloads, or signing
