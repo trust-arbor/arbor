@@ -28,6 +28,7 @@ defmodule Arbor.Memory.CodeStore do
   use GenServer
 
   alias Arbor.Contracts.Security.TaintedValue
+  alias Arbor.Memory.GraphOps
   alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.MutationAdmission
 
@@ -225,21 +226,41 @@ defmodule Arbor.Memory.CodeStore do
 
   @doc """
   Delete a specific code pattern.
+
+  Also removes the pattern's MemoryStore embedding and any knowledge-graph
+  nodes with an outgoing `:derived_from` edge to the pattern source.
+
+  Embedding-write revocation is recorded before the durable embedding delete so
+  a still-running `embed_confirmed` worker cannot persist after this returns.
+  Cleanup failures propagate as `{:error, :store_unavailable}`.
   """
   @spec delete(String.t(), String.t()) :: :ok | {:error, :store_unavailable}
   def delete(agent_id, entry_id) do
     case MutationAdmission.acquire(agent_id) do
       {:ok, lease} ->
-        try do
-          entries =
-            get_agent_entries(agent_id)
-            |> Enum.reject(&(&1.id == entry_id))
+        embed_result =
+          try do
+            entries =
+              get_agent_entries(agent_id)
+              |> Enum.reject(&(&1.id == entry_id))
 
-          :ets.insert(@ets_table, {agent_id, entries})
-          MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
-          :ok
-        after
-          _ = MutationAdmission.release(lease)
+            :ets.insert(@ets_table, {agent_id, entries})
+            MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
+
+            with :ok <- revoke_pattern_embedding_writes(agent_id, entry_id),
+                 :ok <- delete_pattern_embedding(agent_id, entry_id) do
+              :ok
+            end
+          after
+            _ = MutationAdmission.release(lease)
+          end
+
+        graph_result = remove_derived_from_nodes(agent_id, entry_id)
+
+        case {embed_result, graph_result} do
+          {:ok, :ok} -> :ok
+          {{:error, _reason} = error, _} -> error
+          {_, {:error, _reason}} -> {:error, :store_unavailable}
         end
 
       {:error, _reason} ->
@@ -366,6 +387,88 @@ defmodule Arbor.Memory.CodeStore do
       [{^agent_id, entries}] -> entries
       [] -> []
     end
+  end
+
+  defp revoke_pattern_embedding_writes(agent_id, entry_id) do
+    case MemoryStore.revoke_embedding_writes(@namespace, "#{agent_id}:#{entry_id}",
+           agent_id: agent_id
+         ) do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp delete_pattern_embedding(agent_id, entry_id) do
+    case MemoryStore.delete_embedding(@namespace, "#{agent_id}:#{entry_id}", agent_id: agent_id) do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp remove_derived_from_nodes(agent_id, entry_id) do
+    case GraphOps.get_graph(agent_id) do
+      {:ok, graph} ->
+        remove_derived_nodes(agent_id, derived_from_node_ids(graph, entry_id))
+
+      {:error, :graph_not_initialized} ->
+        :ok
+
+      {:error, _reason} ->
+        if graph_cleanup_required?() do
+          {:error, :store_unavailable}
+        else
+          :ok
+        end
+    end
+  end
+
+  # KnowledgeGraphStore down means derived-node cleanup cannot be confirmed.
+  # A live store that reports anything other than a graph is treated as
+  # absence (`:graph_not_initialized` or no durable snapshot).
+  defp graph_cleanup_required? do
+    is_nil(Process.whereis(Arbor.Memory.KnowledgeGraphStore))
+  end
+
+  defp remove_derived_nodes(agent_id, node_ids) do
+    Enum.reduce_while(node_ids, :ok, fn node_id, :ok ->
+      case GraphOps.remove_knowledge(agent_id, node_id) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} -> {:halt, {:error, :store_unavailable}}
+      end
+    end)
+  end
+
+  defp derived_from_node_ids(graph, entry_id) do
+    source_ids =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(&pattern_source_node?(&1, entry_id))
+      |> MapSet.new(& &1.id)
+      |> MapSet.put(entry_id)
+
+    graph.edges
+    |> Enum.flat_map(fn {source_id, edges} ->
+      if Enum.any?(edges, &derived_from_source?(&1, source_ids)),
+        do: [source_id],
+        else: []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp pattern_source_node?(node, entry_id) do
+    node.id == entry_id or
+      Map.get(node.metadata || %{}, :code_pattern_id) == entry_id or
+      Map.get(node.metadata || %{}, "code_pattern_id") == entry_id
+  end
+
+  defp derived_from_source?(edge, source_ids) do
+    edge.relationship == :derived_from and MapSet.member?(source_ids, edge.target_id)
   end
 
   defp generate_id do

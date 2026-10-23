@@ -58,6 +58,7 @@ defmodule Arbor.Memory.MemoryStore do
   @critical_authority_key "arbor_memory_authority"
   @critical_authority_atom_key :arbor_memory_authority
   @critical_authority_marker %{"mode" => "tainted_cas", "version" => 1}
+  @embedding_write_revocations :arbor_memory_embedding_write_revocations
 
   @type provenance_status :: :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type authoritative_location :: :namespaced | :legacy_bare
@@ -881,6 +882,35 @@ defmodule Arbor.Memory.MemoryStore do
   def delete_embedding(_namespace, _key, _opts),
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
+  @doc """
+  Refuse later embedding inserts/updates/reinserts for this logical identity.
+
+  Item-level deletes call this before `delete_embedding/3` so a background
+  `embed_confirmed/6` writer cannot resurrect the row after delete returns.
+  """
+  @spec revoke_embedding_writes(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def revoke_embedding_writes(namespace, key, opts \\ [])
+
+  def revoke_embedding_writes(namespace, key, opts)
+      when is_binary(namespace) and is_binary(key) do
+    if keyword_options?(opts) do
+      agent_id = Keyword.get(opts, :agent_id)
+
+      if is_binary(agent_id) do
+        ensure_embedding_write_revocations()
+        true = :ets.insert(@embedding_write_revocations, {{agent_id, namespace, key}, true})
+        :ok
+      else
+        {:error, {:memory_store, :invalid_request, :missing_agent_id}}
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    end
+  end
+
+  def revoke_embedding_writes(_namespace, _key, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
   defp do_semantic_search(query_text, agent_id, namespace, opts) do
     with {:ok, evidence} <- embed_query_for_search(query_text),
          {:ok, search_opts} <- memory_store_search_opts(evidence, namespace, opts),
@@ -1073,6 +1103,9 @@ defmodule Arbor.Memory.MemoryStore do
       {:error, :not_found} ->
         :ok
 
+      {:error, :unsupported} ->
+        :ok
+
       {:ok, view} ->
         identity =
           {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}
@@ -1155,6 +1188,14 @@ defmodule Arbor.Memory.MemoryStore do
   end
 
   defp write_memory_store_embedding(agent_id, namespace, key, content, type, evidence, taint) do
+    if embedding_writes_revoked?(agent_id, namespace, key) do
+      {:error, :conflict}
+    else
+      do_write_memory_store_embedding(agent_id, namespace, key, content, type, evidence, taint)
+    end
+  end
+
+  defp do_write_memory_store_embedding(agent_id, namespace, key, content, type, evidence, taint) do
     seam = StrictVectorSeam.resolve()
     identity = {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}
 
@@ -1172,6 +1213,7 @@ defmodule Arbor.Memory.MemoryStore do
 
     with {:ok, closed} <- memory_store_write_input(seam, attrs, identity),
          {:ok, operation, _view} <- safe_vector_call(fn -> seam.encode_operation(closed) end),
+         :ok <- refuse_revoked_embedding_write(identity, operation),
          {:ok, _receipt} <- execute_or_reconcile_exact(seam, agent_id, operation, identity) do
       :ok
     else
@@ -1208,6 +1250,16 @@ defmodule Arbor.Memory.MemoryStore do
     do: execute_or_reconcile_exact(seam, agent_id, operation, identity, 1)
 
   defp execute_or_reconcile_exact(seam, agent_id, operation, identity, retries_left) do
+    case refuse_revoked_embedding_write(identity, operation) do
+      {:error, reason} ->
+        {:error, reason}
+
+      :ok ->
+        do_execute_or_reconcile_exact(seam, agent_id, operation, identity, retries_left)
+    end
+  end
+
+  defp do_execute_or_reconcile_exact(seam, agent_id, operation, identity, retries_left) do
     case safe_vector_call(fn -> seam.execute(agent_id, operation, []) end) do
       {:ok, receipt} ->
         with :ok <- validate_receipt_identity(receipt, identity), do: {:ok, receipt}
@@ -2025,6 +2077,41 @@ defmodule Arbor.Memory.MemoryStore do
 
   defp normalize_embedding_type(_type),
     do: {:error, {:memory_store, :invalid_request, :invalid_type}}
+
+  defp refuse_revoked_embedding_write({agent_id, namespace, key, _row_id}, operation) do
+    if embedding_write_kind?(operation) and embedding_writes_revoked?(agent_id, namespace, key) do
+      {:error, :conflict}
+    else
+      :ok
+    end
+  end
+
+  defp refuse_revoked_embedding_write(_identity, _operation), do: :ok
+
+  defp embedding_write_kind?(%{kind: kind}) when kind in [:insert, :update, :reinsert], do: true
+  defp embedding_write_kind?(_operation), do: false
+
+  defp embedding_writes_revoked?(agent_id, namespace, key) do
+    ensure_embedding_write_revocations()
+
+    case :ets.lookup(@embedding_write_revocations, {agent_id, namespace, key}) do
+      [{_key, true}] -> true
+      _ -> false
+    end
+  end
+
+  defp ensure_embedding_write_revocations do
+    case :ets.whereis(@embedding_write_revocations) do
+      :undefined ->
+        :ets.new(@embedding_write_revocations, [:named_table, :public, :set])
+        :ok
+
+      _tid ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
+  end
 
   defp keyword_options?(opts) when is_list(opts) do
     Keyword.keyword?(opts)
