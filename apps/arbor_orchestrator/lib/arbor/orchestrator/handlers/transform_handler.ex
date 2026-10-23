@@ -10,7 +10,8 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   ## Node Attributes
 
     - `transform` — transformation type: "json_extract", "template", "map",
-      "filter", "format", "split", "join", "not_equal"
+      "filter", "format", "split", "join", "not_equal", "nonempty",
+      "byte_size", "diff_files"
     - `source_key` — context key to read input from (default: "last_response")
     - `output_key` — context key to write result to (default: "transform.{node_id}")
     - `expression` — transform-specific expression (JSON path, template string,
@@ -164,6 +165,26 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   # Counter helpers — small deterministic ops so DOT pipelines can
   # implement bounded retry loops without delegating to an LLM
   # interpreter for "increment retry.count" instructions.
+  defp apply_transform("nonempty", input, _expr, _ctx) do
+    {:ok, nonempty_input?(input)}
+  end
+
+  defp apply_transform("byte_size", input, _expr, _ctx) when is_binary(input) do
+    {:ok, byte_size(input)}
+  end
+
+  defp apply_transform("byte_size", _input, _expr, _ctx) do
+    {:error, "byte_size transform requires binary input"}
+  end
+
+  defp apply_transform("diff_files", input, _expr, _ctx) when is_binary(input) do
+    {:ok, diff_paths(input)}
+  end
+
+  defp apply_transform("diff_files", _input, _expr, _ctx) do
+    {:error, "diff_files transform requires binary unified-diff input"}
+  end
+
   defp apply_transform("increment", input, _expr, _ctx) do
     value =
       case input do
@@ -262,6 +283,21 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
       end)
 
     {:ok, result}
+  end
+
+  defp nonempty_input?(list) when is_list(list), do: list != []
+  defp nonempty_input?(bin) when is_binary(bin), do: String.trim(bin) != ""
+  defp nonempty_input?(_), do: false
+
+  defp diff_paths(diff) when is_binary(diff) do
+    ~r/^diff --git a\/(.+?) b\/(.+)$/m
+    |> Regex.scan(diff, capture: :all_but_first)
+    |> Enum.map(fn
+      [_old, new_path] -> new_path
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   defp apply_filter(list, expression) do

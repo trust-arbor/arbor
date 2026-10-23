@@ -48,6 +48,37 @@ defmodule Arbor.Orchestrator.CodeReviewWithFixesFindingsGateSecurityRegressionTe
            "non-empty findings must take the fix branch even when the model sets has_findings:false; routed to #{inspect(next_id)}"
   end
 
+  test "security regression: empty findings take the clean branch even if a model flag says otherwise" do
+    graph = load_graph()
+
+    review = %{
+      "summary" => "model claimed findings",
+      "has_findings" => true,
+      "findings" => []
+    }
+
+    context = Context.new(%{"review_json" => Jason.encode!(review)})
+    {_context, next_id} = walk_findings_gate(graph, context)
+    assert next_id == "prep_review_only_summary"
+  end
+
+  test "security regression: capture requires an explicit diff range and records review scope" do
+    graph = load_graph()
+
+    refute graph.nodes["capture_diff"].attrs["command"] =~ "HEAD~3"
+    refute graph.nodes["capture_diff"].attrs["command"] =~ "${diff_range:-"
+    assert graph.nodes["require_diff_range"].attrs["predicate"] == "expression"
+    assert graph.nodes["require_diff_range"].attrs["expression"] == "diff_range"
+    assert graph.nodes["extract_has_findings"].attrs["transform"] == "nonempty"
+    assert graph.nodes["extract_has_findings"].attrs["source_key"] == "findings"
+    refute graph.nodes["extract_has_findings"].attrs["expression"] == "has_findings"
+
+    assert graph.nodes["record_review_range"].attrs["output_key"] == "review.range"
+    assert graph.nodes["record_review_files"].attrs["transform"] == "diff_files"
+    assert graph.nodes["record_review_bytes"].attrs["transform"] == "byte_size"
+    assert graph.nodes["record_review_truncated"].attrs["output_key"] == "review.truncated"
+  end
+
   defp load_graph do
     assert {:ok, graph} = Orchestrator.parse(File.read!(@pipeline))
     graph

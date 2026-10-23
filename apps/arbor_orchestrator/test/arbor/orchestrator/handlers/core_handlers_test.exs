@@ -325,6 +325,68 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       assert outcome.failure_reason =~ "unknown transform"
     end
 
+    test "nonempty is true for a non-empty list and false otherwise" do
+      nonempty = make_node("ne", %{"transform" => "nonempty", "source_key" => "items"})
+
+      assert %{status: :success, context_updates: %{"transform.ne" => true}} =
+               TransformHandler.execute(
+                 nonempty,
+                 make_context(%{"items" => [%{"issue" => "bug"}]}),
+                 make_graph(),
+                 []
+               )
+
+      assert %{status: :success, context_updates: %{"transform.ne" => false}} =
+               TransformHandler.execute(
+                 nonempty,
+                 make_context(%{"items" => []}),
+                 make_graph(),
+                 []
+               )
+
+      assert %{status: :success, context_updates: %{"transform.ne" => false}} =
+               TransformHandler.execute(nonempty, make_context(%{}), make_graph(), [])
+    end
+
+    test "byte_size and diff_files record captured review scope" do
+      diff = """
+      diff --git a/lib/a.ex b/lib/a.ex
+      index 111..222 100644
+      --- a/lib/a.ex
+      +++ b/lib/a.ex
+      @@ -1 +1 @@
+      -old
+      +new
+      diff --git a/lib/b.ex b/lib/b.ex
+      --- a/lib/b.ex
+      +++ b/lib/b.ex
+      """
+
+      bytes =
+        make_node("bytes", %{
+          "transform" => "byte_size",
+          "source_key" => "diff_content",
+          "output_key" => "review.bytes"
+        })
+
+      files =
+        make_node("files", %{
+          "transform" => "diff_files",
+          "source_key" => "diff_content",
+          "output_key" => "review.files"
+        })
+
+      context = make_context(%{"diff_content" => diff})
+
+      assert %{status: :success, context_updates: %{"review.bytes" => size}} =
+               TransformHandler.execute(bytes, context, make_graph(), [])
+
+      assert size == byte_size(diff)
+
+      assert %{status: :success, context_updates: %{"review.files" => ["lib/a.ex", "lib/b.ex"]}} =
+               TransformHandler.execute(files, context, make_graph(), [])
+    end
+
     test "idempotency is :idempotent" do
       assert TransformHandler.idempotency() == :idempotent
     end

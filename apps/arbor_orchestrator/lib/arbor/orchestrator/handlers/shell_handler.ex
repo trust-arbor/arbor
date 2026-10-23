@@ -84,7 +84,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # Original execution path — reached ONLY after authorize_shell/4 passes.
   defp run_authorized(principal, node, command, prepared, on_error, opts) do
     case run_command(principal, command, prepared, opts) do
-      {:ok, output, exit_code} ->
+      {:ok, output, exit_code, truncated} ->
         # Shell stdout is exposed as `shell.<id>.output` only — NOT as
         # `last_response`. `last_response` is the LLM-output convention
         # (see handler_schema.ex compute ports). Pipelines of the shape
@@ -94,7 +94,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         # reference the namespaced key directly.
         base_updates = %{
           "shell.#{node.id}.exit_code" => exit_code,
-          "shell.#{node.id}.output" => output
+          "shell.#{node.id}.output" => output,
+          "shell.#{node.id}.output_truncated" => truncated
         }
 
         if exit_code == 0 do
@@ -186,7 +187,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         {:ok, result} ->
           output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
           exit_code = Map.get(result, :exit_code, 0)
-          {:ok, output, exit_code}
+          truncated = Map.get(result, :output_truncated, false) == true
+          {:ok, output, exit_code, truncated}
 
         {:error, reason} ->
           {:error, reason}

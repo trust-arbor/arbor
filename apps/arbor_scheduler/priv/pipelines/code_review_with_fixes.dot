@@ -29,7 +29,7 @@
 //
 // Context in (set via initial_values when calling Orchestrator.run, or
 // passed as Oban worker args):
-//   diff_range       — git diff range to review (default "HEAD~3..HEAD")
+//   diff_range       — required git diff range to review (no silent default)
 //   workdir          — repo path (default `pwd`)
 //   max_iterations   — integer cap on fix attempts (default 3)
 //   session.agent_id — signing principal (set by PipelineRunner)
@@ -39,6 +39,11 @@
 //   iteration        — number of fix attempts made
 //   pr_url           — URL of the opened PR
 //   last_failure     — final test runner output (empty if converged)
+//   has_findings     — computed from findings list length, not the model flag
+//   review.range     — the explicit range that was reviewed
+//   review.files     — paths extracted from the captured unified diff
+//   review.bytes     — byte size of the captured diff
+//   review.truncated — true when the shell output cap truncated the diff
 //
 // Capabilities required (declared in code_review_with_fixes.caps.json):
 //   arbor://shell/exec/git           — raw shell git diff capture
@@ -60,12 +65,20 @@ digraph CodeReviewWithFixes {
 
   // ── Phase 0: Capture the diff to review ────────────────────────────
 
-  // Default to HEAD~3..HEAD when caller didn't override.
-  // Shell node stdout lands in shell.<id>.output (not last_response —
-  // see the 2026-06-05 ShellHandler clobber fix in commit 308333df).
+  // Fail closed when the caller omitted the range. A missing range used
+  // to silently become HEAD~3..HEAD and shrink what was reviewed
+  // (arXiv 2610.29379 drop point: select without telling anyone).
+  require_diff_range [
+    type="gate",
+    predicate="expression",
+    expression="diff_range"
+  ]
+
+  // No default range. Shell node stdout lands in shell.<id>.output
+  // (not last_response — see the 2026-06-05 ShellHandler clobber fix).
   capture_diff [
     type="shell",
-    command="git diff ${diff_range:-HEAD~3..HEAD}",
+    command="git diff",
     sandbox="none",
     timeout="30000",
     on_error="fail",
@@ -78,6 +91,37 @@ digraph CodeReviewWithFixes {
     transform="identity",
     source_key="shell.capture_diff.output",
     output_key="diff_content"
+  ]
+
+  // Record what was actually analyzed so a later merge/filter cannot
+  // drop scope quietly. Files come from the captured unified diff;
+  // truncation is the shell output-cap flag.
+  record_review_range [
+    type="transform",
+    transform="identity",
+    source_key="diff_range",
+    output_key="review.range"
+  ]
+
+  record_review_files [
+    type="transform",
+    transform="diff_files",
+    source_key="diff_content",
+    output_key="review.files"
+  ]
+
+  record_review_bytes [
+    type="transform",
+    transform="byte_size",
+    source_key="diff_content",
+    output_key="review.bytes"
+  ]
+
+  record_review_truncated [
+    type="transform",
+    transform="identity",
+    source_key="shell.capture_diff.output_truncated",
+    output_key="review.truncated"
   ]
 
   // ── Phase 1: Review the diff ───────────────────────────────────────
@@ -100,7 +144,7 @@ digraph CodeReviewWithFixes {
     max_tokens="16384",
     temperature="0.2",
     timeout="600000",
-    system_prompt="You are a meticulous code reviewer. Read the git diff and identify CONCRETE issues that warrant a code change — bugs, security holes, missing nil handling, race conditions, off-by-one, wrong base cases, broken pattern matches, capability misuse. Skip stylistic preferences unless they cross into correctness. Output ONLY valid JSON (no markdown code fences, no preface text) with this shape: {\"summary\": \"<one paragraph>\", \"has_findings\": <true|false>, \"findings\": [{\"file\": \"<path>\", \"line\": <number>, \"issue\": \"<what's wrong>\", \"suggested_fix\": \"<concrete change — code or precise edit instructions>\"}]}. The `has_findings` boolean MUST agree with whether the `findings` array is non-empty. If you find no actionable issues, set `has_findings: false` and `findings: []`. Cite exact file paths and line numbers from the diff. Do not invent issues.",
+    system_prompt="You are a meticulous code reviewer. Read the git diff and identify CONCRETE issues that warrant a code change — bugs, security holes, missing nil handling, race conditions, off-by-one, wrong base cases, broken pattern matches, capability misuse. Skip stylistic preferences unless they cross into correctness. Output ONLY valid JSON (no markdown code fences, no preface text) with this shape: {\"summary\": \"<one paragraph>\", \"findings\": [{\"file\": \"<path>\", \"line\": <number>, \"issue\": \"<what's wrong>\", \"suggested_fix\": \"<concrete change — code or precise edit instructions>\"}]}. If you find no actionable issues, set `findings: []`. Cite exact file paths and line numbers from the diff. Do not invent issues. Downstream code computes whether there are findings from the list length — do not emit a has_findings flag.",
     prompt_context_key="diff_content"
   ]
 
@@ -113,15 +157,21 @@ digraph CodeReviewWithFixes {
     output_key="review_json"
   ]
 
-  // Extract has_findings (boolean) to drive the gate. The condition
-  // language doesn't support list-length operations, so we route on
-  // the LLM-emitted boolean instead. The system_prompt requires the
-  // model to keep `has_findings` in sync with the `findings` list.
-  extract_has_findings [
+  // Verdict from the findings list length, never a model-reported flag.
+  // A mismatched has_findings:false + nonempty findings used to take
+  // the clean branch (arXiv 2610.29379).
+  extract_findings [
     type="transform",
     transform="json_extract",
     source_key="review_json",
-    expression="has_findings",
+    expression="findings",
+    output_key="findings"
+  ]
+
+  extract_has_findings [
+    type="transform",
+    transform="nonempty",
+    source_key="findings",
     output_key="has_findings"
   ]
 
@@ -355,8 +405,11 @@ digraph CodeReviewWithFixes {
 
   // ── Flow ───────────────────────────────────────────────────────────
 
-  start -> capture_diff -> snapshot_diff -> review_diff -> snapshot_review
-  snapshot_review -> extract_has_findings -> check_findings
+  start -> require_diff_range -> capture_diff -> snapshot_diff
+  snapshot_diff -> record_review_range -> record_review_files
+  record_review_files -> record_review_bytes -> record_review_truncated
+  record_review_truncated -> review_diff -> snapshot_review
+  snapshot_review -> extract_findings -> extract_has_findings -> check_findings
 
   // No findings → write review-only PR (no branch needed; agent just
   // surfaces the empty review for the human to acknowledge).
