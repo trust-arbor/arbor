@@ -13,9 +13,11 @@ defmodule Arbor.Gateway.CommittedDevKeySecurityRegressionTest do
   Post-fix: boot fails or Auth rejects with a clear development-key error.
   """
   use ExUnit.Case, async: false
+  import ExUnit.CaptureLog
   import Plug.Test
   import Plug.Conn
 
+  alias Arbor.Gateway.Application, as: GatewayApplication
   alias Arbor.Gateway.Auth
   alias Arbor.Gateway.CommittedDevKey
 
@@ -180,6 +182,65 @@ defmodule Arbor.Gateway.CommittedDevKeySecurityRegressionTest do
              )
   end
 
+  test "security regression: localhost is a documented loopback bind" do
+    # :inet.parse_address("localhost") returns {:error, :einval}, not :error.
+    # A :error-only clause raises CaseClauseError and breaks :dev + localhost.
+    assert CommittedDevKey.loopback_bind?("localhost")
+    assert CommittedDevKey.loopback_bind?("LocalHost")
+    assert CommittedDevKey.loopback_bind?("127.0.0.1")
+    assert CommittedDevKey.loopback_bind?("[::1]")
+
+    assert :ok =
+             CommittedDevKey.admit(
+               api_key: @dev_key,
+               env: :dev,
+               bind_ip: "localhost"
+             )
+  end
+
+  test "security regression: Auth 503 does not leak Mix env or bind address" do
+    assert Mix.env() != :dev
+    Application.put_env(:arbor_gateway, :api_key, @dev_key)
+    Application.put_env(:arbor_gateway, :bind_ip, {203, 0, 113, 10})
+
+    {conn, log} =
+      with_log(fn ->
+        authenticate(@dev_key)
+      end)
+
+    assert conn.halted
+    assert conn.status == 503
+    body = Jason.decode!(conn.resp_body)
+    combined = "#{body["error"]} #{body["detail"]}"
+
+    refute combined =~ "MIX_ENV"
+    refute combined =~ ":test"
+    refute combined =~ ":prod"
+    refute combined =~ "203, 0, 113, 10"
+    refute combined =~ "203.0.113.10"
+    assert combined =~ "Committed development API key refused"
+
+    assert log =~ "arbor-dev-key" or log =~ "203, 0, 113, 10" or log =~ "MIX_ENV",
+           "server logs must keep the refusal detail, got #{inspect(log)}"
+  end
+
+  test "security regression: Application.start/2 refuses arbor-dev-key outside :dev" do
+    assert Mix.env() != :dev
+    Application.put_env(:arbor_gateway, :api_key, @dev_key)
+    Application.put_env(:arbor_gateway, :bind_ip, {127, 0, 0, 1})
+
+    assert {:error, {:committed_dev_key_refused, message}} =
+             GatewayApplication.start(:normal, [])
+
+    assert message =~ "arbor-dev-key"
+    assert {:ok, _} = Application.ensure_all_started(:arbor_gateway)
+
+    Application.put_env(:arbor_gateway, :api_key, "unique-prod-like-key")
+
+    result = GatewayApplication.start(:normal, [])
+    refute match?({:error, {:committed_dev_key_refused, _}}, result)
+  end
+
   defp authenticate(key) do
     conn(:get, "/")
     |> put_req_header("x-api-key", key)
@@ -198,6 +259,15 @@ defmodule Arbor.Gateway.CommittedDevKeySecurityRegressionTest do
 
     refute String.contains?(combined, "Invalid API key"),
            "refusal must not hide behind a generic invalid-key message: #{inspect(body)}"
+
+    refute String.contains?(combined, "MIX_ENV"),
+           "HTTP body must not reveal Mix env: #{inspect(body)}"
+
+    refute String.contains?(combined, ":test"),
+           "HTTP body must not reveal Mix env: #{inspect(body)}"
+
+    refute String.contains?(combined, "{0, 0, 0, 0}"),
+           "HTTP body must not reveal bind address: #{inspect(body)}"
   end
 
   defp restore_app(key, nil), do: Application.delete_env(:arbor_gateway, key)
