@@ -13,6 +13,8 @@ defmodule Arbor.Gateway.Auth do
   import Plug.Conn
   @behaviour Plug
 
+  require Logger
+
   alias Arbor.Gateway.CommittedDevKey
 
   @impl true
@@ -59,12 +61,7 @@ defmodule Arbor.Gateway.Auth do
 
   # Env first: the committed dev literal in config/dev.exs must never shadow
   # an operator-set ARBOR_GATEWAY_API_KEY (2026-10-11 cross-library review F-019).
-  defp get_configured_key do
-    case System.get_env("ARBOR_GATEWAY_API_KEY") do
-      key when is_binary(key) and key != "" -> key
-      _ -> Application.get_env(:arbor_gateway, :api_key)
-    end
-  end
+  defp get_configured_key, do: CommittedDevKey.configured_key()
 
   defp extract_key(conn) do
     case get_req_header(conn, "authorization") do
@@ -124,13 +121,15 @@ defmodule Arbor.Gateway.Auth do
   end
 
   defp refuse_committed_dev_key(conn, message) do
+    Logger.error("Arbor Gateway refused committed development API key: #{message}")
+
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(
       503,
       Jason.encode!(%{
         error: "Committed development API key refused",
-        detail: message
+        detail: "Set a unique ARBOR_GATEWAY_API_KEY"
       })
     )
     |> halt()

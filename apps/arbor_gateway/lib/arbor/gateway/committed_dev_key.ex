@@ -74,23 +74,28 @@ defmodule Arbor.Gateway.CommittedDevKey do
 
     case :inet.parse_address(String.to_charlist(normalized)) do
       {:ok, ip} -> loopback_bind?(ip)
-      :error -> normalized == "localhost"
+      {:error, _reason} -> normalized == "localhost"
     end
   end
 
   def loopback_bind?(_bind_ip), do: false
 
+  @doc """
+  Configured gateway API key. Environment wins over application env so the
+  committed `config/dev.exs` literal cannot shadow `ARBOR_GATEWAY_API_KEY`.
+  """
+  @spec configured_key() :: String.t() | nil
+  def configured_key do
+    case System.get_env("ARBOR_GATEWAY_API_KEY") do
+      key when is_binary(key) and key != "" -> key
+      _ -> Application.get_env(:arbor_gateway, :api_key)
+    end
+  end
+
   defp fetch_key(opts) do
     case Keyword.fetch(opts, :api_key) do
       {:ok, key} -> key
       :error -> configured_key()
-    end
-  end
-
-  defp configured_key do
-    case System.get_env("ARBOR_GATEWAY_API_KEY") do
-      key when is_binary(key) and key != "" -> key
-      _ -> Application.get_env(:arbor_gateway, :api_key)
     end
   end
 
