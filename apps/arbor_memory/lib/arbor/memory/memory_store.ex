@@ -1103,9 +1103,6 @@ defmodule Arbor.Memory.MemoryStore do
       {:error, :not_found} ->
         :ok
 
-      {:error, :unsupported} ->
-        :ok
-
       {:ok, view} ->
         identity =
           {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}

@@ -162,7 +162,9 @@ defmodule Arbor.Memory.CodeStoreTest do
         purpose: "Will be kept"
       })
 
-      assert :ok = CodeStore.delete(agent_id, entry.id)
+      # Default vector backend is Unsupported and cannot confirm embedding
+      # absence, so delete fails closed after the ETS row is already gone.
+      assert {:error, :store_unavailable} = CodeStore.delete(agent_id, entry.id)
       assert length(CodeStore.list(agent_id)) == 1
       assert hd(CodeStore.list(agent_id)).code == "keepme"
     end

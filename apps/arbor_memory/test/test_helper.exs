@@ -3,6 +3,7 @@
 :ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
+Code.require_file("support/confirming_vector_seam.ex", __DIR__)
 Code.require_file("support/durable_event_log.ex", __DIR__)
 Code.require_file("support/mutation_admission_fake_backend.ex", __DIR__)
 Code.require_file("support/async_writer_hang_backend.ex", __DIR__)

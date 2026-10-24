@@ -191,7 +191,7 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
                             {Arbor.Memory.MemoryStore, :delete_embedding, 3}},
                            {"code_store.ex", {:remove_derived_from_nodes, 2},
                             {Arbor.Memory.GraphOps, :get_graph, 1}},
-                           {"code_store.ex", {:remove_derived_from_nodes, 2},
+                           {"code_store.ex", {:remove_derived_nodes, 2},
                             {Arbor.Memory.GraphOps, :remove_knowledge, 2}},
                            {"code_store.ex", {:clear, 1},
                             {Arbor.Memory.MutationAdmission, :acquire, 1}},

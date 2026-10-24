@@ -420,19 +420,8 @@ defmodule Arbor.Memory.CodeStore do
         :ok
 
       {:error, _reason} ->
-        if graph_cleanup_required?() do
-          {:error, :store_unavailable}
-        else
-          :ok
-        end
+        {:error, :store_unavailable}
     end
-  end
-
-  # KnowledgeGraphStore down means derived-node cleanup cannot be confirmed.
-  # A live store that reports anything other than a graph is treated as
-  # absence (`:graph_not_initialized` or no durable snapshot).
-  defp graph_cleanup_required? do
-    is_nil(Process.whereis(Arbor.Memory.KnowledgeGraphStore))
   end
 
   defp remove_derived_nodes(agent_id, node_ids) do
