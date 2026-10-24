@@ -9,7 +9,11 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
 
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Security.TaintedValue
   alias Arbor.Memory
+  alias Arbor.Memory.KnowledgeGraphStore
+  alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.MutationAdmission
   alias Arbor.Memory.Test.DurableGraphAuthority
 
@@ -32,6 +36,7 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
       ensure_table(@control)
       :ets.delete_all_objects(@table)
       :ets.insert(@control, {:fail_delete, false})
+      :ets.insert(@control, {:unsupported_fetch, false})
       :ets.insert(@control, {:hang, :off})
     end
 
@@ -44,6 +49,14 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
 
     def fail_next_delete do
       :ets.insert(@control, {:fail_delete, true})
+    end
+
+    def unsupported_fetch do
+      :ets.insert(@control, {:unsupported_fetch, true})
+    end
+
+    def clear_unsupported_fetch do
+      :ets.insert(@control, {:unsupported_fetch, false})
     end
 
     def arm_write_fetch_hang(tester \\ self()) when is_pid(tester) do
@@ -114,6 +127,16 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
       include_tombstone? = Keyword.get(opts, :include_tombstone, false)
       if include_tombstone?, do: maybe_hang_write_fetch()
 
+      case :ets.lookup(@control, :unsupported_fetch) do
+        [{:unsupported_fetch, true}] ->
+          {:error, :unsupported}
+
+        _ ->
+          fetch_record(agent, namespace, key, include_tombstone?)
+      end
+    end
+
+    defp fetch_record(agent, namespace, key, include_tombstone?) do
       case :ets.lookup(@table, {agent, namespace, key}) do
         [{_, record}] ->
           case Embedding.decode_strict_record(record) do
@@ -372,6 +395,106 @@ defmodule Arbor.Memory.CodePatternDeleteDerivedClosureSecurityRegressionTest do
     assert delete_result == :ok or match?({:error, _}, delete_result)
     assert {:error, :not_found} = Memory.get_code(agent_id, entry.id)
     assert {:error, :not_found} = RecordStore.fetch(agent_id, @namespace, logical_key, [])
+  end
+
+  test "security regression: delete_code surfaces a live-store graph read failure", %{
+    agent_id: agent_id
+  } do
+    assert {:ok, nil} =
+             Memory.init_for_agent(agent_id,
+               index_enabled: false,
+               graph_enabled: true,
+               auto_embed: false
+             )
+
+    assert {:ok, entry} =
+             Memory.store_code(agent_id, %{
+               code: "fn live_read -> :fail end",
+               language: "elixir",
+               purpose: "live store authoritative read failure"
+             })
+
+    await_embedding!(agent_id, "#{agent_id}:#{entry.id}")
+    wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id)) end)
+
+    assert {:ok, source_id} =
+             Memory.add_knowledge(agent_id, %{
+               type: :fact,
+               content: "source #{entry.id}",
+               metadata: %{"code_pattern_id" => entry.id}
+             })
+
+    assert {:ok, derived_id} =
+             Memory.add_knowledge(agent_id, %{
+               type: :insight,
+               content: "derived leftover #{entry.id}",
+               metadata: %{"name" => "derived leftover"}
+             })
+
+    assert :ok = Memory.link_knowledge(agent_id, derived_id, source_id, :derived_from)
+
+    assert {:ok, %TaintedValue{value: wrapper, taint: outer}, _status, observed, _location} =
+             MemoryStore.load_tainted_authoritative_with_status("knowledge_graph", agent_id)
+
+    malformed = Map.delete(wrapper, "provenance")
+
+    assert {:ok, %Record{}} =
+             MemoryStore.compare_and_swap_tainted(
+               "knowledge_graph",
+               agent_id,
+               observed,
+               malformed,
+               taint: outer
+             )
+
+    assert is_pid(Process.whereis(KnowledgeGraphStore))
+    assert {:error, :invalid_provenance} = KnowledgeGraphStore.get_graph(agent_id)
+
+    assert {:error, :store_unavailable} = Memory.delete_code(agent_id, entry.id)
+
+    assert {:ok, %TaintedValue{}, _status, restored_observed, _location} =
+             MemoryStore.load_tainted_authoritative_with_status("knowledge_graph", agent_id)
+
+    assert {:ok, %Record{}} =
+             MemoryStore.compare_and_swap_tainted(
+               "knowledge_graph",
+               agent_id,
+               restored_observed,
+               wrapper,
+               taint: outer
+             )
+
+    assert :ok = KnowledgeGraphStore.converge_projection(agent_id)
+    assert {:ok, exported} = Memory.export_knowledge_graph(agent_id)
+    assert Map.has_key?(exported.nodes, derived_id)
+  end
+
+  test "security regression: delete_code does not treat unsupported vector fetch as success",
+       %{agent_id: agent_id} do
+    assert {:ok, nil} =
+             Memory.init_for_agent(agent_id,
+               index_enabled: false,
+               graph_enabled: true,
+               auto_embed: false
+             )
+
+    assert {:ok, entry} =
+             Memory.store_code(agent_id, %{
+               code: "fn unsupported -> :fail_open end",
+               language: "elixir",
+               purpose: "unsupported vector fetch"
+             })
+
+    logical_key = "#{agent_id}:#{entry.id}"
+    await_embedding!(agent_id, logical_key)
+    wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id)) end)
+
+    RecordStore.unsupported_fetch()
+
+    assert {:error, :store_unavailable} = Memory.delete_code(agent_id, entry.id)
+
+    RecordStore.clear_unsupported_fetch()
+    assert {:ok, _view} = RecordStore.fetch(agent_id, @namespace, logical_key, [])
   end
 
   defp stop_knowledge_graph_store! do
