@@ -169,7 +169,7 @@ failure (found 2026-08-31).
 
 <!-- applied-learning: corroborated-council-findings-still-need-independent-factual-verification -->
 <a id="applied-learning-corroborated-council-findings-still-need-independent-factual-verification"></a>
-**Corroborated council findings still need independent factual verification.** Multiple reviewers can share the same false premise. Before treating a claimed compiler or protocol failure as established, reproduce the smallest case with the pinned toolchain or authoritative implementation. On 2026-09-07, Kimi and GLM both called `case` an illegal Elixir variable, but `Code.eval_string("case = 1\ncase")` returned `{1, [case: 1]}` on Elixir 1.19.5. Keep genuine findings active, send the counterexample to the worker, and distinguish a harmless readability rename from a demonstrated compilation fix.
+**Corroborated council findings still need independent factual verification.** Multiple reviewers can share the same false premise. Before treating a claimed compiler or protocol failure as established, reproduce the smallest case with the pinned toolchain or authoritative implementation. On 2026-09-07, Kimi and GLM both called `case` an illegal Elixir variable, but `Code.eval_string("case = 1\ncase")` returned `{1, [case: 1]}` on Elixir 1.19.5. Keep genuine findings active, send the counterexample to the worker, and distinguish a harmless readability rename from a demonstrated compilation fix. The converse holds for the integrator: override a reviewer or adjudicator only on a demonstrated refutation, never on a severity or attacker-model judgment the rubric does not ask for, and re-read any override that every independent judge contradicts. On 2026-10-25 an integrator override of ten blinded `new_true_positive` verdicts to `unverifiable` ("no outside attacker gains") was contradicted by every adjudicator family; the source confirmed the behavior and the claims named a real cross-purpose key holder, so it was reversed.
 
 <!-- applied-learning: design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate -->
 <a id="applied-learning-design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate"></a>
@@ -180,7 +180,10 @@ compiler-owned bounded canonical plan-review projection plus the full-plan
 fingerprint into worker prompts, council input, compilation verification, and
 semantic preflight; omit execution authority and redundant large payloads (found
 2026-09-02 after a council approved a 5,400,000 ms design against a 28,800,000 ms
-frozen plan).
+frozen plan). The converse binds blinded reviewers: build their projection from an
+allowlist of fields, never by copying a metadata block whole. On 2026-10-25 a
+key's `pinned` block carried a disguised eval target's original repo path into
+every adjudication packet.
 
 <!-- applied-learning: reviewer-evidence-must-not-truncate-below-admitted-ledger-size -->
 <a id="applied-learning-reviewer-evidence-must-not-truncate-below-admitted-ledger-size"></a>

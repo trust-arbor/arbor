@@ -13273,9 +13273,9 @@
       "source_session": "unknown",
       "source_incident": "found 2026-08-14 during K2 app-env validation).",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "b0afd17aad431d33b3a7c5d6ce30f7893e850aff4dbcae64d60883b21884901c",
+      "last_confirmed": "2026-10-24",
+      "confirmed_by": "secreview-eval-2026-10-24",
+      "content_sha256": "32c5e7349121ca9b9973481240f56c043668c673fb30ad135f2427e9c0036195",
       "always_loaded": false
     },
     {
@@ -14776,7 +14776,7 @@
       "scope": [],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "46cff51b3d07f3479b97d16f8994c77f004937de3898006bc00674c6b195ab4a",
+      "content_sha256": "51b8190829a4e2c585d272a997cd071568652b56eea75f17322c6139e1192870",
       "always_loaded": false
     },
     {
@@ -14858,9 +14858,9 @@
       "source_session": "codex:01a11e6f-c69d-7bb2-ad39-531441663f1f",
       "source_incident": "found 2026-09-07 preserving G5E evidence after temporary files had disappeared",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "96d6512a32ba3ca6b8ff23a77cdb5278b1aca05ab480916550f8a5eb3603b8fb",
+      "last_confirmed": "2026-10-25",
+      "confirmed_by": "secreview-eval-2026-10-25",
+      "content_sha256": "670604224950e9443eac6fc7d390b717d8624cbb27b7fd9909442486b3a5d658",
       "always_loaded": false
     },
     {
@@ -14976,7 +14976,7 @@
       "scope": [],
       "last_confirmed": "2026-10-16",
       "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "cc62f1213cb2e8dae607fb1273c6f829380a9b160adb3ae921538986893feb28",
+      "content_sha256": "97d862c8903ca9511720fca2fa9776c8ffd0e84893ee7b4217af939cadaa7707",
       "always_loaded": false
     },
     {

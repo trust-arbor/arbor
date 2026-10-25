@@ -374,6 +374,11 @@ during PK-K0 acceptance).
 `apps/arbor_kernel/priv/.../mix.exs`. When a guard means exactly
 `apps/<app>/mix.exs`, filter tracked results by parsed path segments before
 treating them as package roots (found 2026-08-14 during K2 app-env validation).
+The reverse also bites: a pathspec with a wildcard is matched against the whole
+path, not used as a directory prefix, so `git grep ... -- 'apps/*/lib'` matches
+no file under those directories and silently returns nothing, which reads as
+"no callers". Use `'apps/*/lib/**'`, or `-- apps` and filter the paths (found
+2026-10-24 checking reachability for eval findings).
 
 <!-- applied-learning: git-checkout-double-dash-restores-from-the-index-not-head -->
 <a id="applied-learning-git-checkout-double-dash-restores-from-the-index-not-head"></a>
@@ -423,7 +428,11 @@ only scoped diagnostics into a private directory, checksum the copies, and leave
 other agents' originals untouched. Quote Git-owned ref globs in shell commands so
 zsh does not expand or reject them before `git bundle` runs. Reboot persistence is
 not an off-device backup or validation acceptance (found 2026-09-07 during G5E
-preservation).
+preservation). The agent's session scratchpad is such a root too: write any script a
+later step will rerun (queue drivers, grading, key edits) in the project from the
+start, with outputs and backups beside the data, not beside the script. On
+2026-10-25 an eval's drivers for the next run sat in the scratchpad until the human
+asked to move them before a possible reboot.
 
 <!-- applied-learning: compare-native-and-package-manager-git-before-diagnosing-a-lan-outage -->
 <a id="applied-learning-compare-native-and-package-manager-git-before-diagnosing-a-lan-outage"></a>
