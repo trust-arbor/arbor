@@ -372,6 +372,27 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
   end
 
   describe "sync_to_store with embeddings" do
+    test "security regression: skill-source sensitivity reaches the embedding effect" do
+      Testing.put(:skill_embedding_module, CountingEmbed)
+
+      source = %{
+        name: "restricted-embedding-source",
+        description: "Ordinary workflow instructions",
+        body: "Review the release checklist before preparing the next build.",
+        tags: ["workflow"],
+        category: "test",
+        sensitivity: :restricted
+      }
+
+      assert :ok = SkillLibrary.register(source)
+      assert {:ok, 1} = SkillLibrary.sync_to_store()
+
+      assert FakePersistence.embed_calls() == 1
+      assert SuccessEmbed.last_opts()[:dimensions] == 768
+      assert SuccessEmbed.last_opts()[:sensitivity] == :restricted
+      assert FakePersistence.last_upsert().embedding_space["model"] == "test-model"
+    end
+
     test "writes embedding and embedding_space when service succeeds" do
       register_skill("sync-ok")
       assert {:ok, 1} = SkillLibrary.sync_to_store()
