@@ -1,5 +1,31 @@
 defmodule Arbor.AI.FacadeMigrationTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  defmodule OfflineAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "facade_migration_fixture"
+    def complete(_request, _opts), do: {:error, :facade_migration_fixture_unavailable}
+  end
+
+  setup do
+    key = {Arbor.AI.UnifiedBridge, :client}
+    previous = :persistent_term.get(key, :missing)
+
+    client =
+      Arbor.LLM.Client.new(
+        adapters: %{"anthropic" => OfflineAdapter, "openrouter" => OfflineAdapter}
+      )
+
+    :persistent_term.put(key, client)
+
+    on_exit(fn ->
+      if previous == :missing,
+        do: :persistent_term.erase(key),
+        else: :persistent_term.put(key, previous)
+    end)
+
+    :ok
+  end
 
   @moduletag :integration
 

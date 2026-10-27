@@ -115,7 +115,9 @@ defmodule Arbor.AITest do
     end
 
     test "implements AI contract" do
-      behaviours = Arbor.AI.__info__(:attributes)[:behaviour] || []
+      behaviours =
+        Arbor.AI.__info__(:attributes) |> Keyword.get_values(:behaviour) |> List.flatten()
+
       assert Arbor.Contracts.API.AI in behaviours
     end
   end
