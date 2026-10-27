@@ -637,20 +637,41 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
     assert_receive :timeout_then_success_called
   end
 
-  # The hermetic gating lane sets `config :arbor_llm, default_provider:` so
-  # `Client.from_env/1` can construct without UNIFIED_LLM_DEFAULT_PROVIDER.
-  # Tests asserting the "nothing configured" contract must clear that
-  # config source too, just as they clear the env keys.
+  # Discovery reads the configured default provider and ReqLLM credential
+  # slots as well as ENV. Scope all three inputs for the "nothing configured"
+  # and explicit ENV-key contracts without changing the discovery selectors.
   defp without_config_default_provider(fun) do
-    previous = Application.get_env(:arbor_llm, :default_provider)
+    previous = Application.fetch_env(:arbor_llm, :default_provider)
     Application.delete_env(:arbor_llm, :default_provider)
 
     try do
+      without_configured_provider_keys(fun)
+    after
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_llm, :default_provider, value)
+        :error -> Application.delete_env(:arbor_llm, :default_provider)
+      end
+    end
+  end
+
+  defp without_configured_provider_keys(fun) do
+    config_keys =
+      Arbor.LLM.ProviderRegistry.list_cloud()
+      |> Enum.map(&Arbor.LLM.ProviderRegistry.req_llm_atom/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&ReqLLM.Keys.config_key/1)
+      |> Enum.uniq()
+
+    previous = Enum.map(config_keys, &{&1, Application.fetch_env(:req_llm, &1)})
+
+    try do
+      Enum.each(config_keys, &Application.delete_env(:req_llm, &1))
       fun.()
     after
-      if previous != nil do
-        Application.put_env(:arbor_llm, :default_provider, previous)
-      end
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:req_llm, key, value)
+        {key, :error} -> Application.delete_env(:req_llm, key)
+      end)
     end
   end
 

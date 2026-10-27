@@ -172,6 +172,11 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([
+      RecordingAdapter,
+      CountingToolAdapter
+    ])
+
     prev = %{
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
       strict: Application.get_env(:arbor_security, :strict_identity_mode),
