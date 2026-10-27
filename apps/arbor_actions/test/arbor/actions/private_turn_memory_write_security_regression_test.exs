@@ -11,6 +11,8 @@ defmodule Arbor.Actions.PrivateTurnMemoryWriteSecurityRegressionTest do
   @probe_resource "arbor://action/test/private-turn-memory-policy"
 
   defmodule LocalEmbedding do
+    def embed(text, _opts), do: embed(text)
+
     def embed(_text) do
       {:ok,
        %{

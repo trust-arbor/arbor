@@ -55,6 +55,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([Adapter])
+
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
 
     Adapter.set_parent(self())

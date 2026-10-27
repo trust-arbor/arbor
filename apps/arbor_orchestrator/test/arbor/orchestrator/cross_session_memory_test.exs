@@ -134,6 +134,8 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([CaptureAdapter])
+
     {:ok, identity} = Arbor.Security.generate_identity(name: "xsession-memory")
     {:ok, control_identity} = Arbor.Security.generate_identity(name: "xsession-memory-control")
     :ok = Arbor.Security.register_identity_fixture(identity)

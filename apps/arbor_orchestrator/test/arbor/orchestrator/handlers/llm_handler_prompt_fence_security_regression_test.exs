@@ -66,6 +66,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([FenceAdapter])
+
     previous_test_pid = Application.get_env(:arbor_orchestrator, :prompt_fence_test_pid)
     previous_outcome = Application.get_env(:arbor_orchestrator, :prompt_fence_tool_outcome)
     Application.put_env(:arbor_orchestrator, :prompt_fence_test_pid, self())

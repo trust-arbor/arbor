@@ -42,6 +42,27 @@ defmodule Arbor.LLM.TestSupport.SensitivityFixture do
     :ok
   end
 
+  @doc """
+  Register exact fixture adapters without changing sensitivity clearance policy.
+
+  Use this when an in-memory adapter's route must retain a real local provider
+  name; endpoint locality and provider/model clearance remain production checks.
+  """
+  def register_guarded_adapters(adapters) when is_list(adapters) do
+    previous = Application.fetch_env(:arbor_llm, :sensitivity_guarded_adapters)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_llm, :sensitivity_guarded_adapters, value)
+        :error -> Application.delete_env(:arbor_llm, :sensitivity_guarded_adapters)
+      end
+    end)
+
+    guarded = Arbor.LLM.Config.sensitivity_guarded_adapters()
+    Application.put_env(:arbor_llm, :sensitivity_guarded_adapters, Enum.uniq(guarded ++ adapters))
+    :ok
+  end
+
   def put_controls(controls) when is_map(controls) do
     token = "fixture_" <> Integer.to_string(System.unique_integer([:positive]))
     Agent.update(@controls, &Map.put(&1, token, controls))

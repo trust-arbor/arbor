@@ -55,6 +55,8 @@ defmodule Arbor.Orchestrator.Session.SessionPartialTaintProductionSecurityRegres
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([ControlledAdapter])
+
     client =
       Client.new(default_provider: ControlledAdapter.provider(), model_catalog: %{})
       |> Client.register_adapter(ControlledAdapter)

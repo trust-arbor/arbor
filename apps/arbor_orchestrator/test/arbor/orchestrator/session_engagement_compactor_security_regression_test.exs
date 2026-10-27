@@ -92,6 +92,8 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([PromptCaptureAdapter])
+
     PromptCaptureAdapter.set_test_parent(self())
 
     client =

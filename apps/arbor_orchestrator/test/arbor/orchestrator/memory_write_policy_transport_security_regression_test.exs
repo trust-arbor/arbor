@@ -68,6 +68,11 @@ defmodule Arbor.Orchestrator.MemoryWritePolicyTransportSecurityRegressionTest do
     end
   end
 
+  setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([FabricatedToolAdapter])
+    :ok
+  end
+
   test "security regression: exec forwards source policy despite conflicting graph data" do
     node = %Node{
       id: "memory",

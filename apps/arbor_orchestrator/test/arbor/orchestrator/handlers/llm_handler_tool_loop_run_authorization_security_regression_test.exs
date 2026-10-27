@@ -55,6 +55,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([AuthorityAdapter])
+
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
 
     case ActionRegistry.register("test.run_auth_tool_help", Arbor.Actions.Tool.Help) do

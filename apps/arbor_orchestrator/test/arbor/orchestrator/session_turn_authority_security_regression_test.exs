@@ -45,6 +45,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   defmodule PrivateMemoryEmbedding do
+    def embed(text, _opts), do: embed(text)
+
     def embed(_text) do
       {:ok,
        %{
@@ -898,6 +900,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
   test "security regression: receipt-authenticated live Session denies provider memory writes",
        ctx do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([PrivateMemoryToolAdapter])
+
     ensure_event_registry!()
     put_orchestrator_cap!(ctx.agent_id)
     grant!(ctx.agent_id, "arbor://memory/add_knowledge")
@@ -2369,6 +2373,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   defp completion_barrier_session!(ctx, opts \\ []) do
+    Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([CompletionBarrierAdapter])
+
     ensure_event_registry!()
     put_orchestrator_cap!(ctx.agent_id)
     primary = register_active_human!()

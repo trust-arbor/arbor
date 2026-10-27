@@ -82,6 +82,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([CapturingAdapter])
+
     {:ok, _} = RecordingDispatcher.start_link()
     RecordingDispatcher.reset()
     CapturingAdapter.set_parent(self())

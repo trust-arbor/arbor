@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.SteeringMessage
   alias Arbor.LLM.{Client, ContentPart, Request, Response}
+  alias Arbor.LLM.TestSupport.SensitivityFixture
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Handlers.LlmHandler
 
@@ -20,8 +21,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     def provider, do: "handler_typed_steering"
 
     def complete(%Request{} = request, opts) do
-      parent = Map.fetch!(request.provider_options, :parent)
-      scenario = Map.fetch!(request.provider_options, :scenario)
+      controls = SensitivityFixture.get_controls(request.provider_options)
+      parent = Map.fetch!(controls, :parent)
+      scenario = Map.fetch!(controls, :scenario)
       tool_count = Enum.count(request.messages, &(&1.role == :tool))
 
       send(parent, {
@@ -102,7 +104,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
 
     @impl true
     def dispatch(%Request{} = request, opts) do
-      parent = Map.fetch!(request.provider_options, :parent)
+      parent =
+        request.provider_options |> SensitivityFixture.get_controls() |> Map.fetch!(:parent)
 
       route = %{
         destination: request.provider,
@@ -132,6 +135,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
   end
 
   setup do
+    SensitivityFixture.setup([HandlerAdapter])
+
     true = Process.register(self(), __MODULE__)
     previous_dispatcher = Application.get_env(:arbor_orchestrator, :llm_dispatcher)
 
@@ -435,7 +440,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
         "prompt" => "run tools",
         "use_tools" => "true",
         "max_turns" => "10",
-        "provider_options" => %{parent: self(), scenario: scenario}
+        "provider_options" =>
+          SensitivityFixture.put_controls(%{parent: self(), scenario: scenario})
       }
     }
   end
@@ -446,7 +452,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
       attrs: %{
         "simulate" => "false",
         "prompt" => "direct",
-        "provider_options" => %{parent: self(), scenario: :direct}
+        "provider_options" =>
+          SensitivityFixture.put_controls(%{parent: self(), scenario: :direct})
       }
     }
   end
