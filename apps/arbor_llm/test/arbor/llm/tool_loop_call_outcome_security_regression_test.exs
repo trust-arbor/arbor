@@ -93,6 +93,7 @@ defmodule Arbor.LLM.ToolLoopCallOutcomeSecurityRegressionTest do
   end
 
   setup do
+    Arbor.LLM.TestSupport.SensitivityFixture.setup([ScriptedAdapter])
     Process.register(self(), @probe)
     Application.put_env(:arbor_llm, :tool_loop_backoff_base_ms, 1)
 
