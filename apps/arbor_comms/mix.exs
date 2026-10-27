@@ -30,6 +30,7 @@ defmodule ArborComms.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},

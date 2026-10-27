@@ -276,7 +276,8 @@ defmodule Arbor.Commands.SourceCoupling.Core do
 
         Ownership.mix_project_path?(path) ->
           with {:ok, app} <- Ownership.app_of_path(path),
-               {:ok, deps} <- Ownership.in_umbrella_deps(bytes) do
+               {:ok, deps} <- Ownership.in_umbrella_deps(bytes, path),
+               :ok <- unique_project_owner(file_apps, app, path) do
             {:cont, {:ok, Map.put(graph, app, deps), sources, Map.put(file_apps, path, app)}}
           else
             {:error, reason} -> {:halt, {:error, {:mix_file, path, reason}}}
@@ -316,7 +317,8 @@ defmodule Arbor.Commands.SourceCoupling.Core do
 
         private_mix_path?(path) ->
           with {:ok, app} <- Ownership.app_of_path(path),
-               {:ok, deps} <- Ownership.in_umbrella_deps(bytes) do
+               {:ok, deps} <- Ownership.in_umbrella_deps(bytes, path),
+               :ok <- unique_project_owner(file_apps, app, path) do
             {:cont, {:ok, Map.put(graph, app, deps), sources, Map.put(file_apps, path, app)}}
           else
             {:error, reason} -> {:halt, {:error, {:mix_file, path, reason}}}
@@ -340,6 +342,15 @@ defmodule Arbor.Commands.SourceCoupling.Core do
 
       err ->
         err
+    end
+  end
+
+  defp unique_project_owner(file_apps, app, path) do
+    case Enum.find(file_apps, fn {prior_path, owner} ->
+           owner == app and prior_path != path and Ownership.mix_project_path?(prior_path)
+         end) do
+      nil -> :ok
+      {prior_path, _owner} -> {:error, {:duplicate_application_ownership, app, prior_path, path}}
     end
   end
 

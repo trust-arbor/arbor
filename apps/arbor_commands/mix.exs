@@ -34,6 +34,7 @@ defmodule ArborCommands.MixProject do
   # side-effecting Command implementations that need to reach beyond Context.
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       # L2 LLM diagnostics used directly by Mix.Tasks.Arbor.Doctor.

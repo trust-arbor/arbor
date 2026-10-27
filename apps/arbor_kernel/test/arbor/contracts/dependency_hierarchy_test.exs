@@ -1,6 +1,6 @@
 defmodule Arbor.Contracts.DependencyHierarchyTest do
   @moduledoc """
-  Drift guard for the umbrella's in-umbrella dependency hierarchy.
+  Drift guard for the repository's Arbor dependency hierarchy.
 
   This test is the enforcement half of `app-hierarchy-reevaluation`
   (`.arbor/roadmap/1-brainstorming/`). The canonical hierarchy docs (CLAUDE.md →
@@ -15,7 +15,7 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
        longest-path leveling this is equivalent to "every dep targets a strictly
        lower level"; a cycle is the only way that can break.)
     2. **Docs match reality** — CLAUDE.md's published `L0..Ln` block equals the
-       longest-path levels computed from the actual `apps/*/mix.exs` deps. Add a
+       longest-path levels computed from the actual application and extracted-package `mix.exs` deps. Add a
        dep that changes the levels and this fails until CLAUDE.md is updated.
 
   Parsing is done via the mix.exs AST (not a regex) so module names mentioned in
@@ -42,7 +42,7 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
     end
   end
 
-  # ── Parse the real in-umbrella dep graph from apps/*/mix.exs (via AST) ────────
+  # ── Parse the real Arbor dep graph from tracked applications/packages ────────
   # Default reads process env (production contained Mix). Explicit `env` maps are
   # for hermetic proofs only — never System.put_env.
   defp dep_graph do
@@ -50,11 +50,22 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   end
 
   defp dep_graph(root, env) when is_binary(root) and is_map(env) do
-    tracked_mix_files(root, env)
-    |> Map.new(fn path ->
-      app = Path.basename(Path.dirname(path))
-      {app, in_umbrella_deps(path)}
-    end)
+    {graph, _owners} =
+      Enum.reduce(tracked_mix_files(root, env), {%{}, %{}}, fn path, {graph, owners} ->
+        app = Path.basename(Path.dirname(path))
+
+        assert not Map.has_key?(owners, app),
+               "duplicate application owner #{app}: #{inspect(Map.get(owners, app))} and #{path}"
+
+        {Map.put(graph, app, in_umbrella_deps(path, root)), Map.put(owners, app, path)}
+      end)
+
+    for {owner, deps} <- graph, dependency <- deps do
+      assert Map.has_key?(graph, dependency),
+             "missing repository dependency #{dependency} declared by #{owner}"
+    end
+
+    graph
   end
 
   defp inventory_env_from_system do
@@ -86,10 +97,12 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
         contained_tracked_mix_files(root, env)
 
       _ ->
-        case System.cmd("git", ["-C", root, "ls-files", "apps/*/mix.exs"], stderr_to_stdout: true) do
+        args = ["-C", root, "ls-files", "-z", "--", "apps/*/mix.exs", "packages/arbor_*/mix.exs"]
+
+        case System.cmd("git", args, stderr_to_stdout: true) do
           {out, 0} ->
             out
-            |> String.split("\n", trim: true)
+            |> String.split(<<0>>, trim: true)
             |> Enum.filter(&app_mix_project_path?/1)
             |> Enum.map(&Path.join(root, &1))
 
@@ -97,7 +110,8 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
             # Not a git checkout (e.g. an extracted tarball) — best-effort fallback.
             # In-repo CI/local always take the git path above. Contained mode never
             # reaches this branch.
-            Path.wildcard(Path.join([root, "apps", "*", "mix.exs"]))
+            Path.wildcard(Path.join([root, "apps", "*", "mix.exs"])) ++
+              Path.wildcard(Path.join([root, "packages", "arbor_*", "mix.exs"]))
         end
     end
   end
@@ -165,21 +179,24 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
 
   defp app_mix_project_path?(path) when is_binary(path) do
     case Path.split(path) do
-      ["apps", app, "mix.exs"] when is_binary(app) and app != "" and app != "." and app != ".." ->
-        true
+      [scope, app, "mix.exs"]
+      when scope in ["apps", "packages"] and is_binary(app) ->
+        String.starts_with?(app, "arbor_")
 
       _ ->
         false
     end
   end
 
-  defp in_umbrella_deps(path) do
+  defp in_umbrella_deps(path, root) do
     ast = path |> File.read!() |> Code.string_to_quoted!()
 
     {_ast, deps} =
       Macro.prewalk(ast, [], fn
         {dep, opts} = node, acc when is_atom(dep) and is_list(opts) ->
-          if to_string(dep) =~ ~r/^arbor_/ and Keyword.get(opts, :in_umbrella) == true do
+          if to_string(dep) =~ ~r/^arbor_/ and
+               (Keyword.get(opts, :in_umbrella) == true or
+                  repository_path_dep?(dep, opts, path, root)) do
             {node, [to_string(dep) | acc]}
           else
             {node, acc}
@@ -190,6 +207,23 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
       end)
 
     Enum.uniq(deps)
+  end
+
+  defp repository_path_dep?(dep, opts, project_path, root) do
+    case Keyword.get(opts, :path) do
+      target when is_binary(target) ->
+        target
+        |> Path.expand(Path.dirname(project_path))
+        |> Path.relative_to(Path.expand(root))
+        |> Path.split()
+        |> case do
+          [scope, app] when scope in ["apps", "packages"] -> app == Atom.to_string(dep)
+          _external_or_unresolved -> false
+        end
+
+      _dynamic_or_absent ->
+        false
+    end
   end
 
   # ── Longest-path level computation with cycle detection ──────────────────────
@@ -249,6 +283,55 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   end
 
   # ── Tests ────────────────────────────────────────────────────────────────────
+  test "tracked packages and repository path edges cannot disappear from the graph" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+    package = Path.join(fixture.linked, "packages/arbor_signals/mix.exs")
+    File.mkdir_p!(Path.dirname(package))
+
+    File.write!(package, """
+    defmodule Signals.MixProject do
+      def project, do: [app: :arbor_signals, deps: []]
+    end
+    """)
+
+    File.write!(Path.join(fixture.linked, "apps/arbor_shell/mix.exs"), """
+    defmodule Shell.MixProject do
+      def project do
+        [app: :arbor_shell, deps: [
+          {:arbor_kernel, in_umbrella: true},
+          {:arbor_signals, path: "../../packages/arbor_signals", runtime: false}
+        ]]
+      end
+    end
+    """)
+
+    git!(fixture.linked, ["add", "packages/arbor_signals/mix.exs"])
+    graph = dep_graph(fixture.linked, %{})
+    assert graph["arbor_signals"] == []
+    assert Enum.sort(graph["arbor_shell"]) == ["arbor_kernel", "arbor_signals"]
+    assert compute_levels(graph)["arbor_shell"] == 1
+  end
+
+  test "duplicate application/package owners fail closed" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+    duplicate = Path.join(fixture.linked, "packages/arbor_shell/mix.exs")
+    File.mkdir_p!(Path.dirname(duplicate))
+
+    File.write!(duplicate, """
+    defmodule DuplicateShell.MixProject do
+      def project, do: [app: :arbor_shell, deps: []]
+    end
+    """)
+
+    git!(fixture.linked, ["add", "packages/arbor_shell/mix.exs"])
+
+    assert_raise ExUnit.AssertionError, ~r/duplicate application owner arbor_shell/, fn ->
+      dep_graph(fixture.linked, %{})
+    end
+  end
+
   test "the in-umbrella dependency graph is acyclic" do
     # Ordinary Git path via process env (local/CI). Contained validation sets
     # ARBOR_MIX_CONTAINED=1 and supplies the attested inventory instead.
@@ -284,7 +367,7 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
         end
 
       flunk("""
-      CLAUDE.md's "Library Hierarchy" has drifted from the real apps/*/mix.exs graph.
+      CLAUDE.md's "Library Hierarchy" has drifted from the real application/package mix.exs graph.
       Update the Ln block in CLAUDE.md to match the computed levels below
       (this is the source of truth — the deps don't lie):
 

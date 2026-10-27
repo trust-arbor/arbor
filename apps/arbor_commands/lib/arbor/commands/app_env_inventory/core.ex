@@ -8,7 +8,7 @@ defmodule Arbor.Commands.AppEnvInventory.Core do
   alias Arbor.Commands.AppEnvInventory.{Ast, Encode}
 
   @report_schema "arbor.packaging.app_env_inventory.v1"
-  @legacy_owners [:arbor_contracts, :arbor_common, :arbor_signals, :arbor_monitor]
+  @legacy_owners [:arbor_contracts, :arbor_common, :arbor_monitor]
   @accepted_modes MapSet.new(["100644", "100755"])
   @accepted_formats MapSet.new(["sha1", "sha256"])
   @accepted_sources MapSet.new(["git_index_blobs", "test_injection"])
@@ -18,7 +18,6 @@ defmodule Arbor.Commands.AppEnvInventory.Core do
   @count_owners [
     "arbor_contracts",
     "arbor_common",
-    "arbor_signals",
     "arbor_monitor",
     "unresolved"
   ]

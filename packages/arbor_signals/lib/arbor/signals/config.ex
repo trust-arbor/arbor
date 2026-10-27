@@ -1,0 +1,445 @@
+defmodule Arbor.Signals.Config do
+  @moduledoc """
+  Owner-scoped application env for Signals.
+
+  Values live under `config :arbor_signals, ...`. Durable-sink,
+  security, crypto, and identity seams default to `nil` (disabled). Umbrella
+  runtime or tests inject concrete modules; this library never hardcodes those
+  providers.
+
+  ## Configuration Keys
+
+      config :arbor_signals,
+          authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
+          restricted_topics: [:security, :identity],
+          security_sync_subscribers: %{
+            role: %{
+              owner: RegisteredOwner,
+              supervisor: {:application, :owner_application},
+              child_id: RegisteredOwner,
+              events: [:event]
+            }
+          },
+          durable_sink_module: nil,
+          security_module: nil,
+          crypto_module: nil,
+          identity_registry_module: nil,
+          channel_auto_rotate_interval_ms: 86_400_000,
+          channel_rotate_on_leave: true,
+          relay_enabled: true,
+          relay_batch_interval_ms: 50,
+          relay_max_batch_size: 500,
+          relay_category_rate_limit: 100,
+          relay_node_rate_limit: 1000
+  """
+
+  require Logger
+
+  @default_authorizer Arbor.Signals.Adapters.CapabilityAuthorizer
+  @default_restricted_topics [:security, :identity]
+  @default_security_sync_subscribers %{}
+  @security_sync_event_pattern ~r/^[a-z][a-z0-9_]*$/
+  @default_auto_rotate_interval_ms 86_400_000
+  @default_rotate_on_leave true
+  @default_channels_module Arbor.Signals.Channels
+  @default_checkpoint_interval_ms 60_000
+  @default_category_rate_limit 100
+  @default_node_rate_limit 1000
+  @default_batch_interval_ms 50
+  @default_max_batch_size 500
+
+  @doc """
+  Security boundary for all Erlang-distribution signal transport.
+
+  A holder of the distribution cookie can execute arbitrary code on a
+  connected node and is therefore a cluster root. Node zones and relay peer
+  membership are routing and load-shedding inputs; they are not authorization
+  boundaries. This value is deliberately not configurable.
+  """
+  @spec cluster_trust_boundary() :: :distribution_cookie_root
+  def cluster_trust_boundary, do: :distribution_cookie_root
+
+  @doc """
+  Return the configured subscription authorizer module.
+
+  Defaults to `CapabilityAuthorizer`, which forwards bounded subscribe
+  checks to the configured authorization provider.
+  Test env overrides to `OpenAuthorizer` for isolated testing.
+  """
+  @spec authorizer() :: module()
+  def authorizer do
+    configured = get(:authorizer, @default_authorizer)
+
+    if configured == Arbor.Signals.Adapters.OpenAuthorizer and
+         not get(:allow_open_authorizer, false) do
+      Logger.warning(
+        "OpenAuthorizer rejected without allow_open_authorizer flag, using CapabilityAuthorizer"
+      )
+
+      @default_authorizer
+    else
+      configured
+    end
+  end
+
+  @doc """
+  Return the list of restricted topics that require authorization.
+
+  Defaults to `[:security, :identity]`.
+  """
+  @spec restricted_topics() :: [atom()]
+  def restricted_topics do
+    get(:restricted_topics, @default_restricted_topics)
+  end
+
+  @doc false
+  @spec security_sync_owner(atom(), atom()) :: {:ok, atom()} | :error
+  def security_sync_owner(role, event) when is_atom(role) and is_atom(event) do
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
+
+    with true <- is_map(subscribers),
+         %{owner: owner, events: events} <- Map.get(subscribers, role),
+         true <- is_atom(owner) and owner not in [nil, true, false],
+         true <- valid_security_sync_events?(events),
+         true <- event in events do
+      {:ok, owner}
+    else
+      _ -> :error
+    end
+  end
+
+  def security_sync_owner(_role, _event), do: :error
+
+  @doc false
+  @spec security_sync_owner_provenance(atom(), atom()) ::
+          {:ok,
+           %{
+             owner: atom(),
+             supervisor: pid() | {:application, atom()},
+             child_id: term()
+           }}
+          | :error
+  def security_sync_owner_provenance(role, event) when is_atom(role) and is_atom(event) do
+    security_sync_owner_provenance(role, event, security_sync_subscribers_snapshot())
+  end
+
+  def security_sync_owner_provenance(_role, _event), do: :error
+
+  @doc false
+  @spec security_sync_owner_provenance(atom(), atom(), map()) ::
+          {:ok,
+           %{
+             owner: atom(),
+             supervisor: pid() | {:application, atom()},
+             child_id: term()
+           }}
+          | :error
+  def security_sync_owner_provenance(role, event, subscribers)
+      when is_atom(role) and is_atom(event) and is_map(subscribers) do
+    with %{owner: owner, supervisor: supervisor, child_id: child_id, events: events} <-
+           Map.get(subscribers, role),
+         true <- valid_registered_name?(owner),
+         true <- valid_supervisor_root?(supervisor),
+         true <- valid_child_id?(child_id),
+         true <- valid_security_sync_events?(events),
+         true <- event in events do
+      {:ok, %{owner: owner, supervisor: supervisor, child_id: child_id}}
+    else
+      _other -> :error
+    end
+  end
+
+  def security_sync_owner_provenance(_role, _event, _subscribers), do: :error
+
+  @doc false
+  @spec security_sync_subscribers_snapshot() :: map()
+  def security_sync_subscribers_snapshot do
+    case get(:security_sync_subscribers, @default_security_sync_subscribers) do
+      subscribers when is_map(subscribers) -> subscribers
+      _other -> %{}
+    end
+  end
+
+  @doc false
+  @spec security_sync_publisher(atom()) :: {:ok, atom()} | :error
+  def security_sync_publisher(event) when is_atom(event) do
+    security_sync_publisher(event, security_sync_subscribers_snapshot())
+  end
+
+  def security_sync_publisher(_event), do: :error
+
+  @doc false
+  @spec security_sync_publisher(atom(), map()) :: {:ok, atom()} | :error
+  def security_sync_publisher(event, subscribers) when is_atom(event) and is_map(subscribers) do
+    publishers = subscribers |> security_sync_publishers_for(event) |> Enum.uniq()
+
+    case publishers do
+      [owner] -> {:ok, owner}
+      _ -> :error
+    end
+  end
+
+  def security_sync_publisher(_event, _subscribers), do: :error
+
+  defp security_sync_publishers_for(subscribers, event) when is_map(subscribers) do
+    for {_role, %{owner: owner, events: events}} <- subscribers,
+        is_atom(owner),
+        owner not in [nil, true, false],
+        valid_security_sync_events?(events),
+        event in events,
+        do: owner
+  end
+
+  defp security_sync_publishers_for(_subscribers, _event), do: []
+
+  @doc """
+  Whether any well-formed security-sync role is configured.
+
+  An empty or malformed subscriber map is local-only: stores must start
+  without cluster subscriptions. A configured role still fails closed
+  if that owner cannot subscribe.
+  """
+  @spec security_sync_transport_configured?() :: boolean()
+  def security_sync_transport_configured? do
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
+
+    is_map(subscribers) and
+      Enum.any?(subscribers, fn {role, _entry} -> security_sync_role_configured?(role) end)
+  end
+
+  @doc """
+  Whether remote-origin security-sync apply is admitted.
+
+  False by default. A configured `security_sync_subscribers` map is
+  owner-only local subscribe wiring, not authenticated cluster
+  transport. There is no production env flag that re-opens
+  unauthenticated apply.
+  """
+  @spec authenticated_security_sync_transport?() :: boolean()
+  def authenticated_security_sync_transport?, do: false
+
+  # Remote security mutations split by the DIRECTION they move authority.
+  #
+  # Blocking unauthenticated remote apply symmetrically is not fail-closed —
+  # it is fail-closed for grants and fail-OPEN for revocations. Dropping a
+  # remote `:capability_revoked` means this node keeps honoring a capability
+  # another node already revoked, which is the exact hole the gate was meant
+  # to prevent (found 2026-08-19; four security regression tests had been red
+  # on main since 4bda3a047 for this reason).
+  #
+  # Authority-reducing mutations are monotonic and safe to accept from any
+  # peer: the worst a hostile origin achieves is denying service, which any
+  # mesh member can already do directly — Erlang distribution has no
+  # intra-cluster authorization. Authority-granting mutations stay gated,
+  # because those are the ones a forged signal could use to widen access.
+  @authority_reducing_security_mutations [
+    :capability_revoked,
+    :capabilities_revoked_all,
+    :capabilities_cascade_revoked,
+    :capabilities_scope_revoked,
+    :identity_deregistered,
+    :identity_suspended,
+    :identity_revoked
+  ]
+
+  @doc """
+  Whether a remote-origin security mutation of `type` may be applied.
+
+  Authority-reducing types are always admitted. Everything else requires an
+  authenticated sync transport, which does not yet exist — so
+  `:capability_granted`, `:identity_registered`, and `:identity_resumed`
+  stay blocked.
+
+  Note `:identity_resumed` is authority-*restoring* and therefore gated,
+  even though it travels with suspend/revoke in the apply path.
+  """
+  @spec admit_remote_security_mutation?(atom()) :: boolean()
+  def admit_remote_security_mutation?(type) when is_atom(type) do
+    type in @authority_reducing_security_mutations or
+      authenticated_security_sync_transport?()
+  end
+
+  def admit_remote_security_mutation?(_type), do: false
+
+  @doc false
+  @spec authority_reducing_security_mutations() :: [atom()]
+  def authority_reducing_security_mutations, do: @authority_reducing_security_mutations
+
+  @doc false
+  @spec security_sync_role_configured?(atom()) :: boolean()
+  def security_sync_role_configured?(role)
+      when is_atom(role) and role not in [nil, true, false] do
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
+
+    with true <- is_map(subscribers),
+         %{owner: owner, events: events} <- Map.get(subscribers, role),
+         true <- is_atom(owner) and owner not in [nil, true, false],
+         true <- valid_security_sync_events?(events) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  def security_sync_role_configured?(_role), do: false
+
+  defp valid_security_sync_events?(events) do
+    is_list(events) and events != [] and Enum.all?(events, &valid_security_sync_event?/1) and
+      length(events) == length(Enum.uniq(events))
+  end
+
+  defp valid_security_sync_event?(event) when is_atom(event) and event not in [nil, true, false],
+    do: Regex.match?(@security_sync_event_pattern, Atom.to_string(event))
+
+  defp valid_security_sync_event?(_event), do: false
+
+  defp valid_registered_name?(name), do: is_atom(name) and name not in [nil, true, false]
+
+  defp valid_supervisor_root?(pid) when is_pid(pid), do: true
+
+  defp valid_supervisor_root?({:application, application}),
+    do: is_atom(application) and application not in [nil, true, false]
+
+  defp valid_supervisor_root?(_other), do: false
+
+  defp valid_child_id?(child_id), do: child_id not in [nil, true, false]
+
+  @doc """
+  Return the configured auto-rotation interval for channel keys in milliseconds.
+
+  Defaults to 86,400,000 (24 hours).
+  """
+  @spec channel_auto_rotate_interval_ms() :: pos_integer()
+  def channel_auto_rotate_interval_ms do
+    get(:channel_auto_rotate_interval_ms, @default_auto_rotate_interval_ms)
+  end
+
+  @doc """
+  Return whether to automatically rotate channel keys when a member leaves.
+
+  Defaults to `true`. When enabled, departing members cannot read future
+  messages since the key changes after they leave.
+  """
+  @spec channel_rotate_on_leave?() :: boolean()
+  def channel_rotate_on_leave? do
+    get(:channel_rotate_on_leave, @default_rotate_on_leave)
+  end
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.DurableSink`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec durable_sink_module() :: module() | nil | term()
+  def durable_sink_module, do: get(:durable_sink_module, nil)
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.Authorization`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec security_module() :: module() | nil | term()
+  def security_module, do: get(:security_module, nil)
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.Crypto`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec crypto_module() :: module() | nil | term()
+  def crypto_module, do: get(:crypto_module, nil)
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.IdentityKeys`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec identity_registry_module() :: module() | nil | term()
+  def identity_registry_module, do: get(:identity_registry_module, nil)
+
+  @doc "Whether Signals starts its optional supervised children (default true)."
+  @spec start_children?() :: boolean() | nil
+  def start_children?, do: get(:start_children, true)
+
+  @doc "Whether the security telemetry-to-signal bridge attaches (default true)."
+  @spec security_telemetry_bridge?() :: boolean() | nil
+  def security_telemetry_bridge?, do: get(:security_telemetry_bridge, true)
+
+  @doc "Whether the cross-node relay is enabled (default true)."
+  @spec relay_enabled?() :: boolean() | nil
+  def relay_enabled?, do: get(:relay_enabled, true)
+
+  @doc "Per-category relay tokens per second (default 100)."
+  @spec relay_category_rate_limit() :: non_neg_integer()
+  def relay_category_rate_limit, do: get(:relay_category_rate_limit, @default_category_rate_limit)
+
+  @doc "Per-node ingress relay rate limit (default 1000)."
+  @spec relay_node_rate_limit() :: non_neg_integer()
+  def relay_node_rate_limit, do: get(:relay_node_rate_limit, @default_node_rate_limit)
+
+  @doc "Relay batch flush interval in milliseconds (default 50)."
+  @spec relay_batch_interval_ms() :: pos_integer()
+  def relay_batch_interval_ms, do: get(:relay_batch_interval_ms, @default_batch_interval_ms)
+
+  @doc "Relay maximum outbound batch size (default 500)."
+  @spec relay_max_batch_size() :: pos_integer()
+  def relay_max_batch_size, do: get(:relay_max_batch_size, @default_max_batch_size)
+
+  @doc "Checkpoint adapter module, or `nil`."
+  @spec checkpoint_module() :: module() | nil
+  def checkpoint_module, do: get(:checkpoint_module, nil)
+
+  @doc "Checkpoint store backend, or `nil`."
+  @spec checkpoint_store() :: term()
+  def checkpoint_store, do: get(:checkpoint_store, nil)
+
+  @doc "Checkpoint save interval in milliseconds (default 60_000)."
+  @spec checkpoint_interval_ms() :: pos_integer()
+  def checkpoint_interval_ms, do: get(:checkpoint_interval_ms, @default_checkpoint_interval_ms)
+
+  @doc "Channel decrypt module (default `Arbor.Signals.Channels`)."
+  @spec channels_module() :: module()
+  def channels_module, do: get(:channels_module, @default_channels_module)
+
+  @doc "Authorizer that verifies channel principal envelopes (default capability authorizer)."
+  @spec channel_principal_authorizer() :: module() | term()
+  def channel_principal_authorizer,
+    do: get(:channel_principal_authorizer, @default_authorizer)
+
+  @doc "Trusted provider for process-local taint values; defaults to the package contract."
+  @spec taint_module() :: module()
+  def taint_module, do: get(:taint_module, Arbor.Signals.Contracts.Taint)
+
+  @doc "Trusted provider for canonical durable provenance envelopes."
+  @spec taint_envelope_module() :: module()
+  def taint_envelope_module,
+    do: get(:taint_envelope_module, Arbor.Signals.Contracts.TaintEnvelope)
+
+  @doc "Trusted adapter for opaque authorization context values."
+  @spec auth_context_module() :: module() | nil
+  def auth_context_module, do: get(:auth_context_module, Arbor.Signals.Adapters.AuthContext)
+
+  @doc "Trusted OTP application or supervisor that owns the Signals tree."
+  @spec supervision_root() :: {:application, atom()} | pid() | term()
+  def supervision_root, do: get(:supervision_root, {:application, :arbor_signals})
+
+  @doc "Exact child path from the configured root to the Signals supervisor."
+  @spec supervision_path() :: [term()]
+  def supervision_path do
+    case get(:supervision_path, []) do
+      path when is_list(path) ->
+        if length(path) <= 16,
+          do: path,
+          else: raise(ArgumentError, "invalid Signals supervision path")
+
+      _invalid ->
+        raise ArgumentError, "invalid Signals supervision path"
+    end
+  end
+
+  defp get(key, default) when is_atom(key), do: Application.get_env(:arbor_signals, key, default)
+end

@@ -33,6 +33,8 @@ defmodule Arbor.MixProject do
 
   defp deps do
     [
+      {:arbor_signals,
+       path: "packages/arbor_signals", runtime: false, env: Mix.env(), override: true},
       # Jido ecosystem — stable 2.0 Hex releases
       {:jido, "~> 2.0", override: true},
       {:jido_action, "~> 2.0", override: true},

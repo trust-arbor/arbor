@@ -34,6 +34,7 @@ defmodule Arbor.Actions.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},

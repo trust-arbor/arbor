@@ -279,40 +279,8 @@ defmodule Arbor.Signals.ClusterTestHelpers do
 
   # ── Generic Helpers ───────────────────────────────────────────────────
 
-  defp put_signals(key, value) when is_atom(key) do
-    namespace = :signals
-
-    current =
-      case Application.fetch_env(:arbor_kernel, namespace) do
-        {:ok, config} when is_list(config) ->
-          if Keyword.keyword?(config) do
-            config
-          else
-            raise ArgumentError, "malformed :arbor_kernel :signals namespace"
-          end
-
-        {:ok, %{} = config} ->
-          if Map.has_key?(config, :__struct__) do
-            raise ArgumentError, "malformed :arbor_kernel :signals namespace"
-          else
-            config
-          end
-
-        {:ok, _} ->
-          raise ArgumentError, "malformed :arbor_kernel :signals namespace"
-
-        :error ->
-          []
-      end
-
-    next =
-      cond do
-        is_list(current) -> Keyword.put(current, key, value)
-        is_map(current) -> Map.put(current, key, value)
-      end
-
-    Application.put_env(:arbor_kernel, namespace, next)
-  end
+  defp put_signals(key, value) when is_atom(key),
+    do: Application.put_env(:arbor_signals, key, value)
 
   # Start a GenServer via start_link, then unlink so it survives
   # the :erpc caller process exiting.

@@ -4,6 +4,8 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Signals.Config.Testing, as: SignalsConfig
+
   @config_sections [:common, :signals, :monitor, :kernel_runtime]
   @provider_roots [:os_mon, :recon, :mint, :finch, :req]
   @earlier :os_mon
@@ -127,7 +129,7 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
 
     originals = %{
       apps: Map.new([@owner | @provider_roots], fn app -> {app, snapshot_app(app)} end),
-      config: Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)}),
+      config: Map.new(@config_sections, &snapshot_section/1),
       topology: snapshot_owner_topology(),
       trap_exit: trap_exit
     }
@@ -431,6 +433,11 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
     :ok
   end
 
+  defp snapshot_section(:signals),
+    do: {:signals, {:signals_app, Application.get_all_env(:arbor_signals)}}
+
+  defp snapshot_section(section), do: {section, Application.fetch_env(:arbor_kernel, section)}
+
   defp put_section(section, updates) do
     current = Application.get_env(:arbor_kernel, section, []) || []
     value = Enum.reduce(updates, current, fn {key, item}, acc -> Keyword.put(acc, key, item) end)
@@ -586,6 +593,7 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
     restore_provider_roots(originals)
 
     Enum.each(originals.config, fn
+      {:signals, {:signals_app, value}} -> SignalsConfig.restore_namespace(value)
       {section, {:ok, value}} -> Application.put_env(:arbor_kernel, section, value)
       {section, :error} -> Application.delete_env(:arbor_kernel, section)
     end)

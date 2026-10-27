@@ -34,6 +34,46 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
     }
   end
 
+  test "package sources and path dependencies participate in the canonical census" do
+    files = [
+      file("packages/arbor_signals/mix.exs", mix("arbor_signals", [])),
+      file("apps/arbor_kernel_runtime/mix.exs", """
+      defmodule Host.MixProject do
+        def deps, do: [{:arbor_signals, path: "../../packages/arbor_signals", runtime: false}]
+      end
+      """),
+      file("packages/arbor_signals/lib/signals.ex", """
+      defmodule Arbor.Signals do
+        def emit, do: :ok
+      end
+      """),
+      file("apps/arbor_kernel_runtime/lib/runtime.ex", """
+      defmodule Arbor.KernelRuntime.Sample do
+        def emit, do: Arbor.Signals.emit()
+      end
+      """)
+    ]
+
+    assert {:ok, census} = Core.new(bundle(files))
+    assert census["gating_occurrences"] == []
+
+    assert Enum.any?(census["occurrences"], fn occurrence ->
+             occurrence["target"] == "Arbor.Signals" and occurrence["declared"] == true
+           end)
+  end
+
+  test "duplicate app and package owners fail closed instead of overwriting the graph" do
+    files = [
+      file("apps/arbor_signals/mix.exs", mix("arbor_signals", [])),
+      file("packages/arbor_signals/mix.exs", mix("arbor_signals", []))
+    ]
+
+    assert {:error,
+            {:mix_file, "packages/arbor_signals/mix.exs",
+             {:duplicate_application_ownership, "arbor_signals", "apps/arbor_signals/mix.exs",
+              "packages/arbor_signals/mix.exs"}}} = Core.new(bundle(files))
+  end
+
   test "declared downward reference is not gating" do
     files = [
       file("apps/arbor_contracts/mix.exs", mix("arbor_contracts", [])),

@@ -8,6 +8,8 @@ source that *mentions* `Code.compile_string` do not count.
 
 A production-lib drift guard lives at
 `apps/arbor_kernel/test/arbor/contracts/code_loader_sites_lint_test.exs`.
+Its tracked-source scope includes both `apps/*/lib` and `packages/*/lib`, so
+extracting a library cannot remove its loader sites from review.
 `apps/arbor_actions` also keeps a library-local allowlist in
 `apps/arbor_actions/test/arbor/actions/security/code_compile_sites_lint_test.exs`.
 
@@ -21,7 +23,7 @@ rather than deleting.
 
 ---
 
-## Production `apps/*/lib` loader sites
+## Production application and package loader sites
 
 | File:line | Call | Purpose | Untrusted input? | Disposition |
 | --- | --- | --- | --- | --- |

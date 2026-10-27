@@ -5,7 +5,49 @@ defmodule Arbor.Commands.SourceCoupling.GitInventoryTest do
 
   @moduletag :fast
 
+  test "canonical inventory includes extracted package stage-zero sources" do
+    tree_oid = String.duplicate("a", 40)
+    source_oid = String.duplicate("b", 40)
+    mix_oid = String.duplicate("c", 40)
+    path = "packages/arbor_signals/lib/arbor/signals.ex"
+    mix_path = "packages/arbor_signals/mix.exs"
+
+    assert {:ok, result} =
+             GitInventory.load_canonical("/tmp",
+               run_git:
+                 stub_git(tree_oid, [
+                   "100644 #{source_oid} 0\t#{path}",
+                   "100644 #{mix_oid} 0\t#{mix_path}",
+                   "100644 #{mix_oid} 0\tpackages/arbor_signals/examples/standalone/mix.exs"
+                 ])
+             )
+
+    assert Enum.map(result.files, & &1.path) == [path, mix_path]
+    assert Enum.find(result.files, &(&1.path == path)).blob_oid == source_oid
+    assert Enum.all?(result.files, &(&1.bytes == "xxxxxxxx"))
+  end
+
   describe "load_selected_blobs/3 provenance" do
+    test "selected package bytes and digest remain bound to the staged source" do
+      tree_oid = String.duplicate("a", 40)
+      blob_oid = String.duplicate("b", 40)
+      path = "packages/arbor_signals/lib/arbor/signals.ex"
+
+      assert {:ok, result} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_signals"],
+                 run_git: stub_git(tree_oid, ["100644 #{blob_oid} 0\t#{path}"])
+               )
+
+      assert [%{path: ^path, blob_oid: ^blob_oid, bytes: "xxxxxxxx"}] = result.files
+      assert {:ok, digest} = GitInventory.selected_index_digest([{path, "100644", blob_oid}])
+      assert result.selected_index_digest == digest
+
+      assert {:error, _reason} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_signals"],
+                 run_git: stub_git(tree_oid, ["120000 #{blob_oid} 0\t#{path}"])
+               )
+    end
+
     test "returns head_tree_oid as a field distinct from the index-selected blob set" do
       tree_oid = String.duplicate("a", 40)
       blob_oid = String.duplicate("b", 40)
@@ -289,7 +331,10 @@ defmodule Arbor.Commands.SourceCoupling.GitInventoryTest do
         args == ["rev-parse", "HEAD^{tree}"] ->
           {:ok, tree_oid <> "\n"}
 
-        args == ["ls-files", "-z", "--stage"] ->
+        args in [
+          ["ls-files", "-z", "--stage"],
+          ["ls-files", "-z", "--stage", "--", "apps/", "packages/"]
+        ] ->
           {:ok, nul_join(staged_lines)}
 
         args == ["cat-file", "--batch-check"] ->

@@ -10,7 +10,7 @@ defmodule Arbor.Kernel do
   retired app keyspaces are not disjoint:
 
       config :arbor_kernel, common: [...]
-      config :arbor_kernel, signals: [...]
+      config :arbor_signals, start_children: true
       config :arbor_kernel, monitor: [...]
 
   `:contracts` is reserved so it is not reused as a flat key. There is no

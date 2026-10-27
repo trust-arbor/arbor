@@ -254,55 +254,58 @@ config :arbor_persistence, :backup,
   schedule: {3, 0},
   retention: [daily: 7, weekly: 4, monthly: 3]
 
-# Signals owner-scoped config lives under :arbor_kernel, :signals.
+# Signals configuration is owned by the independent :arbor_signals package.
 # Uses runtime configuration to avoid compile-time dependency cycle.
 # The checkpoint_store must implement Arbor.Contracts.Persistence.Store behaviour.
 # See Arbor.Signals.Config.
-config :arbor_kernel,
-  signals: [
-    checkpoint_module: Arbor.Persistence.Checkpoint,
-    checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
-    # Signal bus authorization — CapabilityAuthorizer uses fast ETS capability checks
-    # via Arbor.Security.can?/3 (runtime bridge, no compile-time dep on arbor_security).
-    # Test env overrides to OpenAuthorizer for isolated testing.
-    authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
-    restricted_topics: [:security, :identity],
-    # Bootstrap-only subscriptions for load-bearing distributed security state.
-    # Signals verifies the caller is the configured registered process and only
-    # admits the fixed events listed for that role.
-    security_sync_subscribers: %{
-      nonce_cache: %{
-        owner: Arbor.Security.Identity.NonceCache,
-        supervisor: {:application, :arbor_security},
-        child_id: Arbor.Security.Identity.NonceCache,
-        events: [:nonce_seen]
-      },
-      capability_store: %{
-        owner: Arbor.Security.CapabilityStore,
-        supervisor: {:application, :arbor_security},
-        child_id: Arbor.Security.CapabilityStore,
-        events: [
-          :capability_granted,
-          :capability_revoked,
-          :capabilities_revoked_all,
-          :capabilities_cascade_revoked,
-          :capabilities_scope_revoked
-        ]
-      },
-      identity_registry: %{
-        owner: Arbor.Security.Identity.Registry,
-        supervisor: {:application, :arbor_security},
-        child_id: Arbor.Security.Identity.Registry,
-        events: [
-          :identity_registered,
-          :identity_deregistered,
-          :identity_suspended,
-          :identity_resumed,
-          :identity_revoked
-        ]
-      }
+config :arbor_signals,
+  supervision_root: {:application, :arbor_kernel_runtime},
+  supervision_path: [Arbor.Signals.Application],
+  auth_context_module: Arbor.KernelRuntime.Adapters.SignalAuthContext,
+  taint_module: Arbor.Contracts.Security.Taint,
+  taint_envelope_module: Arbor.Contracts.Security.TaintEnvelope,
+  checkpoint_module: Arbor.Persistence.Checkpoint,
+  checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
+  # Signal bus authorization — CapabilityAuthorizer uses fast ETS capability checks
+  # via Arbor.Security.can?/3 (runtime bridge, no compile-time dep on arbor_security).
+  # Test env overrides to OpenAuthorizer for isolated testing.
+  authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
+  restricted_topics: [:security, :identity],
+  # Bootstrap-only subscriptions for load-bearing distributed security state.
+  # Signals verifies the caller is the configured registered process and only
+  # admits the fixed events listed for that role.
+  security_sync_subscribers: %{
+    nonce_cache: %{
+      owner: Arbor.Security.Identity.NonceCache,
+      supervisor: {:application, :arbor_security},
+      child_id: Arbor.Security.Identity.NonceCache,
+      events: [:nonce_seen]
+    },
+    capability_store: %{
+      owner: Arbor.Security.CapabilityStore,
+      supervisor: {:application, :arbor_security},
+      child_id: Arbor.Security.CapabilityStore,
+      events: [
+        :capability_granted,
+        :capability_revoked,
+        :capabilities_revoked_all,
+        :capabilities_cascade_revoked,
+        :capabilities_scope_revoked
+      ]
+    },
+    identity_registry: %{
+      owner: Arbor.Security.Identity.Registry,
+      supervisor: {:application, :arbor_security},
+      child_id: Arbor.Security.Identity.Registry,
+      events: [
+        :identity_registered,
+        :identity_deregistered,
+        :identity_suspended,
+        :identity_resumed,
+        :identity_revoked
+      ]
     }
-  ]
+  }
 
 # ExMCP 1.0.0-rc.6+ defaults to :prefer_modern (MCP 2026-07-28 first). Arbor's
 # existing HTTP MCP clients, BEAM agent endpoints, and ACP ToolServer peers

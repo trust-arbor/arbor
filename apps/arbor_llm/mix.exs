@@ -43,6 +43,7 @@ defmodule Arbor.LLM.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       # Session 2 (behavioral core): arbor_contracts for the Pipeline.Response
       # and AI.RuntimeContract/Capabilities types ToolLoop and ProviderCatalog
       # reference; arbor_common for PromptSanitizer, AgentTelemetry.Store, and

@@ -546,6 +546,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   alias Arbor.Security.TestBootstrap
   alias Arbor.Security.TestSupport.RecordingEventLogAdapter
   alias Arbor.Signals
+  alias Arbor.Signals.Config.Testing, as: SignalsConfig
 
   alias __MODULE__.CASSandbox
 
@@ -2988,11 +2989,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   # arbor_security test profile; start it so the store's direct cluster
   # signal is observable on the bus.
   defp ensure_signals_children do
-    previous_signals = Application.fetch_env(:arbor_kernel, :signals)
+    previous_signals = SignalsConfig.snapshot_namespace()
     previous_distributed = Application.fetch_env(:arbor_security, :distributed_signals)
 
     signals =
-      Application.get_env(:arbor_kernel, :signals, [])
+      Application.get_all_env(:arbor_signals)
       |> Keyword.put(:security_sync_subscribers, %{
         capability_store: %{
           owner: CapabilityStore,
@@ -3002,12 +3003,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         }
       })
 
-    Application.put_env(:arbor_kernel, :signals, signals)
+    SignalsConfig.restore_namespace(signals)
     Application.put_env(:arbor_security, :distributed_signals, true)
 
     on_exit(fn ->
       restore_application_env(:arbor_security, :distributed_signals, previous_distributed)
-      restore_application_env(:arbor_kernel, :signals, previous_signals)
+      SignalsConfig.restore_namespace(previous_signals)
       :ok = Signals.restore_runtime_fixture()
     end)
 

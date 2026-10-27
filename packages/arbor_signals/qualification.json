@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-27",
+  "base_commit": "27c4eea802ec65969ac963701914ce1a28b000c7",
+  "qualification_snapshot": {
+    "commit": "bd1c2dfef44ceb7fb65c8f284f53634d55ed8fe6",
+    "tree": "53b2af22cc0c5430deda99f726d52dabb2a414b3",
+    "final_delta": "Alias usage/order only in eleven Elixir files; final package, runtime, affected consumers, strict compile and scoped checks rerun. Verification prose and Bus provenance hash updated."
+  },
+  "production_provenance": "adoption-source-map.json",
+  "focused_checks": {
+    "package": {
+      "reported_tests": 481,
+      "failures": 0,
+      "distributed_excluded": 5
+    },
+    "distributed": {
+      "tests": 5,
+      "failures": 0,
+      "private_owned_epmd": true
+    },
+    "runtime": {
+      "tests": 71,
+      "failures": 0
+    },
+    "commands_tooling": {
+      "reported_tests": 163,
+      "failures": 0,
+      "skipped_opt_in_release_probe": 1
+    },
+    "kernel_hierarchy_and_source_guards": {
+      "tests": 21,
+      "failures": 0
+    },
+    "security_sync": {
+      "tests": 5,
+      "failures": 0
+    },
+    "agent_notice_consumer": {
+      "tests": 14,
+      "failures": 0,
+      "explicit_database_and_isolated_repo_tags": true
+    },
+    "dashboard_consumer": {
+      "tests": 8,
+      "failures": 0
+    },
+    "orchestrator_private_stream": {
+      "tests": 1,
+      "failures": 0,
+      "launcher": "exact owning file, mix run --no-start --no-compile, self-bootstrapping fixture"
+    },
+    "security_alias_consumer": {
+      "tests": 67,
+      "failures": 0
+    },
+    "isolated_ai": {
+      "tests": 7,
+      "failures": 0
+    },
+    "isolated_kernel_taint": {
+      "tests": 23,
+      "failures": 0
+    },
+    "strict_package_and_umbrella_compile": {
+      "exit_code": 0
+    },
+    "owned_format": {
+      "files": 156,
+      "exit_code": 0
+    },
+    "signals_construction": {
+      "files": 36,
+      "errors": 0,
+      "exit_code": 0
+    },
+    "final_cold_consumer_and_release": {
+      "dependency_resolution": "normal locked deps.get --only prod --check-locked",
+      "steps": [
+        "dependencies",
+        "strict compile",
+        "consumer",
+        "production release",
+        "release consumer without Mix"
+      ],
+      "all_exit_codes": 0,
+      "fresh_source_files_verified": 44
+    },
+    "memory_mutation_consumer": {
+      "tests": 15,
+      "failures": 0,
+      "explicit_database_and_integration_tags": true,
+      "fresh_private_sqlite_migrations_exit_code": 0
+    }
+  },
+  "full_umbrella_fast_attempt": {
+    "command": "mix test.fast --seed 0",
+    "complete": false,
+    "bound_seconds": 2721,
+    "termination_requested": "SIGTERM to owned test VM only",
+    "exit_code": 2,
+    "reported_suites": [
+      {
+        "application": "arbor_kernel",
+        "reported_summary": "6 doctests, 1347 tests, 1 failure (335 excluded)"
+      },
+      {
+        "application": "arbor_multimedia",
+        "reported_summary": "46 tests, 0 failures"
+      },
+      {
+        "application": "arbor_kernel_runtime",
+        "reported_summary": "8 doctests, 1795 tests, 0 failures (227 excluded)"
+      },
+      {
+        "application": "arbor_security",
+        "reported_summary": "1917 tests, 0 failures (255 excluded)"
+      },
+      {
+        "application": "arbor_cartographer",
+        "reported_summary": "115 tests, 0 failures (19 excluded)"
+      },
+      {
+        "application": "arbor_web",
+        "reported_summary": "56 tests, 0 failures (87 excluded)"
+      },
+      {
+        "application": "arbor_shell",
+        "reported_summary": "1250 tests, 11 failures, 6 skipped (264 excluded)"
+      },
+      {
+        "application": "arbor_sandbox",
+        "reported_summary": "154 tests, 0 failures (102 excluded)"
+      },
+      {
+        "application": "arbor_persistence",
+        "reported_summary": "714 tests, 0 failures (409 excluded)"
+      },
+      {
+        "application": "arbor_historian",
+        "reported_summary": "201 tests, 0 failures (116 excluded)"
+      },
+      {
+        "application": "arbor_comms",
+        "reported_summary": "243 tests, 0 failures (182 excluded)"
+      },
+      {
+        "application": "arbor_consensus",
+        "reported_summary": "246 tests, 0 failures (442 excluded)"
+      },
+      {
+        "application": "arbor_persistence_ecto",
+        "reported_summary": "0 tests, 0 failures (41 excluded)"
+      },
+      {
+        "application": "arbor_llm",
+        "reported_summary": "1000 tests, 0 failures (30 excluded)"
+      },
+      {
+        "application": "arbor_trust",
+        "reported_summary": "1 property, 632 tests, 0 failures (65 excluded)"
+      },
+      {
+        "application": "arbor_scheduler",
+        "reported_summary": "131 tests, 0 failures (60 excluded)"
+      },
+      {
+        "application": "arbor_ai",
+        "reported_summary": "1280 tests, 1 failure (135 excluded)"
+      },
+      {
+        "application": "arbor_memory",
+        "reported_summary": "2196 tests, 0 failures (157 excluded)"
+      },
+      {
+        "application": "arbor_actions",
+        "reported_summary": "1986 tests, 1 failure, 2 skipped (510 excluded)"
+      }
+    ],
+    "not_reached": [
+      "app_env_release_probe",
+      "arbor_agent",
+      "arbor_commands",
+      "arbor_dashboard",
+      "arbor_gateway",
+      "arbor_orchestrator",
+      "arbor_voice",
+      "compile_env_probe",
+      "release_no_mix"
+    ],
+    "limitations": [
+      "Kernel global atom-count assertion changed by one; unchanged source passes isolated on candidate and parent. Aggregate cause not proven.",
+      "Eleven Shell global process-absence assertions see a foreign launcher; it was left untouched.",
+      "AI always-locked-floor test failure deterministically reproduced on parent by loading Shell test helper first.",
+      "Actions quarantine retry sys.get_state timeout: unchanged case passes isolated on parent; aggregate cause unresolved."
+    ]
+  },
+  "quality": {
+    "all_green": false,
+    "quality_alias": "fails unchanged Dashboard agents_live.ex formatting",
+    "scoped_credo": {
+      "files": 156,
+      "findings": 155,
+      "classification": "existing or equivalent moved patterns; 17 introduced alias findings fixed",
+      "exit_code": 30
+    },
+    "global_credo_snapshot": {
+      "files": 4322,
+      "consistency": 2,
+      "warnings": 660,
+      "refactor": 1079,
+      "readability": 658,
+      "design": 3156,
+      "note": "before final alias-only cleanup"
+    },
+    "unused_lock_entries": 24,
+    "xref": {
+      "actual": 104,
+      "cap": 88,
+      "parent_actual": 104
+    },
+    "source_coupling": {
+      "undeclared": 5183,
+      "app_pairs": 56,
+      "upward": 60,
+      "parent_undeclared": 5191,
+      "parent_app_pairs": 58,
+      "parent_upward": 60
+    },
+    "app_env_inventory": {
+      "legacy_owner_occurrences": 0,
+      "exit_code": 0
+    },
+    "platform_inventory": {
+      "closed_scope_apps": 9,
+      "files": 445,
+      "reviewed": 318,
+      "unreviewed": 127,
+      "failures": 276,
+      "scope_changed": false
+    },
+    "safe_recovery_profile": {
+      "check_exit_code": 0,
+      "architecture_status": "blocked",
+      "blockers": 13
+    },
+    "safe_recovery_closure": {
+      "check_exit_code": 0,
+      "architecture_status": "blocked",
+      "open_findings": 117
+    },
+    "safe_recovery_artifact": {
+      "qualified": false,
+      "failure": "overlay_missing"
+    },
+    "baselines_refreshed": false
+  },
+  "rollback": {
+    "snapshot_commit": "bd1c2dfef44ceb7fb65c8f284f53634d55ed8fe6",
+    "exact_parent_tree": "06823568cff7d1096b48fb2e150eb608b350703a",
+    "tracked_files_verified": 5320,
+    "fresh_first_party_compile_exit_code": 0,
+    "runtime_canary_tests": 43,
+    "security_sync_tests": 5,
+    "failures": 0,
+    "final_commit_binding": "final exact revert/tree check recorded in local task ledger"
+  },
+  "acceptance_limits": [
+    "Full umbrella fast and quality acceptance remain incomplete/red.",
+    "M2 product profile release/boot smoke is not implemented; standalone release is separately qualified."
+  ],
+  "evidence": "Private raw logs and exact commands retained under tmp/verification; final cold consumer has independent results/source manifest. Failed/excluded prerequisite attempts retained and distinguished from passing coverage."
+}

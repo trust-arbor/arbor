@@ -1,6 +1,7 @@
 import Config
 
 config :arbor_kernel_runtime, expose_test_fixtures: true
+config :arbor_signals, expose_test_fixtures: true
 
 config :arbor_security,
   session_token_secret: "arbor-test-session-token-secret-32-bytes-minimum",
@@ -235,14 +236,12 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 
 # Disable checkpoint integration in tests (module may not be available).
 # Use OpenAuthorizer — tests don't have the security kernel running.
-config :arbor_kernel,
-  signals: [
-    start_children: false,
-    checkpoint_module: nil,
-    checkpoint_store: nil,
-    authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
-    allow_open_authorizer: true
-  ]
+config :arbor_signals,
+  start_children: false,
+  checkpoint_module: nil,
+  checkpoint_store: nil,
+  authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
+  allow_open_authorizer: true
 
 # Database tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo

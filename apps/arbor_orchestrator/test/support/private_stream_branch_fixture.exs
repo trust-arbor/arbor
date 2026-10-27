@@ -504,8 +504,6 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
   end
 
   defp configure!(root) do
-    signals = Application.get_env(:arbor_kernel, :signals, [])
-
     settings = [
       # These child options select fixture-owned genuine collaborators; the
       # full profile, mandatory PolicyHost and all security gates remain on.
@@ -561,15 +559,12 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
          opts: [repo: AuditRepo]
        }},
       {:arbor_orchestrator, :private_stream_signal_recipient, self()},
-      {:arbor_kernel, :signals,
-       Keyword.merge(signals,
-         start_children: false,
-         authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
-         allow_open_authorizer: false,
-         security_module: Security,
-         crypto_module: Security,
-         relay_enabled: false
-       )}
+      {:arbor_signals, :start_children, false},
+      {:arbor_signals, :authorizer, Arbor.Signals.Adapters.CapabilityAuthorizer},
+      {:arbor_signals, :allow_open_authorizer, false},
+      {:arbor_signals, :security_module, Security},
+      {:arbor_signals, :crypto_module, Security},
+      {:arbor_signals, :relay_enabled, false}
     ]
 
     previous =

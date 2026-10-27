@@ -37,6 +37,7 @@ defmodule Arbor.Dashboard.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:conversation_kit, path: "../../packages/conversation_kit"},
       {:conversation_kit_arbor, path: "../../packages/conversation_kit_arbor"},
       # Umbrella dependencies (Level 0-1)

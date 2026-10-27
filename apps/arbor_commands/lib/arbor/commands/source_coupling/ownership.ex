@@ -17,7 +17,7 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
   @spec app_of_path(String.t()) :: {:ok, String.t()} | {:error, term()}
   def app_of_path(path) when is_binary(path) do
     case Path.split(path) do
-      ["apps", app | _rest] ->
+      [scope, app | _rest] when scope in ["apps", "packages"] ->
         if Regex.match?(@app_re, app), do: {:ok, app}, else: {:error, {:invalid_app, app}}
 
       _ ->
@@ -31,20 +31,20 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
   @spec mix_project_path?(String.t()) :: boolean()
   def mix_project_path?(path) when is_binary(path) do
     case Path.split(path) do
-      ["apps", app, "mix.exs"] -> Regex.match?(@app_re, app)
+      [scope, app, "mix.exs"] when scope in ["apps", "packages"] -> Regex.match?(@app_re, app)
       _ -> false
     end
   end
 
   def mix_project_path?(_), do: false
 
-  @doc "True if path is library source under apps/*/lib."
+  @doc "True if path is library source under apps/*/lib or packages/arbor_*/lib."
   @spec lib_source_path?(String.t()) :: boolean()
   def lib_source_path?(path) when is_binary(path) do
     parts = Path.split(path)
 
     case parts do
-      ["apps", app, "lib" | rest] when rest != [] ->
+      [scope, app, "lib" | rest] when scope in ["apps", "packages"] and rest != [] ->
         Regex.match?(@app_re, app) and Enum.any?(rest, &source_filename?/1) and
           List.last(parts) |> source_filename?()
 
@@ -59,9 +59,11 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
     String.ends_with?(name, ".ex") or String.ends_with?(name, ".exs")
   end
 
-  @doc "Parse in-umbrella arbor_* deps from mix.exs source bytes."
-  @spec in_umbrella_deps(binary()) :: {:ok, [String.t()]} | {:error, term()}
-  def in_umbrella_deps(bytes) when is_binary(bytes) do
+  @doc "Parse umbrella and repository-local path dependencies from mix.exs source bytes."
+  @spec in_umbrella_deps(binary(), String.t() | nil) :: {:ok, [String.t()]} | {:error, term()}
+  def in_umbrella_deps(bytes, project_path \\ nil)
+
+  def in_umbrella_deps(bytes, project_path) when is_binary(bytes) do
     case Code.string_to_quoted(bytes, emit_warnings: false) do
       {:ok, ast} ->
         {_ast, deps} =
@@ -69,7 +71,9 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
             {dep, opts} = node, acc when is_atom(dep) and is_list(opts) ->
               name = Atom.to_string(dep)
 
-              if String.starts_with?(name, "arbor_") and Keyword.get(opts, :in_umbrella) == true do
+              if String.starts_with?(name, "arbor_") and
+                   (Keyword.get(opts, :in_umbrella) == true or
+                      local_path_dependency?(name, opts, project_path)) do
                 {node, [name | acc]}
               else
                 {node, acc}
@@ -86,7 +90,24 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
     end
   end
 
-  def in_umbrella_deps(_), do: {:error, :invalid_bytes}
+  def in_umbrella_deps(_, _), do: {:error, :invalid_bytes}
+
+  defp local_path_dependency?(name, opts, project_path) when is_binary(project_path) do
+    case Keyword.get(opts, :path) do
+      path when is_binary(path) ->
+        project_dir = Path.dirname(Path.join("/repository", project_path))
+
+        case Path.split(Path.expand(path, project_dir)) do
+          ["/", "repository", scope, ^name] when scope in ["apps", "packages"] -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp local_path_dependency?(_name, _opts, _project_path), do: false
 
   @doc """
   Build ownership index from module definition records.

@@ -1,6 +1,6 @@
 defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
   @moduledoc """
-  Drift guard: production `apps/*/lib` Code loader call sites are closed.
+  Drift guard: production `apps/*/lib` and `packages/*/lib` Code loader call sites are closed.
 
   Every `Code.eval_string/eval_quoted/eval_file/compile_string/compile_quoted/
   compile_file/require_file` call (plus `apply(Code, ...)` and
@@ -10,7 +10,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
 
   Detection is AST-based (not grep), so a mention inside a `@moduledoc`, a
   comment, or a generated-source heredoc does not count. Scan set is
-  git-tracked `apps/*/lib` only (`git ls-files`), matching
+  git-tracked `apps/*/lib` and `packages/*/lib` (`git ls-files`), matching
   `shell_string_spawn_source_guard_test.exs`.
 
   Human justification for each remaining site lives in
@@ -46,7 +46,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
     {"apps/arbor_kernel_runtime/lib/mix/tasks/arbor/eval.ex", ":rpc.call(Code, :eval_string)"}
   ]
 
-  test "production apps/*/lib Code loader sites are exactly the reviewed allowlist" do
+  test "production apps/*/lib and packages/*/lib Code loader sites are exactly the reviewed allowlist" do
     sites = scan(tracked_lib_files())
     found = sites |> Enum.map(&{&1.file, &1.what}) |> Enum.sort()
     expected = Enum.sort(@allowlist)
@@ -55,7 +55,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
     stale = expected -- found
 
     assert new == [],
-           "New in-VM Code loader site(s) under apps/*/lib. Review, then add to " <>
+           "New in-VM Code loader site(s) under apps/*/lib or packages/*/lib. Review, then add to " <>
              "@allowlist in #{Path.relative_to_cwd(__ENV__.file)} and " <>
              "#{@inventory_doc}:\n" <>
              format_sites(Enum.filter(sites, &({&1.file, &1.what} in new)))
@@ -110,15 +110,19 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     tracked = "apps/tracked/lib/tracked.ex"
+    package = "packages/arbor_signals/lib/tracked.ex"
     ignored = "apps/ignored/lib/ignored.ex"
     File.mkdir_p!(Path.dirname(Path.join(root, tracked)))
     File.mkdir_p!(Path.dirname(Path.join(root, ignored)))
+    File.mkdir_p!(Path.dirname(Path.join(root, package)))
     File.write!(Path.join(root, tracked), "defmodule Tracked, do: nil\n")
     File.write!(Path.join(root, ignored), "defmodule Ignored, do: nil\n")
+    File.write!(Path.join(root, package), "defmodule TrackedPackage, do: nil\n")
 
     assert {:ok, inventory} =
              SourceInventory.build(String.duplicate("d", 40), [
                tracked,
+               package,
                "apps/tracked/test/tracked_test.exs"
              ])
 
@@ -131,7 +135,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
       "ARBOR_SOURCE_INVENTORY_PATH" => manifest_path
     }
 
-    assert tracked_lib_files(root, env) == [tracked]
+    assert tracked_lib_files(root, env) == [tracked, package]
 
     assert_raise ExUnit.AssertionError, ~r/ARBOR_SOURCE_INVENTORY_PATH/, fn ->
       tracked_lib_files(root, %{"ARBOR_MIX_CONTAINED" => "1"})
@@ -147,7 +151,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
 
       _ ->
         {output, 0} =
-          System.cmd("git", ["ls-files", "-z", "--", "apps"],
+          System.cmd("git", ["ls-files", "-z", "--", "apps", "packages"],
             cd: root,
             stderr_to_stdout: true
           )
@@ -222,7 +226,7 @@ defmodule Arbor.Contracts.CodeLoaderSitesLintTest do
   defp production_lib_source?(path) do
     String.ends_with?(path, ".ex") and
       match?([_, _, "lib" | _], Path.split(path)) and
-      String.starts_with?(path, "apps/")
+      String.starts_with?(path, ["apps/", "packages/"])
   end
 
   defp scan(paths) do

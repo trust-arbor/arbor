@@ -128,7 +128,6 @@ defmodule Mix.Tasks.Arbor.Packaging.AppEnvInventoryTest do
         "by_owner" => %{
           "arbor_contracts" => 0,
           "arbor_common" => 1,
-          "arbor_signals" => 0,
           "arbor_monitor" => 0,
           "unresolved" => 0
         }

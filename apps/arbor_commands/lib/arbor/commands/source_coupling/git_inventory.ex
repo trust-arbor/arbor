@@ -442,7 +442,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
       ["apps", "arbor_integrations" | _] ->
         false
 
-      ["apps", app | _] ->
+      [scope, app | _] when scope in ["apps", "packages"] ->
         MapSet.member?(selected_apps, app)
 
       _ ->
@@ -457,7 +457,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
       ["apps", "arbor_integrations" | _] ->
         false
 
-      ["apps", app | suffix] ->
+      [scope, app | suffix] when scope in ["apps", "packages"] ->
         MapSet.member?(selected_apps, app) and
           (production_source_suffix?(suffix) or traversal_production_source_suffix?(suffix))
 
@@ -470,7 +470,8 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp production_source_path?(path) when is_binary(path) do
     case :binary.split(path, "/", [:global]) do
-      ["apps", app, "lib" | source_segments] when source_segments != [] ->
+      [scope, app, "lib" | source_segments]
+      when scope in ["apps", "packages"] and source_segments != [] ->
         app != "arbor_integrations" and valid_selected_app?(app) and
           ex_source_name?(List.last(source_segments))
 
@@ -716,7 +717,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp prefix_app(prefix) when is_binary(prefix) do
     case Path.split(prefix) do
-      ["apps", app | _] -> [app]
+      [scope, app | _] when scope in ["apps", "packages"] -> [app]
       _ -> []
     end
   end
@@ -822,9 +823,9 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   end
 
   defp ls_files_stage(root, run_git) do
-    # List staged paths under apps/; admit_stage_entries filters mix.exs + lib source.
+    # List staged paths under apps/ and packages/; admit_stage_entries filters mix.exs + lib source.
     # Avoid `**` pathspecs (not portable across Git versions).
-    args = ["ls-files", "-z", "--stage", "--", "apps/"]
+    args = ["ls-files", "-z", "--stage", "--", "apps/", "packages/"]
 
     case run_git.(root, args, "") do
       {:ok, out} -> parse_stage_output(out)
@@ -949,8 +950,11 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp app_ok?(path) do
     case Path.split(path) do
-      ["apps", app | _] -> Regex.match?(~r/\Aarbor_[a-z0-9_]+\z/, app)
-      _ -> false
+      [scope, app | _] when scope in ["apps", "packages"] ->
+        Regex.match?(~r/\Aarbor_[a-z0-9_]+\z/, app)
+
+      _ ->
+        false
     end
   end
 
@@ -958,7 +962,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp mix_path?(path) do
     case Path.split(path) do
-      ["apps", _app, "mix.exs"] -> true
+      [scope, _app, "mix.exs"] when scope in ["apps", "packages"] -> true
       _ -> false
     end
   end
@@ -967,7 +971,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
     parts = Path.split(path)
 
     case parts do
-      ["apps", _app, "lib" | rest] when rest != [] ->
+      [scope, _app, "lib" | rest] when scope in ["apps", "packages"] and rest != [] ->
         name = List.last(parts)
         String.ends_with?(name, ".ex") or String.ends_with?(name, ".exs")
 

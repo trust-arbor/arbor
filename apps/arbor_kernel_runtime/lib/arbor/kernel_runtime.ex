@@ -15,7 +15,7 @@ defmodule Arbor.KernelRuntime do
   use Boundary,
     top_level?: true,
     deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor, Logger],
-    exports: [SafeManagementSurface]
+    exports: [SafeManagementSurface, Adapters.SignalAuthContext]
 
   alias Arbor.Common.Extension.Activation
   alias Arbor.KernelRuntime.BootProfileBinding

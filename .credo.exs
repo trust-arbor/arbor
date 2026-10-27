@@ -14,7 +14,9 @@
           "test/",
           "apps/*/lib/",
           "apps/*/src/",
-          "apps/*/test/"
+          "apps/*/test/",
+          "packages/arbor_signals/lib/",
+          "packages/arbor_signals/test/"
         ],
         excluded: [
           ~r"/_build/",
@@ -58,7 +60,8 @@
           {Credo.Check.Consistency.TabsOrSpaces, []},
 
           # Design
-          {Credo.Check.Design.AliasUsage, [priority: :low, if_nested_deeper_than: 2, if_called_more_often_than: 0]},
+          {Credo.Check.Design.AliasUsage,
+           [priority: :low, if_nested_deeper_than: 2, if_called_more_often_than: 0]},
           {Credo.Check.Design.TagTODO, [exit_status: 0]},
           {Credo.Check.Design.TagFIXME, []},
 
@@ -127,7 +130,11 @@
         ],
         disabled: [
           # Disabled checks with reasons
-          {Credo.Check.Refactor.Apply, [reason: "apply/3 is the core runtime bridge pattern (Code.ensure_loaded? + apply) for cross-hierarchy calls"]},
+          {Credo.Check.Refactor.Apply,
+           [
+             reason:
+               "apply/3 is the core runtime bridge pattern (Code.ensure_loaded? + apply) for cross-hierarchy calls"
+           ]},
           {Credo.Check.Design.DuplicatedCode, [reason: "Too noisy for umbrella projects"]},
           {Credo.Check.Readability.BlockPipe, [reason: "Conflicts with some valid patterns"]},
           {Credo.Check.Readability.ImplTrue, [reason: "We use @impl true explicitly"]},

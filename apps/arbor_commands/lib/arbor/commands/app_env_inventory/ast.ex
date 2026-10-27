@@ -11,7 +11,6 @@ defmodule Arbor.Commands.AppEnvInventory.Ast do
   @legacy_owners MapSet.new([
                    :arbor_contracts,
                    :arbor_common,
-                   :arbor_signals,
                    :arbor_monitor
                  ])
 
@@ -970,6 +969,7 @@ defmodule Arbor.Commands.AppEnvInventory.Ast do
     cond do
       match?(["config" | _], parts) -> "config_block"
       match?(["apps", _app, "config" | _], parts) -> "config_block"
+      match?(["packages", _package, "config" | _], parts) -> "config_block"
       "test" in parts or List.last(parts) == "test_helper.exs" -> "test_support"
       true -> "production"
     end

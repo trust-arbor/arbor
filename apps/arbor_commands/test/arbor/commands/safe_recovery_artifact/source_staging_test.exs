@@ -46,6 +46,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       required_triples(oid) ++
         [
           %{path: "apps/arbor_kernel/test/kernel_test.exs", mode: "100644", oid: oid},
+          %{path: "packages/arbor_signals/lib/arbor/signals.ex", mode: "100644", oid: oid},
           %{
             path: "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json",
             mode: "100644",
@@ -57,6 +58,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     assert {:ok, paths} = SourcePolicy.select(triples)
     assert "apps/arbor_kernel/mix.exs" in paths
     assert "apps/arbor_kernel/test/kernel_test.exs" in paths
+    assert "packages/arbor_signals/mix.exs" in paths
+    assert "packages/arbor_signals/lib/arbor/signals.ex" in paths
     assert "mix.lock" in paths
     refute "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json" in paths
     refute "apps/arbor_dashboard/lib/x.ex" in paths
@@ -396,7 +399,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     generated = [
       "apps/arbor_persistence/.elixir_ls/build/cache",
       "apps/arbor_security/cover/report.html",
-      "apps/arbor_trust/erl_crash.dump"
+      "apps/arbor_trust/erl_crash.dump",
+      "packages/arbor_signals/cover/report.html"
     ]
 
     Enum.each(generated, fn relative ->
@@ -416,6 +420,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/.elixir_ls_evil/x.ex")
     refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/coverup/x.ex")
     refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/erl_crash.dump/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_signals/coverup/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_signals_other/cover/report.html")
   end
 
   @tag :slow
@@ -547,6 +553,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     pairs = [
       {"mix.exs", "umbrella\n"},
       {"apps/arbor_commands/mix.exs", "commands\n"},
+      {"packages/arbor_signals/mix.exs", "signals\n"},
+      {"packages/arbor_signals/lib/signals.ex", "signals source\n"},
       {"mix.lock", "lock\n"},
       {".tool-versions", "erlang 28.4.1\n"},
       {"bin/mix", "#!/bin/sh\n"},

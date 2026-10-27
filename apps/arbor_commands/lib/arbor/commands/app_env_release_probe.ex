@@ -12,7 +12,8 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
   @production_opt_keys [:json, :root]
   @owner_mix_rel [
     ["apps", "arbor_kernel", "mix.exs"],
-    ["apps", "arbor_kernel_runtime", "mix.exs"]
+    ["apps", "arbor_kernel_runtime", "mix.exs"],
+    ["packages", "arbor_signals", "mix.exs"]
   ]
 
   @warning_needles [
@@ -21,7 +22,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
     "compile_env"
   ]
 
-  @retired_config_apps ["arbor_common", "arbor_signals", "arbor_monitor", "arbor_contracts"]
+  @retired_config_apps ["arbor_common", "arbor_monitor", "arbor_contracts"]
 
   @fetch_needles [
     "Resolving Hex dependencies",
@@ -205,6 +206,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
   defp generated_mix_exs(root) do
     kernel = Path.expand("apps/arbor_kernel", root)
     kernel_runtime = Path.expand("apps/arbor_kernel_runtime", root)
+    signals = Path.expand("packages/arbor_signals", root)
 
     """
     # Probe-only fixture; not a production release.
@@ -231,7 +233,8 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
       defp deps do
         [
           {:arbor_kernel, path: #{inspect(kernel)}},
-          {:arbor_kernel_runtime, path: #{inspect(kernel_runtime)}}
+          {:arbor_kernel_runtime, path: #{inspect(kernel_runtime)}},
+          {:arbor_signals, path: #{inspect(signals)}, runtime: false, override: true}
         ]
       end
 

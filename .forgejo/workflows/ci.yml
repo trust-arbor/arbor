@@ -100,6 +100,20 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      # Path dependencies' tests and owning construction checks are not run by
+      # umbrella mix test or the local package-skipping pre-commit hook.
+      - name: Signals package construction checks
+        run: |
+          ./bin/mix run --no-start -e '
+          case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/arbor_signals/lib/") do
+            {:ok, %{passed: true} = result} ->
+              IO.puts("Signals: #{result.files_checked} files checked")
+            {:ok, result} ->
+              Mix.raise("Signals construction checks failed: #{inspect(result)}")
+            {:error, reason} ->
+              Mix.raise("Signals construction checks unavailable: #{inspect(reason)}")
+          end'
+
       - name: Packaging source-coupling census (baseline guard)
         run: ./bin/mix arbor.packaging.source_coupling --check --json
 
@@ -200,6 +214,54 @@ jobs:
             ( cd "$app" && mix test --failed --timeout 120000 ) || retry_failed=1
           done
           exit $retry_failed
+
+  # Signals must stay usable without compiling or starting the Arbor host.
+  # This lane has its own package build, then a fresh external consumer/release.
+  signals:
+    name: Standalone Signals
+    runs-on: native
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Cache standalone package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/arbor_signals/deps
+            packages/arbor_signals/_build
+          key: signals-${{ runner.os }}-${{ hashFiles('packages/arbor_signals/mix.exs', 'packages/arbor_signals/mix.lock', '.tool-versions') }}
+          restore-keys: |
+            signals-${{ runner.os }}-
+
+      - name: Signals package dependencies
+        working-directory: packages/arbor_signals
+        run: ../../bin/mix deps.get
+
+      - name: Signals formatting and strict compile
+        working-directory: packages/arbor_signals
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
+
+      - name: Signals package security and behavior tests
+        working-directory: packages/arbor_signals
+        run: ../../bin/mix test --exclude distributed --timeout 120000
+
+      - name: Independent Signals consumer and production release
+        run: |
+          qualification_root="$(mktemp -d)"
+          python3 packages/arbor_signals/scripts/qualify_standalone.py \
+            --work-dir "$qualification_root/consumer" \
+            --mix "$PWD/bin/mix"
 
   # ── Database lane ───────────────────────────────────────────────────────────
   # Runs ONLY the :database-tagged tests against Postgres. These need the Repo

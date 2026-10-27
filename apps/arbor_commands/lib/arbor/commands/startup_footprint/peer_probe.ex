@@ -86,10 +86,9 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
       persistent: true
     )
 
-    Application.put_env(
-      :arbor_kernel,
-      :signals,
-      [start_children: start_children, security_telemetry_bridge: start_children],
+    Application.put_env(:arbor_signals, :start_children, start_children, persistent: true)
+
+    Application.put_env(:arbor_signals, :security_telemetry_bridge, start_children,
       persistent: true
     )
 

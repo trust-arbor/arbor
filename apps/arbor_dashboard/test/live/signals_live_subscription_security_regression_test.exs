@@ -2,20 +2,14 @@ defmodule Arbor.Dashboard.Live.SignalsLiveSubscriptionSecurityRegressionTest do
   use Arbor.Dashboard.ConnCase, async: false
 
   alias Arbor.Signals
+  alias Arbor.Signals.Config.Testing, as: SignalsConfig
 
   @moduletag :fast
   @moduletag :integration
 
   setup do
-    previous = Application.get_env(:arbor_kernel, :signals, [])
-
-    Application.put_env(
-      :arbor_kernel,
-      :signals,
-      Keyword.put(previous, :restricted_topics, [:security, :identity])
-    )
-
-    on_exit(fn -> Application.put_env(:arbor_kernel, :signals, previous) end)
+    SignalsConfig.isolate_namespace()
+    SignalsConfig.put(:restricted_topics, [:security, :identity])
 
     # Signals only serve the bus supervised by arbor_kernel_runtime; a bus
     # started under this test's supervisor refuses every subscription. Restore
@@ -80,13 +74,7 @@ defmodule Arbor.Dashboard.Live.SignalsLiveSubscriptionSecurityRegressionTest do
 
   test "security regression: restricted categories stay excluded from mount, filters and details",
        %{conn: conn} do
-    settings = Application.get_env(:arbor_kernel, :signals)
-
-    Application.put_env(
-      :arbor_kernel,
-      :signals,
-      Keyword.put(settings, :restricted_topics, [:security, :identity, :skill])
-    )
+    SignalsConfig.put(:restricted_topics, [:security, :identity, :skill])
 
     hidden = Enum.map([:security, :identity, :skill], &emit!(&1, :restricted_fixture))
     {:ok, view, _html} = live(conn, "/signals")

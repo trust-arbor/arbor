@@ -101,7 +101,7 @@ badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_kernel, arbor_multimedia  (zero in-umbrella deps)
+L0  arbor_kernel, arbor_multimedia, arbor_signals  (zero first-party deps)
 L1  arbor_kernel_runtime, arbor_cartographer, arbor_web
 L2  arbor_llm, arbor_security
 L3  arbor_persistence, arbor_shell, arbor_sandbox
@@ -115,10 +115,10 @@ L9  arbor_dashboard
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
 `apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **`arbor_kernel` and `arbor_multimedia` are L0.** Kernel is the passive owner
-  of contracts, types, and identifiers. Active Common, Signals, and Monitor
-  services live in `arbor_kernel_runtime` (L1), which depends only on the
-  passive kernel in-umbrella. Multimedia owns device I/O.
+- **`arbor_kernel`, `arbor_multimedia`, and `arbor_signals` are L0.** Kernel owns
+  passive contracts, types, and identifiers. Signals lives in `packages/arbor_signals`;
+  Kernel Runtime (L1) composes its supervisor after boot admission alongside
+  Common and Monitor. Multimedia owns device I/O.
   In particular `arbor_orchestrator` is L7, not a low kernel — it really deps
   arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
   egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and

@@ -37,6 +37,7 @@ defmodule Arbor.Orchestrator.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},

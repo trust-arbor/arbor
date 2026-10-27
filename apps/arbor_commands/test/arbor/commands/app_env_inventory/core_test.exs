@@ -7,11 +7,10 @@ defmodule Arbor.Commands.AppEnvInventory.CoreTest do
 
   @moduletag :fast
 
-  test "legacy owner list is the closed four-app set" do
+  test "legacy owner list is the closed retired-app set" do
     assert Core.legacy_owners() == [
              :arbor_contracts,
              :arbor_common,
-             :arbor_signals,
              :arbor_monitor
            ]
   end
@@ -38,7 +37,7 @@ defmodule Arbor.Commands.AppEnvInventory.CoreTest do
     refute Map.has_key?(clean, "errors")
 
     lib = "Application.get_env(:arbor_common, :k)\n"
-    testf = "Application.put_env(:arbor_signals, :k, 1)\n"
+    testf = "Application.put_env(:arbor_contracts, :k, 1)\n"
     cfg = "import Config\nconfig :arbor_monitor, :k, 1\n"
 
     assert {:ok, residue} =
@@ -58,7 +57,7 @@ defmodule Arbor.Commands.AppEnvInventory.CoreTest do
     assert residue["counts"]["by_class"]["production"] == 1
     assert residue["counts"]["by_trust"]["literal"] == 3
     assert residue["counts"]["by_owner"]["arbor_common"] == 1
-    assert residue["counts"]["by_owner"]["arbor_signals"] == 1
+    assert residue["counts"]["by_owner"]["arbor_contracts"] == 1
     assert residue["counts"]["by_owner"]["arbor_monitor"] == 1
   end
 

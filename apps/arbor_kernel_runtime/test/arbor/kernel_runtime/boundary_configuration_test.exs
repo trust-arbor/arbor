@@ -4,16 +4,12 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
   @moduletag :fast
 
   @production_boundaries %{
-    # SafeManagementSurface is the ONE deliberate export: `arbor_commands`
-    # aliases it for `mix arbor.packaging.safe_management_surface`, so dropping
-    # it breaks the Boundary check rather than tightening anything. Added by
-    # d7370af8d (P1A, 2026-08-18); this table was not updated with it, leaving
-    # the guard red on main. Keep this list exact — it is a least-privilege
-    # declaration, so a new entry should be a deliberate edit, never a fix-up
-    # to make the suite pass.
+    # These exports serve the management facade and the configured Signals
+    # credential adapter. Keep the list exact: extraction changes ownership,
+    # without granting access to other Kernel Runtime internals.
     Arbor.KernelRuntime => %{
       deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor, Logger],
-      exports: [SafeManagementSurface]
+      exports: [SafeManagementSurface, Adapters.SignalAuthContext]
     },
     Arbor.Common => %{
       deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],
@@ -21,7 +17,8 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     },
     Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},
     Arbor.Signals => %{
-      deps: [Arbor.Common, Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
+      app: :arbor_signals,
+      deps: [Jason, Logger, TypedStruct],
       exports: :all
     },
     Arbor.Monitor => %{
@@ -63,7 +60,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       definition = boundary_definition(module)
       opts = definition.opts
 
-      assert definition.app == :arbor_kernel_runtime
+      assert definition.app == Map.get(expected, :app, :arbor_kernel_runtime)
       assert definition.mix_task? == false
       assert Keyword.fetch!(opts, :top_level?) == true
       assert Keyword.fetch!(opts, :deps) == expected.deps
@@ -105,7 +102,10 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
         ] do
       definition = boundary_definition(module)
 
-      assert definition.app == :arbor_kernel_runtime
+      expected_app =
+        if module == Arbor.Signals.Config.Testing, do: :arbor_signals, else: :arbor_kernel_runtime
+
+      assert definition.app == expected_app
       assert definition.opts[:top_level?] == true
       assert definition.opts[:deps] == [ExUnit.Callbacks]
       assert definition.opts[:exports] == :all

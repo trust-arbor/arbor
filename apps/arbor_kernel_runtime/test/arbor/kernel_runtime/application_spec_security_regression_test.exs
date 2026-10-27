@@ -28,7 +28,9 @@ defmodule Arbor.KernelRuntime.ApplicationSpecSecurityRegressionTest do
 
     assert required == @required
     assert optional == []
-    assert included == []
+    # Signals is included for release closure, but KernelRuntime starts its
+    # supervisor only after boot-profile admission. It is never an eager root.
+    assert included == [:arbor_signals]
 
     Enum.each(@omitted, fn app ->
       refute app in required

@@ -24,10 +24,8 @@ defmodule ArborKernelAppEnvProbe.MixProject do
   defp deps do
     [
       {:arbor_kernel, path: "../../.."},
-      {:arbor_contracts, path: "../../../../arbor_contracts"},
-      {:arbor_common, path: "../../../../arbor_common"},
-      {:arbor_signals, path: "../../../../arbor_signals"},
-      {:arbor_monitor, path: "../../../../arbor_monitor"}
+      {:arbor_kernel_runtime, path: "../../../../arbor_kernel_runtime"},
+      {:arbor_signals, path: "../../../../../packages/arbor_signals", runtime: false}
     ]
   end
 
@@ -37,10 +35,7 @@ defmodule ArborKernelAppEnvProbe.MixProject do
         include_executables_for: [:unix],
         applications: [
           arbor_kernel: :permanent,
-          arbor_contracts: :permanent,
-          arbor_common: :permanent,
-          arbor_signals: :permanent,
-          arbor_monitor: :permanent,
+          arbor_kernel_runtime: :permanent,
           arbor_kernel_app_env_probe: :permanent
         ]
       ]

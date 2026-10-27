@@ -6,7 +6,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_kernel_runtime/",
     "apps/arbor_security/",
     "apps/arbor_persistence/",
-    "apps/arbor_trust/"
+    "apps/arbor_trust/",
+    "packages/arbor_signals/"
   ]
   @app_names ~w(arbor_kernel arbor_kernel_runtime arbor_security arbor_persistence arbor_trust)
   @ignored_generated_dirs ~w(.elixir_ls cover)
@@ -14,6 +15,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
   @required_files [
     "apps/arbor_kernel/mix.exs",
     "apps/arbor_kernel_runtime/mix.exs",
+    "packages/arbor_signals/mix.exs",
     "apps/arbor_security/mix.exs",
     "apps/arbor_persistence/mix.exs",
     "apps/arbor_trust/mix.exs",
@@ -65,11 +67,15 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
   @spec ignored_generated_extra?(String.t()) :: boolean()
   def ignored_generated_extra?(path) when is_binary(path) do
     case String.split(path, "/", trim: false) do
-      ["apps", app, generated | _rest]
-      when app in @app_names and generated in @ignored_generated_dirs ->
+      [scope, app, generated | _rest]
+      when ((scope == "apps" and app in @app_names) or
+              (scope == "packages" and app == "arbor_signals")) and
+             generated in @ignored_generated_dirs ->
         true
 
-      ["apps", app, "erl_crash.dump"] when app in @app_names ->
+      [scope, app, "erl_crash.dump"]
+      when (scope == "apps" and app in @app_names) or
+             (scope == "packages" and app == "arbor_signals") ->
         true
 
       _other ->

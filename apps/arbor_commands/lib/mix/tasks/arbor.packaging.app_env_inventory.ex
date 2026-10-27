@@ -3,7 +3,8 @@ defmodule Mix.Tasks.Arbor.Packaging.AppEnvInventory do
 
   @moduledoc """
   Git-index AST census of retired `:arbor_contracts`, `:arbor_common`,
-  `:arbor_signals`, and `:arbor_monitor` application-env callers.
+  and `:arbor_monitor` application-env callers. `:arbor_signals` is an active
+  package owner and is not retired.
 
       mix arbor.packaging.app_env_inventory
       mix arbor.packaging.app_env_inventory --json

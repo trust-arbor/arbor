@@ -5,6 +5,34 @@ defmodule Arbor.Commands.SourceCoupling.OwnershipTest do
 
   @moduletag :fast
 
+  test "extracted packages retain application and source ownership" do
+    assert {:ok, "arbor_signals"} =
+             Ownership.app_of_path("packages/arbor_signals/lib/arbor/signals.ex")
+
+    assert Ownership.mix_project_path?("packages/arbor_signals/mix.exs")
+    assert Ownership.lib_source_path?("packages/arbor_signals/lib/arbor/signals.ex")
+    refute Ownership.mix_project_path?("packages/arbor_signals/examples/standalone/mix.exs")
+    refute Ownership.lib_source_path?("packages/arbor_signals/test/signals_test.exs")
+  end
+
+  test "repository-local path dependencies count alongside umbrella dependencies" do
+    source = """
+    defmodule Host.MixProject do
+      def deps do
+        [
+          {:arbor_kernel, in_umbrella: true},
+          {:arbor_signals, path: "../../packages/arbor_signals", runtime: false},
+          {:arbor_external, path: "../../../arbor_external"},
+          {:arbor_wrong_name, path: "../../packages/arbor_other"}
+        ]
+      end
+    end
+    """
+
+    assert {:ok, ["arbor_kernel", "arbor_signals"]} =
+             Ownership.in_umbrella_deps(source, "apps/arbor_kernel_runtime/mix.exs")
+  end
+
   test "compute_levels fails closed on missing dependency targets (no silent level-0)" do
     # common declares arbor_contracts, but contracts has no graph node.
     graph = %{

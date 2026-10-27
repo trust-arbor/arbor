@@ -1,6 +1,6 @@
 defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
   @moduledoc """
-  Structural AST source guard: tracked `apps/*/test` must not use ExUnit's
+  Structural AST source guard: tracked `apps/*/test` and `packages/*/test` must not use ExUnit's
   literal `:tmp_dir` tag (`@tag`, `@moduletag`, or `@describetag`).
 
   That tag creates repository-local application tmp directories, which fail
@@ -20,9 +20,9 @@ defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
   @repo_root Path.expand("../../../../..", __DIR__)
   @tag_attrs [:tag, :moduletag, :describetag]
 
-  test "tracked apps/*/test has no literal ExUnit tmp_dir tags" do
+  test "tracked apps/*/test and packages/*/test has no literal ExUnit tmp_dir tags" do
     paths = tracked_test_files()
-    assert paths != [], "expected git-tracked apps/*/test files"
+    assert paths != [], "expected git-tracked apps/*/test and packages/*/test files"
 
     hits =
       paths
@@ -157,15 +157,19 @@ defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     tracked = "apps/tracked/test/tracked_test.exs"
+    package = "packages/arbor_signals/test/tracked_test.exs"
     ignored = "apps/ignored/test/ignored_test.exs"
     File.mkdir_p!(Path.dirname(Path.join(root, tracked)))
     File.mkdir_p!(Path.dirname(Path.join(root, ignored)))
+    File.mkdir_p!(Path.dirname(Path.join(root, package)))
     File.write!(Path.join(root, tracked), "defmodule Tracked, do: nil\n")
     File.write!(Path.join(root, ignored), "defmodule Ignored, do: nil\n")
+    File.write!(Path.join(root, package), "defmodule TrackedPackage, do: nil\n")
 
     assert {:ok, inventory} =
              SourceInventory.build(String.duplicate("d", 40), [
                tracked,
+               package,
                "apps/tracked/lib/tracked.ex"
              ])
 
@@ -178,7 +182,7 @@ defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
       "ARBOR_SOURCE_INVENTORY_PATH" => manifest_path
     }
 
-    assert tracked_test_files(root, env) == [tracked]
+    assert tracked_test_files(root, env) == [tracked, package]
 
     assert_raise ExUnit.AssertionError, ~r/ARBOR_SOURCE_INVENTORY_PATH/, fn ->
       tracked_test_files(root, %{"ARBOR_MIX_CONTAINED" => "1"})
@@ -198,7 +202,7 @@ defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
 
       _ ->
         {output, 0} =
-          System.cmd("git", ["ls-files", "-z", "--", "apps"],
+          System.cmd("git", ["ls-files", "-z", "--", "apps", "packages"],
             cd: root,
             stderr_to_stdout: true
           )
@@ -273,8 +277,9 @@ defmodule Arbor.Contracts.ExUnitTmpDirSourceGuardTest do
   defp app_test_source?(path) when is_binary(path) do
     if String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs") do
       case Path.split(path) do
-        ["apps", app, "test" | _]
-        when is_binary(app) and app != "" and app != "." and app != ".." ->
+        [scope, app, "test" | _]
+        when scope in ["apps", "packages"] and is_binary(app) and app != "" and app != "." and
+               app != ".." ->
           true
 
         _ ->

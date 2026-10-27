@@ -176,19 +176,15 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
 
     # The default test namespace permits OpenAuthorizer and starts no Bus. Use
     # the real capability subscription authorizer for the unprivileged witness.
-    signals = Application.get_env(:arbor_kernel, :signals, [])
-
-    set_env(
-      :arbor_kernel,
-      :signals,
-      Keyword.merge(signals,
-        authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
-        allow_open_authorizer: false,
-        security_module: Security,
-        crypto_module: Security,
-        relay_enabled: false
-      )
-    )
+    for {key, value} <- [
+          authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
+          allow_open_authorizer: false,
+          security_module: Security,
+          crypto_module: Security,
+          relay_enabled: false
+        ] do
+      set_env(:arbor_signals, key, value)
+    end
 
     # Publication and subscribe accept only the application-supervised bus.
     # A bus started under this fixture's supervisor is registered and healthy,

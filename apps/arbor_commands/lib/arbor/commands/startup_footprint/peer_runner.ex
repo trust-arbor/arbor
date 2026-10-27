@@ -272,7 +272,13 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
                control,
                :application,
                :set_env,
-               [[{:arbor_kernel, [{:kernel_runtime, namespace}]}], [persistent: true]],
+               [
+                 [
+                   {:arbor_kernel, [{:kernel_runtime, namespace}]},
+                   {:arbor_signals, Application.get_all_env(:arbor_signals)}
+                 ],
+                 [persistent: true]
+               ],
                :kernel_runtime_env
              ) do
           {:ok, :ok} -> :ok

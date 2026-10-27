@@ -5,12 +5,40 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
 
   @moduletag :fast
 
+  test "the adopted Signals package is a live configuration owner" do
+    assert {:ok, []} =
+             Ast.extract("packages/arbor_signals/lib/arbor/signals/config.ex", """
+             defmodule Sample.SignalsConfig do
+               def authorizer, do: Application.get_env(:arbor_signals, :authorizer)
+               def fixtures?, do: Application.compile_env(:arbor_signals, :expose_test_fixtures, false)
+             end
+             """)
+
+    assert {:ok, []} =
+             Ast.extract("config/config.exs", """
+             import Config
+             config :arbor_signals, start_children: false
+             """)
+  end
+
+  test "retired owners remain detectable inside package config and test files" do
+    assert {:ok, [%{"class" => "config_block", "legacy_app" => "arbor_common"}]} =
+             Ast.extract("packages/arbor_signals/config/test.exs", """
+             Application.get_env(:arbor_common, :old_setting)
+             """)
+
+    assert {:ok, [%{"class" => "test_support", "legacy_app" => "arbor_common"}]} =
+             Ast.extract("packages/arbor_signals/test/signals_test.exs", """
+             Application.put_env(:arbor_common, :old_setting, true)
+             """)
+  end
+
   test "classifies literal Application env calls and config blocks" do
     {:ok, lib} =
       Ast.extract("apps/arbor_common/lib/arbor/common/config.ex", """
       defmodule Sample.Lib do
         def read, do: Application.get_env(:arbor_common, :skill_dirs, [])
-        def fetch, do: Application.fetch_env(:arbor_signals, :authorizer)
+        def fetch, do: Application.fetch_env(:arbor_contracts, :authorizer)
         def bang, do: Application.fetch_env!(:arbor_monitor, :enabled_skills)
         def put, do: Application.put_env(:arbor_common, :x, 1)
         def delete, do: Application.delete_env(:arbor_common, :x)
@@ -34,7 +62,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
       Ast.extract("config/config.exs", """
       import Config
       config :arbor_common, :hands, []
-      config :arbor_signals, authorizer: :x
+      config :arbor_contracts, authorizer: :x
       """)
 
     assert Enum.map(cfg, & &1["form"]) == ["config", "config"]
@@ -48,7 +76,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         alias Application, as: App
         @otp_app :arbor_common
 
-        def via_alias, do: App.get_env(:arbor_signals, :authorizer)
+        def via_alias, do: App.get_env(:arbor_contracts, :authorizer)
 
         def via_attr, do: Application.get_env(@otp_app, :k)
 
@@ -60,7 +88,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
       """)
 
     assert Enum.map(findings, &{&1["trust"], &1["legacy_app"], &1["form"]}) == [
-             {"literal", "arbor_signals", "get_env"},
+             {"literal", "arbor_contracts", "get_env"},
              {"resolved", "arbor_common", "get_env"},
              {"resolved", "arbor_monitor", "get_env"}
            ]
@@ -125,8 +153,8 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
 
   test "classifies test paths as test_support" do
     {:ok, findings} =
-      Ast.extract("apps/arbor_signals/test/arbor/signals/bus_test.exs", """
-      Application.put_env(:arbor_signals, :authorizer, :x)
+      Ast.extract("apps/arbor_contracts/test/arbor/signals/bus_test.exs", """
+      Application.put_env(:arbor_contracts, :authorizer, :x)
       """)
 
     assert [%{"class" => "test_support", "form" => "put_env"}] = findings
@@ -195,7 +223,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
       Ast.extract("apps/foo/lib/dyn_recv.ex", """
       defmodule Sample.DynRecv do
         def via_mod(mod), do: mod.get_env(:arbor_common, :k)
-        def via_cfg(mod), do: mod.config(:arbor_signals, :authorizer)
+        def via_cfg(mod), do: mod.config(:arbor_contracts, :authorizer)
       end
       """)
 
@@ -222,7 +250,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         alias Foo.Application
 
         def read, do: Application.get_env(:arbor_common, :k)
-        def fetch, do: Application.fetch_env(:arbor_signals, :authorizer)
+        def fetch, do: Application.fetch_env(:arbor_contracts, :authorizer)
       end
       """)
 
@@ -250,7 +278,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         alias __MODULE__.NodeRestartCAS
 
         def read, do: Child.get_env(:arbor_common, :k)
-        def cas, do: NodeRestartCAS.get_env(:arbor_signals, :k)
+        def cas, do: NodeRestartCAS.get_env(:arbor_contracts, :k)
       end
       """)
 
@@ -265,7 +293,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
           alias Application, as: App
           import Application
           App.put_env(:arbor_common, :k, 1)
-          put_env(:arbor_signals, :k, 1)
+          put_env(:arbor_contracts, :k, 1)
         end
 
         def read do
@@ -277,7 +305,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
 
     assert Enum.map(findings, &{&1["form"], &1["legacy_app"]}) == [
              {"put_env", "arbor_common"},
-             {"put_env", "arbor_signals"}
+             {"put_env", "arbor_contracts"}
            ]
   end
 
@@ -291,7 +319,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
             import Application
             App.get_env(:arbor_common, :k)
           else
-            App.get_env(:arbor_signals, :k)
+            App.get_env(:arbor_contracts, :k)
             get_env(:arbor_monitor, :k)
           end
         end
@@ -381,11 +409,11 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         alias Application, as: App
 
         def read, do: Application.get_env(app, :k)
-        def via_alias, do: App.get_env(:arbor_signals, :k)
+        def via_alias, do: App.get_env(:arbor_contracts, :k)
       end
       """)
 
-    assert [%{"trust" => "literal", "legacy_app" => "arbor_signals", "form" => "get_env"}] =
+    assert [%{"trust" => "literal", "legacy_app" => "arbor_contracts", "form" => "get_env"}] =
              findings
   end
 
@@ -489,7 +517,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
           app = :arbor_common
           cond do
             false ->
-              app = :arbor_signals
+              app = :arbor_contracts
               Application.get_env(app, :k)
 
             true ->
@@ -500,7 +528,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
       """)
 
     assert Enum.map(findings, &{&1["trust"], &1["legacy_app"]}) == [
-             {"resolved", "arbor_signals"},
+             {"resolved", "arbor_contracts"},
              {"resolved", "arbor_common"}
            ]
   end
@@ -532,7 +560,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
             app = :arbor_common
           end
 
-          App.get_env(:arbor_signals, :k)
+          App.get_env(:arbor_contracts, :k)
           Application.get_env(app, :k)
         end
       end
@@ -557,7 +585,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         alias Foo.{Application, Config}
 
         def read, do: Application.get_env(:arbor_common, :k)
-        def cfg, do: Config.config(:arbor_signals, :authorizer)
+        def cfg, do: Config.config(:arbor_contracts, :authorizer)
       end
       """)
 

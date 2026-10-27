@@ -55,6 +55,7 @@ defmodule Arbor.KernelRuntime.MixProject do
   def application do
     [
       extra_applications: [:logger, :crypto],
+      included_applications: [:arbor_signals],
       mod: {Arbor.KernelRuntime.Application, []}
     ]
   end
@@ -71,6 +72,7 @@ defmodule Arbor.KernelRuntime.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel, in_umbrella: true},
       # Two-segment range: req_llm >= 1.25 compiles against Finch >= 0.22
       # (Finch.Pool struct + Finch.Request :pool_tag); a three-segment

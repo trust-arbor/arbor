@@ -16,6 +16,8 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Signals.Config.Testing, as: SignalsConfig
+
   @moduletag :fast
 
   @common_registries [
@@ -89,11 +91,11 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     assert required_app_set(:arbor_kernel_runtime) == @required_apps
     refute_spec_members(:arbor_kernel_runtime, @provider_roots ++ [:llm_db, :boundary])
     assert optional_app_list(:arbor_kernel_runtime) == []
-    assert included_app_list(:arbor_kernel_runtime) == []
+    assert included_app_list(:arbor_kernel_runtime) == [:arbor_signals]
   end
 
   test "missing or :full start profile nests the three application supervisors" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
 
     on_exit(fn -> restore_test_runtime(config_before) end)
 
@@ -115,7 +117,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "activation_only starts none of Common, Signals, or Monitor" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
 
     on_exit(fn -> restore_test_runtime(config_before) end)
 
@@ -137,7 +139,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "unknown or malformed start profile fails closed" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
 
     on_exit(fn -> restore_test_runtime(config_before) end)
 
@@ -162,7 +164,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "security regression: invalid start profile starts zero provider apps" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
     on_exit(fn -> restore_test_runtime(config_before) end)
 
     stop_runtime()
@@ -181,7 +183,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "security regression: downstream start failure leaves admitted providers running and does not peel unrelated errors" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
     on_exit(fn -> restore_test_runtime(config_before) end)
 
     stop_runtime()
@@ -233,7 +235,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "nested applications honor disabled and enabled child gates" do
-    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    config_before = Map.new(@config_sections, &snapshot_section/1)
 
     on_exit(fn -> restore_test_runtime(config_before) end)
 
@@ -405,6 +407,16 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     Application.put_env(:arbor_kernel, :kernel_runtime, value)
   end
 
+  defp snapshot_section(:signals),
+    do: {:signals, {:signals_app, Application.get_all_env(:arbor_signals)}}
+
+  defp snapshot_section(section), do: {section, Application.fetch_env(:arbor_kernel, section)}
+
+  defp put_section(:signals, updates) do
+    for {key, value} <- updates, do: Application.put_env(:arbor_signals, key, value)
+    :ok
+  end
+
   defp put_section(section, updates) do
     current = Application.get_env(:arbor_kernel, section, []) || []
     value = Enum.reduce(updates, current, fn {key, item}, acc -> Keyword.put(acc, key, item) end)
@@ -424,12 +436,17 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   defp stop_named(name) do
     if pid = Process.whereis(name), do: GenServer.stop(pid)
     :ok
+  catch
+    # Application shutdown may finish between lookup and stop. Only that
+    # already-absent target is benign; other teardown failures still escape.
+    :exit, {:noproc, _call} -> :ok
   end
 
   defp restore_test_runtime(config_before) do
     stop_runtime()
 
     Enum.each(config_before, fn
+      {:signals, {:signals_app, value}} -> SignalsConfig.restore_namespace(value)
       {section, {:ok, value}} -> Application.put_env(:arbor_kernel, section, value)
       {section, :error} -> Application.delete_env(:arbor_kernel, section)
     end)

@@ -1,6 +1,6 @@
 defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
   @moduledoc """
-  Structural AST source guard: production `apps/*/lib` must not contain
+  Structural AST source guard: production `apps/*/lib` and `packages/*/lib` must not contain
   `Port.open({:spawn, ...})` shell-string spawns or `System.cmd("sh"|"bash", ["-c", ...])`.
 
   Scan set is git-tracked files only (`git ls-files`). Detection is AST-only so
@@ -15,9 +15,9 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
 
   @repo_root Path.expand("../../../../..", __DIR__)
 
-  test "production apps/*/lib has no Port spawn-string or System.cmd sh/bash -c sites" do
+  test "production apps/*/lib and packages/*/lib has no Port spawn-string or System.cmd sh/bash -c sites" do
     paths = tracked_lib_files()
-    assert paths != [], "expected git-tracked apps/*/lib files"
+    assert paths != [], "expected git-tracked application/package lib files"
 
     hits =
       paths
@@ -89,15 +89,19 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     tracked = "apps/tracked/lib/tracked.ex"
+    package = "packages/arbor_signals/lib/tracked.ex"
     ignored = "apps/ignored/lib/ignored.ex"
     File.mkdir_p!(Path.dirname(Path.join(root, tracked)))
     File.mkdir_p!(Path.dirname(Path.join(root, ignored)))
+    File.mkdir_p!(Path.dirname(Path.join(root, package)))
     File.write!(Path.join(root, tracked), "defmodule Tracked, do: nil\n")
     File.write!(Path.join(root, ignored), "defmodule Ignored, do: nil\n")
+    File.write!(Path.join(root, package), "defmodule TrackedPackage, do: nil\n")
 
     assert {:ok, inventory} =
              SourceInventory.build(String.duplicate("d", 40), [
                tracked,
+               package,
                "apps/tracked/test/tracked_test.exs"
              ])
 
@@ -110,7 +114,7 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
       "ARBOR_SOURCE_INVENTORY_PATH" => manifest_path
     }
 
-    assert tracked_lib_files(root, env) == [tracked]
+    assert tracked_lib_files(root, env) == [tracked, package]
 
     assert_raise ExUnit.AssertionError, ~r/ARBOR_SOURCE_INVENTORY_PATH/, fn ->
       tracked_lib_files(root, %{"ARBOR_MIX_CONTAINED" => "1"})
@@ -130,7 +134,7 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
 
       _ ->
         {output, 0} =
-          System.cmd("git", ["ls-files", "-z", "--", "apps"],
+          System.cmd("git", ["ls-files", "-z", "--", "apps", "packages"],
             cd: root,
             stderr_to_stdout: true
           )
@@ -205,7 +209,7 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
   defp production_lib_source?(path) do
     (String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs")) and
       match?([_, _, "lib" | _], Path.split(path)) and
-      String.starts_with?(path, "apps/")
+      String.starts_with?(path, ["apps/", "packages/"])
   end
 
   # ---------------------------------------------------------------------------
