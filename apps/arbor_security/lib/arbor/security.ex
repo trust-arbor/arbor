@@ -5363,6 +5363,7 @@ defmodule Arbor.Security do
   The payload must already begin with the exact length-prefixed
   `arbor.scheduler.caps.v2` domain emitted by `Arbor.Scheduler.CapsFile`.
   Security signs those bytes unchanged and never returns private key material.
+  Unsupported signing material returns `{:error, :invalid_key_file_signing_material}`.
   """
   @spec sign_scheduler_caps_payload(term(), binary()) ::
           {:ok, String.t(), binary()} | {:error, term()}
@@ -5371,7 +5372,11 @@ defmodule Arbor.Security do
     with :ok <- validate_scheduler_caps_payload(payload),
          {:ok, %{agent_id: principal_id, private_key: private_key}} <-
            KeyFile.read_device(io_device) do
-      {:ok, principal_id, Crypto.sign(payload, private_key)}
+      try do
+        {:ok, principal_id, Crypto.sign(payload, private_key)}
+      rescue
+        _ -> {:error, :invalid_key_file_signing_material}
+      end
     end
   end
 
