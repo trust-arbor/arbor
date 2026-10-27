@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.{CapsFile, PipelinePaths}
   alias Arbor.Security
+  alias Mix.Tasks.Arbor.Scheduler.SignCaps
 
   @envelope_uri "arbor://fs/write/reports/**"
 
@@ -219,6 +220,53 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
   end
 
   describe "arbor.scheduler.sign_caps" do
+    test "security regression: unsupported signing material leaves the caps file unchanged", %{
+      identity: identity,
+      tmp_dir: tmp_dir
+    } do
+      caps_path = Path.join(tmp_dir, "unsupported.caps.json")
+      dot_path = Path.join(tmp_dir, "unsupported.dot")
+      key_path = Path.join(tmp_dir, "unsupported.arbor.key")
+      File.write!(dot_path, "digraph Unsupported { start [shape=Mdiamond] }")
+
+      original =
+        Jason.encode!(%{
+          "version" => 1,
+          "issuer_id" => identity.agent_id,
+          "capabilities" => [%{"resource_uri" => "arbor://fs/write/reports/x"}],
+          "signature" => ""
+        })
+
+      File.write!(caps_path, original)
+      write_key_file(key_path, %{identity | private_key: :binary.copy(<<42>>, 64)})
+
+      result =
+        try do
+          catch_exit(
+            SignCaps.run([
+              "--key-file",
+              key_path,
+              "--workdir",
+              tmp_dir,
+              "--args-json",
+              "{}",
+              caps_path
+            ])
+          )
+        rescue
+          _ -> :unhandled_signing_exception
+        end
+
+      assert result == {:shutdown, 1}
+
+      assert_received {:mix_shell, :error,
+                       ["sign_caps failed: :invalid_key_file_signing_material"]}
+
+      refute_received {:mix_shell, :info, _}
+      assert File.read!(caps_path) == original
+      assert Path.wildcard(caps_path <> ".tmp-*") == []
+    end
+
     test "signs a well-formed unsigned caps file", %{identity: identity, tmp_dir: tmp_dir} do
       caps_path = Path.join(tmp_dir, "summary.caps.json")
       dot_path = Path.join(tmp_dir, "summary.dot")
@@ -246,7 +294,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       :ok =
         Security.register_issuer_fixture(identity.agent_id, envelope, reason: "sign_caps test")
 
-      Mix.Tasks.Arbor.Scheduler.SignCaps.run([
+      SignCaps.run([
         "--key-file",
         key_path,
         "--workdir",
@@ -291,7 +339,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       write_key_file(key_path, other_identity)
 
       assert catch_exit(
-               Mix.Tasks.Arbor.Scheduler.SignCaps.run([
+               SignCaps.run([
                  "--key-file",
                  key_path,
                  "--workdir",
@@ -322,7 +370,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       )
 
       assert catch_exit(
-               Mix.Tasks.Arbor.Scheduler.SignCaps.run([
+               SignCaps.run([
                  "--key-file",
                  Path.join(tmp_dir, "nonexistent.arbor.key"),
                  "--workdir",

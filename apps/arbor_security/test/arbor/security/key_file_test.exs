@@ -72,6 +72,34 @@ defmodule Arbor.Security.KeyFileTest do
   end
 
   describe "sign_scheduler_caps_payload/2" do
+    test "security regression: returns a bounded error for unsupported key material", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "unsupported-scheduler.arbor.key")
+      principal_id = "agent_" <> String.duplicate("a", 64)
+      material = %{agent_id: principal_id, private_key: :binary.copy(<<42>>, 64)}
+
+      # Historical 64-byte material passes KeyFile validation, but OTP's
+      # Ed25519 signer rejects it. Do not truncate it into a different key.
+      assert {:ok, _path} = Security.write_key_file(path, material)
+      domain = "arbor.scheduler.caps.v2"
+      payload = <<byte_size(domain)::32-big, domain::binary, "canonical-caps-body">>
+      {:ok, io_device} = :file.open(path, [:read, :raw, :binary])
+
+      try do
+        result =
+          try do
+            Security.sign_scheduler_caps_payload(io_device, payload)
+          rescue
+            _ -> :unhandled_signing_exception
+          end
+
+        assert {:error, :invalid_key_file_signing_material} = result
+      after
+        :file.close(io_device)
+      end
+    end
+
     test "security regression: signs only the exact canonical scheduler domain", %{
       tmp_dir: tmp_dir
     } do
