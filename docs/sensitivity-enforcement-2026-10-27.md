@@ -91,3 +91,34 @@ Also scan decoded final content and retain source floors before formatting;
 encoded text alone cannot establish the model's received sensitivity. A Client
 owned stream can prefetch, so delayed-consumption tests use the adapter's actual
 lazy Enumerable boundary.
+
+## Qualification record
+
+Production implementation is `a76c58039`, with main `511609241` integrated in
+`27754d135`. Later commits through `52542685b` correct test fixtures while
+retaining production clearance, locality, disclosure and attestation checks.
+Default app suites used the inherited PostgreSQL configuration, isolated test
+builds and temporary roots outside Git checkouts. Commands, exact revisions,
+exclusions and retained failures are recorded in the delivery security report.
+
+| App | Broad result | Follow-up or limitation |
+| --- | --- | --- |
+| LLM | 1030 tests, 0 failures | Real transport, retry, delayed-stream and tool-result regressions pass. |
+| AI | 1407 tests, 3 failures | All added regressions pass; existing readiness and tight deadline failures are retained with baseline/isolation comparisons. |
+| Memory | 2273 tests, 0 failures | Offline fixture transports preserve real-provider policy. |
+| Agent | 2624 tests, 0 failures, 1 invalid | Existing private transcript Repo setup also fails on baseline with PostgreSQL selected. |
+| Actions | 3077 tests, 3 failures before fixture correction | Corrected private-memory module passes 12/0; unchanged path-alias assertion reproduces on baseline. |
+| Consensus | 668 tests, 0 failures | Config-mutating fixtures now own global event-log settings synchronously; recovery and authorization assertions remain intact. |
+| Orchestrator | 4411 tests, 17 failures before scoped fixture correction | Corrected fixture groups pass 93/0 and 59/0; 13 namespace setup failures reproduce on baseline after registry lock. |
+| KernelRuntime | 2484 tests and 8 doctests, 0 failures | Restricted skill-source and query embedding regressions pass. |
+
+The native namespace failures expose a separate contract seam: the locked
+registry requires dotted plugin aliases, Jido validates underscore-style action
+names, and the execution manifest matches exact tool names. The source and
+original tests reproduce all 13 refusals on baseline when the public registry
+lock is applied. No registry unlock, generated-name override or production
+alias workaround was added to conceal that issue.
+
+Strict compilation, formatting of the committed Elixir diff and whitespace
+checks pass. Commits use the copied repository hook; no hook bypass was needed.
+The source change has not been explicitly reloaded into the live daemon.
