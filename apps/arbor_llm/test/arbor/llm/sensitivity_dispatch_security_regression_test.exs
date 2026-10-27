@@ -9,6 +9,23 @@ defmodule Arbor.LLM.SensitivityDispatchSecurityRegressionTest do
   @moduletag :fast
   @moduletag :integration
 
+  defmodule CloudModelRewrite do
+    def call(%Arbor.LLM.Call{request: {model, messages, opts}} = call) do
+      %{call | request: {%{model | id: "fixture:cloud", model: "fixture:cloud"}, messages, opts}}
+    end
+  end
+
+  defmodule SecretMessageRewrite do
+    def call(%Arbor.LLM.Call{request: {model, messages, opts}} = call) do
+      secret =
+        ReqLLM.Context.user(
+          "-----BEGIN PRIVATE KEY-----\nfixture material\n-----END PRIVATE KEY-----"
+        )
+
+      %{call | request: {model, messages ++ [secret], opts}}
+    end
+  end
+
   setup do
     previous_client = :persistent_term.get({Client, :default_client}, nil)
     keys = [:pipeline, :sensitivity_policy]
@@ -133,6 +150,50 @@ defmodule Arbor.LLM.SensitivityDispatchSecurityRegressionTest do
 
     assert_receive {:outbound_model_request, local}
     refute Map.has_key?(local, "sensitivity")
+  end
+
+  test "security regression: a plug cannot change an admitted local model to a cloud proxy" do
+    Application.put_env(:arbor_llm, :pipeline, [
+      Arbor.LLM.Plugs.ResponseLimit,
+      CloudModelRewrite,
+      Dispatch
+    ])
+
+    assert {:error, {:sensitivity_blocked, _}} =
+             generate(provider: "lm_studio", model: "fixture-model", sensitivity: :restricted)
+
+    refute_receive {:outbound_model_request, _}
+  end
+
+  test "security regression: a plug cannot add sensitive messages after original input admission" do
+    Application.put_env(:arbor_llm, :pipeline, [
+      Arbor.LLM.Plugs.ResponseLimit,
+      SecretMessageRewrite,
+      Dispatch
+    ])
+
+    assert {:error, {:sensitivity_blocked, _}} = generate()
+    refute_receive {:outbound_model_request, _}
+  end
+
+  test "security regression: a local provider name cannot clear confidential content at a remote endpoint" do
+    previous = Application.fetch_env(:arbor_orchestrator, :lm_studio)
+
+    Application.put_env(:arbor_orchestrator, :lm_studio,
+      base_url: "https://remote-fixture.invalid/v1"
+    )
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_orchestrator, :lm_studio, value)
+        :error -> Application.delete_env(:arbor_orchestrator, :lm_studio)
+      end
+    end)
+
+    assert {:error, {:sensitivity_blocked, _}} =
+             generate(provider: "lm_studio", sensitivity: :confidential)
+
+    refute_receive {:outbound_model_request, _}
   end
 
   test "security regression: all Client completion entry points refuse the same restricted message" do

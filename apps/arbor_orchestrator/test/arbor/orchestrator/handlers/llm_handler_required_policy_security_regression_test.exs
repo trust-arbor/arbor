@@ -103,6 +103,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
       {:arbor_orchestrator, :llm_provider_availability, fn _ -> true end},
       {:arbor_orchestrator, :llm_provider_fallbacks, %{}},
       {:arbor_orchestrator, :llm_fallback_providers, []},
+      {:arbor_llm, :sensitivity_guarded_adapters,
+       [
+         Arbor.LLM.Adapter.ReqLLM,
+         Arbor.LLM.Adapter.OAuthResponses,
+         Arbor.LLM.Adapter.LmStudio,
+         Arbor.Orchestrator.LlmRouting.SensitivityAdapter,
+         Adapter
+       ]},
       {:arbor_ai, :sensitivity_routing_overrides, %{"agent_sensitivity_probe" => :block}},
       {:arbor_ai, :backend_capabilities,
        %{
@@ -256,6 +264,30 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
     assert_received {:transport_called, "sensitivity_remote", "safe", _}
   end
 
+  test "security regression: a registered sensitivity wrapper cannot clear an unregistered inner local adapter" do
+    registered = Application.fetch_env!(:arbor_llm, :sensitivity_guarded_adapters)
+
+    Application.put_env(
+      :arbor_llm,
+      :sensitivity_guarded_adapters,
+      List.delete(registered, Adapter)
+    )
+
+    outcome = execute(:direct, [], :restricted, nil, test_provider: "lm_studio")
+
+    assert_refused(outcome)
+    refute_received {:transport_called, "lm_studio", _, _}
+  end
+
+  test "security regression: a host-registered inner effect owner preserves restricted compute execution" do
+    outcome = execute(:direct, [], :restricted, nil, test_provider: "lm_studio")
+
+    assert outcome.status == :success, inspect(outcome)
+    assert_received {:transport_called, "lm_studio", "safe", opts}
+    assert Keyword.fetch!(opts, :sensitivity) == :restricted
+    refute Keyword.has_key?(opts, :__orchestrator_sensitivity_scope__)
+  end
+
   defp assert_refused(outcome) do
     refute_received {:transport_called, _, _, _}
     assert outcome.status in [:fail, :partial_success], inspect(outcome)
@@ -270,10 +302,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
          middleware \\ nil,
          extra_opts \\ []
        ) do
+    {provider, extra_opts} = Keyword.pop(extra_opts, :test_provider, "sensitivity_local")
+
     client =
       Client.new(
-        adapters: %{"sensitivity_local" => Adapter, "sensitivity_remote" => Adapter},
-        default_provider: "sensitivity_local",
+        adapters: %{provider => Adapter, "sensitivity_remote" => Adapter},
+        default_provider: provider,
         model_catalog: %{},
         middleware: if(middleware, do: [middleware], else: []),
         stream_middleware: if(middleware, do: [middleware], else: [])
@@ -282,7 +316,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
     context =
       Context.new(%{
         "session.agent_id" => "agent_sensitivity_probe",
-        "session.llm_provider" => "sensitivity_local",
+        "session.llm_provider" => provider,
         "session.llm_model" => "safe",
         "session.llm_fallback_chain" => fallbacks,
         "__data_sensitivity__" => sensitivity
@@ -291,7 +325,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
     attrs = %{
       "simulate" => "false",
       "prompt" => "private fixture prompt",
-      "llm_provider" => "sensitivity_local",
+      "llm_provider" => provider,
       "llm_model" => "safe"
     }
 
@@ -299,8 +333,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
     parent = self()
 
     route = %{
-      provider: "sensitivity_local",
-      destination: "sensitivity_local",
+      provider: provider,
+      destination: provider,
       model: "safe",
       runtime: "arbor"
     }
