@@ -14,6 +14,9 @@ defmodule Arbor.LLM.StockToolTransportTest do
       {:arbor_llm, :tool_invocation_auditor},
       {:arbor_llm, :pipeline},
       {:arbor_llm, :rate_limit_backoff_dispatch_fn},
+      {:arbor_llm, :sensitivity_policy},
+      {:arbor_llm, :sensitivity_guarded_adapters},
+      {:arbor_ai, :backend_capabilities},
       {:arbor_llm, Plugs.RateLimitBackoff},
       {:arbor_security, :invocation_audit_mode},
       {:arbor_security, :invocation_audit_sink},
@@ -78,6 +81,26 @@ defmodule Arbor.LLM.StockToolTransportTest do
     Client.set_default_client(Client.new(adapters: %{"lm_studio" => LLM.Adapter.ReqLLM}))
     Application.put_env(:arbor_llm, :pipeline, [Plugs.Dispatch, Plugs.ResponseLimit])
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
+  end
+
+  test "security regression: stock identity binds sensitivity implementation and host clearance" do
+    assert {:ok, first} = LLM.stock_tool_transport_identity("lmstudio")
+    modules = Enum.map(first["implementation"], & &1["module"])
+    assert "Elixir.Arbor.LLM.Sensitivity" in modules
+    assert "Elixir.Arbor.LLM.Plugs.Sensitivity" in modules
+
+    Application.put_env(:arbor_ai, :backend_capabilities, %{lmstudio: [:public]})
+    assert {:ok, changed} = LLM.stock_tool_transport_identity("lmstudio")
+    refute changed["runtime_options_digest"] == first["runtime_options_digest"]
+
+    Application.put_env(:arbor_llm, :sensitivity_guarded_adapters, [])
+    assert {:ok, unregistered} = LLM.stock_tool_transport_identity("lmstudio")
+    refute unregistered["runtime_options_digest"] == changed["runtime_options_digest"]
+
+    Application.put_env(:arbor_llm, :sensitivity_policy, __MODULE__.UnknownPolicy)
+
+    assert {:error, :stock_tool_transport_unavailable} =
+             LLM.stock_tool_transport_identity("lmstudio")
   end
 
   test "disabled or substituted auditor and executable retry callback fail closed" do

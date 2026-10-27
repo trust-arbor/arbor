@@ -68,6 +68,34 @@ defmodule Arbor.LLM.SensitivityCarrySecurityRegressionTest do
     end
   end
 
+  test "security regression: schema property names are data while explicit source metadata remains a floor" do
+    schema = %{
+      "type" => "object",
+      "properties" => %{
+        "sensitivity" => %{"type" => "string"},
+        "taint" => %{"type" => "object"},
+        "nested" => %{
+          "type" => "object",
+          "properties" => %{"sensitivity" => %{"type" => "string"}}
+        }
+      }
+    }
+
+    assert {:ok, public_opts} = LLM.carry_sensitivity(schema, [])
+    assert Keyword.fetch!(public_opts, :sensitivity) == :public
+
+    classified = Map.put(schema, "metadata", %{"taint" => taint(:restricted)})
+    assert {:ok, restricted_opts} = LLM.carry_sensitivity(classified, [])
+    assert Keyword.fetch!(restricted_opts, :sensitivity) == :restricted
+  end
+
+  test "security regression: transmitted map keys are scanned for credential bytes" do
+    key = "-----BEGIN PRIVATE KEY-----\nfixture material\n-----END PRIVATE KEY-----"
+
+    assert {:ok, opts} = LLM.carry_sensitivity(%{key => "An ordinary value."}, [])
+    assert Keyword.fetch!(opts, :sensitivity) == :restricted
+  end
+
   test "security regression: invalid public taint cannot masquerade as valid classification" do
     for invalid <- [
           %{sensitivity: :public},
