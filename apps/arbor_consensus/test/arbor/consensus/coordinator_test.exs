@@ -1,5 +1,6 @@
 defmodule Arbor.Consensus.CoordinatorTest do
-  use ExUnit.Case, async: true
+  # Recovery fixtures publish process-owned ETS tables through global config.
+  use ExUnit.Case, async: false
 
   alias Arbor.Consensus.Coordinator
   alias Arbor.Consensus.TestHelpers
@@ -489,8 +490,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
     @describetag :quota_config
 
     setup do
-      original_max = Application.get_env(:arbor_consensus, :max_proposals_per_agent)
-      original_enabled = Application.get_env(:arbor_consensus, :proposal_quota_enabled)
+      original_max = Application.fetch_env(:arbor_consensus, :max_proposals_per_agent)
+      original_enabled = Application.fetch_env(:arbor_consensus, :proposal_quota_enabled)
 
       on_exit(fn ->
         restore_config(:max_proposals_per_agent, original_max)
@@ -973,9 +974,9 @@ defmodule Arbor.Consensus.CoordinatorTest do
     @describetag :recovery_config
 
     setup do
-      original_event_log = Application.get_env(:arbor_consensus, :event_log)
-      original_recovery_strategy = Application.get_env(:arbor_consensus, :recovery_strategy)
-      original_emit_recovery = Application.get_env(:arbor_consensus, :emit_recovery_events)
+      original_event_log = Application.fetch_env(:arbor_consensus, :event_log)
+      original_recovery_strategy = Application.fetch_env(:arbor_consensus, :recovery_strategy)
+      original_emit_recovery = Application.fetch_env(:arbor_consensus, :emit_recovery_events)
 
       on_exit(fn ->
         restore_config(:event_log, original_event_log)
@@ -1356,8 +1357,10 @@ defmodule Arbor.Consensus.CoordinatorTest do
     end
   end
 
-  defp restore_config(key, nil), do: Application.delete_env(:arbor_consensus, key)
-  defp restore_config(key, value), do: Application.put_env(:arbor_consensus, key, value)
+  defp restore_config(key, :error), do: Application.delete_env(:arbor_consensus, key)
+
+  defp restore_config(key, {:ok, value}),
+    do: Application.put_env(:arbor_consensus, key, value)
 
   defp unique_id(prefix) do
     "#{prefix}_#{System.unique_integer([:positive])}"
@@ -1431,9 +1434,9 @@ defmodule Arbor.Consensus.CoordinatorTest do
       # proposal." Combined with H11/H12 (now closed) that made any OIDC
       # user a root-equivalent. In strict mode the Coordinator must refuse
       # to authorize proposals when no authorizer module is wired in.
-      original = Application.get_env(:arbor_consensus, :require_authorizer)
-      Application.put_env(:arbor_consensus, :require_authorizer, true)
+      original = Application.fetch_env(:arbor_consensus, :require_authorizer)
       on_exit(fn -> restore_config(:require_authorizer, original) end)
+      Application.put_env(:arbor_consensus, :require_authorizer, true)
 
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
@@ -1460,9 +1463,9 @@ defmodule Arbor.Consensus.CoordinatorTest do
       # Inverse: dev/test default (require_authorizer: false) keeps the
       # existing permissive shape so test setups that don't wire an
       # authorizer continue to work.
-      original = Application.get_env(:arbor_consensus, :require_authorizer)
-      Application.put_env(:arbor_consensus, :require_authorizer, false)
+      original = Application.fetch_env(:arbor_consensus, :require_authorizer)
       on_exit(fn -> restore_config(:require_authorizer, original) end)
+      Application.put_env(:arbor_consensus, :require_authorizer, false)
 
       {_pid, coord} =
         TestHelpers.start_test_coordinator(

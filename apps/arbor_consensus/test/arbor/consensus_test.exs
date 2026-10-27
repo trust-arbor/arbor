@@ -1,5 +1,6 @@
 defmodule Arbor.ConsensusTest do
-  use ExUnit.Case, async: true
+  # Coordinators read global event-log configuration during startup.
+  use ExUnit.Case, async: false
 
   alias Arbor.Consensus
   alias Arbor.Consensus.TestHelpers
@@ -7,6 +8,16 @@ defmodule Arbor.ConsensusTest do
   @moduletag :integration
 
   setup do
+    event_log = Application.fetch_env(:arbor_consensus, :event_log)
+
+    on_exit(fn ->
+      case event_log do
+        {:ok, value} -> Application.put_env(:arbor_consensus, :event_log, value)
+        :error -> Application.delete_env(:arbor_consensus, :event_log)
+      end
+    end)
+
+    Application.put_env(:arbor_consensus, :event_log, nil)
     {_es_pid, es_name} = TestHelpers.start_test_event_store()
     {_pid, coord} = TestHelpers.start_test_coordinator()
     %{coordinator: coord, event_store: es_name}
@@ -53,18 +64,9 @@ defmodule Arbor.ConsensusTest do
     end
 
     test "list_proposals/1 lists all proposals" do
-      # Temporarily disable event_log to ensure clean state for this test
-      original_event_log = Application.get_env(:arbor_consensus, :event_log)
-      Application.put_env(:arbor_consensus, :event_log, nil)
-
-      # Use isolated coordinator to avoid test pollution from async tests
+      # The setup owns the disabled event log until this test's cleanup.
       {_es_pid, _es_name} = TestHelpers.start_test_event_store()
       {_pid, coord} = TestHelpers.start_test_coordinator()
-
-      # Restore event_log config
-      if original_event_log do
-        Application.put_env(:arbor_consensus, :event_log, original_event_log)
-      end
 
       # Verify we start with empty state (no event recovery since we disabled event_log)
       initial_proposals = Consensus.list_proposals(coord)
@@ -181,20 +183,11 @@ defmodule Arbor.ConsensusTest do
 
   describe "list_pending/1" do
     test "returns pending proposals" do
-      # Disable event_log to ensure clean coordinator state
-      original_event_log = Application.get_env(:arbor_consensus, :event_log)
-      Application.put_env(:arbor_consensus, :event_log, nil)
-
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
           evaluator_backend: TestHelpers.SlowBackend,
           config: [evaluation_timeout_ms: 60_000]
         )
-
-      # Restore event_log config
-      if original_event_log do
-        Application.put_env(:arbor_consensus, :event_log, original_event_log)
-      end
 
       Consensus.submit(
         %{proposer: "a1", change_type: :code_modification, description: "pending test"},
