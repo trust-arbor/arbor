@@ -458,6 +458,22 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
   end
 
   describe "hybrid_search_with_meta" do
+    test "security regression: explicit query sensitivity reaches the embedding effect" do
+      Testing.put(:skill_embedding_module, CountingEmbed)
+
+      assert {:ok, %{meta: meta}} =
+               SkillLibrary.hybrid_search_with_meta("ordinary query",
+                 sensitivity: :restricted,
+                 agent_id: "agent_query_fixture"
+               )
+
+      assert meta.query_embedding == :ok
+      assert FakePersistence.embed_calls() == 1
+      assert SuccessEmbed.last_opts()[:sensitivity] == :restricted
+      assert SuccessEmbed.last_opts()[:agent_id] == "agent_query_fixture"
+      assert SuccessEmbed.last_opts()[:dimensions] == 768
+    end
+
     test "query embedding is passed when service succeeds" do
       register_skill("search-ok", "alpha beta lexical")
 
