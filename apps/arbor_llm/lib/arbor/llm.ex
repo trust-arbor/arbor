@@ -1,6 +1,26 @@
 defmodule Arbor.LLM do
   @moduledoc false
 
+  @doc "Admit an exact outbound model effect using the host-owned sensitivity policy."
+  defdelegate authorize_sensitivity(provider, model, content, opts \\ []),
+    to: Arbor.LLM.Sensitivity,
+    as: :authorize
+
+  @doc "Preserve private classification options across facade translation."
+  defdelegate sensitivity_options(opts), to: Arbor.LLM.Sensitivity, as: :options
+
+  @doc "Carry the maximum scanned and recorded sensitivity across a projection."
+  defdelegate carry_sensitivity(content, opts), to: Arbor.LLM.Sensitivity, as: :carry
+
+  @doc "Admit a host-registered effect owner; a provider name alone does not attest an adapter."
+  defdelegate authorize_adapter_sensitivity(adapter, provider, model, content, opts),
+    to: Arbor.LLM.Client
+
+  @doc "Recheck the actual encoded HTTP effect and admitted origin on each transport attempt."
+  defdelegate protect_sensitivity_request(request, provider, model, content, opts),
+    to: Arbor.LLM.Sensitivity,
+    as: :protect_request
+
   alias Arbor.LLM.AbortError
   alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
 
@@ -652,7 +672,9 @@ defmodule Arbor.LLM do
         max_tokens: Keyword.get(opts, :max_tokens),
         temperature: Keyword.get(opts, :temperature),
         reasoning_effort: Keyword.get(opts, :reasoning_effort),
-        provider_options: Keyword.get(opts, :provider_options, %{})
+        provider_options: Keyword.get(opts, :provider_options, %{}),
+        sensitivity: Keyword.get(opts, :sensitivity),
+        taint: Keyword.get(opts, :taint)
       }
 
       if request.model in [nil, ""] do

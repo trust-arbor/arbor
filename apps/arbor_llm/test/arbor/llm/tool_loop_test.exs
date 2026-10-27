@@ -1,5 +1,5 @@
 defmodule Arbor.LLM.ToolLoopTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.SteeringMessage
@@ -15,9 +15,37 @@ defmodule Arbor.LLM.ToolLoopTest do
   alias Arbor.LLM.Response
 
   alias Arbor.LLM.ToolLoop
+  alias Arbor.LLM.TestSupport.SensitivityFixture
   @moduletag :fast
 
   setup do
+    SensitivityFixture.setup([
+      __MODULE__.LoopAdapter,
+      __MODULE__.MultiToolAdapter,
+      __MODULE__.MaxTurnsAdapter,
+      __MODULE__.HugeResultAdapter,
+      __MODULE__.StructuredWrapUpAdapter,
+      __MODULE__.NoToolsAdapter,
+      __MODULE__.CostMapAdapter,
+      __MODULE__.EmptyAfterToolAdapter,
+      __MODULE__.WhitespaceAfterToolAdapter,
+      __MODULE__.StreamAdapter,
+      __MODULE__.BoomAdapter,
+      __MODULE__.SteerAdapter,
+      __MODULE__.DiscoveryAdapter,
+      __MODULE__.RunawayDiscoveryAdapter,
+      __MODULE__.TerminalSuccessAdapter,
+      __MODULE__.TerminalFailThenSucceedAdapter,
+      __MODULE__.TerminalMixedAdapter,
+      __MODULE__.TerminalMultipleAdapter,
+      __MODULE__.TerminalPendingThenSucceedAdapter,
+      __MODULE__.TerminalHugeResultAdapter,
+      __MODULE__.TerminalFreeFormThenStillFreeFormAdapter,
+      __MODULE__.TerminalFreeFormThenSubmitAdapter,
+      __MODULE__.TerminalSuccessThenWouldLoopAdapter,
+      __MODULE__.TerminalReservationAdapter
+    ])
+
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     root = Path.join(System.tmp_dir!(), "tool-loop-" <> token)
     File.mkdir!(root)
@@ -189,7 +217,8 @@ defmodule Arbor.LLM.ToolLoopTest do
     def complete(%Request{tools: tools, messages: messages} = request, _opts)
         when tools in [nil, []] do
       instruction = List.last(messages).content
-      send(request.provider_options.test_pid, {:structured_wrap_up_instruction, instruction})
+      controls = SensitivityFixture.get_controls(request.provider_options)
+      send(controls.test_pid, {:structured_wrap_up_instruction, instruction})
 
       content =
         if String.contains?(instruction, "plain-text") or
@@ -591,7 +620,7 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       request = %{
         request("structured_wrap_up_test")
-        | provider_options: %{test_pid: self()}
+        | provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
       }
 
       assert {:ok, result} =
@@ -1143,7 +1172,7 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       req = %{
         request("terminal_reservation_test")
-        | provider_options: %{test_pid: self()}
+        | provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
       }
 
       {:ok, _result} =
@@ -1178,7 +1207,8 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       req = %{
         request("terminal_reservation_test")
-        | provider_options: %{test_pid: self(), reserved_response: :free_form}
+        | provider_options:
+            SensitivityFixture.put_controls(%{test_pid: self(), reserved_response: :free_form})
       }
 
       assert {:error, reason} =
@@ -1215,7 +1245,11 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       req = %{
         request("terminal_reservation_test")
-        | provider_options: %{test_pid: self(), reserved_response: :fabricated_read}
+        | provider_options:
+            SensitivityFixture.put_controls(%{
+              test_pid: self(),
+              reserved_response: :fabricated_read
+            })
       }
 
       assert {:error,
@@ -1262,7 +1296,8 @@ defmodule Arbor.LLM.ToolLoopTest do
       Enum.each(cases, fn {response, shape, names, terminal_count, non_terminal_count} ->
         req = %{
           request("terminal_reservation_test")
-          | provider_options: %{test_pid: self(), reserved_response: response}
+          | provider_options:
+              SensitivityFixture.put_controls(%{test_pid: self(), reserved_response: response})
         }
 
         assert {:error, {:invalid_reserved_terminal_tool_submission, diagnostic}} =
@@ -1312,7 +1347,11 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       req = %{
         request("terminal_reservation_test")
-        | provider_options: %{test_pid: self(), reserved_response: :many_non_terminal}
+        | provider_options:
+            SensitivityFixture.put_controls(%{
+              test_pid: self(),
+              reserved_response: :many_non_terminal
+            })
       }
 
       assert {:error, {:invalid_reserved_terminal_tool_submission, diagnostic}} =
@@ -1653,7 +1692,7 @@ defmodule Arbor.LLM.ToolLoopTest do
             request.tool_choice
           )
 
-      provider_options = request.provider_options || %{}
+      provider_options = SensitivityFixture.get_controls(request.provider_options)
       reserved_response = Map.get(provider_options, :reserved_response, :submit)
 
       case Map.get(provider_options, :test_pid) do

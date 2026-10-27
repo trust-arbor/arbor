@@ -187,6 +187,8 @@ defmodule Arbor.Memory.IndexTest do
 
     def disarm(content), do: :persistent_term.erase({__MODULE__, content})
 
+    def embed(content, _opts), do: embed(content)
+
     def embed(content) do
       {mode, counter} = :persistent_term.get({__MODULE__, content})
       :counters.add(counter, 1, 1)

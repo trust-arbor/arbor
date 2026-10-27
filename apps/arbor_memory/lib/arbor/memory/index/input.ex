@@ -16,7 +16,7 @@ defmodule Arbor.Memory.Index.Input do
     with :ok <- validate_content(content),
          {:ok, metadata_bytes} <- validate_metadata(metadata),
          {:ok, opts, embedding_bytes} <-
-           validate_embedding_opts(opts, [:embedding, :type, :source, :taint]),
+           validate_embedding_opts(opts, [:embedding, :type, :source, :taint, :sensitivity]),
          {:ok, taint} <- EmbeddingTaint.from_opts(Keyword.take(opts, [:taint])),
          true <-
            byte_size(content) + metadata_bytes + embedding_bytes + @transport_overhead_bytes <=
@@ -31,7 +31,8 @@ defmodule Arbor.Memory.Index.Input do
 
   @spec batch(term(), term()) :: {:ok, {[{String.t(), map()}], keyword()}} | {:error, term()}
   def batch(items, opts) do
-    with {:ok, opts, embedding_bytes} <- validate_embedding_opts(opts, [:embedding, :taint]),
+    with {:ok, opts, embedding_bytes} <-
+           validate_embedding_opts(opts, [:embedding, :taint, :sensitivity]),
          {:ok, taint} <- EmbeddingTaint.from_opts(Keyword.take(opts, [:taint])),
          {:ok, items, count, payload_bytes} <- validate_batch_items(items),
          true <- count > 0 and count <= VectorOperation.limits().max_batch_operations,
@@ -50,7 +51,16 @@ defmodule Arbor.Memory.Index.Input do
   def recall(query, opts) do
     with :ok <- validate_content(query),
          {:ok, opts, _embedding_bytes} <-
-           validate_embedding_opts(opts, [:embedding, :limit, :threshold, :type, :types]),
+           validate_embedding_opts(opts, [
+             :embedding,
+             :limit,
+             :threshold,
+             :type,
+             :types,
+             :taint,
+             :sensitivity
+           ]),
+         {:ok, opts} <- normalize_recall_taint(opts),
          :ok <- validate_limit(Keyword.get(opts, :limit, 10), @max_recall_limit),
          :ok <- validate_threshold(Keyword.get(opts, :threshold, 0.3)),
          :ok <- validate_filter(Keyword.get(opts, :type)),
@@ -142,11 +152,30 @@ defmodule Arbor.Memory.Index.Input do
 
   defp validate_embedding_opts(opts, allowed) do
     with {:ok, opts} <- exact_keyword(opts, allowed),
+         :ok <- validate_optional_sensitivity(opts),
          {:ok, embedding_bytes} <- validate_optional_embedding(Keyword.get(opts, :embedding)) do
       {:ok, opts, embedding_bytes}
     else
       {:error, :invalid_embedding} -> invalid(:invalid_embedding)
       _invalid -> {:error, :invalid_options}
+    end
+  end
+
+  defp validate_optional_sensitivity(opts) do
+    case Keyword.fetch(opts, :sensitivity) do
+      :error -> :ok
+      {:ok, level} when level in [:public, :internal, :confidential, :restricted] -> :ok
+      _ -> {:error, :invalid_options}
+    end
+  end
+
+  defp normalize_recall_taint(opts) do
+    if Keyword.has_key?(opts, :taint) do
+      with {:ok, taint} <- EmbeddingTaint.from_opts(Keyword.take(opts, [:taint])) do
+        {:ok, Keyword.put(opts, :taint, taint)}
+      end
+    else
+      {:ok, opts}
     end
   end
 

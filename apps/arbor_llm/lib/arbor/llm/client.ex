@@ -311,7 +311,10 @@ defmodule Arbor.LLM.Client do
       Deadline.run(
         fn ->
           with {:ok, adapter} <- resolve_adapter(client, request) do
-            base = fn req -> adapter.complete(req, opts) end
+            base = fn req ->
+              with {:ok, admitted_opts} <- admit_sensitivity(client, request, req, opts, adapter),
+                   do: adapter.complete(req, admitted_opts)
+            end
 
             wrapped =
               Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
@@ -356,7 +359,9 @@ defmodule Arbor.LLM.Client do
                 base = fn req ->
                   case single_attempt_gate_claim(gate) do
                     :ok ->
-                      adapter.complete_single_attempt(req, opts)
+                      with {:ok, admitted_opts} <-
+                             admit_sensitivity(client, request, req, opts, adapter),
+                           do: adapter.complete_single_attempt(req, admitted_opts)
 
                     {:error, _} = error ->
                       error
@@ -398,7 +403,10 @@ defmodule Arbor.LLM.Client do
                :ok <- ensure_stream_supported(adapter),
                {:ok, tracker} <- Boundary.stream_tracker(opts),
                {:ok, max_events} <- Boundary.stream_event_limit(opts) do
-            base = fn req -> normalize_stream(adapter.stream(req, opts)) end
+            base = fn req ->
+              with {:ok, admitted_opts} <- admit_sensitivity(client, request, req, opts, adapter),
+                   do: normalize_stream(adapter.stream(req, admitted_opts))
+            end
 
             wrapped =
               Enum.reduce(Enum.reverse(client.stream_middleware), base, fn mw, acc ->
@@ -452,7 +460,9 @@ defmodule Arbor.LLM.Client do
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
-          with {:ok, adapter} <- resolve_adapter(client, request) do
+          with {:ok, adapter} <- resolve_adapter(client, request),
+               {:ok, admitted_opts} <-
+                 admit_sensitivity(client, request, request, opts, adapter) do
             if adapter_exports?(adapter, :complete_streaming, 3) do
               with {:ok, tracker} <- Boundary.stream_tracker(opts),
                    {:ok, max_events} <- Boundary.stream_event_limit(opts) do
@@ -473,7 +483,7 @@ defmodule Arbor.LLM.Client do
                 end
 
                 try do
-                  adapter.complete_streaming(request, guarded_callback, opts)
+                  adapter.complete_streaming(request, guarded_callback, admitted_opts)
                   |> Boundary.completion(opts)
                 catch
                   :throw, {:invalid_stream_callback_event, reason} -> {:error, reason}
@@ -520,7 +530,9 @@ defmodule Arbor.LLM.Client do
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
-          with {:ok, adapter} <- resolve_adapter(client, request) do
+          with {:ok, adapter} <- resolve_adapter(client, request),
+               {:ok, admitted_opts} <-
+                 admit_sensitivity(client, request, request, opts, adapter) do
             attested? = adapter_exports?(adapter, :complete_streaming_single_attempt, 3)
             ordinary? = adapter_exports?(adapter, :complete_streaming, 3)
 
@@ -545,7 +557,11 @@ defmodule Arbor.LLM.Client do
                   end
 
                   try do
-                    adapter.complete_streaming_single_attempt(request, guarded_callback, opts)
+                    adapter.complete_streaming_single_attempt(
+                      request,
+                      guarded_callback,
+                      admitted_opts
+                    )
                     |> Boundary.completion(opts)
                   catch
                     :throw, {:invalid_stream_callback_event, reason} -> {:error, reason}
@@ -637,6 +653,9 @@ defmodule Arbor.LLM.Client do
 
     with :ok <- Boundary.embedding_inputs(texts),
          {:ok, adapter} <- resolve_embedding_adapter(client, canonical, provider),
+         {:ok, opts} <- Arbor.LLM.Sensitivity.carry(texts, opts),
+         :ok <- Arbor.LLM.Sensitivity.authorize(canonical, model, texts, opts),
+         :ok <- admit_adapter_sensitivity(adapter, opts),
          true <-
            adapter_exports?(adapter, :embed, 3) or {:error, {:embed_not_supported, provider}},
          adapter_opts = safe_put_new(opts, :provider, canonical),
@@ -675,6 +694,43 @@ defmodule Arbor.LLM.Client do
 
   defp normalize_client_deadline(opts, fallback) do
     Deadline.normalize_transport_options(opts, fallback)
+  end
+
+  @doc false
+  def authorize_adapter_sensitivity(adapter, provider, model, content, opts) do
+    with {:ok, carried_opts} <- Arbor.LLM.Sensitivity.carry(content, opts),
+         :ok <- admit_adapter_sensitivity(adapter, carried_opts),
+         :ok <- Arbor.LLM.Sensitivity.authorize(provider, model, content, carried_opts),
+         do: :ok
+  end
+
+  defp admit_sensitivity(client, selected, current, opts, adapter) do
+    provider = selected.provider || client.default_provider
+    current_provider = current.provider || client.default_provider
+
+    if current_provider == provider do
+      with {:ok, carried_opts} <- Arbor.LLM.Sensitivity.carry([selected, current], opts),
+           :ok <- admit_adapter_sensitivity(adapter, carried_opts),
+           :ok <-
+             Arbor.LLM.Sensitivity.authorize(provider, current.model, current, carried_opts) do
+        # Middleware can add content or strengthen a label, never erase the
+        # originating request's recorded sensitivity or change its transport.
+        {:ok, carried_opts}
+      end
+    else
+      {:error, {:sensitivity_blocked, :provider_selection_changed}}
+    end
+  end
+
+  defp admit_adapter_sensitivity(adapter, opts) do
+    guarded = Arbor.LLM.Config.sensitivity_guarded_adapters()
+
+    if Keyword.fetch!(opts, :sensitivity) == :public or
+         (is_list(guarded) and adapter in guarded),
+       do: :ok,
+       else: {:error, {:sensitivity_blocked, :unresolved_adapter_destination}}
+  rescue
+    _ -> {:error, {:sensitivity_blocked, :unresolved_adapter_destination}}
   end
 
   defp embed_texts_option(opts) do

@@ -63,6 +63,7 @@ defmodule Arbor.Memory.HybridSearch do
 
   defp search_snapshot(ctx) do
     with {:ok, taint} <- HybridSearchCore.egress_taint(ctx.snapshot, ctx.nodes),
+         {:ok, sensitivity_opts} <- model_sensitivity_opts(ctx, taint),
          :ok <- authorize_egress(ctx.caller, ctx.route, taint),
          :ok <- ctx.reauthorize.(),
          {:ok, remaining} <- remaining(ctx),
@@ -71,11 +72,13 @@ defmodule Arbor.Memory.HybridSearch do
              ctx.route.provider,
              ctx.route.model,
              [ctx.query | Enum.map(ctx.nodes, & &1.content)],
-             base_url: ctx.route.base_url,
-             timeout_ms: remaining,
-             max_response_bytes: HybridSearchCore.limits().response_bytes,
-             req_http_options: [retry: false, redirect: false],
-             require_live_pipeline: true
+             Keyword.merge(sensitivity_opts,
+               base_url: ctx.route.base_url,
+               timeout_ms: remaining,
+               max_response_bytes: HybridSearchCore.limits().response_bytes,
+               req_http_options: [retry: false, redirect: false],
+               require_live_pipeline: true
+             )
            ),
          {:ok, vectors} <- HybridSearchCore.embeddings(batch, ctx.route, length(ctx.nodes) + 1),
          :ok <- recheck(ctx),
@@ -114,24 +117,29 @@ defmodule Arbor.Memory.HybridSearch do
 
     with {:ok, input} <- HybridSelectionCore.input(ctx.query, candidates),
          {:ok, taint} <- HybridSearchCore.egress_taint(ctx.snapshot, ctx.nodes),
+         {:ok, sensitivity_opts} <- model_sensitivity_opts(ctx, taint),
          :ok <- authorize_egress(ctx.caller, selector, taint),
          :ok <- recheck(ctx),
          {:ok, remaining} <- remaining(ctx),
          {:ok, response} <-
            LLM.generate(
-             provider: selector.provider,
-             model: selector.model,
-             system: HybridSelectionCore.system_prompt(),
-             prompt: input,
-             provider_options: %{response_format: HybridSelectionCore.response_format(candidates)},
-             temperature: 0.0,
-             require_live_pipeline: true,
-             timeout_ms: min(remaining, selector.timeout_ms),
-             max_response_bytes: HybridSelectionCore.response_bytes(),
-             client_opts: [
-               base_url: selector.base_url,
-               req_http_options: [retry: false, redirect: false]
-             ]
+             Keyword.merge(sensitivity_opts,
+               provider: selector.provider,
+               model: selector.model,
+               system: HybridSelectionCore.system_prompt(),
+               prompt: input,
+               provider_options: %{
+                 response_format: HybridSelectionCore.response_format(candidates)
+               },
+               temperature: 0.0,
+               require_live_pipeline: true,
+               timeout_ms: min(remaining, selector.timeout_ms),
+               max_response_bytes: HybridSelectionCore.response_bytes(),
+               client_opts: [
+                 base_url: selector.base_url,
+                 req_http_options: [retry: false, redirect: false]
+               ]
+             )
            ),
          {:ok, selected} <-
            HybridSelectionCore.select(response, candidates, Keyword.get(ctx.opts, :limit, 10)),
@@ -166,6 +174,13 @@ defmodule Arbor.Memory.HybridSearch do
          ) do
       :allow -> :ok
       _ -> {:error, :hybrid_search_egress_refused}
+    end
+  end
+
+  defp model_sensitivity_opts(ctx, taint) do
+    with {:ok, opts} <-
+           LLM.carry_sensitivity(%{taint: taint}, Keyword.take(ctx.opts, [:taint, :sensitivity])) do
+      {:ok, opts |> Keyword.put(:taint, taint) |> Keyword.put(:agent_id, ctx.caller)}
     end
   end
 

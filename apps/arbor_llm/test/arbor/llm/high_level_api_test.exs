@@ -1,5 +1,5 @@
 defmodule Arbor.LLM.HighLevelApiTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.LLM
@@ -21,6 +21,20 @@ defmodule Arbor.LLM.HighLevelApiTest do
   alias Arbor.LLM.StreamEvent
 
   alias Arbor.LLM.Tool
+  alias Arbor.LLM.TestSupport.SensitivityFixture
+
+  setup do
+    SensitivityFixture.setup([
+      __MODULE__.HighLevelAdapter,
+      __MODULE__.ToolLoopAdapter,
+      __MODULE__.HostileOwnedAdapter,
+      __MODULE__.CleanupStreamAdapter,
+      __MODULE__.CrashingSourceAdapter,
+      __MODULE__.ObjectBoundaryAdapter,
+      __MODULE__.SlowToolLoopAdapter,
+      __MODULE__.StreamToolLoopAdapter
+    ])
+  end
 
   defmodule HighLevelAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
@@ -146,6 +160,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
     @impl true
     def stream(%Request{provider_options: options, model: model}, _opts) do
+      options = SensitivityFixture.get_controls(options)
       owner = Map.fetch!(options, :test_pid)
 
       producer =
@@ -191,6 +206,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
     @impl true
     def stream(%Request{provider_options: options, model: model}, _opts) do
+      options = SensitivityFixture.get_controls(options)
       observer = Map.fetch!(options, :test_pid)
 
       Stream.resource(
@@ -227,6 +243,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
     @impl true
     def stream(%Request{provider_options: options, model: model}, _opts) do
+      options = SensitivityFixture.get_controls(options)
       observer = Map.fetch!(options, :test_pid)
 
       Stream.resource(
@@ -797,7 +814,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
       provider: "hostile-owned",
       model: "hostile",
       messages: [Message.new(:user, "hi")],
-      provider_options: %{test_pid: self()}
+      provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
     }
 
     assert {:error, :owned_stream_nesting_forbidden} = Client.stream(client, request)
@@ -866,7 +883,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
       provider: "cleanup-stream",
       model: "delayed-event",
       messages: [Message.new(:user, "hi")],
-      provider_options: %{test_pid: self()}
+      provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
     }
 
     assert {:ok, stream} = Client.stream(client, request, timeout_ms: 30)
@@ -903,7 +920,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
         provider: "crashing-source",
         model: model,
         messages: [Message.new(:user, "hi")],
-        provider_options: %{test_pid: self()}
+        provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
       }
 
       assert {:ok, stream} = Client.stream(client, request, timeout_ms: 1_000)
@@ -1050,7 +1067,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
       provider: "cleanup-stream",
       model: model,
       messages: [Message.new(:user, "hi")],
-      provider_options: %{test_pid: self()}
+      provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
     }
 
     assert {:ok, %Arbor.LLM.OwnedStream{producer: producer} = stream} =

@@ -351,6 +351,14 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   defp handle_direct_query(message, opts, state) do
+    with {:ok, opts} <- Arbor.LLM.carry_sensitivity(message, opts) do
+      do_handle_direct_query(message, opts, state)
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  defp do_handle_direct_query(message, opts, state) do
     # Direct query bypasses Session entirely (no session row, no SessionStore
     # persistence) so the UserMessage envelope's `sent_at` doesn't get
     # threaded anywhere — we just need the content. Accept the typed shape
@@ -401,7 +409,7 @@ defmodule Arbor.Agent.APIAgent do
     end
   end
 
-  defp execute_query(prompt, state, _opts) do
+  defp execute_query(prompt, state, opts) do
     prompt_opts = [
       state: state,
       model: state.config.model,
@@ -410,11 +418,11 @@ defmodule Arbor.Agent.APIAgent do
       skills: state.config.skills
     ]
 
-    # Stable system prompt (identity, self-knowledge, tools — cacheable)
-    system_prompt = Arbor.AI.build_stable_system_prompt(state.id, prompt_opts)
-
-    # Volatile context (goals, WM, KG, timing — changes each query)
-    volatile_context = Arbor.AI.build_volatile_context(state.id, prompt_opts)
+    # Read text and source floor together: the host state can predate memory
+    # fetched by this builder, and its formatted text no longer contains taint.
+    prompt_context = Arbor.AI.build_prompt_context(state.id, prompt_opts)
+    system_prompt = prompt_context.system_prompt
+    volatile_context = prompt_context.volatile_context
 
     # Prepend volatile context to user message
     full_prompt =
@@ -422,20 +430,29 @@ defmodule Arbor.Agent.APIAgent do
         do: prompt,
         else: volatile_context <> "\n\n---\n\n## User Message\n" <> prompt
 
-    api_opts = [
-      provider: state.config.provider,
-      model: state.config.model,
-      agent_id: state.id,
-      system_prompt: system_prompt,
-      max_tokens: gen_param(state, :max_tokens),
-      temperature: gen_param(state, :temperature),
-      top_p: gen_param(state, :top_p),
-      provider_options: gen_param(state, :provider_options),
-      auto_execute: true,
-      max_turns: gen_param(state, :max_turns)
-    ]
+    api_opts =
+      [
+        provider: state.config.provider,
+        model: state.config.model,
+        agent_id: state.id,
+        system_prompt: system_prompt,
+        max_tokens: gen_param(state, :max_tokens),
+        temperature: gen_param(state, :temperature),
+        top_p: gen_param(state, :top_p),
+        provider_options: gen_param(state, :provider_options),
+        auto_execute: true,
+        max_turns: gen_param(state, :max_turns)
+      ]
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
 
-    case Arbor.AI.generate_text_with_tools(full_prompt, api_opts) do
+    source = Map.take(state, [:sensitivity, :taint, :working_memory, :context_window])
+
+    result =
+      with {:ok, api_opts} <- Arbor.LLM.carry_sensitivity([source, prompt_context], api_opts) do
+        Arbor.AI.generate_text_with_tools(full_prompt, api_opts)
+      end
+
+    case result do
       {:ok, response} ->
         new_state = %{state | query_count: state.query_count + 1}
 

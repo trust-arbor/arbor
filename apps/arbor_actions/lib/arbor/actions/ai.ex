@@ -187,7 +187,7 @@ defmodule Arbor.Actions.AI do
     def run(%{prompt: prompt} = params, context) do
       Actions.emit_started(__MODULE__, %{prompt_length: String.length(prompt)})
 
-      opts = build_opts(params)
+      opts = build_opts(params) |> Keyword.merge(Arbor.LLM.sensitivity_options(context))
 
       ai_call =
         if context[:agent_id] do
@@ -331,7 +331,7 @@ defmodule Arbor.Actions.AI do
       })
 
       prompt = build_analysis_prompt(code, question, params[:language])
-      opts = build_opts(params)
+      opts = build_opts(params) |> Keyword.merge(Arbor.LLM.sensitivity_options(context))
 
       ai_call =
         if context[:agent_id] do

@@ -1105,6 +1105,16 @@ defmodule Arbor.LLM.ToolLoop do
         :conversation_source
       ])
 
+    client_opts =
+      if is_nil(tool_taint) do
+        client_opts
+      else
+        case Arbor.LLM.carry_sensitivity(%{taint: tool_taint}, client_opts) do
+          {:ok, carried} -> carried
+          {:error, _} -> Keyword.put(client_opts, :sensitivity, :invalid)
+        end
+      end
+
     single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)
 
     case Keyword.get(opts, :stream_callback) do
@@ -1790,14 +1800,16 @@ defmodule Arbor.LLM.ToolLoop do
     do: {:ok, Enum.reverse(messages), aggregate}
 
   defp build_tool_messages([{call_id, name, result} | rest], nonce, aggregate, messages) do
-    with {:ok, raw_content, is_error, next} <- bounded_legacy_tool_result(result, name, aggregate) do
+    with {:ok, raw_content, is_error, next} <- bounded_legacy_tool_result(result, name, aggregate),
+         {:ok, source_opts} <- Arbor.LLM.carry_sensitivity(result, []) do
       content = raw_content |> truncate(30_000) |> maybe_wrap_tool_result(nonce)
 
       message =
         Message.new(:tool, content, %{
           tool_call_id: call_id,
           name: name,
-          is_error: is_error
+          is_error: is_error,
+          sensitivity: Keyword.fetch!(source_opts, :sensitivity)
         })
 
       build_tool_messages(rest, nonce, next, [message | messages])

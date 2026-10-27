@@ -148,7 +148,9 @@ defmodule Arbor.Memory.Summarizer do
   defp model_for_complexity(:simple, :google, _), do: "google:gemini-2.0-flash"
   defp model_for_complexity(:simple, _, _), do: "anthropic:claude-3-5-haiku-20241022"
 
-  defp model_for_complexity(:moderate, :anthropic, false), do: "anthropic:claude-3-5-sonnet-20241022"
+  defp model_for_complexity(:moderate, :anthropic, false),
+    do: "anthropic:claude-3-5-sonnet-20241022"
+
   defp model_for_complexity(:moderate, :openai, _), do: "openai:gpt-4o-mini"
   defp model_for_complexity(:moderate, :google, _), do: "google:gemini-1.5-flash"
   defp model_for_complexity(:moderate, _, _), do: "anthropic:claude-3-5-haiku-20241022"
@@ -189,7 +191,7 @@ defmodule Arbor.Memory.Summarizer do
     prompt = build_prompt(text, algorithm, opts)
     system_prompt = system_prompt_for(algorithm)
 
-    case call_llm_summarize(prompt, system_prompt, model, complexity) do
+    case call_llm_summarize(prompt, system_prompt, model, complexity, opts) do
       {:ok, _} = success ->
         success
 
@@ -200,9 +202,12 @@ defmodule Arbor.Memory.Summarizer do
     end
   end
 
-  defp call_llm_summarize(prompt, system_prompt, model, complexity) do
+  defp call_llm_summarize(prompt, system_prompt, model, complexity, opts) do
     if LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
-      llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
+      llm_opts =
+        opts
+        |> Keyword.take([:taint, :sensitivity, :agent_id])
+        |> Keyword.merge(system_prompt: system_prompt, model: model, max_tokens: 1000)
 
       case Arbor.AI.generate_text(prompt, llm_opts) do
         {:ok, %{text: summary}} when is_binary(summary) ->

@@ -128,44 +128,49 @@ defmodule Arbor.Memory.ReflectionProcessor do
     # Get LLM module (MockLLM only used if explicitly configured, e.g. in tests)
     llm_module = get_llm_module()
 
-    # Call LLM
-    case llm_module.reflect(prompt, context) do
-      {:ok, response} ->
-        reflection = %{
-          id: generate_id(),
-          agent_id: agent_id,
-          prompt: prompt,
-          analysis: response.analysis,
-          insights: response.insights,
-          self_assessment: response.self_assessment,
-          timestamp: DateTime.utc_now(),
-          goal_updates: nil,
-          new_goals: nil,
-          knowledge_nodes: nil,
-          knowledge_edges: nil,
-          learnings: nil,
-          duration_ms: nil
-        }
+    with {:ok, carried_opts} <-
+           Arbor.LLM.carry_sensitivity([prompt, context], Keyword.put(opts, :agent_id, agent_id)) do
+      context = Map.merge(context, Map.new(Arbor.LLM.sensitivity_options(carried_opts)))
 
-        # Store reflection
-        store_reflection(agent_id, reflection)
+      # Preserve the existing legacy module seam while carrying the source floor.
+      case llm_module.reflect(prompt, context) do
+        {:ok, response} ->
+          reflection = %{
+            id: generate_id(),
+            agent_id: agent_id,
+            prompt: prompt,
+            analysis: response.analysis,
+            insights: response.insights,
+            self_assessment: response.self_assessment,
+            timestamp: DateTime.utc_now(),
+            goal_updates: nil,
+            new_goals: nil,
+            knowledge_nodes: nil,
+            knowledge_edges: nil,
+            learnings: nil,
+            duration_ms: nil
+          }
 
-        # Emit events
-        Signals.emit_cognitive_adjustment(agent_id, :reflection_completed, %{
-          reflection_id: reflection.id,
-          insight_count: length(reflection.insights)
-        })
+          # Store reflection
+          store_reflection(agent_id, reflection)
 
-        Events.record_reflection_completed(agent_id, %{
-          reflection_id: reflection.id,
-          prompt: prompt,
-          insight_count: length(reflection.insights)
-        })
+          # Emit events
+          Signals.emit_cognitive_adjustment(agent_id, :reflection_completed, %{
+            reflection_id: reflection.id,
+            insight_count: length(reflection.insights)
+          })
 
-        {:ok, reflection}
+          Events.record_reflection_completed(agent_id, %{
+            reflection_id: reflection.id,
+            prompt: prompt,
+            insight_count: length(reflection.insights)
+          })
 
-      {:error, _} = error ->
-        error
+          {:ok, reflection}
+
+        {:error, _} = error ->
+          error
+      end
     end
   end
 
@@ -230,8 +235,10 @@ defmodule Arbor.Memory.ReflectionProcessor do
     Signals.emit_reflection_started(agent_id, %{type: :deep_reflect})
 
     with {:ok, context} <- build_deep_context(agent_id, opts),
+         {:ok, llm_opts} <-
+           Arbor.LLM.carry_sensitivity(context, Keyword.put(opts, :agent_id, agent_id)),
          {:ok, prompt} <- {:ok, PromptBuilder.build_reflection_prompt(context)},
-         {:ok, response_text} <- call_llm(prompt, Keyword.put(opts, :agent_id, agent_id)),
+         {:ok, response_text} <- call_llm(prompt, llm_opts),
          {:ok, parsed} <- ResponseParser.parse_reflection_response(response_text) do
       # Integrate results into subsystems
       GoalProcessor.process_goal_updates(agent_id, parsed.goal_updates)
@@ -449,9 +456,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
       GoalStore.get_all_goals(agent_id)
       |> Enum.filter(&(&1.status in [:active, :blocked]))
 
+    # These private source APIs do not expose a complete retained classification.
+    # Carry a conservative floor before their prompt text loses source metadata.
     {:ok,
      %{
        agent_id: agent_id,
+       sensitivity: :restricted,
        self_knowledge: sk,
        self_knowledge_text: format_self_knowledge_or_default(sk),
        goals: goals,
@@ -579,11 +589,10 @@ defmodule Arbor.Memory.ReflectionProcessor do
     Respond only in valid JSON format.
     """
 
-    llm_opts = [
-      system_prompt: system_prompt,
-      provider: provider,
-      model: model
-    ]
+    llm_opts =
+      opts
+      |> Keyword.take([:taint, :sensitivity, :agent_id])
+      |> Keyword.merge(system_prompt: system_prompt, provider: provider, model: model)
 
     {result, usage} =
       case Arbor.AI.generate_text(prompt, llm_opts) do
@@ -621,7 +630,8 @@ defmodule Arbor.Memory.ReflectionProcessor do
   # ============================================================================
 
   defp build_reflection_context(agent_id, include_sk, include_activity) do
-    context = %{agent_id: agent_id}
+    # Legacy reflection context has the same private-source ownership boundary.
+    context = %{agent_id: agent_id, sensitivity: :restricted}
 
     context =
       if include_sk do

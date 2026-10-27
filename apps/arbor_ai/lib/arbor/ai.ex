@@ -1,4 +1,111 @@
 defmodule Arbor.AI do
+  @behaviour Arbor.LLM.Contracts.SensitivityPolicy
+
+  @impl Arbor.LLM.Contracts.SensitivityPolicy
+  def authorize_llm_sensitivity(
+        %{provider: provider, model: model, sensitivity: sensitivity} = route
+      )
+      when is_binary(provider) and is_binary(model) and
+             sensitivity in [:public, :internal, :confidential, :restricted] do
+    provider =
+      case provider do
+        "claude" ->
+          :anthropic
+
+        "codex" ->
+          :openai
+
+        "openai_oauth" ->
+          :openai
+
+        "xai_oauth" ->
+          :xai
+
+        "google" ->
+          :gemini
+
+        "lm_studio_owned" ->
+          :lmstudio
+
+        "lm_studio" ->
+          :lmstudio
+
+        other ->
+          Arbor.Common.SafeAtom.to_existing(other)
+          |> case do
+            {:ok, atom} -> atom
+            _ -> :unknown
+          end
+      end
+
+    local? = provider in [:lmstudio, :ollama] and Map.get(route, :runtime, :arbor) != :acp
+    endpoint = Map.get(route, :base_url)
+    clearance = can_handle_sensitivity?(provider, model, sensitivity)
+
+    local_endpoint? =
+      is_binary(endpoint) and Arbor.Common.EgressClassifier.locality(endpoint) == :on_host
+
+    cloud_model? = String.ends_with?(String.downcase(model), [":cloud", "-cloud"])
+
+    if clearance and
+         (sensitivity == :public or not local? or (local_endpoint? and not cloud_model?)) and
+         (sensitivity != :restricted or (local? and local_endpoint? and not cloud_model?)),
+       do: :ok,
+       else: {:error, :destination_disallowed}
+  rescue
+    _ -> {:error, :invalid_destination}
+  end
+
+  def authorize_llm_sensitivity(_), do: {:error, :invalid_destination}
+
+  @impl Arbor.LLM.Contracts.SensitivityPolicy
+  def llm_sensitivity_identity do
+    modules = [
+      __MODULE__,
+      Arbor.AI.BackendTrust,
+      Arbor.Common.EgressClassifier,
+      Arbor.Common.SafeAtom
+    ]
+
+    configuration = %{
+      capabilities: Arbor.AI.BackendTrust.capabilities(),
+      trust_levels: Arbor.AI.BackendTrust.trust_levels()
+    }
+
+    with true <- policy_identity_data?(configuration),
+         bytes = :erlang.term_to_binary(configuration, [:deterministic]),
+         true <- byte_size(bytes) <= 65_536 do
+      {:ok,
+       %{
+         "configuration_digest" => Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
+         "implementation" =>
+           Enum.map(modules, fn module ->
+             Code.ensure_loaded!(module)
+
+             %{
+               "module" => Atom.to_string(module),
+               "md5" => Base.encode16(module.module_info(:md5), case: :lower)
+             }
+           end)
+       }}
+    else
+      _ -> {:error, :policy_unavailable}
+    end
+  rescue
+    _ -> {:error, :policy_unavailable}
+  end
+
+  defp policy_identity_data?(map) when is_map(map) and not is_struct(map),
+    do:
+      Enum.all?(map, fn {key, value} ->
+        (is_atom(key) or is_binary(key)) and policy_identity_data?(value)
+      end)
+
+  defp policy_identity_data?(list) when is_list(list),
+    do: Enum.all?(list, &policy_identity_data?/1)
+
+  defp policy_identity_data?(value), do: is_atom(value) or is_binary(value) or is_number(value)
+
   @moduledoc """
   Unified LLM interface for Arbor.
 
@@ -288,18 +395,24 @@ defmodule Arbor.AI do
   # Route all tool-calling through UnifiedLLM's ToolLoop.
   # Single path: Client → ToolLoop → provider adapters. No fallbacks.
   defp generate_with_tool_loop(prompt, provider, model, opts) do
+    source =
+      case {Keyword.get(opts, :system_prompt), Keyword.get(opts, :agent_id)} do
+        {nil, agent_id} when not is_nil(agent_id) -> build_prompt_context(agent_id, opts)
+        {system, _} -> %{prompt: system, sensitivity: :public}
+      end
+
+    with {:ok, carried_opts} <-
+           Arbor.LLM.carry_sensitivity(%{sensitivity: source.sensitivity}, opts) do
+      generate_with_tool_loop_request(prompt, provider, model, carried_opts, source.prompt)
+    end
+  end
+
+  defp generate_with_tool_loop_request(prompt, provider, model, opts, system_prompt) do
     agent_id = Keyword.get(opts, :agent_id)
 
     trace = LLMTrace.start(:generate_with_tools, provider, model, agent_id, prompt)
     ToolSignals.emit_started(provider, model, String.length(prompt))
     start_time = System.monotonic_time(:millisecond)
-
-    # Auto-build rich system prompt if none provided
-    system_prompt =
-      case Keyword.get(opts, :system_prompt) do
-        nil -> if agent_id, do: build_rich_system_prompt(agent_id, opts), else: nil
-        p -> p
-      end
 
     # Get the UnifiedLLM client and build request. arbor_llm is a direct dep,
     # so these are compile-time references — no runtime bridge needed.
@@ -324,6 +437,8 @@ defmodule Arbor.AI do
         temperature: Keyword.get(opts, :temperature, 0.7),
         top_p: Keyword.get(opts, :top_p),
         provider_options: Keyword.get(opts, :provider_options) || %{},
+        sensitivity: Keyword.get(opts, :sensitivity),
+        taint: Keyword.get(opts, :taint),
         # Slow local reasoning models (e.g. qwen3.5-122b-a10b-mtp) spend 3-5 min in a hidden reasoning
         # channel before emitting content. Without a generous HTTP receive_timeout, ReqLLM's short
         # default cuts them off mid-generation → EMPTY content on the heaviest-reasoning runs (the
@@ -341,6 +456,8 @@ defmodule Arbor.AI do
       on_tool_call: Keyword.get(opts, :on_tool_call),
       timeout_ms: Keyword.fetch!(opts, :timeout_ms)
     ]
+
+    tool_loop_opts = Keyword.merge(tool_loop_opts, Arbor.LLM.sensitivity_options(opts))
 
     # Run ToolLoop — single path through UnifiedLLM
     case Arbor.LLM.ToolLoop.run(client, request, tool_loop_opts) do
@@ -399,6 +516,7 @@ defmodule Arbor.AI do
   # ── Rich System Prompt ──
 
   defdelegate build_stable_system_prompt(agent_id, opts \\ []), to: SystemPromptBuilder
+  defdelegate build_prompt_context(agent_id, opts \\ []), to: SystemPromptBuilder
   defdelegate build_volatile_context(agent_id, opts \\ []), to: SystemPromptBuilder
   defdelegate build_rich_system_prompt(agent_id, opts \\ []), to: SystemPromptBuilder
 
@@ -434,7 +552,12 @@ defmodule Arbor.AI do
       opts = snapshot_embedding_config(opts)
 
       # Try UnifiedBridge first (orchestrator layer), fall back to legacy backends
-      case UnifiedBridge.embed(text, opts) do
+      result =
+        if Keyword.get(opts, :provider) == :test,
+          do: TestEmbedding.embed(text, opts),
+          else: UnifiedBridge.embed(text, opts)
+
+      case result do
         {:ok, _} = result ->
           result
 
@@ -484,7 +607,12 @@ defmodule Arbor.AI do
       opts = snapshot_embedding_config(opts)
 
       # Try UnifiedBridge first, fall back to legacy backends
-      case UnifiedBridge.embed_batch(texts, opts) do
+      result =
+        if Keyword.get(opts, :provider) == :test,
+          do: TestEmbedding.embed_batch(texts, opts),
+          else: UnifiedBridge.embed_batch(texts, opts)
+
+      case result do
         {:ok, _} = result ->
           result
 

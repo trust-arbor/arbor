@@ -43,25 +43,30 @@ defmodule Arbor.AI.SystemPromptBuilder do
   """
   @spec build_stable_system_prompt(String.t(), keyword()) :: String.t()
   def build_stable_system_prompt(agent_id, opts \\ []) do
+    stable_prompt_context(agent_id, opts).text
+  end
+
+  defp stable_prompt_context(agent_id, opts) do
     budgets = resolve_section_budgets(opts)
     nonce = Keyword.get(opts, :nonce)
+    {identity, identity_floor} = build_identity_section(agent_id)
 
     sections = [
-      truncate_section(build_identity_section(agent_id), budgets.identity),
+      {truncate_section(identity, budgets.identity), identity_floor},
       if(nonce, do: PromptSanitizer.preamble(nonce)),
-      build_project_context_section(opts),
-      CatalogSection.build(:skill, opts),
+      private_section(build_project_context_section(opts)),
+      private_section(CatalogSection.build(:skill, opts)),
       CatalogSection.build(:action, opts),
-      truncate_section(
-        wrap_section(build_self_knowledge_section(agent_id), nonce),
-        budgets.self_knowledge
+      private_section(
+        truncate_section(
+          wrap_section(build_self_knowledge_section(agent_id), nonce),
+          budgets.self_knowledge
+        )
       ),
       truncate_section(build_tool_guidance_section(), budgets.tool_guidance)
     ]
 
-    sections
-    |> Enum.reject(&(is_nil(&1) or &1 == ""))
-    |> Enum.join("\n\n")
+    assemble_context(sections)
   end
 
   # Auto-loaded AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext). workdir
@@ -106,27 +111,66 @@ defmodule Arbor.AI.SystemPromptBuilder do
   """
   @spec build_volatile_context(String.t(), keyword()) :: String.t()
   def build_volatile_context(agent_id, opts \\ []) do
+    volatile_prompt_context(agent_id, opts).text
+  end
+
+  defp volatile_prompt_context(agent_id, opts) do
     budgets = resolve_section_budgets(opts)
     nonce = Keyword.get(opts, :nonce)
 
     sections = [
       build_environment_section(),
-      truncate_section(wrap_section(build_goals_section(agent_id), nonce), budgets.goals),
-      truncate_section(
-        wrap_section(build_working_memory_section(agent_id), nonce),
-        budgets.working_memory
+      private_section(
+        truncate_section(wrap_section(build_goals_section(agent_id), nonce), budgets.goals)
       ),
-      truncate_section(build_active_skills_section(agent_id), budgets.active_skills),
-      truncate_section(
-        wrap_section(build_knowledge_graph_section(agent_id), nonce),
-        budgets.knowledge_graph
+      private_section(
+        truncate_section(
+          wrap_section(build_working_memory_section(agent_id), nonce),
+          budgets.working_memory
+        )
+      ),
+      private_section(
+        truncate_section(build_active_skills_section(agent_id), budgets.active_skills)
+      ),
+      private_section(
+        truncate_section(
+          wrap_section(build_knowledge_graph_section(agent_id), nonce),
+          budgets.knowledge_graph
+        )
       ),
       truncate_section(build_timing_section(opts), budgets.timing)
     ]
 
-    sections
-    |> Enum.reject(&(is_nil(&1) or &1 == ""))
-    |> Enum.join("\n\n")
+    assemble_context(sections)
+  end
+
+  @doc """
+  Build prompt text and its source sensitivity together from the same reads.
+
+  Memory, profile, project and skill APIs currently expose these sections
+  without authoritative source labels. Nonempty sections from those owners
+  therefore retain a restricted floor, including after truncation. Consumers
+  must join this floor into LLM options before dispatch.
+  """
+  @spec build_prompt_context(String.t(), keyword()) :: map()
+  def build_prompt_context(agent_id, opts \\ []) do
+    nonce = Keyword.get_lazy(opts, :nonce, &PromptSanitizer.generate_nonce/0)
+    opts = Keyword.put(opts, :nonce, nonce)
+    stable = stable_prompt_context(agent_id, opts)
+    volatile = volatile_prompt_context(agent_id, opts)
+
+    prompt =
+      [stable.text, volatile.text]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+      |> truncate_total_prompt(@max_total_prompt_chars)
+
+    %{
+      system_prompt: stable.text,
+      volatile_context: volatile.text,
+      prompt: prompt,
+      sensitivity: join_floor(stable.sensitivity, volatile.sensitivity)
+    }
   end
 
   @doc """
@@ -143,19 +187,33 @@ defmodule Arbor.AI.SystemPromptBuilder do
   """
   @spec build_rich_system_prompt(String.t(), keyword()) :: String.t()
   def build_rich_system_prompt(agent_id, opts \\ []) do
-    nonce = Keyword.get_lazy(opts, :nonce, &PromptSanitizer.generate_nonce/0)
-    opts = Keyword.put(opts, :nonce, nonce)
-
-    stable = build_stable_system_prompt(agent_id, opts)
-    volatile = build_volatile_context(agent_id, opts)
-
-    prompt =
-      [stable, volatile]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n\n")
-
-    truncate_total_prompt(prompt, @max_total_prompt_chars)
+    build_prompt_context(agent_id, opts).prompt
   end
+
+  defp private_section(content) when content in [nil, ""], do: {content, :public}
+  defp private_section(content), do: {content, :restricted}
+
+  defp assemble_context(sections) do
+    {texts, floor} =
+      Enum.reduce(sections, {[], :public}, fn section, {texts, floor} ->
+        {text, source_floor} =
+          case section do
+            {text, source_floor} -> {text, source_floor}
+            text -> {text, :public}
+          end
+
+        if text in [nil, ""] do
+          {texts, floor}
+        else
+          {[text | texts], join_floor(floor, source_floor)}
+        end
+      end)
+
+    %{text: texts |> Enum.reverse() |> Enum.join("\n\n"), sensitivity: floor}
+  end
+
+  defp join_floor(:public, :public), do: :public
+  defp join_floor(_, _), do: :restricted
 
   # ── Section Truncation ────────────────────────────────────────────
 
@@ -217,8 +275,8 @@ defmodule Arbor.AI.SystemPromptBuilder do
 
   defp build_identity_section(agent_id) do
     case load_character_prompt(agent_id) do
-      nil -> default_identity_section()
-      prompt -> prompt
+      nil -> {default_identity_section(), :public}
+      prompt -> private_section(prompt)
     end
   end
 

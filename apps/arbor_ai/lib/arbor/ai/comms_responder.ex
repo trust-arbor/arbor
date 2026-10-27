@@ -28,35 +28,39 @@ defmodule Arbor.AI.CommsResponder do
   @session_file "comms-session-id"
 
   @impl true
-  def generate_response(message, _context) do
-    prompt = build_prompt(message)
+  def generate_response(message, context) do
+    with {:ok, sensitivity_opts} <- Arbor.LLM.carry_sensitivity([message, context], []) do
+      prompt = build_prompt(message)
 
-    opts =
-      case load_session_id() do
-        nil ->
-          Logger.info("CommsResponder: starting new session")
-          [backend: :cli, session_context: "comms"]
+      opts =
+        case load_session_id() do
+          nil ->
+            Logger.info("CommsResponder: starting new session")
+            [backend: :cli, session_context: "comms"]
 
-        session_id ->
-          Logger.info("CommsResponder: resuming session #{String.slice(session_id, 0, 12)}...")
-          [backend: :cli, session_id: session_id, session_context: "comms"]
+          session_id ->
+            Logger.info("CommsResponder: resuming session #{String.slice(session_id, 0, 12)}...")
+            [backend: :cli, session_id: session_id, session_context: "comms"]
+        end
+
+      opts = Keyword.merge(opts, sensitivity_opts)
+
+      case Arbor.AI.generate_text(prompt, opts) do
+        {:ok, %{text: text} = response} when is_binary(text) and text != "" ->
+          save_session_id(Map.get(response, :session_id))
+          {channel, body} = extract_channel_hint(text)
+          {:ok, ResponseEnvelope.new(body: body, channel: channel)}
+
+        {:ok, _} ->
+          {:error, :empty_response}
+
+        {:error, reason} ->
+          Logger.warning(
+            "CommsResponder generation failed: #{Arbor.LLM.inspect_external_reason(reason)}"
+          )
+
+          {:error, reason}
       end
-
-    case Arbor.AI.generate_text(prompt, opts) do
-      {:ok, %{text: text} = response} when is_binary(text) and text != "" ->
-        save_session_id(Map.get(response, :session_id))
-        {channel, body} = extract_channel_hint(text)
-        {:ok, ResponseEnvelope.new(body: body, channel: channel)}
-
-      {:ok, _} ->
-        {:error, :empty_response}
-
-      {:error, reason} ->
-        Logger.warning(
-          "CommsResponder generation failed: #{Arbor.LLM.inspect_external_reason(reason)}"
-        )
-
-        {:error, reason}
     end
   end
 

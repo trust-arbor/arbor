@@ -1,5 +1,16 @@
 import Config
 
+# Only the host composition may register adapters with real effect admission.
+# A request or an adapter's own callbacks cannot confer destination authority.
+config :arbor_llm,
+  sensitivity_guarded_adapters: [
+    Arbor.LLM.Adapter.ReqLLM,
+    Arbor.LLM.Adapter.OAuthResponses,
+    Arbor.LLM.Adapter.LmStudio,
+    Arbor.AI.LLM.Adapter.Acp,
+    Arbor.Orchestrator.LlmRouting.SensitivityAdapter
+  ]
+
 # VP-07B0: Hex checksums do not attest Bundlex's secondary native archives.
 # Use the separately admitted system PortAudio library via pkg-config only.
 config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin]

@@ -48,15 +48,96 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   def call(%Call{result: nil, operation: op, request: req, assigns: assigns} = call) do
     single_attempt? = Map.get(assigns, :single_attempt) == true
     live_completion? = Map.get(assigns, :live_completion) == true
-    %{call | result: op |> do_dispatch(req, single_attempt?, live_completion?) |> bounded()}
+    call = prepare_sensitivity(call)
+    admitted = Arbor.LLM.Plugs.Sensitivity.call(call)
+
+    if admitted.halted do
+      admitted
+    else
+      {model, content, opts} = req
+      opts = Keyword.put(opts, :arbor_sensitivity, admitted.metadata.sensitivity_input)
+
+      %{
+        admitted
+        | result:
+            op
+            |> do_dispatch({model, content, opts}, single_attempt?, live_completion?)
+            |> bounded()
+      }
+    end
   end
 
   # Already has a result — short-circuited by an upstream plug.
   def call(%Call{} = call), do: call
 
+  defp prepare_sensitivity(%Call{request: {model, content, opts}} = call) do
+    {provider, model_id} =
+      case model do
+        %LLMDB.Model{provider: p, id: id} ->
+          {p, id}
+
+        value when is_binary(value) ->
+          case String.split(value, ":", parts: 2) do
+            [p, id] -> {p, id}
+            _ -> {nil, value}
+          end
+
+        _ ->
+          {nil, nil}
+      end
+
+    current_content = [
+      content,
+      Keyword.get(opts, :tools, []),
+      Keyword.get(opts, :provider_options, [])
+    ]
+
+    original = Map.get(call.metadata, :sensitivity_input)
+
+    if is_map(original) do
+      expected = Arbor.LLM.ProviderRegistry.req_llm_atom(original.provider)
+      actual = Arbor.LLM.ProviderRegistry.req_llm_atom(provider) || provider
+
+      with true <-
+             expected == actual or {:error, {:sensitivity_blocked, :provider_selection_changed}},
+           {:ok, old_opts} <- Arbor.LLM.carry_sensitivity(original.content, original.opts),
+           {:ok, new_opts} <-
+             Arbor.LLM.carry_sensitivity(
+               current_content,
+               Keyword.take(opts, [:sensitivity, :taint, :base_url])
+             ),
+           {:ok, joined} <-
+             Arbor.LLM.carry_sensitivity(
+               %{sensitivity: Keyword.fetch!(old_opts, :sensitivity)},
+               new_opts
+             ) do
+        input = %{
+          provider: original.provider,
+          model: model_id,
+          content: current_content,
+          opts: joined
+        }
+
+        Call.put_metadata(call, %{sensitivity_input: input})
+      else
+        {:error, _} = error -> %{call | halted: true, result: error}
+      end
+    else
+      Call.put_metadata(call, %{
+        sensitivity_input: %{
+          provider: provider,
+          model: model_id,
+          content: current_content,
+          opts: opts
+        }
+      })
+    end
+  end
+
   # ── Operation-specific dispatch ────────────────────────────────────
 
   defp do_dispatch(:complete, {model_spec, messages, opts}, single_attempt?, live_completion?) do
+    {sensitivity, opts} = Keyword.pop(opts, :arbor_sensitivity)
     maximum = Keyword.get(opts, :arbor_max_response_bytes, 16_777_216)
     anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
 
@@ -66,6 +147,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
          {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts) do
       request
+      |> protect_sensitivity(sensitivity)
       |> ResponseBudget.apply_req_receipt(maximum)
       |> halt_http_failure()
       |> maybe_disable_req_retry(single_attempt?)
@@ -161,6 +243,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   defp maybe_apply_anonymous_auth(request, _anonymous?), do: request
 
   defp dispatch_embedding(model, texts, opts, source, single_attempt?) do
+    {sensitivity, opts} = Keyword.pop(opts, :arbor_sensitivity)
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
     anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
     req_opts = Keyword.drop(opts, [:arbor_max_response_bytes, :arbor_anonymous_auth])
@@ -168,6 +251,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     with {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts) do
       request
+      |> protect_sensitivity(sensitivity)
       |> ResponseBudget.apply_req_receipt(maximum)
       |> halt_http_failure()
       |> maybe_disable_req_retry(single_attempt?)
@@ -192,6 +276,31 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   end
 
   # ── Failure classification ─────────────────────────────────────────
+
+  defp protect_sensitivity(request, input) do
+    endpoint = Keyword.get(input.opts, :base_url) || Req.Request.get_option(request, :base_url)
+
+    case Arbor.LLM.Endpoint.validate(endpoint, {:req_llm_base, input.provider}) do
+      {:ok, endpoint} ->
+        Arbor.LLM.Sensitivity.protect_request(
+          request,
+          input.provider,
+          input.model,
+          input.content,
+          Keyword.put(input.opts, :base_url, endpoint)
+        )
+
+      {:error, _} ->
+        Req.Request.append_request_steps(request,
+          arbor_sensitivity: fn req ->
+            Req.Request.halt(req, %Req.Response{
+              status: 403,
+              private: %{arbor_sensitivity_error: {:sensitivity_blocked, :invalid_destination}}
+            })
+          end
+        )
+    end
+  end
 
   # Insert a response step right after the bounded body decoder that halts any
   # non-2xx, so Arbor classifies it from the real status, headers, and body
@@ -220,6 +329,13 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   # Status first: a non-2xx is a provider failure even when its body was
   # undecodable (an HTML error page) or oversized.
+  defp response_result(
+         {:ok, %Req.Response{private: %{arbor_sensitivity_error: reason}}},
+         _source,
+         _on_success
+       ),
+       do: {:error, reason}
+
   defp response_result({:ok, %Req.Response{status: status} = response}, source, _on_success)
        when status not in 200..299,
        do: {:error, http_error(response, source)}

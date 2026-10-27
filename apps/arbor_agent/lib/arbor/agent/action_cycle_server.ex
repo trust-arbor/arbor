@@ -738,7 +738,7 @@ defmodule Arbor.Agent.ActionCycleServer do
   The function signature matches CycleController's expectation:
   `(context_map) -> {:ok, response_map} | {:error, term()}`
   """
-  def make_default_llm_fn(_agent_id, opts) do
+  def make_default_llm_fn(agent_id, opts) do
     model = Keyword.get(opts, :model) || mind_model()
     provider = Keyword.get(opts, :provider) || mind_provider()
 
@@ -748,15 +748,34 @@ defmodule Arbor.Agent.ActionCycleServer do
       user_msg =
         MindPrompt.build_iteration(recent_percepts: Map.get(context, :recent_percepts, []))
 
-      ai_opts = [
-        model: model,
-        provider: provider,
-        max_tokens: 2000,
-        runtime: :arbor,
-        system_prompt: system_prompt
-      ]
+      ai_opts =
+        [
+          model: model,
+          provider: provider,
+          agent_id: agent_id,
+          max_tokens: 2000,
+          runtime: :arbor,
+          system_prompt: system_prompt
+        ]
+        |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
 
-      case Arbor.AI.generate_text(user_msg, ai_opts) do
+      source =
+        Map.take(context, [
+          :sensitivity,
+          :taint,
+          :identity,
+          :goal,
+          :goals,
+          :last_percept,
+          :recent_percepts
+        ])
+
+      result =
+        with {:ok, ai_opts} <- Arbor.LLM.carry_sensitivity(source, ai_opts) do
+          Arbor.AI.generate_text(user_msg, ai_opts)
+        end
+
+      case result do
         {:ok, %{text: text}} ->
           parse_json_response(text)
 

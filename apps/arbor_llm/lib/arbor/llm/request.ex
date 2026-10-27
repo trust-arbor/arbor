@@ -15,6 +15,8 @@ defmodule Arbor.LLM.Request do
           reasoning_effort: String.t() | nil,
           receive_timeout: pos_integer() | nil,
           provider_options: map(),
+          sensitivity: atom() | nil,
+          taint: term(),
           runtime: atom()
         }
 
@@ -33,6 +35,8 @@ defmodule Arbor.LLM.Request do
             # yet from cold/large quants.
             receive_timeout: nil,
             provider_options: %{},
+            sensitivity: nil,
+            taint: nil,
             # Runtime axis — :arbor (in-BEAM HTTP via req_llm) or :acp
             # (subprocess CLI via AcpPool). Arbor.AI.Runtime.Registry
             # dispatches to the corresponding adapter module. Defaults to

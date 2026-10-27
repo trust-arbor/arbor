@@ -21,7 +21,11 @@ defmodule Arbor.LLM.StockToolTransport do
              Adapter,
              Arbor.LLM.ToolLoop,
              Arbor.LLM.Deadline,
-             Arbor.LLM.ResponseBudget
+             Arbor.LLM.ResponseBudget,
+             Arbor.LLM.Sensitivity,
+             Arbor.LLM.Plugs.Sensitivity,
+             Arbor.LLM.Endpoint,
+             Arbor.LLM.Adapter.ReqLLM.BoundedStream
            ] ++ @pipeline
 
   def identity(provider) when is_binary(provider) do
@@ -37,8 +41,9 @@ defmodule Arbor.LLM.StockToolTransport do
          %{invocation_audit: :required, audit_identity: {:ok, audit}} <-
            apply(auditor, :execution_policy_snapshot, []),
          endpoint when is_binary(endpoint) <- ProviderRegistry.default_base_url(provider),
-         {:ok, implementation} <- implementation(),
-         {:ok, options_digest} <- options_digest() do
+         {:ok, sensitivity} <- sensitivity_identity(),
+         {:ok, implementation} <- implementation([Config.sensitivity_classifier() | @modules]),
+         {:ok, options_digest} <- options_digest(sensitivity) do
       {:ok,
        %{
          "schema" => "arbor.llm.stock_tool_transport.v1",
@@ -82,11 +87,13 @@ defmodule Arbor.LLM.StockToolTransport do
     end
   end
 
-  defp options_digest do
+  defp options_digest(sensitivity) do
     options =
       Map.new(@modules, fn module ->
         {Atom.to_string(module), Application.get_env(:arbor_llm, module, [])}
       end)
+
+    options = Map.put(options, "sensitivity", sensitivity)
 
     # Reject executable/opaque runtime options; identity is not permission to run them.
     if :erlang.external_size(options) <= 65_536 and json_value?(options),
@@ -109,8 +116,26 @@ defmodule Arbor.LLM.StockToolTransport do
   defp json_value?(value), do: is_binary(value) or is_number(value) or value in [nil, true, false]
   defp digest(value), do: "sha256:" <> Base.encode16(:crypto.hash(:sha256, value), case: :lower)
 
-  defp implementation do
-    Enum.reduce_while(@modules, {:ok, []}, fn module, {:ok, acc} ->
+  defp sensitivity_identity do
+    policy = Config.sensitivity_policy()
+
+    with true <- Code.ensure_loaded?(policy),
+         true <- function_exported?(policy, :llm_sensitivity_identity, 0),
+         {:ok, identity} <- apply(policy, :llm_sensitivity_identity, []) do
+      {:ok,
+       %{
+         "policy" => Atom.to_string(policy),
+         "classifier" => Atom.to_string(Config.sensitivity_classifier()),
+         "guarded_adapters" => Enum.map(Config.sensitivity_guarded_adapters(), &Atom.to_string/1),
+         "identity" => identity
+       }}
+    else
+      _ -> {:error, :policy_unavailable}
+    end
+  end
+
+  defp implementation(modules) do
+    Enum.reduce_while(Enum.uniq(modules), {:ok, []}, fn module, {:ok, acc} ->
       if Code.ensure_loaded?(module) do
         entry = %{
           "module" => Atom.to_string(module),

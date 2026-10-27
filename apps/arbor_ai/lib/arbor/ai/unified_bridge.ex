@@ -324,7 +324,9 @@ defmodule Arbor.AI.UnifiedBridge do
       # this the underlying Finch recv has no deadline and a slow local
       # LLM blocks the calling process indefinitely.
       receive_timeout: Keyword.fetch!(opts, :timeout_ms),
-      provider_options: Keyword.get(opts, :provider_options, %{})
+      provider_options: Keyword.get(opts, :provider_options, %{}),
+      sensitivity: Keyword.get(opts, :sensitivity),
+      taint: Keyword.get(opts, :taint)
     }
   end
 

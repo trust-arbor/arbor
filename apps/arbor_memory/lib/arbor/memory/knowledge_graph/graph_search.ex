@@ -138,7 +138,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
     types = Keyword.get(opts, :types)
     min_relevance = Keyword.get(opts, :min_relevance, 0.0)
 
-    query_embedding = compute_node_embedding(query)
+    query_embedding =
+      compute_node_embedding(query, Keyword.take(opts, [:taint, :sensitivity, :agent_id]))
 
     candidates =
       graph.nodes
@@ -858,9 +859,9 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
-  defp compute_node_embedding(text) when is_binary(text) do
+  defp compute_node_embedding(text, opts) when is_binary(text) do
     if embedding_service_available?() do
-      case Arbor.AI.embed(text, []) do
+      case Arbor.AI.embed(text, opts) do
         {:ok, %{embedding: embedding}} when is_list(embedding) -> embedding
         _ -> nil
       end
@@ -869,7 +870,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
     end
   end
 
-  defp compute_node_embedding(_), do: nil
+  defp compute_node_embedding(_, _opts), do: nil
 
   defp cosine_similarity([], _), do: 0.0
   defp cosine_similarity(_, []), do: 0.0

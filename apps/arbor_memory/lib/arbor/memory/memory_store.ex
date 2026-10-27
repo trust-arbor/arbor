@@ -882,7 +882,7 @@ defmodule Arbor.Memory.MemoryStore do
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
   defp do_semantic_search(query_text, agent_id, namespace, opts) do
-    with {:ok, evidence} <- embed_query_for_search(query_text),
+    with {:ok, evidence} <- embed_query_for_search(query_text, opts),
          {:ok, search_opts} <- memory_store_search_opts(evidence, namespace, opts),
          seam <- StrictVectorSeam.resolve() do
       case safe_vector_call(fn -> seam.search(agent_id, evidence.vector, search_opts) end) do
@@ -923,8 +923,10 @@ defmodule Arbor.Memory.MemoryStore do
     end
   end
 
-  defp embed_query_for_search(query_text) do
-    case Arbor.AI.embed(query_text) do
+  defp embed_query_for_search(query_text, opts) do
+    embedding_opts = Keyword.take(opts, [:taint, :sensitivity, :agent_id])
+
+    case Arbor.AI.embed(query_text, embedding_opts) do
       {:ok, result} ->
         case EmbeddingEvidence.from_provider_result(result) do
           {:ok, evidence} ->
@@ -1117,7 +1119,7 @@ defmodule Arbor.Memory.MemoryStore do
           {:ok, :acknowledged} | {:error, atom() | term()}
   def embed_confirmed(agent_id, namespace, key, content, type, taint) do
     evidence =
-      case Arbor.AI.embed(content) do
+      case Arbor.AI.embed(content, taint: taint, agent_id: agent_id) do
         {:ok, result} ->
           case EmbeddingEvidence.from_provider_result(result) do
             {:ok, validated} -> validated

@@ -114,7 +114,15 @@ defmodule Arbor.AI.Runtime.Acp do
           {:ok, Response.t()} | {:error, term()}
   def execute(%Request{} = request, _callbacks, opts) do
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, @default_timeout),
+         {:ok, opts} <- Arbor.LLM.carry_sensitivity(request, opts),
          {:ok, cli} <- resolve_cli(request),
+         :ok <-
+           Arbor.LLM.authorize_sensitivity(
+             cli,
+             request.model || "",
+             request,
+             Keyword.put(opts, :runtime, :acp)
+           ),
          {:ok, checkout_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, session} <- pool_checkout(cli, build_checkout_opts(request, checkout_opts)) do
       result =
@@ -259,6 +267,7 @@ defmodule Arbor.AI.Runtime.Acp do
     send_opts =
       opts
       |> Keyword.take([:timeout, :deadline_ms])
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
       |> Keyword.put(:timeout, timeout)
       |> maybe_add(:system_prompt, system_prompt)
 

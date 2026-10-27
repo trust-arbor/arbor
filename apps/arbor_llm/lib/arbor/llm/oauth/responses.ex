@@ -120,7 +120,16 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   defp do_complete(identity, req, opts, limits, single_attempt? \\ false) do
-    with :ok <- ResponseBudget.validate(req, request_limits()) do
+    with :ok <- ResponseBudget.validate(req, request_limits()),
+         {:ok, opts} <- Arbor.LLM.Sensitivity.carry(req, opts),
+         :ok <-
+           Arbor.LLM.Sensitivity.authorize(
+             identity.backend,
+             Keyword.get(opts, :model) || @default_models[identity.backend],
+             req,
+             Keyword.put(opts, :base_url, response_endpoint(identity.backend))
+           ) do
+      limits = Map.put(limits, :sensitivity_opts, Arbor.LLM.Sensitivity.options(opts))
       sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
       body = build_body(Keyword.get(opts, :model) || @default_models[identity.backend], req)
 
@@ -367,15 +376,29 @@ defmodule Arbor.LLM.OAuth.Responses do
   defp do_request_sse(url, headers, body, limits, identity) do
     into = bounded_sse_receipt(limits)
 
-    case Req.post(url,
-           headers: headers,
-           json: body,
-           receive_timeout: max(limits.deadline_ms - System.monotonic_time(:millisecond), 1),
-           redirect: false,
-           compressed: false,
-           decode_body: false,
-           into: into
-         ) do
+    request =
+      Req.new(
+        url: url,
+        method: :post,
+        headers: headers,
+        json: body,
+        receive_timeout: max(limits.deadline_ms - System.monotonic_time(:millisecond), 1),
+        redirect: false,
+        compressed: false,
+        decode_body: false,
+        into: into
+      )
+      |> Arbor.LLM.Sensitivity.protect_request(
+        identity.backend || :unknown,
+        body["model"] || body[:model] || "",
+        body,
+        Map.get(limits, :sensitivity_opts, [])
+      )
+
+    case Req.request(request) do
+      {:ok, %Req.Response{private: %{arbor_sensitivity_error: reason}}} ->
+        {:error, reason}
+
       {:ok, %Req.Response{private: %{arbor_oauth_response_error: reason}}} ->
         {:error, classify_halt(reason, identity)}
 
@@ -1163,8 +1186,25 @@ defmodule Arbor.LLM.OAuth.Responses do
     ]
   end
 
-  defp normalize_limits(%{timeout: _timeout} = limits), do: validate_limits(limits)
-  defp normalize_limits(opts) when is_list(opts), do: build_limits(opts)
+  defp normalize_limits(%{timeout: _timeout} = limits) do
+    with {:ok, limits} <- validate_limits(limits),
+         {:ok, carried_opts} <-
+           Arbor.LLM.Sensitivity.carry(
+             Map.take(limits, [:sensitivity, :taint, "sensitivity", "taint"]),
+             Map.get(limits, :sensitivity_opts, [])
+           ) do
+      {:ok, Map.put(limits, :sensitivity_opts, Arbor.LLM.Sensitivity.options(carried_opts))}
+    end
+  end
+
+  defp normalize_limits(opts) when is_list(opts) do
+    with {:ok, limits} <- build_limits(opts),
+         {:ok, carried_opts} <-
+           Arbor.LLM.Sensitivity.carry(nil, Arbor.LLM.Sensitivity.options(opts)) do
+      {:ok, Map.put(limits, :sensitivity_opts, Arbor.LLM.Sensitivity.options(carried_opts))}
+    end
+  end
+
   defp normalize_limits(_opts), do: {:error, :invalid_responses_limits}
 
   defp build_limits(opts) do

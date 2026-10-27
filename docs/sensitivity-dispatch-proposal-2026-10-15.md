@@ -1,13 +1,13 @@
 # FINDING-011: sensitivity enforcement at outbound model effects
 
-Date: 2026-10-15. Status: **needs decision; finding remains open**.
+Date: 2026-10-15. Status: **historical proposal; implementation follows its conservative policy**.
 Source revision: `56e45390ba118ee25fc42890866d911d0b7072c2`.
 
-This is a proposal, not an implemented security gate. The security task's
-design-first stop condition applies because the available classifiers disagree
-on which content may reach trusted cloud providers. The task also requires a
-policy decision before choosing caller exemptions. No production behavior or
-tests were changed.
+The implementation authorized on 2026-10-26 adopts the conservative decisions
+below. See [the implementation record](sensitivity-enforcement-2026-10-27.md)
+and its accompanying security report for code and validation. The remainder is
+the original design inventory at the source revision above, retained as history;
+its descriptions of missing code and required next steps describe that revision.
 
 ## What fits the current hierarchy
 
@@ -198,6 +198,5 @@ integration points, not extra producer files in the count above.
 6. Verify compile with warnings as errors, format, and full touched-app suites
    through the security wrappers. Keep the live daemon and `.arbor` repo alone.
 
-The report accompanying this proposal records validation actually run. No
-red-to-green proof exists for this proposal, and FINDING-011 must not be closed
-or downgraded on the strength of this document.
+This proposal by itself supplied no red-to-green proof. Use the later
+implementation record and security report to assess the completed changes.

@@ -199,6 +199,8 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
   end
 
   defmodule ObservingProvider do
+    def embed(text, _opts), do: embed(text)
+
     def embed(text) do
       send(StrictSeam.observer(), {:embedding_provider_called, text})
       {:error, :provider_must_not_receive_private_text}

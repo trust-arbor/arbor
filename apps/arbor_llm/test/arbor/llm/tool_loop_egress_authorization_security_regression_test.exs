@@ -8,13 +8,16 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
   @moduletag voice_id: "VOICE-17"
 
   alias Arbor.LLM.{Client, ContentPart, Message, Request, Response, ToolLoop}
+  alias Arbor.LLM.TestSupport.SensitivityFixture
 
   defmodule CountingAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "llm_auth_counting"
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       if is_pid(parent) do
         send(parent, {:client_complete, request.model, Keyword.keys(opts)})
@@ -25,7 +28,9 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
 
     def complete_single_attempt(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       if is_pid(parent) do
         send(parent, {:client_complete, request.model, Keyword.keys(opts)})
@@ -66,7 +71,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_unsupported_single"
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:adapter_complete, :ordinary})
 
       {:ok,
@@ -87,7 +95,9 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_no_stream"
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       if is_pid(parent) do
         send(parent, {:client_complete, :fallback, Keyword.keys(opts)})
@@ -105,7 +115,9 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
 
     def complete_single_attempt(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       if is_pid(parent) do
         send(parent, {:client_complete, :fallback, Keyword.keys(opts)})
@@ -129,7 +141,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_stream_ordinary_only"
 
     def complete_streaming(%Request{} = request, _callback, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:client_complete_streaming, :ordinary})
 
       {:ok,
@@ -143,7 +158,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:adapter_complete, :ordinary})
 
       {:ok,
@@ -164,7 +182,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_max_turns"
 
     def complete(%Request{tools: tools} = request, opts) when tools in [nil, []] do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:client_complete, :wrap_up, tools})
 
       {:ok,
@@ -178,7 +199,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:client_complete, :ordinary, request.tools})
 
       {:ok,
@@ -199,7 +223,10 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_empty_final"
 
     def complete(%Request{tools: tools} = request, opts) when tools in [nil, []] do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
+
       if is_pid(parent), do: send(parent, {:client_complete, :empty_final_retry})
 
       {:ok,
@@ -213,7 +240,9 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       case Enum.count(request.messages, &(&1.role == :tool)) do
         0 ->
@@ -250,7 +279,9 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def provider, do: "llm_auth_terminal_correction"
 
     def complete(%Request{} = request, opts) do
-      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      parent =
+        Keyword.get(opts, :parent) ||
+          Map.get(SensitivityFixture.get_controls(request.provider_options), :parent)
 
       correction? =
         Enum.any?(request.messages, &(&1.role == :user and &1.content =~ "terminal tool"))
@@ -336,6 +367,21 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     def execute(name, _args, _workdir, _opts), do: {:error, "unknown #{name}"}
   end
 
+  setup do
+    SensitivityFixture.setup([
+      CountingAdapter,
+      UnsupportedSingleAttemptAdapter,
+      NoStreamCapabilityAdapter,
+      StreamOrdinaryOnlyAdapter,
+      MaxTurnsAdapter,
+      EmptyFinalAdapter,
+      TerminalFreeFormThenSubmitAdapter,
+      GatedSingleAttemptAdapter
+    ])
+
+    :ok
+  end
+
   defp client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -346,7 +392,7 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
       provider: provider,
       model: "test",
       messages: [Message.new(:user, "test prompt")],
-      provider_options: %{parent: self()}
+      provider_options: SensitivityFixture.put_controls(%{parent: self()})
     }
   end
 

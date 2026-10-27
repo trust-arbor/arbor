@@ -66,13 +66,16 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   # Resolve the exact route FIRST: an unknown provider must fail before any input is built,
   # any credential is read, and any socket is opened.
   defp do_complete(request, opts, single_attempt? \\ false) do
-    with {:ok, %{route: route}} <- OAuth.route_only(request.provider) do
+    with {:ok, %{route: route}} <- OAuth.route_only(request.provider),
+         {:ok, opts} <- Arbor.LLM.Sensitivity.carry(request, opts),
+         :ok <- Arbor.LLM.Sensitivity.authorize(request.provider, request.model, request, opts) do
       {instructions, input} = build_input(request.messages)
       req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
 
       response_opts =
         opts
         |> Keyword.take([:max_response_bytes, :max_events, :max_event_bytes, :max_work])
+        |> Keyword.merge(Arbor.LLM.Sensitivity.options(opts))
         |> maybe_put_opt(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
         |> maybe_put_opt(:model, model_id(request.model))
 

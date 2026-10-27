@@ -524,7 +524,7 @@ defmodule Arbor.Actions.Skill do
                context[:agent_id],
                version.approval
              ),
-           {:ok, dot} <- compile_skill_to_dot(version.skill),
+           {:ok, dot} <- compile_skill_to_dot(version.skill, context),
            {:ok, _} <-
              SkillLibrary.resolve_approved_version(
                version.name,
@@ -561,14 +561,15 @@ defmodule Arbor.Actions.Skill do
       end
     end
 
-    defp compile_skill_to_dot(skill) do
+    defp compile_skill_to_dot(skill, context) do
       user_prompt =
         "Compile this skill to a DOT graph:\n\nSkill name: #{skill.name}\n\n#{skill.body}"
 
-      case Config.ai_module().generate_text(user_prompt,
-             model: "fast",
-             system_prompt: CompilationPrompt.system_prompt()
-           ) do
+      opts =
+        [model: "fast", system_prompt: CompilationPrompt.system_prompt()]
+        |> Keyword.merge(Arbor.LLM.sensitivity_options(context))
+
+      case Config.ai_module().generate_text(user_prompt, opts) do
         {:ok, response} ->
           case extract_dot_from_response(response) do
             dot when is_binary(dot) and byte_size(dot) in 1..262_144 -> {:ok, dot}

@@ -237,6 +237,8 @@ defmodule Arbor.Agent.ContextCompactor do
       summarizer: summarizer_option(Keyword.get(opts, :summarizer))
     }
 
+    config = Map.merge(config, Map.new(Arbor.LLM.sensitivity_options(opts)))
+
     %__MODULE__{
       effective_window: effective_window,
       config: config
@@ -1021,11 +1023,11 @@ defmodule Arbor.Agent.ContextCompactor do
       select_narrative_batch(messages, origins, compactor, low_detail, current, target)
 
     if run_narrative_batch?(selection, current, target, batch) do
-      prompt = build_narrative_prompt(selection.previous_summary, selection.items)
+      case summarize_selection(selection, compactor.config) do
+        {:ok, narrative, sensitivity} ->
+          {messages, origins} =
+            apply_summary(messages, origins, selection, narrative, compactor, sensitivity)
 
-      case summarize(prompt, compactor.config) do
-        {:ok, narrative} ->
-          {messages, origins} = apply_summary(messages, origins, selection, narrative, compactor)
           stats = %{stats | narratives: stats.narratives + 1}
           narrative_batches(messages, origins, compactor, stats, low_detail, batch + 1)
 
@@ -1060,8 +1062,11 @@ defmodule Arbor.Agent.ContextCompactor do
 
     previous_summary =
       Enum.find_value(entries, fn
-        {msg, {:summary, first, last}} -> %{text: summary_text(msg), first: first, last: last}
-        _entry -> nil
+        {msg, {:summary, first, last}} ->
+          %{text: summary_text(msg), message: msg, first: first, last: last}
+
+        _entry ->
+          nil
       end)
 
     omitted_range = omitted_range(origins)
@@ -1159,7 +1164,7 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # Replace the previous summary, the consumed part of the omission range and
   # the consumed view messages with ONE summary right after the pinned pair.
-  defp apply_summary(messages, origins, selection, narrative, compactor) do
+  defp apply_summary(messages, origins, selection, narrative, compactor, sensitivity) do
     consumed_view =
       for %{source: :view, index: idx} <- selection.items, into: MapSet.new(), do: idx
 
@@ -1173,8 +1178,12 @@ defmodule Arbor.Agent.ContextCompactor do
         end
 
     summary_entry =
-      {%{role: :user, content: @summary_prefix <> narrative, compactor_kind: :summary},
-       {:summary, Enum.min(covered), Enum.max(covered)}}
+      {%{
+         role: :user,
+         content: @summary_prefix <> narrative,
+         compactor_kind: :summary,
+         sensitivity: sensitivity
+       }, {:summary, Enum.min(covered), Enum.max(covered)}}
 
     omission_entries =
       case {selection.omitted_range, consumed_omitted} do
@@ -1277,6 +1286,24 @@ defmodule Arbor.Agent.ContextCompactor do
     message |> msg_content() |> content_to_text() |> String.replace_prefix(@summary_prefix, "")
   end
 
+  defp summarize_selection(selection, config) do
+    previous =
+      case selection.previous_summary do
+        %{message: message} -> [message]
+        nil -> []
+      end
+
+    sources = previous ++ Enum.map(selection.items, & &1.message)
+
+    with {:ok, sensitivity_opts} <-
+           Arbor.LLM.carry_sensitivity(sources, Arbor.LLM.sensitivity_options(config)),
+         prompt = build_narrative_prompt(selection.previous_summary, selection.items),
+         config = Map.merge(config, Map.new(sensitivity_opts)),
+         {:ok, narrative} <- summarize(prompt, config) do
+      {:ok, narrative, Keyword.fetch!(sensitivity_opts, :sensitivity)}
+    end
+  end
+
   defp summarize(prompt, config) do
     summarizer = Map.get(config, :summarizer) || (&default_summarizer/2)
 
@@ -1302,12 +1329,16 @@ defmodule Arbor.Agent.ContextCompactor do
   # No max_tokens cap: reasoning models spend a small budget on hidden
   # reasoning and return empty content (CLAUDE.md Applied Learning).
   defp default_summarizer(prompt, config) do
-    case Arbor.AI.generate_text(prompt,
-           model: Map.get(config, :compaction_model),
-           provider: Map.get(config, :compaction_provider),
-           temperature: 0.2,
-           runtime: :arbor
-         ) do
+    opts =
+      [
+        model: Map.get(config, :compaction_model),
+        provider: Map.get(config, :compaction_provider),
+        temperature: 0.2,
+        runtime: :arbor
+      ]
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(config))
+
+    case Arbor.AI.generate_text(prompt, opts) do
       {:ok, response} ->
         case extract_response_text(response) do
           text when is_binary(text) and text != "" -> {:ok, text}

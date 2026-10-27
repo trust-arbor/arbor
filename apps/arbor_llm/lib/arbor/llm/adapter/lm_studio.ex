@@ -44,11 +44,19 @@ defmodule Arbor.LLM.Adapter.LmStudio do
       Deadline.run(
         fn ->
           with {:ok, maximum} <- response_limit(opts),
-               {:ok, url} <- chat_url() do
+               {:ok, url} <- chat_url(),
+               :ok <-
+                 Arbor.LLM.Sensitivity.authorize(
+                   "lm_studio_owned",
+                   request.model,
+                   request,
+                   Keyword.put(opts, :base_url, url)
+                 ) do
             do_complete(request, opts, url, maximum)
             |> Boundary.completion(opts)
           else
             {:error, {:invalid_response_limit, _maximum}} = error -> error
+            {:error, {:sensitivity_blocked, _}} = error -> error
             {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
           end
         end,
@@ -73,11 +81,19 @@ defmodule Arbor.LLM.Adapter.LmStudio do
       Deadline.run(
         fn ->
           with {:ok, maximum} <- response_limit(opts),
-               {:ok, url} <- chat_url() do
+               {:ok, url} <- chat_url(),
+               :ok <-
+                 Arbor.LLM.Sensitivity.authorize(
+                   "lm_studio_owned",
+                   request.model,
+                   request,
+                   Keyword.put(opts, :base_url, url)
+                 ) do
             do_complete(request, opts, url, maximum, true)
             |> Boundary.completion(opts)
           else
             {:error, {:invalid_response_limit, _maximum}} = error -> error
+            {:error, {:sensitivity_blocked, _}} = error -> error
             {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
           end
         end,
@@ -101,6 +117,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
         json: body,
         receive_timeout: Keyword.fetch!(opts, :receive_timeout)
       )
+      |> Arbor.LLM.Sensitivity.protect_request("lm_studio_owned", request.model, request, opts)
       |> ResponseBudget.apply_req_receipt(maximum)
 
     # Disable retry only on the fully prepared request for single-attempt mode.
@@ -112,6 +129,9 @@ defmodule Arbor.LLM.Adapter.LmStudio do
       end
 
     case Req.request(req) do
+      {:ok, %Req.Response{private: %{arbor_sensitivity_error: reason}}} ->
+        {:error, reason}
+
       {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} ->
         {:error, {:response_bytes_exceeded, maximum}}
 

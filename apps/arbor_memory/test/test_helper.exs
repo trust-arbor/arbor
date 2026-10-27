@@ -1,4 +1,32 @@
 {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
+
+defmodule Arbor.Memory.TestSupport.OfflineLLMAdapter do
+  @moduledoc false
+  @behaviour Arbor.LLM.ProviderAdapter
+
+  def provider, do: "memory_test_offline"
+  def complete(_request, _opts), do: {:error, :memory_test_llm_unavailable}
+end
+
+# Untagged unit tests exercise local fallback behavior even when the shared
+# .env contains valid provider credentials. Keep every default Client route
+# offline; a real transport integration must install its own explicit client.
+# This changes only the test transport, leaving classification and admission
+# enabled. AI's verified :test embedding backend remains independent of Client.
+prior_llm_client = :persistent_term.get({Arbor.LLM.Client, :default_client}, :missing)
+prior_bridge_client = :persistent_term.get({Arbor.AI.UnifiedBridge, :client}, :missing)
+
+offline_providers = Arbor.LLM.known_providers() ++ ~w(acp openai_oauth xai_oauth)
+
+offline_client =
+  Arbor.LLM.Client.new(
+    adapters: Map.new(offline_providers, &{&1, Arbor.Memory.TestSupport.OfflineLLMAdapter}),
+    default_provider: "openai"
+  )
+
+Arbor.LLM.Client.set_default_client(offline_client)
+:persistent_term.put({Arbor.AI.UnifiedBridge, :client}, offline_client)
+
 :ok = Arbor.Security.TestBootstrap.start!()
 :ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
 
@@ -56,3 +84,14 @@ end
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database
 ExUnit.start(exclude: [:database, :llm, :llm_local])
+
+ExUnit.after_suite(fn _result ->
+  for {key, prior} <- [
+        {{Arbor.LLM.Client, :default_client}, prior_llm_client},
+        {{Arbor.AI.UnifiedBridge, :client}, prior_bridge_client}
+      ] do
+    if prior == :missing,
+      do: :persistent_term.erase(key),
+      else: :persistent_term.put(key, prior)
+  end
+end)

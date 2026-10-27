@@ -5,6 +5,7 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
 
   alias Arbor.Memory.ContextWindow
 
+  @sensitivity_levels [:public, :internal, :confidential, :restricted]
   @default_max_tokens 10_000
   @default_summary_threshold 0.7
   @default_ratios %{
@@ -23,6 +24,7 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
   def serialize(%{multi_layer: true} = window) do
     %{
       "agent_id" => window.agent_id,
+      "sensitivity" => serialize_sensitivity(window),
       "multi_layer" => true,
       "version" => window.version,
       "max_tokens" => window.max_tokens,
@@ -55,6 +57,7 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
   def serialize(window) do
     %{
       "agent_id" => window.agent_id,
+      "sensitivity" => serialize_sensitivity(window),
       "entries" =>
         Enum.map(window.entries, fn {type, content, timestamp} ->
           %{
@@ -93,7 +96,24 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
     summarization = deserialize_multi_layer_summarization(data)
     fact_extraction = deserialize_multi_layer_fact_extraction(data)
 
-    struct!(ContextWindow, Map.merge(base, tokens) |> Map.merge(summarization) |> Map.merge(fact_extraction))
+    content = [
+      base.full_detail,
+      base.retrieved_context,
+      base.recent_summary,
+      base.distant_summary
+    ]
+
+    has_summary? =
+      nonempty_summary?(base.recent_summary) or nonempty_summary?(base.distant_summary)
+
+    fields =
+      base
+      |> Map.merge(tokens)
+      |> Map.merge(summarization)
+      |> Map.merge(fact_extraction)
+      |> Map.put(:sensitivity, restore_sensitivity(data, content, has_summary?))
+
+    struct!(ContextWindow, fields)
   end
 
   defp deserialize_multi_layer_base(data) do
@@ -126,11 +146,9 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
   defp deserialize_multi_layer_summarization(data) do
     %{
       summarization_enabled: flex_field(data, :summarization_enabled) || false,
-      summarization_algorithm:
-        parse_atom(flex_field(data, :summarization_algorithm), :prose),
+      summarization_algorithm: parse_atom(flex_field(data, :summarization_algorithm), :prose),
       summarization_model: flex_field(data, :summarization_model),
-      summarization_provider:
-        parse_atom(flex_field(data, :summarization_provider), nil)
+      summarization_provider: parse_atom(flex_field(data, :summarization_provider), nil)
     }
   end
 
@@ -138,8 +156,7 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
     %{
       fact_extraction_enabled: flex_field(data, :fact_extraction_enabled) || false,
       fact_extraction_model: flex_field(data, :fact_extraction_model),
-      fact_extraction_provider:
-        parse_atom(flex_field(data, :fact_extraction_provider), nil),
+      fact_extraction_provider: parse_atom(flex_field(data, :fact_extraction_provider), nil),
       min_fact_confidence: flex_field(data, :min_fact_confidence) || 0.7
     }
   end
@@ -151,12 +168,53 @@ defmodule Arbor.Memory.ContextWindow.Serialization do
 
     %ContextWindow{
       agent_id: flex_field(data, :agent_id),
+      sensitivity:
+        restore_sensitivity(
+          data,
+          Enum.map(entries, fn {_type, content, _timestamp} -> content end),
+          Enum.any?(entries, fn {type, content, _timestamp} ->
+            type == :summary and nonempty_summary?(content)
+          end)
+        ),
       entries: entries,
       max_tokens: flex_field(data, :max_tokens) || @default_max_tokens,
       summary_threshold: flex_field(data, :summary_threshold) || @default_summary_threshold,
       model_id: flex_field(data, :model_id)
     }
   end
+
+  defp serialize_sensitivity(window) do
+    case Map.get(window, :sensitivity) do
+      level when level in @sensitivity_levels -> Atom.to_string(level)
+      _invalid_or_missing -> "restricted"
+    end
+  end
+
+  defp restore_sensitivity(data, content, has_summary?) do
+    labels =
+      Enum.flat_map([:sensitivity, "sensitivity"], fn key ->
+        case Map.fetch(data, key) do
+          {:ok, value} -> [{:sensitivity, value}]
+          :error -> []
+        end
+      end)
+
+    # Old summaries have lost their source labels. Scanning ordinary prose
+    # cannot prove that those sources were public, even when it finds nothing.
+    opts =
+      if labels == [],
+        do: [sensitivity: if(has_summary?, do: :restricted, else: :public)],
+        else: labels
+
+    case Arbor.LLM.carry_sensitivity(content, opts) do
+      {:ok, joined} -> Keyword.fetch!(joined, :sensitivity)
+      {:error, _reason} -> :restricted
+    end
+  end
+
+  defp nonempty_summary?(nil), do: false
+  defp nonempty_summary?(""), do: false
+  defp nonempty_summary?(_), do: true
 
   defp flex_field(data, key) do
     Map.get(data, key) || Map.get(data, to_string(key))

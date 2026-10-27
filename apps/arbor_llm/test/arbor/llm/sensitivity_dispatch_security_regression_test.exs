@@ -134,8 +134,10 @@ defmodule Arbor.LLM.SensitivityDispatchSecurityRegressionTest do
   end
 
   test "security regression: loopback transport does not clear a cloud proxy model" do
-    assert {:error, {:sensitivity_blocked, _}} =
-             generate(provider: "ollama", model: "fixture:cloud", sensitivity: :restricted)
+    for model <- ["fixture:cloud", "fixture:120b-cloud", "fixture:CLOUD"] do
+      assert {:error, {:sensitivity_blocked, _}} =
+               generate(provider: "ollama", model: model, sensitivity: :restricted)
+    end
 
     refute_receive {:outbound_model_request, _}
   end

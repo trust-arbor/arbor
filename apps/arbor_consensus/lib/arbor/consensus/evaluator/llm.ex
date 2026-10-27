@@ -117,7 +117,9 @@ defmodule Arbor.Consensus.Evaluator.LLM do
     model = Keyword.get(opts, :model)
     provider = Keyword.get(opts, :provider)
 
-    Logger.debug("LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms, model: #{model || "default"})")
+    Logger.debug(
+      "LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms, model: #{model || "default"})"
+    )
 
     # Build options for AI call
     ai_opts = [
@@ -125,8 +127,10 @@ defmodule Arbor.Consensus.Evaluator.LLM do
       max_tokens: 2048,
       temperature: 0.3
     ]
+
     ai_opts = if model, do: Keyword.put(ai_opts, :model, model), else: ai_opts
     ai_opts = if provider, do: Keyword.put(ai_opts, :provider, provider), else: ai_opts
+    ai_opts = Keyword.merge(ai_opts, Keyword.take(opts, [:sensitivity, :taint, :agent_id]))
 
     task =
       Task.async(fn ->

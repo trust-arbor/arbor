@@ -1437,6 +1437,8 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_recall(query, opts, state) do
+    opts = Keyword.put(opts, :agent_id, state.agent_id)
+
     with {:ok, evidence} <- get_or_compute_embedding(query, opts, state.embedding_provider) do
       threshold = Keyword.get(opts, :threshold, state.default_threshold)
       limit = Keyword.get(opts, :limit, @default_limit)
@@ -2055,7 +2057,7 @@ defmodule Arbor.Memory.Index do
   defp get_or_compute_embedding(content, opts, provider) do
     case Keyword.get(opts, :embedding) do
       nil ->
-        compute_embedding(content, provider)
+        compute_embedding(content, provider, opts)
 
       embedding when is_list(embedding) ->
         case EmbeddingEvidence.from_precomputed(embedding) do
@@ -2188,22 +2190,40 @@ defmodule Arbor.Memory.Index do
 
   defp validate_durable_content(_), do: {:error, :invalid_content}
 
-  @spec compute_embedding(String.t(), module()) :: {:ok, map()} | {:error, term()}
-  defp compute_embedding("", _provider), do: {:error, :empty_content}
+  @spec compute_embedding(String.t(), module(), keyword()) :: {:ok, map()} | {:error, term()}
+  defp compute_embedding("", _provider, _opts), do: {:error, :empty_content}
 
-  defp compute_embedding(content, provider) do
+  defp compute_embedding(content, provider, opts) do
     if provider == Arbor.AI and not embedding_service_enabled?() do
       {:ok, EmbeddingEvidence.local_hash_fallback(content)}
     else
-      compute_embedding_via_provider(content, provider)
+      compute_embedding_via_provider(content, provider, opts)
     end
   end
 
   defp embedding_service_enabled?,
     do: Application.get_env(:arbor_memory, :embedding_service_enabled, true)
 
-  defp compute_embedding_via_provider(content, provider) do
-    case provider.embed(content) do
+  defp compute_embedding_via_provider(content, provider, opts) do
+    provider_opts = Keyword.take(opts, [:taint, :sensitivity, :agent_id])
+
+    result =
+      cond do
+        provider == Arbor.AI ->
+          provider.embed(content, provider_opts)
+
+        Code.ensure_loaded?(provider) and function_exported?(provider, :embed, 2) ->
+          provider.embed(content, provider_opts)
+
+        not nonpublic_embedding_floor?(provider_opts) and Code.ensure_loaded?(provider) and
+            function_exported?(provider, :embed, 1) ->
+          provider.embed(content)
+
+        true ->
+          {:error, :embedding_sensitivity_unavailable}
+      end
+
+    case result do
       {:ok, result} ->
         case EmbeddingEvidence.from_provider_result(result) do
           {:ok, evidence} ->
@@ -2218,6 +2238,15 @@ defmodule Arbor.Memory.Index do
         Logger.warning("Embedding provider failed, using hash fallback: #{inspect(reason)}")
         {:ok, EmbeddingEvidence.local_hash_fallback(content)}
     end
+  end
+
+  defp nonpublic_embedding_floor?(opts) do
+    Keyword.get(opts, :sensitivity, :public) != :public or
+      case Keyword.get(opts, :taint) do
+        nil -> false
+        %{sensitivity: :public} -> false
+        _nonpublic_or_invalid -> true
+      end
   end
 
   defp cosine_similarity(vec_a, vec_b) when length(vec_a) == length(vec_b) do
@@ -2518,7 +2547,7 @@ defmodule Arbor.Memory.Index do
         end
 
       query when is_binary(query) ->
-        with {:ok, evidence} <- get_or_compute_embedding(query, [], provider),
+        with {:ok, evidence} <- get_or_compute_embedding(query, [agent_id: agent_id], provider),
              descriptor = search_descriptor(evidence),
              search_opts = [
                model_id: descriptor.model_id,
@@ -2839,9 +2868,11 @@ defmodule Arbor.Memory.Index do
   end
 
   defp run_background_call(
-         {:preflight_index, backend, _agent_id, provider, entry_id_generator, clock, content,
+         {:preflight_index, backend, agent_id, provider, entry_id_generator, clock, content,
           metadata, opts}
        ) do
+    opts = Keyword.put(opts, :agent_id, agent_id)
+
     with :ok <- maybe_validate_durable_content(backend, content),
          {:ok, evidence} <- get_or_compute_embedding(content, opts, provider),
          {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
@@ -2868,8 +2899,10 @@ defmodule Arbor.Memory.Index do
   end
 
   defp run_background_call(
-         {:preflight_batch, backend, _agent_id, provider, entry_id_generator, clock, items, opts}
+         {:preflight_batch, backend, agent_id, provider, entry_id_generator, clock, items, opts}
        ) do
+    opts = Keyword.put(opts, :agent_id, agent_id)
+
     items
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {{content, metadata}, position}, {:ok, acc} ->

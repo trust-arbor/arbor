@@ -217,13 +217,19 @@ defmodule Arbor.Consensus.LLMBridge do
         messages: [system_msg, user_msg],
         max_tokens: max_tokens,
         temperature: temperature,
-        receive_timeout: timeout
+        receive_timeout: timeout,
+        sensitivity: Keyword.get(opts, :sensitivity),
+        taint: Keyword.get(opts, :taint)
       })
 
     # Get or create default client
     client = apply(@client_mod, :default_client, [])
 
-    case apply(@client_mod, :complete, [client, request]) do
+    case apply(@client_mod, :complete, [
+           client,
+           request,
+           Keyword.take(opts, [:sensitivity, :taint, :agent_id])
+         ]) do
       {:ok, response} ->
         {:ok, response.text, response.usage}
 
@@ -257,6 +263,8 @@ defmodule Arbor.Consensus.LLMBridge do
         temperature: Keyword.get(opts, :temperature, 0.7),
         runtime: :acp
       ]
+
+      ai_opts = Keyword.merge(ai_opts, Keyword.take(opts, [:sensitivity, :taint, :agent_id]))
 
       ai_opts =
         case Keyword.get(opts, :max_tokens) do

@@ -351,10 +351,15 @@ defmodule Arbor.Memory.ActionPatterns do
 
     llm_opts =
       opts
-      |> Keyword.take([:model, :provider])
+      |> Keyword.take([:model, :provider, :taint, :sensitivity, :agent_id])
       |> Keyword.put_new(:max_tokens, 1000)
 
-    case llm_client.generate_text(prompt, llm_opts) do
+    result =
+      with {:ok, llm_opts} <- Arbor.LLM.carry_sensitivity(patterns, llm_opts) do
+        llm_client.generate_text(prompt, llm_opts)
+      end
+
+    case result do
       {:ok, response} ->
         parse_llm_learnings(response, patterns, max_learnings)
 

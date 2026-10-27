@@ -10,6 +10,7 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.SteeringMessage
   alias Arbor.LLM.{Client, ContentPart, Message, Request, Response, ToolLoop}
+  alias Arbor.LLM.TestSupport.SensitivityFixture
   alias Arbor.Signals.Signal
 
   defmodule AdapterSupport do
@@ -18,7 +19,9 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
     alias Arbor.LLM.{ContentPart, Response}
 
     def complete(mode, request, opts) do
-      parent = Map.fetch!(request.provider_options, :parent)
+      parent =
+        request.provider_options |> SensitivityFixture.get_controls() |> Map.fetch!(:parent)
+
       send(parent, {:adapter_attempt, mode, request, opts})
       tool_count = Enum.count(request.messages, &(&1.role == :tool))
 
@@ -120,6 +123,15 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
   setup do
     ensure_signal_children()
     true = Process.register(self(), __MODULE__)
+
+    SensitivityFixture.setup([
+      ImmediateAdapter,
+      OneRoundAdapter,
+      ThreeRoundAdapter,
+      TwoThenFailAdapter,
+      AlwaysToolAdapter
+    ])
+
     :ok
   end
 
@@ -535,7 +547,7 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
       provider: provider,
       model: "test-model",
       messages: [Message.new(:user, "initial prompt")],
-      provider_options: %{parent: self()}
+      provider_options: SensitivityFixture.put_controls(%{parent: self()})
     }
   end
 

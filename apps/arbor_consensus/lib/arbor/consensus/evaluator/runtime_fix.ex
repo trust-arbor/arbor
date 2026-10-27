@@ -63,7 +63,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
 
     if perspective in @perspectives do
-      do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout)
+      do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout, opts)
     else
       unsupported_perspective(proposal, perspective, evaluator_id)
     end
@@ -73,13 +73,19 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
   # Private Implementation
   # ===========================================================================
 
-  defp do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout) do
+  defp do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout, opts) do
     prompt = build_prompt(proposal, perspective)
 
     task =
       Task.async(fn ->
         # Force :arbor runtime for speed (uses configured OpenRouter model)
-        ai_module.generate_text(prompt, runtime: :arbor, max_tokens: 500)
+        ai_module.generate_text(
+          prompt,
+          Keyword.merge(
+            [runtime: :arbor, max_tokens: 500],
+            Keyword.take(opts, [:sensitivity, :taint, :agent_id])
+          )
+        )
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

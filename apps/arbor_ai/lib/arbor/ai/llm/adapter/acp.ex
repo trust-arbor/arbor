@@ -93,6 +93,14 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
         else: [receive_timeout: request.receive_timeout] ++ opts
 
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(fallback_opts, @default_timeout),
+         {:ok, opts} <- Arbor.LLM.carry_sensitivity(request, opts),
+         :ok <-
+           Arbor.LLM.authorize_sensitivity(
+             resolve_agent(request),
+             request.model || "",
+             request,
+             Keyword.put(opts, :runtime, :acp)
+           ),
          {:ok, checkout_deadline_opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
       agent = resolve_agent(request)
 
@@ -119,6 +127,10 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
               with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
                 {:ok, format_response(result, request, agent)}
               end
+
+            {:error, {:sensitivity_blocked, _reason}} = error ->
+              pool_checkin(session, opts)
+              error
 
             {:error, reason} ->
               # Always return session to pool, even on prompt failure
@@ -341,6 +353,7 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
     send_opts =
       opts
       |> Keyword.take([:timeout, :deadline_ms])
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
       |> Keyword.put(:timeout, timeout)
       |> maybe_add(:system_prompt, system_prompt)
 

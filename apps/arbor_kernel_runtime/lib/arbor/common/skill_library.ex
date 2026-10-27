@@ -806,7 +806,7 @@ defmodule Arbor.Common.SkillLibrary do
          true <- Code.ensure_loaded?(mod),
          true <- function_exported?(mod, :hybrid_search_skills_with_meta, 3) do
       {query_embedding, space, qstat} =
-        case safe_embed(String.trim(query)) do
+        case safe_embed(String.trim(query), opts) do
           {:ok, vec, space} -> {vec, space, :ok}
           :no_service -> {nil, nil, :no_service}
           :failed -> {nil, nil, :failed}
@@ -889,7 +889,7 @@ defmodule Arbor.Common.SkillLibrary do
           # vectors and they would never be backfilled. Current space is only known
           # after embed/2, so conservative packet-correct behavior is re-embed.
           attrs =
-            case safe_embed(EmbeddingText.for_skill(skill)) do
+            case safe_embed(EmbeddingText.for_skill(skill), sensitivity: :restricted) do
               {:ok, vec, space} ->
                 attrs
                 |> Map.put(:embedding, vec)
@@ -943,7 +943,7 @@ defmodule Arbor.Common.SkillLibrary do
     :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
   end
 
-  defp safe_embed(text) when is_binary(text) do
+  defp safe_embed(text, opts) when is_binary(text) do
     case resolve_embedding_module() do
       :no_service ->
         :no_service
@@ -953,9 +953,16 @@ defmodule Arbor.Common.SkillLibrary do
 
         if is_integer(expected) and expected > 0 do
           try do
+            # Source sync uses the conservative floor; query callers retain
+            # their explicit labels when the query is projected into text.
+            embed_opts =
+              opts
+              |> Keyword.take([:sensitivity, :taint, :agent_id])
+              |> Keyword.put(:dimensions, expected)
+
             # Request provider output in the admitted dimension space.
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
-            case apply(mod, :embed, [text, [dimensions: expected]]) do
+            case apply(mod, :embed, [text, embed_opts]) do
               {:ok, result} -> validate_embed_result(result, expected)
               {:error, _} -> :failed
               _ -> :failed

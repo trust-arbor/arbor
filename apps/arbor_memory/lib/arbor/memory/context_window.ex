@@ -77,6 +77,7 @@ defmodule Arbor.Memory.ContextWindow do
 
   @type t :: %__MODULE__{
           agent_id: String.t(),
+          sensitivity: :public | :internal | :confidential | :restricted,
           # Legacy mode fields
           entries: [entry()],
           max_tokens: pos_integer(),
@@ -119,6 +120,8 @@ defmodule Arbor.Memory.ContextWindow do
 
   defstruct [
     :agent_id,
+    # Monotonic owner floor survives conversion of rich messages to summaries.
+    sensitivity: :public,
     # Legacy mode fields
     entries: [],
     max_tokens: 10_000,
@@ -263,6 +266,12 @@ defmodule Arbor.Memory.ContextWindow do
       multi_layer: multi_layer
     }
 
+    base =
+      case Keyword.take(merged_opts, [:sensitivity, :taint]) do
+        [] -> base
+        labels -> retain_sensitivity(base, nil, labels)
+      end
+
     if multi_layer do
       %{
         base
@@ -312,6 +321,7 @@ defmodule Arbor.Memory.ContextWindow do
   end
 
   def add_entry(window, type, content) when type in [:message, :summary] do
+    window = retain_sensitivity(window, content)
     entry = {type, content, DateTime.utc_now()}
     %{window | entries: window.entries ++ [entry]}
   end
@@ -321,6 +331,7 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec add_entries(t(), [{entry_type(), String.t()}]) :: t()
   def add_entries(window, entries) do
+    window = retain_sensitivity(window, Enum.map(entries, fn {_type, content} -> content end))
     now = DateTime.utc_now()
 
     new_entries =
@@ -369,11 +380,14 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec add_message(t(), map()) :: t()
   def add_message(%{multi_layer: false} = window, message) do
+    window = retain_sensitivity(window, message)
     content = message[:content] || message["content"] || ""
     add_entry(window, :message, content)
   end
 
   def add_message(%{multi_layer: true} = window, message) do
+    window = retain_sensitivity(window, message)
+
     timestamped =
       message
       |> Map.put_new(:timestamp, DateTime.utc_now())
@@ -411,6 +425,7 @@ defmodule Arbor.Memory.ContextWindow do
   @spec add_user_message(t(), String.t(), keyword()) :: t()
   def add_user_message(window, content, opts \\ []) do
     speaker = Keyword.get(opts, :speaker, "Human")
+    window = retain_sensitivity(window, content, Keyword.take(opts, [:sensitivity, :taint]))
 
     add_message(window, %{
       role: :user,
@@ -444,6 +459,7 @@ defmodule Arbor.Memory.ContextWindow do
     if Enum.empty?(results) do
       window
     else
+      window = retain_sensitivity(window, results)
       formatted = Enum.map_join(results, "\n\n", &Formatting.format_action_result/1)
 
       add_message(window, %{
@@ -463,9 +479,11 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec add_retrieved(t(), map()) :: t()
   def add_retrieved(%{multi_layer: true} = window, context) do
+    window = retain_sensitivity(window, context)
     content = context[:content] || context["content"] || ""
+    source_context = Map.put(context, :sensitivity, window.sensitivity)
 
-    if Compression.semantically_duplicate?(window.retrieved_context, content) do
+    if Compression.semantically_duplicate?(window.retrieved_context, content, source_context) do
       Logger.debug("ContextWindow dedup: skipping duplicate retrieved context",
         content_preview: String.slice(content, 0, 50)
       )
@@ -473,7 +491,7 @@ defmodule Arbor.Memory.ContextWindow do
       window
     else
       timestamped =
-        context
+        source_context
         |> Map.put_new(:retrieved_at, DateTime.utc_now())
         |> Compression.maybe_add_embedding(content)
 
@@ -608,6 +626,7 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec apply_summary(t(), String.t(), keyword()) :: t()
   def apply_summary(window, summary, opts \\ []) do
+    window = retain_sensitivity(window, summary, Keyword.take(opts, [:sensitivity, :taint]))
     keep_recent = Keyword.get(opts, :keep_recent, 3)
 
     if length(window.entries) <= keep_recent do
@@ -705,6 +724,7 @@ defmodule Arbor.Memory.ContextWindow do
   def compress(%{multi_layer: true, full_detail: []} = window), do: window
 
   def compress(%{multi_layer: true} = window) do
+    window = retain_sensitivity(window, [window.full_detail, window.retrieved_context])
     detail_budget = Compression.full_detail_budget(window)
     recent_budget = Compression.recent_summary_budget(window)
 
@@ -792,6 +812,21 @@ defmodule Arbor.Memory.ContextWindow do
   end
 
   def compress(window), do: window
+
+  # These immutable APIs retain content for local use even when its classifier
+  # is unavailable or rejects a label. Such a failure must never clear an
+  # inherited floor or become permission to send a later plain summary away.
+  defp retain_sensitivity(window, content, opts \\ []) do
+    inherited = %{sensitivity: Map.get(window, :sensitivity, :public)}
+
+    sensitivity =
+      case Arbor.LLM.carry_sensitivity([inherited, content], opts) do
+        {:ok, joined} -> Keyword.fetch!(joined, :sensitivity)
+        {:error, _reason} -> :restricted
+      end
+
+    Map.put(window, :sensitivity, sensitivity)
+  end
 
   # ============================================================================
   # Rendering / Context Building (delegated to Formatting)

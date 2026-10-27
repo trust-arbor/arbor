@@ -106,7 +106,8 @@ defmodule Arbor.Actions.Judge.Evaluate do
 
   @impl true
   @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-  def run(params, _context) do
+  def run(params, caller_context) do
+    params = Map.put(params, :sensitivity_options, Arbor.LLM.sensitivity_options(caller_context))
     _content = params[:content]
     domain = params[:domain] || "advisory"
     mode = params[:mode] || :critique
@@ -236,7 +237,7 @@ defmodule Arbor.Actions.Judge.Evaluate do
     {system_prompt, user_prompt} =
       PromptBuilder.build(subject, rubric, evidence_summary, :critique, intent: params[:intent])
 
-    case call_llm(system_prompt, user_prompt, llm_fn) do
+    case call_llm(system_prompt, user_prompt, llm_fn, Map.get(params, :sensitivity_options, [])) do
       {:ok, response, llm_meta} ->
         case PromptBuilder.parse_response(response, rubric, :critique) do
           {:ok, verdict} ->
@@ -260,16 +261,17 @@ defmodule Arbor.Actions.Judge.Evaluate do
     end
   end
 
-  defp call_llm(system_prompt, user_prompt, llm_fn) when is_function(llm_fn, 2) do
-    llm_fn.(system_prompt, user_prompt)
+  defp call_llm(system_prompt, user_prompt, llm_fn, opts) when is_function(llm_fn, 2) do
+    with :ok <- Arbor.LLM.authorize_sensitivity(:unknown, "", [system_prompt, user_prompt], opts),
+         do: llm_fn.(system_prompt, user_prompt)
   end
 
-  defp call_llm(system_prompt, user_prompt, nil) do
+  defp call_llm(system_prompt, user_prompt, nil, opts) do
     # Runtime bridge to Arbor.AI
     if LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       case apply(Arbor.AI, :generate_text, [
              user_prompt,
-             [system_prompt: system_prompt, temperature: 0.15]
+             Keyword.merge([system_prompt: system_prompt, temperature: 0.15], opts)
            ]) do
         {:ok, %{text: text} = response} ->
           meta = %{

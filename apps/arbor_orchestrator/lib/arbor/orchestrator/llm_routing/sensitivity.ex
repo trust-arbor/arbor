@@ -10,7 +10,11 @@ defmodule Arbor.Orchestrator.LlmRouting.Sensitivity do
   @scope_opt :__orchestrator_sensitivity_scope__
   @selection_key {__MODULE__, :selected_provider}
 
-  def private_opts(opts), do: Keyword.take(opts, [@scope_opt])
+  def private_opts(opts) do
+    opts
+    |> Keyword.take([@scope_opt])
+    |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
+  end
 
   # Only this owning compute call is wrapped. General-purpose Client callers
   # retain their own policy; the scope crosses its private deadline worker.
@@ -37,7 +41,17 @@ defmodule Arbor.Orchestrator.LlmRouting.Sensitivity do
           stream_middleware: [selection_middleware(scope) | client.stream_middleware]
       }
 
-      {wrapped, Keyword.put(opts, @scope_opt, scope)}
+      opts = Keyword.put(opts, @scope_opt, scope)
+
+      # The mandatory Client gate runs before this wrapper invokes its inner
+      # adapter, so the owning compute's floor must already be present there.
+      opts =
+        case Arbor.LLM.carry_sensitivity(%{sensitivity: sensitivity}, opts) do
+          {:ok, carried} -> carried
+          {:error, _} -> Keyword.put(opts, :sensitivity, :invalid)
+        end
+
+      {wrapped, opts}
     end
   end
 
@@ -99,7 +113,17 @@ defmodule Arbor.Orchestrator.LlmRouting.Sensitivity do
       {:error, {:sensitivity_blocked, :provider_selection_changed}}
     else
       with :allow <- authorize(scope, provider, request.model),
-           {:ok, adapter} <- Client.adapter_for(scope.client, %{request | provider: provider}) do
+           {:ok, adapter} <- Client.adapter_for(scope.client, %{request | provider: provider}),
+           {:ok, opts} <-
+             Arbor.LLM.carry_sensitivity([request, %{sensitivity: scope.sensitivity}], opts),
+           :ok <-
+             Arbor.LLM.authorize_adapter_sensitivity(
+               adapter,
+               provider,
+               request.model,
+               request,
+               opts
+             ) do
         arity = 2 + length(middle)
 
         if Code.ensure_loaded?(adapter) and function_exported?(adapter, operation, arity) do

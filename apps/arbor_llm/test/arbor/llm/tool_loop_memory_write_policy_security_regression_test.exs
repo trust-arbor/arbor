@@ -9,6 +9,7 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
   @moduletag :security_regression
 
   alias Arbor.LLM.{Client, ContentPart, Message, Request, Response, ToolLoop}
+  alias Arbor.LLM.TestSupport.SensitivityFixture
 
   defmodule RecordingAdapter do
     @moduledoc false
@@ -21,7 +22,9 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
     def complete_streaming(request, _callback, opts), do: respond(request, opts, :stream)
 
     defp respond(request, opts, mode) do
-      observer = Map.fetch!(request.provider_options, :observer)
+      observer =
+        request.provider_options |> SensitivityFixture.get_controls() |> Map.fetch!(:observer)
+
       round = Enum.count(request.messages, &(&1.role == :tool))
       send(observer, {:provider_request, mode, round, opts})
 
@@ -83,6 +86,7 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
 
   setup do
     true = Process.register(self(), __MODULE__)
+    SensitivityFixture.setup([RecordingAdapter, FakeAcpAdapter])
     :ok
   end
 
@@ -218,7 +222,7 @@ defmodule Arbor.LLM.ToolLoopMemoryWritePolicySecurityRegressionTest do
       provider: provider,
       model: "test",
       messages: [Message.new(:user, "remember this")],
-      provider_options: %{observer: self()}
+      provider_options: SensitivityFixture.put_controls(%{observer: self()})
     }
 
     tools = [

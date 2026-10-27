@@ -15,6 +15,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
   @spec start(term(), term(), keyword(), keyword()) :: {:ok, t()} | {:error, term()}
   def start(model_spec, messages, opts, limits_opts) do
+    {sensitivity, opts} = Keyword.pop(opts, :arbor_sensitivity)
     anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
     opts = Keyword.delete(opts, :arbor_anonymous_auth)
 
@@ -25,6 +26,19 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          {:ok, request} <- provider.attach_stream(model, context, opts, finch_name),
          request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, limits} <- build_limits(opts, limits_opts) do
+      sensitivity =
+        sensitivity || %{provider: model.provider, model: model.id, content: messages, opts: []}
+
+      sensitivity =
+        Map.update!(sensitivity, :opts, fn opts ->
+          Keyword.put(
+            opts,
+            :sensitivity_admitted_url,
+            Keyword.get(opts, :base_url) || request_url(request)
+          )
+        end)
+
+      limits = Map.put(limits, :sensitivity_input, sensitivity)
       ref = make_ref()
 
       pid =
@@ -310,18 +324,37 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
     callback = fn event, acc -> handle_http_event(event, acc) end
 
-    final_state =
-      case Finch.stream_while(request, finch_name, state, callback, request_opts) do
-        {:ok, state} ->
-          state
+    input = limits.sensitivity_input
 
-        {:error, reason, state} ->
-          %{
-            state
-            | failure:
-                state.failure ||
-                  {:stream_transport_error, Arbor.LLM.ExternalTerm.sanitize(reason)}
-          }
+    actual_url = request_url(request)
+
+    admission =
+      Arbor.LLM.Sensitivity.authorize_wire(
+        input.provider,
+        input.model,
+        input.content,
+        Keyword.put(input.opts, :base_url, actual_url),
+        request.body
+      )
+
+    final_state =
+      case admission do
+        {:error, reason} ->
+          %{state | failure: reason}
+
+        :ok ->
+          case Finch.stream_while(request, finch_name, state, callback, request_opts) do
+            {:ok, state} ->
+              state
+
+            {:error, reason, state} ->
+              %{
+                state
+                | failure:
+                    state.failure ||
+                      {:stream_transport_error, Arbor.LLM.ExternalTerm.sanitize(reason)}
+              }
+          end
       end
 
     finish_request(final_state)
@@ -338,6 +371,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
         {ref, :error,
          {:stream_transport_exception, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
       )
+  end
+
+  defp request_url(request) do
+    URI.to_string(%URI{
+      scheme: to_string(request.scheme),
+      host: request.host,
+      port: request.port,
+      path: request.path
+    })
   end
 
   defp handle_http_event({:status, status}, state) when is_integer(status) do

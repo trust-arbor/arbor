@@ -26,6 +26,7 @@ defmodule Arbor.Agent.ContextSummarizer do
   @type summary_tier :: :recent | :tier_1 | :tier_2
 
   @type context_window :: %{
+          optional(:sensitivity) => atom(),
           recent: [map()],
           tier_1_summary: String.t() | nil,
           tier_2_summary: String.t() | nil,
@@ -53,9 +54,15 @@ defmodule Arbor.Agent.ContextSummarizer do
   """
   @spec summarize(context_window()) :: {:ok, context_window()} | {:error, term()}
   def summarize(context) do
-    with {:ok, {recent, to_summarize}} <- split_context(context),
-         {:ok, tier_1} <- summarize_tier(to_summarize, :tier_1, context[:tier_1_summary]),
-         {:ok, tier_2} <- maybe_promote_to_tier_2(context, tier_1) do
+    source =
+      Map.take(context, [:sensitivity, :taint, :recent, :tier_1_summary, :tier_2_summary])
+
+    with {:ok, sensitivity_opts} <-
+           Arbor.LLM.carry_sensitivity(source, Arbor.LLM.sensitivity_options(context)),
+         {:ok, {recent, to_summarize}} <- split_context(context),
+         {:ok, tier_1} <-
+           summarize_tier(to_summarize, :tier_1, context[:tier_1_summary], sensitivity_opts),
+         {:ok, tier_2} <- maybe_promote_to_tier_2(context, tier_1, sensitivity_opts) do
       new_context = %{
         context
         | recent: recent,
@@ -64,7 +71,7 @@ defmodule Arbor.Agent.ContextSummarizer do
           last_summarized_at: DateTime.utc_now()
       }
 
-      {:ok, new_context}
+      {:ok, Map.put(new_context, :sensitivity, Keyword.fetch!(sensitivity_opts, :sensitivity))}
     end
   end
 
@@ -138,17 +145,18 @@ defmodule Arbor.Agent.ContextSummarizer do
     {:ok, {recent, to_summarize}}
   end
 
-  defp summarize_tier([], _tier, existing_summary), do: {:ok, existing_summary}
+  defp summarize_tier([], _tier, existing_summary, _sensitivity_opts),
+    do: {:ok, existing_summary}
 
-  defp summarize_tier(messages, tier, existing_summary) do
+  defp summarize_tier(messages, tier, existing_summary, sensitivity_opts) do
     if cache_enabled?() do
-      summarize_with_cache(messages, tier, existing_summary)
+      summarize_with_cache(messages, tier, existing_summary, sensitivity_opts)
     else
-      do_summarize_tier(messages, tier, existing_summary)
+      do_summarize_tier(messages, tier, existing_summary, sensitivity_opts)
     end
   end
 
-  defp summarize_with_cache(messages, tier, existing_summary) do
+  defp summarize_with_cache(messages, tier, existing_summary, sensitivity_opts) do
     content_hash = SummaryCache.hash_content(messages)
 
     case SummaryCache.get(content_hash) do
@@ -157,12 +165,12 @@ defmodule Arbor.Agent.ContextSummarizer do
         {:ok, cached_summary}
 
       {:error, _} ->
-        summarize_and_cache(messages, tier, existing_summary, content_hash)
+        summarize_and_cache(messages, tier, existing_summary, content_hash, sensitivity_opts)
     end
   end
 
-  defp summarize_and_cache(messages, tier, existing_summary, content_hash) do
-    case do_summarize_tier(messages, tier, existing_summary) do
+  defp summarize_and_cache(messages, tier, existing_summary, content_hash, sensitivity_opts) do
+    case do_summarize_tier(messages, tier, existing_summary, sensitivity_opts) do
       {:ok, summary} = result ->
         if summary, do: SummaryCache.put(content_hash, summary)
         result
@@ -172,10 +180,10 @@ defmodule Arbor.Agent.ContextSummarizer do
     end
   end
 
-  defp do_summarize_tier(messages, tier, existing_summary) do
+  defp do_summarize_tier(messages, tier, existing_summary, sensitivity_opts) do
     prompt = build_summarization_prompt(messages, tier, existing_summary)
 
-    case call_summarizer(prompt) do
+    case call_summarizer(prompt, sensitivity_opts) do
       {:ok, %{text: summary}} ->
         {:ok, summary}
 
@@ -192,16 +200,15 @@ defmodule Arbor.Agent.ContextSummarizer do
     end
   end
 
-  defp call_summarizer(prompt) do
+  defp call_summarizer(prompt, sensitivity_opts) do
     model = config(:summarizer_model, "claude-haiku")
     provider = config(:summarizer_provider, :anthropic)
 
-    Arbor.AI.generate_text(prompt,
-      model: model,
-      provider: provider,
-      max_tokens: 2000,
-      runtime: :arbor
-    )
+    opts =
+      [model: model, provider: provider, max_tokens: 2000, runtime: :arbor]
+      |> Keyword.merge(sensitivity_opts)
+
+    Arbor.AI.generate_text(prompt, opts)
   rescue
     e -> {:error, {:summarizer_exception, Exception.message(e)}}
   catch
@@ -260,7 +267,7 @@ defmodule Arbor.Agent.ContextSummarizer do
     "#{header}\n\n#{summary}"
   end
 
-  defp maybe_promote_to_tier_2(context, _new_tier_1) do
+  defp maybe_promote_to_tier_2(context, _new_tier_1, sensitivity_opts) do
     tier_2_age = config(:summary_tier_2_age_hours, 24)
 
     if should_promote_to_tier_2?(context, tier_2_age) do
@@ -274,7 +281,12 @@ defmodule Arbor.Agent.ContextSummarizer do
 
       if combined do
         # Re-summarize the combined tier 2 content
-        do_summarize_tier([%{role: "context", content: combined}], :tier_2, nil)
+        do_summarize_tier(
+          [%{role: "context", content: combined}],
+          :tier_2,
+          nil,
+          sensitivity_opts
+        )
       else
         {:ok, context[:tier_2_summary]}
       end

@@ -1,11 +1,16 @@
 defmodule Arbor.LLM.ToolLoopTaintTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.LLM.{Client, ContentPart, Message, Request, Response, ToolLoop}
+  alias Arbor.LLM.TestSupport.SensitivityFixture
 
   @moduletag :fast
   @moduletag :security_regression
+
+  setup do
+    SensitivityFixture.setup([__MODULE__.Adapter, __MODULE__.NeverCalledAdapter])
+  end
 
   defmodule Adapter do
     @behaviour Arbor.LLM.ProviderAdapter
@@ -13,7 +18,8 @@ defmodule Arbor.LLM.ToolLoopTaintTest do
     def provider, do: "tool_loop_taint_test"
 
     def complete(%Request{} = request, opts) do
-      send(request.provider_options.test_pid, {:adapter_call, request, opts})
+      controls = SensitivityFixture.get_controls(request.provider_options)
+      send(controls.test_pid, {:adapter_call, request, opts})
 
       case Enum.count(request.messages, &(&1.role == :tool)) do
         0 -> tool_call("first", %{"path" => "one", "mode" => "read"})
@@ -141,7 +147,7 @@ defmodule Arbor.LLM.ToolLoopTaintTest do
       provider: adapter.provider(),
       model: "test",
       messages: [Message.new(:user, "test")],
-      provider_options: %{test_pid: self()}
+      provider_options: SensitivityFixture.put_controls(%{test_pid: self()})
     }
   end
 

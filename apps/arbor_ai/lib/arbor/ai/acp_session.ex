@@ -606,12 +606,16 @@ defmodule Arbor.AI.AcpSession do
   def handle_call({:send_message, content, opts}, from, state) do
     with true <- prompt_caller_alive?(from),
          :ok <- Arbor.AI.Timeout.ensure_active(opts),
+         :ok <- authorize_prompt_sensitivity(state, content, opts),
          {:ok, state} <- ensure_session(state, opts),
          :ok <- Arbor.AI.Timeout.ensure_active(opts),
          true <- prompt_caller_alive?(from) do
       acknowledge_prompt_call(from)
       do_send_message(content, opts, from, state)
     else
+      {:error, {:sensitivity_blocked, _reason}} = error ->
+        {:reply, error, state}
+
       {:error, :timeout} ->
         operation_timed_out(:create, state)
 
@@ -2333,6 +2337,7 @@ defmodule Arbor.AI.AcpSession do
     opts
     |> drop_transcript_capture_opts()
     |> drop_usage_attribution_opts()
+    |> Keyword.drop([:sensitivity, :taint])
   end
 
   defp build_acp_provider_usage_event(prompt, usage, state) do
@@ -2826,6 +2831,7 @@ defmodule Arbor.AI.AcpSession do
   defp do_send_message(content, opts, from, state) do
     with {:ok, initial_opts, _initial_timeout} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(initial_opts),
+         :ok <- authorize_prompt_sensitivity(state, content, initial_opts),
          :ok <-
            refresh_provider_client_auth(
              state.provider,
@@ -2874,13 +2880,13 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp start_prompt_worker(client, session_id, content, opts) do
+  defp start_prompt_worker(client, session_id, content, opts, sensitivity_scope) do
     parent = self()
     ref = make_ref()
 
     {pid, monitor_ref} =
       spawn_monitor(fn ->
-        result = run_prompt(client, session_id, content, opts)
+        result = run_prompt(client, session_id, content, opts, sensitivity_scope)
         send(parent, {:acp_prompt_result, ref, result, System.monotonic_time(:millisecond)})
       end)
 
@@ -2888,11 +2894,18 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp start_task_prompt(state, content, opts, hard_timeout, inactivity_timeout) do
+    sensitivity_scope = %{
+      provider: state.provider,
+      model: effective_prompt_model(state),
+      opts: Arbor.LLM.sensitivity_options(opts)
+    }
+
     start_prompt_worker(
       state.client,
       state.session_id,
       content,
-      prompt_client_opts(opts, hard_timeout)
+      prompt_client_opts(opts, hard_timeout),
+      sensitivity_scope
     )
     |> Map.merge(%{
       prompt_opts: opts,
@@ -3337,20 +3350,28 @@ defmodule Arbor.AI.AcpSession do
 
   defp bounded_task_control_reason(_reason), do: :unspecified
 
-  defp run_prompt(client, session_id, content, opts) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(acp_client_module(), :prompt, [client, session_id, content, opts]) do
-      {:ok, result} ->
-        case validate_acp_result(result, :prompt) do
-          :ok -> {:ok, result}
-          {:error, reason} -> {:error, reason}
-        end
+  defp run_prompt(client, session_id, content, opts, sensitivity_scope) do
+    with :ok <-
+           Arbor.LLM.authorize_sensitivity(
+             sensitivity_scope.provider,
+             sensitivity_scope.model,
+             [content, Keyword.get(opts, :system_prompt)],
+             Keyword.put(sensitivity_scope.opts, :runtime, :acp)
+           ) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(acp_client_module(), :prompt, [client, session_id, content, opts]) do
+        {:ok, result} ->
+          case validate_acp_result(result, :prompt) do
+            :ok -> {:ok, result}
+            {:error, reason} -> {:error, reason}
+          end
 
-      {:error, reason} ->
-        {:error, Arbor.LLM.sanitize_external_reason(reason)}
+        {:error, reason} ->
+          {:error, Arbor.LLM.sanitize_external_reason(reason)}
 
-      other ->
-        {:error, {:unexpected_prompt_result, Arbor.LLM.sanitize_external_reason(other)}}
+        other ->
+          {:error, {:unexpected_prompt_result, Arbor.LLM.sanitize_external_reason(other)}}
+      end
     end
   rescue
     exception ->
@@ -3790,11 +3811,13 @@ defmodule Arbor.AI.AcpSession do
             other -> other
           end
 
+        next_status = if match?({:sensitivity_blocked, _reason}, reason), do: :ready, else: :error
+
         new_state =
           state
           |> settle_failed_prompt_task_controls(prompt, settlement_failure)
           |> clear_prompt_capture()
-          |> Map.put(:status, :error)
+          |> Map.put(:status, next_status)
 
         emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
         {:reply, reply, new_state}
@@ -4348,6 +4371,24 @@ defmodule Arbor.AI.AcpSession do
     |> Keyword.delete(:inactivity_timeout_ms)
     |> sanitize_provider_facing_opts()
     |> Keyword.put(:timeout, hard_timeout)
+  end
+
+  defp authorize_prompt_sensitivity(state, content, opts) do
+    Arbor.LLM.authorize_sensitivity(
+      state.provider,
+      effective_prompt_model(state),
+      [content, Keyword.get(opts, :system_prompt)],
+      opts |> Arbor.LLM.sensitivity_options() |> Keyword.put(:runtime, :acp)
+    )
+  end
+
+  defp effective_prompt_model(%{model: model}) when is_binary(model), do: model
+
+  defp effective_prompt_model(%{provider: provider}) do
+    case Config.model_selection_strategy(provider) do
+      {:launch_bound, model} -> model
+      _ -> ""
+    end
   end
 
   defp pop_usage_context(opts) when is_list(opts) do

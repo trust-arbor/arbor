@@ -459,7 +459,15 @@ defmodule Arbor.Memory.FactExtractor do
 
     llm_opts =
       opts
-      |> Keyword.take([:model, :provider, :receive_timeout, :timeout])
+      |> Keyword.take([
+        :model,
+        :provider,
+        :receive_timeout,
+        :timeout,
+        :taint,
+        :sensitivity,
+        :agent_id
+      ])
       |> Keyword.put_new(:max_tokens, 1000)
       |> Keyword.put(:system_prompt, @extraction_system_prompt)
 

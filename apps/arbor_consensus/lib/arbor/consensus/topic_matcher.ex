@@ -174,11 +174,15 @@ defmodule Arbor.Consensus.TopicMatcher do
     else
       prompt = build_classification_prompt(description, context, non_general_topics)
 
-      case ai_module.generate_text(prompt,
-             system_prompt: classification_system_prompt(),
-             temperature: 0.1,
-             max_tokens: 200
-           ) do
+      ai_opts =
+        [
+          system_prompt: classification_system_prompt(),
+          temperature: 0.1,
+          max_tokens: 200
+        ]
+        |> Keyword.merge(Keyword.take(opts, [:sensitivity, :taint, :agent_id]))
+
+      case ai_module.generate_text(prompt, ai_opts) do
         {:ok, %{text: text}} ->
           parse_classification_response(text, non_general_topics)
 

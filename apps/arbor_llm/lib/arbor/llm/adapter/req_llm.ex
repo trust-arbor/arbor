@@ -521,6 +521,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         else: usage_context
 
     with {:ok, req_opts} <- validated_embed_opts(arbor_provider, model, opts) do
+      input = %{
+        provider: arbor_provider,
+        model: model,
+        content: texts,
+        opts: sensitivity_opts(opts)
+      }
+
+      req_opts = Keyword.put(req_opts, :arbor_sensitivity, input)
+
       case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
         {:ok, indexed, usage} when is_list(indexed) ->
           case Boundary.embedding_response_with_indices(
@@ -951,6 +960,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     inferred_base_url = caller_base_url || default_base_url_for(request.provider)
 
     base
+    |> maybe_merge(:arbor_sensitivity, %{
+      provider: request.provider,
+      model: request.model,
+      content: request,
+      opts: sensitivity_opts(opts)
+    })
     |> maybe_merge(:base_url, inferred_base_url)
     |> maybe_merge(:api_key, local_api_key(request.provider, opts))
     |> maybe_merge(:req_http_options, local_req_http_options(request.provider, opts))
@@ -1318,9 +1333,14 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
          fixture_scope \\ nil,
          completion_pipeline \\ nil
        ) do
+    {model, content, req_opts} = request
+    {input, req_opts} = Keyword.pop(req_opts, :arbor_sensitivity)
+    request = {model, content, req_opts}
+
     call =
       operation
       |> Call.new(request)
+      |> Call.put_metadata(%{sensitivity_input: input})
       |> maybe_put_provider_usage_context(usage_context)
       |> maybe_put_fixture_scope(fixture_scope)
       |> Call.assign(:live_completion, not is_nil(completion_pipeline))
@@ -1345,6 +1365,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
     Pipeline.through(call, selected_pipeline)
   end
+
+  defp sensitivity_opts(opts),
+    do: Keyword.take(opts, [:sensitivity, :taint, :agent_id, :base_url, :runtime])
 
   defp maybe_put_fixture_scope(call, nil), do: call
 

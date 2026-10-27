@@ -28,6 +28,7 @@ defmodule Arbor.Memory.PrivateConversationSQLiteTest do
   end
 
   defmodule NoEmbeddingProvider do
+    def embed(text, _opts), do: embed(text)
     def embed(_text), do: {:error, :unexpected_embedding_provider_call}
   end
 

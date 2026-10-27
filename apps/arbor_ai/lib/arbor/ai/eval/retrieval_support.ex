@@ -234,14 +234,20 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     deadline_ms = System.monotonic_time(:millisecond) + timeout
 
     with {:ok, canonical_url} <- Arbor.LLM.validate_endpoint(url, :eval_http),
-         :ok <- Arbor.LLM.validate_decoded_term(json, request_json_limits()) do
+         :ok <- Arbor.LLM.validate_decoded_term(json, request_json_limits()),
+         {:ok, sensitivity_opts} <- Arbor.LLM.carry_sensitivity(json, base_url: canonical_url),
+         model = request_model(json),
+         :ok <- Arbor.LLM.authorize_sensitivity(:unknown, model, json, sensitivity_opts) do
       Arbor.LLM.run_until_deadline(
-        fn -> do_post_json(canonical_url, json, deadline_ms, maximum) end,
+        fn ->
+          do_post_json(canonical_url, json, model, sensitivity_opts, deadline_ms, maximum)
+        end,
         deadline_ms,
         timeout,
         {:transport_error, {:deadline_exceeded, timeout}}
       )
     else
+      {:error, {:sensitivity_blocked, _}} = error -> error
       {:error, reason} -> {:error, {:transport_error, bounded_external_reason(reason)}}
     end
   end
@@ -249,17 +255,28 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def post_json(_url, _json, _timeout, _max_response_bytes),
     do: {:error, {:transport_error, :invalid_http_request}}
 
-  defp do_post_json(url, json, deadline_ms, max_response_bytes) do
+  defp do_post_json(url, json, model, sensitivity_opts, deadline_ms, max_response_bytes) do
     into = bounded_response_collector(max_response_bytes)
 
-    case Req.post(url,
-           json: json,
-           receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
-           redirect: false,
-           compressed: false,
-           decode_body: false,
-           into: into
-         ) do
+    # The eval URL admits a protocol and origin, not a proven model provider.
+    # Unknown destinations retain public access while nonpublic input denies.
+    request =
+      Req.new(
+        url: url,
+        method: :post,
+        json: wire_json(json),
+        receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
+        redirect: false,
+        compressed: false,
+        decode_body: false,
+        into: into
+      )
+      |> Arbor.LLM.protect_sensitivity_request(:unknown, model, json, sensitivity_opts)
+
+    case Req.request(request) do
+      {:ok, %Req.Response{private: %{arbor_sensitivity_error: reason}}} ->
+        {:error, reason}
+
       {:ok, %Req.Response{private: %{arbor_eval_response_overflow: true}}} ->
         {:error, {:http_response_bytes_exceeded, max_response_bytes}}
 
@@ -286,6 +303,16 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   catch
     kind, reason -> {:error, {:transport_error, {kind, bounded_external_reason(reason)}}}
   end
+
+  defp request_model(json) when is_map(json),
+    do: Map.get(json, "model") || Map.get(json, :model) || ""
+
+  defp request_model(_json), do: ""
+
+  defp wire_json(json) when is_map(json),
+    do: Map.drop(json, [:sensitivity, :taint, "sensitivity", "taint"])
+
+  defp wire_json(json), do: json
 
   defp request_json_limits do
     [

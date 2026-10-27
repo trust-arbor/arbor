@@ -105,7 +105,7 @@ defmodule Arbor.Memory.Retrieval do
 
   defp recall_from_persistent(agent_id, query, opts) do
     with {:ok, {query, opts}} <- Input.recall(query, opts),
-         {:ok, evidence} <- compute_query_evidence(query, opts) do
+         {:ok, evidence} <- compute_query_evidence(query, Keyword.put(opts, :agent_id, agent_id)) do
       limit = Keyword.get(opts, :limit, @default_limit)
       threshold = Keyword.get(opts, :threshold, @default_threshold)
 
@@ -123,7 +123,9 @@ defmodule Arbor.Memory.Retrieval do
   defp compute_query_evidence(query, opts) do
     case Keyword.get(opts, :embedding) do
       nil ->
-        case Arbor.AI.embed(query) do
+        embedding_opts = Keyword.take(opts, [:taint, :sensitivity, :agent_id])
+
+        case Arbor.AI.embed(query, embedding_opts) do
           {:ok, result} ->
             case EmbeddingEvidence.from_provider_result(result) do
               {:ok, evidence} -> {:ok, evidence}

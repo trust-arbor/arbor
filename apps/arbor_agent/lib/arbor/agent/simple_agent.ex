@@ -163,7 +163,10 @@ defmodule Arbor.Agent.SimpleAgent do
       max_turns: max_turns,
       model: model,
       provider: provider,
-      llm_opts: Keyword.take(opts, [:timeout, :max_response_bytes]),
+      llm_opts:
+        opts
+        |> Keyword.take([:timeout, :max_response_bytes])
+        |> Keyword.merge(LLM.sensitivity_options(opts)),
       working_dir: working_dir,
       agent_id: agent_id,
       tool_history: [],
@@ -208,12 +211,13 @@ defmodule Arbor.Agent.SimpleAgent do
             # Build tool result messages
             tool_msgs =
               Enum.zip(classified.tool_calls, result_strings)
-              |> Enum.map(fn {tc, result_str} ->
+              |> Enum.map(fn {tc, {result_str, sensitivity}} ->
                 %{
                   role: :tool,
                   tool_call_id: tc.id,
                   name: tc_name(tc),
-                  content: result_str
+                  content: result_str,
+                  sensitivity: sensitivity
                 }
               end)
 
@@ -274,18 +278,20 @@ defmodule Arbor.Agent.SimpleAgent do
   # ── LLM Call ──────────────────────────────────────────────────────
 
   defp llm_call(messages, tools, state) do
-    LLM.generate(
-      state.llm_opts ++
-        [
-          provider: to_string(state.provider),
-          model: state.model,
-          messages: Enum.map(messages, &to_llm_message/1),
-          tools: tools,
-          max_tool_rounds: 0,
-          max_tokens: 16_384,
-          temperature: 0.3
-        ]
-    )
+    with {:ok, opts} <- LLM.carry_sensitivity(messages, state.llm_opts) do
+      LLM.generate(
+        opts ++
+          [
+            provider: to_string(state.provider),
+            model: state.model,
+            messages: Enum.map(messages, &to_llm_message/1),
+            tools: tools,
+            max_tool_rounds: 0,
+            max_tokens: 16_384,
+            temperature: 0.3
+          ]
+      )
+    end
   end
 
   defp to_llm_message(%{role: :assistant} = message) do
@@ -293,18 +299,26 @@ defmodule Arbor.Agent.SimpleAgent do
       [%{kind: :text, text: Map.get(message, :content) || ""}] ++
         Map.get(message, :tool_calls, [])
 
-    %Message{role: :assistant, content: content}
+    %Message{role: :assistant, content: content, metadata: message_metadata(message)}
   end
 
   defp to_llm_message(%{role: :tool} = message) do
     %Message{
       role: :tool,
       content: message.content,
-      metadata: Map.take(message, [:tool_call_id, :name])
+      metadata: Map.merge(message_metadata(message), Map.take(message, [:tool_call_id, :name]))
     }
   end
 
-  defp to_llm_message(message), do: %Message{role: message.role, content: message.content}
+  defp to_llm_message(message) do
+    %Message{role: message.role, content: message.content, metadata: message_metadata(message)}
+  end
+
+  defp message_metadata(message) do
+    message
+    |> Map.get(:metadata, %{})
+    |> Map.merge(Map.new(LLM.sensitivity_options(message)))
+  end
 
   # ── Tool Execution ───────────────────────────────────────────────
 
@@ -315,6 +329,13 @@ defmodule Arbor.Agent.SimpleAgent do
       start = System.monotonic_time(:millisecond)
       result = execute_tool(name, args, state)
       duration = System.monotonic_time(:millisecond) - start
+
+      sensitivity =
+        case LLM.carry_sensitivity(result, LLM.sensitivity_options(state.llm_opts)) do
+          {:ok, opts} -> Keyword.fetch!(opts, :sensitivity)
+          {:error, _reason} -> :invalid
+        end
+
       result_str = format_result(result)
 
       entry = %{
@@ -323,10 +344,11 @@ defmodule Arbor.Agent.SimpleAgent do
         args: args,
         result: truncate(result_str, @max_result_length),
         duration_ms: duration,
-        timestamp: DateTime.utc_now()
+        timestamp: DateTime.utc_now(),
+        sensitivity: sensitivity
       }
 
-      {result_str, history ++ [entry]}
+      {{result_str, sensitivity}, history ++ [entry]}
     end)
   end
 

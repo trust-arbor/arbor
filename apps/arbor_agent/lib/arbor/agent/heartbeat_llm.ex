@@ -27,8 +27,8 @@ defmodule Arbor.Agent.HeartbeatLLM do
   """
   @spec think(map(), keyword()) :: {:ok, HeartbeatResponse.parsed()} | {:error, term()}
   def think(state, opts \\ []) do
-    prompt = HeartbeatPrompt.build_prompt(state)
-    system = HeartbeatPrompt.system_prompt(state)
+    prompt_context = HeartbeatPrompt.build_prompt_context(state)
+    system_context = HeartbeatPrompt.system_prompt_context(state)
 
     model = Keyword.get(opts, :model) || heartbeat_model()
     provider = Keyword.get(opts, :provider) || heartbeat_provider()
@@ -39,13 +39,33 @@ defmodule Arbor.Agent.HeartbeatLLM do
         provider: provider,
         max_tokens: Keyword.get(opts, :max_tokens, 1500),
         runtime: :arbor,
-        system_prompt: system
+        system_prompt: system_context.system_prompt,
+        agent_id: state[:agent_id] || state[:id]
       ]
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
       |> maybe_put_opt(opts, :receive_timeout)
       |> maybe_put_opt(opts, :timeout)
 
     llm_started_at = System.monotonic_time(:millisecond)
-    ai_result = call_ai(prompt, ai_opts)
+
+    source =
+      Map.take(state, [
+        :sensitivity,
+        :taint,
+        :context_window,
+        :pending_messages,
+        :background_suggestions,
+        :active_skills,
+        :working_memory,
+        :self_knowledge
+      ])
+
+    ai_result =
+      with {:ok, ai_opts} <-
+             Arbor.LLM.carry_sensitivity([source, prompt_context, system_context], ai_opts) do
+        call_ai(prompt_context.prompt, ai_opts)
+      end
+
     llm_duration = System.monotonic_time(:millisecond) - llm_started_at
 
     # Record LLM latency for fitness tracking

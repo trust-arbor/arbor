@@ -59,38 +59,53 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   """
   @spec build_prompt(map()) :: String.t()
   def build_prompt(state) do
+    build_prompt_context(state).prompt
+  end
+
+  @doc "Build heartbeat text and the floor of newly fetched private context together."
+  @spec build_prompt_context(map()) :: %{prompt: String.t(), sensitivity: :public | :restricted}
+  def build_prompt_context(state) do
     mode = Map.get(state, :cognitive_mode, :consolidation)
     enabled = Map.get(state, :enabled_prompt_sections, :all)
     nonce = PromptSanitizer.generate_nonce()
 
     # Sections tagged :wrap contain untrusted data and get nonce-wrapped.
     # Sections tagged :raw are static instructions and stay unwrapped.
-    [
+    sections = [
       {:timing, :raw, fn -> timing_section(state) end},
       {:cognitive, :raw, fn -> cognitive_section(mode) end},
-      {:self_knowledge, :wrap, fn -> self_knowledge_section(state) end},
+      {:self_knowledge, :wrap, fn -> private_section(self_knowledge_section(state)) end},
       {:conversation, :wrap, fn -> conversation_section(state) end},
       {:goals, :wrap, fn -> goals_section(state, mode) end},
-      {:active_skills, :wrap, fn -> active_skills_section(state) end},
+      {:active_skills, :wrap, fn -> private_section(active_skills_section(state)) end},
       {:tools, :raw, fn -> tools_section(state) end},
-      {:proposals, :wrap, fn -> proposals_section(state) end},
+      {:proposals, :wrap, fn -> private_section(proposals_section(state)) end},
       {:patterns, :wrap, fn -> patterns_section(state) end},
-      {:percepts, :wrap, fn -> percepts_section(state) end},
+      {:percepts, :wrap, fn -> private_section(percepts_section(state)) end},
       {:pending, :raw, fn -> pending_section(state) end},
       {:directive, :raw, fn -> directive_section(mode, state) end},
       {:response_format, :raw, fn -> response_format_section() end}
     ]
-    |> Enum.filter(fn {name, _, _} -> enabled == :all or name in enabled end)
-    |> Enum.map(fn {_name, mode, builder} ->
-      content = builder.()
 
-      case mode do
-        :wrap -> wrap_section(content, nonce)
-        :raw -> content
-      end
-    end)
-    |> Enum.reject(&(is_nil(&1) or &1 == ""))
-    |> Enum.join("\n\n")
+    {texts, floor} =
+      sections
+      |> Enum.filter(fn {name, _, _} -> enabled == :all or name in enabled end)
+      |> Enum.reduce({[], :public}, fn {_name, mode, builder}, {texts, floor} ->
+        {content, source_floor} =
+          case builder.() do
+            {content, source_floor} -> {content, source_floor}
+            content -> {content, :public}
+          end
+
+        if content in [nil, ""] do
+          {texts, floor}
+        else
+          text = if mode == :wrap, do: wrap_section(content, nonce), else: content
+          {[text | texts], join_floor(floor, source_floor)}
+        end
+      end)
+
+    %{prompt: texts |> Enum.reverse() |> Enum.join("\n\n"), sensitivity: floor}
   end
 
   @doc """
@@ -102,6 +117,15 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   """
   @spec system_prompt(map()) :: String.t()
   def system_prompt(state) do
+    system_prompt_context(state).system_prompt
+  end
+
+  @doc "Build system text together with the floor of any externally loaded skill body."
+  @spec system_prompt_context(map()) :: %{
+          system_prompt: String.t(),
+          sensitivity: :public | :restricted
+        }
+  def system_prompt_context(state) do
     nonce = Map.get(state, :nonce)
 
     nonce_preamble =
@@ -112,10 +136,18 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       end
 
     case load_skill("heartbeat-system-prompt", %{"nonce_preamble" => nonce_preamble}) do
-      {:ok, body} -> body
-      _ -> fallback_system_prompt(nonce_preamble)
+      {:ok, body} -> %{system_prompt: body, sensitivity: :restricted}
+      _ -> %{system_prompt: fallback_system_prompt(nonce_preamble), sensitivity: :public}
     end
   end
+
+  # These source APIs do not export authoritative sensitivity alongside their
+  # rendered private records. Keep the strictest floor until such a source API
+  # exists; scanning the resulting plain text cannot recover recorded labels.
+  defp private_section(content) when content in [nil, ""], do: {content, :public}
+  defp private_section(content), do: {content, :restricted}
+  defp join_floor(:public, :public), do: :public
+  defp join_floor(_, _), do: :restricted
 
   defp fallback_system_prompt(preamble) do
     """
@@ -203,13 +235,14 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     cond do
       goals == [] ->
-        "## Active Goals\nNo active goals. Consider suggesting goals or reflecting on your situation."
+        {"## Active Goals\nNo active goals. Consider suggesting goals or reflecting on your situation.",
+         :public}
 
       mode == :plan_execution ->
-        format_decomposition_target(goals, agent_id, mode)
+        private_section(format_decomposition_target(goals, agent_id, mode))
 
       true ->
-        format_goals_default(goals, mode)
+        private_section(format_goals_default(goals, mode))
     end
   end
 
@@ -593,7 +626,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp directive_section(:goal_pursuit, _state) do
     case load_skill("directive-goal-pursuit") do
       {:ok, body} ->
-        body
+        private_section(body)
 
       _ ->
         """
@@ -608,7 +641,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp directive_section(:plan_execution, _state) do
     case load_skill("directive-plan-execution") do
       {:ok, body} ->
-        body
+        private_section(body)
 
       _ ->
         """
@@ -632,7 +665,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     if goals != [] do
       case load_skill("directive-reflection") do
         {:ok, body} ->
-          body
+          private_section(body)
 
         _ ->
           """
@@ -650,7 +683,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp response_format_section do
     case load_skill("heartbeat-response-format") do
       {:ok, body} ->
-        body
+        private_section(body)
 
       _ ->
         """

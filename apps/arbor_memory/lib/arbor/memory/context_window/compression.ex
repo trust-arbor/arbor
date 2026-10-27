@@ -308,10 +308,19 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   # ============================================================================
 
   @doc false
-  def semantically_duplicate?([], _content), do: false
+  def semantically_duplicate?(existing_contexts, new_content, source_context \\ nil)
 
-  def semantically_duplicate?(existing_contexts, new_content) do
-    case compute_embedding(new_content) do
+  def semantically_duplicate?([], _content, _source_context), do: false
+
+  def semantically_duplicate?(existing_contexts, new_content, source_context) do
+    embedding =
+      with {:ok, opts} <- Arbor.LLM.carry_sensitivity(source_context, []) do
+        compute_embedding(new_content, opts)
+      else
+        _ -> nil
+      end
+
+    case embedding do
       nil ->
         # No embedding available, fall back to exact match
         Enum.any?(existing_contexts, fn ctx ->
@@ -328,7 +337,14 @@ defmodule Arbor.Memory.ContextWindow.Compression do
 
   @doc false
   def maybe_add_embedding(context, content) do
-    case compute_embedding(content) do
+    embedding =
+      with {:ok, opts} <- Arbor.LLM.carry_sensitivity(context, []) do
+        compute_embedding(content, opts)
+      else
+        _ -> nil
+      end
+
+    case embedding do
       nil -> context
       embedding -> Map.put(context, :embedding, embedding)
     end
@@ -344,16 +360,21 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   end
 
   defp summarize_messages(%{summarization_enabled: true} = window, messages) do
-    formatted = Formatting.format_messages_for_summary(messages)
-    original_tokens = estimate_tokens_text(formatted)
-    llm_opts = summarization_llm_opts(window)
+    case Arbor.LLM.carry_sensitivity(messages, summarization_llm_opts(window)) do
+      {:ok, llm_opts} ->
+        formatted = Formatting.format_messages_for_summary(messages)
+        original_tokens = estimate_tokens_text(formatted)
 
-    case window.summarization_algorithm do
-      :incremental_bullets ->
-        summarize_incremental(formatted, original_tokens, llm_opts)
+        case window.summarization_algorithm do
+          :incremental_bullets ->
+            summarize_incremental(formatted, original_tokens, llm_opts)
 
-      _prose ->
-        summarize_prose(formatted, original_tokens, llm_opts)
+          _prose ->
+            summarize_prose(formatted, original_tokens, llm_opts)
+        end
+
+      {:error, _reason} ->
+        fallback_summary(messages)
     end
   end
 
@@ -410,7 +431,11 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   end
 
   defp summarization_llm_opts(window) do
-    opts = [receive_timeout: compression_llm_timeout()]
+    opts = [
+      agent_id: window.agent_id,
+      sensitivity: Map.get(window, :sensitivity, :restricted),
+      receive_timeout: compression_llm_timeout()
+    ]
 
     opts =
       if window.summarization_model, do: [{:model, window.summarization_model} | opts], else: opts
@@ -440,7 +465,9 @@ defmodule Arbor.Memory.ContextWindow.Compression do
         end
 
       opts =
-        [system_prompt: system_prompt, max_tokens: 1000]
+        llm_opts
+        |> Keyword.take([:taint, :sensitivity, :agent_id, :receive_timeout])
+        |> Keyword.merge(system_prompt: system_prompt, max_tokens: 1000)
         |> maybe_add_llm_opt(:model, llm_opts[:model])
         |> maybe_add_llm_opt(:provider, llm_opts[:provider])
 
@@ -539,7 +566,13 @@ defmodule Arbor.Memory.ContextWindow.Compression do
         "This will be used as distant memory, so focus on what might be referenced later.\n\n" <>
         "CONTENT:\n#{text}\n\nCONDENSED SUMMARY:"
 
-    call_summarization_llm(prompt, :prose, summarization_llm_opts(window))
+    with {:ok, opts} <-
+           Arbor.LLM.carry_sensitivity(
+             [window.full_detail, window.retrieved_context, text],
+             summarization_llm_opts(window)
+           ) do
+      call_summarization_llm(prompt, :prose, opts)
+    end
   end
 
   defp truncate_to_budget(text, budget_tokens) do
@@ -560,6 +593,8 @@ defmodule Arbor.Memory.ContextWindow.Compression do
 
     opts =
       [
+        agent_id: window.agent_id,
+        sensitivity: Map.get(window, :sensitivity, :restricted),
         source: "compression_cycle_#{window.compression_count}",
         min_confidence: window.min_fact_confidence,
         receive_timeout: compression_llm_timeout(),
@@ -568,7 +603,12 @@ defmodule Arbor.Memory.ContextWindow.Compression do
       |> maybe_add_llm_opt(:model, window.fact_extraction_model)
       |> maybe_add_llm_opt(:provider, window.fact_extraction_provider)
 
-    case FactExtractor.extract_batch(texts, opts) do
+    result =
+      with {:ok, opts} <- Arbor.LLM.carry_sensitivity(messages, opts) do
+        FactExtractor.extract_batch(texts, opts)
+      end
+
+    case result do
       facts when is_list(facts) ->
         # Filter by confidence threshold
         filtered =
@@ -666,12 +706,17 @@ defmodule Arbor.Memory.ContextWindow.Compression do
 
   defp compute_context_embedding(ctx) do
     existing_content = ctx[:content] || ctx["content"] || ""
-    compute_embedding(existing_content)
+
+    with {:ok, opts} <- Arbor.LLM.carry_sensitivity(ctx, []) do
+      compute_embedding(existing_content, opts)
+    else
+      _ -> nil
+    end
   end
 
-  defp compute_embedding(content) when is_binary(content) and byte_size(content) > 0 do
+  defp compute_embedding(content, opts) when is_binary(content) and byte_size(content) > 0 do
     if embedding_service_available?() do
-      case Arbor.AI.embed(content) do
+      case Arbor.AI.embed(content, opts) do
         {:ok, %{embedding: embedding}} -> embedding
         _ -> nil
       end
@@ -680,7 +725,7 @@ defmodule Arbor.Memory.ContextWindow.Compression do
     end
   end
 
-  defp compute_embedding(_), do: nil
+  defp compute_embedding(_, _opts), do: nil
 
   defp embedding_service_available? do
     # Config-gated so the hermetic test lane never reaches a live embedding
