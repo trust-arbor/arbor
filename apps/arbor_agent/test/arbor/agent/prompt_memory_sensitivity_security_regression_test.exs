@@ -30,11 +30,15 @@ defmodule Arbor.Agent.PromptMemorySensitivitySecurityRegressionTest do
 
   setup do
     previous_client = :persistent_term.get({Client, :default_client}, nil)
+    bridge_key = {Arbor.AI.UnifiedBridge, :client}
+    previous_bridge = :persistent_term.get(bridge_key, :missing)
     keys = [:pipeline, :sensitivity_policy]
     previous = Enum.map(keys, &{&1, Application.fetch_env(:arbor_llm, &1)})
     Application.delete_env(:arbor_llm, :sensitivity_policy)
     Application.put_env(:arbor_llm, :pipeline, [FixtureHTTP, Dispatch])
-    Client.set_default_client(Client.new(adapters: %{"openai" => Adapter}))
+    client = Client.new(adapters: %{"openai" => Adapter})
+    Client.set_default_client(client)
+    :persistent_term.put(bridge_key, client)
     Arbor.Common.Config.Testing.isolate_namespace()
     Arbor.Common.Config.Testing.put(:project_context_enabled, false)
     Arbor.Common.Config.Testing.put(:skill_catalog_enabled, false)
@@ -86,6 +90,10 @@ defmodule Arbor.Agent.PromptMemorySensitivitySecurityRegressionTest do
     end)
 
     on_exit(fn ->
+      if previous_bridge == :missing,
+        do: :persistent_term.erase(bridge_key),
+        else: :persistent_term.put(bridge_key, previous_bridge)
+
       if previous_client,
         do: Client.set_default_client(previous_client),
         else: Client.clear_default_client()

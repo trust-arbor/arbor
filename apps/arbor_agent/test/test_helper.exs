@@ -1,3 +1,27 @@
+defmodule Arbor.Agent.TestSupport.OfflineLLMAdapter do
+  @moduledoc false
+  @behaviour Arbor.LLM.ProviderAdapter
+
+  def provider, do: "agent_test_offline"
+  def complete(_request, _opts), do: {:error, :agent_test_llm_unavailable}
+end
+
+# Untagged controller and fallback tests must remain offline even when the
+# shared .env contains live credentials. Tests proving a real transport path
+# install their own explicit clients; production sensitivity checks stay on.
+prior_llm_client = :persistent_term.get({Arbor.LLM.Client, :default_client}, :missing)
+prior_bridge_client = :persistent_term.get({Arbor.AI.UnifiedBridge, :client}, :missing)
+offline_providers = Arbor.LLM.known_providers() ++ ~w(acp openai_oauth xai_oauth)
+
+offline_client =
+  Arbor.LLM.Client.new(
+    adapters: Map.new(offline_providers, &{&1, Arbor.Agent.TestSupport.OfflineLLMAdapter}),
+    default_provider: "openai"
+  )
+
+Arbor.LLM.Client.set_default_client(offline_client)
+:persistent_term.put({Arbor.AI.UnifiedBridge, :client}, offline_client)
+
 # Security stores + capability authority. Test config intentionally leaves the
 # security supervisor empty, so consumer suites must opt into the shared
 # bootstrap before any behavioral fixture grants capabilities.
@@ -88,3 +112,14 @@ _ = Arbor.Agent.Test.RuntimeAdmissionTopology.start_fixed_production!()
 # Isolated Repo fixtures own the canonical Repo name and run separately with
 # --include isolated_repo. Fast loop: `mix test.fast`.
 ExUnit.start(exclude: [:skip, :database, :isolated_repo, :external, :llm, :llm_local])
+
+ExUnit.after_suite(fn _result ->
+  for {key, prior} <- [
+        {{Arbor.LLM.Client, :default_client}, prior_llm_client},
+        {{Arbor.AI.UnifiedBridge, :client}, prior_bridge_client}
+      ] do
+    if prior == :missing,
+      do: :persistent_term.erase(key),
+      else: :persistent_term.put(key, prior)
+  end
+end)

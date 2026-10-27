@@ -11,6 +11,7 @@ defmodule Arbor.Agent.HostMemoryOwnershipTest do
   alias Arbor.Agent.{APIAgent, AgentSeed, Claude, SessionManager}
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.LLM.Client
+  alias Arbor.LLM.TestSupport.SensitivityFixture
   alias Arbor.Memory
   alias Arbor.Memory.WorkingMemory
 
@@ -42,7 +43,7 @@ defmodule Arbor.Agent.HostMemoryOwnershipTest do
     @moduledoc false
     @behaviour Arbor.LLM.ProviderAdapter
     alias Arbor.LLM.{ContentPart, Response}
-    def provider, do: "openai"
+    def provider, do: "host_memory_fixture"
 
     def complete(request, _opts) do
       send(Arbor.Agent.HostMemoryOwnershipTest, {:provider_request, request})
@@ -125,11 +126,12 @@ defmodule Arbor.Agent.HostMemoryOwnershipTest do
     set_env(:arbor_agent, :checkpoint_enabled, false)
     set_env(:arbor_agent, :timing_context_enabled, false)
     set_env(:arbor_ai, :runtime_registry, %{acp: Runtime})
+    SensitivityFixture.setup([Adapter])
 
     original_client = Client.default_client()
 
     client =
-      Client.new(default_provider: "openai", model_catalog: %{})
+      Client.new(default_provider: Adapter.provider(), model_catalog: %{})
       |> Client.register_adapter(Adapter)
 
     Client.set_default_client(client)
@@ -350,7 +352,9 @@ defmodule Arbor.Agent.HostMemoryOwnershipTest do
     opts = [id: agent_id, memory_enabled: false, skip_executor: true, capture_thinking: false]
 
     opts =
-      if module == APIAgent, do: opts ++ [provider: :openai, model: "gpt-4o-mini"], else: opts
+      if module == APIAgent,
+        do: opts ++ [provider: :host_memory_fixture, model: "host-memory-test-model"],
+        else: opts
 
     pid = start_supervised!({module, opts})
     :sys.replace_state(pid, &Map.merge(&1, local_state(agent_id, count)))

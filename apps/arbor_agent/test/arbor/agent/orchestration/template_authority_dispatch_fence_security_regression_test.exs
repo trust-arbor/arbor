@@ -515,7 +515,9 @@ defmodule Arbor.Agent.Orchestration.TemplateAuthorityDispatchFenceSecurityRegres
   test "security regression: stale fence-seed completion/failure/timeout messages are harmless",
        %{supervisor: supervisor} do
     TestFenceFacade.set_blocking({:ok, []})
-    store = seed_store(supervisor, worker_timeout_ms: 80, retry_base_ms: 5_000)
+    # Capture the live attempt before its real timeout. This test verifies
+    # stale-event handling after expiry, not sub-100 ms scheduler latency.
+    store = seed_store(supervisor, worker_timeout_ms: 500, retry_base_ms: 5_000)
 
     assert wait_until(fn -> TestFenceFacade.worker_pid() != nil end)
 
