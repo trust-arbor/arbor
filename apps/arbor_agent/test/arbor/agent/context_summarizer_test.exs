@@ -1,8 +1,17 @@
 defmodule Arbor.Agent.ContextSummarizerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Agent.ContextSummarizer
+  alias Arbor.LLM.Client
+
+  defmodule OfflineAdapter do
+    @moduledoc false
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    def provider, do: "context_summarizer_test_offline"
+    def complete(_request, _opts), do: {:error, :context_summarizer_test_llm_unavailable}
+  end
 
   setup do
     # Store original values
@@ -10,8 +19,33 @@ defmodule Arbor.Agent.ContextSummarizerTest do
     original_max = Application.get_env(:arbor_agent, :context_max_tokens)
     original_ratio = Application.get_env(:arbor_agent, :context_recent_ratio)
     original_cache = Application.get_env(:arbor_agent, :summary_cache_enabled)
+    original_client = :persistent_term.get({Client, :default_client}, :missing)
+    original_bridge = :persistent_term.get({Arbor.AI.UnifiedBridge, :client}, :missing)
+
+    # These tests exercise summary fallback, so shared provider credentials
+    # must not turn their synthetic prose into a live model request. Replace
+    # only the transport; keep the production scanner and policy enabled.
+    providers = Arbor.LLM.known_providers() ++ ~w(acp openai_oauth xai_oauth)
+
+    client =
+      Client.new(
+        adapters: Map.new(providers, &{&1, OfflineAdapter}),
+        default_provider: "openai"
+      )
+
+    Client.set_default_client(client)
+    :persistent_term.put({Arbor.AI.UnifiedBridge, :client}, client)
 
     on_exit(fn ->
+      for {key, original} <- [
+            {{Client, :default_client}, original_client},
+            {{Arbor.AI.UnifiedBridge, :client}, original_bridge}
+          ] do
+        if original == :missing,
+          do: :persistent_term.erase(key),
+          else: :persistent_term.put(key, original)
+      end
+
       if original_enabled do
         Application.put_env(:arbor_agent, :context_summarization_enabled, original_enabled)
       else
@@ -122,7 +156,7 @@ defmodule Arbor.Agent.ContextSummarizerTest do
 
       Application.put_env(:arbor_agent, :context_recent_ratio, 0.7)
 
-      # Summarize will fail on AI call (no real backend), but should
+      # The explicit offline adapter makes the AI call fail, but should
       # gracefully degrade and keep existing nil summary
       {:ok, result} = ContextSummarizer.summarize(window)
 

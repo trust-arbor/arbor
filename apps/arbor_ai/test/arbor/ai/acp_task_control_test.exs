@@ -758,18 +758,22 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
   test "security regression: queued follow-ups retain the initial prompt deadline" do
     session = start_session()
-    caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 80) end)
+    # Leave scheduling/admission headroom while distinguishing the original
+    # deadline from a fresh timeout incorrectly granted to the queued prompt.
+    caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 500) end)
 
     assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
 
     assert {:ok, :queued, :same_session_follow_up} =
              AcpSession.deliver_task_control(session, control("deadline-follow", "follow"))
 
-    Process.sleep(50)
+    Process.sleep(250)
     send(initial_worker, {:release, {:ok, %{"text" => "initial"}}})
-    assert_receive {:prompt_started, _follow_worker, ^client, "same-session", "follow"}
+    assert_receive {:prompt_started, _follow_worker, ^client, "same-session", "follow"}, 150
 
-    assert {:ok, {:error, :timeout}} = Task.yield(caller, 60)
+    # The original deadline expires within this window. Renewing it at the
+    # follow-up would leave the call alive beyond the window and fail here.
+    assert {:ok, {:error, :timeout}} = Task.yield(caller, 300)
     assert_receive {:cancelled, ^client, "same-session"}
     assert Process.alive?(session)
 
