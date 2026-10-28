@@ -185,6 +185,24 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     assert preferred.agent_id == identity.agent_id
   end
 
+  # A missing signing-key store process was read as "no persisted root", so a
+  # persistent-mode boot generated and adopted a fresh in-memory root while the
+  # real one sat in an expected but stopped store: a silent rotation of the
+  # trust root, which P0-5 forbids.
+  test "security regression: an expected but stopped signing-key store is unavailable, not a first boot",
+       %{identity: identity} do
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
+
+    # The store's child spec stays in the security tree; its process is stopped.
+    assert :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, @store_name)
+    assert {:error, :store_unavailable} = SystemAuthority.load_persisted_keypair_for_test()
+
+    # A tree with no signing-key store at all (the activation_only shape) is
+    # still a first boot.
+    assert :ok = Supervisor.delete_child(Arbor.Security.Supervisor, @store_name)
+    assert :not_found = SystemAuthority.load_persisted_keypair_for_test()
+  end
+
   test "security regression: valid legacy v2 split records migrate only after full validation",
        %{identity: identity} do
     put_legacy_split!(identity, identity)

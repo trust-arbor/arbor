@@ -40,6 +40,32 @@ defmodule Arbor.Security.SupervisedOwner do
     :exit, _ -> nil
   end
 
+  @doc """
+  Whether `child_id` is in `supervisor`'s tree and running.
+
+  `child_pid/2` answers nil both for a child the tree never had and for one
+  whose spec is present but whose process is stopped or restarting. Callers
+  that must not read "temporarily down" as "never configured" use this. An
+  unreachable supervisor is `:not_running`, never `:absent`.
+  """
+  @spec child_status(pid(), term()) :: {:running, pid()} | :not_running | :absent
+  def child_status(supervisor, child_id) when is_pid(supervisor) do
+    case Enum.find(GenServer.call(supervisor, :which_children, :infinity), fn
+           {^child_id, _pid, _type, _modules} -> true
+           _child -> false
+         end) do
+      {^child_id, pid, _type, _modules} when is_pid(pid) -> {:running, pid}
+      {^child_id, _not_running, _type, _modules} -> :not_running
+      nil -> :absent
+    end
+  rescue
+    _ -> :not_running
+  catch
+    :exit, _ -> :not_running
+  end
+
+  def child_status(_supervisor, _child_id), do: :not_running
+
   @doc false
   @spec protected_directory_owner(atom(), term(), atom(), [term()]) :: pid() | nil
   def protected_directory_owner(table, key, application, child_path)
