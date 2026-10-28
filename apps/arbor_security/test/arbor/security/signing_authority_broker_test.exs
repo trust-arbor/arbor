@@ -33,6 +33,50 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
      public_key: identity.public_key}
   end
 
+  # Security regression: derive_secret checked the requested label and the
+  # authority, never the label against the purpose the authority was opened for,
+  # so an authority opened for an unrelated purpose (here platform activation)
+  # could derive the principal's engine checkpoint HMAC key and forge checkpoints
+  # of that principal's runs.
+  describe "security regression: purpose-owned derive labels" do
+    test "security regression: another purpose cannot derive the engine checkpoint secret", ctx do
+      {:ok, activation} = open_authority(ctx, purpose: :platform_activation)
+
+      assert {:error, :purpose_mismatch} =
+               Security.derive_secret_with_authority(activation, :engine_checkpoint_hmac_v3)
+
+      assert {:error, :purpose_mismatch} =
+               Security.derive_secret_with_authority(activation, "engine_checkpoint_hmac_v3")
+    end
+
+    test "every pipeline-running purpose derives the same checkpoint secret", ctx do
+      # Coding recovery resumes checkpoints a coding executor wrote, so the
+      # secret must not depend on which of these purposes derives it.
+      secrets =
+        for purpose <- [
+              :session,
+              :heartbeat,
+              :coding_task_executor,
+              :coding_task_recovery,
+              :oidc_operator
+            ] do
+          {:ok, authority} = open_authority(ctx, purpose: purpose)
+
+          assert {:ok, secret} =
+                   Security.derive_secret_with_authority(authority, :engine_checkpoint_hmac_v3)
+
+          secret
+        end
+
+      assert [_one] = Enum.uniq(secrets)
+    end
+
+    test "labels no purpose owns stay derivable under any purpose", ctx do
+      {:ok, activation} = open_authority(ctx, purpose: :platform_activation)
+      assert {:ok, _} = Security.derive_secret_with_authority(activation, :capability_mac)
+    end
+  end
+
   describe "open_signing_authority/1 + sign_with_authority/2" do
     test "signs payload and verifies via SignedRequest path", ctx do
       assert {:ok, authority} = open_authority(ctx, purpose: :session)

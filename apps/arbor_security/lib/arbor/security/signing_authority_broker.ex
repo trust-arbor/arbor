@@ -286,6 +286,20 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   @derive_domain_prefix "arbor.signing_authority.v1/"
   @identity_endorsement_domain "arbor.identity.endorsement.v1"
   @identity_endorsement_purposes [:session, :heartbeat, :action_cycle]
+  # Derive labels owned by specific open-time purposes, keyed by derived domain
+  # (so the atom and string spellings are one label). The engine checkpoint key
+  # is derivable only by the purposes whose authorities run pipelines; coding
+  # recovery resumes what the coding executor wrote, so both derive it. Labels
+  # not listed here stay open to every purpose.
+  @purpose_owned_derive_domains %{
+    "arbor.signing_authority.v1/engine_checkpoint_hmac_v3" => [
+      :session,
+      :heartbeat,
+      :coding_task_executor,
+      :coding_task_recovery,
+      :oidc_operator
+    ]
+  }
   @max_identity_id_bytes 256
   @owner_table :arbor_security_signing_authority_broker_directory
   @acquisition_v1 "arbor.signing_authority.acquire.v1"
@@ -1524,6 +1538,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
            {:ok, info} <- derive_info(purpose),
            {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- require_derive_purpose(info, entry.purpose),
            {:ok, private_key} <- private_key_for(entry, authority.token, state) do
         safely_derive_secret(private_key, info)
       end
@@ -2850,6 +2865,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   defp require_platform_activation_purpose(:platform_activation), do: :ok
 
   defp require_platform_activation_purpose(_purpose), do: {:error, :purpose_mismatch}
+
+  defp require_derive_purpose(info, purpose) do
+    case Map.fetch(@purpose_owned_derive_domains, info) do
+      {:ok, purposes} -> if purpose in purposes, do: :ok, else: {:error, :purpose_mismatch}
+      :error -> :ok
+    end
+  end
 
   defp validate_resource_binding(payload) when is_binary(payload) do
     cond do
