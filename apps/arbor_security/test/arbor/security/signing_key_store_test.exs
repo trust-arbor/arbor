@@ -25,6 +25,71 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     :ok
   end
 
+  # Security regression: every principal's key was encrypted under one master
+  # key with no associated data, and reads never related the record to the id
+  # it was read under. A writer to the signing-key store who lacked the master
+  # key could copy one principal's record under another's id, and reads for the
+  # second principal returned the first principal's private key.
+  describe "security regression: a stored key is bound to the id it is stored under" do
+    setup do
+      n = :erlang.unique_integer([:positive])
+      victim = "agent_signing_key_transplant_victim_#{n}"
+      target = "agent_signing_key_transplant_target_#{n}"
+
+      on_exit(fn ->
+        SigningKeyStore.delete_fixture(victim)
+        SigningKeyStore.delete_fixture(target)
+      end)
+
+      {:ok, victim: victim, target: target}
+    end
+
+    test "security regression: a single-key record copied under another id does not decrypt", %{
+      victim: victim,
+      target: target
+    } do
+      {_pub, victim_key} = :crypto.generate_key(:eddsa, :ed25519)
+      {_pub, target_key} = :crypto.generate_key(:eddsa, :ed25519)
+      assert :ok = SigningKeyStore.put_fixture(victim, victim_key)
+      assert :ok = SigningKeyStore.put_fixture(target, target_key)
+
+      transplant!(victim, target)
+
+      assert {:error, _reason} = SigningKeyStore.get_for_test(target)
+      assert {:ok, ^victim_key} = SigningKeyStore.get_for_test(victim)
+    end
+
+    test "security regression: a keypair record copied under another id does not decrypt", %{
+      victim: victim,
+      target: target
+    } do
+      {_pub, victim_signing} = :crypto.generate_key(:eddsa, :ed25519)
+      {_pub, victim_encryption} = :crypto.generate_key(:ecdh, :x25519)
+      {_pub, target_signing} = :crypto.generate_key(:eddsa, :ed25519)
+
+      assert :ok =
+               SigningKeyStore.put_keypair_fixture(victim, victim_signing, victim_encryption)
+
+      assert :ok = SigningKeyStore.put_fixture(target, target_signing)
+
+      transplant!(victim, target)
+
+      assert {:error, _reason} = SigningKeyStore.get_keypair_for_test(target)
+      assert {:error, _reason} = SigningKeyStore.get_for_test(target)
+      assert {:ok, %{signing: ^victim_signing}} = SigningKeyStore.get_keypair_for_test(victim)
+    end
+  end
+
+  defp transplant!(from, to) do
+    assert {:ok, %Record{data: data}} =
+             AuthorityStore.authoritative_get(from, name: :arbor_security_signing_keys)
+
+    copied = %Record{id: to, key: to, data: data, metadata: %{}}
+
+    assert {:ok, _stored} =
+             AuthorityStore.acknowledged_put(to, copied, name: :arbor_security_signing_keys)
+  end
+
   describe "put/2 and get/1" do
     test "stores and retrieves a private key" do
       # Generate a fresh Ed25519 keypair

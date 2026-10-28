@@ -18,6 +18,12 @@ defmodule Arbor.Security.SigningKeyStore do
     authority_record: "arbor-authority-store-record-authentication-v1",
     capability_revocation_ledger: "arbor-capability-revocation-ledger-authentication-v1"
   }
+  # Records written with this marker carry the id they are stored under as
+  # associated data, so a record copied under another id fails to decrypt.
+  # Unmarked records predate the binding and are read unbound.
+  @record_binding_field "aad"
+  @record_binding_v1 "record_key_v1"
+  @record_binding_domain "arbor.signing_key_store.record.v1/"
 
   @doc """
   Store an agent's signing private key (encrypted at rest).
@@ -44,10 +50,11 @@ defmodule Arbor.Security.SigningKeyStore do
 
   defp do_put(agent_id, private_key) do
     with {:ok, enc_key} <- get_encryption_key() do
-      {ciphertext, iv, tag} = Crypto.encrypt(private_key, enc_key)
+      {ciphertext, iv, tag} = Crypto.encrypt(private_key, enc_key, record_aad(agent_id))
 
       data = %{
         "v" => 1,
+        @record_binding_field => @record_binding_v1,
         "ct" => Base.encode64(ciphertext),
         "iv" => Base.encode64(iv),
         "tag" => Base.encode64(tag)
@@ -115,17 +122,17 @@ defmodule Arbor.Security.SigningKeyStore do
       case data do
         %{"format" => "keypair", "v" => 2} ->
           # v2 keypair — extract the signing key
-          with {:ok, keypair} <- decrypt_keypair(data, enc_key) do
+          with {:ok, keypair} <- decrypt_keypair(data, enc_key, agent_id) do
             {:ok, keypair.signing}
           end
 
         %{"format" => "authority_bundle", "v" => 3} ->
-          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key, agent_id) do
             {:ok, identity.private_key}
           end
 
         _ ->
-          decrypt_single_key(data, enc_key)
+          decrypt_single_key(data, enc_key, agent_id)
       end
     else
       {:error, :not_found} -> {:error, :no_signing_key}
@@ -448,11 +455,12 @@ defmodule Arbor.Security.SigningKeyStore do
         Map.new(keypair_data, fn {k, v} -> {k, Base.encode64(v)} end)
 
       plaintext = Jason.encode!(encoded_data)
-      {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key)
+      {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key, record_aad(agent_id))
 
       data = %{
         "v" => 2,
         "format" => "keypair",
+        @record_binding_field => @record_binding_v1,
         "ct" => Base.encode64(ciphertext),
         "iv" => Base.encode64(iv),
         "tag" => Base.encode64(tag)
@@ -531,10 +539,16 @@ defmodule Arbor.Security.SigningKeyStore do
     with :ok <- validate_identity_keypairs(identity),
          {:ok, enc_key} <- get_encryption_key(),
          {:ok, encrypted} <-
-           encrypt_keypair(identity.private_key, identity.encryption_private_key, enc_key) do
+           encrypt_keypair(
+             identity.private_key,
+             identity.encryption_private_key,
+             enc_key,
+             record_aad(agent_id)
+           ) do
       data = %{
         "v" => 3,
         "format" => "authority_bundle",
+        @record_binding_field => @record_binding_v1,
         "ct" => encrypted.ct,
         "iv" => encrypted.iv,
         "tag" => encrypted.tag,
@@ -603,7 +617,7 @@ defmodule Arbor.Security.SigningKeyStore do
          {:ok, enc_key} <- get_read_only_encryption_key() do
       case unwrap_record(raw) do
         %{"format" => "authority_bundle", "v" => 3} = data ->
-          decrypt_authority_bundle(data, enc_key)
+          decrypt_authority_bundle(data, enc_key, agent_id)
 
         %{"format" => "keypair", "v" => 2} ->
           {:error, :legacy_keypair}
@@ -655,22 +669,22 @@ defmodule Arbor.Security.SigningKeyStore do
 
       case data do
         %{"format" => "keypair", "v" => 2} ->
-          decrypt_keypair(data, enc_key)
+          decrypt_keypair(data, enc_key, agent_id)
 
         %{"format" => "authority_bundle", "v" => 3} ->
-          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key, agent_id) do
             {:ok, %{signing: identity.private_key, encryption: identity.encryption_private_key}}
           end
 
         %{"v" => 1} ->
           # Legacy single signing key — decrypt and wrap
-          with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+          with {:ok, signing_key} <- decrypt_single_key(data, enc_key, agent_id) do
             {:ok, %{signing: signing_key}}
           end
 
         _ ->
           # Try legacy format
-          with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+          with {:ok, signing_key} <- decrypt_single_key(data, enc_key, agent_id) do
             {:ok, %{signing: signing_key}}
           end
       end
@@ -1052,22 +1066,36 @@ defmodule Arbor.Security.SigningKeyStore do
     Application.get_env(:arbor_security, :master_key_path, default)
   end
 
-  defp decrypt_single_key(data, enc_key) do
-    with {:ok, ciphertext} <- Base.decode64(data["ct"]),
+  defp record_aad(agent_id), do: @record_binding_domain <> agent_id
+
+  # A bound record decrypts only under the id it is read for. Unmarked records
+  # predate the binding; any other marker value is refused, not read unbound.
+  defp read_aad(data, agent_id) do
+    case Map.fetch(data, @record_binding_field) do
+      {:ok, @record_binding_v1} -> {:ok, record_aad(agent_id)}
+      :error -> {:ok, ""}
+      {:ok, _other} -> {:error, :invalid_key_record}
+    end
+  end
+
+  defp decrypt_single_key(data, enc_key, agent_id) do
+    with {:ok, aad} <- read_aad(data, agent_id),
+         {:ok, ciphertext} <- Base.decode64(data["ct"]),
          {:ok, iv} <- Base.decode64(data["iv"]),
          {:ok, tag} <- Base.decode64(data["tag"]) do
-      Crypto.decrypt(ciphertext, enc_key, iv, tag)
+      Crypto.decrypt(ciphertext, enc_key, iv, tag, aad)
     else
       :error -> {:error, :invalid_key_record}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp decrypt_keypair(data, enc_key) do
-    with {:ok, ciphertext} <- Base.decode64(data["ct"]),
+  defp decrypt_keypair(data, enc_key, agent_id) do
+    with {:ok, aad} <- read_aad(data, agent_id),
+         {:ok, ciphertext} <- Base.decode64(data["ct"]),
          {:ok, iv} <- Base.decode64(data["iv"]),
          {:ok, tag} <- Base.decode64(data["tag"]),
-         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag),
+         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag, aad),
          {:ok, keypair_map} <- Jason.decode(plaintext),
          {:ok, signing} <- Base.decode64(keypair_map["signing"]) do
       result = %{signing: signing}
@@ -1091,7 +1119,7 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
-  defp encrypt_keypair(signing_key, encryption_key, enc_key)
+  defp encrypt_keypair(signing_key, encryption_key, enc_key, aad)
        when is_binary(signing_key) and is_binary(encryption_key) do
     plaintext =
       Jason.encode!(%{
@@ -1099,7 +1127,7 @@ defmodule Arbor.Security.SigningKeyStore do
         "encryption" => Base.encode64(encryption_key)
       })
 
-    {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key)
+    {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key, aad)
 
     {:ok,
      %{
@@ -1113,13 +1141,15 @@ defmodule Arbor.Security.SigningKeyStore do
     _, _ -> {:error, :key_encryption_failed}
   end
 
-  defp encrypt_keypair(_signing_key, _encryption_key, _enc_key),
+  defp encrypt_keypair(_signing_key, _encryption_key, _enc_key, _aad),
     do: {:error, :invalid_key_material}
 
-  defp decrypt_authority_bundle(%{"public" => public} = data, enc_key)
+  defp decrypt_authority_bundle(%{"public" => public} = data, enc_key, agent_id)
        when is_map(public) do
     with true <-
-           exact_string_keys?(data, ["ct", "format", "iv", "public", "tag", "v"]),
+           exact_string_keys?(data, ["ct", "format", "iv", "public", "tag", "v"]) or
+             exact_string_keys?(data, ["aad", "ct", "format", "iv", "public", "tag", "v"]),
+         {:ok, aad} <- read_aad(data, agent_id),
          true <-
            exact_string_keys?(public, [
              "agent_id",
@@ -1129,7 +1159,7 @@ defmodule Arbor.Security.SigningKeyStore do
              "public_key"
            ]),
          {:ok, %{signing: signing, encryption: encryption}} <-
-           decrypt_required_keypair(data, enc_key),
+           decrypt_required_keypair(data, enc_key, aad),
          {:ok, public_key} <- decode_required_base64(public["public_key"]),
          {:ok, encryption_public_key} <-
            decode_required_base64(public["encryption_public_key"]),
@@ -1156,13 +1186,14 @@ defmodule Arbor.Security.SigningKeyStore do
     _, _ -> {:error, :invalid_authority_bundle}
   end
 
-  defp decrypt_authority_bundle(_data, _enc_key), do: {:error, :invalid_authority_bundle}
+  defp decrypt_authority_bundle(_data, _enc_key, _agent_id),
+    do: {:error, :invalid_authority_bundle}
 
-  defp decrypt_required_keypair(data, enc_key) do
+  defp decrypt_required_keypair(data, enc_key, aad) do
     with {:ok, ciphertext} <- decode_required_base64(data["ct"]),
          {:ok, iv} <- decode_required_base64(data["iv"]),
          {:ok, tag} <- decode_required_base64(data["tag"]),
-         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag),
+         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag, aad),
          {:ok, %{"signing" => signing_b64, "encryption" => encryption_b64} = keypair} <-
            Jason.decode(plaintext),
          true <- exact_string_keys?(keypair, ["encryption", "signing"]),
@@ -1228,7 +1259,7 @@ defmodule Arbor.Security.SigningKeyStore do
     try do
       with {:ok, raw} <- get_record(agent_id),
            {:ok, enc_key} <- get_read_only_encryption_key(),
-           :ok <- validate_signing_record(raw, enc_key) do
+           :ok <- validate_signing_record(raw, enc_key, agent_id) do
         {:ok, :available}
       else
         {:error, :not_found} -> {:error, :no_signing_key}
@@ -1244,20 +1275,20 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
-  defp validate_signing_record(raw, enc_key) do
+  defp validate_signing_record(raw, enc_key, agent_id) do
     case unwrap_record(raw) do
       %{"format" => "keypair", "v" => 2} = data ->
-        with {:ok, %{signing: signing_key}} <- decrypt_keypair(data, enc_key) do
+        with {:ok, %{signing: signing_key}} <- decrypt_keypair(data, enc_key, agent_id) do
           validate_signing_key(signing_key)
         end
 
       %{"format" => "authority_bundle", "v" => 3} = data ->
-        with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+        with {:ok, identity} <- decrypt_authority_bundle(data, enc_key, agent_id) do
           validate_signing_key(identity.private_key)
         end
 
       data ->
-        with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+        with {:ok, signing_key} <- decrypt_single_key(data, enc_key, agent_id) do
           validate_signing_key(signing_key)
         end
     end
