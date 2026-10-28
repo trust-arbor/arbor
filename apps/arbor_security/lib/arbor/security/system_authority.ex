@@ -840,6 +840,10 @@ defmodule Arbor.Security.SystemAuthority do
     # on disk. Idempotent: no-op if the legacy record never existed.
     cleanup_legacy_plaintext_record(supervisor_pid)
 
+    # Re-encrypt signing-key records written before ciphertext was bound to
+    # its storage id (one-time; idempotent, never fatal, never deletes).
+    rebind_unbound_signing_keys(supervisor_pid)
+
     case load_persisted_keypair(supervisor_pid) do
       {:ok, identity} ->
         Logger.info("[SystemAuthority] Loaded persistent keypair: #{identity.agent_id}")
@@ -3554,6 +3558,31 @@ defmodule Arbor.Security.SystemAuthority do
 
       _other ->
         :ok
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  # Skipped records stay readable in their old form; only ids are logged.
+  defp rebind_unbound_signing_keys(supervisor_pid) do
+    case SigningKeyStore.Owner.rebind_unbound_records_from_supervisor(supervisor_pid) do
+      {:ok, %{rebound: 0, skipped: []}} ->
+        :ok
+
+      {:ok, %{rebound: rebound, skipped: []}} ->
+        Logger.info("[SystemAuthority] Rebound #{rebound} signing-key record(s) to their ids.")
+
+      {:ok, %{rebound: rebound, skipped: skipped}} ->
+        Logger.warning(
+          "[SystemAuthority] Rebound #{rebound} signing-key record(s); left " <>
+            "#{length(skipped)} unbound: #{inspect(skipped)}"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "[SystemAuthority] Signing-key rebind did not run: #{inspect(reason)}. " <>
+            "Unbound records stay readable."
+        )
     end
   catch
     _, _ -> :ok
