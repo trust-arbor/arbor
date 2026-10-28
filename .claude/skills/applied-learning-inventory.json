@@ -5,10 +5,10 @@
   "source_captured_on": "2026-08-03",
   "admission_cutover": "2026-10-16",
   "archive_root": ".claude/applied-learning-archive",
-  "entry_count": 802,
+  "entry_count": 804,
   "always_loaded_count": 12,
   "original_entry_count": 461,
-  "post_migration_entry_count": 341,
+  "post_migration_entry_count": 343,
   "entries": [
     {
       "source_ordinal": 1,
@@ -10334,8 +10334,8 @@
       "source_session": "unknown",
       "source_incident": "found 2026-07-21 while proving historical branch-settlement set equality).",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
+      "last_confirmed": "2026-10-28",
+      "confirmed_by": "secreview-eval-2026-10-28 (recurred three times: set -- $pair, a command stored in $S and in $P)",
       "content_sha256": "722494a2c4369aee37d568a80f0058c98bdb5e30a3b512c69745cd7df8628f80",
       "always_loaded": false
     },
@@ -10927,9 +10927,9 @@
         "worker_provider_account_exhausted",
         "Arbor.Orchestrator.CodingPlan.OutcomeMapper"
       ],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "a773c367072174aa6cff38819c3d3ecd1cb313d2b5b39de0d831a1351c582c73",
+      "last_confirmed": "2026-10-26",
+      "confirmed_by": "secreview-eval-2026-10-26",
+      "content_sha256": "f218288d083d856a928541c7ea212bb833fb80971859a9dacafb94845915a324",
       "always_loaded": false,
       "revisit_when": null
     },
@@ -16535,6 +16535,46 @@
       "confirmed_by": null,
       "revisit_when": null,
       "content_sha256": "1878af543d48403ed7c23e656d9f81c150929cb36ed396c3ebd093b7c81656e3",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 808,
+      "source_kind": "post-migration",
+      "slug": "archive-a-failed-attempt-with-everything-later-measurements-read",
+      "title": "Archive a failed attempt with everything later measurements read.",
+      "topic": "testing-live-runtime",
+      "class": "tooling",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime-evidence.md",
+      "anchor": "applied-learning-archive-a-failed-attempt-with-everything-later-measurements-read",
+      "created": "2026-10-26",
+      "source_session": "claude:a1f978e1-f012-4d39-b7a0-3656828a45be",
+      "source_incident": "found 2026-10-26 when a secure-code-review eval rerun's session folder still held its failed attempt's session",
+      "scope": [],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "f5cd2cd0e5f9e310fa1c4cda81a6e0c198acf2e5affa3f6a3552df0eaafb54bb",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 809,
+      "source_kind": "post-migration",
+      "slug": "wait-on-the-process-you-started-not-on-a-status-a-failure-path-may-never-set",
+      "title": "Wait on the process you started, not on a status a failure path may never set.",
+      "topic": "testing-live-runtime",
+      "class": "tooling",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime-evidence.md",
+      "anchor": "applied-learning-wait-on-the-process-you-started-not-on-a-status-a-failure-path-may-never-set",
+      "created": "2026-10-27",
+      "source_session": "claude:a1f978e1-f012-4d39-b7a0-3656828a45be",
+      "source_incident": "found 2026-10-27 when a secure-code-review eval queue waited 18 hours on a manifest row an invalid claims file left running",
+      "scope": [],
+      "last_confirmed": null,
+      "confirmed_by": null,
+      "revisit_when": null,
+      "content_sha256": "b90b52540b03fd06cb196a6d54af39f08aed47202e4f8c814f06118957b321be",
       "always_loaded": false
     }
   ]
