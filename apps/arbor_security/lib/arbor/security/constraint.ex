@@ -45,7 +45,11 @@ defmodule Arbor.Security.Constraint do
           :ok | {:error, {:constraint_violated, :time_window, map()}}
   def evaluate_time_window(nil), do: :ok
 
-  def evaluate_time_window(%{start_hour: start_hour, end_hour: end_hour}) do
+  # Hours must be integers: under term order every integer sorts below every
+  # binary, so string hours made a midnight-wrapping window allow every hour.
+  def evaluate_time_window(%{start_hour: start_hour, end_hour: end_hour})
+      when is_integer(start_hour) and start_hour in 0..24 and is_integer(end_hour) and
+             end_hour in 0..24 do
     current_hour = DateTime.utc_now().hour
 
     in_window? =
@@ -63,6 +67,11 @@ defmodule Arbor.Security.Constraint do
        {:constraint_violated, :time_window,
         %{current_hour: current_hour, start_hour: start_hour, end_hour: end_hour}}}
     end
+  end
+
+  def evaluate_time_window(window) do
+    {:error,
+     {:constraint_violated, :time_window, %{reason: :invalid_time_window, window: window}}}
   end
 
   @doc false
