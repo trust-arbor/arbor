@@ -121,6 +121,77 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupported
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
 end
 
+defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.ReobserveStallingJSONFile do
+  @moduledoc false
+  # JSONFile double that stalls the first authoritative read of an armed key
+  # after a successful compare-and-create: the grant's CAS lands, then the
+  # audit boundary's re-read outlives the default GenServer.call timeout.
+  @behaviour Arbor.Contracts.Persistence.Store
+  @behaviour Arbor.Security.Store.BoundedInventory
+
+  alias Arbor.Security.Store.JSONFile
+
+  @armed_key {__MODULE__, :armed}
+  @stall_key {__MODULE__, :stall}
+  @stall_ms 5_500
+
+  def arm(key) when is_binary(key), do: :persistent_term.put(@armed_key, key)
+
+  def clear do
+    :persistent_term.erase(@armed_key)
+    :persistent_term.erase(@stall_key)
+  end
+
+  @impl true
+  def put(key, record, opts \\ []), do: JSONFile.put(key, record, opts)
+
+  @impl true
+  def get(key, opts \\ []), do: JSONFile.get(key, opts)
+
+  @impl true
+  def delete(key, opts \\ []), do: JSONFile.delete(key, opts)
+
+  @impl true
+  def list(opts \\ []), do: JSONFile.list(opts)
+
+  @impl Arbor.Security.Store.BoundedInventory
+  def bounded_list(limit, opts \\ []), do: JSONFile.bounded_list(limit, opts)
+
+  @impl true
+  def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
+
+  def authoritative_entry(key, opts) do
+    if :persistent_term.get(@stall_key, nil) == key do
+      :persistent_term.erase(@stall_key)
+      Process.sleep(@stall_ms)
+    end
+
+    JSONFile.authoritative_entry(key, opts)
+  end
+
+  @impl true
+  defdelegate durability_class(opts), to: JSONFile
+
+  def compare_and_create(key, expected, value, opts) do
+    result = JSONFile.compare_and_create(key, expected, value, opts)
+
+    if match?({:ok, _}, result) and :persistent_term.get(@armed_key, nil) == key do
+      :persistent_term.erase(@armed_key)
+      :persistent_term.put(@stall_key, key)
+    end
+
+    result
+  end
+
+  @impl true
+  def compare_and_swap(key, expected, value, opts),
+    do: JSONFile.compare_and_swap(key, expected, value, opts)
+
+  @impl true
+  def compare_and_delete(key, expected, opts),
+    do: JSONFile.compare_and_delete(key, expected, opts)
+end
+
 defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   use ExUnit.Case, async: false
 
@@ -136,6 +207,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupportedJSONFile
   alias Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJSONFile
+  alias Arbor.Security.CapabilityStorePersistenceRegressionTest.ReobserveStallingJSONFile
   alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Store.JSONFile
@@ -202,6 +274,32 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   end
 
   @tag :fast
+  @tag :slow
+  test "security regression: an applied grant whose re-read fails is outcome-unknown, not refused" do
+    principal_id = "agent_capability_store_reobserve_exit_regression"
+    resource_uri = "arbor://fs/read/capability-store-reobserve-exit-regression"
+    backend_dir = unique_tmp_dir("capability-store-reobserve-exit")
+    on_exit(&ReobserveStallingJSONFile.clear/0)
+
+    configure_isolated_json_store(backend_dir, ReobserveStallingJSONFile)
+
+    {:ok, cap} = Capability.new(resource_uri: resource_uri, principal_id: principal_id)
+    ReobserveStallingJSONFile.arm(cap.id)
+
+    # The store's own 5 s call to the authority owner times out on the
+    # post-CAS re-read; this caller waits longer so it sees the reported result.
+    result =
+      Arbor.Common.authenticated_call(
+        Process.whereis(CapabilityStore),
+        {:audited_mutation, Security.current_invocation_id(), {:put_fixture, cap}},
+        15_000
+      )
+
+    # The record is durably stored, so the grant must never be reported refused.
+    assert {:ok, %Record{}} = AuthorityStore.authoritative_get(cap.id, name: @capability_store)
+    assert result == {:error, :outcome_unknown}
+  end
+
   test "security regression: failed replacement compensates durable state" do
     principal_id = "agent_capability_store_compensation_regression"
     resource_uri = "arbor://fs/read/capability-store-compensation-regression"
