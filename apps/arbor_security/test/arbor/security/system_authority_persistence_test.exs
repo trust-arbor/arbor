@@ -203,6 +203,73 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     assert :not_found = SystemAuthority.load_persisted_keypair_for_test()
   end
 
+  # Records written before signing-key ciphertext was bound to its storage id
+  # stayed unbound, so they could still be copied under another principal's id.
+  # A persistent root boot now re-encrypts them bound, once, by compare-and-swap,
+  # and leaves alone any record whose key does not derive its agent_ id.
+  test "security regression: a persistent boot rebinds signing-key records written before the binding",
+       %{identity: identity} do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
+
+    {:ok, agent} = Identity.generate(name: "rebind-agent")
+    assert :ok = SigningKeyStore.put_fixture(agent.agent_id, agent.private_key)
+
+    {_pub, stray_key} = :crypto.generate_key(:eddsa, :ed25519)
+    stray_id = "agent_rebind_not_derived_#{System.unique_integer([:positive])}"
+    assert :ok = SigningKeyStore.put_fixture(stray_id, stray_key)
+
+    for id <- [@authority_signing_id, agent.agent_id, stray_id] do
+      assert :ok = SigningKeyStore.unbind_record_fixture(id)
+      refute bound_record?(id)
+    end
+
+    restart_system_authority!()
+
+    assert bound_record?(@authority_signing_id)
+    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair_for_test()
+    assert loaded.agent_id == identity.agent_id
+    assert loaded.private_key == identity.private_key
+
+    assert bound_record?(agent.agent_id)
+    assert {:ok, agent.private_key} == SigningKeyStore.get_for_test(agent.agent_id)
+
+    # Its key does not derive its id, so it may be a copy: left as it was.
+    refute bound_record?(stray_id)
+    assert {:ok, ^stray_key} = SigningKeyStore.get_for_test(stray_id)
+  end
+
+  test "security regression: the boot rebind uses compare-and-swap where the store has it and runs once",
+       %{identity: identity} do
+    # The in-memory store supports compare-and-swap; ControlledBackend does not.
+    stop_signing_store!()
+
+    start_signing_store_fixture!(
+      name: @store_name,
+      backend: nil,
+      namespace: "signing_keys",
+      hydration_limit: 100
+    )
+
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
+    {:ok, agent} = Identity.generate(name: "rebind-cas-agent")
+    assert :ok = SigningKeyStore.put_fixture(agent.agent_id, agent.private_key)
+
+    for id <- [@authority_signing_id, agent.agent_id],
+        do: assert(:ok = SigningKeyStore.unbind_record_fixture(id))
+
+    restart_system_authority!()
+    assert bound_record?(@authority_signing_id) and bound_record?(agent.agent_id)
+
+    # A second boot finds nothing to rebind and leaves the records readable.
+    restart_system_authority!()
+    assert bound_record?(@authority_signing_id) and bound_record?(agent.agent_id)
+    assert {:ok, loaded} = SystemAuthority.load_persisted_keypair_for_test()
+    assert loaded.private_key == identity.private_key
+    assert {:ok, agent.private_key} == SigningKeyStore.get_for_test(agent.agent_id)
+  end
+
   test "security regression: valid legacy v2 split records migrate only after full validation",
        %{identity: identity} do
     put_legacy_split!(identity, identity)
@@ -1098,6 +1165,11 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   end
 
   defp restart_signing_store!(table), do: replace_signing_store!(table)
+
+  defp bound_record?(id) do
+    {:ok, %Record{data: data}} = AuthorityStore.authoritative_get(id, name: @store_name)
+    Map.get(data, "aad") == "record_key_v1"
+  end
 
   defp stop_signing_store! do
     case Supervisor.terminate_child(Arbor.Security.Supervisor, @store_name) do

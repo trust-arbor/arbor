@@ -55,6 +55,10 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
   def delete_authority_record_from_supervisor(supervisor, key),
     do: direct_call(supervisor, {:delete_authority_record_from_supervisor, supervisor, key})
 
+  @doc false
+  def rebind_unbound_records_from_supervisor(supervisor),
+    do: direct_call(supervisor, {:rebind_unbound_records_from_supervisor, supervisor})
+
   def load_public_identity(agent_id, opts), do: call({:load_public_identity, agent_id, opts})
   def build_registration_proof(identity), do: call({:build_registration_proof, identity})
   def migrate_legacy_locator(locator, opts), do: call({:migrate_legacy_locator, locator, opts})
@@ -90,6 +94,8 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
 
   if Mix.env() == :test do
     def put_fixture(agent_id, private_key), do: call({:put_fixture, agent_id, private_key})
+
+    def unbind_record_fixture(agent_id), do: call({:unbind_record_fixture, agent_id})
 
     def put_keypair_fixture(agent_id, signing_key, encryption_key),
       do: call({:put_keypair_fixture, agent_id, signing_key, encryption_key})
@@ -233,6 +239,20 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
     case admit_startup_system_authority(caller, supervisor, state) do
       {:ok, state} ->
         {:reply, SigningKeyStore.delete_authority_record_from_owner(key, supervisor), state}
+
+      {:error, _reason} ->
+        {:reply, {:error, :key_mutation_unauthorized}, state}
+    end
+  end
+
+  defp handle_authenticated_call(
+         {:rebind_unbound_records_from_supervisor, supervisor},
+         caller,
+         state
+       ) do
+    case admit_startup_system_authority(caller, supervisor, state) do
+      {:ok, state} ->
+        {:reply, SigningKeyStore.rebind_unbound_records_from_owner(supervisor), state}
 
       {:error, _reason} ->
         {:reply, {:error, :key_mutation_unauthorized}, state}
@@ -383,6 +403,9 @@ defmodule Arbor.Security.SigningKeyStore.Owner do
   if Mix.env() == :test do
     defp handle_authenticated_call({:put_fixture, agent_id, private_key}, _caller, state),
       do: {:reply, SigningKeyStore.put_from_owner(agent_id, private_key), state}
+
+    defp handle_authenticated_call({:unbind_record_fixture, agent_id}, _caller, state),
+      do: {:reply, SigningKeyStore.unbind_record_from_owner(agent_id), state}
 
     defp handle_authenticated_call(
            {:put_keypair_fixture, agent_id, signing_key, encryption_key},

@@ -112,6 +112,21 @@ defmodule Arbor.Security.SigningKeyStore do
     @doc false
     def load_public_identity_fixture(agent_id, opts \\ []),
       do: Owner.load_public_identity_fixture(agent_id, opts)
+
+    @doc false
+    # Rewrite a record in the unbound form code before the id binding wrote.
+    def unbind_record_fixture(agent_id), do: Owner.unbind_record_fixture(agent_id)
+
+    @doc false
+    def unbind_record_from_owner(agent_id) do
+      with true <- owner_process?() || {:error, :key_mutation_unauthorized},
+           {:ok, %Record{data: data} = raw} <- get_record(agent_id),
+           {:ok, enc_key} <- get_read_only_encryption_key(),
+           {:ok, aad} <- read_aad(data, agent_id),
+           {:ok, unbound} <- reencrypt_record(data, enc_key, aad, :unbound) do
+        acknowledged_put(agent_id, Record.update(raw, unbound))
+      end
+    end
   end
 
   defp do_get(agent_id) do
@@ -534,6 +549,182 @@ defmodule Arbor.Security.SigningKeyStore do
 
   def delete_authority_record_from_owner(_key, _supervisor),
     do: {:error, :key_mutation_unauthorized}
+
+  @doc false
+  # One-time re-encryption of records written before ciphertext was bound to its
+  # storage id. Called through the Owner by the persistent SystemAuthority at
+  # boot; idempotent, so later boots find nothing to do. Nothing is deleted:
+  # each unbound record is rewritten by compare-and-swap with the same key
+  # material, read back, and restored if the bound copy does not read back the
+  # same key. A record whose key does not derive its agent_ id may be a copy
+  # made under the wrong id, so it is left as it was and reported.
+  def rebind_unbound_records_from_owner(supervisor) when is_pid(supervisor) do
+    if Owner.owner_process_from_supervisor?(supervisor),
+      do: do_rebind_unbound_records({:supervisor, supervisor}),
+      else: {:error, :key_mutation_unauthorized}
+  end
+
+  def rebind_unbound_records_from_owner(_supervisor), do: {:error, :key_mutation_unauthorized}
+
+  defp do_rebind_unbound_records(store_context) do
+    with {:ok, keys} <- list_record_keys(store_context) do
+      initial = %{rebound: 0, already_bound: 0, skipped: []}
+
+      report =
+        case keys do
+          [] ->
+            initial
+
+          keys ->
+            case get_read_only_encryption_key() do
+              {:ok, enc_key} ->
+                Enum.reduce(keys, initial, &tally_rebind(&1, enc_key, store_context, &2))
+
+              {:error, reason} ->
+                %{initial | skipped: [{:all, reason}]}
+            end
+        end
+
+      {:ok, %{report | skipped: Enum.reverse(report.skipped)}}
+    end
+  end
+
+  defp tally_rebind(key, enc_key, store_context, report) do
+    case rebind_record(key, enc_key, store_context) do
+      :rebound -> %{report | rebound: report.rebound + 1}
+      :already_bound -> %{report | already_bound: report.already_bound + 1}
+      :not_key_record -> report
+      {:skipped, reason} -> %{report | skipped: [{key, reason} | report.skipped]}
+    end
+  end
+
+  defp rebind_record(key, enc_key, store_context) do
+    with {:ok, %Record{data: data} = before} <- get_record(key, store_context),
+         :unbound <- binding_state(data),
+         {:ok, signing_key} <- read_signing_key(data, enc_key, key),
+         :ok <- verify_key_id(key, signing_key),
+         {:ok, bound} <- reencrypt_record(data, enc_key, "", {:bound, key}),
+         :ok <- write_record(key, before, bound, store_context) do
+      verify_rebound(key, enc_key, signing_key, before, store_context)
+    else
+      :bound -> :already_bound
+      :not_key_record -> :not_key_record
+      {:error, reason} -> {:skipped, reason}
+    end
+  end
+
+  defp binding_state(%{"ct" => ct, "iv" => iv, "tag" => tag} = data)
+       when is_binary(ct) and is_binary(iv) and is_binary(tag) do
+    case Map.fetch(data, @record_binding_field) do
+      :error -> :unbound
+      {:ok, @record_binding_v1} -> :bound
+      {:ok, _other} -> {:error, :unknown_binding}
+    end
+  end
+
+  defp binding_state(_data), do: :not_key_record
+
+  defp read_signing_key(data, enc_key, key) do
+    case data do
+      %{"format" => "keypair", "v" => 2} ->
+        with {:ok, %{signing: signing}} <- decrypt_keypair(data, enc_key, key), do: {:ok, signing}
+
+      %{"format" => "authority_bundle", "v" => 3} ->
+        with {:ok, identity} <- decrypt_authority_bundle(data, enc_key, key),
+             do: {:ok, identity.private_key}
+
+      %{"format" => _unknown} ->
+        {:error, :unknown_format}
+
+      _single_key ->
+        decrypt_single_key(data, enc_key, key)
+    end
+  end
+
+  # agent_ ids are self-certifying, so a key that does not derive its id is not
+  # rebound. Other ids (human_, system_authority) are not derived from the key;
+  # the authority bundle checks its own public fields when it is read.
+  defp verify_key_id("agent_" <> _rest = key, signing_key) do
+    with :ok <- validate_signing_key(signing_key),
+         {:ok, public_key} <- signing_public_key(signing_key) do
+      if Crypto.derive_agent_id(public_key) == key,
+        do: :ok,
+        else: {:error, :key_does_not_derive_id}
+    end
+  end
+
+  defp verify_key_id(_key, signing_key), do: validate_signing_key(signing_key)
+
+  defp signing_public_key(<<seed::binary-size(32)>>) do
+    {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519, seed)
+    {:ok, public_key}
+  rescue
+    _ -> {:error, :invalid_key_material}
+  end
+
+  defp signing_public_key(<<_seed::binary-size(32), public_key::binary-size(32)>>),
+    do: {:ok, public_key}
+
+  defp signing_public_key(_signing_key), do: {:error, :invalid_key_material}
+
+  defp verify_rebound(key, enc_key, signing_key, before, store_context) do
+    with {:ok, %Record{data: data}} <- get_record(key, store_context),
+         {:ok, ^signing_key} <- read_signing_key(data, enc_key, key) do
+      :rebound
+    else
+      _ ->
+        with {:ok, %Record{} = current} <- get_record(key, store_context),
+             do: write_record(key, current, before.data, store_context)
+
+        {:skipped, :rebind_verification_failed}
+    end
+  end
+
+  # Compare-and-swap where the backend supports it; otherwise the store's
+  # ordinary acknowledged write, as every other signing-key write uses.
+  defp write_record(key, %Record{} = current, data, store_context) do
+    case swap_record(key, current, data, store_context) do
+      {:ok, _stored} -> :ok
+      {:error, :unsupported} -> acknowledged_put(key, Record.update(current, data), store_context)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp swap_record(key, %Record{} = current, data, store_context) do
+    replacement = %{Record.update(current, data) | revision: current.revision + 1}
+
+    result =
+      case store_context do
+        :application ->
+          AuthorityStore.acknowledged_compare_and_swap(key, {:value, current}, replacement,
+            name: @store_name
+          )
+
+        {:supervisor, supervisor} ->
+          AuthorityStore.acknowledged_compare_and_swap_from_supervisor(
+            supervisor,
+            key,
+            {:value, current},
+            replacement,
+            name: @store_name
+          )
+      end
+
+    case result do
+      {:ok, %Record{} = stored} -> {:ok, stored}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :outcome_unknown}
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    _, _ -> {:error, :outcome_unknown}
+  end
+
+  defp list_record_keys(:application), do: AuthorityStore.authoritative_list(name: @store_name)
+
+  defp list_record_keys({:supervisor, supervisor}),
+    do: AuthorityStore.authoritative_list_from_supervisor(supervisor, name: @store_name)
 
   defp do_put_authority_bundle(agent_id, identity, store_context) do
     with :ok <- validate_identity_keypairs(identity),
@@ -1075,6 +1266,34 @@ defmodule Arbor.Security.SigningKeyStore do
       {:ok, @record_binding_v1} -> {:ok, record_aad(agent_id)}
       :error -> {:ok, ""}
       {:ok, _other} -> {:error, :invalid_key_record}
+    end
+  end
+
+  # Re-encrypt a record's ciphertext under another AAD without touching its
+  # plaintext or format fields: {:bound, id} binds it to id and marks it,
+  # :unbound writes the form records had before the binding.
+  defp reencrypt_record(data, enc_key, from_aad, target) do
+    with {:ok, ciphertext} <- decode_required_base64(data["ct"]),
+         {:ok, iv} <- decode_required_base64(data["iv"]),
+         {:ok, tag} <- decode_required_base64(data["tag"]),
+         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag, from_aad) do
+      to_aad = if target == :unbound, do: "", else: record_aad(elem(target, 1))
+      {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key, to_aad)
+
+      data =
+        Map.merge(data, %{
+          "ct" => Base.encode64(ciphertext),
+          "iv" => Base.encode64(iv),
+          "tag" => Base.encode64(tag)
+        })
+
+      {:ok,
+       if(target == :unbound,
+         do: Map.delete(data, @record_binding_field),
+         else: Map.put(data, @record_binding_field, @record_binding_v1)
+       )}
+    else
+      _ -> {:error, :invalid_key_record}
     end
   end
 

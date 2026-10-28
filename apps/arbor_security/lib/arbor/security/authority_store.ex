@@ -100,6 +100,10 @@ defmodule Arbor.Security.AuthorityStore do
     do: startup_authoritative_call(supervisor, opts, {:authoritative_entry, key})
 
   @doc false
+  def authoritative_list_from_supervisor(supervisor, opts),
+    do: startup_authoritative_call(supervisor, opts, {:authoritative_list, nil})
+
+  @doc false
   def take_hydrated_entries_from_supervisor(supervisor, opts),
     do: startup_authoritative_call(supervisor, opts, :take_hydrated_entries)
 
