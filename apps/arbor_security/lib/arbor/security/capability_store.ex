@@ -1670,19 +1670,14 @@ defmodule Arbor.Security.CapabilityStore do
     requested_ids = Map.get(state.by_principal, principal_id, [])
     {cap_ids, failed} = delete_capability_ids(requested_ids)
     count = length(cap_ids)
-    revoked_caps = Enum.map(cap_ids, &Map.get(state.by_id, &1))
 
-    state =
-      Enum.reduce(revoked_caps, state, fn
-        %Capability{} = cap, acc -> deindex_resource(acc, cap)
-        _nil_cap, acc -> acc
-      end)
-
+    # The shared helper clears every index (by_issuer, by_parent and by_usage
+    # included), as single and cascade revocation do. Stale parent entries made
+    # a later cascade revisit revoked children; stale usage counts carried over
+    # to a capability stored again under the same id.
     state =
       state
-      |> update_in([:by_id], fn by_id ->
-        Enum.reduce(cap_ids, by_id, &Map.delete(&2, &1))
-      end)
+      |> revoke_capability_ids(cap_ids)
       |> put_in([:by_principal, principal_id], requested_ids -- cap_ids)
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
