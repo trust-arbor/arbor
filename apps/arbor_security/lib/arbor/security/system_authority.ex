@@ -3261,6 +3261,21 @@ defmodule Arbor.Security.SystemAuthority do
   # silently regenerating the trust root.
   @doc false
   def load_persisted_keypair do
+    case own_key_store_status() do
+      :absent -> :not_found
+      :not_running -> {:error, :store_unavailable}
+      {:running, _pid} -> load_persisted_keypair_from_store()
+    end
+  end
+
+  defp own_key_store_status do
+    case startup_supervisor_pid() do
+      {:ok, supervisor_pid} -> SupervisedOwner.child_status(supervisor_pid, @key_store_name)
+      {:error, _reason} -> :not_running
+    end
+  end
+
+  defp load_persisted_keypair_from_store do
     if SigningKeyStore.available?() do
       case SigningKeyStore.get_authority_bundle(@authority_signing_id) do
         {:ok, identity} ->
@@ -3276,14 +3291,27 @@ defmodule Arbor.Security.SystemAuthority do
           {:error, reason}
       end
     else
-      :not_found
+      # The tree has the store, so a vanished process is unavailable, not absent.
+      {:error, :store_unavailable}
     end
   catch
     _, _reason ->
       {:error, :store_unavailable}
   end
 
+  # The key store missing from the tree (activation_only) is a first boot. A
+  # key store the tree has but that is not running is unavailable: reading it
+  # as "no persisted root" would adopt a fresh in-memory root over the real one,
+  # the silent rotation P0-5 forbids.
   defp load_persisted_keypair(supervisor_pid) when is_pid(supervisor_pid) do
+    case SupervisedOwner.child_status(supervisor_pid, @key_store_name) do
+      :absent -> :not_found
+      :not_running -> {:error, :store_unavailable}
+      {:running, _pid} -> load_persisted_keypair_from_supervisor(supervisor_pid)
+    end
+  end
+
+  defp load_persisted_keypair_from_supervisor(supervisor_pid) do
     if SupervisedOwner.child_pid(supervisor_pid, @key_store_name) do
       case SigningKeyStore.Owner.get_authority_bundle_from_supervisor(
              supervisor_pid,
@@ -3302,7 +3330,8 @@ defmodule Arbor.Security.SystemAuthority do
           {:error, reason}
       end
     else
-      :not_found
+      # The tree has the store, so a vanished process is unavailable, not absent.
+      {:error, :store_unavailable}
     end
   catch
     _, _reason -> {:error, :store_unavailable}
