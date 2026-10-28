@@ -30,8 +30,10 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   A capability the authority store cannot represent (its serialized form is
   the only stored form) is refused as `{:error, :invalid_capability_record}`
   before the journal is consulted; it is not a journal outage. An unexpected
-  exception inside the grant boundary is still refused as
-  `:audit_unavailable`, but its exception module is logged.
+  exception inside the grant boundary before the effect attempt is still
+  refused as `:audit_unavailable`, but its exception module is logged. After
+  the effect attempt nothing escapes to that boundary: an unreadable outcome is
+  `:outcome_unknown`, never a refusal.
   """
 
   require Logger
@@ -312,14 +314,22 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   defp effect(:revoke, key, before, _after_entry),
     do: AuthorityStore.acknowledged_compare_and_delete(key, before, name: @store)
 
+  # Runs after the effect attempt, so nothing here may raise or exit to put/2's
+  # boundary: that boundary reports :audit_unavailable (a refusal) and would
+  # disguise a grant the store may already hold. An unreadable outcome is
+  # :outcome_unknown; a journal failure on a known effect degrades its audit.
   defp reobserve(operation, intent, audit) do
-    case entry(intent["authority_key"]) do
+    case safely(fn -> entry(intent["authority_key"]) end, {:error, :outcome_unknown}) do
       {:ok, current} ->
         observation = Core.observation(intent, current)
 
         recorded =
           if audit == :tracked,
-            do: record_observation(intent, observation),
+            do:
+              safely(
+                fn -> record_observation(intent, observation) end,
+                {:error, :audit_unavailable}
+              ),
             else: {:error, :audit_unavailable}
 
         finish(operation, intent["operation_id"], current, observation, recorded)
@@ -376,6 +386,15 @@ defmodule Arbor.Security.CapabilityMutationAudit do
   defp rate_limited_warning?(_count), do: false
 
   defp entry(key), do: AuthorityStore.authoritative_entry(key, name: @store)
+
+  defp safely(fun, fallback) do
+    fun.()
+  rescue
+    _ -> fallback
+  catch
+    _, _ -> fallback
+  end
+
   defp admit_put(:create, %Record{}), do: {:error, :conflict}
   defp admit_put(_mode, _entry), do: :ok
   defp admit_delete(:current, _entry), do: :ok
