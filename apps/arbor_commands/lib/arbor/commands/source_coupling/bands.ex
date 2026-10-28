@@ -29,7 +29,12 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
     "arbor_cartographer" => "P",
     "arbor_llm" => "P",
     "arbor_security" => "P",
+    # Persistence adoption retains the family P band; reviewed successor scope:
+    # docs/arbor/PLATFORM_INVENTORY_V2.md.
     "arbor_persistence" => "P",
+    "arbor_persistence_sql" => "P",
+    "arbor_persistence_eventstore" => "P",
+    "arbor_persistence_host" => "P",
     "arbor_persistence_ecto" => "P",
     "arbor_shell" => "P",
     "arbor_sandbox" => "P",

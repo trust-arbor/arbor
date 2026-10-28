@@ -408,9 +408,11 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
         %{
           "turn" => 10,
           "name" => "file_read",
-          "args" => %{"path" => "apps/arbor_persistence/lib/arbor/persistence/buffered_store.ex"},
+          "args" => %{
+            "path" => "packages/arbor_persistence/lib/arbor/persistence/buffered_store.ex"
+          },
           "result" =>
-            "apps/arbor_persistence/lib/arbor/persistence/buffered_store.ex\n" <>
+            "packages/arbor_persistence/lib/arbor/persistence/buffered_store.ex\n" <>
               "defmodule Arbor.Persistence.BufferedStore do\n" <>
               "  use GenServer\n" <>
               "  @moduledoc \"ETS cache + pluggable backend persistence.\"\n\n" <>

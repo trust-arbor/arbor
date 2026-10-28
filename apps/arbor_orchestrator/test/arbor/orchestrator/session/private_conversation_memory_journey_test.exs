@@ -22,7 +22,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   @moduletag :database
   @moduletag :isolated_repo
   @real_turn_dot Path.expand("../../../../specs/pipelines/session/turn.dot", __DIR__)
-  @migrations Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
   @sentinel "the observatory passphrase is VIOLET-QUARTZ-731"
 
   defmodule CaptureProvider do
@@ -118,8 +118,8 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     set_env(:arbor_trust, :approval_guard_enabled, false)
     set_env(:arbor_memory, :private_memory_security, Security)
     set_env(:arbor_memory, :strict_vector_seam, Arbor.Memory.StrictVectorSeam.Default)
-    set_env(:arbor_persistence, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto)
-    set_env(:arbor_persistence, :vector_store_repo, Repo)
+    set_env(:arbor_persistence_host, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto)
+    set_env(:arbor_persistence_host, :vector_store_repo, Repo)
     set_env(:arbor_orchestrator, :_private_memory_journey_observer, self())
     set_env(:arbor_orchestrator, :preprocessor_enabled, false)
     snapshot_fixture = SnapshotFixture.start!()

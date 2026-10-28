@@ -67,7 +67,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   # Byte-level anchors: ExUnit numbered failure, Mix compilation banner, or
   # uncaught BEAM/Mix exception heading. Erlang :re is PCRE in byte mode.
   @diagnostic_anchor_pattern ~r/  [0-9]+\) [^\n]+\([A-Z][A-Za-z0-9_.]*\)|== Compilation error|\*\* \([A-Z][A-Za-z0-9_.]*\)/
-  @schema_project_mix_file "apps/arbor_persistence/mix.exs"
+  @schema_project_mix_file "apps/arbor_persistence_host/mix.exs"
   @schema_bootstrap_repo "Arbor.Persistence.Repo"
   @schema_bootstrap_tasks ["ecto.create", "ecto.migrate"]
   @schema_bootstrap_args ["-r", @schema_bootstrap_repo, "--quiet"]

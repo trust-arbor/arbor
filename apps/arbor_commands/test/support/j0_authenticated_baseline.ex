@@ -57,7 +57,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
     {:arbor_memory, :embedding_service_enabled},
     {:arbor_ai, :session_turn_dot},
     {:arbor_agent, :orchestrator_session_module},
-    {:arbor_persistence, Arbor.Persistence.Repo}
+    {:arbor_persistence_host, Arbor.Persistence.Repo}
   ]
 
   def preference, do: @preference
@@ -603,7 +603,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
       :arbor_kernel_runtime,
       :arbor_security,
       :arbor_trust,
-      :arbor_persistence,
+      :arbor_persistence_host,
       :arbor_memory,
       :arbor_comms,
       :arbor_llm,

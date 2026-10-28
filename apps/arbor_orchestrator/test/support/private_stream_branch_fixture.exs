@@ -76,7 +76,7 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
       assert Enum.any?(Application.started_applications(), &(elem(&1, 0) == :db_connection))
       start!(Repo, {Repo, database_options(Path.join(root, "conversation.sqlite3"))})
       start!(AuditRepo, {AuditRepo, database_options(Path.join(root, "audit.sqlite3"))})
-      migrations = Path.expand("../../../arbor_persistence/priv/repo/migrations", __DIR__)
+      migrations = Path.expand("../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
       Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
       Ecto.Migrator.run(AuditRepo, migrations, :up, all: true, log: false)
 
@@ -507,9 +507,9 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
     settings = [
       # These child options select fixture-owned genuine collaborators; the
       # full profile, mandatory PolicyHost and all security gates remain on.
-      {:arbor_persistence, :start_children, false},
-      {:arbor_persistence, :start_repo, false},
-      {:arbor_persistence, :sql_repository, Repo},
+      {:arbor_persistence_host, :start_children, false},
+      {:arbor_persistence_host, :start_repo, false},
+      {:arbor_persistence_host, :sql_repository, Repo},
       {:arbor_agent, :start_children, false},
       {:arbor_memory, :start_children, false},
       {:arbor_trust, :start_children, false},

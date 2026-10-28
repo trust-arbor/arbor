@@ -1,0 +1,36 @@
+{
+  "sqlite": [
+    "test/arbor/persistence/database_case_test.exs",
+    "test/arbor/persistence/event_log/durability_test.exs",
+    "test/arbor/persistence/event_log/ecto_purge_security_regression_test.exs",
+    "test/arbor/persistence/event_log/ecto_retry_test.exs",
+    "test/arbor/persistence/event_log/ecto_sqlite_concurrent_append_test.exs",
+    "test/arbor/persistence/event_log/ecto_stream_absence_test.exs",
+    "test/arbor/persistence/event_log/ecto_test.exs",
+    "test/arbor/persistence/event_log_public_boundary_security_regression_test.exs",
+    "test/arbor/persistence/event_log_timestamp_parent_regression_test.exs",
+    "test/arbor/persistence/event_record_read_database_test.exs",
+    "test/arbor/persistence/queryable_store/postgres_test.exs",
+    "test/arbor/persistence/queryable_store/sqlite_json_regression_test.exs",
+    "test/arbor/persistence/records_generation_migration_test.exs",
+    "test/arbor/persistence/store/cas_fencing_test.exs"
+  ],
+  "postgres": [
+    "test/arbor/persistence/database_case_test.exs",
+    "test/arbor/persistence/event_log/durability_test.exs",
+    "test/arbor/persistence/event_log/ecto_concurrent_append_test.exs",
+    "test/arbor/persistence/event_log/ecto_protocol_migration_security_regression_test.exs",
+    "test/arbor/persistence/event_log/ecto_purge_security_regression_test.exs",
+    "test/arbor/persistence/event_log/ecto_retry_test.exs",
+    "test/arbor/persistence/event_log/ecto_stream_absence_test.exs",
+    "test/arbor/persistence/event_log/ecto_test.exs",
+    "test/arbor/persistence/event_log/postgres_repair_test.exs",
+    "test/arbor/persistence/event_log_public_boundary_security_regression_test.exs",
+    "test/arbor/persistence/event_log_timestamp_parent_regression_test.exs",
+    "test/arbor/persistence/event_record_read_database_test.exs",
+    "test/arbor/persistence/queryable_store/postgres_concurrent_cas_test.exs",
+    "test/arbor/persistence/queryable_store/postgres_test.exs",
+    "test/arbor/persistence/records_generation_migration_test.exs",
+    "test/arbor/persistence/store/cas_fencing_test.exs"
+  ]
+}

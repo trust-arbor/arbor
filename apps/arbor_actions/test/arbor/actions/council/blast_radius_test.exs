@@ -16,7 +16,7 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine/checkpoint.ex",
         "apps/arbor_agent/priv/templates/coding_agent.md",
-        "apps/arbor_persistence/priv/repo/migrations/20260707000000_add_eval_runs.exs"
+        "apps/arbor_persistence_host/priv/repo/migrations/20260707000000_add_eval_runs.exs"
       ]
 
       for path <- high_risk_paths do

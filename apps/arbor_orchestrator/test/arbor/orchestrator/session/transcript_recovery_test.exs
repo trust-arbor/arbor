@@ -16,7 +16,10 @@ defmodule Arbor.Orchestrator.Session.TranscriptRecoveryTest do
   @moduletag :database
   @moduletag :sqlite
   @moduletag :integration
-  @migrations_path Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations_path Path.expand(
+                     "../../../../../arbor_persistence_host/priv/repo/migrations",
+                     __DIR__
+                   )
 
   if Repo.__adapter__() != Ecto.Adapters.SQLite3 do
     @moduletag skip: "requires the compiled SQLite Repo adapter"

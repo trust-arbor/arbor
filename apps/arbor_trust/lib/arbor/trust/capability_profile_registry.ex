@@ -162,7 +162,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "voice"}), do: :arbor_voice
   defp owner_for_parsed(%CapabilityUri{domain: "shell"}), do: :arbor_shell
   defp owner_for_parsed(%CapabilityUri{domain: "historian"}), do: :arbor_historian
-  defp owner_for_parsed(%CapabilityUri{domain: "persistence"}), do: :arbor_persistence
+  defp owner_for_parsed(%CapabilityUri{domain: "persistence"}), do: :arbor_persistence_host
   defp owner_for_parsed(%CapabilityUri{domain: "sandbox"}), do: :arbor_sandbox
   defp owner_for_parsed(%CapabilityUri{domain: "agent"}), do: :arbor_agent
   defp owner_for_parsed(%CapabilityUri{domain: "chat"}), do: :arbor_gateway

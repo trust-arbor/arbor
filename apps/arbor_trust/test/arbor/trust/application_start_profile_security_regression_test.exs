@@ -134,7 +134,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     assert Arbor.Trust.healthy?()
 
     started = Application.started_applications() |> Enum.map(&elem(&1, 0))
-    assert :arbor_persistence in started
+    assert :arbor_persistence_host in started
     assert :phoenix_pubsub in started
   end
 
@@ -351,7 +351,10 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     Enum.each(
       [
+        :arbor_persistence_host,
         :arbor_persistence,
+        :arbor_persistence_sql,
+        :arbor_persistence_eventstore,
         :phoenix_pubsub,
         :ecto,
         :ecto_sql,

@@ -180,7 +180,7 @@ finally:
         "apps/arbor_comms/test/support/conversation_journal_sqlite.exs",
         "apps/arbor_comms/test/support/conversation_journal_worker.exs",
         "apps/arbor_comms/test/support/conversation_journal_qualify.py",
-        "apps/arbor_persistence/lib/arbor/persistence.ex",
+        "apps/arbor_persistence_host/lib/arbor/persistence.ex",
     ]
     hashes = {path: hashlib.sha256((WORKSPACE / path).read_bytes()).hexdigest() for path in sources}
     report = {"passed": failure is None and closed, "failure": failure, "checks": checks,

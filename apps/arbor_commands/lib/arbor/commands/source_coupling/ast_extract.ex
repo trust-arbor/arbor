@@ -1048,7 +1048,9 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   end
 
   defp emit_attr_module_leaves(fields, state, line) when is_map(fields) do
-    Enum.reduce(fields, state, fn
+    # These are symbolic field tables, including literal __struct__ export keys.
+    # Enumerate raw pairs so Enumerable cannot misclassify them as runtime structs.
+    Enum.reduce(Map.to_list(fields), state, fn
       {_key, {:module, mod}}, st ->
         add_ref(st, line, mod, "attribute")
 

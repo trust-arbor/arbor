@@ -48,11 +48,15 @@ defmodule Arbor.Trust.MixProject do
 
   defp deps do
     [
+      {:arbor_persistence,
+       path: "../../packages/arbor_persistence", env: Mix.env(), runtime: false},
+      {:arbor_persistence_sql,
+       path: "../../packages/arbor_persistence_sql", env: Mix.env(), runtime: false},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       # Umbrella dependencies
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true, runtime: false},
+      {:arbor_persistence_host, in_umbrella: true, runtime: false},
 
       # Core dependencies
       {:telemetry, "~> 1.0"},

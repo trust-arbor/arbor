@@ -5,7 +5,8 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   Enumerates stage-0 tracked paths and reads exact blob bytes via
   argv-safe `git cat-file --batch` (OIDs on stdin). The E0A selected-source
   API admits only production Elixir sources at
-  `apps/<selected_app>/lib/<one-or-more-segments>.ex`.
+  `apps/<selected_app>/lib/<one-or-more-segments>.ex` or the same
+  production layout under `packages/`.
   """
 
   @oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
@@ -227,7 +228,8 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @doc """
   Load selected-app production Elixir source blobs from the full index.
 
-  Selection is exactly `apps/<selected_app>/lib/<one-or-more-segments>.ex`.
+  Selection is exactly `apps/<selected_app>/lib/<one-or-more-segments>.ex` or the same
+  production layout under `packages/`.
   Tracked app metadata, configuration, `priv`, tests, `.exs` files, unselected
   apps, and `apps/arbor_integrations` are ignored before selected-entry
   mode/stage/OID admission, just like every other unrelated path. A malformed

@@ -153,7 +153,7 @@ config :arbor_kernel,
 config :arbor_kernel_runtime,
   boot_profile_clock_mfa: {Arbor.KernelRuntime.BootProfileBinding.Testing, :now, []}
 
-config :arbor_persistence, start_children: false
+config :arbor_persistence_host, start_children: false
 config :arbor_ai, start_children: false
 
 # Default LLM provider and model for :llm tagged tests.
@@ -265,10 +265,10 @@ if System.get_env("ARBOR_DB") == "postgres" do
     engine: Oban.Engines.Basic,
     notifier: Oban.Notifiers.Postgres
 
-  config :arbor_persistence,
+  config :arbor_persistence_host,
     repo_adapter: Ecto.Adapters.Postgres
 
-  config :arbor_persistence, Arbor.Persistence.Repo,
+  config :arbor_persistence_host, Arbor.Persistence.Repo,
     database: "arbor_persistence_test",
     username: "arbor_dev",
     hostname: "localhost",
@@ -279,10 +279,10 @@ else
     engine: Oban.Engines.Lite,
     notifier: Oban.Notifiers.PG
 
-  config :arbor_persistence,
+  config :arbor_persistence_host,
     repo_adapter: Ecto.Adapters.SQLite3
 
-  config :arbor_persistence, Arbor.Persistence.Repo,
+  config :arbor_persistence_host, Arbor.Persistence.Repo,
     database:
       (case System.get_env("ARBOR_SQLITE_PATH") do
          path when is_binary(path) and path != "" -> Path.expand(path)
@@ -309,7 +309,7 @@ config :arbor_memory,
 # pgvector tests (requires postgres + pgvector extension). Keep the vector
 # store fail-closed in the hermetic suite so Index start rehydration does not
 # touch the shared test database. Dual/pgvector files configure Ecto locally.
-config :arbor_persistence,
+config :arbor_persistence_host,
   embedding_dimension: 768,
   vector_store_backend: Arbor.Persistence.VectorStore.Unsupported
 
@@ -351,3 +351,11 @@ config :arbor_scheduler, Oban,
   testing: :manual,
   queues: false,
   plugins: false
+
+# SQL package compile-time state follows the selected host Repo adapter.
+config :arbor_persistence_sql,
+       :repo_adapter,
+       if(System.get_env("ARBOR_DB") == "postgres",
+         do: Ecto.Adapters.Postgres,
+         else: Ecto.Adapters.SQLite3
+       )

@@ -9,12 +9,14 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
   filesystem or process access.
   """
 
-  @scan_manifest_domain "arbor.packaging.platform_inventory.scan_manifest.v1\0"
-  @entries_domain "arbor.packaging.platform_inventory.entries.v1\0"
-  @review_domain "arbor.packaging.platform_inventory.review.v1\0"
-  @comparison_domain "arbor.packaging.platform_inventory.comparison.v1\0"
-  @comparison_failures_domain "arbor.packaging.platform_inventory.comparison.failures.v1\0"
-  @report_schema "arbor.packaging.platform_inventory.v1"
+  alias Arbor.Commands.PlatformInventory.Scope
+
+  @scan_manifest_domain "arbor.packaging.platform_inventory.scan_manifest.v2\0"
+  @entries_domain "arbor.packaging.platform_inventory.entries.v2\0"
+  @review_domain "arbor.packaging.platform_inventory.review.v2\0"
+  @comparison_domain "arbor.packaging.platform_inventory.comparison.v2\0"
+  @comparison_failures_domain "arbor.packaging.platform_inventory.comparison.failures.v2\0"
+  @report_schema "arbor.packaging.platform_inventory.v2"
 
   @oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
   @digest_re ~r/\A[0-9a-f]{64}\z/
@@ -29,17 +31,7 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
                        "third_party_extension"
                      ])
 
-  @platform_apps MapSet.new([
-                   "arbor_cartographer",
-                   "arbor_llm",
-                   "arbor_security",
-                   "arbor_persistence",
-                   "arbor_persistence_ecto",
-                   "arbor_shell",
-                   "arbor_sandbox",
-                   "arbor_historian",
-                   "arbor_trust"
-                 ])
+  @platform_apps MapSet.new(Scope.platform_apps())
 
   @comparison_statuses MapSet.new(["match", "mismatch", "unreviewed"])
   @report_modes MapSet.new(["report", "check"])
@@ -789,24 +781,7 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
     end)
   end
 
-  defp platform_source_app(path) do
-    case String.split(path, "/") do
-      ["apps", app, "lib" | rest] when rest != [] ->
-        cond do
-          not MapSet.member?(@platform_apps, app) ->
-            {:error, :outside_platform_scope}
-
-          not String.ends_with?(List.last(rest), ".ex") ->
-            {:error, :not_elixir_source}
-
-          true ->
-            {:ok, app}
-        end
-
-      _ ->
-        {:error, :outside_platform_scope}
-    end
-  end
+  defp platform_source_app(path), do: Scope.source_app(path)
 
   defp validate_comparison_alignment(entries, classifications, comparison) do
     expected = expected_comparison(entries, classifications)

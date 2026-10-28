@@ -139,7 +139,7 @@ defmodule Arbor.Memory.HybridRuntimeConfigTest do
     write_dotenv(root)
     # Config.Reader evaluates configuration only; it does not start Repo or make
     # provider calls. Satisfy unrelated production prerequisites with fixture data.
-    adapter = Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.SQLite3)
+    adapter = Application.get_env(:arbor_persistence_host, :repo_adapter, Ecto.Adapters.SQLite3)
 
     backend =
       case adapter do

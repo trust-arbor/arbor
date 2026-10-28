@@ -57,7 +57,7 @@ defmodule Arbor.Agent.ProfileNoticeRestartSQLSecurityRegressionTest do
        log: false}
     )
 
-    path = Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+    path = Path.expand("../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
     for {file, version, module} <- [
           {"20260130000001_create_records.exs", 20_260_130_000_001,

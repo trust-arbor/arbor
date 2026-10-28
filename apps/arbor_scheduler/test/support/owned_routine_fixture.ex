@@ -19,7 +19,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   # compilation strict while exercising the same actual APIs on the candidate.
   @oban Arbor.Scheduler.Test.OwnedRoutineOban
   @dot Path.expand("../../priv/pipelines/morning_digest.dot", __DIR__)
-  @migrations Path.expand("../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   # Observation-only test boundary. Every invocation still reaches the actual
   # public Scheduler gate after the pause. It cannot authorize an effect itself.
@@ -112,12 +112,12 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     # Initialize the new SQLite file/WAL with one connection, then retain four
     # real connections for the concurrent insertion/admission regressions.
     bootstrap_opts = Keyword.put(repo_opts, :pool_size, 1)
-    env(:arbor_persistence, Repo, bootstrap_opts)
+    env(:arbor_persistence_host, Repo, bootstrap_opts)
     start_supervised!({Repo, bootstrap_opts})
     assert Repo.config()[:pool] == DBConnection.ConnectionPool
     assert [_ | _] = Ecto.Migrator.run(Repo, @migrations, :up, all: true, log: false)
     assert :ok = stop_supervised(Repo)
-    Application.put_env(:arbor_persistence, Repo, repo_opts)
+    Application.put_env(:arbor_persistence_host, Repo, repo_opts)
 
     supervisor =
       start_supervised!(%{
@@ -154,13 +154,13 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     {:ok, root} = SafePath.resolve_real(root)
 
     opts =
-      Application.fetch_env!(:arbor_persistence, Repo)
+      Application.fetch_env!(:arbor_persistence_host, Repo)
       |> Keyword.put(:database, name)
       |> Keyword.put(:pool, DBConnection.ConnectionPool)
       |> Keyword.put(:pool_size, 4)
 
     assert :ok = Postgres.storage_up(opts)
-    env(:arbor_persistence, Repo, opts)
+    env(:arbor_persistence_host, Repo, opts)
 
     supervisor =
       start_supervised!(%{

@@ -1,7 +1,9 @@
 defmodule ArborAgentReleaseGate.MixProject do
   use Mix.Project
   @root Path.expand("../../../..", __DIR__)
-  @libraries ~w(arbor_actions arbor_agent arbor_ai arbor_comms arbor_consensus arbor_historian arbor_kernel arbor_kernel_runtime arbor_llm arbor_memory arbor_orchestrator arbor_persistence arbor_sandbox arbor_scheduler arbor_security arbor_shell arbor_trust)a
+  @umbrella_libraries ~w(arbor_actions arbor_agent arbor_ai arbor_comms arbor_consensus arbor_historian arbor_kernel arbor_kernel_runtime arbor_llm arbor_memory arbor_orchestrator arbor_persistence_host arbor_sandbox arbor_scheduler arbor_security arbor_shell arbor_trust)a
+  @package_libraries ~w(arbor_persistence arbor_persistence_sql arbor_persistence_eventstore)a
+  @libraries @umbrella_libraries ++ @package_libraries
 
   def project do
     [
@@ -24,8 +26,10 @@ defmodule ArborAgentReleaseGate.MixProject do
            override: true}
         ] ++
           Enum.map(@libraries, fn app ->
+            scope = if app in @package_libraries, do: "packages", else: "apps"
+
             {app,
-             path: Path.join([@root, "apps", to_string(app)]),
+             path: Path.join([@root, scope, to_string(app)]),
              override: true,
              runtime: false,
              env: :prod}

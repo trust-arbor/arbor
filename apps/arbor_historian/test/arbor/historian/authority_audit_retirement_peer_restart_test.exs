@@ -121,7 +121,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
           )
 
         true = Repo.__adapter__() == Ecto.Adapters.SQLite3
-        migrations = Path.join(umbrella, "apps/arbor_persistence/priv/repo/migrations")
+        migrations = Path.join(umbrella, "apps/arbor_persistence_host/priv/repo/migrations")
         _ = Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
         :ok = Security.TestBootstrap.start!()
 

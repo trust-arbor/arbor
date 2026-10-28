@@ -7,24 +7,12 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   filesystem, Git process, configuration, or runtime state is consulted.
   """
 
-  alias Arbor.Commands.PlatformInventory.{Ast, Encode}
+  alias Arbor.Commands.PlatformInventory.{Ast, Encode, Scope}
   alias Arbor.Commands.SourceCoupling.GitInventory
 
-  @report_schema "arbor.packaging.platform_inventory.v1"
+  @report_schema "arbor.packaging.platform_inventory.v2"
 
-  @platform_apps [
-    "arbor_cartographer",
-    "arbor_llm",
-    "arbor_security",
-    "arbor_persistence",
-    "arbor_persistence_ecto",
-    "arbor_shell",
-    "arbor_sandbox",
-    "arbor_historian",
-    "arbor_trust"
-  ]
-
-  @platform_apps_set MapSet.new(@platform_apps)
+  @platform_apps Scope.platform_apps()
 
   @component_classes [
     "k_primitive",
@@ -42,15 +30,13 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   @max_files 5_000
   @max_blob_bytes 1_048_576
   @max_total_bytes 64 * 1024 * 1024
-  @max_path_bytes 4_096
-
   @bundle_atom_required [:files, :head_tree_oid, :object_format, :selected_index_digest]
   @bundle_string_required ["files", "head_tree_oid", "object_format", "selected_index_digest"]
 
   @file_atom_keys [:path, :blob_oid, :mode, :byte_size, :bytes]
   @file_string_keys ["path", "blob_oid", "mode", "byte_size", "bytes"]
 
-  @doc "Closed nine-app Platform inventory scope."
+  @doc "Reviewed eleven-owner Platform v2 inventory scope."
   @spec platform_apps() :: [String.t()]
   def platform_apps, do: @platform_apps
 
@@ -325,18 +311,7 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   defp validate_total_bytes(_), do: {:error, :total_bytes_limit}
 
   defp valid_source_path?(path) do
-    path != "" and byte_size(path) <= @max_path_bytes and
-      not String.contains?(path, <<0>>) and
-      not String.starts_with?(path, "/") and
-      not String.contains?(path, "\\") and
-      path |> String.split("/") |> Enum.all?(&(&1 not in ["..", "", "."])) and
-      case String.split(path, "/") do
-        ["apps", app, "lib" | rest] when rest != [] ->
-          MapSet.member?(@platform_apps_set, app) and String.ends_with?(List.last(rest), ".ex")
-
-        _ ->
-          false
-      end
+    match?({:ok, _app}, Scope.source_app(path))
   end
 
   defp verify_selected_index_digest(files, selected_index_digest) do
@@ -390,7 +365,7 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   end
 
   defp app_of_path(path) do
-    ["apps", app | _] = String.split(path, "/")
+    {:ok, app} = Scope.source_app(path)
     app
   end
 

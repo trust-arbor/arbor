@@ -67,7 +67,7 @@ defmodule Mix.Tasks.Arbor.Eval.Summarization do
     {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
 
     # Try to start persistence for result storage
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    _ = Application.ensure_all_started(:arbor_persistence_eventstore)
 
     {opts, _, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 

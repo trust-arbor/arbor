@@ -16,7 +16,13 @@
           "apps/*/src/",
           "apps/*/test/",
           "packages/arbor_signals/lib/",
-          "packages/arbor_signals/test/"
+          "packages/arbor_signals/test/",
+          "packages/arbor_persistence/lib/",
+          "packages/arbor_persistence/test/",
+          "packages/arbor_persistence_sql/lib/",
+          "packages/arbor_persistence_sql/test/",
+          "packages/arbor_persistence_eventstore/lib/",
+          "packages/arbor_persistence_eventstore/test/"
         ],
         excluded: [
           ~r"/_build/",

@@ -5,7 +5,7 @@ defmodule Arbor.Comms.TestConversationSQLite do
     use Ecto.Repo, otp_app: :arbor_comms, adapter: Ecto.Adapters.SQLite3
   end
 
-  @migration_root Path.expand("../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migration_root Path.expand("../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   def create_schema!(repo) do
     repo.query!("""

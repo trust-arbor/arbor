@@ -50,7 +50,7 @@ jobs:
 
       # App-local Security suite against a fresh MIX_BUILD_PATH. Must run
       # before the umbrella compile below, which would populate shared
-      # `_build/test` (and the cache of that tree) with arbor_persistence,
+      # `_build/test` (and the cache of that tree) with Persistence packages/Host,
       # arbor_historian, arbor_comms, and Phoenix and mask upward deps.
       - name: Security app-local suite (isolated fresh build)
         run: |
@@ -88,7 +88,7 @@ jobs:
             fi
           done
 
-          for forbidden in arbor_persistence arbor_historian arbor_comms phoenix phoenix_pubsub; do
+          for forbidden in arbor_persistence arbor_persistence_host arbor_persistence_sql arbor_persistence_eventstore arbor_historian arbor_comms phoenix phoenix_pubsub; do
             if echo "$compiled" | grep -qx "$forbidden"; then
               echo "forbidden application compiled in app-local Security suite: $forbidden" >&2
               exit 1
@@ -102,17 +102,19 @@ jobs:
 
       # Path dependencies' tests and owning construction checks are not run by
       # umbrella mix test or the local package-skipping pre-commit hook.
-      - name: Signals package construction checks
+      - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/arbor_signals/lib/") do
-            {:ok, %{passed: true} = result} ->
-              IO.puts("Signals: #{result.files_checked} files checked")
-            {:ok, result} ->
-              Mix.raise("Signals construction checks failed: #{inspect(result)}")
-            {:error, reason} ->
-              Mix.raise("Signals construction checks unavailable: #{inspect(reason)}")
-          end'
+          Enum.each(~w(arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+            case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
+              {:ok, %{passed: true} = result} ->
+                IO.puts("#{package}: #{result.files_checked} files checked")
+              {:ok, result} ->
+                Mix.raise("#{package} construction checks failed: #{inspect(result)}")
+              {:error, reason} ->
+                Mix.raise("#{package} construction checks unavailable: #{inspect(reason)}")
+            end
+          end)'
 
       - name: Packaging source-coupling census (baseline guard)
         run: ./bin/mix arbor.packaging.source_coupling --check --json
@@ -263,6 +265,95 @@ jobs:
             --work-dir "$qualification_root/consumer" \
             --mix "$PWD/bin/mix"
 
+  # Persistence packages are independent projects, outside umbrella test discovery.
+  persistence:
+    name: Persistence package (${{ matrix.package }})
+    runs-on: native
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [arbor_persistence, arbor_persistence_sql, arbor_persistence_eventstore]
+    env:
+      MIX_ENV: test
+      ARBOR_DB: sqlite
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Cache standalone package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/${{ matrix.package }}/deps
+            packages/${{ matrix.package }}/_build
+          key: persistence-${{ matrix.package }}-${{ runner.os }}-${{ hashFiles('packages/arbor_persistence*/mix.exs', 'packages/arbor_persistence*/mix.lock', '.tool-versions') }}
+
+      - name: Package dependencies
+        working-directory: packages/${{ matrix.package }}
+        run: ../../bin/mix deps.get
+
+      - name: Package formatting and strict compile
+        working-directory: packages/${{ matrix.package }}
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
+
+      - name: Package behavior and security tests
+        working-directory: packages/${{ matrix.package }}
+        run: |
+          runtime_root="$(mktemp -d)"
+          mkdir -p "$runtime_root/tmp" "$runtime_root/data"
+          export TMPDIR="$runtime_root/tmp"
+          export ARBOR_HOME="$runtime_root/home"
+          export ARBOR_DATA_DIR="$runtime_root/data"
+          export ARBOR_SQLITE_PATH="$runtime_root/data/package.sqlite3"
+          ../../bin/mix test --exclude distributed --timeout 120000
+
+      - name: Independent Core consumer and production release
+        if: matrix.package == 'arbor_persistence'
+        run: |
+          qualification_root="$(mktemp -d)"
+          python3 packages/arbor_persistence/scripts/qualify_standalone.py \
+            --work-dir "$qualification_root/consumer" \
+            --mix "$PWD/bin/mix"
+
+      - name: SQL adapter private SQLite database lane
+        if: matrix.package == 'arbor_persistence_sql'
+        working-directory: packages/arbor_persistence_sql
+        run: |
+          runtime_root="$(mktemp -d)"
+          mkdir -p "$runtime_root/tmp" "$runtime_root/data"
+          export TMPDIR="$runtime_root/tmp"
+          export ARBOR_HOME="$runtime_root/home"
+          export ARBOR_DATA_DIR="$runtime_root/data"
+          export PERSISTENCE_SQL_ADAPTER=sqlite
+          export PERSISTENCE_SQLITE_PATH="$runtime_root/data/adapter.sqlite3"
+          export PERSISTENCE_MIGRATE=1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          paths = json.loads(Path("test-lanes.json").read_text())["sqlite"]
+          raise SystemExit(subprocess.run([
+              "../../bin/mix", "test", *paths, "--include", "database", "--timeout", "120000"
+          ], check=False).returncode)
+          PY
+
+      - name: Independent SQL consumer and production release
+        if: matrix.package == 'arbor_persistence_sql'
+        run: |
+          qualification_root="$(mktemp -d)"
+          python3 packages/arbor_persistence/scripts/qualify_standalone.py \
+            --adapter sql \
+            --work-dir "$qualification_root/consumer" \
+            --mix "$PWD/bin/mix"
+
   # ── Database lane ───────────────────────────────────────────────────────────
   # Runs ONLY the :database-tagged tests against Postgres. These need the Repo
   # started + Sandbox isolation, which `Arbor.Persistence.DatabaseCase` provides.
@@ -271,6 +362,18 @@ jobs:
   database:
     name: Database Tests
     runs-on: native
+    services:
+      persistence_postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: arbor_package_ci
+          POSTGRES_PASSWORD: arbor_package_ci_fixture
+          POSTGRES_DB: postgres
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U arbor_package_ci -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       MIX_ENV: test
       ARBOR_COOKIE: ci_test_cookie_not_a_secret
@@ -298,6 +401,72 @@ jobs:
 
       - name: Compile
         run: mix compile
+
+      # Path-package tests are not discovered by the umbrella database command.
+      # This fresh service and explicit fixture environment keep both moved
+      # PostgreSQL suites required without selecting a runner/operator database.
+      - name: SQL and EventStore package PostgreSQL lanes (required)
+        env:
+          PERSISTENCE_POSTGRES_HOST: 127.0.0.1
+          PERSISTENCE_POSTGRES_PORT: ${{ job.services.persistence_postgres.ports[5432] }}
+          PERSISTENCE_POSTGRES_USER: arbor_package_ci
+          PERSISTENCE_POSTGRES_PASSWORD: arbor_package_ci_fixture
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          repository = Path.cwd()
+          prepare = r'''
+          {:ok, _} = Application.ensure_all_started(:postgrex)
+          {:ok, connection} = Postgrex.start_link(
+            database: "postgres",
+            hostname: System.fetch_env!("PERSISTENCE_POSTGRES_HOST"),
+            port: String.to_integer(System.fetch_env!("PERSISTENCE_POSTGRES_PORT")),
+            username: System.fetch_env!("PERSISTENCE_POSTGRES_USER"),
+            password: System.fetch_env!("PERSISTENCE_POSTGRES_PASSWORD")
+          )
+          try do
+            database = System.fetch_env!("PERSISTENCE_POSTGRES_DB")
+            true = Regex.match?(~r/\Aarbor_ci_[a-z]+\z/, database)
+            Postgrex.query!(connection, "CREATE DATABASE " <> database, [])
+          after
+            GenServer.stop(connection)
+          end
+          '''
+          for package, database in [
+              ("arbor_persistence_sql", "arbor_ci_sql"),
+              ("arbor_persistence_eventstore", "arbor_ci_eventstore"),
+          ]:
+              project = repository / "packages" / package
+              runtime = Path(tempfile.mkdtemp(prefix=package + "-postgres-"))
+              (runtime / "tmp").mkdir()
+              (runtime / "data").mkdir()
+              env = os.environ.copy()
+              env.update({
+                  "MIX_ENV": "test",
+                  "MIX_BUILD_PATH": str(runtime / "build"),
+                  "MIX_DEPS_PATH": str(project / "deps"),
+                  "TMPDIR": str(runtime / "tmp"),
+                  "ARBOR_HOME": str(runtime / "home"),
+                  "ARBOR_DATA_DIR": str(runtime / "data"),
+                  "PERSISTENCE_SQL_ADAPTER": "postgres",
+                  "PERSISTENCE_POSTGRES_DB": database,
+                  "PERSISTENCE_MIGRATE": "1",
+              })
+              mix = str(repository / "bin/mix")
+              paths = json.loads((project / "test-lanes.json").read_text())["postgres"]
+              for arguments in [
+                  ["deps.get", "--only", "test", "--check-locked"],
+                  ["compile", "--warnings-as-errors"],
+                  ["run", "--no-start", "-e", prepare],
+                  ["test", *paths, "--include", "database", "--timeout", "120000"],
+              ]:
+                  subprocess.run([mix, *arguments], cwd=project, env=env, check=True)
+          PY
 
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo

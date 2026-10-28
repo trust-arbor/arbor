@@ -35,6 +35,11 @@ defmodule Arbor.MixProject do
     [
       {:arbor_signals,
        path: "packages/arbor_signals", runtime: false, env: Mix.env(), override: true},
+      {:arbor_persistence, path: "packages/arbor_persistence", env: Mix.env(), override: true},
+      {:arbor_persistence_sql,
+       path: "packages/arbor_persistence_sql", env: Mix.env(), override: true},
+      {:arbor_persistence_eventstore,
+       path: "packages/arbor_persistence_eventstore", env: Mix.env(), override: true},
       # Jido ecosystem — stable 2.0 Hex releases
       {:jido, "~> 2.0", override: true},
       {:jido_action, "~> 2.0", override: true},

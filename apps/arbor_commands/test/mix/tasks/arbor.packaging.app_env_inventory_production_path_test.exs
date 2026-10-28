@@ -23,7 +23,10 @@ defmodule Mix.Tasks.Arbor.Packaging.AppEnvInventoryProductionPathTest do
     assert report["counts"]["by_class"]["test_support"] == 0
     assert report["counts"]["by_class"]["config_block"] == 0
     assert map_size(report["counts"]["by_trust"]) == 3
-    assert map_size(report["counts"]["by_owner"]) == 5
+
+    assert Enum.sort(Map.keys(report["counts"]["by_owner"])) ==
+             ["arbor_common", "arbor_contracts", "arbor_monitor", "unresolved"]
+
     assert report["provenance"]["provenance_source"] == "git_index_blobs"
     assert report["provenance"]["object_format"] in ["sha1", "sha256"]
     assert is_binary(report["provenance"]["tree_oid"])

@@ -15,7 +15,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     "arbor_kernel",
     "arbor_kernel_runtime",
     "arbor_security",
-    "arbor_persistence",
+    "arbor_persistence_host",
     "arbor_trust"
   ]
 
@@ -48,6 +48,27 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
           %{path: "apps/arbor_kernel/test/kernel_test.exs", mode: "100644", oid: oid},
           %{path: "packages/arbor_signals/lib/arbor/signals.ex", mode: "100644", oid: oid},
           %{
+            path: "packages/arbor_persistence/lib/arbor/persistence/core.ex",
+            mode: "100644",
+            oid: oid
+          },
+          %{
+            path: "packages/arbor_persistence_sql/lib/arbor/persistence/sql/repo.ex",
+            mode: "100644",
+            oid: oid
+          },
+          %{
+            path: "apps/arbor_persistence_host/lib/arbor/persistence.ex",
+            mode: "100644",
+            oid: oid
+          },
+          %{path: "apps/arbor_persistence/lib/arbor/persistence.ex", mode: "100644", oid: oid},
+          %{
+            path: "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto.ex",
+            mode: "100644",
+            oid: oid
+          },
+          %{
             path: "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json",
             mode: "100644",
             oid: oid
@@ -60,6 +81,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     assert "apps/arbor_kernel/test/kernel_test.exs" in paths
     assert "packages/arbor_signals/mix.exs" in paths
     assert "packages/arbor_signals/lib/arbor/signals.ex" in paths
+    assert "packages/arbor_persistence/lib/arbor/persistence/core.ex" in paths
+    assert "packages/arbor_persistence_sql/lib/arbor/persistence/sql/repo.ex" in paths
+    assert "apps/arbor_persistence_host/lib/arbor/persistence.ex" in paths
+    refute "apps/arbor_persistence/lib/arbor/persistence.ex" in paths
+    refute "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto.ex" in paths
     assert "mix.lock" in paths
     refute "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json" in paths
     refute "apps/arbor_dashboard/lib/x.ex" in paths
@@ -397,10 +423,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     File.write!(Path.join(root, ".git/info/exclude"), ".elixir_ls/\ncover/\nerl_crash.dump\n")
 
     generated = [
-      "apps/arbor_persistence/.elixir_ls/build/cache",
+      "apps/arbor_persistence_host/.elixir_ls/build/cache",
       "apps/arbor_security/cover/report.html",
       "apps/arbor_trust/erl_crash.dump",
-      "packages/arbor_signals/cover/report.html"
+      "packages/arbor_signals/cover/report.html",
+      "packages/arbor_persistence/.elixir_ls/build/cache",
+      "packages/arbor_persistence_sql/erl_crash.dump"
     ]
 
     Enum.each(generated, fn relative ->
@@ -555,6 +583,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"apps/arbor_commands/mix.exs", "commands\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},
       {"packages/arbor_signals/lib/signals.ex", "signals source\n"},
+      {"packages/arbor_persistence/mix.exs", "persistence\n"},
+      {"packages/arbor_persistence/lib/core.ex", "core source\n"},
+      {"packages/arbor_persistence_sql/mix.exs", "persistence sql\n"},
+      {"packages/arbor_persistence_sql/lib/sql.ex", "sql source\n"},
       {"mix.lock", "lock\n"},
       {".tool-versions", "erlang 28.4.1\n"},
       {"bin/mix", "#!/bin/sh\n"},

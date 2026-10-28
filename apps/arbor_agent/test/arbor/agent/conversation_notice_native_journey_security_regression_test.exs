@@ -16,7 +16,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
   @moduletag :database
   @moduletag :isolated_repo
   @moduletag :security_regression
-  @migrations Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
   @notice_action Arbor.Actions.Comms.PublishConversationNotice
   @stored_reply "Native notice persisted"
   @ordinary_reply "The ordinary deterministic turn still works"
@@ -213,7 +213,7 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
           {:arbor_actions, :default_taint_policy, :strict},
           {:arbor_orchestrator, :private_conversation_memory, false},
           {:arbor_orchestrator, :preprocessor_enabled, false},
-          {:arbor_persistence, :sql_repository, Repo},
+          {:arbor_persistence_host, :sql_repository, Repo},
           {:arbor_actions, :comms_module, Arbor.Comms},
           {:arbor_comms, :conversation_persistence_module, Arbor.Persistence},
           {:arbor_comms, :conversation_directory_persistence_module, Arbor.Persistence},

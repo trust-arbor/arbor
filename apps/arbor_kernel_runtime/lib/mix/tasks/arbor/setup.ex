@@ -463,12 +463,12 @@ defmodule Mix.Tasks.Arbor.Setup do
   # ── Helpers ──────────────────────────────────────────────────────────
 
   defp sqlite? do
-    adapter = Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.Postgres)
+    adapter = Application.get_env(:arbor_persistence_host, :repo_adapter, Ecto.Adapters.Postgres)
     adapter == Ecto.Adapters.SQLite3
   end
 
   defp get_sqlite_db_path do
-    config = Application.get_env(:arbor_persistence, Arbor.Persistence.Repo, [])
+    config = Application.get_env(:arbor_persistence_host, Arbor.Persistence.Repo, [])
     Keyword.get(config, :database, Path.expand("~/.arbor/arbor_dev.db"))
   end
 
@@ -492,7 +492,7 @@ defmodule Mix.Tasks.Arbor.Setup do
   end
 
   defp check_postgres do
-    config = Application.get_env(:arbor_persistence, Arbor.Persistence.Repo, [])
+    config = Application.get_env(:arbor_persistence_host, Arbor.Persistence.Repo, [])
     hostname = Keyword.get(config, :hostname, "localhost")
     port = Keyword.get(config, :port, 5432)
 

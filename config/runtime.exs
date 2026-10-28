@@ -371,7 +371,7 @@ if config_env() == :prod do
     end
 
   compiled_adapter =
-    Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.SQLite3)
+    Application.get_env(:arbor_persistence_host, :repo_adapter, Ecto.Adapters.SQLite3)
 
   if compiled_adapter != runtime_adapter do
     raise """
@@ -438,7 +438,7 @@ if config_env() == :prod do
           ]
     end
 
-  config :arbor_persistence, Arbor.Persistence.Repo, repo_config
+  config :arbor_persistence_host, Arbor.Persistence.Repo, repo_config
 end
 
 # Optional operator surface for the Apple Container runtime. Test VMs must not

@@ -450,7 +450,7 @@ defmodule Arbor.Signals.SubsystemClusterTest do
           [
             :arbor_kernel,
             :arbor_kernel_runtime,
-            :arbor_persistence,
+            :arbor_persistence_host,
             :arbor_memory,
             :arbor_trust
           ] ++ extra_applications

@@ -56,10 +56,13 @@ defmodule Arbor.Consensus.MixProject do
 
   defp deps do
     [
+      {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
+      {:arbor_persistence_eventstore,
+       path: "../../packages/arbor_persistence_eventstore", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       # Umbrella dependencies
       {:arbor_kernel_runtime, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       # arbor_ai is an optional runtime dependency for LLM classification in TopicMatcher.
       # It's not required at compile time — TopicMatcher uses dependency injection (ai_module opt)

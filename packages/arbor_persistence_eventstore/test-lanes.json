@@ -1,0 +1,10 @@
+{
+  "postgres": [
+    "test/arbor/persistence/ecto/event_log_integration_test.exs",
+    "test/arbor/persistence/ecto/event_log_parent_security_regression_test.exs",
+    "test/arbor/persistence/ecto/event_serializer_test.exs",
+    "test/arbor/persistence/ecto/independence_source_guard_test.exs",
+    "test/arbor/persistence/ecto/named_schema_regression_test.exs",
+    "test/arbor_persistence_ecto_test.exs"
+  ]
+}

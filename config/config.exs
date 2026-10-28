@@ -236,10 +236,26 @@ config :arbor_kernel,
 config :arbor_gateway, mcp_workspace: "~/.arbor/workspace"
 config :arbor_gateway, :chat_agent_facade, Arbor.Agent
 
+# Generic mechanisms use exact trusted host contracts and integration ports.
+config :arbor_persistence,
+  contract_modules: %{
+    record: Arbor.Contracts.Persistence.Record,
+    revision: Arbor.Contracts.Persistence.Revision,
+    filter: Arbor.Contracts.Persistence.Filter,
+    append_operation: Arbor.Contracts.Persistence.AppendOperation
+  },
+  authorization_provider: Arbor.Security,
+  event_bus: Arbor.Signals
+
+# The independent SQL adapter borrows the product Repo explicitly.
+config :arbor_persistence_sql,
+  repo: Arbor.Persistence.Repo,
+  repo_adapter: Ecto.Adapters.SQLite3
+
 # Persistence — Ecto repos for mix tasks (create, migrate, rollback)
 # Adapter selected at compile time: SQLite3 (default) or Postgres
 # Set ARBOR_DB=postgres to use PostgreSQL (recommended for production)
-config :arbor_persistence,
+config :arbor_persistence_host,
   ecto_repos: [Arbor.Persistence.Repo],
   repo_adapter: Ecto.Adapters.SQLite3
 
@@ -247,7 +263,7 @@ config :arbor_persistence,
 # To enable, set enabled: true and create a key pair:
 #   age-keygen -o ~/.arbor/backup-key-private.txt
 #   age-keygen -y ~/.arbor/backup-key-private.txt > ~/.arbor/backup-key.txt
-config :arbor_persistence, :backup,
+config :arbor_persistence_host, :backup,
   enabled: false,
   backup_dir: "~/.arbor/backups",
   age_key_file: "~/.arbor/backup-key.txt",
@@ -524,7 +540,7 @@ config :arbor_memory,
 # Vector store: Ecto on the application Repo. Writes and list/2 work on
 # SQLite and Postgres; ANN search still requires pgvector (SQLite recall
 # rehydrates ETS and scores in-process).
-config :arbor_persistence,
+config :arbor_persistence_host,
   # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
   embedding_dimension: 768,
   vector_store_backend: Arbor.Persistence.VectorStore.Ecto,

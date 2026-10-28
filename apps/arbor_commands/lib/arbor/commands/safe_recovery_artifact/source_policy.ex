@@ -5,19 +5,24 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_kernel/",
     "apps/arbor_kernel_runtime/",
     "apps/arbor_security/",
-    "apps/arbor_persistence/",
+    "apps/arbor_persistence_host/",
     "apps/arbor_trust/",
-    "packages/arbor_signals/"
+    "packages/arbor_signals/",
+    "packages/arbor_persistence/",
+    "packages/arbor_persistence_sql/"
   ]
-  @app_names ~w(arbor_kernel arbor_kernel_runtime arbor_security arbor_persistence arbor_trust)
+  @app_names ~w(arbor_kernel arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust)
+  @package_names ~w(arbor_signals arbor_persistence arbor_persistence_sql)
   @ignored_generated_dirs ~w(.elixir_ls cover)
 
   @required_files [
     "apps/arbor_kernel/mix.exs",
     "apps/arbor_kernel_runtime/mix.exs",
     "packages/arbor_signals/mix.exs",
+    "packages/arbor_persistence/mix.exs",
+    "packages/arbor_persistence_sql/mix.exs",
     "apps/arbor_security/mix.exs",
-    "apps/arbor_persistence/mix.exs",
+    "apps/arbor_persistence_host/mix.exs",
     "apps/arbor_trust/mix.exs",
     "build_support/mix_project_paths.exs",
     "config/config.exs",
@@ -69,13 +74,13 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     case String.split(path, "/", trim: false) do
       [scope, app, generated | _rest]
       when ((scope == "apps" and app in @app_names) or
-              (scope == "packages" and app == "arbor_signals")) and
+              (scope == "packages" and app in @package_names)) and
              generated in @ignored_generated_dirs ->
         true
 
       [scope, app, "erl_crash.dump"]
       when (scope == "apps" and app in @app_names) or
-             (scope == "packages" and app == "arbor_signals") ->
+             (scope == "packages" and app in @package_names) ->
         true
 
       _other ->

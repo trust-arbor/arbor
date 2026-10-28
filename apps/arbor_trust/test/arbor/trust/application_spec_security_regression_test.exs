@@ -7,7 +7,16 @@ defmodule Arbor.Trust.ApplicationSpecSecurityRegressionTest do
 
   alias Arbor.KernelRuntime.ApplicationSpecPeer
 
-  @omitted [:arbor_persistence, :phoenix_pubsub, :ecto, :ecto_sql, :postgrex]
+  @omitted [
+    :arbor_persistence_host,
+    :arbor_persistence,
+    :arbor_persistence_sql,
+    :arbor_persistence_eventstore,
+    :phoenix_pubsub,
+    :ecto,
+    :ecto_sql,
+    :postgrex
+  ]
   @required MapSet.new([
               :arbor_kernel_runtime,
               :arbor_security,

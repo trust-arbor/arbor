@@ -1,0 +1,446 @@
+{
+  "schema_version": 1,
+  "source_base_commit": "64d3adf1cf7094b8bdcf620f3b3e1a2e2b326cf4",
+  "family_provenance": "../arbor_persistence/adoption-source-map.json",
+  "package": "arbor_persistence_eventstore",
+  "source_inventory": [
+    {
+      "source_path": "apps/arbor_persistence/test/support/postgres_delay_proxy.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "14c8511fe6433e40361ceb6af325114fdead314d",
+      "source_sha256": "a8ab48351bfc014bc8f10fe806711b16f830c85972a3acba10b545b88a5065a0",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/support/postgres_delay_proxy.ex",
+          "disposition": "independent-test-helper-copy",
+          "sha256": "153a859c49047d97e34c57c453ba737fe33f2e197058472744c53d1e9627fc1f",
+          "git_blob": "7df45574d9205170942ef5806d0c46b9a7b08407",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "packages/arbor_persistence_eventstore/test/support/postgres_delay_proxy.ex",
+          "disposition": "independent-test-helper-copy",
+          "sha256": "9ff48d917f4a13cb2d703146ed10a871b6d18c8b67f4a303108ac3f472356aa7",
+          "git_blob": "0fd4f39b76c36bc39cbfe56e0be58fc9f621fc55",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/test/support/postgres_delay_proxy.ex",
+          "disposition": "retained_host_owner",
+          "sha256": "a8ab48351bfc014bc8f10fe806711b16f830c85972a3acba10b545b88a5065a0",
+          "git_blob": "14c8511fe6433e40361ceb6af325114fdead314d",
+          "content_equal_to_source": true,
+          "adaptation": "Host owner/path/configuration remap; product behavior retained."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/.formatter.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "d2cda26eddc9110057ce9e8002585682217542cc",
+      "source_sha256": "a46ecd2cb12fd54c0cf0928c72fb10bef329b3f72b49df9bef621c3370734bc5",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/.formatter.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "f6ce47e56bd4f633daf19c3f7b42c3e4e0a593940bed6c001f9f1fb6a657cc0c",
+          "git_blob": "bf398565f33336df1d10d29b260c90e7cd8a84c5",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/.gitignore",
+      "source_mode": "100644",
+      "source_base_git_blob": "58087e7458faca6a719570c8089d050796a01397",
+      "source_sha256": "bee416a76f11663aa5670d2c33cd5f029fec7be0f58c08431c9cf2519ac8a98b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/.gitignore",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "bee416a76f11663aa5670d2c33cd5f029fec7be0f58c08431c9cf2519ac8a98b",
+          "git_blob": "58087e7458faca6a719570c8089d050796a01397",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/README.md",
+      "source_mode": "100644",
+      "source_base_git_blob": "c4c12be2ef44033fa1ea7a55d22b1e6ed1b3858c",
+      "source_sha256": "77c3bad277c88c675ee42e334c9ee860a9b05468165dfff7112ba387e311099d",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/README.md",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "15fc9e2333f7829ca9f0fcf7d7be42776977025e85ade859b80aeed0d533531d",
+          "git_blob": "641cd62dc2aefbb66782a38d18530206b9376f8f",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/config/config.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "e228b0f9c56dc949ad97a94a80fc8f75d4385b19",
+      "source_sha256": "c24d21d959af2709e62ce6db0dd6a4a22b93eb78c74a384009a67126ef57bc50",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/config/config.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "a4597855c349a1b52b0ffb722992ff34441fe17b2392a941b9c1c119fa151c8d",
+          "git_blob": "20c3bc827bcb7cfc184c003b974f4bd65a9a71a6",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/config/dev.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "27cd8593d2436736e0a86043338b26b933dca8ef",
+      "source_sha256": "88c5c845a716f43fe4a502540c831ce068910493afa498449e9d97685da92bc9",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/config/dev.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "2d847506b2c7cd28cc7ea202baa0048a42b6954ef8bf45cda2d9ddeb3d4e87a4",
+          "git_blob": "d4e4bc01ee8149088749ed9bc8a27a3fd714f9eb",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/config/prod.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "7216267b87b534d09fa9f02019cf63936340b161",
+      "source_sha256": "9e4cda8bd6077ee1fda5c8f171bc27f941501ec8be6a9bceac58fc3a9b106c3f",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/config/prod.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "47d5d9d10c24221b5d61c38a074ade39ee88a7cc98d9bd0c594dcbc86b145351",
+          "git_blob": "d15e50f0dba48eba9761a16cb363a26f224d78c9",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/config/test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "ea8e4a4b96393191e6886339782b4f2dc5bedf71",
+      "source_sha256": "c3f738259b3cb1863cd7cc4526c898b913c4c4fdeefa2a57fc2e7f5a8b3d52f9",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/config/test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "0bca6cd2556066e5d2e3fd71d90abf30d8800f6c0d9051e8eac8156d9f1bcbc6",
+          "git_blob": "4208524c624a9141ed457e6dfbe1ea4c0c309625",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "25005a4374beeb85b7ca87dbe3d455c1116ca83d",
+      "source_sha256": "434c58b9060fb62d98def512657f257f93bbd616bafebd4a770a431d15cf5c44",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "e669c1c4b983fcfb0785c78ac8d7a1dfad64b9dfe6d58724dc8e441176fdb2d3",
+          "git_blob": "4938290b04779d125ebc60fd3a685d24b97af637",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/application.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "4e88aecdca1a849b7efcc755ff1e56e5f21e0e51",
+      "source_sha256": "3fc626bee069f754c0b5890634b591f594c2f80644c2cf73c4a4699029fb4e28",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/application.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "3fc626bee069f754c0b5890634b591f594c2f80644c2cf73c4a4699029fb4e28",
+          "git_blob": "4e88aecdca1a849b7efcc755ff1e56e5f21e0e51",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "008c04f2e2d046a7b6c32142c0ca4419cb81ebe1",
+      "source_sha256": "4fcbe36c0e228c9e8be91400c845d631d65f3b0da07a05d04c3a9a23ce8b60d8",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_log.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "97829915848ce9c325192c5988e8803aa7fe7f99625cd68a98756660c9e65e6c",
+          "git_blob": "abbad9b8f77ee3450f9dc48dd078b729d3072e85",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log_schema.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "e9dd27e748c8b03640d2df476b9700594002824a",
+      "source_sha256": "5c755d0c527e1c8efdf657360cf4fe86b5e78c65482d710978b745f87926c148",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_log_schema.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "0ccbb0c99e869a106fd4da1182350642e9617565adfb187dc9ccabc73557629d",
+          "git_blob": "352af89de84d25a232605107d9cc4de354b62d92",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_serializer.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "4eab62c0fecc3657a5a4fe95a60aed949bfeb7b6",
+      "source_sha256": "d5eb2d014a99150430be0065faecc3de6a534fdb960159c884782d6687983e7c",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_serializer.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "d5eb2d014a99150430be0065faecc3de6a534fdb960159c884782d6687983e7c",
+          "git_blob": "4eab62c0fecc3657a5a4fe95a60aed949bfeb7b6",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_store.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "743d92b62cf2ca2435a6aa8eda50e4e8aa1b7a7f",
+      "source_sha256": "808e2cd06ed6ece7edd2893de63759691d6405d1b6fc97071aae740d6874b899",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_store.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "cb8fcf4d42a0b9efbfaae94e72b7e528ad874a1ce8ac35cf10db5c818c36a8a7",
+          "git_blob": "240accf324e5e4df4887d45bd809ef535788b7db",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/lib/mix/tasks/arbor.event_log.migrate.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "1469df74b3fa6b25c055625fb6d66c8b875fd3fc",
+      "source_sha256": "b2e135768750c60aeccdcfc7e089a71a62b38adb099f5d50e926746d8134baa0",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/lib/mix/tasks/arbor.event_log.migrate.ex",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "b2e135768750c60aeccdcfc7e089a71a62b38adb099f5d50e926746d8134baa0",
+          "git_blob": "1469df74b3fa6b25c055625fb6d66c8b875fd3fc",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/mix.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "d4e0de851f973ca4560299c62b324bc45c3f2f75",
+      "source_sha256": "f4c13ec5f502abe54eaab1659548461b7f9eb5873664dc09ff6c9ace0d91a97e",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/mix.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "32fc667d0bed32b8969dd85a2a31075e42af032a17bcf187e550dbd32aa372cf",
+          "git_blob": "cb6b52622a87e58f451768d64d291d7b62931224",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260711000001_operation_fences_and_position_capacity.sql",
+      "source_mode": "100644",
+      "source_base_git_blob": "3615a443715624d51a6f0417d80cfe79f24532c0",
+      "source_sha256": "858ec5f2a3b9afe5f23a2595e921194d7588c97176a3f8e11869f39508f047ac",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260711000001_operation_fences_and_position_capacity.sql",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "858ec5f2a3b9afe5f23a2595e921194d7588c97176a3f8e11869f39508f047ac",
+          "git_blob": "3615a443715624d51a6f0417d80cfe79f24532c0",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260712000002_database_writer_fence.sql",
+      "source_mode": "100644",
+      "source_base_git_blob": "51590b3d97a650a6f897ff307a8dcab018ec1105",
+      "source_sha256": "72b8680ab08e6063904efe19c83162fecd4f957965204c15f094a92c3a17b3cc",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260712000002_database_writer_fence.sql",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "72b8680ab08e6063904efe19c83162fecd4f957965204c15f094a92c3a17b3cc",
+          "git_blob": "51590b3d97a650a6f897ff307a8dcab018ec1105",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260712000003_reject_missing_operation_markers.sql",
+      "source_mode": "100644",
+      "source_base_git_blob": "0d41c40ba2105c95a8e3b09be6ce8698113da36c",
+      "source_sha256": "eacfc5fc45b91f765898496cc65ee9817a6ab2b24a0e77885dcc9207274301de",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260712000003_reject_missing_operation_markers.sql",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "eacfc5fc45b91f765898496cc65ee9817a6ab2b24a0e77885dcc9207274301de",
+          "git_blob": "0d41c40ba2105c95a8e3b09be6ce8698113da36c",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/arbor/persistence/ecto/event_log_integration_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "cce82a4e83745c2f950f95f3712fba6c62f09a54",
+      "source_sha256": "7ff10c569a58ca1f1c6815a5cfdb6b8694d9cc12a70356ff95964afa169979e5",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/arbor/persistence/ecto/event_log_integration_test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "a9e8108624aa36fe9a2d6da21d3472d7494265cca4ca5366e9f2039d6277015a",
+          "git_blob": "e3c34a4c211a22a93eee8c17f85c8fbc2c2b0d27",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/arbor/persistence/ecto/event_log_parent_security_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "92845413b7c44428e236bc773f11b6ed15e9528c",
+      "source_sha256": "2a8456651346bcb12922b137265d8e3f05d8a836773a7fecb7641a4256c3c432",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/arbor/persistence/ecto/event_log_parent_security_regression_test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "5f529d8d276b27610dbe2647ebebcd9f726632b2b9a66e4c1a8a9ee10bd12ff3",
+          "git_blob": "45b40b4dc6f98aa06b25d7df7f20d5b56078520f",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/arbor/persistence/ecto/event_serializer_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "5e70c17597480f6dc29d3dca8b7e0ea1d53465bd",
+      "source_sha256": "d41c950647e466561fe037c086eb1fd50882605a753c08b75b87e605540adbe5",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/arbor/persistence/ecto/event_serializer_test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "d41c950647e466561fe037c086eb1fd50882605a753c08b75b87e605540adbe5",
+          "git_blob": "5e70c17597480f6dc29d3dca8b7e0ea1d53465bd",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/arbor/persistence/ecto/named_schema_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "cc46ab01a1ae2e30814f7133b16ca8ee2e78314b",
+      "source_sha256": "50a32e7c9460a0c311452b639f2ef3a0b2a03dcf1b587adc254d50e259be6844",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/arbor/persistence/ecto/named_schema_regression_test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "fee054488f9f41bb6334a9baed5059ee5e208cea79f0f8925985fcca31384036",
+          "git_blob": "839a6c81fd24cb91cb20602c168f62d731b4123d",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/arbor_persistence_ecto_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "520a4a3ffd64d85762e13410820da8d34507a241",
+      "source_sha256": "2150edd0483c897bdf261c0e1721b117b0087e65534755668b99de1e47ddd5cd",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/arbor_persistence_ecto_test.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "2150edd0483c897bdf261c0e1721b117b0087e65534755668b99de1e47ddd5cd",
+          "git_blob": "520a4a3ffd64d85762e13410820da8d34507a241",
+          "content_equal_to_source": true,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/test/test_helper.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "86f20de9b4ca5bed51ab8c647ec7c505b0ea1903",
+      "source_sha256": "1cf7049fddd16b1f4cd0425e7ab70211edec32e30bfcf9cf08bad5aaa0b290d6",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_eventstore/test/test_helper.exs",
+          "disposition": "moved_eventstore_adapter",
+          "sha256": "908734eadd080fc96629002da85e6ed3e5adb271d0f122c58e4e37b6c6776c75",
+          "git_blob": "94dfbf48476bbc9e9e1d3514055ff957f2cce1aa",
+          "content_equal_to_source": false,
+          "adaptation": "Current Main implementation retained; OTP/configuration owner changed to arbor_persistence_eventstore where required."
+        }
+      ]
+    }
+  ],
+  "new_boundary_modules": [],
+  "protocol_migrations": [
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260711000001_operation_fences_and_position_capacity.sql",
+      "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260711000001_operation_fences_and_position_capacity.sql",
+      "source_base_git_blob": "3615a443715624d51a6f0417d80cfe79f24532c0",
+      "sha256": "858ec5f2a3b9afe5f23a2595e921194d7588c97176a3f8e11869f39508f047ac",
+      "unchanged": true
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260712000002_database_writer_fence.sql",
+      "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260712000002_database_writer_fence.sql",
+      "source_base_git_blob": "51590b3d97a650a6f897ff307a8dcab018ec1105",
+      "sha256": "72b8680ab08e6063904efe19c83162fecd4f957965204c15f094a92c3a17b3cc",
+      "unchanged": true
+    },
+    {
+      "source_path": "apps/arbor_persistence_ecto/priv/event_log/migrations/20260712000003_reject_missing_operation_markers.sql",
+      "path": "packages/arbor_persistence_eventstore/priv/event_log/migrations/20260712000003_reject_missing_operation_markers.sql",
+      "source_base_git_blob": "0d41c40ba2105c95a8e3b09be6ce8698113da36c",
+      "sha256": "eacfc5fc45b91f765898496cc65ee9817a6ab2b24a0e77885dcc9207274301de",
+      "unchanged": true
+    }
+  ]
+}

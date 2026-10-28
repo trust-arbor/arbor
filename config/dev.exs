@@ -57,7 +57,7 @@ end
 # ARBOR_DB_NAME / ARBOR_SQLITE_PATH select an isolated development database.
 if System.get_env("ARBOR_DB") == "postgres" do
   # PostgreSQL
-  config :arbor_persistence, Arbor.Persistence.Repo,
+  config :arbor_persistence_host, Arbor.Persistence.Repo,
     database: System.get_env("ARBOR_DB_NAME", "arbor_persistence_dev"),
     username: System.get_env("DB_USER", "arbor_dev"),
     password: System.get_env("DB_PASS", ""),
@@ -66,7 +66,7 @@ if System.get_env("ARBOR_DB") == "postgres" do
     log: false,
     types: Arbor.Persistence.PostgrexTypes
 
-  config :arbor_persistence,
+  config :arbor_persistence_host,
     repo_adapter: Ecto.Adapters.Postgres,
     start_repo: true,
     stores: []
@@ -80,7 +80,7 @@ if System.get_env("ARBOR_DB") == "postgres" do
     embedding_dedup_enabled: true
 else
   # SQLite — zero-config default
-  config :arbor_persistence,
+  config :arbor_persistence_host,
     repo_adapter: Ecto.Adapters.SQLite3,
     start_repo: true,
     stores: []
@@ -89,7 +89,7 @@ else
     engine: Oban.Engines.Lite,
     notifier: Oban.Notifiers.PG
 
-  config :arbor_persistence, Arbor.Persistence.Repo,
+  config :arbor_persistence_host, Arbor.Persistence.Repo,
     database:
       System.get_env("ARBOR_SQLITE_PATH", Path.expand("~/.arbor/arbor_dev.db"))
       |> Path.expand(),
@@ -379,3 +379,11 @@ import_config "provider_route_profile.exs"
 # minutes) may complete instead of dying at the 45 s production bound. The
 # durable fix is an asynchronous council_consult (friction log, 2026-08-29).
 config :arbor_gateway, mcp_handler_call_timeout_ms: 600_000
+
+# SQL package compile-time state follows the selected host Repo adapter.
+config :arbor_persistence_sql,
+       :repo_adapter,
+       if(System.get_env("ARBOR_DB") == "postgres",
+         do: Ecto.Adapters.Postgres,
+         else: Ecto.Adapters.SQLite3
+       )

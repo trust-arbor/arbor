@@ -21,11 +21,11 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.SqliteEvidence do
     end
 
     # Suite restoration: stop_owned_repo/1 calls restore_repo_config(previous);
-    # start_suite!/1 @env_keys already includes {:arbor_persistence, Repo}.
-    previous = Application.fetch_env(:arbor_persistence, Repo)
+    # start_suite!/1 @env_keys already includes {:arbor_persistence_host, Repo}.
+    previous = Application.fetch_env(:arbor_persistence_host, Repo)
 
     Application.put_env(
-      :arbor_persistence,
+      :arbor_persistence_host,
       Repo,
       database: database,
       pool: DBConnection.ConnectionPool,
@@ -131,8 +131,10 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.SqliteEvidence do
   defp content_text(text) when is_binary(text), do: text
   defp content_text(other), do: inspect(other)
 
-  defp restore_repo_config({:ok, value}), do: Application.put_env(:arbor_persistence, Repo, value)
-  defp restore_repo_config(:error), do: Application.delete_env(:arbor_persistence, Repo)
+  defp restore_repo_config({:ok, value}),
+    do: Application.put_env(:arbor_persistence_host, Repo, value)
+
+  defp restore_repo_config(:error), do: Application.delete_env(:arbor_persistence_host, Repo)
 
   defp repo_alive? do
     case Process.whereis(Repo) do
@@ -142,7 +144,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline.SqliteEvidence do
   end
 
   defp migrations_path! do
-    case :code.priv_dir(:arbor_persistence) do
+    case :code.priv_dir(:arbor_persistence_host) do
       {:error, reason} ->
         flunk("arbor_persistence priv dir unavailable: #{inspect(reason)}")
 

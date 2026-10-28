@@ -163,7 +163,7 @@ defmodule Arbor.Scheduler.OwnedDigestRuntimeConfigTest do
     """)
 
     # Select the already compiled adapter; Config.Reader performs no DB connection.
-    adapter = Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.SQLite3)
+    adapter = Application.get_env(:arbor_persistence_host, :repo_adapter, Ecto.Adapters.SQLite3)
 
     System.put_env(
       "ARBOR_DB",

@@ -34,10 +34,14 @@ defmodule ArborAgent.MixProject do
 
   defp deps do
     [
+      {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
+      {:arbor_persistence_sql, path: "../../packages/arbor_persistence_sql", env: Mix.env()},
+      {:arbor_persistence_eventstore,
+       path: "../../packages/arbor_persistence_eventstore", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
       # L4 public conversation admission/replay facade; Agent remains L7.
       {:arbor_comms, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},

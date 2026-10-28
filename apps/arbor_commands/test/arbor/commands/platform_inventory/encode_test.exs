@@ -69,7 +69,7 @@ defmodule Arbor.Commands.PlatformInventory.EncodeTest do
                Encode.entries_digest([entry2])
     end
 
-    test "rejects an app outside the closed nine-app set" do
+    test "rejects an app outside the closed eleven-owner set" do
       entry = Map.put(valid_entry(), "app", "arbor_dashboard")
 
       assert {:error, {:invalid_field, "app", :unknown_app}} = Encode.entries_digest([entry])
@@ -550,7 +550,7 @@ defmodule Arbor.Commands.PlatformInventory.EncodeTest do
 
   defp valid_report do
     bind_digests(%{
-      "schema" => "arbor.packaging.platform_inventory.v1",
+      "schema" => "arbor.packaging.platform_inventory.v2",
       "mode" => "report",
       "status" => "unreviewed",
       "output" => "human",
@@ -582,7 +582,7 @@ defmodule Arbor.Commands.PlatformInventory.EncodeTest do
     ]
 
     bind_digests(%{
-      "schema" => "arbor.packaging.platform_inventory.v1",
+      "schema" => "arbor.packaging.platform_inventory.v2",
       "mode" => "report",
       "status" => "mismatch",
       "output" => "human",

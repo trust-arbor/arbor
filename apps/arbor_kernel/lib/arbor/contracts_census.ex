@@ -12,7 +12,7 @@ defmodule Arbor.Contracts.Census do
     (e.g. `lib/arbor/contracts/security/capability.ex`)
   - `:modules` — every column-0 `defmodule` in the file
   - `:loc` — physical line count
-  - `:external_consumers` — sorted umbrella app names (not `arbor_kernel`)
+  - `:external_consumers` — sorted application/package owner names (not `arbor_kernel`)
   - `:internal_consumers` — sorted app-relative paths under `arbor_kernel`
     (`lib/...` and `test/...`) that reference this file
   - `:in_registry` — module appears in `lib/arbor/contracts.ex` `list_contracts/0`
@@ -462,7 +462,7 @@ defmodule Arbor.Contracts.Census do
   end
 
   defp consumer_scan_path?(path) do
-    String.starts_with?(path, "apps/") and
+    String.starts_with?(path, ["apps/", "packages/"]) and
       (String.contains?(path, "/lib/") or String.contains?(path, "/test/")) and
       (String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs"))
   end
@@ -476,11 +476,13 @@ defmodule Arbor.Contracts.Census do
         contained_paths(env, filter)
 
       _ ->
-        case System.cmd("git", ["-C", root, "ls-files", "apps/"], stderr_to_stdout: true) do
+        case System.cmd("git", ["-C", root, "ls-files", "-z", "--", "apps/", "packages/"],
+               stderr_to_stdout: true
+             ) do
           {out, 0} ->
             {:ok,
              out
-             |> String.split("\n", trim: true)
+             |> String.split(<<0>>, trim: true)
              |> Enum.filter(filter)
              |> Enum.sort()}
 
@@ -820,7 +822,7 @@ defmodule Arbor.Contracts.Census do
 
   defp app_from_path(path) do
     case Path.split(path) do
-      ["apps", app | _] -> app
+      [scope, app | _] when scope in ["apps", "packages"] -> app
       _ -> "unknown"
     end
   end

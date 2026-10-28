@@ -846,7 +846,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
     # Start persistence for DB-backed eval storage (optional — falls back to JSON)
     try do
-      Application.ensure_all_started(:arbor_persistence)
+      Application.ensure_all_started(:arbor_persistence_host)
     rescue
       _ -> :ok
     catch

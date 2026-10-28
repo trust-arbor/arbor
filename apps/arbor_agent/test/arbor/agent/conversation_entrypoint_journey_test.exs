@@ -22,7 +22,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
               "../../../../arbor_orchestrator/specs/pipelines/session/turn.dot",
               __DIR__
             )
-  @migrations Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   defmodule CaptureProvider do
     def provider, do: "lm_studio"

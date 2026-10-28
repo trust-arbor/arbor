@@ -1,0 +1,891 @@
+{
+  "schema_version": 1,
+  "source_base_commit": "64d3adf1cf7094b8bdcf620f3b3e1a2e2b326cf4",
+  "family_provenance": "../arbor_persistence/adoption-source-map.json",
+  "package": "arbor_persistence_sql",
+  "source_inventory": [
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/database_case.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "c67ec14eee9f3ed072c86f24b127147adfa5ec70",
+      "source_sha256": "d99055a5c4addf4ea381096436083084de36169dab205be205ac2cd800daa8ae",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/support/database_case.ex",
+          "disposition": "independent-test-helper-copy",
+          "sha256": "9c0b2ea999b64fa788533ec09e1a31d7301f29a9a870822f0bb0d559eeeb5a94",
+          "git_blob": "6e72ce9cd4cdcad97e20d9defbe31b92121b2264",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/lib/arbor/persistence/database_case.ex",
+          "disposition": "retained_host_owner",
+          "sha256": "d99055a5c4addf4ea381096436083084de36169dab205be205ac2cd800daa8ae",
+          "git_blob": "c67ec14eee9f3ed072c86f24b127147adfa5ec70",
+          "content_equal_to_source": true,
+          "adaptation": "Host owner/path/configuration remap; product behavior retained."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ecto.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "74e9bba102dbbf17b60b88e382de7fb2f9add0e7",
+      "source_sha256": "c98d2eaa7b11d463b3858fe39ba96d990ce097f574a277d1f5977103966b952b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/event_log/ecto.ex",
+          "disposition": "move-current-Main",
+          "sha256": "7075421544f0189c40c6691c7076e593079f64ce0072a49deb018ddfd7e916b7",
+          "git_blob": "939cbc07460c7ac0d4b91655ad4e79601d5a5479",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/event_log/postgres_repair.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "473f3fd258acef886596477c72a50b585bae564c",
+      "source_sha256": "593a67b9ced7ab897aca9edf4103a20855e8c383cf55e8b9b8d3c0dd25fc159e",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/event_log/postgres_repair.ex",
+          "disposition": "move-current-Main",
+          "sha256": "5215941bec577f2b18733cf49470359cd01968f64a52de7082ab07ffe7f0fa40",
+          "git_blob": "cc5c7b83f04178365bba9964b9df3f09975bd9b0",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/migration_helper.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "0325b687ce042188e14c2e5136771c2e470c9e7c",
+      "source_sha256": "dcbfeb370a4b274682a508c39ed167b4599c6b8b1f59dd7bf3ad1ef65975747a",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/migration_helper.ex",
+          "disposition": "move-current-Main",
+          "sha256": "626e1bd25bfaf7e4d4730f3ed9f78835312ca2cbbe1feb747ccf79f540f294a7",
+          "git_blob": "ab3e89249e8b8f5c1a4be4d0586da5f5ca9fdc56",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/postgres.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "c5a1197ccb3c70dfc799a6156415cac7e5942bd8",
+      "source_sha256": "0da7700b7b44692396f14e4f5441f86a0bc3aef8522eb10214fc408d6d13086b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/queryable_store/postgres.ex",
+          "disposition": "move-current-Main",
+          "sha256": "bbdaf2b5406f7afaed66d74b31d8c0c0601d467e4471c7582004cf0ff57e96fa",
+          "git_blob": "aaf3b4a7215b939083251337b94f6be304eb706e",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/repo.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "1ffc646a1d5a7951e0c5ebb5c41a31f96226de7e",
+      "source_sha256": "4a442023b7a6b2471e6695a8bb94c60877155f710b9717679943bee2e0ec0f74",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/sql/repo.ex",
+          "disposition": "independent-repo-copy-host-identity-retained",
+          "sha256": "ec936979858aeb9999c897705aa96d32acb96d08bd3ce7c29a53609d59f0fdbd",
+          "git_blob": "b7a1efb404ede4198b9ea4426cd9c4697e6ffd55",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/lib/arbor/persistence/repo.ex",
+          "disposition": "retained_host_owner",
+          "sha256": "5bac3b4a31113c0563e5a156e856d5912aa73c3109ff0563e56ccb75f9ea1921",
+          "git_blob": "1c446698313a46db5c674eae6b821e04b14b6200",
+          "content_equal_to_source": false,
+          "adaptation": "Host owner/path/configuration remap; product behavior retained."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "19b2d63881c1e1121c97f89eac6f71652f35f3d1",
+      "source_sha256": "dc948e90d979b89faa2a3ef56943812e5661f183a0b4bc1b2b1f55268fb35ec2",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/event.ex",
+          "disposition": "move-current-Main",
+          "sha256": "dc948e90d979b89faa2a3ef56943812e5661f183a0b4bc1b2b1f55268fb35ec2",
+          "git_blob": "19b2d63881c1e1121c97f89eac6f71652f35f3d1",
+          "content_equal_to_source": true
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event_log_operation.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "156992639e1fe61f25191638a8e0e078e6d1717b",
+      "source_sha256": "f7d5544f58ca7a354c1dea2b35659378a4ede15a42af8c8f404d436bce075df7",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/event_log_operation.ex",
+          "disposition": "move-current-Main",
+          "sha256": "f7d5544f58ca7a354c1dea2b35659378a4ede15a42af8c8f404d436bce075df7",
+          "git_blob": "156992639e1fe61f25191638a8e0e078e6d1717b",
+          "content_equal_to_source": true
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/schemas/record.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "7527479b9951eda53bcc2b77b49f19f53644e255",
+      "source_sha256": "56dab4b3545d470be26bf427df0e2132c9a1785c547d243f522d25611077535f",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/record.ex",
+          "disposition": "move-current-Main",
+          "sha256": "215b7a986ee6353639bfadb143f3adbacdb497e398c89acd078fa5a17480b727",
+          "git_blob": "88876237752fa3300df68fe8e72128688a6d020f",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/arbor/persistence/sqlite_busy_timeout.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "49b9b2acd08a8f29b430981e1f89eff83c12ee4e",
+      "source_sha256": "9a8b58b9e21e124bbf16b62ec6aa09f3b37b4553fbd2413c218ceb6e0385d29a",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/arbor/persistence/sqlite_busy_timeout.ex",
+          "disposition": "move-current-Main",
+          "sha256": "9a8b58b9e21e124bbf16b62ec6aa09f3b37b4553fbd2413c218ceb6e0385d29a",
+          "git_blob": "49b9b2acd08a8f29b430981e1f89eff83c12ee4e",
+          "content_equal_to_source": true
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/lib/mix/tasks/arbor/event_log/repair.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "bfcfd661a02dd660c599e40e4b9b2e3d7d7e6558",
+      "source_sha256": "5cdb4d92c71c773bec0a1f7e2d7bb2d0202b72adfd752809cc4148a44535d784",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/lib/mix/tasks/arbor/event_log/repair.ex",
+          "disposition": "move-current-Main",
+          "sha256": "7941209c51225b3c5db2399caac18345aafdeae1a41d615ef0d5b19e5db2a05c",
+          "git_blob": "c49f923174d3f15eb9eb6c55d93142a83ac5774e",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260128000001_create_events.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "b18d3c6a047d1f790b33d105b05c6c1807ec72ce",
+      "source_sha256": "d51eba232c733e6437bb0ab75b32c6336d7640fc0f141f8468fd03d642445e88",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260128000001_create_events.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "a45f069dd25dbd84043da2cf4ce6f9d3530acac4788cf0a48af4fe6f6debea80",
+          "git_blob": "c4d962868e649f5b22b78efd3a8c54383f54c648",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260128000001_create_events.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "d51eba232c733e6437bb0ab75b32c6336d7640fc0f141f8468fd03d642445e88",
+          "git_blob": "b18d3c6a047d1f790b33d105b05c6c1807ec72ce",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260130000001_create_records.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "e39746f70dd7cf5324b68ecb0cc882af7c37980b",
+      "source_sha256": "9e9c199502a096139209114f490bbebf77e737bee97ba8c1b482ddbff5853ee1",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260130000001_create_records.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "3b8351bc29183b72d41c0c749ead8da32c5953f4c396612ffa36a16d86c43393",
+          "git_blob": "5a2202c0bbf334016d49b583adc12c82bd400dd5",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260130000001_create_records.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "9e9c199502a096139209114f490bbebf77e737bee97ba8c1b482ddbff5853ee1",
+          "git_blob": "e39746f70dd7cf5324b68ecb0cc882af7c37980b",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260210000001_add_agent_id_to_events.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "bc8ef687c7963bad11a266ff1334642f9f5545e4",
+      "source_sha256": "9ec2e8d4e0cc5d9068211fa4fade8be80d95d18cb909efa352aaaf4f2cd47a04",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260210000001_add_agent_id_to_events.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "0f949ad91c793c409e42cf5cf49a2b4c6f9eb8f4c1ca396f7e15fbea3038e1f3",
+          "git_blob": "cc3b8d0e2e8f104eaf67d07a0594c58605eeb8d0",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260210000001_add_agent_id_to_events.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "9ec2e8d4e0cc5d9068211fa4fade8be80d95d18cb909efa352aaaf4f2cd47a04",
+          "git_blob": "bc8ef687c7963bad11a266ff1334642f9f5545e4",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260625000001_records_single_unique_identity.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "12b60ebb2133a89de3c02821db7fa82a8196450c",
+      "source_sha256": "123604e1f5b83c5bb887c7e9c2a2b038562a433c57dc4b0826afd68a1dc0b19b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260625000001_records_single_unique_identity.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "c10eae94ffbdd06e2a2d3b014017e0c0a54081cea8c0b91802a7782332a49cc8",
+          "git_blob": "0942d45a12849a92367f96ebef9d4ef37f45dac6",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260625000001_records_single_unique_identity.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "123604e1f5b83c5bb887c7e9c2a2b038562a433c57dc4b0826afd68a1dc0b19b",
+          "git_blob": "12b60ebb2133a89de3c02821db7fa82a8196450c",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000001_add_event_committed_at.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "547ee54422b218963c40c810d2b0eaac94ca8bf3",
+      "source_sha256": "753ee878bd1f7c65adc34313d9b3439fd5e85e510de14f1461c72806611e95ad",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000001_add_event_committed_at.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "dde4da4eda5edbb5adbccaa9d7095f9970fe31494cc8d387d76e08127c48165c",
+          "git_blob": "7376c02be928aa84ff9695471d750295bdcd7118",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260711000001_add_event_committed_at.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "753ee878bd1f7c65adc34313d9b3439fd5e85e510de14f1461c72806611e95ad",
+          "git_blob": "547ee54422b218963c40c810d2b0eaac94ca8bf3",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "78566cc5fadf7d6e2bbd34508bf7cc9d590dc191",
+      "source_sha256": "781155b3959408980947f840d27ed94d1a78ebab3f8d58443eb949a4fcae3046",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "e607bd56d17e749d52848691e17e6a5ea8b411637666152c69af26b2e002040b",
+          "git_blob": "1565abe4c83ff8c0c426d233cdc964d31385b117",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "781155b3959408980947f840d27ed94d1a78ebab3f8d58443eb949a4fcae3046",
+          "git_blob": "78566cc5fadf7d6e2bbd34508bf7cc9d590dc191",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000003_create_event_log_operations.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "6688759b610e2d42bd5d2b4bf23d7efa79db7e70",
+      "source_sha256": "15212628c8999d5687fb3772cf9054afe81517ddcfa42fcb3f9783e140696010",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000003_create_event_log_operations.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "37bcd87e36391b2b0e338b5bcff15c92edc90382db500bc9d2e3702f3bc77b00",
+          "git_blob": "76b2f59eb813533863598ccadcc6deb3b23975bd",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260711000003_create_event_log_operations.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "15212628c8999d5687fb3772cf9054afe81517ddcfa42fcb3f9783e140696010",
+          "git_blob": "6688759b610e2d42bd5d2b4bf23d7efa79db7e70",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "da65f2bec0aaf8bb2cec833530d5ff2ef7ed3f0a",
+      "source_sha256": "fddd00b297e0a826de619c46d0f743e7c2845b5005f032e002d4cb831f1837f6",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "0daca6c3cca6901a72b7cc88190f97524ac420cf805d04d4637643c30ec9900c",
+          "git_blob": "bfced25d1869ebb4a51941f42c00b5313287689c",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "fddd00b297e0a826de619c46d0f743e7c2845b5005f032e002d4cb831f1837f6",
+          "git_blob": "da65f2bec0aaf8bb2cec833530d5ff2ef7ed3f0a",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "087e2c16f63fbb9c8f61fabdc3d6a3f225712998",
+      "source_sha256": "9ee3067012479ae341438b58c8b4611d015d65d3513c1c0eb8729bef8afae696",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "a587eb7acf0f45291f72b7ae4ccd4b757f166ac35df7361d4b539ad340a89a71",
+          "git_blob": "321ea51d0d7e2769f214243359e117c1fcd298f2",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "9ee3067012479ae341438b58c8b4611d015d65d3513c1c0eb8729bef8afae696",
+          "git_blob": "087e2c16f63fbb9c8f61fabdc3d6a3f225712998",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260713000001_add_records_revision.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "d47cea7887e7e978e2f3b1f0e4fbc2437563b4f2",
+      "source_sha256": "7c5abe565fdeb63dfeab08e7b5a03beef9e8eacf99378a9e1177cb8b98e4e84b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260713000001_add_records_revision.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "7af882e6b6bd670e39c1d19678cc506e9f7c5b8aeb3ff786ef9c609077811a5e",
+          "git_blob": "8580e2fb12f2a7988803ead52cf3cc211b6e87aa",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260713000001_add_records_revision.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "7c5abe565fdeb63dfeab08e7b5a03beef9e8eacf99378a9e1177cb8b98e4e84b",
+          "git_blob": "d47cea7887e7e978e2f3b1f0e4fbc2437563b4f2",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260713000002_records_generation_and_namespace_key_identity.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "fc133b39a27d77c9f9e0049c554737e71a0f4fcd",
+      "source_sha256": "d2fff9d3725dfe16a4f1d48218f96552ca0239e9d02c988a9c09750096d0d26b",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260713000002_records_generation_and_namespace_key_identity.exs",
+          "disposition": "independent-history-copy-host-original-retained",
+          "sha256": "0bebb00d08db8bd17cf81457c8e89309a57d4f51b95526888f6438ee13e70341",
+          "git_blob": "bd968137efecb2e8d8402792c1f96e1ac410e480",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/priv/repo/migrations/20260713000002_records_generation_and_namespace_key_identity.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "d2fff9d3725dfe16a4f1d48218f96552ca0239e9d02c988a9c09750096d0d26b",
+          "git_blob": "fc133b39a27d77c9f9e0049c554737e71a0f4fcd",
+          "content_equal_to_source": true,
+          "adaptation": "Historical host migration version, module and body retained byte-for-byte."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/database_case_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "53fce8e2c10082d2a024930607431c4104aab61d",
+      "source_sha256": "1c92cab2d50ccacc171a5fb026f9c8fe6ba102cadf214e03e6a8e940a3c78413",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/database_case_test.exs",
+          "disposition": "copy-host-test-retained",
+          "sha256": "88aeb2d8946efd35a5966a9d7e31e6b8ca860b16951579966bf6aea9ee6ecdd4",
+          "git_blob": "7fe25ea27f6a051db24fa9be6f7430a33d291dfd",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/test/arbor/persistence/database_case_test.exs",
+          "disposition": "retained_host_owner",
+          "sha256": "1c92cab2d50ccacc171a5fb026f9c8fe6ba102cadf214e03e6a8e940a3c78413",
+          "git_blob": "53fce8e2c10082d2a024930607431c4104aab61d",
+          "content_equal_to_source": true,
+          "adaptation": "Host owner/path/configuration remap; product behavior retained."
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/durability_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "83e1f98f8a049fe76431963ebc84129f2d313eb8",
+      "source_sha256": "2e8e7b4a240b27c671a8264e00b3f4e335d9bb8aa36d948300f21f7b992a5735",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/durability_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "ecf95b80a356aba19ea73197042e56cac3745df4b9ad3f0b92f6cfa657e546d7",
+          "git_blob": "8133331be22446150d5e5edd5a0564e3cb6b19d4",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_concurrent_append_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "22292b0e4f16e44dd4497cadae385115e345123d",
+      "source_sha256": "3289630f4a6d19e17d925a96bf78061a1995b08af951476eccfc4cdbef2783d3",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_concurrent_append_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "e830f8108eeb8f16175ef31072ae21cdce0906d9d54cb979f35f0bde4ce6a40e",
+          "git_blob": "92618ca50a85d310ff0034e052250232abbc0bc3",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_protocol_migration_security_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "087bbb333d61f27dc132362860ef237346c0adf7",
+      "source_sha256": "bc8e4fabc6c67985a132b55e4b46590c79fafdf56e02c9be36ecedce427653d1",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_protocol_migration_security_regression_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "6f90857cddd07501bca3bd0ad9ffc7ec4a40be50b1eb1e0e72c81fba571e1a26",
+          "git_blob": "7bd7f2f250599ca7091e22c7f4fab00255778528",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_purge_security_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "27359989818eb719fd1427e8f021143a17003fda",
+      "source_sha256": "cd3b547f37eaf20c1019a1320bd772b9815c56bc24c9493540d328938c10ab7c",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_purge_security_regression_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "95231e38ab1939bb445980c1540d9cda372cb8fde3cc0a6e768cb3fe1834cefd",
+          "git_blob": "a84500089ff24785717b68580d5a6b34892163bd",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_retry_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "93a0c5c3997cac201d08246fbe9712b1c08673a1",
+      "source_sha256": "2ba256f0a6553afc257c4b743d16b262ba70e29f959ddce30719a0a345af2e74",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_retry_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "aba02eb7d67316bcdba488a0175c02142d9e0b2a14fbc767a489baa819a22d11",
+          "git_blob": "e04fd6db000ad88b7893b3cb600dac95cfc0cb0d",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_sqlite_concurrent_append_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "f559dd5440b45f731f538be31a1ea1ea9f6fc5a0",
+      "source_sha256": "db8160219b4b04e641d9a779a5180dbce641f9f3c8e4bb45f1e984d76fce2cfd",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_sqlite_concurrent_append_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "ee02c1961a3b7f82932957b960934cc0f427c22033a5c23e9abb0caf2207de84",
+          "git_blob": "d5bef2648f26911cd35ba4bddc3a3645968afe5d",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_stream_absence_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "d7ea49bcb4178ad1a33741ad7e5644f8a916c323",
+      "source_sha256": "be99cd54ad5572f8dbbc6367a664bb7df1155b8ddcc15ce667efc9b3f0c2e956",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_stream_absence_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "740abfe58e7ada5b9f0dc7d73674d1245938ebb40024a1cfb19bdca18cdaa3f8",
+          "git_blob": "88683751d7ea74fb0fed22c41b041258aa833102",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/ecto_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "858ec41bac63c9f7b61056d68242bb5456024d89",
+      "source_sha256": "cff08a353f83501cee5f206883996214fb21256727cf2fa6f62ab3496f2afbb6",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/ecto_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "e721797de9977067d5a1dc34b613c3340e3377ece595fe8b7d89a90ef4e85a3e",
+          "git_blob": "b6050a35f8b590ad9385f8cca9aa2de500547e76",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log/postgres_repair_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "4278d7aacb27e5558b7dfa7171fb92d427b58250",
+      "source_sha256": "4948a08997f8a91146593be320c450bd66a130df5b8bba442b9711d5c58218b6",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log/postgres_repair_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "3be1017ca9a7614c84d1dd8018d9f545eb66f63ae7521bd8911256d2ab80fd8e",
+          "git_blob": "66bdde9fe4417b3d6fa78542f60d03d5fe21737a",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log_public_boundary_security_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "b64d0b52667f008409aaa11357d75e554d2b3725",
+      "source_sha256": "b2c40a31a7719e14024eb1432cab43c504ebc21d2765bf216020fa05ffd79a43",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log_public_boundary_security_regression_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "e570dbaa4f940d29a07bdf3940c9aca787dfcff71fdb92945a73e1d25aa19951",
+          "git_blob": "23d10b482a6688e61b9bead409983c223075be48",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_log_timestamp_parent_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "1441d021cf940285554190bb44a58c580b73bf48",
+      "source_sha256": "9f7dfb8a1ae41b760db96cb9a47dc60702af04cb7f660949d2060d5389ca1186",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_log_timestamp_parent_regression_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "e9c5205ce4afe1967cfc9a5f1d31bd36f7e0c31546583b3136e11d301891b203",
+          "git_blob": "47b74ca2255f94df86914be160eb7e25da8c050d",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/event_record_read_database_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "0166148d1aecf3f7e8f2dc232461733df01bd9d8",
+      "source_sha256": "90a3d621edf20bfde3af6f3babab6b32015e63e3adfdaa967c93b9cd5e1acca8",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/event_record_read_database_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "19443e3e8f6a334ec0f63ed5e9f4bfd2870ab241a81cd51ce17756a9e66e4899",
+          "git_blob": "efdd7f140f74ce37e81acb2e0a1e53d7db0c6185",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/queryable_store/postgres_concurrent_cas_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "a7ed2d83c0a0af39a3f0b8f97acdff5916ab2f2f",
+      "source_sha256": "b872477da1ed81c419ebb5405858315b1e4e1d1f7a74844d0213dd935fb89d45",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/queryable_store/postgres_concurrent_cas_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "ac3ba47b24dbde5c51345f4c3b02f73dec04f7ab18ddb06b660b52441563e318",
+          "git_blob": "49c16e187fdd1ff7e81dd805e9c743f8c58dd711",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/queryable_store/postgres_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "851a818286e0654873a1a3cb65f4dbebaace73a0",
+      "source_sha256": "18e299ed83854ea9a1dc96ce314a593e86997dd04c2b3c2443135200a1b2e063",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/queryable_store/postgres_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "c36fb9611c072b655b5cb6d599af070b4fa0c1d8ee1cdcfa86316617681cfd41",
+          "git_blob": "24e482c786b9f4f0b95392712c56998576e680f1",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/queryable_store/sqlite_json_regression_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "a604923c642d64df265c9d7283f292666cfeba40",
+      "source_sha256": "624cde244e62f8dcd9ad0c0491444b7fad1fe7af3e7658c659366349157c0646",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/queryable_store/sqlite_json_regression_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "96f6fc7556e88bba2d9f01ae912afaefaf8b32e9a819e0bdc4f8a0e63e99aa83",
+          "git_blob": "048769f40e8853885e26d69480f6aea1f5323b88",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/records_generation_migration_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "f65355bc5a025fbdbf12dbbbc61ce7a833ca453f",
+      "source_sha256": "192092805fce48788d618354a704ff163627b0475ea0e5fabda31ee61f120e6d",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/records_generation_migration_test.exs",
+          "disposition": "move-current-Main",
+          "sha256": "8fde4ff2b6f9642434e973d00c0358f0ab8dee23ca3608f21ef6d9603be6add3",
+          "git_blob": "4c354a7b4244da26570fa8a14b30cd054c0ddff1",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/arbor/persistence/store/cas_fencing_test.exs",
+      "source_mode": "100644",
+      "source_base_git_blob": "3ff04696355083311e48a4cdf62b684e9c834620",
+      "source_sha256": "d5b815cc171db7a3346fb8540afbf92826b4b84c7689cb1e640c3cd5b17574c6",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence/test/arbor/persistence/store/cas_fencing_test.exs",
+          "disposition": "moved_and_adapted",
+          "sha256": "d5e5a24f92a7174cafce78f0a913ed43dcea7f64f8bbb798a74400b305268ac2",
+          "git_blob": "b0e7f0fa105c56c8a8b3f0008b8c1bacdaab3f4a",
+          "content_equal_to_source": false,
+          "adaptation": "Exact owned contracts and resource-owner context; host dependency references replaced by package ports where present."
+        },
+        {
+          "path": "packages/arbor_persistence_sql/test/arbor/persistence/store/cas_fencing_test.exs",
+          "disposition": "full-copy-core-and-SQL-assertions-retained",
+          "sha256": "412a48953f0a439c942edf38d6f72215dd44bb445baceb1ccfca62df7ab56966",
+          "git_blob": "da2b6904d9938dd8e3f55a29d00e2550595bbead",
+          "content_equal_to_source": false
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_persistence/test/support/postgres_delay_proxy.ex",
+      "source_mode": "100644",
+      "source_base_git_blob": "14c8511fe6433e40361ceb6af325114fdead314d",
+      "source_sha256": "a8ab48351bfc014bc8f10fe806711b16f830c85972a3acba10b545b88a5065a0",
+      "destinations": [
+        {
+          "path": "packages/arbor_persistence_sql/test/support/postgres_delay_proxy.ex",
+          "disposition": "independent-test-helper-copy",
+          "sha256": "153a859c49047d97e34c57c453ba737fe33f2e197058472744c53d1e9627fc1f",
+          "git_blob": "7df45574d9205170942ef5806d0c46b9a7b08407",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "packages/arbor_persistence_eventstore/test/support/postgres_delay_proxy.ex",
+          "disposition": "independent-test-helper-copy",
+          "sha256": "9ff48d917f4a13cb2d703146ed10a871b6d18c8b67f4a303108ac3f472356aa7",
+          "git_blob": "0fd4f39b76c36bc39cbfe56e0be58fc9f621fc55",
+          "content_equal_to_source": false
+        },
+        {
+          "path": "apps/arbor_persistence_host/test/support/postgres_delay_proxy.ex",
+          "disposition": "retained_host_owner",
+          "sha256": "a8ab48351bfc014bc8f10fe806711b16f830c85972a3acba10b545b88a5065a0",
+          "git_blob": "14c8511fe6433e40361ceb6af325114fdead314d",
+          "content_equal_to_source": true,
+          "adaptation": "Host owner/path/configuration remap; product behavior retained."
+        }
+      ]
+    }
+  ],
+  "new_boundary_modules": [
+    {
+      "path": "packages/arbor_persistence_sql/lib/arbor/persistence/sql/config.ex",
+      "modules": [
+        "Arbor.Persistence.SQL.Config"
+      ],
+      "sha256": "6f9106af602857829348c998cb074ae23d58c4b9c3be2321c9008bde9fada58f",
+      "disposition": "new_boundary_or_composition_helper"
+    }
+  ],
+  "independent_migrations": [
+    {
+      "version": "20260128000001",
+      "filename": "20260128000001_create_events.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.CreateEvents",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260128000001_create_events.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260128000001_create_events.exs",
+      "source_sha256": "d51eba232c733e6437bb0ab75b32c6336d7640fc0f141f8468fd03d642445e88",
+      "sha256": "a45f069dd25dbd84043da2cf4ce6f9d3530acac4788cf0a48af4fe6f6debea80",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260130000001",
+      "filename": "20260130000001_create_records.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.CreateRecords",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260130000001_create_records.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260130000001_create_records.exs",
+      "source_sha256": "9e9c199502a096139209114f490bbebf77e737bee97ba8c1b482ddbff5853ee1",
+      "sha256": "3b8351bc29183b72d41c0c749ead8da32c5953f4c396612ffa36a16d86c43393",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260210000001",
+      "filename": "20260210000001_add_agent_id_to_events.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.AddAgentIdToEvents",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260210000001_add_agent_id_to_events.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260210000001_add_agent_id_to_events.exs",
+      "source_sha256": "9ec2e8d4e0cc5d9068211fa4fade8be80d95d18cb909efa352aaaf4f2cd47a04",
+      "sha256": "0f949ad91c793c409e42cf5cf49a2b4c6f9eb8f4c1ca396f7e15fbea3038e1f3",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260625000001",
+      "filename": "20260625000001_records_single_unique_identity.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.RecordsSingleUniqueIdentity",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260625000001_records_single_unique_identity.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260625000001_records_single_unique_identity.exs",
+      "source_sha256": "123604e1f5b83c5bb887c7e9c2a2b038562a433c57dc4b0826afd68a1dc0b19b",
+      "sha256": "c10eae94ffbdd06e2a2d3b014017e0c0a54081cea8c0b91802a7782332a49cc8",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260711000001",
+      "filename": "20260711000001_add_event_committed_at.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.AddEventCommittedAt",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000001_add_event_committed_at.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000001_add_event_committed_at.exs",
+      "source_sha256": "753ee878bd1f7c65adc34313d9b3439fd5e85e510de14f1461c72806611e95ad",
+      "sha256": "dde4da4eda5edbb5adbccaa9d7095f9970fe31494cc8d387d76e08127c48165c",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260711000002",
+      "filename": "20260711000002_enforce_unique_event_global_position.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.EnforceUniqueEventGlobalPosition",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+      "source_sha256": "781155b3959408980947f840d27ed94d1a78ebab3f8d58443eb949a4fcae3046",
+      "sha256": "e607bd56d17e749d52848691e17e6a5ea8b411637666152c69af26b2e002040b",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260711000003",
+      "filename": "20260711000003_create_event_log_operations.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.CreateEventLogOperations",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260711000003_create_event_log_operations.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260711000003_create_event_log_operations.exs",
+      "source_sha256": "15212628c8999d5687fb3772cf9054afe81517ddcfa42fcb3f9783e140696010",
+      "sha256": "37bcd87e36391b2b0e338b5bcff15c92edc90382db500bc9d2e3702f3bc77b00",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260712000004",
+      "filename": "20260712000004_enforce_event_log_protocol.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.EnforceEventLogProtocol",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+      "source_sha256": "fddd00b297e0a826de619c46d0f743e7c2845b5005f032e002d4cb831f1837f6",
+      "sha256": "0daca6c3cca6901a72b7cc88190f97524ac420cf805d04d4637643c30ec9900c",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260712000005",
+      "filename": "20260712000005_harden_event_log_protocol_epoch.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.HardenEventLogProtocolEpoch",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+      "source_sha256": "9ee3067012479ae341438b58c8b4611d015d65d3513c1c0eb8729bef8afae696",
+      "sha256": "a587eb7acf0f45291f72b7ae4ccd4b757f166ac35df7361d4b539ad340a89a71",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260713000001",
+      "filename": "20260713000001_add_records_revision.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.AddRecordsRevision",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260713000001_add_records_revision.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260713000001_add_records_revision.exs",
+      "source_sha256": "7c5abe565fdeb63dfeab08e7b5a03beef9e8eacf99378a9e1177cb8b98e4e84b",
+      "sha256": "7af882e6b6bd670e39c1d19678cc506e9f7c5b8aeb3ff786ef9c609077811a5e",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    },
+    {
+      "version": "20260713000002",
+      "filename": "20260713000002_records_generation_and_namespace_key_identity.exs",
+      "module": "Arbor.Persistence.SQL.Repo.Migrations.RecordsGenerationAndNamespaceKeyIdentity",
+      "source_path": "apps/arbor_persistence/priv/repo/migrations/20260713000002_records_generation_and_namespace_key_identity.exs",
+      "path": "packages/arbor_persistence_sql/priv/repo/migrations/20260713000002_records_generation_and_namespace_key_identity.exs",
+      "source_sha256": "d2fff9d3725dfe16a4f1d48218f96552ca0239e9d02c988a9c09750096d0d26b",
+      "sha256": "0bebb00d08db8bd17cf81457c8e89309a57d4f51b95526888f6438ee13e70341",
+      "only_module_namespace_changed": true,
+      "host_original_retained": true
+    }
+  ]
+}

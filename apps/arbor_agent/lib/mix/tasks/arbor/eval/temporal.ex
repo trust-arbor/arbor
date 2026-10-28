@@ -44,7 +44,7 @@ defmodule Mix.Tasks.Arbor.Eval.Temporal do
   @impl Mix.Task
   def run(args) do
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    _ = Application.ensure_all_started(:arbor_persistence_eventstore)
 
     {opts, _, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 

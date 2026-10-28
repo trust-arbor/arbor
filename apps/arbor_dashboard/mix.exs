@@ -47,7 +47,7 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_historian, in_umbrella: true},
 
       # Level 1
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
 
       # Level 2
       {:arbor_security, in_umbrella: true},

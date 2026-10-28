@@ -12,5 +12,11 @@ breeze_locals =
 [
   inputs: ["{mix,.formatter}.exs", "{config,lib,test}/**/*.{ex,exs}"],
   locals_without_parens: breeze_locals,
-  subdirectories: ["apps/*", "packages/arbor_signals"]
+  subdirectories: [
+    "apps/*",
+    "packages/arbor_signals",
+    "packages/arbor_persistence",
+    "packages/arbor_persistence_sql",
+    "packages/arbor_persistence_eventstore"
+  ]
 ]

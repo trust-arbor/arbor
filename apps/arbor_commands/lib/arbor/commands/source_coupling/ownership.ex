@@ -68,6 +68,18 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
       {:ok, ast} ->
         {_ast, deps} =
           Macro.prewalk(ast, [], fn
+            {:{}, _metadata, [dep, _requirement, opts]} = node, acc
+            when is_atom(dep) and is_list(opts) ->
+              name = Atom.to_string(dep)
+
+              if String.starts_with?(name, "arbor_") and
+                   (Keyword.get(opts, :in_umbrella) == true or
+                      local_path_dependency?(name, opts, project_path)) do
+                {node, [name | acc]}
+              else
+                {node, acc}
+              end
+
             {dep, opts} = node, acc when is_atom(dep) and is_list(opts) ->
               name = Atom.to_string(dep)
 

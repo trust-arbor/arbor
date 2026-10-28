@@ -84,27 +84,28 @@ defmodule Arbor.Memory.IndexDualTest do
 
   setup do
     original_backend =
-      Application.get_env(:arbor_persistence, :vector_store_backend, :not_configured)
+      Application.get_env(:arbor_persistence_host, :vector_store_backend, :not_configured)
 
-    original_repo = Application.get_env(:arbor_persistence, :vector_store_repo, :not_configured)
+    original_repo =
+      Application.get_env(:arbor_persistence_host, :vector_store_repo, :not_configured)
 
     original_seam = Application.get_env(:arbor_memory, :strict_vector_seam, :not_configured)
 
     Application.put_env(
-      :arbor_persistence,
+      :arbor_persistence_host,
       :vector_store_backend,
       Arbor.Persistence.VectorStore.Ecto
     )
 
-    Application.put_env(:arbor_persistence, :vector_store_repo, Arbor.Persistence.Repo)
+    Application.put_env(:arbor_persistence_host, :vector_store_repo, Arbor.Persistence.Repo)
     Application.put_env(:arbor_memory, :strict_vector_seam, StrictVectorSeam.Default)
 
     agent_id = unique("strict_index_agent")
 
     on_exit(fn ->
       AckLossSeam.disarm(agent_id)
-      restore_env(:arbor_persistence, :vector_store_backend, original_backend)
-      restore_env(:arbor_persistence, :vector_store_repo, original_repo)
+      restore_env(:arbor_persistence_host, :vector_store_backend, original_backend)
+      restore_env(:arbor_persistence_host, :vector_store_repo, original_repo)
       restore_env(:arbor_memory, :strict_vector_seam, original_seam)
     end)
 

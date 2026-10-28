@@ -24,7 +24,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   @moduletag :fast
 
   @migrations Path.expand(
-                "../../../../arbor_persistence/priv/repo/migrations",
+                "../../../../arbor_persistence_host/priv/repo/migrations",
                 __DIR__
               )
 

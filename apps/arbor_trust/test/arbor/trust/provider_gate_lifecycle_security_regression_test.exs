@@ -8,7 +8,7 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
 
   use ExUnit.Case, async: false
 
-  @roots [:arbor_persistence, :phoenix_pubsub]
+  @roots [:arbor_persistence_host, :phoenix_pubsub]
 
   setup do
     start_children = Application.fetch_env(:arbor_trust, :start_children)

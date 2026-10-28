@@ -5,6 +5,23 @@ defmodule Arbor.Commands.SourceCoupling.OwnershipTest do
 
   @moduletag :fast
 
+  test "versioned adapter path dependencies preserve declared Core ownership and levels" do
+    source = """
+    defmodule Arbor.Persistence.SQL.MixProject do
+      def deps, do: [{:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence"}]
+    end
+    """
+
+    assert {:ok, ["arbor_persistence"]} =
+             Ownership.in_umbrella_deps(source, "packages/arbor_persistence_sql/mix.exs")
+
+    assert {:ok, %{"arbor_persistence" => 0, "arbor_persistence_sql" => 1}} =
+             Ownership.compute_levels(%{
+               "arbor_persistence" => [],
+               "arbor_persistence_sql" => ["arbor_persistence"]
+             })
+  end
+
   test "extracted packages retain application and source ownership" do
     assert {:ok, "arbor_signals"} =
              Ownership.app_of_path("packages/arbor_signals/lib/arbor/signals.ex")

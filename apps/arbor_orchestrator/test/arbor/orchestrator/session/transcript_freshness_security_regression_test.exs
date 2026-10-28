@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
   @moduletag :integration
   @moduletag :database
   @moduletag :isolated_repo
-  @migrations Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   defmodule Capture do
     def provider, do: "lm_studio"

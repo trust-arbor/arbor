@@ -93,7 +93,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
     {:ok, _} = Application.ensure_all_started(:arbor_ai)
     {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    _ = Application.ensure_all_started(:arbor_persistence_eventstore)
     :ok
   end
 

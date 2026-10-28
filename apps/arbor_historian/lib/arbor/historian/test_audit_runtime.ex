@@ -65,7 +65,7 @@ if Mix.env() == :test do
            journal_mode: :wal}
         )
 
-      migrations = Application.app_dir(:arbor_persistence, "priv/repo/migrations")
+      migrations = Application.app_dir(:arbor_persistence_host, "priv/repo/migrations")
       _ = Ecto.Migrator.run(TestAuditRepo, migrations, :up, all: true, log: false)
 
       Application.put_env(:arbor_historian, :durable_event_log_target, %{

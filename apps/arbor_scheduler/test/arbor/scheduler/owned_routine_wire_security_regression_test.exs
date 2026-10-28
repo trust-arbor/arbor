@@ -90,7 +90,7 @@ defmodule Arbor.Scheduler.OwnedRoutineWireSecurityRegressionTest do
     end
   end
 
-  if Application.compile_env(:arbor_persistence, :repo_adapter) == Ecto.Adapters.SQLite3 do
+  if Application.compile_env(:arbor_persistence_host, :repo_adapter) == Ecto.Adapters.SQLite3 do
     test "exact legacy SQLite wire remains historically verified without rewriting stored proof",
          f do
       intent = F.intent!(f)

@@ -56,7 +56,7 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
 
     # Ensure persistence is available for storing results
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    _ = Application.ensure_all_started(:arbor_persistence_eventstore)
 
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
 

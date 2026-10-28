@@ -24,7 +24,10 @@ defmodule Arbor.Orchestrator.Session.SelfKnowledgeChainTest do
   @store :arbor_memory_durable
   @collection "model_output_chain_fixture"
   @heartbeat_path Path.expand("../../../../specs/pipelines/session/heartbeat.dot", __DIR__)
-  @migrations_path Path.expand("../../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations_path Path.expand(
+                     "../../../../../arbor_persistence_host/priv/repo/migrations",
+                     __DIR__
+                   )
 
   if Repo.__adapter__() != Ecto.Adapters.SQLite3 do
     @moduletag skip: "requires the compiled SQLite Repo adapter"

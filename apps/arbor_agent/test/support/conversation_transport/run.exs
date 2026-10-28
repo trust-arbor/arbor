@@ -4,9 +4,9 @@ File.mkdir_p!(root)
 repo = Arbor.Persistence.Repo
 
 Application.put_env(
-  :arbor_persistence,
+  :arbor_persistence_host,
   repo,
-  Application.get_env(:arbor_persistence, repo, [])
+  Application.get_env(:arbor_persistence_host, repo, [])
   |> Keyword.put(:database, Path.join(root, "fallback.sqlite3"))
 )
 

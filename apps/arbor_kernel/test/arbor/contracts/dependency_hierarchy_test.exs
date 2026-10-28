@@ -193,6 +193,16 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
 
     {_ast, deps} =
       Macro.prewalk(ast, [], fn
+        {:{}, _metadata, [dep, _requirement, opts]} = node, acc
+        when is_atom(dep) and is_list(opts) ->
+          if to_string(dep) =~ ~r/^arbor_/ and
+               (Keyword.get(opts, :in_umbrella) == true or
+                  repository_path_dep?(dep, opts, path, root)) do
+            {node, [to_string(dep) | acc]}
+          else
+            {node, acc}
+          end
+
         {dep, opts} = node, acc when is_atom(dep) and is_list(opts) ->
           if to_string(dep) =~ ~r/^arbor_/ and
                (Keyword.get(opts, :in_umbrella) == true or
@@ -491,6 +501,24 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   end
 
   # ── Linked-worktree fixture (private tmp; never touches the real umbrella) ──
+
+  test "versioned local package dependencies contribute to hierarchy levels" do
+    suffix = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+    root = Path.join(System.tmp_dir!(), "arbor-versioned-package-dep-#{suffix}")
+    project = Path.join(root, "packages/arbor_persistence_sql/mix.exs")
+    File.mkdir_p!(Path.dirname(project))
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    File.write!(project, """
+    defmodule VersionedPackageFixture do
+      def deps do
+        [{:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence"}]
+      end
+    end
+    """)
+
+    assert in_umbrella_deps(project, root) == ["arbor_persistence"]
+  end
 
   defp linked_worktree_fixture do
     scratch =

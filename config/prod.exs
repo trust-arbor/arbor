@@ -36,9 +36,11 @@ prod_repo_adapter =
     _ -> {Oban.Engines.Lite, Oban.Notifiers.PG}
   end
 
-config :arbor_persistence,
+config :arbor_persistence_host,
   start_repo: true,
   repo_adapter: prod_repo_adapter
+
+config :arbor_persistence_sql, :repo_adapter, prod_repo_adapter
 
 config :arbor_scheduler, Oban,
   engine: prod_oban_engine,

@@ -10,6 +10,8 @@ attacksurface.*.md
 /_build
 **/apps/*/_build/
 **/apps/*/deps/
+**/packages/**/_build/
+**/packages/**/deps/
 /cover/
 **/cover/
 /doc/

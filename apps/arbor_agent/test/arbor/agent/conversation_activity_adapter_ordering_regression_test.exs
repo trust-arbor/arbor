@@ -15,7 +15,7 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
   # Optional package consumer: run with its normally compiled private BEAMs on
   # ERL_LIBS and --include external. No new Agent runtime dependency is added.
   @moduletag :external
-  @migrations Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations Path.expand("../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   setup_all do
     assert Code.ensure_loaded?(Adapter),

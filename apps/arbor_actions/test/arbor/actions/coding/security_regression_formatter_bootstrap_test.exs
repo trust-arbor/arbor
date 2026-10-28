@@ -7,7 +7,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterBootstrapTest do
   @moduletag :fast
   @moduletag :security_regression
 
-  @schema_project_mix_file "apps/arbor_persistence/mix.exs"
+  @schema_project_mix_file "apps/arbor_persistence_host/mix.exs"
   @schema_bootstrap_args ["-r", "Arbor.Persistence.Repo", "--quiet"]
   @selected_test "test/selected_test.exs"
 

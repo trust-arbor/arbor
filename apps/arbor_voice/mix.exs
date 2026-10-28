@@ -37,7 +37,7 @@ defmodule ArborVoice.MixProject do
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_multimedia, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
       {:arbor_comms, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},

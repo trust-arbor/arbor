@@ -21,7 +21,7 @@ defmodule Arbor.Memory.PrivateConversationSQLiteTest do
   @moduletag :database
   @moduletag :sqlite
   @moduletag :integration
-  @migrations_path Path.expand("../../../../arbor_persistence/priv/repo/migrations", __DIR__)
+  @migrations_path Path.expand("../../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
 
   if Repo.__adapter__() != Ecto.Adapters.SQLite3 do
     @moduletag skip: "requires the compiled SQLite Repo adapter"
@@ -49,8 +49,8 @@ defmodule Arbor.Memory.PrivateConversationSQLiteTest do
        Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver},
       {:arbor_memory, :strict_vector_seam, Arbor.Memory.StrictVectorSeam.Default},
       {:arbor_memory, :private_memory_security, Security},
-      {:arbor_persistence, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto},
-      {:arbor_persistence, :vector_store_repo, Repo},
+      {:arbor_persistence_host, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto},
+      {:arbor_persistence_host, :vector_store_repo, Repo},
       {:arbor_security, :identity_verification, true},
       {:arbor_security, :system_authority_mode, :persistent},
       {:arbor_security, :master_key_path, Path.join(root, "master.key")}

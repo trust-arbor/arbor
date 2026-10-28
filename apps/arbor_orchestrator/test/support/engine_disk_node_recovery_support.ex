@@ -157,7 +157,7 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
       get_in(prod, [:arbor_memory, :persistence_backend])
     )
 
-    Application.put_env(:arbor_persistence, Repo,
+    Application.put_env(:arbor_persistence_host, Repo,
       database: Path.join(disk_root, "authority.sqlite3"),
       pool: DBConnection.ConnectionPool,
       pool_size: 2,
@@ -168,7 +168,7 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
 
     # Boot the Repo explicitly before Orchestrator; never open the test-config
     # default database. All other optional service owners remain disabled.
-    Application.put_env(:arbor_persistence, :start_children, false)
+    Application.put_env(:arbor_persistence_host, :start_children, false)
     Application.put_env(:arbor_orchestrator, :recovery_enabled, false)
     Application.put_env(:arbor_orchestrator, :discover_local_providers, false)
     Application.put_env(:arbor_orchestrator, :preflight_models_on_start, false)
@@ -198,9 +198,9 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
 
   defp boot!(source_root) do
     check!(apply(Repo, :__adapter__, []) == Ecto.Adapters.SQLite3, :compiled_sqlite_adapter)
-    {:ok, _} = Application.ensure_all_started(:arbor_persistence)
+    {:ok, _} = Application.ensure_all_started(:arbor_persistence_host)
     {:ok, _} = Supervisor.start_child(Arbor.Persistence.Supervisor, Repo)
-    migrations = Path.join(source_root, "apps/arbor_persistence/priv/repo/migrations")
+    migrations = Path.join(source_root, "apps/arbor_persistence_host/priv/repo/migrations")
     Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
     :ok = Security.TestBootstrap.start!()
     {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)

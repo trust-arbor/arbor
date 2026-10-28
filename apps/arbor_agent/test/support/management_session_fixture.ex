@@ -70,7 +70,7 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
        journal_mode: :wal}
     )
 
-    migrations = Path.expand("../../../arbor_persistence/priv/repo/migrations", __DIR__)
+    migrations = Path.expand("../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
     Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
 
     assert Process.whereis(:arbor_agent_profiles) == nil,

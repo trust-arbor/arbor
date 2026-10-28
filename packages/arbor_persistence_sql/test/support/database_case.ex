@@ -1,0 +1,209 @@
+defmodule Arbor.Persistence.SQL.TestSupport.DatabaseCase do
+  @moduledoc """
+  ExUnit case template for tests that need the durable Ecto Repo
+  (`Arbor.Persistence.SQL.Repo`) with proper `Ecto.Adapters.SQL.Sandbox` isolation.
+
+  Tag the test module `@moduletag :database` (so it's excluded from the default,
+  no-database test lane) and `use Arbor.Persistence.SQL.TestSupport.DatabaseCase`.
+
+  This template handles the setup that every `:database` test was previously
+  open-coding inconsistently (some started the Repo, some called
+  `Sandbox.checkout` against a Repo that was never started — the latter crashed
+  with *"could not lookup Ecto repo … it was not started"*):
+
+  - **Starts the Repo lazily**, only when a `:database` test actually runs, in
+    `setup_all`. Doing it here rather than in app boot keeps the Repo's startup
+    from interfering with non-database app initialization (e.g. `Signals.Store`).
+  - **Fails setup explicitly** when the selected database is unreachable.
+    ExUnit has no runtime setup callback return for skipping; adapter-specific
+    suites use compile-time `@moduletag skip: reason` when their adapter is not
+    selected. A selected but unreachable database is a failed prerequisite.
+  - **Sets `:manual` Sandbox mode** and checks out a per-test connection via
+    `start_owner!`/`stop_owner` — the modern API that ties the connection's
+    ownership to a helper process stopped on exit. This avoids the
+    `{:shared, pid}` "owner process died before the test ran" footgun that the
+    earlier hand-rolled setup hit.
+
+  ## Adapter-local support
+
+  This helper is compiled only from the adapter's `test/support` directory.
+  It does not ship as a runtime ExUnit dependency. Arbor's host retains its
+  separate shared DatabaseCase and product Repo identity.
+
+  ## Usage
+
+      defmodule My.Thing.DatabaseTest do
+        use Arbor.Persistence.SQL.TestSupport.DatabaseCase, async: false
+
+        test "reads/writes through the durable Repo" do
+          # Arbor.Persistence.SQL.Repo is started + a Sandbox connection is checked out
+        end
+      end
+  """
+  use ExUnit.CaseTemplate
+
+  alias Ecto.Adapters.SQL.Sandbox
+
+  using do
+    quote do
+      alias Arbor.Persistence.SQL.Repo
+    end
+  end
+
+  # How long to wait for the Repo's connection pool / sandbox owner to be alive
+  # before giving up. Tens of ms is plenty under normal load; the generous
+  # ceiling only matters on a heavily-loaded CI box.
+  @repo_ready_timeout_ms 5_000
+  @repo_ready_poll_ms 25
+
+  setup_all do
+    case ensure_repo_started() do
+      {:ok, _pid} ->
+        # The Repo is started UNLINKED (see ensure_repo_started/0): a linked
+        # start would tie the Repo's lifetime to this setup_all callback's
+        # short-lived process, so the FIRST module's teardown would kill the
+        # Repo and a LATER module that got {:already_started, <dying pid>} would
+        # then call Sandbox.mode/2 against a dead owner → `(EXIT) no process`.
+        # That was the intermittent `set_manual_mode/0` crash. Unlinking +
+        # waiting for the pool below makes the case tolerant of cross-module
+        # startup ordering and restarts.
+        case wait_for_repo_ready(@repo_ready_timeout_ms) do
+          :ok ->
+            case set_manual_mode() do
+              :ok ->
+                if sqlite_repo?(), do: ensure_sqlite_writer_lock_table!()
+                :ok
+
+              {:error, reason} ->
+                raise_unavailable_database!(reason)
+            end
+
+          {:error, reason} ->
+            raise_unavailable_database!(reason)
+        end
+
+      {:error, reason} ->
+        raise_unavailable_database!(reason)
+    end
+  end
+
+  @doc false
+  @spec raise_unavailable_database!(term()) :: no_return()
+  def raise_unavailable_database!(reason) do
+    raise RuntimeError, "database test prerequisite unavailable: #{inspect(reason)}"
+  end
+
+  # Start the Repo if it isn't already, and ALWAYS return it unlinked from the
+  # caller so it outlives this setup_all process. Returns {:ok, pid} once a live
+  # Repo supervisor exists, or {:error, reason} if it can't be started.
+  defp ensure_repo_started do
+    case Arbor.Persistence.SQL.Repo.start_link() do
+      {:ok, pid} ->
+        Process.unlink(pid)
+        {:ok, pid}
+
+      {:error, {:already_started, pid}} ->
+        # Defensively unlink in case a prior caller in this process linked it.
+        _ = Process.unlink(pid)
+        {:ok, pid}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Poll until the Repo's GenServer / connection pool is registered AND alive,
+  # so the subsequent `Sandbox.mode(Repo, :manual)` (a GenServer.call into the
+  # pool) can't race a not-yet-up or just-died owner.
+  defp wait_for_repo_ready(timeout_ms) when timeout_ms <= 0 do
+    if repo_alive?(), do: :ok, else: {:error, :repo_not_ready}
+  end
+
+  defp wait_for_repo_ready(timeout_ms) do
+    if repo_alive?() do
+      :ok
+    else
+      Process.sleep(@repo_ready_poll_ms)
+      wait_for_repo_ready(timeout_ms - @repo_ready_poll_ms)
+    end
+  end
+
+  defp repo_alive? do
+    case GenServer.whereis(Arbor.Persistence.SQL.Repo) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  setup tags do
+    # The owner process holds the checked-out connection; stopping it on exit
+    # releases it and rolls back the test's transaction. `shared: true` (the
+    # default for sync tests) lets processes the test spawns see the same
+    # connection — needed by tests that drive GenServers/indexes.
+    pid = Sandbox.start_owner!(Arbor.Persistence.SQL.Repo, shared: not (tags[:async] == true))
+    on_exit(fn -> Sandbox.stop_owner(pid) end)
+
+    # The SQL sandbox starts a deferred transaction. Exqlite 0.42's SQLite
+    # returns SQLITE_BUSY immediately, without calling the busy handler, when
+    # that transaction has already read and another connection commits before
+    # the first write. Reserve the write lock before the test reads.
+    if sqlite_repo?(), do: reserve_sqlite_writer!()
+
+    :ok
+  end
+
+  # Repo.__adapter__/0 is a compile-time constant. Comparing it directly to
+  # Ecto.Adapters.SQLite3 is a typing violation under ARBOR_DB=postgres
+  # (always-false disjoint types) and fails `compile --warnings-as-errors`.
+  defp sqlite_repo? do
+    Atom.to_string(Arbor.Persistence.SQL.Repo.__adapter__()) == "Elixir.Ecto.Adapters.SQLite3"
+  end
+
+  defp ensure_sqlite_writer_lock_table! do
+    repo = Arbor.Persistence.SQL.Repo
+    :ok = Sandbox.checkout(repo, sandbox: false)
+
+    try do
+      repo.query!("CREATE TABLE IF NOT EXISTS arbor_test_writer_lock (id INTEGER PRIMARY KEY)")
+      repo.query!("INSERT OR IGNORE INTO arbor_test_writer_lock (id) VALUES (1)")
+    after
+      Sandbox.checkin(repo)
+    end
+  end
+
+  defp reserve_sqlite_writer! do
+    Arbor.Persistence.SQL.Repo.query!("UPDATE arbor_test_writer_lock SET id = 1 WHERE id = 1")
+  end
+
+  defp set_manual_mode do
+    set_manual_mode(@repo_ready_timeout_ms)
+  end
+
+  # `Sandbox.mode/2` issues a GenServer.call into the connection pool. Even
+  # after wait_for_repo_ready/1, the pool can briefly be unavailable across a
+  # restart, so we retry on the `no process`/noproc exit instead of letting it
+  # crash setup_all (which previously took down every test in the module). On a
+  # genuinely absent database the caller raises one explicit setup failure.
+  defp set_manual_mode(remaining_ms) when remaining_ms <= 0 do
+    # Last attempt: normalize an exit so setup_all can report one clear failure.
+    try do
+      Sandbox.mode(Arbor.Persistence.SQL.Repo, :manual)
+      :ok
+    catch
+      :exit, reason -> {:error, {:database_sandbox_not_ready, reason}}
+    end
+  end
+
+  defp set_manual_mode(remaining_ms) do
+    Sandbox.mode(Arbor.Persistence.SQL.Repo, :manual)
+    :ok
+  catch
+    :exit, {:noproc, _} ->
+      Process.sleep(@repo_ready_poll_ms)
+      set_manual_mode(remaining_ms - @repo_ready_poll_ms)
+
+    :exit, {:no_proc, _} ->
+      Process.sleep(@repo_ready_poll_ms)
+      set_manual_mode(remaining_ms - @repo_ready_poll_ms)
+  end
+end

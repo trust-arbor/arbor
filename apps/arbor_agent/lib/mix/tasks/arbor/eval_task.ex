@@ -137,7 +137,7 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
     # Persistence first so QueryableStore/Repo exist before orchestrator
     # and agent profile writes. Starting it last raced sqlite/Postgres
     # connections and surfaced as `database is locked`.
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    _ = Application.ensure_all_started(:arbor_persistence_eventstore)
 
     # This Mix task is a dedicated BEAM, but arbor_agent still starts Bootstrap
     # and Reconciler. Those would auto-start persisted agents into the eval

@@ -86,7 +86,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementDatabaseTest do
         log: false
       )
 
-    migrations = Application.app_dir(:arbor_persistence, "priv/repo/migrations")
+    migrations = Application.app_dir(:arbor_persistence_host, "priv/repo/migrations")
     _ = Ecto.Migrator.run(TemplateRepo, migrations, :up, all: true, log: false)
     _ = TemplateRepo.query!("PRAGMA wal_checkpoint(TRUNCATE)")
     :ok = Supervisor.stop(repo)

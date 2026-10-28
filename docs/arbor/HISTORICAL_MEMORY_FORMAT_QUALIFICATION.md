@@ -76,7 +76,7 @@ apps/arbor_memory/test/arbor/memory/knowledge_graph_store_test.exs:269
 apps/arbor_memory/test/arbor/memory/goal_store_provenance_test.exs:469
 apps/arbor_memory/test/arbor/memory/intent_store_provenance_test.exs:773
 apps/arbor_memory/test/arbor/memory/intent_store_provenance_test.exs:1177
-apps/arbor_persistence/test/arbor/persistence/queryable_store/sqlite_json_regression_test.exs
+packages/arbor_persistence_sql/test/arbor/persistence/queryable_store/sqlite_json_regression_test.exs
 ```
 
 The SQLite selector needs an isolated migrated SQLite Repo and its database tags;

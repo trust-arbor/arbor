@@ -1,0 +1,474 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-27",
+  "base_commit": "64d3adf1cf7094b8bdcf620f3b3e1a2e2b326cf4",
+  "package": "arbor_persistence_sql",
+  "family_qualification": "../arbor_persistence/qualification.json",
+  "production_provenance": "adoption-source-map.json",
+  "qualification_status": "implemented_scoped_checks_pass_broad_gates_open",
+  "focused_checks": {
+    "observed_result": "passed",
+    "source_binding": "Post-lint adapter production/configuration/selected-test sources SHA-verified before and after strict compile and the complete selected suites.",
+    "final_dependency_confirmation": "passed_post_lint_full_adapter_suites_and_current_source_cold_release_lanes",
+    "strict_compile": {
+      "exit_code": 0,
+      "fresh_first_party_compilation": true
+    },
+    "default_suite": {
+      "reported_tests": 67,
+      "failures": 0,
+      "excluded": 119,
+      "exit_code": 0
+    },
+    "formatter": {
+      "exit_code": 0
+    },
+    "sqlite_suite": {
+      "tests": 161,
+      "failures": 0,
+      "excluded": 0,
+      "files": 16,
+      "migration_opt_in": true,
+      "postgres_files_not_selected": true
+    },
+    "postgres_suite": {
+      "tests": 175,
+      "failures": 0,
+      "excluded": 0,
+      "skipped": 0,
+      "files": 18,
+      "strict_compile_exit": 0
+    },
+    "corrected_failed_attempt": {
+      "issue": "SQLite IN text assertion rejected valid PostgreSQL = ANY membership; one-query/bounded-row assertions retained",
+      "assertions_preserved": "One-query and bounded-row requirements retained; equivalent PostgreSQL membership rendering admitted.",
+      "rerun_sqlite_tests": 2,
+      "rerun_postgres_tests": 2,
+      "rerun_failures": 0
+    }
+  },
+  "cold_consumer_receipts": [
+    {
+      "closure_observations": {
+        "fresh-reader": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "migration": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "release-reader": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "writer": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ]
+      },
+      "copied_sources_verified": true,
+      "exit_code": 0,
+      "expected_arbor_closure": [
+        "arbor_persistence",
+        "arbor_persistence_sql"
+      ],
+      "lane": "sql-sqlite",
+      "matches_current_source": true,
+      "no_mix_release_stage": "release-reader",
+      "receipt_sha256": "64558f53f3daa03bd0a5e14121997faa0742c351fe871c68141f6b8593a145a4",
+      "source_file_count": 68,
+      "source_manifest_sha256": "c6668ada81f3f697c0077234600e431390f6e5bcf2d85b8f3be262f875732766",
+      "stages": [
+        {
+          "exit_code": 0,
+          "name": "toolchain",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "dependencies",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "compile",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "migration",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "writer",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "fresh-reader",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "release",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "release-reader",
+          "source_manifest_verified": true,
+          "status": "passed"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "closure_observations": {
+        "fresh-reader": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "migration": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "release-reader": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ],
+        "writer": [
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          },
+          {
+            "compiled": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "loaded": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ],
+            "started": [
+              "arbor_persistence",
+              "arbor_persistence_sql"
+            ]
+          }
+        ]
+      },
+      "copied_sources_verified": true,
+      "exit_code": 0,
+      "expected_arbor_closure": [
+        "arbor_persistence",
+        "arbor_persistence_sql"
+      ],
+      "lane": "sql-postgres",
+      "matches_current_source": true,
+      "no_mix_release_stage": "release-reader",
+      "receipt_sha256": "4e4e5894e9e3312e0c0a658e29aee2c6fd8e85fb7226cac78e1953b797a29329",
+      "source_file_count": 68,
+      "source_manifest_sha256": "c6668ada81f3f697c0077234600e431390f6e5bcf2d85b8f3be262f875732766",
+      "stages": [
+        {
+          "exit_code": 0,
+          "name": "toolchain",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "dependencies",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "compile",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "postgres-identity",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "postgres-database",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "migration",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "writer",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "fresh-reader",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "release",
+          "source_manifest_verified": true,
+          "status": "passed"
+        },
+        {
+          "exit_code": 0,
+          "name": "release-reader",
+          "source_manifest_verified": true,
+          "status": "passed"
+        }
+      ],
+      "status": "passed"
+    }
+  ],
+  "final_root_qualification": {
+    "status": "recorded_in_family_final_root_results",
+    "family_record": "../arbor_persistence/qualification.json",
+    "broad_fast_and_quality_gates_passed": false
+  },
+  "acceptance_limits": [
+    "Independent package release checks do not implement or qualify the product M2 per-profile release gate.",
+    "No claim of distributed invalidation delivery or cache coherence from simulated message tests.",
+    "Database restart/fencing evidence is not power-loss durability or distributed failover certification.",
+    "No automatic migration, schema repair, protocol epoch downgrade or data/wire conversion occurs during adoption.",
+    "The full umbrella fast gate is incomplete and quality remains red; final scoped results and limits are in the family record."
+  ],
+  "host_integration": {
+    "family_record": "../arbor_persistence/qualification.json",
+    "status": "passed_focused_selection",
+    "host_default_tests": 270,
+    "ordinary_database_tests": 377,
+    "exclusive_database_fixture_tests": 45,
+    "failures": 0,
+    "final_root_qualification": "in_progress"
+  },
+  "final_dependency_confirmation": "passed_post_lint_full_adapter_suites_and_current_source_cold_release_lanes",
+  "rollback": {
+    "family_record": "../arbor_persistence/qualification.json",
+    "status": "passed_atomic_snapshot_rehearsal",
+    "snapshot_commit": "ce80d27df8a63c8e1a8e6392e02d2a766332c6e2",
+    "restored_tree": "6a8f8d7dcd77abafcadb5cd504e0820fd5f560da",
+    "final_adoption_commit_binding": "recorded_in_final_task_verification_ledger",
+    "final_runtime_snapshot": "828fcd9334d40d2a6a6381b8b89d7336babb256b"
+  },
+  "production_provenance_sha256": "329db646f450a3ad2aee7460c5ff9619c8f40a32e92f8bfab33d46a84b3353dc",
+  "independent_final_review": {
+    "status": "passed",
+    "findings": 0,
+    "family_record": "../arbor_persistence/qualification.json"
+  }
+}

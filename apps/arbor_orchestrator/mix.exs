@@ -37,6 +37,8 @@ defmodule Arbor.Orchestrator.MixProject do
 
   defp deps do
     [
+      {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
+      {:arbor_persistence_sql, path: "../../packages/arbor_persistence_sql", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
@@ -68,7 +70,7 @@ defmodule Arbor.Orchestrator.MixProject do
       {:arbor_trust, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       # Source-owned engagement binding after authenticated receipt consumption.
       # arbor_comms is L4 and does not depend on arbor_orchestrator, so this

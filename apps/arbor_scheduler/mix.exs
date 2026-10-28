@@ -35,7 +35,7 @@ defmodule Arbor.Scheduler.MixProject do
     [
       # Umbrella deps
       {:arbor_kernel_runtime, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence_host, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},
 

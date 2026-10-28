@@ -8,12 +8,13 @@ Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Inc
 
 The `Arbor.Contracts` namespace in `arbor_kernel` admits only three categories:
 
-**Shared data types** — Structs referenced by two or more umbrella libraries
+**Shared data types** — Structs referenced by two or more libraries
 other than `arbor_kernel`. Exactly one consuming library means the type
 belongs to that consumer, not here. The executable consumer census defined by
 [`AC-1.0`](../specs/arbor-contracts/AC-1.0.md) decides the question; run
 `./bin/mix arbor.contracts.census` rather than inferring consumers from
 dependency declarations.
+The census counts actual application owners in both `apps/` and `packages/`.
 ```
 Security.Capability, Trust.Profile, Trust.Event
 Consensus.Protocol, Consensus.Proposal, Consensus.Evaluation,
@@ -47,7 +48,7 @@ Library-owned contract modules use the AC-4 destination convention:
 `<AppRootNamespace>.Contracts.<Leaf>`, with a matching path under that app's
 `lib/` directory.
 
-**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `Arbor.Contracts` in `arbor_kernel` only when two or more other umbrella libraries consume it, or when it is a facade behaviour under `contracts/api/`.
+**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `Arbor.Contracts` in `arbor_kernel` only when two or more other libraries consume it, or when it is a facade behaviour under `contracts/api/`.
 
 ## 3. Contract Callback Naming
 
