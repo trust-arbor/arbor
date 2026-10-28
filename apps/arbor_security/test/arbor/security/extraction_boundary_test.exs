@@ -44,7 +44,7 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
     refute mix_exs() =~ ":arbor_trust"
   end
 
-  test "B9 security regression: Arbor.Signals refs are contained to distributed sync and the three facade ports" do
+  test "B9 security regression: Arbor.Signals refs are contained to its adapter and three facade ports" do
     refs =
       security_lib_files()
       |> Enum.flat_map(fn path ->
@@ -55,13 +55,7 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
       end)
 
     if mix_exs() =~ ":arbor_kernel_runtime" do
-      allowed_sync_files =
-        MapSet.new([
-          "apps/arbor_security/lib/arbor/security/capability_store.ex",
-          "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
-          "apps/arbor_security/lib/arbor/security/identity/registry.ex",
-          "apps/arbor_security/lib/arbor/security/signal_sync.ex"
-        ])
+      adapter_path = "apps/arbor_security/lib/arbor/security/adapters/signals_transport.ex"
 
       allowed_facade_ports =
         MapSet.new([
@@ -76,7 +70,8 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
         refs
         |> Enum.reject(fn
           {^facade_path, parts} -> MapSet.member?(allowed_facade_ports, parts)
-          {path, _parts} -> MapSet.member?(allowed_sync_files, path)
+          {^adapter_path, [:Arbor, :Signals]} -> true
+          {_path, _parts} -> false
         end)
         |> Enum.map(fn {path, parts} -> "#{path} references #{format_module(parts)}" end)
 
