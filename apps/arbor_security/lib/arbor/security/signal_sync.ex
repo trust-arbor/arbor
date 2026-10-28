@@ -4,7 +4,7 @@ defmodule Arbor.Security.SignalSync do
   require Logger
 
   alias Arbor.Security.PrivateState
-  alias Arbor.Signals
+  alias Arbor.Security.SignalTransport
 
   @max_resubscribe_attempts 5
   @resubscribe_base_delay_ms 50
@@ -14,6 +14,7 @@ defmodule Arbor.Security.SignalSync do
 
   defstruct [
     :role,
+    :transport,
     :bus_pid,
     :bus_monitor_ref,
     :delivery_custody,
@@ -24,6 +25,7 @@ defmodule Arbor.Security.SignalSync do
 
   @type t :: %__MODULE__{
           role: atom(),
+          transport: module(),
           events: [atom()],
           bus_pid: pid() | nil,
           bus_monitor_ref: reference() | nil,
@@ -32,19 +34,20 @@ defmodule Arbor.Security.SignalSync do
           resubscribe_attempt: non_neg_integer()
         }
 
-  @spec establish(atom(), [atom()], boolean()) :: {:ok, t() | nil} | {:error, term()}
-  # Config asks through the public Signals facade so Security does not reach
-  # across the application boundary into Signals internals.
   @spec transport_configured?() :: boolean()
-  def transport_configured?, do: Signals.security_sync_transport_configured?()
+  def transport_configured?, do: SignalTransport.configured?()
 
+  @spec establish(atom(), [atom()], boolean()) :: {:ok, t() | nil} | {:error, term()}
   def establish(_role, _events, false), do: {:ok, nil}
 
   def establish(role, events, true) when is_atom(role) and is_list(events) do
-    if Signals.security_sync_role_configured?(role) do
-      establish_with_bus(role, events, nil)
+    with {:ok, transport} <- SignalTransport.capture(),
+         {:ok, true} <- SignalTransport.configured?(transport),
+         {:ok, true} <- SignalTransport.role_configured?(transport, role) do
+      establish_with_bus(role, events, nil, transport)
     else
-      {:ok, nil}
+      {:ok, false} -> {:ok, nil}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -71,7 +74,7 @@ defmodule Arbor.Security.SignalSync do
         {@resubscribe_message, role, attempt},
         %__MODULE__{role: role, resubscribe_attempt: attempt} = sync
       ) do
-    case establish_with_bus(sync.role, sync.events, sync) do
+    case establish_with_bus(sync.role, sync.events, sync, sync.transport) do
       {:ok, established} ->
         {:ok, established}
 
@@ -84,6 +87,19 @@ defmodule Arbor.Security.SignalSync do
   end
 
   def handle_info(_message, _sync), do: :unhandled
+
+  @spec admit_remote_security_mutation?(t() | nil, atom()) :: boolean()
+  def admit_remote_security_mutation?(%__MODULE__{transport: transport}, type),
+    do: SignalTransport.admit_remote_security_mutation?(transport, type)
+
+  def admit_remote_security_mutation?(_sync, _type), do: false
+
+  @spec emit(t() | nil, atom(), atom(), map(), keyword()) :: :ok | {:error, term()}
+  def emit(%__MODULE__{transport: transport}, category, type, data, opts),
+    do: SignalTransport.emit(transport, category, type, data, opts)
+
+  def emit(_sync, _category, _type, _data, _opts),
+    do: {:error, :security_sync_provider_unavailable}
 
   # The single admission gate for `{:signal_received, delivery_ref, signal}`.
   # Forged deliveries (no authenticated ref) are dropped silently. An
@@ -140,12 +156,12 @@ defmodule Arbor.Security.SignalSync do
       Process.demonitor(sync.bus_monitor_ref, [:flush])
     end
 
-    unsubscribe_all(sync.subscription_ids)
+    unsubscribe_all(sync.transport, sync.subscription_ids)
     PrivateState.delete(sync.delivery_custody, @delivery_custody_anchor)
   end
 
-  defp establish_with_bus(role, events, existing_sync) do
-    case subscribe_all(role, events) do
+  defp establish_with_bus(role, events, existing_sync, transport) do
+    case subscribe_all(transport, role, events) do
       {:ok, subscription_ids, bus_pid, delivery_refs} ->
         case store_delivery_refs(existing_sync, MapSet.new(delivery_refs)) do
           {:ok, delivery_custody} ->
@@ -155,6 +171,7 @@ defmodule Arbor.Security.SignalSync do
               {:ok,
                %__MODULE__{
                  role: role,
+                 transport: transport,
                  events: events,
                  bus_pid: bus_pid,
                  bus_monitor_ref: monitor_ref,
@@ -164,12 +181,12 @@ defmodule Arbor.Security.SignalSync do
                }}
             else
               Process.demonitor(monitor_ref, [:flush])
-              unsubscribe_all(subscription_ids)
+              unsubscribe_all(transport, subscription_ids)
               {:error, :signals_bus_restarted_during_subscription}
             end
 
           {:error, reason} ->
-            unsubscribe_all(subscription_ids)
+            unsubscribe_all(transport, subscription_ids)
             {:error, reason}
         end
 
@@ -178,11 +195,11 @@ defmodule Arbor.Security.SignalSync do
     end
   end
 
-  defp subscribe_all(role, events) do
+  defp subscribe_all(transport, role, events) do
     Enum.reduce_while(events, {:ok, [], [], nil}, fn event,
                                                      {:ok, subscription_ids, delivery_refs,
                                                       expected_bus_pid} ->
-      case subscribe(role, event) do
+      case SignalTransport.subscribe(transport, role, event) do
         {:ok, subscription_id, bus_pid, delivery_ref}
         when is_reference(delivery_ref) and
                (is_nil(expected_bus_pid) or expected_bus_pid == bus_pid) ->
@@ -190,11 +207,11 @@ defmodule Arbor.Security.SignalSync do
            {:ok, [subscription_id | subscription_ids], [delivery_ref | delivery_refs], bus_pid}}
 
         {:ok, subscription_id, _different_bus_pid, _delivery_ref} ->
-          unsubscribe_all([subscription_id | subscription_ids])
+          unsubscribe_all(transport, [subscription_id | subscription_ids])
           {:halt, {:error, :signals_bus_restarted_during_subscription}}
 
         {:error, reason} ->
-          unsubscribe_all(subscription_ids)
+          unsubscribe_all(transport, subscription_ids)
           {:halt, {:error, {:subscription_failed, event, reason}}}
       end
     end)
@@ -210,22 +227,9 @@ defmodule Arbor.Security.SignalSync do
     end
   end
 
-  defp subscribe(role, event) do
-    Signals.subscribe_security_sync(role, event)
-  rescue
-    error -> {:error, {:exception, error}}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  defp unsubscribe_all(subscription_ids) do
+  defp unsubscribe_all(transport, subscription_ids) do
     Enum.each(subscription_ids, fn subscription_id ->
-      try do
-        _ = Signals.unsubscribe(subscription_id)
-      catch
-        :exit, _reason -> :ok
-      end
+      _ = SignalTransport.unsubscribe(transport, subscription_id)
     end)
 
     :ok

@@ -865,6 +865,16 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  Host transport for distributed security synchronization.
+
+  Missing or explicit `nil` means local-only. Arbor's root configuration
+  explicitly selects its Signals adapter. A configured unavailable provider
+  never silently becomes local-only.
+  """
+  @spec signal_transport() :: module() | nil
+  def signal_transport, do: Application.get_env(@app, :signal_transport)
+
+  @doc """
   Whether to emit distributed signals on capability state changes.
 
   When `true`, the CapabilityStore and Identity.Registry emit `:security`
@@ -873,15 +883,19 @@ defmodule Arbor.Security.Config do
   invalidate their local caches.
 
   Default: `true` when the flag is unset. Effective enablement also
-  requires a usable Signals security-sync subscriber map. An empty or
-  missing map is local-only so a fresh VM can start without aborting
-  on `:unauthorized` cluster subscriptions.
+  requires a configured security-sync transport. With Arbor's Signals adapter,
+  an empty or missing subscriber map is local-only. A malformed or unavailable
+  configured provider keeps startup enabled so establishment refuses explicitly.
   """
   @spec distributed_signals_enabled?() :: boolean()
   def distributed_signals_enabled? do
-    enforcement_toggle(:distributed_signals, true) and
+    distributed_signals_requested?() and
       Arbor.Security.SignalSync.transport_configured?()
   end
+
+  @doc false
+  @spec distributed_signals_requested?() :: boolean()
+  def distributed_signals_requested?, do: enforcement_toggle(:distributed_signals, true)
 
   # Production is "a connected node could accept a replayed signed request",
   # which `ReplayPeers` narrows from bare `Node.list() != []` to peers that

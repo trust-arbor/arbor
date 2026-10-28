@@ -101,7 +101,7 @@ defmodule Arbor.Security.Identity.NonceCache do
       expiry = now + ttl_seconds
       state = put_in(state, [:nonces, nonce], expiry)
       # Propagate to peer nodes so the nonce can't be replayed elsewhere.
-      emit_nonce_seen(nonce, expiry)
+      emit_nonce_seen(state, nonce, expiry)
       {:reply, :ok, state}
     end
   end
@@ -162,9 +162,10 @@ defmodule Arbor.Security.Identity.NonceCache do
     SignalSync.establish(:nonce_cache, @signal_events, Config.distributed_signals_enabled?())
   end
 
-  defp emit_nonce_seen(nonce, expiry) do
-    if Config.distributed_signals_enabled?() do
-      Arbor.Signals.emit(
+  defp emit_nonce_seen(state, nonce, expiry) do
+    if Config.distributed_signals_requested?() do
+      SignalSync.emit(
+        Map.get(state, :signal_sync),
         :security,
         @signal_type,
         %{

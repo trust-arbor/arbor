@@ -57,7 +57,6 @@ defmodule Arbor.Security.Identity.Registry do
   alias Arbor.Security.PrivateState
   alias Arbor.Security.SignalSync
   alias Arbor.Security.SupervisedOwner
-  alias Arbor.Signals
 
   @id_store :arbor_security_identities
   @owner_directory :arbor_security_identity_registry_owner_directory
@@ -1108,7 +1107,7 @@ defmodule Arbor.Security.Identity.Registry do
               |> update_in([:authority_records], &Map.delete(&1, agent_id))
               |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
-            emit_identity_signal(:identity_deregistered, agent_id)
+            emit_identity_signal(state, :identity_deregistered, agent_id)
             {:reply, :ok, state}
 
           {:error, reason} ->
@@ -1173,7 +1172,7 @@ defmodule Arbor.Security.Identity.Registry do
         case commit_identity_update(state, agent_id, updated_entry) do
           {:ok, state} ->
             state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-            emit_identity_signal(:identity_revoked, agent_id)
+            emit_identity_signal(state, :identity_revoked, agent_id)
 
             # Capability cleanup uses its own independently authorized receipt
             # at the Security facade. Status becomes terminal first so any
@@ -1229,7 +1228,7 @@ defmodule Arbor.Security.Identity.Registry do
                 |> index_by_name(identity.name, identity.agent_id)
                 |> update_in([:stats, :total_registered], &(&1 + 1))
 
-              emit_identity_signal(:identity_registered, identity.agent_id)
+              emit_identity_signal(state, :identity_registered, identity.agent_id)
               {:reply, :ok, state}
             else
               {:error, reason} -> {:reply, {:error, reason}, state}
@@ -1969,9 +1968,10 @@ defmodule Arbor.Security.Identity.Registry do
     )
   end
 
-  defp emit_identity_signal(type, agent_id) do
-    if Config.distributed_signals_enabled?() do
-      Signals.emit(
+  defp emit_identity_signal(state, type, agent_id) do
+    if Config.distributed_signals_requested?() do
+      SignalSync.emit(
+        Map.get(state, :signal_sync),
         :security,
         type,
         %{
@@ -1998,7 +1998,7 @@ defmodule Arbor.Security.Identity.Registry do
       origin_node in [node(), Atom.to_string(node())] ->
         state
 
-      not Signals.admit_remote_security_mutation?(signal.type) ->
+      not SignalSync.admit_remote_security_mutation?(state.signal_sync, signal.type) ->
         state
 
       true ->
@@ -2258,7 +2258,7 @@ defmodule Arbor.Security.Identity.Registry do
     case commit_identity_update(state, agent_id, updated_entry) do
       {:ok, state} ->
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        emit_identity_signal(signal_type, agent_id)
+        emit_identity_signal(state, signal_type, agent_id)
         {:reply, :ok, state}
 
       {:error, reason} ->

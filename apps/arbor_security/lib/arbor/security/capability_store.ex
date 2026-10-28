@@ -35,7 +35,6 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Security.SignalSync
   alias Arbor.Security.SupervisedOwner
   alias Arbor.Security.SystemAuthority
-  alias Arbor.Signals
 
   @cap_store :arbor_security_capabilities
   @owner_directory :arbor_security_capability_store_owner_directory
@@ -1401,7 +1400,7 @@ defmodule Arbor.Security.CapabilityStore do
             case persist_capability(cap, acknowledged: true) do
               :ok ->
                 state = add_capability_to_state(state, cap)
-                emit_capability_signal(:capability_granted, cap)
+                emit_capability_signal(state, :capability_granted, cap)
                 {:reply, {:ok, :stored}, state}
 
               {:error, _} = error ->
@@ -1417,12 +1416,13 @@ defmodule Arbor.Security.CapabilityStore do
                 state = add_capability_to_state(state, cap)
 
                 emit_revocation_signal(
+                  state,
                   :capability_revoked,
                   [existing_cap.id],
                   existing_cap.principal_id
                 )
 
-                emit_capability_signal(:capability_granted, cap)
+                emit_capability_signal(state, :capability_granted, cap)
                 {:reply, {:ok, :stored}, state}
 
               {:error, reason} = error ->
@@ -1657,7 +1657,7 @@ defmodule Arbor.Security.CapabilityStore do
               |> revoke_capability_ids([capability_id])
               |> update_in([:stats, :total_revoked], &(&1 + 1))
 
-            emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
+            emit_revocation_signal(state, :capability_revoked, [capability_id], cap.principal_id)
             {:reply, :ok, next}
 
           {:error, _} = error ->
@@ -1687,7 +1687,7 @@ defmodule Arbor.Security.CapabilityStore do
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
     if count > 0 do
-      emit_revocation_signal(:capabilities_revoked_all, cap_ids, principal_id)
+      emit_revocation_signal(state, :capabilities_revoked_all, cap_ids, principal_id)
     end
 
     {:reply, reduction_result(count, failed), state}
@@ -1708,7 +1708,7 @@ defmodule Arbor.Security.CapabilityStore do
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
     if count > 0 do
-      emit_revocation_signal(:capabilities_scope_revoked, matching_ids, nil)
+      emit_revocation_signal(state, :capabilities_scope_revoked, matching_ids, nil)
     end
 
     {:reply, reduction_result(count, failed), state}
@@ -1731,7 +1731,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_revoked], &(&1 + count))
           |> update_in([:stats, :total_cascade_revoked], &(&1 + count))
 
-        emit_revocation_signal(:capabilities_cascade_revoked, all_ids, nil)
+        emit_revocation_signal(state, :capabilities_cascade_revoked, all_ids, nil)
         {:reply, reduction_result(count, failed), state}
     end
   end
@@ -2228,7 +2228,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> revoke_capability_ids([cap.id])
           |> update_in([:stats, :total_revoked], &(&1 + 1))
 
-        emit_revocation_signal(:capability_revoked, [cap.id], cap.principal_id)
+        emit_revocation_signal(state, :capability_revoked, [cap.id], cap.principal_id)
         {:reply, success_reply, next}
 
       {:error, reason} ->
@@ -2460,7 +2460,7 @@ defmodule Arbor.Security.CapabilityStore do
             {:ok, state, :added} ->
               # Durable-only convergence that newly projected into live: emit
               # the restricted cluster-sync signal exactly once.
-              emit_capability_signal(:capability_granted, stored)
+              emit_capability_signal(state, :capability_granted, stored)
               {:reply, {:ok, :idempotent, id}, state}
 
             {:ok, state, :already_present} ->
@@ -2538,14 +2538,14 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp ack_emit_committed(state, verified, id, :applied, _kind) do
     state = update_in(state, [:stats, :total_granted], &(&1 + 1))
-    emit_capability_signal(:capability_granted, verified)
+    emit_capability_signal(state, :capability_granted, verified)
     {:reply, {:ok, :applied, id}, state}
   end
 
   defp ack_emit_committed(state, verified, id, :idempotent, :added) do
     # Durable-only convergence that newly projected into live: emit the
     # restricted cluster-sync signal exactly once.
-    emit_capability_signal(:capability_granted, verified)
+    emit_capability_signal(state, :capability_granted, verified)
     {:reply, {:ok, :idempotent, id}, state}
   end
 
@@ -2616,7 +2616,7 @@ defmodule Arbor.Security.CapabilityStore do
               principal_id = ack_revoke_principal(state, capability_id, record)
               state = revoke_capability_ids(state, [capability_id])
               state = update_in(state, [:stats, :total_revoked], &(&1 + 1))
-              emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+              emit_revocation_signal(state, :capability_revoked, [capability_id], principal_id)
               {:reply, {:ok, :applied, capability_id}, state}
 
             {:error, :conflict} ->
@@ -2784,7 +2784,7 @@ defmodule Arbor.Security.CapabilityStore do
         principal_id = ack_revoke_principal(state, capability_id, observed)
         state = revoke_capability_ids(state, [capability_id])
         state = update_in(state, [:stats, :total_revoked], &(&1 + 1))
-        emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+        emit_revocation_signal(state, :capability_revoked, [capability_id], principal_id)
         {:reply, {:ok, :applied, capability_id}, state}
 
       {:error, :conflict} ->
@@ -2887,7 +2887,7 @@ defmodule Arbor.Security.CapabilityStore do
     {state, newly_evicted?, principal_id} = ensure_ack_evicted(state, capability_id)
 
     if newly_evicted? do
-      emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+      emit_revocation_signal(state, :capability_revoked, [capability_id], principal_id)
     end
 
     {:reply, {:ok, :idempotent, capability_id}, state}
@@ -3637,7 +3637,7 @@ defmodule Arbor.Security.CapabilityStore do
       # Per-type, not wholesale: revocation must apply even without an
       # authenticated transport, or a capability revoked on another node
       # stays live here. Grants remain gated.
-      not Signals.admit_remote_security_mutation?(signal.type) ->
+      not SignalSync.admit_remote_security_mutation?(state.signal_sync, signal.type) ->
         state
 
       true ->
@@ -3719,9 +3719,10 @@ defmodule Arbor.Security.CapabilityStore do
   # Distributed Signal Emission
   # ===========================================================================
 
-  defp emit_capability_signal(type, cap) do
-    if Config.distributed_signals_enabled?() do
-      Signals.emit(
+  defp emit_capability_signal(state, type, cap) do
+    if Config.distributed_signals_requested?() do
+      SignalSync.emit(
+        Map.get(state, :signal_sync),
         :security,
         type,
         %{
@@ -3737,9 +3738,10 @@ defmodule Arbor.Security.CapabilityStore do
     _, _ -> :ok
   end
 
-  defp emit_revocation_signal(type, cap_ids, principal_id) do
-    if Config.distributed_signals_enabled?() do
-      Signals.emit(
+  defp emit_revocation_signal(state, type, cap_ids, principal_id) do
+    if Config.distributed_signals_requested?() do
+      SignalSync.emit(
+        Map.get(state, :signal_sync),
         :security,
         type,
         %{
