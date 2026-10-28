@@ -1186,13 +1186,20 @@ defmodule Arbor.Security.AuthorityStore do
   defp ephemeral_cas(_current, {:value, _expected}, _replacement), do: {:error, :conflict}
   defp ephemeral_cas(_current, :not_found, _replacement), do: {:error, :conflict}
 
+  # The limit bounds live records. Deletes keep a tombstone in `entries` (CAS
+  # inserts read its generation), so counting map entries let keys that were
+  # written and deleted exhaust capacity for the process lifetime.
   defp ensure_ephemeral_capacity(state, key) do
-    if Map.has_key?(state.entries, key) or map_size(state.entries) < state.hydration_limit do
+    if Map.has_key?(state.entries, key) or
+         live_ephemeral_count(state.entries) < state.hydration_limit do
       :ok
     else
       {:error, :inventory_limit_exceeded}
     end
   end
+
+  defp live_ephemeral_count(entries),
+    do: Enum.count(entries, fn {_key, entry} -> match?(%Record{}, entry) end)
 
   defp durable_compare_and_swap(state, key, expected, replacement) do
     if function_exported?(state.backend, :compare_and_swap, 4) do
