@@ -13,6 +13,10 @@ defmodule Arbor.Gateway.Auth do
   import Plug.Conn
   @behaviour Plug
 
+  require Logger
+
+  alias Arbor.Gateway.CommittedDevKey
+
   @impl true
   def init(opts), do: opts
 
@@ -32,31 +36,32 @@ defmodule Arbor.Gateway.Auth do
         |> halt()
 
       expected_key ->
-        case extract_key(conn) do
-          {:ok, presented_key} ->
-            # M4: pattern-match on ^expected_key is NOT constant-time and
-            # leaks the key character-by-character through timing analysis.
-            # Plug.Crypto.secure_compare/2 is constant-time (XOR-based).
-            if Plug.Crypto.secure_compare(presented_key, expected_key) do
-              conn
-            else
-              reject(conn, "Invalid API key")
-            end
+        case CommittedDevKey.admit(api_key: expected_key) do
+          {:error, message} ->
+            refuse_committed_dev_key(conn, message)
 
-          :error ->
-            reject(conn, no_key_message(conn))
+          :ok ->
+            case extract_key(conn) do
+              {:ok, presented_key} ->
+                # M4: pattern-match on ^expected_key is NOT constant-time and
+                # leaks the key character-by-character through timing analysis.
+                # Plug.Crypto.secure_compare/2 is constant-time (XOR-based).
+                if Plug.Crypto.secure_compare(presented_key, expected_key) do
+                  conn
+                else
+                  reject(conn, "Invalid API key")
+                end
+
+              :error ->
+                reject(conn, no_key_message(conn))
+            end
         end
     end
   end
 
   # Env first: the committed dev literal in config/dev.exs must never shadow
   # an operator-set ARBOR_GATEWAY_API_KEY (2026-10-11 cross-library review F-019).
-  defp get_configured_key do
-    case System.get_env("ARBOR_GATEWAY_API_KEY") do
-      key when is_binary(key) and key != "" -> key
-      _ -> Application.get_env(:arbor_gateway, :api_key)
-    end
-  end
+  defp get_configured_key, do: CommittedDevKey.configured_key()
 
   defp extract_key(conn) do
     case get_req_header(conn, "authorization") do
@@ -112,6 +117,21 @@ defmodule Arbor.Gateway.Auth do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(401, Jason.encode!(%{error: "Unauthorized", detail: message}))
+    |> halt()
+  end
+
+  defp refuse_committed_dev_key(conn, message) do
+    Logger.error("Arbor Gateway refused committed development API key: #{message}")
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(
+      503,
+      Jason.encode!(%{
+        error: "Committed development API key refused",
+        detail: "Set a unique ARBOR_GATEWAY_API_KEY"
+      })
+    )
     |> halt()
   end
 end
