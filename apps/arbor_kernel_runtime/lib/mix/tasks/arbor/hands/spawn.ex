@@ -194,18 +194,8 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     File.chmod!(run_script, 0o755)
 
     # Start tmux session
-    {output, exit_code} =
-      System.cmd(
-        "tmux",
-        [
-          "new-session",
-          "-d",
-          "-s",
-          session,
-          "#{run_script}; exec bash"
-        ],
-        stderr_to_stdout: true
-      )
+    {:ok, argv} = local_tmux_argv(session, run_script)
+    {output, exit_code} = System.cmd("tmux", argv, stderr_to_stdout: true)
 
     if exit_code != 0 do
       Mix.shell().error("Failed to start tmux session: #{output}")
@@ -405,5 +395,17 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
   # L10: Wrap value in single quotes, escaping any embedded single quotes
   defp shell_escape(str) do
     "'" <> String.replace(str, "'", "'\\''") <> "'"
+  end
+
+  @doc false
+  @spec validate_spawn_path(term()) :: {:ok, String.t()} | {:error, :invalid_spawn_path}
+  def validate_spawn_path(path) when is_binary(path), do: {:ok, path}
+  def validate_spawn_path(_path), do: {:error, :invalid_spawn_path}
+
+  @doc false
+  @spec local_tmux_argv(String.t(), String.t()) ::
+          {:ok, [String.t()]} | {:error, :invalid_spawn_path}
+  def local_tmux_argv(session, run_script) do
+    {:ok, ["new-session", "-d", "-s", session, "#{run_script}; exec bash"]}
   end
 end
