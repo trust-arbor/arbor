@@ -82,7 +82,13 @@ defmodule Arbor.Common.InstructionFileTrustSecurityRegressionTest do
     Testing.put(:instruction_trusted_roots, [approved])
 
     write_skill(Path.join([approved, "approved-skill", "SKILL.md"]), "approved-skill", "GOOD")
-    write_skill(Path.join([unapproved, "unapproved-skill", "SKILL.md"]), "unapproved-skill", "BAD")
+
+    write_skill(
+      Path.join([unapproved, "unapproved-skill", "SKILL.md"]),
+      "unapproved-skill",
+      "BAD"
+    )
+
     write_skill(Path.join([outside, "linked-skill", "SKILL.md"]), "linked-skill", "LINK")
     File.ln_s!(Path.join(outside, "linked-skill"), Path.join(approved, "linked-skill"))
 

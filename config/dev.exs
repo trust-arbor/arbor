@@ -320,6 +320,12 @@ arbor_source_root = Path.expand("..", __DIR__)
 
 config :arbor_orchestrator, coding_repo_roots: [arbor_source_root]
 
+# Instruction files (AGENTS.md / CLAUDE.md / skills) are trusted only from
+# configured roots plus the agent config dir. In dev, the checkout is an
+# approved root so coding templates that opt into project context still load
+# this repository's conventions. Prod keeps the default empty list.
+config :arbor_kernel, common: [instruction_trusted_roots: [arbor_source_root]]
+
 # Project context (AGENTS.md/CLAUDE.md) is NOT enabled globally: a blanket dev
 # override put the 31 KB developer handbook into every agent's prompt,
 # conversationalists included (2026-08-25). Coding-related templates opt in via
