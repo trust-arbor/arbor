@@ -91,6 +91,18 @@ defmodule Arbor.MixProjectPathsTest do
     end)
   end
 
+  test "the standalone Kernel project does not load monorepo build or configuration inputs" do
+    source = File.read!(Path.join(@root, "packages/arbor_kernel/mix.exs"))
+
+    refute source =~ "build_support/"
+    refute source =~ "Code.require_file"
+    refute source =~ "config_path:"
+    refute source =~ "lockfile:"
+    refute source =~ "build_path:"
+    refute source =~ "deps_path:"
+    refute File.exists?(Path.join(@root, "apps/arbor_kernel/mix.exs"))
+  end
+
   test "contained mode: missing or invalid inventory fails closed without wildcard" do
     fixture = linked_worktree_fixture()
 

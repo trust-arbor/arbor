@@ -6,7 +6,7 @@ Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Inc
 
 ## 1. What Goes in Contracts
 
-The `Arbor.Contracts` namespace in `arbor_kernel` admits only three categories:
+The `Arbor.Contracts` namespace in `packages/arbor_kernel` admits only three categories:
 
 **Shared data types** — Structs referenced by two or more libraries
 other than `arbor_kernel`. Exactly one consuming library means the type
@@ -236,7 +236,7 @@ import from a higher-level library, the dependency direction is wrong.
 ## 11. Organization
 
 ```
-arbor_kernel/lib/arbor/contracts/
+packages/arbor_kernel/lib/arbor/contracts/
   agent/
   ai/
   api/            # Facade behaviours; the only AC-1 multi-consumer exemption

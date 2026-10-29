@@ -35,6 +35,8 @@ defmodule Arbor.MixProject do
 
   defp deps do
     [
+      {:arbor_kernel, "~> 2.0.0-dev",
+       path: "packages/arbor_kernel", env: Mix.env(), override: true},
       {:arbor_custody, "~> 0.1.0-dev",
        path: "packages/arbor_custody", env: Mix.env(), override: true},
       {:arbor_signals,

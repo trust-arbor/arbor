@@ -6,7 +6,7 @@ defmodule Arbor.Commands.PackagingRoot do
   @markers [
     "mix.exs",
     "apps/arbor_commands/mix.exs",
-    "apps/arbor_kernel/mix.exs"
+    "packages/arbor_kernel/mix.exs"
   ]
 
   @spec resolve(nil | String.t()) :: {:ok, String.t()} | {:error, term()}

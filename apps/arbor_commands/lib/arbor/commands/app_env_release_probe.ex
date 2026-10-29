@@ -8,10 +8,10 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
   """
 
   alias Arbor.Commands.PackagingRoot
-  @template_rel ["apps", "arbor_kernel", "priv", "packaging", "app_env_release_probe"]
+  @template_rel ["packages", "arbor_kernel", "priv", "packaging", "app_env_release_probe"]
   @production_opt_keys [:json, :root]
   @owner_mix_rel [
-    ["apps", "arbor_kernel", "mix.exs"],
+    ["packages", "arbor_kernel", "mix.exs"],
     ["apps", "arbor_kernel_runtime", "mix.exs"],
     ["packages", "arbor_signals", "mix.exs"]
   ]
@@ -204,7 +204,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
   end
 
   defp generated_mix_exs(root) do
-    kernel = Path.expand("apps/arbor_kernel", root)
+    kernel = Path.expand("packages/arbor_kernel", root)
     kernel_runtime = Path.expand("apps/arbor_kernel_runtime", root)
     signals = Path.expand("packages/arbor_signals", root)
 

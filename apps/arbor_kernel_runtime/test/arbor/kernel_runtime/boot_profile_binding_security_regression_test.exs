@@ -16,7 +16,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
   @moduletag :security_regression
 
   @fixture_dir Path.expand(
-                 "../../../../arbor_kernel/test/fixtures/extension_envelopes/v1",
+                 "../../../../../packages/arbor_kernel/test/fixtures/extension_envelopes/v1",
                  __DIR__
                )
   @digest "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268"

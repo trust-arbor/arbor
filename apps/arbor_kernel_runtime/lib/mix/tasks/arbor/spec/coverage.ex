@@ -32,7 +32,11 @@ defmodule Mix.Tasks.Arbor.Spec.Coverage do
   use Mix.Task
 
   @specs_globs ["docs/specs/*.md", "docs/arbor/specs/**/*.md"]
-  @test_globs ["apps/*/test/**/*.exs", "test/**/*.exs"]
+  @test_globs [
+    "apps/*/test/**/*.exs",
+    "packages/arbor_kernel/test/**/*.exs",
+    "test/**/*.exs"
+  ]
 
   # - **TRUST-7** (MUST): ...   /   - **TRUST-14** (MUST, planned): ...
   @statement_re ~r/^\s*-\s+\*\*([A-Z][A-Z0-9]*-\d+)\*\*\s+\((MUST(?:\s+NOT)?|SHOULD(?:\s+NOT)?|MAY)(,\s*planned)?\)/

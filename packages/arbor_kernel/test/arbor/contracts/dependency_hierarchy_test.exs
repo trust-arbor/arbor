@@ -36,7 +36,7 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
 
   defp find_root(dir) do
     cond do
-      File.exists?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> raise "could not locate umbrella root from #{__DIR__}"
       true -> find_root(Path.dirname(dir))
     end

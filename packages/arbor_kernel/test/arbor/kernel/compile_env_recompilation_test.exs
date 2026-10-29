@@ -19,7 +19,7 @@ defmodule Arbor.Kernel.CompileEnvRecompilationTest do
 
   test "changing :arbor_kernel nested compile_env recompiles the dependent module" do
     root = umbrella_root()
-    template_dir = Path.join(root, "apps/arbor_kernel/priv/packaging/compile_env_probe")
+    template_dir = Path.join(root, "packages/arbor_kernel/priv/packaging/compile_env_probe")
     template_snapshot = snapshot_tree(template_dir)
 
     tmp =
@@ -35,7 +35,7 @@ defmodule Arbor.Kernel.CompileEnvRecompilationTest do
       assert snapshot_tree(template_dir) == template_snapshot
     end)
 
-    kernel_abs = Path.expand("apps/arbor_kernel", root)
+    kernel_abs = Path.expand("packages/arbor_kernel", root)
     write_temp_project(tmp, kernel_abs, :first)
 
     build_path = Path.expand(Path.join(tmp, "build"))
@@ -195,7 +195,7 @@ defmodule Arbor.Kernel.CompileEnvRecompilationTest do
 
   defp find_root(dir) do
     cond do
-      File.regular?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> flunk("umbrella root not found")
       true -> find_root(Path.dirname(dir))
     end

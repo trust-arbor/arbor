@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminalTest do
 
   @moduletag :fast
 
-  @kernel_test "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
+  @kernel_test "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"
 
   test "admits contract_change capacity including an interrupted launched stage" do
     unstarted = wrap_capacity(unstarted_capacity_report())

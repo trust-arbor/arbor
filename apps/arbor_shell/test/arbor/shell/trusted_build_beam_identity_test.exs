@@ -137,7 +137,7 @@ defmodule Arbor.Shell.TrustedBuild.BeamIdentityTest do
     dir = Path.join(prefix, "lib")
     File.mkdir_p!(dir)
     src = Path.join(dir, "m.ex")
-    resource = Path.join(prefix, "apps/arbor_kernel/lib/arbor/kernel.ex")
+    resource = Path.join(prefix, "packages/arbor_kernel/lib/arbor/kernel.ex")
 
     File.write!(src, """
     defmodule #{inspect(mod)} do

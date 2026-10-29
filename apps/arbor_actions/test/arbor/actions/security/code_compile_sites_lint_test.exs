@@ -9,7 +9,7 @@ defmodule Arbor.Actions.Security.CodeCompileSitesLintTest do
   `module_source` verbatim). A new site must be added to `@allowlist` here on
   purpose — with the same scrutiny the existing ones got — rather than landing
   silently. Mirrors the hierarchy drift guard in
-  `apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`: the
+  `packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`: the
   allowlist must equal reality exactly, so a stale entry fails too.
 
   Detection is AST-based (not grep), so a mention inside a `@moduledoc`, a

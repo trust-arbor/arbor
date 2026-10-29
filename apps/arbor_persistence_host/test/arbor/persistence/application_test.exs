@@ -30,7 +30,15 @@ defmodule Arbor.Persistence.ApplicationTest do
     build_path = Path.join(@root, "_build/prod")
 
     fixture_dir =
-      Path.join([@root, "apps", "arbor_kernel", "test", "fixtures", "extension_envelopes", "v1"])
+      Path.join([
+        @root,
+        "packages",
+        "arbor_kernel",
+        "test",
+        "fixtures",
+        "extension_envelopes",
+        "v1"
+      ])
 
     # Prod has no installer sys.config. The fixture is the dev/test stage-zero,
     # valid through 2027-08-17, so the prod clock can bind it.

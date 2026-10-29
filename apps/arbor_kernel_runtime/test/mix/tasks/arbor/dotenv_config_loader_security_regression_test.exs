@@ -18,6 +18,7 @@ defmodule Mix.Tasks.Arbor.DotenvConfigLoaderSecurityRegressionTest do
     config_dir = Path.join(tmp, "config")
     File.cp_r!(Path.join(repo_root, "config"), config_dir)
     File.ln_s!(Path.join(repo_root, "apps"), Path.join(tmp, "apps"))
+    File.ln_s!(Path.join(repo_root, "packages"), Path.join(tmp, "packages"))
 
     allowed = ["ARBOR_CONFIG_TIME_PROBE", "OPENAI_API_KEY"]
     blocked = ["MIX_ENV", "ERL_LIBS", "BASH_ENV"]

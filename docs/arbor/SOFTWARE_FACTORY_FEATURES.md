@@ -290,7 +290,7 @@ runs ten seats in parallel (`docs/arbor/COUNCIL_SETUP.md` for remapping):
 - Corroborated major findings or a security veto reject or send back for
   rework.
 - **Blast radius**: changes under `apps/arbor_security/`, `apps/arbor_trust/`,
-  `apps/arbor_kernel/` or the Engine force `human_review` regardless of the
+  `packages/arbor_kernel/` or the Engine force `human_review` regardless of the
   vote.
 
 ### 7. Adoption

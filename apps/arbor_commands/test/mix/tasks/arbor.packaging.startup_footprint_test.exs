@@ -66,7 +66,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
            )
 
     refute File.exists?(
-             Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe")
+             Path.join(root, "packages/arbor_kernel/priv/packaging/startup_footprint_probe")
            )
 
     refute String.contains?(shell, "startup_footprint_probe")
@@ -153,11 +153,11 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
         "sf-cli-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(Path.join(root, "apps/arbor_kernel"))
+    File.mkdir_p!(Path.join(root, "packages/arbor_kernel"))
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
     File.write!(Path.join(root, "mix.exs"), "defmodule Root do\nend\n")
     File.write!(Path.join(root, "apps/arbor_commands/mix.exs"), "defmodule C do\nend\n")
-    File.write!(Path.join(root, "apps/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
+    File.write!(Path.join(root, "packages/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
 
     policy = %{
       "schema" => "arbor.packaging.startup_footprint.policy.v1",
@@ -187,7 +187,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
 
   defp find_umbrella(dir) do
     cond do
-      File.regular?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> raise "umbrella root not found"
       true -> find_umbrella(Path.dirname(dir))
     end

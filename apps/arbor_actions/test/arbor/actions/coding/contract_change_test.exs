@@ -76,7 +76,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
     fixture = leased_contract_repo(tmp_dir)
 
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: 2
@@ -94,8 +94,8 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
     assert result.reason == "contract_change_validated"
     assert is_binary(result.validated_tree_oid)
     assert is_binary(result.validated_head)
-    assert "apps/arbor_kernel/lib/arbor/contracts/foo.ex" in result.changed_files
-    assert "apps/arbor_kernel/test/arbor/contracts/admission_test.exs" in result.test_paths
+    assert "packages/arbor_kernel/lib/arbor/contracts/foo.ex" in result.changed_files
+    assert "packages/arbor_kernel/test/arbor/contracts/admission_test.exs" in result.test_paths
     refute Enum.any?(result.test_paths, &String.contains?(&1, "*"))
 
     assert_receive {:contract_mix, _path, preflight_args, preflight_opts}
@@ -202,7 +202,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
   test "leading-space decoy fails closed without Mix", %{tmp_dir: tmp_dir} do
     fixture = leased_contract_repo(tmp_dir)
     change_dashboard!(fixture)
-    leading = " apps/arbor_kernel/lib/arbor/contracts/new.ex"
+    leading = " packages/arbor_kernel/lib/arbor/contracts/new.ex"
 
     write_relative!(
       fixture.lease.worktree_path,
@@ -219,7 +219,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
   test "trailing-space decoy fails closed without Mix", %{tmp_dir: tmp_dir} do
     fixture = leased_contract_repo(tmp_dir)
     change_dashboard!(fixture)
-    trailing = "apps/arbor_kernel/lib/arbor/contracts/new.ex "
+    trailing = "packages/arbor_kernel/lib/arbor/contracts/new.ex "
 
     write_relative!(
       fixture.lease.worktree_path,
@@ -243,7 +243,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
     end)
 
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: 3
@@ -259,7 +259,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
     fixture = leased_contract_repo(tmp_dir, suite?: false)
 
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: 4
@@ -375,18 +375,18 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
     File.write!(Path.join(path, "config/config.exs"), "import Config\n")
     File.write!(Path.join(path, "mix.lock"), "%{}\n")
 
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts"))
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/test/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/test/arbor/contracts"))
     File.mkdir_p!(Path.join(path, "apps/arbor_dashboard/lib/arbor"))
 
-    File.write!(Path.join(path, "apps/arbor_kernel/mix.exs"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/mix.exs"), """
     defmodule Arbor.Kernel.MixProject do
       use Mix.Project
       def project, do: [app: :arbor_kernel, version: "0.1.0", elixir: "~> 1.14", deps: []]
     end
     """)
 
-    File.write!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"), """
     defmodule Arbor.Contracts.Foo do
       def value, do: 1
     end
@@ -400,7 +400,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
 
     if suite? do
       File.write!(
-        Path.join(path, "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"),
+        Path.join(path, "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"),
         """
         defmodule Arbor.Contracts.AdmissionTest do
           use ExUnit.Case
@@ -410,7 +410,10 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
       )
 
       File.write!(
-        Path.join(path, "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"),
+        Path.join(
+          path,
+          "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+        ),
         """
         defmodule Arbor.Contracts.DependencyHierarchyTest do
           use ExUnit.Case
@@ -431,7 +434,7 @@ defmodule Arbor.Actions.Coding.ContractChangeTest do
 
   defp change_kernel_contract!(fixture) do
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: :contained

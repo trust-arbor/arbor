@@ -260,9 +260,11 @@ def validate_postgres_connection(path, fixture):
 def validate_locations(args, work):
     package_source = Path(__file__).resolve().parents[1]
     repository = package_source.parents[1]
+    # A nested checkout may still have a pre-adoption ancestor checkout.
+    kernel_markers = ("packages/arbor_kernel/mix.exs", "apps/arbor_kernel/mix.exs")
     source_roots = [repository] + [
         ancestor for ancestor in repository.parents
-        if (ancestor / "apps/arbor_kernel/mix.exs").is_file()
+        if any((ancestor / marker).is_file() for marker in kernel_markers)
     ]
     if any(work == root or root in work.parents for root in source_roots):
         raise RuntimeError("--work-dir must be outside all Arbor source checkouts")

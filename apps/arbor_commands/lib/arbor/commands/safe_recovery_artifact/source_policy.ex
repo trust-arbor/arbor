@@ -2,7 +2,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
   @moduledoc false
 
   @app_roots [
-    "apps/arbor_kernel/",
+    "packages/arbor_kernel/",
     "apps/arbor_kernel_runtime/",
     "apps/arbor_security/",
     "apps/arbor_persistence_host/",
@@ -12,12 +12,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "packages/arbor_persistence/",
     "packages/arbor_persistence_sql/"
   ]
-  @app_names ~w(arbor_kernel arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust)
-  @package_names ~w(arbor_custody arbor_signals arbor_persistence arbor_persistence_sql)
+  @app_names ~w(arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust)
+  @package_names ~w(arbor_kernel arbor_custody arbor_signals arbor_persistence arbor_persistence_sql)
   @ignored_generated_dirs ~w(.elixir_ls cover)
 
   @required_files [
-    "apps/arbor_kernel/mix.exs",
+    "packages/arbor_kernel/mix.exs",
     "apps/arbor_kernel_runtime/mix.exs",
     "packages/arbor_custody/mix.exs",
     "packages/arbor_signals/mix.exs",

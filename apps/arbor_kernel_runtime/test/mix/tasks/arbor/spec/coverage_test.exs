@@ -84,6 +84,42 @@ defmodule Mix.Tasks.Arbor.Spec.CoverageTest do
     assert %{"TRUST-1" => [_]} = Coverage.scan_test_tags("TRUST", root)
   end
 
+  test "Kernel package migration preserves its conformance proof and umbrella proofs", %{
+    root: root
+  } do
+    tag = "@" <> "tag"
+
+    former_path =
+      write(
+        root,
+        "apps/arbor_kernel/test/arbor/contracts/conformance_test.exs",
+        "#{tag} spec: \"KERNELMIGRATION-1\"\ntest \"proof\" do\n  assert true\nend\n"
+      )
+
+    app_path =
+      write(
+        root,
+        "apps/example/test/conformance_test.exs",
+        "#{tag} spec: \"KERNELMIGRATION-2\"\ntest \"proof\" do\n  assert true\nend\n"
+      )
+
+    assert Coverage.scan_test_tags("KERNELMIGRATION", root) == %{
+             "KERNELMIGRATION-1" => [former_path],
+             "KERNELMIGRATION-2" => [app_path]
+           }
+
+    package_path =
+      Path.join(root, "packages/arbor_kernel/test/arbor/contracts/conformance_test.exs")
+
+    File.mkdir_p!(Path.dirname(package_path))
+    File.rename!(former_path, package_path)
+
+    assert Coverage.scan_test_tags("KERNELMIGRATION", root) == %{
+             "KERNELMIGRATION-1" => [package_path],
+             "KERNELMIGRATION-2" => [app_path]
+           }
+  end
+
   test "comments and strings cannot claim conformance proof", %{root: root} do
     marker = "@" <> "tag spec: \"VOICE-9\""
 

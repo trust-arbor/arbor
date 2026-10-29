@@ -24,7 +24,7 @@ defmodule ArborKernelAppEnvProbe.MixProject do
   defp deps do
     [
       {:arbor_kernel, path: "../../.."},
-      {:arbor_kernel_runtime, path: "../../../../arbor_kernel_runtime"},
+      {:arbor_kernel_runtime, path: "../../../../../apps/arbor_kernel_runtime"},
       {:arbor_signals, path: "../../../../../packages/arbor_signals", runtime: false}
     ]
   end

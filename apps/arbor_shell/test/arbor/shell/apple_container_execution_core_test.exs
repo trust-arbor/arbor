@@ -227,9 +227,52 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == ["xref", "graph"]
     end
 
+    @tag :security_regression
+    test "security regression: Kernel package tests keep exact package and segment bounds" do
+      for path <- [
+            "packages/arbor_kernel/test/arbor/contracts/admission_test.exs",
+            "apps/arbor_actions/test/arbor/contracts/example_test.exs",
+            "apps/arbor_security/test/arbor/security/contracts/example_test.exs",
+            "apps/arbor_security/test/support/contracts/example_test.exs"
+          ] do
+        assert {:ok, _spec} =
+                 Core.new(
+                   valid_request(%{
+                     args: [
+                       "arbor.contracts.test",
+                       "--no-deps-check",
+                       "--warnings-as-errors",
+                       "--",
+                       path
+                     ]
+                   })
+                 )
+      end
+
+      for path <- [
+            "packages/arbor_kernel_evil/test/example_test.exs",
+            "packages/unreviewed/test/example_test.exs",
+            "packages/arbor_kernel/../test/example_test.exs",
+            "packages/arbor_kernel/test/../../mix.exs"
+          ] do
+        assert {:error, :invalid_test_path} =
+                 Core.new(
+                   valid_request(%{
+                     args: [
+                       "arbor.contracts.test",
+                       "--no-deps-check",
+                       "--warnings-as-errors",
+                       "--",
+                       path
+                     ]
+                   })
+                 )
+      end
+    end
+
     test "xref graph and exact tests may skip dependency lock checks" do
       xref = ["xref", "graph", "--no-deps-check"]
-      test = ["test", "--no-deps-check", "--", "apps/arbor_kernel/test/example_test.exs"]
+      test = ["test", "--no-deps-check", "--", "apps/arbor_actions/test/example_test.exs"]
 
       assert {:ok, xref_spec} = Core.new(valid_request(%{args: xref}))
       assert xref_spec.plan.command_args == xref
@@ -245,7 +288,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                      "0",
                      "--no-deps-check",
                      "--",
-                     "apps/arbor_kernel/test/example_test.exs"
+                     "apps/arbor_actions/test/example_test.exs"
                    ]
                  })
                )
@@ -1309,21 +1352,21 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   end
 
   describe "public spawn facade: ContractChange test argv containment" do
-    @contract_change_test_path "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
+    @contract_change_test_path "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"
     @contract_change_test_argv [
-      "test",
+      "arbor.contracts.test",
       "--no-deps-check",
       "--warnings-as-errors",
       "--",
       @contract_change_test_path
     ]
     @contract_change_test_argv_two_paths [
-      "test",
+      "arbor.contracts.test",
       "--no-deps-check",
       "--warnings-as-errors",
       "--",
       @contract_change_test_path,
-      "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+      "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
     ]
 
     @tag :security_regression
@@ -1357,29 +1400,38 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       path = @contract_change_test_path
 
       near_misses = [
-        {:deletion, ["test", "--no-deps-check", "--warnings-as-errors", path],
+        {:deletion, ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", path],
          :unsupported_mix_command},
-        {:missing_no_deps_check, ["test", "--warnings-as-errors", "--", path],
+        {:missing_no_deps_check, ["arbor.contracts.test", "--warnings-as-errors", "--", path],
          :unsupported_mix_command},
-        {:reordering, ["test", "--warnings-as-errors", "--no-deps-check", "--", path],
+        {:reordering,
+         ["arbor.contracts.test", "--warnings-as-errors", "--no-deps-check", "--", path],
          :unsupported_mix_command},
         {:duplicate,
          [
-           "test",
+           "arbor.contracts.test",
            "--no-deps-check",
            "--warnings-as-errors",
            "--warnings-as-errors",
            "--",
            path
          ], :unsupported_mix_command},
-        {:option_shaped, ["test", "--no-deps-check", "--warnings-as-errors", "--", "--trace"],
+        {:option_shaped,
+         ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", "--", "--trace"],
          :option_shaped_test_path},
-        {:empty_path, ["test", "--no-deps-check", "--warnings-as-errors", "--"],
+        {:empty_path, ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", "--"],
          :empty_test_paths},
         {:flag_extension,
-         ["test", "--no-deps-check", "--warnings-as-errors", "--trace", "--", path],
-         :unsupported_mix_command},
-        {:comma_encoding, ["test", "--no-deps-check", "--warnings-as-errors,", "--", path],
+         [
+           "arbor.contracts.test",
+           "--no-deps-check",
+           "--warnings-as-errors",
+           "--trace",
+           "--",
+           path
+         ], :unsupported_mix_command},
+        {:comma_encoding,
+         ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors,", "--", path],
          :unsupported_mix_command}
       ]
 

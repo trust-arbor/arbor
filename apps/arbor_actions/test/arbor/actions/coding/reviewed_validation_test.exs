@@ -669,12 +669,12 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     changed_files =
       Enum.map(1..70, fn i ->
-        "apps/arbor_kernel/lib/arbor/contracts/file_#{pad3(i)}.ex"
+        "packages/arbor_kernel/lib/arbor/contracts/file_#{pad3(i)}.ex"
       end)
 
     test_paths =
       Enum.map(1..80, fn i ->
-        "apps/arbor_kernel/test/arbor/contracts/file_#{pad3(i)}_test.exs"
+        "packages/arbor_kernel/test/arbor/contracts/file_#{pad3(i)}_test.exs"
       end)
 
     decoy = Enum.map(1..80, &"extra-#{&1}")
@@ -714,12 +714,12 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     files_2000 =
       Enum.map(1..2_000, fn i ->
-        "apps/arbor_kernel/lib/arbor/contracts/bound_#{i}.ex"
+        "packages/arbor_kernel/lib/arbor/contracts/bound_#{i}.ex"
       end)
 
     tests_256 =
       Enum.map(1..256, fn i ->
-        "apps/arbor_kernel/test/arbor/contracts/bound_#{pad3(i)}_test.exs"
+        "packages/arbor_kernel/test/arbor/contracts/bound_#{pad3(i)}_test.exs"
       end)
 
     Application.put_env(
@@ -768,7 +768,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     over_tests =
       Enum.map(1..257, fn i ->
-        "apps/arbor_kernel/test/arbor/contracts/over_#{pad3(i)}_test.exs"
+        "packages/arbor_kernel/test/arbor/contracts/over_#{pad3(i)}_test.exs"
       end)
 
     Application.put_env(
@@ -794,7 +794,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     over_files =
       Enum.map(1..2001, fn i ->
-        "apps/arbor_kernel/lib/arbor/contracts/over_#{i}.ex"
+        "packages/arbor_kernel/lib/arbor/contracts/over_#{i}.ex"
       end)
 
     Application.put_env(

@@ -1,22 +1,13 @@
-Code.require_file(Path.expand("../../build_support/mix_project_paths.exs", __DIR__))
-
 defmodule Arbor.Kernel.MixProject do
   use Mix.Project
 
   @version "2.0.0-dev"
-  @source_url "https://github.com/trust-arbor/arbor_contracts"
+  @source_url "https://github.com/trust-arbor/arbor"
 
   def project do
-    paths =
-      Arbor.MixProjectPaths.project_paths(build_path: "../../_build", deps_path: "../../deps")
-
     [
       app: :arbor_kernel,
       version: @version,
-      build_path: paths[:build_path],
-      config_path: "../../config/config.exs",
-      deps_path: paths[:deps_path],
-      lockfile: "../../mix.lock",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       compilers: [:boundary] ++ Mix.compilers(),
@@ -35,7 +26,7 @@ defmodule Arbor.Kernel.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :crypto]
     ]
   end
 
@@ -59,14 +50,15 @@ defmodule Arbor.Kernel.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url}
+      links: %{"GitHub" => @source_url},
+      files: ~w(lib mix.exs README.md LICENSE docs/ADOPTION.md)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: ["README.md", "docs/ADOPTION.md"]
     ]
   end
 end

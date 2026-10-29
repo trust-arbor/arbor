@@ -15165,9 +15165,9 @@
       "source_session": "codex:01a1461c-b6f8-7f52-adb7-6fcd858dc571",
       "source_incident": "found 2026-09-27 while qualifying ConversationKit against a real Arbor Session",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "ef52277b8386d8131652268927dd14671285c8eae427585fcfcd66f801724619",
+      "last_confirmed": "2026-10-29",
+      "confirmed_by": "codex",
+      "content_sha256": "7863903709e416b8bca4db7e78d77e959e627ce0008c4bd91781e702976d00ad",
       "always_loaded": false
     },
     {

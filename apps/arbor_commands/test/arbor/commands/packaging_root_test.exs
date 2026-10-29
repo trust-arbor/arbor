@@ -12,6 +12,17 @@ defmodule Arbor.Commands.PackagingRootTest do
     assert {:ok, ^root} = PackagingRoot.resolve(root)
   end
 
+  test "rejects the former umbrella Kernel location without its canonical package" do
+    root = tmp_root!()
+
+    for marker <- ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"] do
+      write_marker!(root, marker)
+    end
+
+    refute PackagingRoot.root?(root)
+    assert {:error, :invalid_root_marker} = PackagingRoot.resolve(root)
+  end
+
   test "rejects retired and incomplete lookalike roots" do
     root = tmp_root!()
     write_marker!(root, "apps/arbor_contracts/mix.exs")
@@ -20,7 +31,7 @@ defmodule Arbor.Commands.PackagingRootTest do
     assert {:error, :invalid_root_marker} = PackagingRoot.resolve(root)
 
     write_marker!(root, "mix.exs")
-    write_marker!(root, "apps/arbor_kernel/mix.exs")
+    write_marker!(root, "packages/arbor_kernel/mix.exs")
 
     refute PackagingRoot.root?(root)
     assert {:error, :invalid_root_marker} = PackagingRoot.resolve(root)
@@ -30,7 +41,7 @@ defmodule Arbor.Commands.PackagingRootTest do
     root = tmp_root!()
 
     Enum.each(
-      ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"],
+      ["mix.exs", "apps/arbor_commands/mix.exs", "packages/arbor_kernel/mix.exs"],
       &write_marker!(root, &1)
     )
 
