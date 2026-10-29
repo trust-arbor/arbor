@@ -111,6 +111,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   @default_pipeline [
+    Arbor.LLM.Plugs.Usage,
     Arbor.LLM.Plugs.ResponseLimit,
     Arbor.LLM.Plugs.EvalReplay,
     Arbor.LLM.Plugs.Dispatch,

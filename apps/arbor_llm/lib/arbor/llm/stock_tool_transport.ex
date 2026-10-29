@@ -4,6 +4,7 @@ defmodule Arbor.LLM.StockToolTransport do
   alias Arbor.LLM.{Client, Config, ProviderRegistry, Request}
 
   @pipeline [
+    Arbor.LLM.Plugs.Usage,
     Arbor.LLM.Plugs.ResponseLimit,
     Arbor.LLM.Plugs.EvalReplay,
     Arbor.LLM.Plugs.Dispatch,
