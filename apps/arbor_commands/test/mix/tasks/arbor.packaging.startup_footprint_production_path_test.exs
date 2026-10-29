@@ -120,7 +120,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
 
   defp find_root(dir) do
     cond do
-      File.regular?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> raise "umbrella root not found"
       true -> find_root(Path.dirname(dir))
     end

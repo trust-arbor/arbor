@@ -300,7 +300,7 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
         "arbor-safe-management-#{System.unique_integer([:positive, :monotonic])}"
       )
 
-    for marker <- ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"] do
+    for marker <- ["mix.exs", "apps/arbor_commands/mix.exs", "packages/arbor_kernel/mix.exs"] do
       path = Path.join(root, marker)
       File.mkdir_p!(Path.dirname(path))
       File.write!(path, "# marker\n")

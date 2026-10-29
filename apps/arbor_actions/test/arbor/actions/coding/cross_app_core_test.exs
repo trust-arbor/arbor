@@ -400,6 +400,38 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert scoped.affected_apps == ["beta"]
   end
 
+  test "shared Kernel package changes select all consumer suites without admitting lookalikes" do
+    assert {:ok, graph} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "beta", app: "beta", deps: ["alpha"]},
+               %{dir: "delta", app: "delta", deps: []}
+             ])
+
+    path = "packages/arbor_kernel/lib/arbor/contracts/security/signing_authority.ex"
+
+    for selector <- [
+          fn -> Core.select([path], graph) end,
+          fn -> Core.select_revisions([path], graph, graph) end
+        ] do
+      assert {:ok, selection} = selector.()
+      assert selection.root_wide
+      assert selection.changed_apps == []
+      assert selection.affected_apps == ["alpha", "beta", "delta"]
+      assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/delta/test"]
+    end
+
+    for lookalike <- [
+          "packages/arbor_kernel_extra/lib/arbor/contracts/security/signing_authority.ex",
+          "packages/other_package/lib/arbor/contracts/security/signing_authority.ex"
+        ] do
+      assert {:ok, selection} = Core.select([lookalike], graph)
+      refute selection.root_wide
+      assert selection.affected_apps == []
+      assert selection.test_paths == []
+    end
+  end
+
   test "fails closed for malformed or ambiguous dependency metadata" do
     assert {:error, :app_dir_name_mismatch} =
              Core.build_graph([%{dir: "alpha", app: "other", deps: []}])

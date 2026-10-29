@@ -297,7 +297,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
           unstarted: [
             Core.tests_batch(
               1,
-              Core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+              Core.inventory_sha256([
+                "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"
+              ])
             )
           ],
           per_batch_budget_ms: 10_000
@@ -306,8 +308,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
     evidence =
       Core.show(%{
-        changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
-        test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+        changed_files: ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
+        test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
         checks: %{
           preflight: check,
           test: Core.skipped_check("validation_containment_failure")
@@ -443,7 +445,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     paths =
       Enum.map(1..80, fn i ->
         n = String.pad_leading(Integer.to_string(i), 3, "0")
-        "apps/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
+        "packages/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
       end)
 
     wide = Map.put(contract_capacity_result(:test), :test_paths, paths)
@@ -1385,8 +1387,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       passed: true,
       reason: "contract_change_validated",
       base_commit: @base_oid,
-      changed_files: ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
-      test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+      changed_files: ["packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
+      test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
       preflight: cross_check(),
       test: cross_check(),
       validated_tree_oid: @sha1,
@@ -1524,7 +1526,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     tests =
       core.tests_batch(
         1,
-        core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+        core.inventory_sha256(["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"])
       )
 
     plan =
@@ -1554,7 +1556,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     tests =
       core.tests_batch(
         1,
-        core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+        core.inventory_sha256(["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"])
       )
 
     plan =
@@ -1865,14 +1867,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
   defp max_contract_changed_path(i) do
     index = String.pad_leading(Integer.to_string(i), 4, "0")
-    prefix = "apps/arbor_kernel/lib/arbor/contracts/"
+    prefix = "packages/arbor_kernel/lib/arbor/contracts/"
     suffix = "_#{index}.ex"
     prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
   end
 
   defp max_contract_test_path(i) do
     index = String.pad_leading(Integer.to_string(i), 4, "0")
-    prefix = "apps/arbor_kernel/test/arbor/contracts/"
+    prefix = "packages/arbor_kernel/test/arbor/contracts/"
     suffix = "_#{index}_test.exs"
     prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
   end

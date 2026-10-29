@@ -136,6 +136,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @test_tag_re ~r/\A[A-Za-z_][A-Za-z0-9_.-]*\z/
   @seed_re ~r/\A[0-9]+\z/
   @test_path_re ~r/\A(?:apps\/[A-Za-z0-9_.-]+\/)?test(?:\/[A-Za-z0-9_.()&+@ -]+)*(?::\d+)?\z/
+  @contract_test_path_re ~r/\A(?:packages\/arbor_kernel\/test\/arbor\/contracts|apps\/[A-Za-z0-9_.-]+\/test(?:\/[A-Za-z0-9_.()&+@ -]+)*\/contracts)(?:\/[A-Za-z0-9_.()&+@ -]+)*\/[A-Za-z0-9_.()&+@ -]+_test\.exs\z/
   @format_path_re ~r/\A[A-Za-z0-9_.()&+@ -]+(?:\/[A-Za-z0-9_.()&+@ -]+)*\z/
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
   @xref_formats MapSet.new(["stats", "cycles", "linked"])
@@ -1153,6 +1154,15 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp match_reviewed_mix_shape(["run" | _rest]), do: {:error, :unsupported_mix_command}
 
+  # Package-aware ContractChange test dispatcher; no generic task/options.
+  defp match_reviewed_mix_shape(
+         ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", "--" | paths] = args
+       ) do
+    with {:ok, _validated_paths} <- validate_test_paths(paths, @contract_test_path_re) do
+      {:ok, args}
+    end
+  end
+
   # Exact ContractChange test child only. Ordered prefix is test,
   # --no-deps-check, --warnings-as-errors, -- plus relative paths.
   # Reuse validate_test_paths/1. Do not teach parse_test_args this flag.
@@ -1280,11 +1290,13 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp validate_test_paths([]), do: {:error, :empty_test_paths}
+  defp validate_test_paths(paths), do: validate_test_paths(paths, @test_path_re)
 
-  defp validate_test_paths(paths) when is_list(paths) do
+  defp validate_test_paths([], _pattern), do: {:error, :empty_test_paths}
+
+  defp validate_test_paths(paths, pattern) when is_list(paths) do
     Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
-      case validate_test_path(path) do
+      case validate_test_path(path, pattern) do
         :ok -> {:cont, {:ok, [path | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -1295,7 +1307,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp validate_test_path(path) when is_binary(path) do
+  defp validate_test_path(path, pattern) when is_binary(path) do
     with :ok <- require_valid_utf8(path) do
       components = Path.split(strip_line_suffix(path))
 
@@ -1312,7 +1324,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
         Enum.any?(components, &(&1 in ["", ".", ".."])) ->
           {:error, :invalid_test_path}
 
-        not Regex.match?(@test_path_re, path) ->
+        not Regex.match?(pattern, path) ->
           {:error, :invalid_test_path}
 
         true ->
@@ -1413,6 +1425,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
+  defp default_mix_env(["arbor.contracts.test" | _]), do: "test"
   defp default_mix_env(["test" | _]), do: "test"
   defp default_mix_env(_), do: "dev"
 

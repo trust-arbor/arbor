@@ -8,11 +8,11 @@ defmodule Arbor.Persistence.AgentTelemetryTest do
 
   describe "contract ownership regression" do
     test "the one-consumer kernel contract source is absent" do
+      kernel_root = Path.expand("../../../../../packages/arbor_kernel", __DIR__)
+      assert File.regular?(Path.join(kernel_root, "mix.exs"))
+
       contract_path =
-        Path.expand(
-          "../../../../arbor_kernel/lib/arbor/contracts/agent/telemetry_event.ex",
-          __DIR__
-        )
+        Path.join(kernel_root, "lib/arbor/contracts/agent/telemetry_event.ex")
 
       refute File.exists?(contract_path)
     end

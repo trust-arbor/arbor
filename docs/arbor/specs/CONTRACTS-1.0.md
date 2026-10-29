@@ -5,7 +5,7 @@
 **Canonical since:** 2026-08-12
 
 This is the tracked conformance authority for what may reside in
-`apps/arbor_kernel/lib/arbor/contracts`. It amends
+`packages/arbor_kernel/lib/arbor/contracts`. It amends
 `docs/arbor/CONTRACT_RULES.md`; that document
 contains the implementation guidance and this document defines the statement
 IDs used by `./bin/mix arbor.spec.coverage`.

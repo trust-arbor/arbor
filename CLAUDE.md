@@ -114,7 +114,7 @@ L9  arbor_dashboard
 ```
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
-`apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
+`packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
 - **Kernel, Multimedia, Signals, and Persistence core are L0.** Kernel owns
   passive contracts, types, and identifiers. Signals lives in `packages/arbor_signals`;
   Kernel Runtime (L1) composes its supervisor after boot admission alongside

@@ -21,7 +21,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Validate do
 
   1. warning-strict compile + xref graph + census `--fail-on-violation`
      (source-compatibility evidence + executable CONTRACT_RULES admission)
-  2. warning-strict exact-file contract tests
+  2. warning-strict exact-file contract tests through `arbor.contracts.test`,
+     which dispatches the Kernel package and umbrella app test files
 
   Does not run the unbounded cross_app downstream suite. Domain failures return
   `{:ok, %{passed: false, ...}}`; authority/setup/mutation return `{:error, reason}`.

@@ -337,7 +337,7 @@ config :arbor_orchestrator, preprocessor_enabled: true
 # Development installer substitute for P1A-2. Production samples the clock
 # and receives these bytes from installer sys.config, not from this file.
 boot_profile_fixture_dir =
-  Path.expand("../apps/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
+  Path.expand("../packages/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
 
 config :arbor_kernel,
   kernel_runtime: [

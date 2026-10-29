@@ -48,6 +48,7 @@ defmodule Arbor.Actions.Council.BlastRadius do
         {"apps/arbor_security/", :security_app},
         {"apps/arbor_trust/", :trust_app},
         {"apps/arbor_kernel/", :contracts_app},
+        {"packages/arbor_kernel/", :contracts_app},
         {"apps/arbor_orchestrator/lib/arbor/orchestrator/engine", :dot_engine}
       ],
       high_risk_paths: [
@@ -64,7 +65,8 @@ defmodule Arbor.Actions.Council.BlastRadius do
       authority_surface_prefixes: [
         {"apps/arbor_security/", :security_authority_surface},
         {"apps/arbor_trust/", :trust_authority_surface},
-        {"apps/arbor_kernel/lib/arbor/contracts/security/", :security_contract_surface}
+        {"apps/arbor_kernel/lib/arbor/contracts/security/", :security_contract_surface},
+        {"packages/arbor_kernel/lib/arbor/contracts/security/", :security_contract_surface}
       ]
     }
   end

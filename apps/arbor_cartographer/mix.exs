@@ -44,7 +44,7 @@ defmodule Arbor.Cartographer.MixProject do
     [
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       # Umbrella dependencies
-      {:arbor_kernel, in_umbrella: true},
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../../packages/arbor_kernel", env: Mix.env()},
 
       # Core dependencies
       {:telemetry, "~> 1.0"},

@@ -293,6 +293,11 @@ council rationale persistence).
 <a id="applied-learning-derive-integration-fixture-roots-from-source-locations-not-mix-working-directory"></a>
 **Derive integration fixture roots from source locations, not Mix working directory.** Umbrella test tasks can execute with the current directory set to apps/<app>. A helper using File.cwd! to find migrations or retained evidence may create a database in the wrong tree and run zero migrations. Derive fixture, migration and artifact roots from __DIR__ or an explicit validated root; positively assert migrations and isolated storage before exercising persistence (found 2026-09-27 while qualifying ConversationKit against a real Arbor Session).
 
+When relocating an app into a package, migrate relative paths, copied fixture
+trees, and source-root markers together. Assert the owning root exists before
+asserting a source file is absent, so an obsolete path cannot make the guard
+pass vacuously (reinforced 2026-10-29 during passive Kernel adoption).
+
 An existing private database can still predate the candidate migration. Apply
 normal migrations to the verified private database and assert the required
 schema before interpreting a facade unavailable result as a product failure.

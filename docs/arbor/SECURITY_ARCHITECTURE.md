@@ -126,7 +126,7 @@ effects; a package name, signature, BEAM process, or MCP connection is not isola
   not equivalent to an external signer or hardware boundary.
 
 Authoritative code: [`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex),
-[`SignedRequest`](../../apps/arbor_kernel/lib/arbor/contracts/security/signed_request.ex),
+[`SignedRequest`](../../packages/arbor_kernel/lib/arbor/contracts/security/signed_request.ex),
 [`SignedRequestAuth`](../../apps/arbor_gateway/lib/arbor/gateway/signed_request_auth.ex),
 [`Identity.Verifier`](../../apps/arbor_security/lib/arbor/security/identity/verifier.ex),
 and [`Reload-Stable Signing Authority`](../../.arbor/decisions/2026-07-11-reload-stable-signing-authority.md).

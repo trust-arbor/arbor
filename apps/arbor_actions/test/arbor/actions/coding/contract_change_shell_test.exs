@@ -9,7 +9,7 @@ defmodule Arbor.Actions.Coding.ContractChange.ShellTest do
 
   @moduletag :fast
 
-  @kernel_test "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
+  @kernel_test "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"
 
   setup do
     previous_runner = Application.get_env(:arbor_actions, :contract_change_mix_runner)
@@ -676,24 +676,24 @@ defmodule Arbor.Actions.Coding.ContractChange.ShellTest do
     File.mkdir_p!(Path.join(path, "config"))
     File.write!(Path.join(path, "config/config.exs"), "import Config\n")
     File.write!(Path.join(path, "mix.lock"), "%{}\n")
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts"))
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/test/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/test/arbor/contracts"))
 
-    File.write!(Path.join(path, "apps/arbor_kernel/mix.exs"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/mix.exs"), """
     defmodule Arbor.Kernel.MixProject do
       use Mix.Project
       def project, do: [app: :arbor_kernel, version: "0.1.0", elixir: "~> 1.14", deps: []]
     end
     """)
 
-    File.write!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"), """
     defmodule Arbor.Contracts.Foo do
       def value, do: 1
     end
     """)
 
     File.write!(
-      Path.join(path, "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"),
+      Path.join(path, "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"),
       """
       defmodule Arbor.Contracts.AdmissionTest do
         use ExUnit.Case
@@ -703,7 +703,7 @@ defmodule Arbor.Actions.Coding.ContractChange.ShellTest do
     )
 
     File.write!(
-      Path.join(path, "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"),
+      Path.join(path, "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"),
       """
       defmodule Arbor.Contracts.DependencyHierarchyTest do
         use ExUnit.Case
@@ -722,7 +722,7 @@ defmodule Arbor.Actions.Coding.ContractChange.ShellTest do
 
   defp change_kernel_contract!(fixture) do
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: :contained

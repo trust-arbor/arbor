@@ -29,7 +29,7 @@ defmodule Arbor.Actions.ShellAuthorizerBootConfigSecurityRegressionTest do
       File.cp!(Path.join(@config_dir, name), Path.join(configs, name))
     end
 
-    fixture_dir = "apps/arbor_kernel/test/fixtures/extension_envelopes/v1"
+    fixture_dir = "packages/arbor_kernel/test/fixtures/extension_envelopes/v1"
     File.mkdir_p!(Path.join(root, fixture_dir))
 
     for name <- ~w(boot_profile_manifest.json boot_profile_signature.json) do

@@ -12,7 +12,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   @overlay_sha256 "45d67c7868152c1b9b4b86cd1cea1d8834136e13f8e0348648b89f8aa90e7b5b"
 
   @apps [
-    "arbor_kernel",
     "arbor_kernel_runtime",
     "arbor_security",
     "arbor_persistence_host",
@@ -45,7 +44,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     triples =
       required_triples(oid) ++
         [
-          %{path: "apps/arbor_kernel/test/kernel_test.exs", mode: "100644", oid: oid},
+          %{path: "packages/arbor_kernel/test/kernel_test.exs", mode: "100644", oid: oid},
           %{path: "packages/arbor_signals/lib/arbor/signals.ex", mode: "100644", oid: oid},
           %{
             path: "packages/arbor_persistence/lib/arbor/persistence/core.ex",
@@ -77,8 +76,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
         ]
 
     assert {:ok, paths} = SourcePolicy.select(triples)
-    assert "apps/arbor_kernel/mix.exs" in paths
-    assert "apps/arbor_kernel/test/kernel_test.exs" in paths
+    assert "packages/arbor_kernel/mix.exs" in paths
+    assert "packages/arbor_kernel/test/kernel_test.exs" in paths
     assert "packages/arbor_signals/mix.exs" in paths
     assert "packages/arbor_signals/lib/arbor/signals.ex" in paths
     assert "packages/arbor_persistence/lib/arbor/persistence/core.ex" in paths
@@ -143,7 +142,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     extras =
       Enum.map(1..5_000, fn index ->
         %{
-          path: "apps/arbor_kernel/lib/f#{index}.ex",
+          path: "packages/arbor_kernel/lib/f#{index}.ex",
           mode: "100644",
           oid: oid
         }
@@ -161,12 +160,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
 
     assert {:error, :symlink_input} =
              SourcePolicy.select([
-               %{path: "apps/arbor_kernel/lib/x.ex", mode: "120000", oid: oid} | required
+               %{path: "packages/arbor_kernel/lib/x.ex", mode: "120000", oid: oid} | required
              ])
 
     assert {:error, :unsupported_mode} =
              SourcePolicy.select([
-               %{path: "apps/arbor_kernel/lib/x.ex", mode: "100666", oid: oid} | required
+               %{path: "packages/arbor_kernel/lib/x.ex", mode: "100666", oid: oid} | required
              ])
 
     assert {:error, :missing_required_input} =
@@ -211,7 +210,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     assert Enum.sort_by(first["build_inputs"], & &1["path"]) == first["build_inputs"]
     assert @overlay_source_path in Enum.map(first["build_inputs"], & &1["path"])
 
-    assert "apps/arbor_kernel/test/kernel_test.exs" in Enum.map(
+    assert "packages/arbor_kernel/test/kernel_test.exs" in Enum.map(
              first["build_inputs"],
              & &1["path"]
            )
@@ -220,10 +219,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     refute "AGENTS.md" in Enum.map(first["build_inputs"], & &1["path"])
     assert {:error, :enoent} = File.lstat(Path.join(first["source_root"], "AGENTS.md"))
     assert {:error, :enoent} = File.lstat(Path.join(first["source_root"], ".agents/skills"))
-    assert File.regular?(Path.join(first["source_root"], "apps/arbor_kernel/lib/a.ex"))
+    assert File.regular?(Path.join(first["source_root"], "packages/arbor_kernel/lib/a.ex"))
     assert {:ok, _inventory} = Arbor.Shell.inventory_regular_tree(first["identity"]["path"])
 
-    File.write!(Path.join(root, "apps/arbor_kernel/lib/a.ex"), "dirty-not-read\n")
+    File.write!(Path.join(root, "packages/arbor_kernel/lib/a.ex"), "dirty-not-read\n")
 
     assert {:error, :selected_worktree_drift} = stage!(root, overlay, digest)
   end
@@ -273,9 +272,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   @tag :slow
   @tag :integration
   test "selected symlink fails closed", %{root: root} do
-    File.rm!(Path.join(root, "apps/arbor_kernel/lib/a.ex"))
-    File.ln_s!("missing", Path.join(root, "apps/arbor_kernel/lib/a.ex"))
-    git!(root, ["add", "--", "apps/arbor_kernel/lib/a.ex"])
+    File.rm!(Path.join(root, "packages/arbor_kernel/lib/a.ex"))
+    File.ln_s!("missing", Path.join(root, "packages/arbor_kernel/lib/a.ex"))
+    git!(root, ["add", "--", "packages/arbor_kernel/lib/a.ex"])
     git!(root, ["commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", "link"])
 
     overlay = "overlay-bytes"
@@ -492,9 +491,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     paths = Enum.map(lease["build_inputs"], & &1["path"])
     assert Enum.all?(generated, &SourcePolicy.ignored_generated_extra?/1)
     assert Enum.all?(generated, &(&1 not in paths))
-    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/.elixir_ls_evil/x.ex")
-    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/coverup/x.ex")
-    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/erl_crash.dump/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_kernel/.elixir_ls_evil/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_kernel/coverup/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_kernel/erl_crash.dump/x.ex")
     refute SourcePolicy.ignored_generated_extra?("packages/arbor_signals/coverup/x.ex")
     refute SourcePolicy.ignored_generated_extra?("packages/arbor_signals_other/cover/report.html")
   end
@@ -505,7 +504,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     File.mkdir_p!(Path.join(root, ".git/info"))
     File.write!(Path.join(root, ".git/info/exclude"), "ignored-secret\n")
     File.write!(Path.join(root, "ignored-secret"), "outside\n")
-    File.write!(Path.join(root, "apps/arbor_kernel/ignored-secret"), "secret\n")
+    File.write!(Path.join(root, "packages/arbor_kernel/ignored-secret"), "secret\n")
 
     overlay = "overlay-bytes"
     digest = sha256_hex(overlay)
@@ -516,7 +515,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   @tag :integration
   test "core.fileMode=false chmod drift fails closed", %{root: root} do
     git!(root, ["config", "core.fileMode", "false"])
-    path = Path.join(root, "apps/arbor_kernel/lib/a.ex")
+    path = Path.join(root, "packages/arbor_kernel/lib/a.ex")
     File.chmod!(path, 0o755)
 
     assert {:ok, output} =
@@ -572,7 +571,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     padding =
       Enum.map(1..padding_count, fn index ->
         %{
-          "path" => "apps/arbor_kernel/lib/f#{index}.ex",
+          "path" => "packages/arbor_kernel/lib/f#{index}.ex",
           "sha256" => String.duplicate("b", 64)
         }
       end)
@@ -628,6 +627,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     pairs = [
       {"mix.exs", "umbrella\n"},
       {"apps/arbor_commands/mix.exs", "commands\n"},
+      {"packages/arbor_kernel/mix.exs", "arbor_kernel\n"},
+      {"packages/arbor_kernel/lib/a.ex", "arbor_kernel\n"},
       {"packages/arbor_custody/mix.exs", "custody\n"},
       {"packages/arbor_custody/lib/custody.ex", "custody source\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},
@@ -644,7 +645,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"config/prod.exs", "prod\n"},
       {"config/provider_route_profile.exs", "routes\n"},
       {"config/runtime.exs", "runtime\n"},
-      {"apps/arbor_kernel/test/kernel_test.exs", "test\n"}
+      {"packages/arbor_kernel/test/kernel_test.exs", "test\n"}
     ]
 
     app_pairs =

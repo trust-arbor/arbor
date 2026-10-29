@@ -114,7 +114,7 @@ config :arbor_security,
 config :arbor_kernel, common: [start_children: false]
 
 boot_profile_fixture_dir =
-  Path.expand("../apps/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
+  Path.expand("../packages/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
 
 config :arbor_kernel,
   kernel_runtime: [

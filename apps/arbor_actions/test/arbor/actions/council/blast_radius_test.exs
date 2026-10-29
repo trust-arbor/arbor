@@ -12,7 +12,7 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
       high_risk_paths = [
         "apps/arbor_security/lib/arbor/security.ex",
         "apps/arbor_trust/lib/arbor/trust.ex",
-        "apps/arbor_kernel/lib/arbor/contracts/security/capability.ex",
+        "packages/arbor_kernel/lib/arbor/contracts/security/capability.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine/checkpoint.ex",
         "apps/arbor_agent/priv/templates/coding_agent.md",
@@ -66,6 +66,21 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
       assert route.blast_radius == :high
       assert route.human_required
       assert :security_app in route.reasons
+    end
+
+    test "kernel security contracts retain authority review after package adoption" do
+      for path <- [
+            "packages/arbor_kernel/lib/arbor/contracts/security/signing_authority.ex",
+            "apps/arbor_kernel/lib/arbor/contracts/security/signing_authority.ex"
+          ] do
+        route = BlastRadius.route(verdict(:keep), [path])
+
+        assert route.action == :human_review
+        assert route.blast_radius == :high
+        assert route.authority_widening
+        assert :contracts_app in route.reasons
+        assert :security_contract_surface in route.reasons
+      end
     end
 
     test "routes revise verdicts back to the agent" do

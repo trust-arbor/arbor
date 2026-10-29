@@ -284,7 +284,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
   end
 
   defp write_packaging_root_markers!(root) do
-    for relative <- ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"] do
+    for relative <- ["mix.exs", "apps/arbor_commands/mix.exs", "packages/arbor_kernel/mix.exs"] do
       path = Path.join(root, relative)
       File.mkdir_p!(Path.dirname(path))
       File.write!(path, "defmodule PackagingRootMarker do\nend\n")

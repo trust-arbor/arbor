@@ -7,7 +7,7 @@ defmodule Arbor.Common.Extension.FakeTransportTest do
   alias Arbor.Contracts.Extension.Envelope
 
   @fixture_dir Path.expand(
-                 "../../../../../arbor_kernel/test/fixtures/extension_envelopes/v1",
+                 "../../../../../../packages/arbor_kernel/test/fixtures/extension_envelopes/v1",
                  __DIR__
                )
 

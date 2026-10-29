@@ -514,7 +514,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Select changed and affected apps from changed files and a dependency graph.
 
   Directly changed apps plus every downstream in-umbrella dependent. Root
-  build-impact files select all apps. Unrelated docs do not widen selection.
+  build-impact files and the shared Kernel package select all apps. Unrelated
+  docs do not widen selection.
   Attaches a zero topology_change for a stable selection shape.
   """
   @spec select([String.t()], graph()) :: {:ok, selection()} | {:error, term()}
@@ -773,6 +774,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     cond do
       MapSet.member?(@root_wide_exact, path) -> true
       String.starts_with?(path, "config/") -> true
+      String.starts_with?(path, "packages/arbor_kernel/") -> true
       true -> false
     end
   end

@@ -8,7 +8,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
   owner. The preflight warning-strict compile loads attested dependencies into
   the fresh private build, then xref and census. Compile and xref are
   source-compatibility evidence; census is CONTRACT_RULES admission. Binding
-  council owns semantic compatibility.
+  council owns semantic compatibility. The test child uses `arbor.contracts.test`
+  to dispatch exact package and app contract-test inventories.
   """
 
   alias Arbor.Actions.Coding.BlobManifest

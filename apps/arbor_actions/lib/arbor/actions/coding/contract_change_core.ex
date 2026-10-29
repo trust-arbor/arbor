@@ -35,7 +35,7 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
   @sha256_re ~r/\A[0-9a-f]{64}\z/
   @excerpt_omission_marker "\n...[omitted]...\n"
   @utf8_replacement <<0xEF, 0xBF, 0xBD>>
-  @test_argv_prefix ["test", "--no-deps-check", "--warnings-as-errors", "--"]
+  @test_argv_prefix ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", "--"]
   # First task compiles attested deps via Mix.Tasks.Compile deps.loadpaths.
   # Later xref keeps --no-deps-check against the populated private build.
   @preflight_argv [
@@ -119,7 +119,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
   Coordinated consumer edits may accompany a surface. Arbitrary non-contract
   work is not admitted. Invalid paths never count as a surface. App-owned
   contract paths count only when `apps/<app>/mix.exs` exists in the union of
-  the immutable base and candidate path inventories.
+  the immutable base and candidate path inventories. The shared Kernel surface
+  is the exact `packages/arbor_kernel/` root; other package paths are not admitted.
   """
   @spec admit_contract_surface(term(), term(), term()) :: {:ok, boolean()} | {:error, term()}
   def admit_contract_surface(changed_files, base_paths, candidate_paths)
@@ -166,7 +167,7 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
 
   def select_contract_tests(_, _), do: {:error, :invalid_test_selection}
 
-  @doc "Owner-owned Mix test argv for an exact inventory, or fail closed."
+  @doc "Owner-owned package-aware contract-test argv for an exact inventory, or fail closed."
   @spec test_argv([String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   def test_argv(paths) when is_list(paths) do
     with {:ok, normalized} <- normalize_test_files(paths) do
@@ -604,19 +605,22 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
 
   defp recognized_contract_surface?(path, app_roots) when is_binary(path) do
     case split_repo_path(path) do
-      {:ok, ["apps", "arbor_kernel", "lib", "arbor", "contracts.ex"]} ->
+      {:ok, ["packages", "arbor_kernel", "lib", "arbor", "contracts.ex"]} ->
         true
 
-      {:ok, ["apps", "arbor_kernel", "lib", "arbor", "contracts" | rest]} when rest != [] ->
+      {:ok, ["packages", "arbor_kernel", "lib", "arbor", "contracts" | rest]} when rest != [] ->
         true
 
       {:ok, ["docs", "arbor", "CONTRACT_RULES.md"]} ->
         true
 
-      {:ok, ["apps", "arbor_kernel", "lib", "mix", "tasks", "arbor.contracts.census.ex"]} ->
+      {:ok, ["packages", "arbor_kernel", "lib", "mix", "tasks", "arbor.contracts.census.ex"]} ->
         true
 
-      {:ok, ["apps", "arbor_kernel", "lib", "arbor", "contracts_census.ex"]} ->
+      {:ok, ["packages", "arbor_kernel", "lib", "mix", "tasks", "arbor.contracts.test.ex"]} ->
+        true
+
+      {:ok, ["packages", "arbor_kernel", "lib", "arbor", "contracts_census.ex"]} ->
         true
 
       {:ok, ["apps", app, "lib" | rest]} ->
@@ -663,7 +667,7 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
 
   defp kernel_contract_test?(path) do
     case split_repo_path(path) do
-      {:ok, ["apps", "arbor_kernel", "test", "arbor", "contracts" | rest]} ->
+      {:ok, ["packages", "arbor_kernel", "test", "arbor", "contracts" | rest]} ->
         rest != [] and test_file_name?(List.last(rest))
 
       _ ->

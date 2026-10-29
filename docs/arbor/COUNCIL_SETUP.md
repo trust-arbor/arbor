@@ -83,7 +83,7 @@ After the ledger reduce, `Arbor.Actions.Council.BlastRadius` still routes:
 | `stop` | Reject / security veto |
 
 High-blast-radius includes `apps/arbor_security/`, `apps/arbor_trust/`,
-`apps/arbor_kernel/`, the Engine, the `coding_agent` manifest, and the
+`packages/arbor_kernel/`, the Engine, the `coding_agent` manifest, and the
 council DOT / blast-radius module themselves. Editing the council graph
 to remap models is therefore itself an authority-surface change.
 

@@ -11,12 +11,12 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
   @max_changed_files BlobManifest.max_changed_files()
 
   @kernel_suite [
-    "apps/arbor_kernel/test/arbor/contracts/admission_test.exs",
-    "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+    "packages/arbor_kernel/test/arbor/contracts/admission_test.exs",
+    "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
   ]
 
   @app_roots [
-    "apps/arbor_kernel/mix.exs",
+    "packages/arbor_kernel/mix.exs",
     "apps/arbor_security/mix.exs"
   ]
 
@@ -60,12 +60,13 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
   describe "admit_contract_surface/3" do
     test "admits kernel contracts, barrel, app-owned contracts, CONTRACT_RULES, and census" do
       for path <- [
-            "apps/arbor_kernel/lib/arbor/contracts/security/capability.ex",
-            "apps/arbor_kernel/lib/arbor/contracts.ex",
+            "packages/arbor_kernel/lib/arbor/contracts/security/capability.ex",
+            "packages/arbor_kernel/lib/arbor/contracts.ex",
             "apps/arbor_security/lib/arbor/security/contracts/foo.ex",
             "docs/arbor/CONTRACT_RULES.md",
-            "apps/arbor_kernel/lib/mix/tasks/arbor.contracts.census.ex",
-            "apps/arbor_kernel/lib/arbor/contracts_census.ex"
+            "packages/arbor_kernel/lib/mix/tasks/arbor.contracts.census.ex",
+            "packages/arbor_kernel/lib/mix/tasks/arbor.contracts.test.ex",
+            "packages/arbor_kernel/lib/arbor/contracts_census.ex"
           ] do
         assert {:ok, true} = Core.admit_contract_surface([path], @app_roots, @app_roots)
       end
@@ -76,7 +77,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
                Core.admit_contract_surface(
                  [
                    "apps/arbor_dashboard/lib/arbor/dashboard.ex",
-                   "apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"
+                   "packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex"
                  ],
                  @app_roots,
                  @app_roots
@@ -86,13 +87,18 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     test "rejects no-contract diffs and false prefixes" do
       for path <- [
             "apps/arbor_dashboard/lib/arbor/dashboard.ex",
-            "apps/arbor_kernel/test/arbor/contracts/plan_test.exs",
-            "apps/arbor_kernel/lib/arbor/contracts_extra.ex",
-            "apps/arbor_kernel/lib/arbor/contract/foo.ex",
+            "packages/arbor_kernel/test/arbor/contracts/plan_test.exs",
+            "packages/arbor_kernel/lib/arbor/contracts_extra.ex",
+            "packages/arbor_kernel/lib/arbor/contract/foo.ex",
             "apps/foo/lib/bar/contracts.ex",
             "apps/foo/lib/bar/contracts_api/x.ex",
             "docs/arbor/CONTRACT_RULES.md.bak",
-            "apps/arbor_kernel/lib/mix/tasks/arbor.contracts.census.bak.ex",
+            "packages/arbor_kernel/lib/mix/tasks/arbor.contracts.census.bak.ex",
+            "packages/arbor_kernel/lib/mix/tasks/arbor.contracts.test.bak.ex",
+            "packages/arbor_kernel/lib/mix/tasks/arbor.contracts.test/ex",
+            "packages/arbor_kernel_extra/lib/arbor/contracts/foo.ex",
+            "packages/ghost_app/lib/ghost/contracts/foo.ex",
+            "apps/arbor_kernel/lib/arbor/contracts/foo.ex",
             "apps/arbor_contracts/lib/arbor/contracts/foo.ex"
           ] do
         assert {:ok, false} = Core.admit_contract_surface([path], @app_roots, @app_roots), path
@@ -100,8 +106,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     end
 
     test "rejects leading and trailing whitespace paths without aliasing" do
-      leading = " apps/arbor_kernel/lib/arbor/contracts/foo.ex"
-      trailing = "apps/arbor_kernel/lib/arbor/contracts/foo.ex "
+      leading = " packages/arbor_kernel/lib/arbor/contracts/foo.ex"
+      trailing = "packages/arbor_kernel/lib/arbor/contracts/foo.ex "
 
       assert {:error, {:invalid_repo_path, ^leading}} =
                Core.admit_contract_surface([leading], @app_roots, @app_roots)
@@ -111,8 +117,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     end
 
     test "rejects double-slash and dot-segment paths as malformed" do
-      double = "apps/arbor_kernel/lib/arbor/contracts/foo//bar.ex"
-      dotted = "apps/arbor_kernel/lib/arbor/contracts/foo/./bar.ex"
+      double = "packages/arbor_kernel/lib/arbor/contracts/foo//bar.ex"
+      dotted = "packages/arbor_kernel/lib/arbor/contracts/foo/./bar.ex"
 
       assert {:error, {:invalid_repo_path, ^double}} =
                Core.admit_contract_surface([double], @app_roots, @app_roots)
@@ -126,7 +132,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
     test "app-owned contracts require mix.exs in the base or candidate inventory" do
       ghost = "apps/ghost_app/lib/ghost/contracts/foo.ex"
-      kernel_only = ["apps/arbor_kernel/mix.exs"]
+      kernel_only = ["packages/arbor_kernel/mix.exs"]
 
       assert {:ok, false} = Core.admit_contract_surface([ghost], kernel_only, kernel_only)
 
@@ -155,10 +161,10 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     test "enforces the changed-file bound without rewriting paths" do
       exact =
         Enum.map(1..@max_changed_files, fn i ->
-          "apps/arbor_kernel/lib/arbor/contracts/f#{i}.ex"
+          "packages/arbor_kernel/lib/arbor/contracts/f#{i}.ex"
         end)
 
-      overflow = exact ++ ["apps/arbor_kernel/lib/arbor/contracts/overflow.ex"]
+      overflow = exact ++ ["packages/arbor_kernel/lib/arbor/contracts/overflow.ex"]
 
       assert {:ok, true} = Core.admit_contract_surface(exact, [], [])
       assert {:error, :too_many_paths} = Core.admit_contract_surface(overflow, [], [])
@@ -167,10 +173,10 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
   describe "BlobManifest path identity" do
     test "preserves exact Git path bytes and uses segment-aware validation" do
-      leading = " apps/arbor_kernel/lib/arbor/contracts/new.ex"
-      trailing = "apps/arbor_kernel/lib/arbor/contracts/new.ex "
-      trimmed = "apps/arbor_kernel/lib/arbor/contracts/new.ex"
-      dots_name = "apps/arbor_kernel/lib/arbor/contracts/bar..baz.ex"
+      leading = " packages/arbor_kernel/lib/arbor/contracts/new.ex"
+      trailing = "packages/arbor_kernel/lib/arbor/contracts/new.ex "
+      trimmed = "packages/arbor_kernel/lib/arbor/contracts/new.ex"
+      dots_name = "packages/arbor_kernel/lib/arbor/contracts/bar..baz.ex"
 
       assert {:ok, [^leading]} =
                BlobManifest.diff_blob_manifests([], [blob(leading, "b")])
@@ -244,7 +250,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
           ]
 
       changed = [
-        "apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex",
+        "packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex",
         "apps/arbor_security/lib/arbor/security/contracts/foo.ex",
         "apps/arbor_security/test/support/contracts/extra_test.exs",
         "apps/arbor_dashboard/lib/arbor/dashboard.ex"
@@ -264,13 +270,13 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
     test "rejects false-prefix test paths and missing kernel suite" do
       freeze = [
-        "apps/arbor_kernel/test/arbor/contracts_extra/foo_test.exs",
+        "packages/arbor_kernel/test/arbor/contracts_extra/foo_test.exs",
         "apps/foo/test/bar/contractss/x_test.exs"
       ]
 
       assert {:error, :contract_suite_missing} =
                Core.select_contract_tests(
-                 ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
+                 ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
                  freeze
                )
     end
@@ -281,7 +287,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
       assert {:ok, selected} =
                Core.select_contract_tests(
                  [
-                   "apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex",
+                   "packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex",
                    "apps/evil/test/arbor/contracts/injected_test.exs"
                  ],
                  freeze
@@ -308,10 +314,18 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
              ]
 
       assert Core.test_argv_prefix() ==
-               ["test", "--no-deps-check", "--warnings-as-errors", "--"]
+               ["arbor.contracts.test", "--no-deps-check", "--warnings-as-errors", "--"]
 
       assert {:ok, args} = Core.test_argv(@kernel_suite)
       assert args == Core.test_argv_prefix() ++ Enum.sort(@kernel_suite)
+    end
+
+    test "uses the closed dispatcher for mixed package and app contract tests" do
+      paths = @kernel_suite ++ ["apps/arbor_security/test/arbor/security/contracts/foo_test.exs"]
+
+      assert {:ok, argv} = Core.test_argv(paths)
+      assert argv == Core.test_argv_prefix() ++ Enum.sort(paths)
+      refute List.starts_with?(argv, ["test"])
     end
   end
 
@@ -336,13 +350,13 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     test "keeps exact sorted inventories at the 2000/256 transport bound" do
       files =
         Enum.map(1..2_000, fn i ->
-          "apps/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
+          "packages/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
         end)
 
       tests =
         Enum.map(1..256, fn i ->
           n = String.pad_leading(Integer.to_string(i), 3, "0")
-          "apps/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
+          "packages/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
         end)
 
       assert {:ok, inventories} = Core.admit_transport_inventories(files, tests)
@@ -365,8 +379,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
   describe "feedback_projection/1" do
     test "omits path lists and carries counts plus inventory digests" do
-      files = ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"]
-      tests = ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"]
+      files = ["packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex"]
+      tests = ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"]
       passed = Core.completed_check(%{"passed" => true, "exit_code" => 0})
 
       evidence =
@@ -427,8 +441,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
       evidence =
         Core.show(%{
-          changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
-          test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+          changed_files: ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
+          test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
           checks: %{
             preflight: mixed,
             test: Core.skipped_check("validation_capacity_exceeded")
@@ -451,8 +465,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
       evidence =
         Core.show(%{
-          changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
-          test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+          changed_files: ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
+          test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
           checks: %{preflight: passed, test: passed},
           base_commit: String.duplicate("a", 40)
         })
@@ -465,7 +479,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
       too_many =
         Enum.map(1..2_001, fn i ->
-          "apps/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
+          "packages/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
         end)
 
       assert {:error, :invalid_feedback_projection} =
@@ -480,8 +494,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
       evidence =
         Core.show(%{
-          changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
-          test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+          changed_files: ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
+          test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
           checks: %{preflight: passed, test: passed},
           base_commit: String.duplicate("a", 40)
         })
@@ -653,8 +667,8 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
       evidence =
         Core.show(%{
-          changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
-          test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+          changed_files: ["packages/arbor_kernel/lib/arbor/contracts/foo.ex"],
+          test_paths: ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
           checks: %{
             preflight: mixed,
             test: Core.skipped_check("validation_capacity_exceeded")
@@ -698,13 +712,13 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
   test "security regression: admit_transport_inventories admits 256/2000, rejects over-bound with the bound error, and rejects non-lists as invalid shape" do
     files_2000 =
       Enum.map(1..2_000, fn i ->
-        "apps/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
+        "packages/arbor_kernel/lib/arbor/contracts/file_#{i}.ex"
       end)
 
     tests_256 =
       Enum.map(1..256, fn i ->
         n = String.pad_leading(Integer.to_string(i), 3, "0")
-        "apps/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
+        "packages/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
       end)
 
     assert {:ok, admitted} = Core.admit_transport_inventories(files_2000, tests_256)
@@ -712,11 +726,11 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     assert length(admitted.test_paths) == 256
 
     tests_257 =
-      tests_256 ++ ["apps/arbor_kernel/test/arbor/contracts/file_257_test.exs"]
+      tests_256 ++ ["packages/arbor_kernel/test/arbor/contracts/file_257_test.exs"]
 
     assert {:error, :too_many_paths} = Core.admit_transport_inventories(files_2000, tests_257)
 
-    files_2001 = files_2000 ++ ["apps/arbor_kernel/lib/arbor/contracts/file_2001.ex"]
+    files_2001 = files_2000 ++ ["packages/arbor_kernel/lib/arbor/contracts/file_2001.ex"]
     assert {:error, :too_many_paths} = Core.admit_transport_inventories(files_2001, tests_256)
 
     assert {:error, :invalid_contract_inventory} =
@@ -835,14 +849,14 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
 
   defp max_changed_path(i) do
     index = String.pad_leading(Integer.to_string(i), 4, "0")
-    prefix = "apps/arbor_kernel/lib/arbor/contracts/"
+    prefix = "packages/arbor_kernel/lib/arbor/contracts/"
     suffix = "_#{index}.ex"
     prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
   end
 
   defp max_test_path(i) do
     index = String.pad_leading(Integer.to_string(i), 4, "0")
-    prefix = "apps/arbor_kernel/test/arbor/contracts/"
+    prefix = "packages/arbor_kernel/test/arbor/contracts/"
     suffix = "_#{index}_test.exs"
     prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
   end

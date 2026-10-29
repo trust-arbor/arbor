@@ -129,8 +129,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
          "passed" => true,
          "reason" => "contract_change_validated",
          "base_commit" => String.duplicate("c", 40),
-         "changed_files" => ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
-         "test_paths" => ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+         "changed_files" => ["packages/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
+         "test_paths" => ["packages/arbor_kernel/test/arbor/contracts/admission_test.exs"],
          "preflight" => check,
          "test" => check,
          "validated_tree_oid" =>

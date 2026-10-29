@@ -31,7 +31,7 @@ defmodule Arbor.Signals.RuntimeWiringSourceShapeTest do
 
   defp find_root(dir) do
     cond do
-      File.exists?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) ->
+      File.exists?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) ->
         dir
 
       Path.dirname(dir) == dir ->

@@ -849,7 +849,7 @@ defmodule Arbor.Contracts.AdmissionTest do
     end
 
     @tag spec: "AC-2,AC-3,AC-11"
-    test "live: signing_authority/validator has 7 internals and is shared by security and trust",
+    test "live: signing_authority/validator retains 7 production internals and its package ownership test",
          %{
            by_path: by_path
          } do
@@ -857,7 +857,9 @@ defmodule Arbor.Contracts.AdmissionTest do
       assert e
       assert Enum.sort(e.external_consumers) == ["arbor_security", "arbor_trust"]
       assert e.tier == :shared
-      assert length(e.internal_consumers) == 7
+      assert length(e.internal_consumers) == 8
+      assert Enum.count(e.internal_consumers, &String.starts_with?(&1, "lib/")) == 7
+      assert "test/arbor/kernel/passive_startup_isolation_test.exs" in e.internal_consumers
       # ForgeProjection validates key_id / poster_agent_id with the same
       # principal-id grammar as signed requests (forge packet 1a, 2026-09-04).
       assert "lib/arbor/contracts/coding/forge_projection.ex" in e.internal_consumers

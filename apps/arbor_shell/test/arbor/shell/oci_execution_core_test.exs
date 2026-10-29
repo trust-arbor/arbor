@@ -131,9 +131,52 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
       end
     end
 
+    @tag :security_regression
+    test "security regression: Kernel package tests keep exact package and segment bounds" do
+      for path <- [
+            "packages/arbor_kernel/test/arbor/contracts/admission_test.exs",
+            "apps/arbor_actions/test/arbor/contracts/example_test.exs",
+            "apps/arbor_security/test/arbor/security/contracts/example_test.exs",
+            "apps/arbor_security/test/support/contracts/example_test.exs"
+          ] do
+        assert {:ok, _spec} =
+                 Core.new(
+                   valid_request(%{
+                     args: [
+                       "arbor.contracts.test",
+                       "--no-deps-check",
+                       "--warnings-as-errors",
+                       "--",
+                       path
+                     ]
+                   })
+                 )
+      end
+
+      for path <- [
+            "packages/arbor_kernel_evil/test/example_test.exs",
+            "packages/unreviewed/test/example_test.exs",
+            "packages/arbor_kernel/../test/example_test.exs",
+            "packages/arbor_kernel/test/../../mix.exs"
+          ] do
+        assert {:error, :invalid_test_path} =
+                 Core.new(
+                   valid_request(%{
+                     args: [
+                       "arbor.contracts.test",
+                       "--no-deps-check",
+                       "--warnings-as-errors",
+                       "--",
+                       path
+                     ]
+                   })
+                 )
+      end
+    end
+
     test "xref graph and exact tests may skip dependency lock checks" do
       xref = ["xref", "graph", "--no-deps-check"]
-      test = ["test", "--no-deps-check", "--", "apps/arbor_kernel/test/example_test.exs"]
+      test = ["test", "--no-deps-check", "--", "apps/arbor_actions/test/example_test.exs"]
 
       assert {:ok, xref_spec} = Core.new(valid_request(%{args: xref}))
       assert xref_spec.plan.command_args == xref
@@ -149,7 +192,7 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
                      "0",
                      "--no-deps-check",
                      "--",
-                     "apps/arbor_kernel/test/example_test.exs"
+                     "apps/arbor_actions/test/example_test.exs"
                    ]
                  })
                )
@@ -192,7 +235,7 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
         "--no-deps-check",
         "--warnings-as-errors",
         "--",
-        "apps/arbor_kernel/test/example_test.exs"
+        "apps/arbor_actions/test/example_test.exs"
       ]
 
       assert {:ok, preflight_spec} = Core.new(valid_request(%{args: preflight}))
@@ -206,7 +249,7 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
             List.insert_at(preflight, 3, "boundary"),
             List.replace_at(preflight, 1, "deps.get"),
             List.delete(preflight, "--no-deps-check"),
-            ["test", "--warnings-as-errors", "--", "apps/arbor_kernel/test/example_test.exs"]
+            ["test", "--warnings-as-errors", "--", "apps/arbor_actions/test/example_test.exs"]
           ] do
         assert {:error, :unsupported_mix_command} = Core.new(valid_request(%{args: args}))
       end

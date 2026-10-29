@@ -287,7 +287,7 @@ defmodule Arbor.Commands.StartupFootprintTest do
         "sf-cli-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(Path.join(root, "apps/arbor_kernel"))
+    File.mkdir_p!(Path.join(root, "packages/arbor_kernel"))
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
     File.write!(Path.join(root, "mix.exs"), "defmodule Root do\nend\n")
 
@@ -296,7 +296,7 @@ defmodule Arbor.Commands.StartupFootprintTest do
       "defmodule Commands do\nend\n"
     )
 
-    File.write!(Path.join(root, "apps/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
+    File.write!(Path.join(root, "packages/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
 
     policy = %{
       "schema" => Core.policy_schema(),
@@ -339,7 +339,7 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
   defp find_umbrella(dir) do
     cond do
-      File.regular?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> raise "umbrella root not found"
       true -> find_umbrella(Path.dirname(dir))
     end

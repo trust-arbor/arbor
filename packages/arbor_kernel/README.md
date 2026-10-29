@@ -5,6 +5,17 @@ AI agent orchestration system. This application has no OTP callback or active
 service tree; runtime Common, Signals, and Monitor services are owned by
 `arbor_kernel_runtime`.
 
+The monorepo source of truth is `packages/arbor_kernel`. This package retains
+the existing `Arbor.Contracts.*`, `Arbor.Types`, and `Arbor.Identifiers` module
+identities. It has no first-party dependencies. Its runtime dependencies are
+TypedStruct, Jason, and the OTP Logger and Crypto applications; Crypto supports
+the public identity, signed-request, identifier, and digest functions.
+
+Starting Kernel does not start Security, Kernel Runtime, Signals, or a signing
+authority broker. SigningAuthority and SigningAuthorityBootstrap are validated,
+redacted references. Constructing one does not issue authority or prove that a
+broker recognizes its token.
+
 ## Philosophy: Graduated Contracts
 
 Arbor uses "contracts as graduation, not specification":
@@ -20,10 +31,19 @@ Only interfaces that have proven themselves through real usage become contracts.
 ```elixir
 def deps do
   [
-    {:arbor_kernel, "~> 2.0"}
+    {:arbor_kernel, "~> 2.0.0-dev"}
   ]
 end
 ```
+
+Inside Arbor, consumers resolve the same application through its monorepo path
+dependency. Outside Arbor, the project uses ordinary Mix dependency, build, and
+configuration paths; no umbrella `build_support`, config, lockfile, or source
+checkout is required. Publication remains a separate decision.
+
+See [adoption rationale](docs/ADOPTION.md) for source ownership and compatibility,
+and the monorepo's `examples/standalone` directory for an independent cold
+SigningAuthority/Bootstrap and crypto smoke fixture.
 
 ## Contract Categories
 

@@ -15,6 +15,8 @@
           "apps/*/lib/",
           "apps/*/src/",
           "apps/*/test/",
+          "packages/arbor_kernel/lib/",
+          "packages/arbor_kernel/test/",
           "packages/arbor_custody/lib/",
           "packages/arbor_custody/test/",
           "packages/arbor_signals/lib/",

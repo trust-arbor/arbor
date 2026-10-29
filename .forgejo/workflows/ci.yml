@@ -105,7 +105,7 @@ jobs:
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+          Enum.each(~w(arbor_kernel arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -216,6 +216,56 @@ jobs:
             ( cd "$app" && mix test --failed --timeout 120000 ) || retry_failed=1
           done
           exit $retry_failed
+
+  # Kernel is a standalone path dependency, so umbrella mix test no longer
+  # discovers its contracts or source-aware monorepo conformance tests.
+  kernel:
+    name: Standalone Kernel
+    runs-on: native
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Cache standalone package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/arbor_kernel/deps
+            packages/arbor_kernel/_build
+          key: kernel-${{ runner.os }}-${{ hashFiles('packages/arbor_kernel/mix.exs', 'mix.lock', '.tool-versions') }}
+
+      - name: Kernel package dependencies (authoritative monorepo lock)
+        working-directory: packages/arbor_kernel
+        run: |
+          # This CI-only copy retains the pinned public dependency versions.
+          cp ../../mix.lock mix.lock
+          ../../bin/mix deps.get
+
+      - name: Kernel formatting and strict compile
+        working-directory: packages/arbor_kernel
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
+
+      - name: Full Kernel package and monorepo conformance tests
+        working-directory: packages/arbor_kernel
+        run: |
+          runtime_root="$(mktemp -d)"
+          mkdir -p "$runtime_root/tmp" "$runtime_root/data" "$runtime_root/home"
+          touch "$runtime_root/empty.env"
+          export TMPDIR="$runtime_root/tmp"
+          export ARBOR_HOME="$runtime_root/home"
+          export ARBOR_DATA_DIR="$runtime_root/data"
+          export ARBOR_ENV_PATH="$runtime_root/empty.env"
+          ../../bin/mix test --timeout 120000
 
   # Signals must stay usable without compiling or starting the Arbor host.
   # This lane has its own package build, then a fresh external consumer/release.

@@ -8,7 +8,7 @@ defmodule Arbor.Contracts.Census do
 
   ## Entry fields (exact)
 
-  - `:path` — app-relative under `apps/arbor_kernel/`
+  - `:path` — app-relative under `packages/arbor_kernel/`
     (e.g. `lib/arbor/contracts/security/capability.ex`)
   - `:modules` — every column-0 `defmodule` in the file
   - `:loc` — physical line count
@@ -42,7 +42,9 @@ defmodule Arbor.Contracts.Census do
   @contracts_app "arbor_kernel"
   @contracts_prefix "lib/arbor/contracts/"
   @registry_rel "lib/arbor/contracts.ex"
-  @registry_umbrella "apps/arbor_kernel/lib/arbor/contracts.ex"
+  @kernel_prefix "packages/arbor_kernel/"
+  @legacy_kernel_prefix "apps/arbor_kernel/"
+  @registry_umbrella @kernel_prefix <> "lib/arbor/contracts.ex"
   @valid_tiers [:a, :a2, :b, :c, :d, :shared]
   @tier_sort_order %{a: 0, a2: 1, b: 2, c: 3, d: 4, shared: 5}
 
@@ -402,7 +404,7 @@ defmodule Arbor.Contracts.Census do
       {path, source} ->
         rel =
           cond do
-            String.starts_with?(path, "apps/arbor_kernel/") ->
+            String.starts_with?(path, [@kernel_prefix, @legacy_kernel_prefix]) ->
               app_relative(path)
 
             String.starts_with?(path, @contracts_prefix) ->
@@ -457,17 +459,23 @@ defmodule Arbor.Contracts.Census do
   end
 
   defp contract_scan_path?(path) do
-    String.starts_with?(path, "apps/arbor_kernel/" <> @contracts_prefix) and
+    String.starts_with?(path, @kernel_prefix <> @contracts_prefix) and
       String.ends_with?(path, ".ex")
   end
 
   defp consumer_scan_path?(path) do
-    String.starts_with?(path, ["apps/", "packages/"]) and
-      (String.contains?(path, "/lib/") or String.contains?(path, "/test/")) and
-      (String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs"))
+    case Path.split(path) do
+      [scope, _app, source_scope | rest]
+      when scope in ["apps", "packages"] and source_scope in ["lib", "test"] and rest != [] ->
+        String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs")
+
+      _ ->
+        false
+    end
   end
 
-  defp app_relative("apps/arbor_kernel/" <> rest), do: rest
+  defp app_relative(@kernel_prefix <> rest), do: rest
+  defp app_relative(@legacy_kernel_prefix <> rest), do: rest
   defp app_relative(path), do: path
 
   defp tracked_paths(root, env, filter) when is_function(filter, 1) do
@@ -647,7 +655,7 @@ defmodule Arbor.Contracts.Census do
         path
 
       String.starts_with?(path, "lib/") or String.starts_with?(path, "test/") ->
-        "apps/arbor_kernel/" <> path
+        @kernel_prefix <> path
 
       true ->
         path
@@ -786,7 +794,7 @@ defmodule Arbor.Contracts.Census do
 
   defp normalize_gf_path(path) do
     cond do
-      String.starts_with?(path, "apps/arbor_kernel/") -> app_relative(path)
+      String.starts_with?(path, [@kernel_prefix, @legacy_kernel_prefix]) -> app_relative(path)
       String.starts_with?(path, @contracts_prefix) -> path
       String.starts_with?(path, "lib/") -> path
       true -> @contracts_prefix <> String.trim_leading(path, "/")
@@ -831,7 +839,7 @@ defmodule Arbor.Contracts.Census do
 
   defp find_root(dir) do
     cond do
-      File.exists?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      File.regular?(Path.join([dir, "packages", "arbor_kernel", "mix.exs"])) -> dir
       Path.dirname(dir) == dir -> raise "could not locate umbrella root from #{dir}"
       true -> find_root(Path.dirname(dir))
     end
@@ -934,11 +942,11 @@ defmodule Arbor.Contracts.Census do
 
     ## Method
 
-    Two independent counts per file under `apps/arbor_kernel/lib/arbor/contracts/`:
+    Two independent counts per file under `packages/arbor_kernel/lib/arbor/contracts/`:
 
     - **External consumers** — umbrella apps *other than* `arbor_kernel` referencing any module
       the file declares, or a descendant of one. Decides **admissibility** (AC-1).
-    - **Internal consumers** — other files *inside* `apps/arbor_kernel` (both `lib/` and `test/`)
+    - **Internal consumers** — other files *inside* `packages/arbor_kernel` (both `lib/` and `test/`)
       referencing the same. Decides **movability** (AC-11).
 
     Both counts expand brace aliases (`alias Arbor.Contracts.Security.{Taint, TaintEnvelope}`) before

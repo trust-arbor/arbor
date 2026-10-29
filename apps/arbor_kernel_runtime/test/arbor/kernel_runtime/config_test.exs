@@ -7,7 +7,7 @@ defmodule Arbor.KernelRuntime.ConfigTest do
   @moduletag :fast
 
   @fixture_dir Path.expand(
-                 "../../../../arbor_kernel/test/fixtures/extension_envelopes/v1",
+                 "../../../../../packages/arbor_kernel/test/fixtures/extension_envelopes/v1",
                  __DIR__
                )
   @installer_key_id "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395"

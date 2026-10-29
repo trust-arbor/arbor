@@ -54,7 +54,7 @@ defmodule Arbor.Persistence.Host.MixProject do
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
       {:arbor_persistence_sql, path: "../../packages/arbor_persistence_sql", env: Mix.env()},
-      {:arbor_kernel, in_umbrella: true},
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../../packages/arbor_kernel", env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:typed_struct, "~> 0.3"},

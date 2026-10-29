@@ -80,6 +80,15 @@ to enable it on a host with access to those libraries.
 Tagging, adapter lanes, and the full test-run matrix live in
 [TEST_TAGGING.md](docs/arbor/TEST_TAGGING.md).
 
+The root test command runs umbrella applications. Passive Kernel lives in
+`packages/arbor_kernel` and has its own full suite and standalone CI lane:
+
+```bash
+(cd packages/arbor_kernel && ../../bin/mix deps.get && ../../bin/mix test)
+```
+
+Run suites from an isolated worktree when an Arbor server is active.
+
 ### Isolated Git worktrees
 
 A Git worktree is tracked files only. Three harness artifacts then fail

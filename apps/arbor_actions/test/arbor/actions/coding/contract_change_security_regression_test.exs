@@ -159,8 +159,8 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     tmp_dir: tmp_dir
   } do
     decoy_source = "defmodule Arbor.Contracts.New do\n  def value, do: :decoy\nend\n"
-    leading = " apps/arbor_kernel/lib/arbor/contracts/new.ex"
-    trailing = "apps/arbor_kernel/lib/arbor/contracts/new.ex "
+    leading = " packages/arbor_kernel/lib/arbor/contracts/new.ex"
+    trailing = "packages/arbor_kernel/lib/arbor/contracts/new.ex "
 
     leading_fixture = leased_contract_repo(tmp_dir)
     change_dashboard!(leading_fixture)
@@ -260,7 +260,7 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     fixture = leased_contract_repo(tmp_dir)
     change_kernel_contract!(fixture)
 
-    rel = "apps/arbor_kernel/lib/arbor/contracts/foo.ex"
+    rel = "packages/arbor_kernel/lib/arbor/contracts/foo.ex"
     frozen_path = Path.join(fixture.lease.worktree_path, rel)
     frozen_bytes = File.read!(frozen_path)
 
@@ -502,18 +502,18 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     File.write!(Path.join(path, "config/config.exs"), "import Config\n")
     File.write!(Path.join(path, "mix.lock"), "%{}\n")
 
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts"))
-    File.mkdir_p!(Path.join(path, "apps/arbor_kernel/test/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts"))
+    File.mkdir_p!(Path.join(path, "packages/arbor_kernel/test/arbor/contracts"))
     File.mkdir_p!(Path.join(path, "apps/arbor_dashboard/lib/arbor"))
 
-    File.write!(Path.join(path, "apps/arbor_kernel/mix.exs"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/mix.exs"), """
     defmodule Arbor.Kernel.MixProject do
       use Mix.Project
       def project, do: [app: :arbor_kernel, version: "0.1.0", elixir: "~> 1.14", deps: []]
     end
     """)
 
-    File.write!(Path.join(path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"), """
+    File.write!(Path.join(path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"), """
     defmodule Arbor.Contracts.Foo do
       def value, do: 1
     end
@@ -526,7 +526,7 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     """)
 
     File.write!(
-      Path.join(path, "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"),
+      Path.join(path, "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"),
       """
       defmodule Arbor.Contracts.AdmissionTest do
         use ExUnit.Case
@@ -536,7 +536,7 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     )
 
     File.write!(
-      Path.join(path, "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"),
+      Path.join(path, "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"),
       """
       defmodule Arbor.Contracts.DependencyHierarchyTest do
         use ExUnit.Case
@@ -556,7 +556,7 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
 
   defp change_kernel_contract!(fixture) do
     File.write!(
-      Path.join(fixture.lease.worktree_path, "apps/arbor_kernel/lib/arbor/contracts/foo.ex"),
+      Path.join(fixture.lease.worktree_path, "packages/arbor_kernel/lib/arbor/contracts/foo.ex"),
       """
       defmodule Arbor.Contracts.Foo do
         def value, do: :contained

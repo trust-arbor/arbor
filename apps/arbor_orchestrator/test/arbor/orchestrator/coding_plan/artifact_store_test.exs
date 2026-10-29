@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
   alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper, ValidationCapacityTerminal}
 
-  @kernel_test "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
+  @kernel_test "packages/arbor_kernel/test/arbor/contracts/admission_test.exs"
 
   @compilation_seal_filename ".coding-compilation-seal.json"
   @compilation_publication_barrier_key {ArtifactStore, :compilation_publication_barrier}

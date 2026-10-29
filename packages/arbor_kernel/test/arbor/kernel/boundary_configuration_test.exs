@@ -14,7 +14,7 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
   }
 
   test "passive kernel enables strict alias-aware Boundary compilation" do
-    source = File.read!(Path.join(umbrella_root(), "apps/arbor_kernel/mix.exs"))
+    source = File.read!(Path.join(umbrella_root(), "packages/arbor_kernel/mix.exs"))
 
     assert source =~ ~r/compilers:\s*\[:boundary\]\s*\+\+\s*Mix\.compilers\(\)/
     assert source =~ ~r/type:\s*:strict/
@@ -45,7 +45,7 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     end
   end
 
-  test "the contracts census is explicitly classified as development tooling" do
+  test "the contract Mix tasks are explicitly classified as development tooling" do
     definition = boundary_definition(Arbor.Kernel.DevTools)
 
     assert definition.app == :arbor_kernel
@@ -57,7 +57,7 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     assert {:ok, modules} = :application.get_key(:arbor_kernel, :modules)
 
     tasks = Enum.filter(modules, &mix_task?/1)
-    assert tasks == [Mix.Tasks.Arbor.Contracts.Census]
+    assert tasks == [Mix.Tasks.Arbor.Contracts.Census, Mix.Tasks.Arbor.Contracts.Test]
 
     for task <- tasks do
       task_definition = boundary_definition(task)
