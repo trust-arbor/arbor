@@ -151,7 +151,7 @@ defmodule Arbor.Shell.TrustedBuild.BeamIdentity do
 
   defp stabilize_attr_vsn(attr_bin) do
     try do
-      term = :erlang.binary_to_term(attr_bin)
+      term = :erlang.binary_to_term(attr_bin, [:safe])
       rewritten = pin_vsn(term)
 
       if rewritten == term do

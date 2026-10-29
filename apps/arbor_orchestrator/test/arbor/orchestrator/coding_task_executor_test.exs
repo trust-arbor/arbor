@@ -1257,6 +1257,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defp restore(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
   defp restore(key, value), do: Application.put_env(:arbor_orchestrator, key, value)
 
+  defp default_coding_pipeline_logs_root do
+    home =
+      case System.get_env("ARBOR_HOME") do
+        value when is_binary(value) and value != "" -> Path.expand(value)
+        _ -> Path.expand("~/.arbor")
+      end
+
+    Path.join([home, "logs", "coding_tasks"])
+  end
+
   defp with_compiler_semantic_preflight_trace(fun) do
     parent = self()
 
@@ -1452,6 +1462,53 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defp valid_context(overrides \\ %{}) do
     Map.merge(%{"task_id" => "task_coding_1", "caller_id" => "caller_test"}, overrides)
+  end
+
+  # Shared /tmp (and similar) is writable by this uid but owned by root. The
+  # current logs-root admission accepts that directory and would create a
+  # predictable task-* child there; clean the child even if the assertion fails.
+  defp foreign_owned_logs_root_fixture! do
+    euid = probe_test_euid!()
+
+    root =
+      Enum.find([System.tmp_dir!(), "/tmp", "/var/tmp"], fn path ->
+        case File.lstat(path, time: :posix) do
+          {:ok, %File.Stat{type: :directory, uid: uid, mode: mode}}
+          when is_integer(uid) and uid != euid ->
+            Bitwise.band(mode, 0o002) == 0o002
+
+          _other ->
+            false
+        end
+      end)
+
+    if is_nil(root) do
+      flunk("expected a foreign-owned world-writable directory such as /tmp")
+    end
+
+    task_id = "task_foreign_owned_logs_#{System.unique_integer([:positive])}"
+    digest = :crypto.hash(:sha256, task_id) |> Base.encode16(case: :lower)
+    leaked = Path.join(root, "task-" <> digest)
+    on_exit(fn -> File.rm_rf(leaked) end)
+    {root, task_id, leaked}
+  end
+
+  defp probe_test_euid! do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        ".arbor-euid-#{Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)}"
+      )
+
+    {:ok, io} = :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive])
+    :ok = :file.close(io)
+
+    try do
+      %File.Stat{uid: uid} = File.lstat!(path, time: :posix)
+      uid
+    after
+      _ = File.rm(path)
+    end
   end
 
   defp put_success_runner_reply(profile_id \\ "default") do
@@ -5117,6 +5174,48 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Process.get(:coding_executor_last_run) == nil
     end
 
+    test "security regression: a pre-created world-writable logs root is refused" do
+      root = Path.join(Process.get(:coding_executor_tmp_dir), "world-writable-logs")
+      File.mkdir_p!(root)
+      File.chmod!(root, 0o777)
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, root)
+
+      assert {:error, :invalid_coding_pipeline_logs_root} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: a pre-created group-writable logs root is refused" do
+      root = Path.join(Process.get(:coding_executor_tmp_dir), "group-writable-logs")
+      File.mkdir_p!(root)
+      File.chmod!(root, 0o770)
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, root)
+
+      assert {:error, :invalid_coding_pipeline_logs_root} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: a logs root owned by another user is refused" do
+      {root, task_id, leaked} = foreign_owned_logs_root_fixture!()
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, root)
+
+      assert {:error, :invalid_coding_pipeline_logs_root} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => task_id})
+               )
+
+      refute File.exists?(leaked)
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
     test "invalid artifact store module and malformed store replies fail closed" do
       Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, "not-a-module")
 
@@ -8642,8 +8741,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert is_binary(Config.coding_pipeline_path())
       assert String.ends_with?(Config.coding_pipeline_path(), "coding-change-v1.dot")
 
-      assert Config.coding_pipeline_logs_root() ==
-               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+      assert Config.coding_pipeline_logs_root() == default_coding_pipeline_logs_root()
     end
 
     test "coding pipeline logs root accepts a configured path and rejects blank values" do
@@ -8652,8 +8750,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, "  ")
 
-      assert Config.coding_pipeline_logs_root() ==
-               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+      assert Config.coding_pipeline_logs_root() == default_coding_pipeline_logs_root()
     end
   end
 

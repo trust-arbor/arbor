@@ -3584,9 +3584,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     configured = Config.coding_pipeline_logs_root()
 
     with :ok <- validate_logs_base_path(configured),
-         :ok <- create_logs_base(configured),
+         :ok <- Config.ensure_private_coding_pipeline_logs_root(configured),
          {:ok, canonical} <- SafePath.resolve_real(configured),
-         true <- File.dir?(canonical) do
+         true <- File.dir?(canonical),
+         :ok <- Config.admit_private_coding_pipeline_logs_root(canonical) do
       {:ok, canonical}
     else
       _ -> {:error, :invalid_coding_pipeline_logs_root}
@@ -3603,13 +3604,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp validate_logs_base_path(_path), do: {:error, :invalid_path}
-
-  defp create_logs_base(path) do
-    case File.mkdir_p(path) do
-      :ok -> :ok
-      {:error, _reason} = error -> error
-    end
-  end
 
   defp ensure_task_logs_directory(root) do
     case File.lstat(root) do
@@ -4386,14 +4380,26 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     configured = Config.coding_pipeline_logs_root()
 
     with :ok <- validate_logs_base_path(configured),
+         :ok <- Config.admit_private_coding_pipeline_logs_root(configured),
          {:ok, canonical} <- SafePath.resolve_real(configured),
-         true <- File.dir?(canonical) do
+         true <- File.dir?(canonical),
+         :ok <- Config.admit_private_coding_pipeline_logs_root(canonical) do
       {:ok, canonical}
     else
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, :eio} -> {:error, :unavailable}
-      false -> {:error, :invalid_coding_pipeline_logs_root}
-      _ -> {:error, :unavailable}
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, :eio} ->
+        {:error, :unavailable}
+
+      {:error, :invalid_coding_pipeline_logs_root} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+
+      false ->
+        {:error, :invalid_coding_pipeline_logs_root}
+
+      _ ->
+        {:error, :unavailable}
     end
   end
 
