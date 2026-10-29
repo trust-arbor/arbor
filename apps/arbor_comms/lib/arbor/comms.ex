@@ -159,6 +159,27 @@ defmodule Arbor.Comms do
     end
   end
 
+  @doc """
+  Resolve an explicitly configured human operator for an agent.
+
+  Unlike `operator_for_agent/1`, this result-returning API fails closed when
+  the operator mapping is absent or invalid. The current single-operator
+  mapping applies to every valid agent identity and does not require an active
+  delivery channel. Valid opaque operator identities are returned unchanged.
+  """
+  @spec resolve_operator_for_agent(String.t()) ::
+          {:ok, String.t()}
+          | {:error, :invalid_principal | :operator_not_configured | :invalid_operator_config}
+  def resolve_operator_for_agent(agent_id) when is_binary(agent_id) do
+    if String.valid?(agent_id) and String.trim(agent_id) != "" do
+      Config.operator_user_id()
+    else
+      {:error, :invalid_principal}
+    end
+  end
+
+  def resolve_operator_for_agent(_agent_id), do: {:error, :invalid_principal}
+
   # -- Sending --
 
   @doc """

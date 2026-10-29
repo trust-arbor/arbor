@@ -70,6 +70,14 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
     end
   end
 
+  defmodule ExplicitOperatorResolver do
+    @moduledoc false
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, "operator_actions_test"}
+  end
+
   setup do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
@@ -85,6 +93,7 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
       {:arbor_security, :consensus_escalation_enabled, false},
       {:arbor_security, :consensus_module, PendingApprovalProbe},
       {:arbor_security, :interaction_router, PendingApprovalProbe},
+      {:arbor_security, :operator_resolver, ExplicitOperatorResolver},
       {:arbor_security, :use_interaction_router_for_approval, true},
       {:arbor_security, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},

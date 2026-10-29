@@ -23,6 +23,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     end
   end
 
+  defmodule ExplicitOperatorResolver do
+    @moduledoc false
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, "operator_actions_test"}
+  end
+
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     {:ok, _} = Application.ensure_all_started(:arbor_security)
@@ -40,6 +48,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       interaction_router:
         Application.get_env(:arbor_security, :use_interaction_router_for_approval),
+      operator_resolver: Application.fetch_env(:arbor_security, :operator_resolver),
       signing_required: Application.get_env(:arbor_security, :capability_signing_required),
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
       approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms)
@@ -48,6 +57,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_module, AskGitCommitPolicy)
     Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
     Application.put_env(:arbor_security, :capability_signing_required, false)
     Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_actions, :approval_timeout_ms, 3_000)
@@ -55,6 +65,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     on_exit(fn ->
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
       restore_env(:arbor_trust, :policy_module, previous.policy_module)
+
+      case previous.operator_resolver do
+        {:ok, resolver} -> Application.put_env(:arbor_security, :operator_resolver, resolver)
+        :error -> Application.delete_env(:arbor_security, :operator_resolver)
+      end
 
       restore_env(
         :arbor_security,

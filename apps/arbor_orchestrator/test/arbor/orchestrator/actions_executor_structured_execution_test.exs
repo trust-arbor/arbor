@@ -14,6 +14,14 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
     def confirmation_mode(_principal_id, _resource_uri, _opts), do: :gated
   end
 
+  defmodule ExplicitOperatorResolver do
+    @moduledoc false
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, "operator_structured_execution"}
+  end
+
   defmodule ConsensusStub do
     @moduledoc false
   end
@@ -71,6 +79,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       consensus_module: Application.get_env(:arbor_security, :consensus_module),
+      operator_resolver: Application.fetch_env(:arbor_security, :operator_resolver),
       escalation_enabled: Application.get_env(:arbor_security, :consensus_escalation_enabled),
       interaction_router:
         Application.get_env(:arbor_security, :use_interaction_router_for_approval),
@@ -84,6 +93,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
     Application.put_env(:arbor_security, :consensus_module, ConsensusStub)
+    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
     Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
     Application.put_env(:arbor_security, :capability_signing_required, false)
@@ -93,6 +103,11 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
     Application.delete_env(:arbor_orchestrator, :security_module)
 
     on_exit(fn ->
+      case previous.operator_resolver do
+        {:ok, value} -> Application.put_env(:arbor_security, :operator_resolver, value)
+        :error -> Application.delete_env(:arbor_security, :operator_resolver)
+      end
+
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
       restore_env(:arbor_trust, :policy_module, previous.policy_module)
       restore_env(:arbor_security, :consensus_module, previous.consensus_module)
@@ -235,6 +250,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
         await_pending_request(agent_id, attempts - 1)
 
       request ->
+        assert request.user_id == "operator_structured_execution"
         request
     end
   end

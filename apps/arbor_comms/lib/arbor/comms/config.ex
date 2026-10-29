@@ -45,6 +45,40 @@ defmodule Arbor.Comms.Config do
     Application.get_env(:arbor_comms, channel, [])
   end
 
+  @doc """
+  Return the configured operator identity without substituting an agent identity.
+
+  The current single-operator mapping uses `:signal, :interaction_user_id`
+  independently of channel enablement or delivery configuration. The identity
+  is opaque: valid nonblank strings are returned without rewriting their bytes.
+  Duplicate mappings and malformed configuration fail closed.
+  """
+  @spec operator_user_id() ::
+          {:ok, String.t()} | {:error, :operator_not_configured | :invalid_operator_config}
+  def operator_user_id do
+    config = channel_config(:signal)
+
+    if is_list(config) and Keyword.keyword?(config) do
+      case Keyword.get_values(config, :interaction_user_id) do
+        [] -> {:error, :operator_not_configured}
+        [nil] -> {:error, :operator_not_configured}
+        [""] -> {:error, :operator_not_configured}
+        [operator] when is_binary(operator) -> validate_operator_user_id(operator)
+        _ -> {:error, :invalid_operator_config}
+      end
+    else
+      {:error, :invalid_operator_config}
+    end
+  end
+
+  defp validate_operator_user_id(operator) do
+    if String.valid?(operator) and String.trim(operator) != "" do
+      {:ok, operator}
+    else
+      {:error, :invalid_operator_config}
+    end
+  end
+
   @doc false
   @spec engagement_provenance_adapter() :: {:ok, module()} | {:error, :invalid_config}
   def engagement_provenance_adapter do

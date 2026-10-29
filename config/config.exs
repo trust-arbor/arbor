@@ -17,6 +17,7 @@ config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin
 
 # Common configuration for all Arbor apps
 config :arbor_security,
+  operator_resolver: Arbor.Comms.Adapters.SecurityOperatorResolver,
   signal_transport: Arbor.Security.Adapters.SignalsTransport,
   native_notice_source_authorizer: Arbor.Agent.NoticeSourceAuthority,
   authority_audit_consumer_name: Arbor.Historian.AuthorityAuditPuller,

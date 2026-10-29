@@ -54,6 +54,13 @@ defmodule Arbor.Trust.ApprovalGuardTest do
     end
   end
 
+  defmodule ExplicitOperatorResolver do
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, " operator_test "}
+  end
+
   defmodule MockConsensus do
     def submit(%{} = _proposal, _opts \\ []), do: {:ok, "proposal_test"}
     def healthy?, do: true
@@ -207,6 +214,8 @@ defmodule Arbor.Trust.ApprovalGuardTest do
                )
 
       assert_received {:escalated, ^request_id, attrs}
+      assert attrs.user_id == " operator_test "
+      assert attrs.agent_id == "agent_test"
       metadata = attrs.metadata
 
       assert metadata.gate == :trust_policy
@@ -229,6 +238,8 @@ defmodule Arbor.Trust.ApprovalGuardTest do
                ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/rm")
 
       assert_received {:escalated, ^request_id, attrs}
+      assert attrs.user_id == " operator_test "
+      assert attrs.agent_id == "agent_test"
       assert attrs.metadata.gate == :capability_constraint
       assert attrs.metadata.trust.profile.reversibility == :irreversible
       assert attrs.metadata.trust.profile.graduation_threshold == :never
@@ -305,17 +316,27 @@ defmodule Arbor.Trust.ApprovalGuardTest do
 
   # Route escalations to CapturingRouter for the duration of one test.
   defp enable_capturing_router do
-    keys = [:consensus_module, :use_interaction_router_for_approval, :interaction_router]
-    previous = Map.new(keys, &{&1, Application.get_env(:arbor_security, &1)})
+    keys = [
+      :consensus_module,
+      :use_interaction_router_for_approval,
+      :interaction_router,
+      :operator_resolver
+    ]
+
+    previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
 
     on_exit(fn ->
-      Enum.each(previous, fn {key, value} -> restore(:arbor_security, key, value) end)
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
+        {key, :error} -> Application.delete_env(:arbor_security, key)
+      end)
     end)
 
     Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
     Application.put_env(:arbor_security, :consensus_module, MockConsensus)
     Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
     Application.put_env(:arbor_security, :interaction_router, CapturingRouter)
+    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

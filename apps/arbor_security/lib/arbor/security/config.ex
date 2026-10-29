@@ -631,6 +631,18 @@ defmodule Arbor.Security.Config do
     Application.get_env(@app, :interaction_router, @default_interaction_router)
   end
 
+  @doc """
+  Host module implementing `Arbor.Security.Contracts.OperatorResolver`.
+
+  Defaults to `nil`. An available approval router requires an explicit resolver;
+  missing resolution denies routing rather than using the principal as its own
+  operator. The host owns the mapping and injects its adapter.
+  """
+  @spec operator_resolver() :: module() | nil
+  def operator_resolver do
+    Application.get_env(@app, :operator_resolver)
+  end
+
   # ===========================================================================
   # Quota Configuration (Phase 7)
   # ===========================================================================

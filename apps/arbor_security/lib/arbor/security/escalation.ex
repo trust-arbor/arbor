@@ -143,8 +143,10 @@ defmodule Arbor.Security.Escalation do
   `Arbor.Contracts.Comms.Interaction.response_topic_for_agent(principal_id)`
   and receives `{:interaction_response, %{...}}` when the human responds.
 
-  The production default is `Arbor.Comms.InteractionRouter`, injected
-  through Config so `arbor_security` does not compile against arbor_comms.
+  The host injects the router and an `OperatorResolver` through Config. The
+  resolver must return an explicit human interaction user ID. Missing or failed
+  resolution denies the request without submitting an interaction or falling
+  back to consensus.
   """
   @spec submit_via_router(map(), String.t(), String.t(), keyword() | map()) ::
           {:ok, :pending_approval, String.t()} | {:error, term()}
@@ -159,46 +161,42 @@ defmodule Arbor.Security.Escalation do
   end
 
   defp do_submit_via_router(router, capability, principal_id, resource_uri, opts) do
-    # Route to the human operator's user_id (the same identifier
-    # Signal.PresenceKeeper registers with PresenceTracker). Without
-    # this lookup, user_id == agent_id silently maps to a presence
-    # nobody is registered for, the router queues with no adapter, and
-    # the operator never sees the prompt.
-    user_id = resolve_operator(principal_id)
-    context = approval_context(capability, principal_id, resource_uri, opts)
-    metadata = approval_metadata(capability, principal_id, resource_uri, context)
+    with {:ok, user_id} <- resolve_operator(principal_id) do
+      context = approval_context(capability, principal_id, resource_uri, opts)
+      metadata = approval_metadata(capability, principal_id, resource_uri, context)
 
-    attrs = %{
-      kind: :approval,
-      agent_id: principal_id,
-      user_id: user_id,
-      description: approval_description(resource_uri, context),
-      resource_uri: resource_uri,
-      metadata: metadata
-    }
+      attrs = %{
+        kind: :approval,
+        agent_id: principal_id,
+        user_id: user_id,
+        description: approval_description(resource_uri, context),
+        resource_uri: resource_uri,
+        metadata: metadata
+      }
 
-    # Private source control travels outside the interaction and its metadata.
-    # Presence matters: an invalid supplied source must fail at the configured
-    # router instead of falling back to an unrelated approval request.
-    router_opts =
-      case opts do
-        options when is_list(options) ->
-          Keyword.take(options, [:conversation_source])
+      # Private source control travels outside the interaction and its metadata.
+      # Presence matters: an invalid supplied source must fail at the configured
+      # router instead of falling back to an unrelated approval request.
+      router_opts =
+        case opts do
+          options when is_list(options) ->
+            Keyword.take(options, [:conversation_source])
 
-        options when is_map(options) ->
-          options |> Map.take([:conversation_source]) |> Map.to_list()
+          options when is_map(options) ->
+            options |> Map.take([:conversation_source]) |> Map.to_list()
+        end
+
+      case router.request(attrs, router_opts) do
+        {:ok, request_id} ->
+          {:ok, :pending_approval, request_id}
+
+        {:error, reason} = err ->
+          Logger.warning(
+            "Escalation: InteractionRouter.request failed for #{resource_uri}: #{inspect(reason)}"
+          )
+
+          err
       end
-
-    case router.request(attrs, router_opts) do
-      {:ok, request_id} ->
-        {:ok, :pending_approval, request_id}
-
-      {:error, reason} = err ->
-        Logger.warning(
-          "Escalation: InteractionRouter.request failed for #{resource_uri}: #{inspect(reason)}"
-        )
-
-        err
     end
   rescue
     e ->
@@ -216,19 +214,31 @@ defmodule Arbor.Security.Escalation do
       function_exported?(router, :request, 2)
   end
 
-  # Resolve the human operator's user_id for routing. Uses
-  # Arbor.Comms.operator_for_agent/1 when present (which reads the
-  # configured operator from :arbor_comms, :signal, :interaction_user_id)
-  # and falls back to principal_id for symmetry with the legacy
-  # behavior in deployments without Arbor.Comms running.
+  # Resolve only through the trusted host port. Provider failures are deliberately
+  # normalized so private configuration or exception data cannot enter audit events.
   defp resolve_operator(principal_id) do
-    comms = Module.concat([:Arbor, :Comms])
+    resolver = Config.operator_resolver()
 
-    if Code.ensure_loaded?(comms) and function_exported?(comms, :operator_for_agent, 1) do
-      apply(comms, :operator_for_agent, [principal_id])
+    if is_atom(resolver) and not is_nil(resolver) and Code.ensure_loaded?(resolver) and
+         function_exported?(resolver, :resolve_operator, 1) do
+      case resolver.resolve_operator(principal_id) do
+        {:ok, user_id} when is_binary(user_id) ->
+          if String.valid?(user_id) and String.trim(user_id) != "" do
+            {:ok, user_id}
+          else
+            {:error, :operator_resolution_failed}
+          end
+
+        _ ->
+          {:error, :operator_resolution_failed}
+      end
     else
-      principal_id
+      {:error, :operator_resolver_unavailable}
     end
+  rescue
+    _ -> {:error, :operator_resolution_failed}
+  catch
+    _, _ -> {:error, :operator_resolution_failed}
   end
 
   @doc """

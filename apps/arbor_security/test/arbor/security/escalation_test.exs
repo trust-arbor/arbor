@@ -47,10 +47,36 @@ defmodule Arbor.Security.EscalationTest do
         interaction -> {:ok, interaction}
       end
     end
+
+    def requests, do: Agent.get(__MODULE__, & &1)
   end
 
   defmodule NotARouter do
     @moduledoc false
+  end
+
+  defmodule ExplicitOperatorResolver do
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, " operator_test "}
+  end
+
+  defmodule FailingOperatorResolver do
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:error, :operator_not_configured}
+  end
+
+  defmodule RaisingOperatorResolver do
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id) do
+      send(self(), :operator_resolver_called)
+      raise "operator resolver must not run on the consensus path"
+    end
   end
 
   # Mock consensus module for testing
@@ -92,7 +118,8 @@ defmodule Arbor.Security.EscalationTest do
       consensus_module: Application.get_env(:arbor_security, :consensus_module, :unset),
       use_interaction_router_for_approval:
         Application.get_env(:arbor_security, :use_interaction_router_for_approval, :unset),
-      interaction_router: Application.get_env(:arbor_security, :interaction_router, :unset)
+      interaction_router: Application.get_env(:arbor_security, :interaction_router, :unset),
+      operator_resolver: Application.get_env(:arbor_security, :operator_resolver, :unset)
     }
 
     on_exit(fn ->
@@ -175,15 +202,23 @@ defmodule Arbor.Security.EscalationTest do
       Application.put_env(:arbor_security, :consensus_module, MockConsensus)
       Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
       Application.put_env(:arbor_security, :interaction_router, NotARouter)
+      Application.put_env(:arbor_security, :operator_resolver, RaisingOperatorResolver)
 
       assert {:ok, :pending_approval, proposal_id} =
                Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
 
       assert String.starts_with?(proposal_id, "proposal_")
+      refute_received :operator_resolver_called
     end
   end
 
   describe "config seam" do
+    test "operator_resolver defaults to nil without host configuration" do
+      Application.delete_env(:arbor_security, :operator_resolver)
+
+      assert Config.operator_resolver() == nil
+    end
+
     test "interaction_router defaults to Arbor.Comms.InteractionRouter" do
       Application.delete_env(:arbor_security, :interaction_router)
 
@@ -196,6 +231,7 @@ defmodule Arbor.Security.EscalationTest do
     setup do
       start_supervised!(FakeInteractionRouter)
       Application.put_env(:arbor_security, :interaction_router, FakeInteractionRouter)
+      Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
       :ok
     end
 
@@ -214,9 +250,30 @@ defmodule Arbor.Security.EscalationTest do
       # going through the consensus mock.
       assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
       assert interaction.agent_id == "agent_test"
+      assert interaction.user_id == " operator_test "
       assert interaction.resource_uri == "arbor://fs/write/sensitive"
       assert interaction.kind == :approval
       assert interaction.metadata.capability_id == cap.id
+    end
+
+    test "security regression: selected router resolution errors do not fall back to consensus",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, CapturingConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      for {resolver, reason} <- [
+            {nil, :operator_resolver_unavailable},
+            {FailingOperatorResolver, :operator_resolution_failed}
+          ] do
+        Application.put_env(:arbor_security, :operator_resolver, resolver)
+
+        assert {:error, ^reason} =
+                 Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+        assert FakeInteractionRouter.requests() == %{}
+        refute_received {:proposal, _}
+      end
     end
 
     test "stores approval context in interaction metadata", %{capability: cap} do
@@ -377,11 +434,51 @@ defmodule Arbor.Security.EscalationTest do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
       Application.put_env(:arbor_security, :consensus_module, MockConsensus)
       Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+      Application.put_env(:arbor_security, :operator_resolver, RaisingOperatorResolver)
 
       assert {:ok, :pending_approval, proposal_id} =
                Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
 
       assert String.starts_with?(proposal_id, "proposal_")
+      refute_received :operator_resolver_called
+    end
+  end
+
+  describe "submit_via_router/4" do
+    setup do
+      start_supervised!(FakeInteractionRouter)
+      Application.put_env(:arbor_security, :interaction_router, FakeInteractionRouter)
+      :ok
+    end
+
+    test "security regression: direct router submission requires successful operator resolution",
+         %{capability: cap} do
+      for {resolver, reason} <- [
+            {nil, :operator_resolver_unavailable},
+            {FailingOperatorResolver, :operator_resolution_failed}
+          ] do
+        Application.put_env(:arbor_security, :operator_resolver, resolver)
+
+        assert {:error, ^reason} =
+                 Escalation.submit_via_router(cap, "agent_test", "arbor://fs/write/sensitive",
+                   operator_resolver: ExplicitOperatorResolver
+                 )
+
+        assert FakeInteractionRouter.requests() == %{}
+      end
+    end
+
+    test "direct router submission preserves the resolved operator and requesting principal",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.submit_via_router(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
+      assert interaction.user_id == " operator_test "
+      assert interaction.agent_id == "agent_test"
+      assert interaction.metadata.capability_id == cap.id
     end
   end
 
