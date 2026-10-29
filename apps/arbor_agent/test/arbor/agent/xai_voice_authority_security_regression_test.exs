@@ -17,4 +17,17 @@ defmodule Arbor.Agent.XaiVoiceAuthoritySecurityRegressionTest do
     assert {:error, :capability_mutation_unauthorized} =
              XaiVoiceOrchestrator.converse_audio_file(missing)
   end
+
+  test "security regression: mic capture is not a fixed shared /tmp path" do
+    beam =
+      case :code.get_object_code(XaiVoiceOrchestrator) do
+        {:module, _mod, bin, _filename} ->
+          bin
+
+        :error ->
+          File.read!(:code.which(XaiVoiceOrchestrator))
+      end
+
+    assert :binary.match(beam, "/tmp/arbor_mic_in.pcm") == :nomatch
+  end
 end
