@@ -839,39 +839,42 @@ defmodule Arbor.Commands.Baseline do
   # Mix `_build/<env>/lib/<dep>/{priv,src,include}` entries are relative
   # symlinks into the deps tree. Recreate those that resolve inside the
   # compiled build or the deps checkout; refuse absolute and outside links.
-  # In-umbrella `lib/<app>` entries point at `repo/apps/<app>` and must not
-  # be seeded — the unit compiles those apps from `/workspace` (V7-20c).
+  # First-party `lib/<app>` entries point at `repo/apps/<app>` or
+  # `repo/packages/<app>` and must not be seeded: the unit compiles those
+  # sources from `/workspace` (V7-20c).
   defp copy_compiled_build_tree(source, dest, tree_source, tree_dest, repo_root) do
     bounds = %{
       build_source: Path.expand(source),
       build_dest: Path.expand(dest),
       tree_source: Path.expand(tree_source),
       tree_dest: Path.expand(tree_dest),
-      umbrella_apps: umbrella_app_names(repo_root)
+      first_party_apps: first_party_app_names(repo_root)
     }
 
     copy_compiled_entry(source, dest, bounds)
   end
 
-  defp umbrella_app_names(repo_root) when is_binary(repo_root) do
-    apps = Path.join(repo_root, "apps")
+  defp first_party_app_names(repo_root) when is_binary(repo_root) do
+    ["apps", "packages"]
+    |> Enum.flat_map(&source_app_names(Path.join(repo_root, &1)))
+    |> MapSet.new()
+  end
 
-    case File.ls(apps) do
+  defp first_party_app_names(_repo_root), do: MapSet.new()
+
+  defp source_app_names(source_root) do
+    case File.ls(source_root) do
       {:ok, names} ->
-        names
-        |> Enum.filter(fn name ->
-          match?({:ok, %File.Stat{type: :directory}}, File.lstat(Path.join(apps, name)))
+        Enum.filter(names, fn name ->
+          match?({:ok, %File.Stat{type: :directory}}, File.lstat(Path.join(source_root, name)))
         end)
-        |> MapSet.new()
 
       _other ->
-        MapSet.new()
+        []
     end
   end
 
-  defp umbrella_app_names(_repo_root), do: MapSet.new()
-
-  defp skip_umbrella_app_entry?(source, %{build_source: root, umbrella_apps: apps}) do
+  defp skip_first_party_app_entry?(source, %{build_source: root, first_party_apps: apps}) do
     case path_relative(source, root) do
       rel when is_binary(rel) ->
         case Path.split(rel) do
@@ -885,7 +888,7 @@ defmodule Arbor.Commands.Baseline do
   end
 
   defp copy_compiled_entry(source, dest, bounds) do
-    if skip_umbrella_app_entry?(source, bounds) do
+    if skip_first_party_app_entry?(source, bounds) do
       :ok
     else
       copy_compiled_entry_body(source, dest, bounds)
