@@ -31,7 +31,7 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
   @spec to_arbor_tool(String.t(), map()) :: map()
   def to_arbor_tool(server_name, %{"name" => name} = tool) do
     %{
-      name: "mcp.#{server_name}.#{name}",
+      name: tool_key(server_name, name),
       description: Map.get(tool, "description", "MCP tool: #{name}"),
       input_schema: normalize_schema(Map.get(tool, "inputSchema", %{})),
       source: :mcp,
@@ -129,12 +129,15 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
 
       iex> ToolBridge.parse_tool_name("mcp.github.create_issue")
       {:ok, "github", "create_issue"}
+
+      iex> ToolBridge.parse_tool_name(ToolBridge.tool_key("a.b", "c"))
+      {:ok, "a.b", "c"}
   """
   @spec parse_tool_name(String.t()) :: {:ok, String.t(), String.t()} | :error
   def parse_tool_name("mcp." <> rest) do
     case String.split(rest, ".", parts: 2) do
       [server_name, tool_name] when server_name != "" and tool_name != "" ->
-        {:ok, server_name, tool_name}
+        {:ok, decode_segment(server_name), decode_segment(tool_name)}
 
       _ ->
         :error
@@ -143,7 +146,31 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
 
   def parse_tool_name(_), do: :error
 
+  @doc """
+  Unambiguous Arbor-facing key for an MCP server/tool pair.
+
+  `mcp.<server>.<tool>` collides when either segment contains a dot
+  (server `a.b` tool `c` vs server `a` tool `b.c`). Dots in each
+  segment are percent-encoded so `parse_tool_name/1` can split on the
+  first literal `.` after the `mcp.` prefix. Names without dots keep
+  the historical `mcp.github.create_issue` shape.
+  """
+  @spec tool_key(String.t(), String.t()) :: String.t()
+  def tool_key(server_name, tool_name)
+      when is_binary(server_name) and is_binary(tool_name) do
+    "mcp.#{encode_segment(server_name)}.#{encode_segment(tool_name)}"
+  end
+
   # -- Private --
+
+  defp encode_segment(segment) when is_binary(segment) do
+    URI.encode(segment, fn
+      ?. -> false
+      c -> URI.char_unreserved?(c)
+    end)
+  end
+
+  defp decode_segment(segment) when is_binary(segment), do: URI.decode(segment)
 
   defp normalize_schema(%{"type" => _} = schema), do: schema
 

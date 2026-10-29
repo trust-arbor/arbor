@@ -5,12 +5,13 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
 
   ## First-discovery policy
 
-  A tool name that has never been pinned is auto-admitted and pinned.
-  That matches `ClientConnection` on 2026-10-20: first `tools/list` after
-  connect is cached with no extra operator prompt. Server-connect approval
+  A tool name that has never been pinned is auto-admitted and pinned
+  only while the pin map is empty (first `tools/list` after connect, or
+  after pins are dropped). Server-connect approval
   (`Arbor.Security.mcp_server_approval_uri/2`) still gates starting the
-  connection; tool-call capabilities still gate `call_tool`. This core only
-  pins what the model would see (`name`, `description`, `inputSchema`).
+  connection; tool-call capabilities still gate `call_tool`. This core
+  pins what the model would see: `name`, `description`, `annotations`,
+  `inputSchema`, and `outputSchema`.
 
   ## Refresh / list_changed
 
@@ -21,12 +22,11 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
   from the latest list are kept so a later reuse of the name with a new
   description is still gated.
 
-  A rename is a new name and follows first-discovery. There is no stable
-  MCP tool id other than `name`. There is no stricter first-seen mode in
-  this repo; a brand-new name on an already-pinned server is pinned on
-  first sight. Pass `unknown: :quarantine` only when the pin store is
-  unreadable so a restart cannot re-trust by treating a load failure as
-  an empty pin map.
+  A rename is a new name. Once any pin exists for the server identity, a
+  brand-new name is held for re-approval rather than auto-pinned. Pass
+  `unknown: :quarantine` when the pin store is unreadable so a restart
+  cannot re-trust by treating a load failure as an empty pin map. Pass
+  `unknown: :pin` to force first-discovery even when pins already exist.
   """
 
   @type tool :: map()
@@ -42,9 +42,10 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
         }
 
   @doc """
-  SHA-256 (lowercase hex) of the canonical `{name, description, inputSchema}`
-  encoding. Atom and string keys/values that represent the same JSON term
-  hash the same way.
+  SHA-256 (lowercase hex) of the canonical
+  `{name, description, annotations, inputSchema, outputSchema}` encoding.
+  Atom and string keys/values that represent the same JSON term hash
+  the same way.
   """
   @spec fingerprint(tool()) :: String.t()
   def fingerprint(tool) when is_map(tool) do
@@ -59,9 +60,11 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
   @spec canonical_term(tool()) :: [{String.t(), term()}]
   def canonical_term(tool) when is_map(tool) do
     [
+      {"annotations", canonicalize(field(tool, "annotations", %{}))},
       {"description", canonicalize(field(tool, "description", ""))},
       {"inputSchema", canonicalize(field(tool, "inputSchema", %{}))},
-      {"name", canonicalize(field(tool, "name", ""))}
+      {"name", canonicalize(field(tool, "name", ""))},
+      {"outputSchema", canonicalize(field(tool, "outputSchema", %{}))}
     ]
   end
 
@@ -77,7 +80,7 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
 
   @spec admit(pin_map(), [tool()], keyword()) :: decision()
   def admit(pins, tools, opts) when is_map(pins) and is_list(tools) and is_list(opts) do
-    unknown = Keyword.get(opts, :unknown, :pin)
+    unknown = Keyword.get(opts, :unknown, default_unknown(pins))
 
     {admitted, quarantined, pins, changes} =
       Enum.reduce(tools, {[], [], pins, []}, &admit_one(&1, &2, unknown))
@@ -144,6 +147,9 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
     end
   end
 
+  defp default_unknown(pins) when map_size(pins) == 0, do: :pin
+  defp default_unknown(_pins), do: :quarantine
+
   defp admit_unknown(tool, name, hash, {admitted, quarantined, pins, changes}, :pin) do
     {[tool | admitted], quarantined, Map.put(pins, name, hash), changes}
   end
@@ -179,6 +185,12 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintCore do
 
   defp field(tool, "inputSchema", default),
     do: Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", default)
+
+  defp field(tool, "outputSchema", default),
+    do: Map.get(tool, :outputSchema) || Map.get(tool, "outputSchema", default)
+
+  defp field(tool, "annotations", default),
+    do: Map.get(tool, :annotations) || Map.get(tool, "annotations", default)
 
   defp canonicalize(map) when is_map(map) do
     map

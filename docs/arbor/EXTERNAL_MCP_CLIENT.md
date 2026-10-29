@@ -82,7 +82,8 @@ connects *out* to third-party MCP servers. Those tool descriptions are pinned
 after first discovery (or later re-approval) so a refresh cannot silently
 replace the text shown to the model.
 
-Pins are SHA-256 of `name` / `description` / `inputSchema`, keyed by
+Pins are SHA-256 of `name` / `description` / `annotations` /
+`inputSchema` / `outputSchema`, keyed by
 `Arbor.Security.mcp_server_approval_uri/2` and the tool name, and stored in
 `~/.arbor/mcp_tool_pins` (`config :arbor_gateway, :mcp_tool_pin_dir`). A
 mismatch quarantines the tool and emits `:mcp_tool_fingerprint_changed`.

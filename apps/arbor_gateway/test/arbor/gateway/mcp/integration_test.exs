@@ -42,6 +42,10 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
             MockServer.sample_tool(
               name: "get_weather",
               description: "Get weather for a city"
+            ),
+            MockServer.sample_tool(
+              name: "sample_tool",
+              description: "Echo input"
             )
           ]
         )
@@ -60,19 +64,21 @@ defmodule Arbor.Gateway.MCP.IntegrationTest do
       {:ok, status} = ClientConnection.status(conn)
       assert status.connection_status == :connected
       assert status.server_name == "weather_service"
-      assert status.tool_count == 1
+      assert status.tool_count == 2
       assert "get_weather" in status.tools
+      assert "sample_tool" in status.tools
 
       # List tools
       {:ok, tools} = ClientConnection.list_tools(conn)
-      assert length(tools) == 1
-      assert hd(tools)["name"] == "get_weather"
+      assert length(tools) == 2
+      assert "get_weather" in Enum.map(tools, & &1["name"])
 
       # Convert to Arbor format
       arbor_tools = ToolBridge.to_arbor_tools("weather_service", tools)
-      assert length(arbor_tools) == 1
-      tool = hd(arbor_tools)
-      assert tool.name == "mcp.weather_service.get_weather"
+      assert length(arbor_tools) == 2
+      names = Enum.map(arbor_tools, & &1.name)
+      assert "mcp.weather_service.get_weather" in names
+      tool = Enum.find(arbor_tools, &(&1.mcp_tool_name == "get_weather"))
       assert tool.capability_uri == "arbor://mcp/weather_service/get_weather"
       assert tool.source == :mcp
 

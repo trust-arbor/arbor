@@ -126,6 +126,32 @@ defmodule Arbor.Gateway.MCP.CallOutcome do
     )
   end
 
+  @doc """
+  A call refused because the tool is neither in the current listed set
+  nor in the accepted pin map.
+  """
+  @spec unknown_tool(String.t() | nil, String.t()) :: CallFailure.t()
+  def unknown_tool(server_name, tool_name) do
+    failure(
+      :refused,
+      "MCP tool #{server_name || "connection"}/#{tool_name} is not in the listed or pinned set.",
+      tool_name
+    )
+  end
+
+  @doc """
+  A call refused because the tool appeared after the pin set existed
+  and has not been re-approved.
+  """
+  @spec unapproved_tool(String.t() | nil, String.t()) :: CallFailure.t()
+  def unapproved_tool(server_name, tool_name) do
+    failure(
+      :refused,
+      "MCP tool #{server_name || "connection"}/#{tool_name} is held for re-approval; it appeared after the pin set existed.",
+      tool_name
+    )
+  end
+
   @doc false
   @spec classify(term()) :: CallFailure.outcome()
   def classify(:not_connected), do: :not_sent
