@@ -204,6 +204,13 @@ the compiled app list as well as the test result. This exposed 15 Security test
 failures hidden by the umbrella build because fixtures still called Persistence,
 Historian, Comms, and Phoenix modules (found 2026-08-20 during P1C acceptance).
 
+Also repeat an ordinary strict compile after the fresh build and after rebuilding
+changed dependencies. Boundary can lose implicit external ownership for an
+unversioned local path dependency during incremental refresh. Declare extracted
+libraries with a version requirement and path override, preserving the failed
+cache evidence and checking repeated warm compiles. Clearing caches alone does
+not establish stable dependency admission (reconfirmed 2026-10-28).
+
 <!-- applied-learning: a-baseline-is-only-valid-on-a-pinned-tree -->
 <a id="applied-learning-a-baseline-is-only-valid-on-a-pinned-tree"></a>
 **Compare identical commands on frozen baseline and candidate trees.** Record source revision, dirty-state identity, exact selectors, environment, and executed scope before and after each run; movement in the tree or unexplained test-count changes invalidates the comparison. Compare quality failures with the original pre-task base as well as any test-only parent, since the latter already contains new test code. Separate pre-existing failures from introduced ones and validate owned files and behavior without formatting unrelated backlog. Refresh isolated snapshots with explicit absolute source and destination paths, then verify expected changed bytes or hashes before accepting their evidence. Keep shared-tree mutations such as stash out of observational baseline checks. (Merged 2026-10-16 from 3 entries; first found 2026-07-22, last 2026-10-07.)

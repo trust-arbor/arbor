@@ -93,6 +93,50 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "Custody is a required physical build input with an exact package root" do
+    oid = String.duplicate("d", 40)
+    required = required_triples(oid)
+    custody_project = "packages/arbor_custody/mix.exs"
+    custody_source = "packages/arbor_custody/lib/arbor/custody.ex"
+    custody_test = "packages/arbor_custody/test/custody_test.exs"
+    embedded = "apps/arbor_custody/lib/arbor/custody.ex"
+    other_package = "packages/arbor_custody_other/lib/arbor/custody.ex"
+
+    extras =
+      Enum.map([custody_source, custody_test, embedded, other_package], fn path ->
+        %{path: path, mode: "100644", oid: oid}
+      end)
+
+    assert custody_project in SourcePolicy.required_files()
+    assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+    assert custody_project in paths
+    assert custody_source in paths
+    assert custody_test in paths
+    refute embedded in paths
+    refute other_package in paths
+
+    assert {:error, :missing_required_input} =
+             SourcePolicy.select(Enum.reject(required, &(&1.path == custody_project)) ++ extras)
+  end
+
+  @tag :fast
+  test "Custody generated tooling exceptions retain exact directory and owner boundaries" do
+    for path <- [
+          "packages/arbor_custody/.elixir_ls/build/cache",
+          "packages/arbor_custody/cover/report.html",
+          "packages/arbor_custody/erl_crash.dump"
+        ] do
+      assert SourcePolicy.ignored_generated_extra?(path)
+    end
+
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_custody/coverup/report.html")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_custody/.elixir_ls_evil/cache")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_custody/erl_crash.dump/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_custody_other/cover/report.html")
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_custody/cover/report.html")
+  end
+
+  @tag :fast
   test "enforces the 4999 source-row bound before later work" do
     oid = String.duplicate("c", 40)
 
@@ -426,6 +470,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       "apps/arbor_persistence_host/.elixir_ls/build/cache",
       "apps/arbor_security/cover/report.html",
       "apps/arbor_trust/erl_crash.dump",
+      "packages/arbor_custody/.elixir_ls/build/cache",
+      "packages/arbor_custody/cover/report.html",
+      "packages/arbor_custody/erl_crash.dump",
       "packages/arbor_signals/cover/report.html",
       "packages/arbor_persistence/.elixir_ls/build/cache",
       "packages/arbor_persistence_sql/erl_crash.dump"
@@ -581,6 +628,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     pairs = [
       {"mix.exs", "umbrella\n"},
       {"apps/arbor_commands/mix.exs", "commands\n"},
+      {"packages/arbor_custody/mix.exs", "custody\n"},
+      {"packages/arbor_custody/lib/custody.ex", "custody source\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},
       {"packages/arbor_signals/lib/signals.ex", "signals source\n"},
       {"packages/arbor_persistence/mix.exs", "persistence\n"},

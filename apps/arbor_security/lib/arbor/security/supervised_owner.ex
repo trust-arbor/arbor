@@ -145,10 +145,10 @@ defmodule Arbor.Security.SupervisedOwner do
   # still running — Scheduler.Application.start/2 even waits for that claim.
   # The master cannot be asked for its child yet (see application_root/1), so
   # the root is bound from unforgeable spawn parents by
-  # Arbor.Common.starting_application_root/3, and the exact child ids are then
+  # Arbor.Custody.starting_application_root/3, and the exact child ids are then
   # still confirmed top-down.
   defp starting_application_authorized?(caller, application, child_path) do
-    case Arbor.Common.starting_application_root(application, caller, length(child_path)) do
+    case Arbor.Custody.starting_application_root(application, caller, length(child_path)) do
       {:ok, root} -> child_at_path(root, child_path, @startup_lookup_timeout_ms) == caller
       :error -> false
     end

@@ -12,7 +12,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       exports: [SafeManagementSurface, Adapters.SignalAuthContext]
     },
     Arbor.Common => %{
-      deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],
+      deps: [Arbor.Contracts, Arbor.Custody, Finch, Jason, Logger, Req, Zoi],
       exports: :all
     },
     Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},

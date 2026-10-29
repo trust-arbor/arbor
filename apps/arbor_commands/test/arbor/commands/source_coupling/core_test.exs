@@ -1,7 +1,7 @@
 defmodule Arbor.Commands.SourceCoupling.CoreTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Commands.SourceCoupling.{Baseline, Classify, Core, Encode}
+  alias Arbor.Commands.SourceCoupling.{Bands, Baseline, Classify, Core, Encode}
 
   @moduletag :fast
 
@@ -60,6 +60,60 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
     assert Enum.any?(census["occurrences"], fn occurrence ->
              occurrence["target"] == "Arbor.Signals" and occurrence["declared"] == true
            end)
+  end
+
+  test "Custody is a K owner with declared runtime and Security census edges" do
+    files = [
+      file("packages/arbor_custody/mix.exs", mix("arbor_custody", [])),
+      file("apps/arbor_kernel_runtime/mix.exs", """
+      defmodule Runtime.MixProject do
+        def deps, do: [{:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"}]
+      end
+      """),
+      file("apps/arbor_security/mix.exs", """
+      defmodule Security.MixProject do
+        def deps, do: [{:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"}]
+      end
+      """),
+      file("packages/arbor_custody/lib/arbor/custody.ex", """
+      defmodule Arbor.Custody do
+        def resolve, do: :error
+      end
+      """),
+      file("apps/arbor_kernel_runtime/lib/runtime.ex", """
+      defmodule Arbor.KernelRuntime.Sample do
+        def resolve, do: Arbor.Custody.resolve()
+      end
+      """),
+      file("apps/arbor_security/lib/security.ex", """
+      defmodule Arbor.Security.Sample do
+        def resolve, do: Arbor.Custody.resolve()
+      end
+      """)
+    ]
+
+    assert {:ok, "K"} = Bands.band_of("arbor_custody")
+    assert {:ok, census} = Core.new(bundle(files))
+    assert census["gating_occurrences"] == []
+
+    custody_edges = Enum.filter(census["occurrences"], &(&1["to_app"] == "arbor_custody"))
+
+    assert custody_edges |> Enum.map(& &1["from_app"]) |> Enum.uniq() |> Enum.sort() == [
+             "arbor_kernel_runtime",
+             "arbor_security"
+           ]
+
+    for edge <- custody_edges do
+      assert edge["declared"] == true
+      assert edge["to_band"] == "K"
+      assert edge["level_direction"] == "level_downward"
+    end
+
+    assert Enum.find(custody_edges, &(&1["from_app"] == "arbor_kernel_runtime"))["fate"] ==
+             "intra_band"
+
+    assert Enum.find(custody_edges, &(&1["from_app"] == "arbor_security"))["fate"] ==
+             "downward"
   end
 
   test "duplicate app and package owners fail closed instead of overwriting the graph" do

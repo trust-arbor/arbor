@@ -20,6 +20,8 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
   @app_band %{
     "arbor_kernel" => "K",
     "arbor_kernel_runtime" => "K",
+    # Caller-owned OTP custody retains the extracted Common mechanism band.
+    "arbor_custody" => "K",
     # L0 device I/O. Same rank as the kernel; voice depends downward on it.
     "arbor_multimedia" => "K",
     "arbor_contracts" => "K",

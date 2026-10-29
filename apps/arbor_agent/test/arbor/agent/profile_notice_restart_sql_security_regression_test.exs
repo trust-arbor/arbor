@@ -289,13 +289,13 @@ defmodule Arbor.Agent.ProfileNoticeRestartSQLSecurityRegressionTest do
   defp wait_for_call(_, 0), do: flunk("owned mutation did not reach the suspended broker")
 
   defp wait_for_call(pid, count) do
-    # Profile writes reach NativeNoticeBroker through AuthenticatedCall, which
-    # waits in its own receive. GenServer.call still shows :gen.do_call.
+    # Profile writes reach NativeNoticeBroker through the extracted custody
+    # engine's receive. GenServer.call still shows :gen.do_call.
     case Process.info(pid, :current_function) do
       {:current_function, {:gen, :do_call, _}} ->
         :ok
 
-      {:current_function, {Arbor.Common.AuthenticatedCall, fun, arity}}
+      {:current_function, {Arbor.Custody.AuthenticatedCall, fun, arity}}
       when fun in [:call, :await_challenge, :await_reply] and arity in [3, 4] ->
         :ok
 

@@ -72,6 +72,7 @@ defmodule Arbor.KernelRuntime.MixProject do
 
   defp deps do
     [
+      {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel, in_umbrella: true},
       # Two-segment range: req_llm >= 1.25 compiles against Finch >= 0.22
