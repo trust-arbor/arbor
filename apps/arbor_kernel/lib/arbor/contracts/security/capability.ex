@@ -319,10 +319,14 @@ defmodule Arbor.Contracts.Security.Capability do
   - Reduced delegation depth
   - Same or shorter expiration time
   - Additional constraints as specified
+  - The requested `:resource_uri` when it is a subset of the parent. Omitting
+    it inherits the parent address. A requested URI outside the parent is
+    rejected as `:widens_envelope`
   """
   @spec delegate(t(), Types.agent_id(), keyword()) :: {:ok, t()} | {:error, term()}
   def delegate(%__MODULE__{} = parent, new_principal_id, opts \\ []) do
     new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
+    requested_resource = opts[:resource_uri] || parent.resource_uri
 
     cond do
       parent.delegation_depth <= 0 ->
@@ -338,6 +342,12 @@ defmodule Arbor.Contracts.Security.Capability do
       # `constraints: %{rate_limit: 1_000_000}` and silently expand a parent
       # cap that only allowed 100/sec. Reject construction.
       not constraints_subset?(new_constraints, parent.constraints) ->
+        {:error, :widens_envelope}
+
+      # Resource attenuation: a requested child URI must stay inside the parent.
+      # Pre-fix, delegate/3 always copied parent.resource_uri, so a request for
+      # `fs://root/sub` from `fs://root/**` still authorized the whole tree.
+      not uri_subset?(requested_resource, parent.resource_uri) ->
         {:error, :widens_envelope}
 
       true ->
@@ -361,7 +371,7 @@ defmodule Arbor.Contracts.Security.Capability do
 
         # Attenuation: delegated caps can only restrict, never expand
         new(
-          resource_uri: parent.resource_uri,
+          resource_uri: requested_resource,
           principal_id: new_principal_id,
           expires_at: new_expires_at,
           not_before: new_not_before,
