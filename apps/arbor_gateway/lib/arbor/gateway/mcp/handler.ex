@@ -1408,7 +1408,17 @@ defmodule Arbor.Gateway.MCP.Handler do
            timeout: 30_000
          ) do
       {:ok, %{value: value}} ->
-        "## Success (MCP: #{server_name}/#{tool_name})\n\n#{format_result(value)}"
+        ## Success text that re-enters an agent or operator prompt must keep
+        ## the UNTRUSTED label. Stripping ToolBridge.taint_result/3 down to
+        ## the inner value is a security regression (Exposure Check AH).
+        "## Success (MCP: #{server_name}/#{tool_name})\n\n" <>
+          "#{ToolBridge.untrusted_result_label(server_name, tool_name)}\n\n" <>
+          "#{format_result(value)}"
+
+      {:ok, value} ->
+        "## Success (MCP: #{server_name}/#{tool_name})\n\n" <>
+          "#{ToolBridge.untrusted_result_label(server_name, tool_name)}\n\n" <>
+          "#{format_result(value)}"
 
       {:error, {:not_connected, name}} ->
         "## Error\n\nMCP server '#{name}' is not connected. " <>
