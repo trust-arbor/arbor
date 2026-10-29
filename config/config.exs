@@ -2,7 +2,13 @@ import Config
 
 # Only the host composition may register adapters with real effect admission.
 # A request or an adapter's own callbacks cannot confer destination authority.
+# DEFAULT CHANGE (2026-10-29): after untrusted/external tool results enter
+# context, send-capable tools (email, HTTP POST, messaging) are refused.
+# This is independent of the still-dark :arbor_security, :egress_gate_enforcing
+# flag. Explicit opt-out:
+#   config :arbor_llm, :strict_taint_send_gate, false
 config :arbor_llm,
+  strict_taint_send_gate: true,
   sensitivity_guarded_adapters: [
     Arbor.LLM.Adapter.ReqLLM,
     Arbor.LLM.Adapter.OAuthResponses,
@@ -336,6 +342,11 @@ config :arbor_ai, :acp_providers, %{
 }
 
 # AI routing defaults
+# DEFAULT CHANGE (2026-10-29): Arbor.AI.generate_text_with_tools/2 labels
+# unlabeled runs untrusted. Opt out with :allow_untainted or:
+#   config :arbor_ai, :allow_untainted_tool_calls, true
+config :arbor_ai, :allow_untainted_tool_calls, false
+
 config :arbor_ai,
   # Default provider/model for API calls (via OpenRouter)
   # gpt-oss-120b:free chosen 2026-06-04 after the previous default

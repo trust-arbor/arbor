@@ -57,7 +57,8 @@ defmodule Arbor.AI.GenerateTextWithToolsTaintSecurityRegressionTest do
 
   defmodule RecordingExecutor do
     def execute(name, args, workdir, opts) do
-      send(self(), {:tool_execution, name, args, workdir, opts})
+      dest = Application.get_env(:arbor_ai, :generate_tools_taint_test_pid, self())
+      send(dest, {:tool_execution, name, args, workdir, opts})
       {:ok, "external inbox payload"}
     end
   end
@@ -81,6 +82,8 @@ defmodule Arbor.AI.GenerateTextWithToolsTaintSecurityRegressionTest do
 
   setup do
     SensitivityFixture.setup([Adapter])
+    previous_pid = Application.get_env(:arbor_ai, :generate_tools_taint_test_pid)
+    Application.put_env(:arbor_ai, :generate_tools_taint_test_pid, self())
     previous_client = :persistent_term.get({Client, :default_client}, :none)
 
     client =
@@ -97,6 +100,10 @@ defmodule Arbor.AI.GenerateTextWithToolsTaintSecurityRegressionTest do
         :none -> Client.clear_default_client()
         client -> Client.set_default_client(client)
       end
+
+      if is_nil(previous_pid),
+        do: Application.delete_env(:arbor_ai, :generate_tools_taint_test_pid),
+        else: Application.put_env(:arbor_ai, :generate_tools_taint_test_pid, previous_pid)
 
       if is_nil(previous_gate),
         do: Application.delete_env(:arbor_llm, :strict_taint_send_gate),
