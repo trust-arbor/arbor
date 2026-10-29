@@ -188,7 +188,13 @@ config :arbor_actions,
   coding_default_acp_agent: "codex",
   # Production default: node-restart durable retained-workspace journal is on.
   # config/test.exs must disable this so MIX_ENV=test never opens ~/.arbor.
-  workspace_retention_journal_enabled: true
+  workspace_retention_journal_enabled: true,
+  # DEFAULT CHANGE (taint labeling, 2026-10-29): File.Read / File.Search label
+  # content :untrusted when the canonical (symlink-resolved) path is outside
+  # every configured trusted_file_roots. An empty list is fail-closed.
+  # Opt out explicitly: taint_file_reads_outside_trusted_roots: false
+  trusted_file_roots: [],
+  taint_file_reads_outside_trusted_roots: true
 
 # The umbrella owns this upward runtime composition: Shell stays independent
 # of Actions while every generic agent call uses the real Security/Trust-aware
