@@ -122,12 +122,22 @@ defmodule Arbor.Security.Reflex.BuiltinTest do
       assert shadow.priority == 100
     end
 
-    test "includes AWS credentials warning" do
+    test "includes AWS credentials block generated from AgentContainment" do
       reflexes = Builtin.file_reflexes()
       aws = Enum.find(reflexes, &(&1.id == "aws_credentials"))
 
       assert aws != nil
-      assert aws.response == :warn
+      assert aws.response == :block
+    end
+
+    test "blocks every AgentContainment home credential path" do
+      reflexes = Builtin.file_reflexes()
+
+      for %{id: id} <- Arbor.Common.HomeCredentialPaths.entries() do
+        reflex = Enum.find(reflexes, &(&1.id == id))
+        assert reflex != nil
+        assert reflex.response == :block
+      end
     end
   end
 

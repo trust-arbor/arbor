@@ -6844,11 +6844,29 @@ defmodule Arbor.Security do
         cmd -> Map.put(context, :command, cmd)
       end
 
-    # Add path if it can be extracted from the resource URI
+    # Add path if it can be extracted from the resource URI or file_path opt.
+    # Keep the caller-given spelling (`~`, `$HOME`) so home-credential
+    # reflexes match before URI synthesis turns them into `/~/...`.
+    extracted = extract_path_from_uri(resource_uri)
+    file_path = Keyword.get(opts, :file_path)
+
+    paths =
+      [extracted, file_path]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+
     context =
-      case extract_path_from_uri(resource_uri) do
-        nil -> context
-        path -> Map.put(context, :path, path)
+      case paths do
+        [] ->
+          context
+
+        [path] ->
+          Map.put(context, :path, path)
+
+        [path | _] = many ->
+          context
+          |> Map.put(:path, path)
+          |> Map.put(:paths, many)
       end
 
     # Add URL if provided

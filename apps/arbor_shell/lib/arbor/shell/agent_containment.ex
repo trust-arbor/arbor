@@ -1,12 +1,16 @@
 defmodule Arbor.Shell.AgentContainment do
   @moduledoc false
 
+  alias Arbor.Common.HomeCredentialPaths
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security
 
   @max_path_bytes 4096
   @max_capabilities 256
+  # Directory and filename segments that must not be an agent cwd. The
+  # home-relative credential subset lives in HomeCredentialPaths so
+  # security reflexes are generated from the same list.
   @protected ~r{(?:^|/)(?:\.ssh|\.aws|\.azure|\.gnupg|\.claude|\.codex|\.agents|\.config|\.arbor|\.git|\.kube|\.docker|\.netrc|\.npmrc|\.pypirc|\.env(?:\.[^/]*)?|credentials(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|id_rsa|id_ed25519)(?:/|$)|/Library/(?:Keychains|Application Support)(?:/|$)}
 
   # Admission is re-evaluated for each invocation. A live child's kernel policy
@@ -53,6 +57,14 @@ defmodule Arbor.Shell.AgentContainment do
   end
 
   def validate_projection(_, _), do: {:error, :invalid_agent_containment}
+
+  @doc false
+  @spec home_credential_paths() :: [HomeCredentialPaths.entry()]
+  def home_credential_paths, do: HomeCredentialPaths.entries()
+
+  @doc false
+  @spec protected_path?(String.t()) :: boolean()
+  def protected_path?(path) when is_binary(path), do: protected?(path)
 
   defp authorize_write(agent, cwd, "touch", caps, authorizer, opts),
     do: authorize_root(agent, cwd, :write, caps, authorizer, opts)

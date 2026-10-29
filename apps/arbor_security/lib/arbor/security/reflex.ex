@@ -57,8 +57,8 @@ defmodule Arbor.Security.Reflex do
       end
   """
 
+  alias Arbor.Common.HomeCredentialPaths
   alias Arbor.Contracts.Security.Reflex, as: ReflexContract
-  alias Arbor.Common.SafePath
   alias Arbor.Security.Reflex.Registry
 
   @type check_context :: %{
@@ -118,10 +118,15 @@ defmodule Arbor.Security.Reflex do
   Useful for testing individual reflexes.
   """
   @spec matches?(ReflexContract.t(), check_context()) :: boolean()
-  def matches?(%ReflexContract{trigger: {:path, glob}} = reflex, %{path: path} = context)
-      when is_binary(glob) and is_binary(path) do
-    globs = [glob, normalize_reflex_path(glob)] |> Enum.uniq()
-    paths = [path, normalize_reflex_path(path)] |> Enum.uniq()
+  def matches?(%ReflexContract{trigger: {:path, glob}} = reflex, context)
+      when is_binary(glob) do
+    globs = [glob | HomeCredentialPaths.expand_all(glob)] |> Enum.uniq()
+
+    paths =
+      context
+      |> HomeCredentialPaths.context_paths()
+      |> Enum.flat_map(&[&1 | HomeCredentialPaths.expand_all(&1)])
+      |> Enum.uniq()
 
     Enum.any?(globs, fn candidate_glob ->
       candidate_reflex = %{reflex | trigger: {:path, candidate_glob}}
@@ -134,26 +139,6 @@ defmodule Arbor.Security.Reflex do
 
   def matches?(%ReflexContract{} = reflex, context) do
     ReflexContract.matches?(reflex, context)
-  end
-
-  defp normalize_reflex_path(path) do
-    home = System.user_home!()
-
-    expanded =
-      path
-      |> String.replace_prefix("$HOME", home)
-      |> Path.expand()
-
-    if String.contains?(expanded, ["*", "?"]) do
-      expanded
-    else
-      case SafePath.resolve_real(expanded) do
-        {:ok, real} -> real
-        _ -> expanded
-      end
-    end
-  rescue
-    _ -> path
   end
 
   @doc """

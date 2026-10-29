@@ -20,6 +20,7 @@ defmodule Arbor.Security.Reflex.Builtin do
   - 70: Lower security (warnings, logging)
   """
 
+  alias Arbor.Common.HomeCredentialPaths
   alias Arbor.Contracts.Security.Reflex
 
   @protected_infrastructure_module_names [
@@ -291,88 +292,77 @@ defmodule Arbor.Security.Reflex.Builtin do
   """
   @spec file_reflexes() :: [Reflex.t()]
   def file_reflexes do
-    [
-      # Block SSH private key access
-      Reflex.path(
-        "ssh_private_keys",
-        "~/.ssh/id_*",
-        id: "ssh_private_keys",
+    home_credential_reflexes() ++
+      [
+        # Block SSH private key access
+        Reflex.path(
+          "ssh_private_keys",
+          "~/.ssh/id_*",
+          id: "ssh_private_keys",
+          response: :block,
+          message: "Blocked: access to SSH private keys",
+          priority: 95
+        ),
+        # Warn on .env file access
+        Reflex.path(
+          "env_files",
+          "**/.env*",
+          id: "env_files",
+          response: :warn,
+          message: "Warning: accessing environment file (may contain secrets)",
+          priority: 80
+        ),
+        # Block access to system password files
+        Reflex.path(
+          "etc_passwd",
+          "/etc/passwd",
+          id: "etc_passwd",
+          response: :block,
+          message: "Blocked: access to system password file",
+          priority: 90
+        ),
+        Reflex.path(
+          "etc_shadow",
+          "/etc/shadow",
+          id: "etc_shadow",
+          response: :block,
+          message: "Blocked: access to system shadow file",
+          priority: 100
+        ),
+        # Block access to keychain/credential stores
+        Reflex.path(
+          "gnome_keyring",
+          "~/.local/share/keyrings/*",
+          id: "gnome_keyring",
+          response: :block,
+          message: "Blocked: access to GNOME keyring",
+          priority: 95
+        ),
+        # Warn on git credentials
+        Reflex.path(
+          "git_credentials",
+          "~/.git-credentials",
+          id: "git_credentials",
+          response: :warn,
+          message: "Warning: accessing git credentials",
+          priority: 85
+        )
+      ]
+  end
+
+  # Built from AgentContainment's protected credential list (via the shared
+  # HomeCredentialPaths module) so shell cwd denial and fs reflexes cannot drift.
+  defp home_credential_reflexes do
+    Enum.map(HomeCredentialPaths.entries(), fn entry ->
+      Reflex.custom(
+        entry.id,
+        fn context -> HomeCredentialPaths.blocked?(entry, context) end,
+        id: entry.id,
         response: :block,
-        message: "Blocked: access to SSH private keys",
+        message: "Blocked: access to #{entry.glob}",
         priority: 95
-      ),
-      # Block SSH config access
-      Reflex.path(
-        "ssh_config",
-        "~/.ssh/config",
-        id: "ssh_config",
-        response: :warn,
-        message: "Warning: accessing SSH configuration",
-        priority: 80
-      ),
-      # Warn on .env file access
-      Reflex.path(
-        "env_files",
-        "**/.env*",
-        id: "env_files",
-        response: :warn,
-        message: "Warning: accessing environment file (may contain secrets)",
-        priority: 80
-      ),
-      # Block access to system password files
-      Reflex.path(
-        "etc_passwd",
-        "/etc/passwd",
-        id: "etc_passwd",
-        response: :block,
-        message: "Blocked: access to system password file",
-        priority: 90
-      ),
-      Reflex.path(
-        "etc_shadow",
-        "/etc/shadow",
-        id: "etc_shadow",
-        response: :block,
-        message: "Blocked: access to system shadow file",
-        priority: 100
-      ),
-      # Warn on AWS credentials
-      Reflex.path(
-        "aws_credentials",
-        "~/.aws/credentials",
-        id: "aws_credentials",
-        response: :warn,
-        message: "Warning: accessing AWS credentials",
-        priority: 90
-      ),
-      # Block access to keychain/credential stores
-      Reflex.path(
-        "gnome_keyring",
-        "~/.local/share/keyrings/*",
-        id: "gnome_keyring",
-        response: :block,
-        message: "Blocked: access to GNOME keyring",
-        priority: 95
-      ),
-      # Warn on NPM/Yarn token files
-      Reflex.path(
-        "npm_tokens",
-        "~/.npmrc",
-        id: "npm_tokens",
-        response: :warn,
-        message: "Warning: accessing NPM configuration (may contain tokens)",
-        priority: 80
-      ),
-      # Warn on git credentials
-      Reflex.path(
-        "git_credentials",
-        "~/.git-credentials",
-        id: "git_credentials",
-        response: :warn,
-        message: "Warning: accessing git credentials",
-        priority: 85
       )
-    ]
+    end)
   end
 
   @doc """
