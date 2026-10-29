@@ -13611,9 +13611,9 @@
         "mix arbor.restart",
         "Arbor.Orchestrator.CodingPlan.ActionCatalog"
       ],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "d3384fbcffb5a795fab0f3dca329b2cc11c97f5f12949b3af818791c71dd2222",
+      "last_confirmed": "2026-10-29",
+      "confirmed_by": "codex",
+      "content_sha256": "32665aaf95e0467a48484169eba1a0e6ed9fecea0368360e291a5c6fac0e3268",
       "always_loaded": false,
       "revisit_when": null
     },

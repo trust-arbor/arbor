@@ -209,6 +209,12 @@ VP-05D1 validation rework).
 <a id="applied-learning-hot-reload-updates-modules-not-running-child-processes"></a>
 **Converge loaded code, live state, and supervised ownership before dispatch.** Use the supported recompile path between tasks; avoid raw umbrella recompilation. Code loading neither migrates GenServer state nor replaces retained local function captures, startup arguments, or supervision topology. Check existing state and required owners, then apply an explicit migration or compatible access; restart the smallest owner only after work quiesces and persisted reconstruction is safe. Represent retained callbacks as reload-stable data or references. Loaded/disk digest agreement alone proves neither process readiness nor reconstruction safety. Bind state-validity certificates to the loaded identity of every module whose semantics the validator executes, recompute that bounded identity at the callback gate, and fail closed when unavailable; do not cache it across independently reloadable modules. Verify fresh catalog identities, exact child ownership, and public readiness after reload or managed restart. For stop/build/start deployment, stop the owning daemon before source integration can trigger automatic reload, keep it stopped through the build, and verify the new owner before dispatch. (Merged 2026-10-16 from 6 entries; first found 2026-07-10, last 2026-08-26.)
 
+For reload regressions, keep the current module callable while replacing its
+code: delete/load gaps let scheduled callers auto-load an extra version.
+Soft-purge with a deadline before the single load and again before exercising
+retained references; do not retry failed loads or hard-purge live workers
+(reinforced 2026-10-29 by a controlled pre-adoption reproduction).
+
 <!-- applied-learning: load-modules-before-installing-erlang-call-trace-patterns -->
 <a id="applied-learning-load-modules-before-installing-erlang-call-trace-patterns"></a>
 **Load modules before installing Erlang call trace patterns.**
