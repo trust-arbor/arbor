@@ -1,0 +1,50 @@
+{
+  "base": "7e3860de5fd2d62317f09da1636ded70e7e0ddbe",
+  "source_of_truth": "Main",
+  "first_party_dependencies": [],
+  "third_party_dependencies": [],
+  "implementations": [
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/authenticated_call.ex",
+      "source_blob": "611a2ea0adc3022b6a2ec0622cde6e93c7adbbc1",
+      "source_sha256": "c5d77bd1b045cf12e3d0210db580a1d4a82ed5564bd6c070eb129c72ca119967",
+      "destination_path": "packages/arbor_custody/lib/arbor/custody/authenticated_call.ex",
+      "destination_sha256": "35716fb9b491a4463d66f8ad48e2e06100346db2459779e9a06465a379641adf",
+      "adaptations": [
+        "Implementation namespace moved to Arbor.Custody.AuthenticatedCall",
+        "Explicit fixed legacy Common identity replaces __MODULE__ for seals, table names and error origins."
+      ],
+      "algorithm_bytes_unchanged_after_adaptations": true
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/process_private_state.ex",
+      "source_blob": "ae36aacf541305e26a6e72490eadebf8f8b216fb",
+      "source_sha256": "ea270eddb881b688cf54bc581c8958f7b20e97156f0232900b37a00459cecb1e",
+      "destination_path": "packages/arbor_custody/lib/arbor/custody/process_private_state.ex",
+      "destination_sha256": "5e00754782cf7322c16053dca2e93405c6dac9e8d6d4c4f97c1e4c1b1c5d6578",
+      "adaptations": [
+        "Implementation namespace moved to Arbor.Custody.ProcessPrivateState",
+        "Explicit fixed legacy Common identity replaces __MODULE__ for seals, table names and error origins."
+      ],
+      "algorithm_bytes_unchanged_after_adaptations": true
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/supervised_owner.ex",
+      "source_blob": "e259d1fdfaea7ba6f399992826adcdc56b27b229",
+      "source_sha256": "753bf05cafdff84764367482bc7541411e89a54cd88050770a2bb69ecf0cea43",
+      "destination_path": "packages/arbor_custody/lib/arbor/custody/supervised_owner.ex",
+      "destination_sha256": "80f16d75f0ef5adc8e9535badb1efdf5f13ea8185afa96c44c8852420f999abb",
+      "adaptations": [
+        "Implementation namespace moved to Arbor.Custody.SupervisedOwner"
+      ],
+      "algorithm_bytes_unchanged_after_adaptations": true
+    }
+  ],
+  "scope_exclusions": [
+    "Signals helper copy",
+    "Security.PrivateState and richer SupervisedOwner policy",
+    "SigningAuthority",
+    "taint contracts",
+    "OIDC"
+  ]
+}

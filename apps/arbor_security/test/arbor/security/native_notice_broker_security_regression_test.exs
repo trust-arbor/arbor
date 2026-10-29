@@ -542,7 +542,9 @@ defmodule Arbor.Security.NativeNoticeBrokerSecurityRegressionTest do
 
   defp wait_for_native_call(worker, attempts) do
     case Process.info(worker, :current_function) do
-      {:current_function, {Arbor.Common.AuthenticatedCall, function, _arity}}
+      # Common retains the legacy wire/error identity, while this private
+      # waiting frame now executes in the extracted custody engine.
+      {:current_function, {Arbor.Custody.AuthenticatedCall, function, _arity}}
       when function in [:await_challenge, :await_reply] ->
         :ok
 

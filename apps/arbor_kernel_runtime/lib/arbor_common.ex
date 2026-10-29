@@ -25,7 +25,7 @@ defmodule Arbor.Common do
 
   use Boundary,
     top_level?: true,
-    deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],
+    deps: [Arbor.Contracts, Arbor.Custody, Finch, Jason, Logger, Req, Zoi],
     exports: :all
 
   @typedoc "Opaque reply target returned after an authenticated same-node call."
