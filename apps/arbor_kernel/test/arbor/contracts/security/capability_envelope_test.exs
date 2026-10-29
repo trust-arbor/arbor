@@ -170,6 +170,35 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
       refute Capability.constraints_subset?(nil, %{})
       refute Capability.constraints_subset?(%{}, nil)
     end
+
+    test "security regression: omitting a parent integer limit is not a subset" do
+      # CoSA: constraints_subset?/2 used to walk only child keys, so a child
+      # that dropped rate/budget/max_size/expiry looked like a subset and
+      # delegation could widen the envelope by omission.
+      for key <- [:rate_limit, :budget, :max_size, :expiry, :max_uses] do
+        refute Capability.constraints_subset?(%{}, %{key => 10}),
+               "omitting parent #{key} must not be a subset"
+
+        if key != :rate_limit do
+          refute Capability.constraints_subset?(%{rate_limit: 1}, %{key => 10, rate_limit: 10}),
+                 "omitting parent #{key} while tightening another key must not be a subset"
+        end
+
+        assert Capability.constraints_subset?(%{key => 10}, %{key => 10})
+        assert Capability.constraints_subset?(%{key => 5}, %{key => 10})
+        refute Capability.constraints_subset?(%{key => 11}, %{key => 10})
+      end
+    end
+
+    test "security regression: omitting parent requires_approval is not a subset" do
+      refute Capability.constraints_subset?(%{}, %{requires_approval: true})
+      refute Capability.constraints_subset?(%{rate_limit: 1}, %{requires_approval: true})
+
+      assert Capability.constraints_subset?(
+               %{requires_approval: true, rate_limit: 1},
+               %{requires_approval: true}
+             )
+    end
   end
 
   describe "envelope_subset?/2 (combo)" do
@@ -233,6 +262,24 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
           resource_uri: "arbor://fs/write/X",
           principal_id: "agent_parent",
           constraints: %{}
+        )
+
+      {:ok, child} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/X/Y",
+          principal_id: "agent_child",
+          constraints: %{}
+        )
+
+      refute Capability.envelope_subset?(child, parent)
+    end
+
+    test "security regression: child omitting a parent constraint is not an envelope subset" do
+      {:ok, parent} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/X/**",
+          principal_id: "agent_parent",
+          constraints: %{rate_limit: 10, budget: 5, max_size: 1024}
         )
 
       {:ok, child} =
