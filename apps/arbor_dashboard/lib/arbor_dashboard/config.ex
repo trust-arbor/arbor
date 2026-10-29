@@ -16,6 +16,8 @@ defmodule Arbor.Dashboard.Config do
   def voice_api, do: Application.get_env(:arbor_dashboard, :voice_api, Arbor.Voice)
   def multimedia_api, do: Application.get_env(:arbor_dashboard, :multimedia_api, Arbor.Multimedia)
 
-  def local_voice_controls?,
-    do: Application.get_env(:arbor_dashboard, :local_voice_controls, false) == true
+  def local_voice_controls? do
+    Application.get_env(:arbor_dashboard, :local_voice_controls, false) == true and
+      Code.ensure_loaded?(voice_api()) and Code.ensure_loaded?(multimedia_api())
+  end
 end
