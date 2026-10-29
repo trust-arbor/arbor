@@ -142,7 +142,9 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
   defp resolve_working_dir(_name, false = _use_worktree, base_cwd, _opts), do: base_cwd
 
   defp spawn_local(name, hand_dir, prompt_file, cwd, opts) do
-    config_dir = Hands.config_dir()
+    config_dir = require_spawn_path(Hands.config_dir())
+    prompt_file = require_spawn_path(prompt_file)
+    cwd = require_spawn_path(cwd)
     session = Hands.tmux_session_name(name)
 
     unless File.dir?(config_dir) do
@@ -193,8 +195,17 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     File.write!(run_script, script_content)
     File.chmod!(run_script, 0o755)
 
-    # Start tmux session
-    {:ok, argv} = local_tmux_argv(session, run_script)
+    # Start tmux session. The workspace path is a dedicated argv element,
+    # never interpolated into tmux's shell-command string.
+    argv =
+      case local_tmux_argv(session, run_script) do
+        {:ok, argv} ->
+          argv
+
+        {:error, :invalid_spawn_path} ->
+          refuse_invalid_spawn_path()
+      end
+
     {output, exit_code} = System.cmd("tmux", argv, stderr_to_stdout: true)
 
     if exit_code != 0 do
@@ -293,6 +304,7 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
   end
 
   defp start_sandbox_container(container, image, name, cwd) do
+    cwd = require_spawn_path(cwd)
     creds_volume = Hands.sandbox_credentials_volume()
     gateway = System.get_env("ARBOR_GATEWAY") || "http://host.docker.internal:4000"
 
@@ -397,15 +409,46 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     "'" <> String.replace(str, "'", "'\\''") <> "'"
   end
 
+  defp require_spawn_path(path) do
+    case validate_spawn_path(path) do
+      {:ok, path} -> path
+      {:error, :invalid_spawn_path} -> refuse_invalid_spawn_path()
+    end
+  end
+
+  defp refuse_invalid_spawn_path do
+    Mix.shell().error("Refusing to spawn with a path containing NUL or a newline")
+    exit({:shutdown, 1})
+  end
+
   @doc false
   @spec validate_spawn_path(term()) :: {:ok, String.t()} | {:error, :invalid_spawn_path}
-  def validate_spawn_path(path) when is_binary(path), do: {:ok, path}
+  def validate_spawn_path(path) when is_binary(path) and path != "" do
+    if String.contains?(path, [<<0>>, "\n", "\r"]) do
+      {:error, :invalid_spawn_path}
+    else
+      {:ok, path}
+    end
+  end
+
   def validate_spawn_path(_path), do: {:error, :invalid_spawn_path}
 
   @doc false
   @spec local_tmux_argv(String.t(), String.t()) ::
           {:ok, [String.t()]} | {:error, :invalid_spawn_path}
   def local_tmux_argv(session, run_script) do
-    {:ok, ["new-session", "-d", "-s", session, "#{run_script}; exec bash"]}
+    with {:ok, session} <- validate_spawn_path(session),
+         {:ok, run_script} <- validate_spawn_path(run_script) do
+      {:ok,
+       [
+         "new-session",
+         "-d",
+         "-s",
+         session,
+         "-e",
+         "ARBOR_HAND_RUN=" <> run_script,
+         "/bin/bash -c 'exec \"$ARBOR_HAND_RUN\"; exec bash'"
+       ]}
+    end
   end
 end
