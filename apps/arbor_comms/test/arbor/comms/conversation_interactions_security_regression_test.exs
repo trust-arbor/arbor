@@ -247,8 +247,8 @@ defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
 
     parent = self()
 
-    source =
-      spawn(fn ->
+    {source, source_monitor} =
+      spawn_monitor(fn ->
         {:ok, handle} = Arbor.Comms.open_conversation_source(ctx.binding, self(), make_ref())
         {:ok, receipt} = Arbor.Comms.request_conversation_interaction(handle, spec(), 10_000)
         send(parent, {:source_receipt, receipt})
@@ -258,8 +258,12 @@ defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
         end
       end)
 
-    assert_receive {:source_receipt, down_receipt}
+    # Receipt creation performs synchronous durable journal work. Wait for its
+    # completion before testing DOWN rather than imposing ExUnit's default 100 ms.
+    on_exit(fn -> Process.exit(source, :kill) end)
+    assert_receive {:source_receipt, down_receipt}, 5_000
     Process.exit(source, :kill)
+    assert_receive {:DOWN, ^source_monitor, :process, ^source, :killed}, 5_000
 
     assert_eventually(fn ->
       Authority.status(down_receipt.request_id) == {:ok, :abandoned}
