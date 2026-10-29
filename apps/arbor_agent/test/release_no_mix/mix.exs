@@ -1,8 +1,8 @@
 defmodule ArborAgentReleaseGate.MixProject do
   use Mix.Project
   @root Path.expand("../../../..", __DIR__)
-  @umbrella_libraries ~w(arbor_actions arbor_agent arbor_ai arbor_comms arbor_consensus arbor_historian arbor_kernel arbor_kernel_runtime arbor_llm arbor_memory arbor_orchestrator arbor_persistence_host arbor_sandbox arbor_scheduler arbor_security arbor_shell arbor_trust)a
-  @package_libraries ~w(arbor_persistence arbor_persistence_sql arbor_persistence_eventstore)a
+  @umbrella_libraries ~w(arbor_actions arbor_agent arbor_ai arbor_comms arbor_consensus arbor_historian arbor_kernel_runtime arbor_llm arbor_memory arbor_orchestrator arbor_persistence_host arbor_sandbox arbor_scheduler arbor_security arbor_shell arbor_trust)a
+  @package_libraries ~w(arbor_kernel arbor_persistence arbor_persistence_sql arbor_persistence_eventstore)a
   @libraries @umbrella_libraries ++ @package_libraries
 
   def project do

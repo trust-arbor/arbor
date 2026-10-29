@@ -780,6 +780,97 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     refute File.exists?(Path.join(report["baseline_root"], "build/lib/foo"))
   end
 
+  test "security regression: Kernel package migration preserves a third-party-only compiled baseline",
+       %{root: root} do
+    {repo, deps} = mix_layout_fixture!(root)
+    former_source = Path.join(repo, "apps/arbor_kernel")
+    package_source = Path.join(repo, "packages/arbor_kernel")
+    File.mkdir_p!(Path.join(former_source, "priv"))
+    File.write!(Path.join(former_source, "priv/keep"), "kernel source\n")
+
+    File.write!(Path.join(former_source, "mix.exs"), """
+    defmodule FixtureKernel.MixProject do
+      use Mix.Project
+      def project, do: [app: :arbor_kernel, version: "0.1.0", deps: []]
+    end
+    """)
+
+    compile = fn ctx, scope, outside_dependency_link? ->
+      File.mkdir_p!(Path.join(ctx.deps_path, "dep/priv"))
+      File.write!(Path.join(ctx.deps_path, "dep/priv/keep"), "dependency source\n")
+      build = ctx.deps_path <> "-build"
+
+      for name <- ["dep", "arbor_kernel"] do
+        entry = Path.join(build, "lib/#{name}")
+        File.rm_rf!(entry)
+        File.mkdir_p!(Path.join(entry, "ebin"))
+        File.write!(Path.join(entry, "ebin/#{name}.beam"), "compiled #{name}\n")
+      end
+
+      kernel_target = "../../../repo/#{scope}/arbor_kernel/priv"
+
+      File.ln_s!(kernel_target, Path.join(build, "lib/arbor_kernel/priv"))
+      assert File.read!(Path.join(build, "lib/arbor_kernel/priv/keep")) == "kernel source\n"
+
+      dependency_target =
+        if outside_dependency_link?, do: kernel_target, else: "../../../deps/dep/priv"
+
+      File.ln_s!(dependency_target, Path.join(build, "lib/dep/priv"))
+      :ok
+    end
+
+    options = [
+      arbor_home: root,
+      repo_root: repo,
+      deps_path: deps,
+      platform: "linux/amd64",
+      active_config_path: Path.join(root, "validation-runtime.json"),
+      image_build: fn _request ->
+        {:ok,
+         %{
+           index_digest: @index,
+           manifest_digest: @manifest,
+           image: "docker.io/arbor/validation@" <> @index,
+           image_id: "sha256:" <> String.duplicate("1", 64)
+         }}
+      end,
+      deps_fetch: fn _ctx -> :ok end,
+      smoke_test: fn _copy, _platform -> :ok end,
+      shell: FakeShell
+    ]
+
+    snapshots =
+      Enum.map(["apps", "packages"], fn scope ->
+        if scope == "packages" do
+          File.mkdir_p!(Path.dirname(package_source))
+          File.rename!(former_source, package_source)
+        end
+
+        opts = Keyword.put(options, :deps_compile, &compile.(&1, scope, false))
+        assert {:ok, report} = Build.execute([], opts)
+        baseline = report["baseline_root"]
+
+        assert {:error, :enoent} = File.lstat(Path.join(baseline, "build/lib/arbor_kernel"))
+
+        assert {:ok, %File.Stat{type: :symlink}} =
+                 File.lstat(Path.join(baseline, "build/lib/dep/priv"))
+
+        {
+          report["tree_digest"],
+          File.read!(Path.join(baseline, "build/lib/dep/ebin/dep.beam")),
+          File.read!(Path.join(baseline, "build/lib/dep/priv/keep"))
+        }
+      end)
+
+    assert [before_migration, after_migration] = snapshots
+    assert before_migration == after_migration
+    assert elem(after_migration, 1) == "compiled dep\n"
+    assert elem(after_migration, 2) == "dependency source\n"
+
+    outside_link_opts = Keyword.put(options, :deps_compile, &compile.(&1, "packages", true))
+    assert {:error, :symlink_rejected} = Build.execute([], outside_link_opts)
+  end
+
   test "status uses the Shell facade and never names Authority modules" do
     task_path =
       Path.expand("../../../lib/mix/tasks/arbor.baseline.status.ex", Path.dirname(__ENV__.file))
