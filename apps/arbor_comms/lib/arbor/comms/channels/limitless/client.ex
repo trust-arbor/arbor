@@ -16,6 +16,11 @@ defmodule Arbor.Comms.Channels.Limitless.Client do
 
   @base_url "https://api.limitless.ai/v1"
   @timeout 30_000
+  @test_options_enabled Application.compile_env(
+                          :arbor_kernel_runtime,
+                          :expose_test_fixtures,
+                          false
+                        )
 
   @type lifelog :: %{
           id: String.t(),
@@ -120,11 +125,12 @@ defmodule Arbor.Comms.Channels.Limitless.Client do
       {"Accept", "application/json"}
     ]
 
-    req_opts = [
-      headers: headers,
-      params: params,
-      receive_timeout: @timeout
-    ]
+    req_opts =
+      credentialed_req_options(
+        headers: headers,
+        params: params,
+        receive_timeout: @timeout
+      )
 
     Logger.debug("Limitless API request",
       method: method,
@@ -227,9 +233,36 @@ defmodule Arbor.Comms.Channels.Limitless.Client do
     end)
   end
 
+  @doc false
+  @spec credentialed_req_options(keyword()) :: keyword()
+  def credentialed_req_options(opts) when is_list(opts) do
+    opts
+    |> maybe_merge_test_req_options()
+    |> Keyword.put(:redirect, false)
+    |> Keyword.put(:max_redirects, 0)
+  end
+
+  if @test_options_enabled do
+    defp maybe_merge_test_req_options(opts) do
+      case Keyword.get(config_keyword(), :req_options) do
+        extra when is_list(extra) -> Keyword.merge(opts, extra)
+        _other -> opts
+      end
+    end
+  else
+    defp maybe_merge_test_req_options(opts), do: opts
+  end
+
   defp api_key do
     config(:api_key) || System.get_env("LIMITLESS_API_KEY") ||
       raise "LIMITLESS_API_KEY not configured"
+  end
+
+  defp config_keyword do
+    case Application.get_env(:arbor_comms, :limitless, []) do
+      opts when is_list(opts) -> opts
+      _other -> []
+    end
   end
 
   defp base_url do
@@ -237,7 +270,6 @@ defmodule Arbor.Comms.Channels.Limitless.Client do
   end
 
   defp config(key) do
-    Application.get_env(:arbor_comms, :limitless, [])
-    |> Keyword.get(key)
+    Keyword.get(config_keyword(), key)
   end
 end
