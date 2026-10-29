@@ -26,7 +26,17 @@ defmodule Arbor.Gateway.MCP.ClientConfigCore do
 
   # Known config keys, read as atom or string. Anything else keeps its atom
   # key; unknown string keys are dropped rather than atomized.
-  @known_keys [:transport, :command, :env, :url, :server, :name, :auto_discover, :agent_id]
+  @known_keys [
+    :transport,
+    :command,
+    :env,
+    :url,
+    :server,
+    :name,
+    :auto_discover,
+    :agent_id,
+    :pin_store_dir
+  ]
 
   @spec normalize(String.t(), map()) :: {:ok, map()} | {:error, {:invalid_mcp_config, atom()}}
   def normalize(server_name, config) when is_binary(server_name) and is_map(config) do
