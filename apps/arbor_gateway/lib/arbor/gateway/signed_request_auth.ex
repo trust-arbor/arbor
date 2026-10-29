@@ -26,14 +26,17 @@ defmodule Arbor.Gateway.SignedRequestAuth do
       payload = method <> "\\n" <> request_path <> "\\n" <> body
 
   Method and path are not transmitted in the header — the server reconstructs
-  them from the conn. Body is read from the request stream and cached in
+  them from the conn. Body is read from the request stream with an explicit
+  1 MiB `:length` / `:read_length` (see `max_body_bytes/0`) and cached in
   `conn.assigns[:raw_body]` so downstream plugs (ExMCP.HttpPlug) can pick it up
   via `read_or_cached_body/1` instead of trying to re-read the consumed stream.
+  A body past that cap is refused with 413 without further reads.
 
   ## Behaviour
 
   - **Header present, signature valid** → assigns `:agent_id` and
     `:signed_request_authenticated`, body is cached for downstream
+  - **Header present, body larger than `max_body_bytes/0`** → halt 413
   - **Header present, signature invalid** → pass through (lets API key
     auth fall back); body is still cached if it was read
   - **Header absent** → pass through without touching the body
@@ -71,6 +74,21 @@ defmodule Arbor.Gateway.SignedRequestAuth do
   require Logger
 
   @behaviour Plug
+
+  # Match ExMCP.HttpPlug's 1 MiB body cap so a signed request cannot buffer
+  # Plug's 8 MB default ahead of the signature check. Override with
+  # `:signed_request_max_body_bytes` / `:signed_request_read_length`.
+  @default_max_body_bytes 1_048_576
+
+  @doc "Maximum signed-request body size read before auth, in bytes (1 MiB)."
+  @spec max_body_bytes() :: pos_integer()
+  def max_body_bytes,
+    do: positive_env(:signed_request_max_body_bytes, @default_max_body_bytes)
+
+  @doc "Chunk size (`:read_length`) for the pre-auth body read, in bytes."
+  @spec read_length() :: pos_integer()
+  def read_length,
+    do: positive_env(:signed_request_read_length, max_body_bytes())
 
   @impl true
   def init(opts), do: opts
@@ -142,6 +160,9 @@ defmodule Arbor.Gateway.SignedRequestAuth do
       |> assign(:signed_request, signed_request)
       |> assign(:signed_request_authenticated, true)
     else
+      {:error, {:body_too_large, conn}} ->
+        reject_too_large(conn)
+
       {:error, reason} ->
         Logger.debug("[SignedRequestAuth] Verification failed: #{inspect(reason)}")
         # Non-destructive passthrough — let downstream auth try.
@@ -250,17 +271,36 @@ defmodule Arbor.Gateway.SignedRequestAuth do
   # --- Body read with caching ---
 
   defp read_and_cache_body(conn) do
-    case read_body(conn) do
-      {:ok, body, conn} ->
+    length = max_body_bytes()
+
+    case read_body(conn, length: length, read_length: read_length()) do
+      {:ok, body, conn} when byte_size(body) <= length ->
         {:ok, body, assign(conn, :raw_body, body)}
 
-      {:more, _partial, _conn} ->
-        # Body too large to read in one shot. We don't try to support
-        # streamed bodies for signed requests — sign once, send once.
-        {:error, :body_too_large}
+      {:ok, _body, conn} ->
+        {:error, {:body_too_large, conn}}
+
+      {:more, _partial, conn} ->
+        # Stop at the first oversize chunk. Do not keep reading — that would
+        # buffer past the pre-auth cap plus one adapter chunk.
+        {:error, {:body_too_large, conn}}
 
       {:error, reason} ->
         {:error, {:read_body_failed, reason}}
+    end
+  end
+
+  defp reject_too_large(conn) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(413, Jason.encode!(%{error: "Payload Too Large"}))
+    |> halt()
+  end
+
+  defp positive_env(key, default) do
+    case Application.get_env(:arbor_gateway, key, default) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> default
     end
   end
 
