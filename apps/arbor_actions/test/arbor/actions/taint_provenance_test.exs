@@ -8,7 +8,7 @@ defmodule Arbor.Actions.TaintProvenanceTest do
     This is the other half of the web-fetch -> shell gate; the threading half
     lives in `ExecHandlerTaintTest` (arbor_orchestrator).
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Actions.Shell
   alias Arbor.Actions.Taint
@@ -34,6 +34,23 @@ defmodule Arbor.Actions.TaintProvenanceTest do
   end
 
   describe "Phase 1 — path-based provenance (file reads)" do
+    setup do
+      previous_roots = Application.fetch_env(:arbor_actions, :trusted_file_roots)
+
+      previous_opt_out =
+        Application.fetch_env(:arbor_actions, :taint_file_reads_outside_trusted_roots)
+
+      Application.put_env(:arbor_actions, :trusted_file_roots, [])
+      Application.delete_env(:arbor_actions, :taint_file_reads_outside_trusted_roots)
+
+      on_exit(fn ->
+        restore_env(:trusted_file_roots, previous_roots)
+        restore_env(:taint_file_reads_outside_trusted_roots, previous_opt_out)
+      end)
+
+      :ok
+    end
+
     test "path_provenance flags foreign/shared/sensitive locations as untrusted" do
       assert Taint.path_provenance("/tmp/payload.txt") == :untrusted
       assert Taint.path_provenance("/var/data/x") == :untrusted
@@ -42,9 +59,9 @@ defmodule Arbor.Actions.TaintProvenanceTest do
       assert Taint.path_provenance("/app/config/credentials.json") == :untrusted
     end
 
-    test "path_provenance asserts no provenance for ordinary workspace paths" do
-      assert Taint.path_provenance("lib/arbor/foo.ex") == nil
-      assert Taint.path_provenance("/work/project/README.md") == nil
+    test "path_provenance labels ordinary paths untrusted unless they sit inside trusted roots" do
+      # Default change: empty trusted_file_roots is fail-closed.
+      assert Taint.path_provenance("/work/project/README.md") == :untrusted
       assert Taint.path_provenance(nil) == nil
     end
 
@@ -52,7 +69,7 @@ defmodule Arbor.Actions.TaintProvenanceTest do
       for mod <- [Arbor.Actions.File.Read, Arbor.Actions.File.Search] do
         assert Taint.output_taint_for(mod, %{path: "/tmp/x"}) == :untrusted
         assert Taint.output_taint_for(mod, %{"path" => "/tmp/x"}) == :untrusted
-        assert Taint.output_taint_for(mod, %{path: "lib/x.ex"}) == nil
+        assert Taint.output_taint_for(mod, %{path: "lib/x.ex"}) == :untrusted
       end
     end
 
@@ -127,4 +144,7 @@ defmodule Arbor.Actions.TaintProvenanceTest do
                )
     end
   end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_actions, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_actions, key)
 end

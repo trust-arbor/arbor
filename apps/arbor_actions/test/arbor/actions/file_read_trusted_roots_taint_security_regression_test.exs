@@ -41,7 +41,9 @@ defmodule Arbor.Actions.FileReadTrustedRootsTaintSecurityRegressionTest do
     File.ln_s!(canonical_outside, planted_link)
 
     previous_roots = Application.fetch_env(:arbor_actions, :trusted_file_roots)
-    previous_opt_out = Application.fetch_env(:arbor_actions, :taint_file_reads_outside_trusted_roots)
+
+    previous_opt_out =
+      Application.fetch_env(:arbor_actions, :taint_file_reads_outside_trusted_roots)
 
     Application.put_env(:arbor_actions, :trusted_file_roots, [canonical_trusted])
     Application.delete_env(:arbor_actions, :taint_file_reads_outside_trusted_roots)
@@ -91,6 +93,18 @@ defmodule Arbor.Actions.FileReadTrustedRootsTaintSecurityRegressionTest do
            "a trusted-root symlink whose real path is outside the roots must stay untrusted"
 
     assert Taint.output_taint_for(FileActions.Read, %{path: planted_link}) == :untrusted
+  end
+
+  test "security regression: opt-out restores heuristic-only labeling for ordinary paths",
+       %{outside_path: outside_path, inside_path: inside_path} do
+    Application.put_env(:arbor_actions, :taint_file_reads_outside_trusted_roots, false)
+
+    assert {:ok, outside} = FileActions.Read.run(%{path: outside_path}, %{})
+    assert {:ok, inside} = FileActions.Read.run(%{path: inside_path}, %{})
+    assert result_taint(outside) == nil
+    assert result_taint(inside) == nil
+    assert Taint.output_taint_for(FileActions.Read, %{path: outside_path}) == nil
+    assert Taint.path_provenance("/tmp/payload.txt") == :untrusted
   end
 
   defp result_taint(result) when is_map(result) do
