@@ -40,6 +40,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
 
     assert applications ==
              MapSet.new([
+               :arbor_custody,
                :arbor_kernel_runtime,
                :elixir,
                :jason,

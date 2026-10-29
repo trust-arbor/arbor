@@ -14,6 +14,7 @@ breeze_locals =
   locals_without_parens: breeze_locals,
   subdirectories: [
     "apps/*",
+    "packages/arbor_custody",
     "packages/arbor_signals",
     "packages/arbor_persistence",
     "packages/arbor_persistence_sql",
