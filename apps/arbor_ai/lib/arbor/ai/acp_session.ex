@@ -1044,11 +1044,20 @@ defmodule Arbor.AI.AcpSession do
     |> merge_adapter_opts(tool_profile_opts)
     |> append_allowed_tools(mcp_allow_tools)
     |> Arbor.AI.AcpSession.ToolClass.require_shell_callbacks()
+    |> pin_codex_arbor_approval(Keyword.get(opts, :provider))
     |> Keyword.put_new(:pending_request_timeout, @default_pending_request_timeout_ms)
     |> Keyword.put_new(:handler_request_timeout, @default_handler_request_timeout_ms)
     |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
     |> inject_os_cwd(cwd)
   end
+
+  # Last-mile ceiling: raw `client_opts` can skip Config.resolve/2. Codex
+  # builtin reviewer / auto-approve modes still collapse to Arbor-owned
+  # approval unless the explicit opt-out is set.
+  defp pin_codex_arbor_approval(client_opts, :codex),
+    do: Config.pin_codex_arbor_approval(client_opts)
+
+  defp pin_codex_arbor_approval(client_opts, _provider), do: client_opts
 
   defp normalize_handler_opts(opts) when is_list(opts) do
     if Keyword.keyword?(opts), do: opts, else: []

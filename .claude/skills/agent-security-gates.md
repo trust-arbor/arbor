@@ -1222,6 +1222,29 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   refuses ambient session minting without actor authority.
   Regression: `bridge_authorize_tool_route_security_regression_test.exs`.
 
+## 39. Codex approvals are Arbor-owned (2026-10-29, DEFAULT CHANGE)
+
+- **What:** launching Codex used to inherit the adapter's `agent` mode, which
+  sets `approvalsReviewer: auto_review` (Codex's built-in AI reviewer) or
+  `approvalPolicy: never` (`agent-full-access`). Arbor's capability and
+  approval system is the only authority. The default is now
+  `mode_id: "read-only"` → `approvalPolicy: on-request` +
+  `approvalsReviewer: user`. Every Codex approval is an ACP
+  `session/request_permission` answered by
+  `Arbor.AI.AcpSession.Handler`. Builtin reviewer / auto-approve modes are
+  refused unless the caller sets the exact opt-out
+  `allow_builtin_approval_reviewer: true` or
+  `config :arbor_ai, :codex_allow_builtin_approval_reviewer, true`.
+- **Symptom:** a Codex exec, file-write, or network approval is decided by
+  Codex itself, or `Config.resolve(:codex, adapter_opts: [mode_id: "agent"])`
+  returns `{:ok, _}` without the opt-out.
+- **Action:** keep the default. Grant the agent the required
+  `arbor://acp/tool/<tool>` capabilities (and the Shell floor for execute).
+  Do not turn Codex's reviewer back on to make a command run. The opt-out
+  is explicit and fail-open by design — only use it when you intentionally
+  want Codex to decide its own approvals.
+  Regression: `codex_approval_security_regression_test.exs`.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

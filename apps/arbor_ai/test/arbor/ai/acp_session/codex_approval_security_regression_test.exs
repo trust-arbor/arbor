@@ -168,7 +168,11 @@ defmodule Arbor.AI.AcpSession.CodexApprovalSecurityRegressionTest do
       Application.put_env(:arbor_ai, :trust_policy_module, AutoTrustPolicy)
 
       {:ok, handler} =
-        Handler.init(agent_id: "agent_codex_approval", provider: :codex, permission_timeout_ms: 10)
+        Handler.init(
+          agent_id: "agent_codex_approval",
+          provider: :codex,
+          permission_timeout_ms: 10
+        )
 
       tool_call = %{
         "toolName" => "execute",

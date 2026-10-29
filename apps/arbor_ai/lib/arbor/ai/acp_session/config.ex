@@ -157,16 +157,30 @@ defmodule Arbor.AI.AcpSession.Config do
       adapter: ExMCP.ACP.Adapters.ClaudeSDK,
       adapter_opts: [model: "sonnet", permission_mode: :default]
     },
-    # Default added 2026-09-07 to match `claude` above. Codex previously carried
-    # no default, so every dispatch had to name a model in the packet — which is
-    # how two P1a runs went out on gpt-5.3-codex-spark and gpt-5.6-terra after
-    # both were superseded. gpt-6-astra is confirmed present in the openai_oauth
-    # catalog and answers through codex-cli >= 0.153.4 (0.151.0 rejects it
-    # server-side). A packet may still override this explicitly.
+    # DEFAULT CHANGE (2026-10-29, Exposure Check item AB): Codex previously
+    # launched on the adapter's built-in `agent` mode, which sets
+    # `approvalsReviewer: auto_review` (Codex's own AI reviewer) and can
+    # auto-approve commands, file writes, and network. Arbor's capability and
+    # approval system is the only authority. The default is now
+    # `mode_id: "read-only"` → `approvalPolicy: on-request` +
+    # `approvalsReviewer: user`, so every Codex approval is an ACP
+    # `session/request_permission` answered by
+    # `Arbor.AI.AcpSession.Handler`. Codex builtin reviewer / auto-approve
+    # modes (`agent`, `agent-full-access`) are refused unless the caller
+    # sets the explicit opt-out `allow_builtin_approval_reviewer: true` or
+    # `config :arbor_ai, :codex_allow_builtin_approval_reviewer, true`.
+    #
+    # Model default added 2026-09-07 to match `claude` above. Codex previously
+    # carried no default, so every dispatch had to name a model in the packet —
+    # which is how two P1a runs went out on gpt-5.3-codex-spark and
+    # gpt-5.6-terra after both were superseded. gpt-6-astra is confirmed
+    # present in the openai_oauth catalog and answers through codex-cli >=
+    # 0.153.4 (0.151.0 rejects it server-side). A packet may still override
+    # this model explicitly.
     codex: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.Codex,
-      adapter_opts: [model: "gpt-6-astra"]
+      adapter_opts: [model: "gpt-6-astra", mode_id: "read-only"]
     },
     pi: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
@@ -202,7 +216,7 @@ defmodule Arbor.AI.AcpSession.Config do
         |> merge_opts(opts)
         |> enforce_adapter_environment_isolation()
 
-      {:ok, resolved_opts}
+      maybe_enforce_codex_approval(provider, resolved_opts)
     else
       {:error, _} = error ->
         error
@@ -418,7 +432,101 @@ defmodule Arbor.AI.AcpSession.Config do
   @spec raw_opts(keyword()) :: keyword()
   def raw_opts(opts), do: opts
 
+  @doc """
+  Arbor-owned Codex approval mode.
+
+  Maps to Codex `approvalPolicy: on-request` and `approvalsReviewer: user`.
+  Codex's built-in AI reviewer (`auto_review`) and auto-approve (`never`)
+  stay off.
+  """
+  @spec arbor_owned_codex_mode() :: String.t()
+  def arbor_owned_codex_mode, do: "read-only"
+
+  @doc false
+  @spec enforce_codex_approval_opts(keyword()) :: {:ok, keyword()} | {:error, term()}
+  def enforce_codex_approval_opts(opts) when is_list(opts) do
+    adapter_opts = keyword_adapter_opts(opts)
+
+    if allow_codex_builtin_approval_reviewer?(adapter_opts) do
+      {:ok, opts}
+    else
+      case requested_codex_mode(adapter_opts) do
+        mode when mode in [nil, "read-only"] ->
+          {:ok, put_adapter_opt(opts, :mode_id, arbor_owned_codex_mode())}
+
+        mode ->
+          {:error, {:codex_builtin_approval_reviewer_refused, mode}}
+      end
+    end
+  end
+
+  def enforce_codex_approval_opts(opts), do: {:ok, opts}
+
+  @doc false
+  @spec pin_codex_arbor_approval(keyword()) :: keyword()
+  def pin_codex_arbor_approval(opts) when is_list(opts) do
+    case enforce_codex_approval_opts(opts) do
+      {:ok, pinned} -> pinned
+      {:error, _} -> put_adapter_opt(opts, :mode_id, arbor_owned_codex_mode())
+    end
+  end
+
+  def pin_codex_arbor_approval(opts), do: opts
+
   # -- Private --
+
+  defp maybe_enforce_codex_approval(:codex, opts), do: enforce_codex_approval_opts(opts)
+  defp maybe_enforce_codex_approval(_provider, opts), do: {:ok, opts}
+
+  defp allow_codex_builtin_approval_reviewer?(adapter_opts) do
+    Keyword.get(adapter_opts, :allow_builtin_approval_reviewer) == true or
+      Application.get_env(:arbor_ai, :codex_allow_builtin_approval_reviewer, false) == true
+  end
+
+  defp requested_codex_mode(adapter_opts) do
+    case Keyword.get(adapter_opts, :mode_id) do
+      nil ->
+        nil
+
+      :read_only ->
+        "read-only"
+
+      "read_only" ->
+        "read-only"
+
+      mode when is_atom(mode) and mode not in [nil, true, false] ->
+        normalize_codex_mode_atom(mode)
+
+      mode when is_binary(mode) ->
+        mode
+
+      other ->
+        other
+    end
+  end
+
+  defp normalize_codex_mode_atom(:agent), do: "agent"
+  defp normalize_codex_mode_atom(:agent_full_access), do: "agent-full-access"
+  defp normalize_codex_mode_atom(mode), do: Atom.to_string(mode)
+
+  defp keyword_adapter_opts(opts) do
+    case Keyword.get(opts, :adapter_opts, []) do
+      adapter_opts when is_list(adapter_opts) ->
+        if Keyword.keyword?(adapter_opts), do: adapter_opts, else: []
+
+      _other ->
+        []
+    end
+  end
+
+  defp put_adapter_opt(opts, key, value) do
+    adapter_opts =
+      opts
+      |> keyword_adapter_opts()
+      |> Keyword.put(key, value)
+
+    Keyword.put(opts, :adapter_opts, adapter_opts)
+  end
 
   defp default_config(provider) do
     case Map.get(@native_providers, provider) do
