@@ -14,6 +14,14 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     def confirmation_mode(_principal_id, _resource_uri, _opts), do: :gated
   end
 
+  defmodule ExplicitOperatorResolver do
+    @moduledoc false
+    @behaviour Arbor.Security.Contracts.OperatorResolver
+
+    @impl true
+    def resolve_operator(_principal_id), do: {:ok, "operator_approval_retry"}
+  end
+
   defmodule ConsensusStub do
     @moduledoc false
   end
@@ -46,6 +54,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       consensus_module: Application.get_env(:arbor_security, :consensus_module),
+      operator_resolver: Application.fetch_env(:arbor_security, :operator_resolver),
       escalation_enabled: Application.get_env(:arbor_security, :consensus_escalation_enabled),
       interaction_router:
         Application.get_env(:arbor_security, :use_interaction_router_for_approval),
@@ -64,6 +73,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
     Application.put_env(:arbor_security, :consensus_module, ConsensusStub)
+    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
     Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
     Application.put_env(:arbor_security, :capability_signing_required, false)
@@ -72,6 +82,11 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 2_000)
 
     on_exit(fn ->
+      case previous.operator_resolver do
+        {:ok, value} -> Application.put_env(:arbor_security, :operator_resolver, value)
+        :error -> Application.delete_env(:arbor_security, :operator_resolver)
+      end
+
       restore_env(:arbor_trust, :approval_evidence_provider, previous.approval_evidence_provider)
       restore_env(:arbor_trust, :graduation_thresholds, previous.graduation_thresholds)
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
@@ -695,6 +710,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
         await_pending_request(agent_id, attempts - 1)
 
       request ->
+        assert request.user_id == "operator_approval_retry"
         request
     end
   end

@@ -92,6 +92,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   ```
   If it *should* shell, grant the shell caps and expect `:ask` (or wire an approver).
 
+## 2B. Human approval routing needs an explicit operator
+
+- **What:** the selected interaction-router approval path requires a host
+  `Arbor.Security.Contracts.OperatorResolver`. Missing, failed, or malformed
+  resolution denies before submitting a request; it never substitutes the
+  requesting agent or falls back to consensus after resolution fails.
+- **Symptom:** authorization returns `:operator_resolver_unavailable` or
+  `:operator_resolution_failed` instead of a pending approval.
+- **Action:** Arbor injects `Arbor.Comms.Adapters.SecurityOperatorResolver`.
+  Configure `:arbor_comms, :signal, :interaction_user_id` with the human's exact
+  interaction ID. Channel enablement and delivery readiness are separate. A
+  custom host must inject its own resolver through
+  `:arbor_security, :operator_resolver`; request options cannot override it.
+
 ## 3. File tools need **path-scoped** fs caps (not the bare tool cap)
 
 - **What:** `file_read`/`file_list`/`file_write` authorize `arbor://fs/<op>` with the

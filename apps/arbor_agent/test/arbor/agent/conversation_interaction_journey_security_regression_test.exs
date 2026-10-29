@@ -132,6 +132,7 @@ defmodule Arbor.Agent.ConversationInteractionJourneySecurityRegressionTest do
           {:arbor_security, :reflex_checking_enabled, false},
           {:arbor_security, :uri_registry_enforcement, false},
           {:arbor_security, :use_interaction_router_for_approval, true},
+          {:arbor_security, :operator_resolver, Arbor.Comms.Adapters.SecurityOperatorResolver},
           {:arbor_security, :identity_alias_resolver,
            Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver},
           {:arbor_trust, :policy_enforcer_enabled, false},
@@ -167,6 +168,7 @@ defmodule Arbor.Agent.ConversationInteractionJourneySecurityRegressionTest do
     :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
     {:ok, token} = Arbor.Security.SessionToken.generate(oidc.identity.agent_id)
     human = %{human_id: oidc.identity.agent_id, token: token, identity: oidc.identity}
+    set_env(:arbor_comms, :signal, enabled: false, interaction_user_id: human.human_id)
 
     on_exit(fn ->
       Security.deregister_identity_fixture(human.human_id)
