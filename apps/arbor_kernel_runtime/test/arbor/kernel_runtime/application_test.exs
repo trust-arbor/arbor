@@ -49,6 +49,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
                   ])
   @provider_roots [:os_mon, :recon, :mint, :finch, :req]
   @required_apps MapSet.new([
+                   :arbor_custody,
                    :arbor_kernel,
                    :crypto,
                    :elixir,

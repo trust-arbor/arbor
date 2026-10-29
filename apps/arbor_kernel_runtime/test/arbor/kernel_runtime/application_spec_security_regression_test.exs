@@ -9,6 +9,7 @@ defmodule Arbor.KernelRuntime.ApplicationSpecSecurityRegressionTest do
 
   @omitted [:os_mon, :finch, :mint, :req, :recon]
   @required MapSet.new([
+              :arbor_custody,
               :arbor_kernel,
               :crypto,
               :elixir,
