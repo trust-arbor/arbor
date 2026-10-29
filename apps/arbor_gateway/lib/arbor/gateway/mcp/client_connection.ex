@@ -19,7 +19,9 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   and can be manually refreshed via `refresh_tools/1`.
 
   First discovery auto-pins each tool's SHA-256 fingerprint (`name`,
-  `description`, `inputSchema`) and presents it. Accepted pins are stored
+  `description`, `annotations`, `inputSchema`, `outputSchema`) while the
+  pin set is empty. Once any pin exists, a newly advertised name is held
+  for re-approval instead of being auto-pinned. Accepted pins are stored
   under the server's approved config identity and reloaded on process
   restart. A later refresh, `notifications/tools/list_changed`, or restart
   that changes a pinned tool quarantines it until
@@ -115,6 +117,12 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       {:error, {:fingerprint_changed, _name}, server_name} ->
         {:error, CallOutcome.fingerprint_changed(server_name, tool_name)}
 
+      {:error, {:unapproved_tool, _name}, server_name} ->
+        {:error, CallOutcome.unapproved_tool(server_name, tool_name)}
+
+      {:error, {:unknown_tool, _name}, server_name} ->
+        {:error, CallOutcome.unknown_tool(server_name, tool_name)}
+
       {:error, {:not_connected, status}, server_name} ->
         {:error, CallOutcome.not_connected(server_name, tool_name, status)}
 
@@ -127,9 +135,11 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   @doc """
   Refresh the cached tool list from the server.
 
-  Newly seen names are auto-pinned (first-discovery). A pinned tool whose
-  name, description, or inputSchema changed is quarantined and omitted from
-  the returned list until `approve_tool_fingerprint/2`.
+  Newly seen names are auto-pinned only while the pin set is empty.
+  After that they are held for re-approval. A pinned tool whose name,
+  description, annotations, inputSchema, or outputSchema changed is
+  quarantined and omitted from the returned list until
+  `approve_tool_fingerprint/2`.
   """
   @spec refresh_tools(pid()) :: {:ok, [map()]} | {:error, term()}
   def refresh_tools(pid), do: GenServer.call(pid, :refresh_tools)
@@ -244,10 +254,18 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
         %{connection_status: :connected, client_pid: client_pid} = state
       )
       when is_pid(client_pid) and is_binary(tool_name) do
-    if quarantined_name?(state, tool_name) do
-      {:reply, {:error, {:fingerprint_changed, tool_name}, state.server_name}, state}
-    else
-      {:reply, {:ok, client_pid, state.server_name}, state}
+    cond do
+      quarantined_name?(state, tool_name) and Map.has_key?(state.tool_pins, tool_name) ->
+        {:reply, {:error, {:fingerprint_changed, tool_name}, state.server_name}, state}
+
+      quarantined_name?(state, tool_name) ->
+        {:reply, {:error, {:unapproved_tool, tool_name}, state.server_name}, state}
+
+      listed_or_pinned?(state, tool_name) ->
+        {:reply, {:ok, client_pid, state.server_name}, state}
+
+      true ->
+        {:reply, {:error, {:unknown_tool, tool_name}, state.server_name}, state}
     end
   end
 
@@ -633,6 +651,10 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     Enum.any?(state.quarantined_tools, &(&1["name"] == tool_name))
   end
 
+  defp listed_or_pinned?(state, tool_name) do
+    Enum.any?(state.tools, &(&1["name"] == tool_name)) or Map.has_key?(state.tool_pins, tool_name)
+  end
+
   defp interpret_effects(effects, state) do
     Enum.each(effects, fn
       {:emit, type, data} ->
@@ -726,7 +748,9 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     %{
       "name" => Map.get(tool, :name) || Map.get(tool, "name"),
       "description" => Map.get(tool, :description) || Map.get(tool, "description", ""),
-      "inputSchema" => Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", %{})
+      "inputSchema" => Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", %{}),
+      "outputSchema" => Map.get(tool, :outputSchema) || Map.get(tool, "outputSchema", %{}),
+      "annotations" => Map.get(tool, :annotations) || Map.get(tool, "annotations", %{})
     }
   end
 

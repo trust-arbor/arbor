@@ -12,8 +12,9 @@ other `docs/arbor/roadmap/` items so parallel PRs do not conflict.
 
 ## Summary
 
-The outbound MCP client already pins each tool's `name`, `description`, and
-`inputSchema`, quarantines a drifted definition, persists the pin across
+The outbound MCP client already pins each tool's `name`, `description`,
+`annotations`, `inputSchema`, and `outputSchema`, quarantines a drifted
+definition, persists the pin across
 restart, and exposes `Arbor.Gateway.approve_mcp_tool_fingerprint/2` plus
 `:mcp_tool_fingerprint_changed`. There is no dashboard flow yet. Operators
 must call the API (or Tidewave / IEx) to inspect a quarantine and re-pin.
@@ -35,8 +36,8 @@ are already implemented.
 
 ## Out of scope for this item
 
-- Changing first-discovery (new names on an already-pinned server are still
-  auto-pinned).
+- Changing first-discovery further (new names on an already-pinned server
+  are already held for re-approval).
 - Replacing `ToolPinStore` or the approval-URI identity key.
 - A Security capability URI per tool description.
 

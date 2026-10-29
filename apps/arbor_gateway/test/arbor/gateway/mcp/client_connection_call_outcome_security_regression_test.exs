@@ -18,7 +18,15 @@ defmodule Arbor.Gateway.MCP.ClientConnectionCallOutcomeSecurityRegressionTest do
   defmodule ScriptedHandler do
     @moduledoc false
 
-    def list_tools(_state), do: []
+    def list_tools(_state) do
+      [
+        %{"name" => "slow_tool", "description" => "Slow", "inputSchema" => %{}},
+        %{"name" => "failing_tool", "description" => "Fail", "inputSchema" => %{}},
+        %{"name" => "claims_refused_tool", "description" => "Claims refused", "inputSchema" => %{}},
+        %{"name" => "ok_tool", "description" => "OK", "inputSchema" => %{}}
+      ]
+    end
+
     def list_resources(_state), do: []
     def list_prompts(_state), do: []
 
@@ -55,7 +63,7 @@ defmodule Arbor.Gateway.MCP.ClientConnectionCallOutcomeSecurityRegressionTest do
       server_name: "scripted",
       transport: :test,
       server: server,
-      auto_discover: false
+      auto_discover: true
     }
 
     conn = start_supervised!({ClientConnection, config}, id: :scripted_conn)

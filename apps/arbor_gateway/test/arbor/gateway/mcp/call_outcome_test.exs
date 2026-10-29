@@ -108,6 +108,16 @@ defmodule Arbor.Gateway.MCP.CallOutcomeTest do
     end
   end
 
+  describe "unknown_tool/2" do
+    test "refuses a name that is not listed or pinned" do
+      assert %CallFailure{outcome: :refused, tool: "secret", message: message} =
+               CallOutcome.unknown_tool("docs", "secret")
+
+      assert message =~ "listed" or message =~ "pinned"
+      assert message =~ "docs/secret"
+    end
+  end
+
   describe "exited/3" do
     test "a client that was already gone is :not_sent; any other exit is :unknown" do
       assert %CallFailure{outcome: :not_sent} =

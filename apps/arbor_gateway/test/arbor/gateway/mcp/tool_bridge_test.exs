@@ -106,6 +106,17 @@ defmodule Arbor.Gateway.MCP.ToolBridgeTest do
       assert :error = ToolBridge.parse_tool_name("mcp.server.")
       assert :error = ToolBridge.parse_tool_name("mcp..tool")
     end
+
+    test "security regression: dotted server names do not collide with dotted tool names" do
+      from_dotted_server = ToolBridge.to_arbor_tool("a.b", %{"name" => "c", "description" => "C"})
+      from_dotted_tool = ToolBridge.to_arbor_tool("a", %{"name" => "b.c", "description" => "BC"})
+
+      refute from_dotted_server.name == from_dotted_tool.name
+      assert {:ok, "a.b", "c"} = ToolBridge.parse_tool_name(from_dotted_server.name)
+      assert {:ok, "a", "b.c"} = ToolBridge.parse_tool_name(from_dotted_tool.name)
+      assert ToolBridge.tool_key("a.b", "c") == from_dotted_server.name
+      assert ToolBridge.tool_key("a", "b.c") == from_dotted_tool.name
+    end
   end
 
   describe "taint_result/3" do

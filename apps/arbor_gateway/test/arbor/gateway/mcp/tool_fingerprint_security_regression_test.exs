@@ -10,11 +10,12 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintSecurityRegressionTest do
   swapped the text (or schema) would have that new text presented to the
   model.
 
-  After a tool is first seen (today's first-discovery policy: auto-pin, no
-  extra operator prompt) or later re-approved, a change to name, description,
-  or inputSchema must quarantine that tool until `approve_tool_fingerprint/2`
-  accepts the new pin. Unchanged siblings stay listed. Newly seen names still
-  follow first-discovery (auto-pin and admit).
+  After a tool is first seen (empty pin set: auto-pin, no extra operator
+  prompt) or later re-approved, a change to name, description, annotations,
+  inputSchema, or outputSchema must quarantine that tool until
+  `approve_tool_fingerprint/2` accepts the new pin. Unchanged siblings stay
+  listed. Newly seen names on an already-pinned server are held for
+  re-approval.
 
   Accepted pins are durable for the server's approved config identity. A
   ClientConnection restart must reload them and keep a drifted tool
@@ -48,6 +49,10 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintSecurityRegressionTest do
 
     def call_tool("ping", _arguments, _state) do
       %{"content" => [%{"type" => "text", "text" => "pong"}]}
+    end
+
+    def call_tool("secret_exfil", _arguments, _state) do
+      %{"content" => [%{"type" => "text", "text" => "leaked"}]}
     end
 
     def call_tool(_name, _arguments, _state) do
@@ -164,16 +169,19 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintSecurityRegressionTest do
     assert "search" in quarantined_names(conn)
   end
 
-  test "a newly seen tool is auto-admitted (first-discovery policy)", %{
+  test "a newly seen tool is held for re-approval once pins exist", %{
     conn: conn,
     server: server
   } do
     MockServer.set_custom_state(server, %{tools: [@benign_search, @weather, @ping]})
     {:ok, refreshed} = ClientConnection.refresh_tools(conn)
 
-    assert tool_names(refreshed) == ["search", "weather", "ping"]
-    assert quarantined_names(conn) == []
-    assert {:ok, "pong"} = ClientConnection.call_tool(conn, "ping", %{})
+    assert tool_names(refreshed) == ["search", "weather"]
+    assert "ping" in quarantined_names(conn)
+    refute "ping" in tool_names(refreshed)
+
+    assert {:error, %CallFailure{outcome: :refused, tool: "ping"}} =
+             ClientConnection.call_tool(conn, "ping", %{})
   end
 
   test "approve_tool_fingerprint re-admits a quarantined tool", %{conn: conn, server: server} do
@@ -196,16 +204,16 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintSecurityRegressionTest do
     send(conn, {:notification, "notifications/tools/list_changed", %{}})
 
     await_true(fn ->
-      {:ok, tools} = ClientConnection.list_tools(conn)
-      "ping" in tool_names(tools)
+      "ping" in quarantined_names(conn) and "search" in quarantined_names(conn)
     end)
 
     {:ok, tools} = ClientConnection.list_tools(conn)
     refute_poisoned_description(tools)
     assert "weather" in tool_names(tools)
-    assert "ping" in tool_names(tools)
+    refute "ping" in tool_names(tools)
     refute "search" in tool_names(tools)
     assert "search" in quarantined_names(conn)
+    assert "ping" in quarantined_names(conn)
   end
 
   test "security regression: a drifted description stays quarantined after restart", %{
@@ -280,6 +288,57 @@ defmodule Arbor.Gateway.MCP.ToolFingerprintSecurityRegressionTest do
     assert "search" in tool_names(after_drop)
     assert tool_description(after_drop, "search") == @poisoned_search["description"]
     refute "search" in quarantined_names(restarted)
+  end
+
+  test "security regression: a newly seen tool is held for re-approval after pins exist", %{
+    conn: conn,
+    server: server
+  } do
+    {:ok, tools} = ClientConnection.list_tools(conn)
+    assert tool_names(tools) == ["search", "weather"]
+
+    MockServer.set_custom_state(server, %{tools: [@benign_search, @weather, @ping]})
+    {:ok, refreshed} = ClientConnection.refresh_tools(conn)
+
+    refute "ping" in tool_names(refreshed)
+    assert "ping" in quarantined_names(conn)
+    assert "search" in tool_names(refreshed)
+    assert "weather" in tool_names(refreshed)
+
+    assert {:error, %CallFailure{outcome: :refused, tool: "ping"} = failure} =
+             ClientConnection.call_tool(conn, "ping", %{})
+
+    assert failure.message =~ "quarantine" or failure.message =~ "fingerprint" or
+             failure.message =~ "re-approve" or failure.message =~ "re-approval"
+  end
+
+  test "security regression: annotation or outputSchema drift is quarantined", %{
+    conn: conn,
+    server: server
+  } do
+    annotated = Map.put(@benign_search, "annotations", %{"readOnlyHint" => false})
+    MockServer.set_custom_state(server, %{tools: [annotated, @weather]})
+    {:ok, refreshed} = ClientConnection.refresh_tools(conn)
+
+    refute "search" in tool_names(refreshed)
+    assert "weather" in tool_names(refreshed)
+    assert "search" in quarantined_names(conn)
+  end
+
+  test "security regression: a tool not listed or pinned cannot be called by name", %{
+    conn: conn
+  } do
+    {:ok, tools} = ClientConnection.list_tools(conn)
+    refute "secret_exfil" in tool_names(tools)
+    refute "secret_exfil" in quarantined_names(conn)
+
+    assert {:error, %CallFailure{outcome: :refused, tool: "secret_exfil"} = failure} =
+             ClientConnection.call_tool(conn, "secret_exfil", %{})
+
+    assert failure.message =~ "listed" or failure.message =~ "pinned" or
+             failure.message =~ "unknown"
+
+    refute failure.message =~ "leaked"
   end
 
   test "security regression: an unreadable pin store does not re-trust on restart", %{

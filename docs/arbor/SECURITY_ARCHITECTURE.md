@@ -419,12 +419,17 @@ discovered tool so a later `tools/list` or `notifications/tools/list_changed`
 cannot silently replace the text the model sees (SEAL-class description
 poisoning / rug-pulls, arXiv:2610.25372).
 
-- **What is pinned.** SHA-256 of a canonical `{name, description, inputSchema}`
-  encoding. Atom and string JSON terms hash the same way.
-- **When.** First discovery auto-pins a new name (there is no stricter
-  first-seen mode). A later mismatch quarantines that tool: it is omitted from
-  `list_tools` / `refresh_tools` and `call_tool` returns `:refused`. Unchanged
-  siblings stay listed. A rename is a new name.
+- **What is pinned.** SHA-256 of a canonical
+  `{name, description, annotations, inputSchema, outputSchema}` encoding.
+  Atom and string JSON terms hash the same way. Annotations include
+  `readOnlyHint`, `destructiveHint`, and the rest of the MCP tool
+  annotation object.
+- **When.** First discovery auto-pins a new name only while the pin set
+  is empty. Once any pin exists, a newly advertised name is held for
+  re-approval. A later mismatch quarantines that tool: it is omitted from
+  `list_tools` / `refresh_tools` and `call_tool` returns `:refused`.
+  `call_tool` also refuses a name that is neither listed nor pinned.
+  Unchanged siblings stay listed. A rename is a new name.
 - **Where.** Accepted pins are stored per approved config identity
   (`Arbor.Security.mcp_server_approval_uri/2`) and tool name in
   `Arbor.Gateway.MCP.ToolPinStore`, a gateway-owned JSON file under
@@ -445,6 +450,9 @@ poisoning / rug-pulls, arXiv:2610.25372).
   `Arbor.Agent.Manager.set_mcp_config/3`.
 - **UI.** Listing quarantined tools with a description/schema diff is planned;
   see [MCP tool re-approval UI](./roadmap/mcp-tool-reapproval-ui.md).
+- **Names.** Arbor-facing tool keys are `ToolBridge.tool_key/2`. Dots in the
+  server or tool segment are percent-encoded so server `a.b` tool `c` and
+  server `a` tool `b.c` do not share a name.
 
 Authoritative code: [`ToolFingerprintCore`](../../apps/arbor_gateway/lib/arbor/gateway/mcp/tool_fingerprint_core.ex),
 [`ToolPinStore`](../../apps/arbor_gateway/lib/arbor/gateway/mcp/tool_pin_store.ex),

@@ -442,8 +442,10 @@ Principal-scoped tools require the stdio signing proxy, not bare
 HTTP/Bearer. See [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
 
 When Arbor itself is the MCP *client* (connecting out to a third-party
-server), tool `name` / `description` / `inputSchema` are SHA-256 pinned at
-first discovery and stored under the server's approved config identity.
+server), tool `name` / `description` / `annotations` / `inputSchema` /
+`outputSchema` are SHA-256 pinned at first discovery (empty pin set)
+and stored under the server's approved config identity. A later new
+name on that identity is held for re-approval.
 A later list that changes a pinned tool quarantines it and emits
 `:mcp_tool_fingerprint_changed`. Re-approve with
 `Arbor.Gateway.approve_mcp_tool_fingerprint/2`. See
