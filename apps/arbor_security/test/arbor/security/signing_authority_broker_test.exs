@@ -681,11 +681,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       beam_path = :code.which(Arbor.Security)
       assert is_list(beam_path)
 
-      # Purge and reload the facade module (simulates hot code load).
-      # Named dispatch (not a closure) must still resolve after purge/reload.
-      # purge/1 returns true only when old-code processes were killed — ignore the bool.
-      _ = :code.purge(Arbor.Security)
-      _ = :code.delete(Arbor.Security)
+      # Keep current code available: deleting it lets another caller auto-load
+      # a version before our explicit load, which then fails with :not_purged.
+      # Soft purge waits for existing callers without killing their processes.
+      wait_until(fn -> :code.soft_purge(Arbor.Security) end, 500)
 
       abs_path =
         beam_path
@@ -693,14 +692,22 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         |> String.replace_suffix(".beam", "")
         |> String.to_charlist()
 
+      # Model another facade caller in the reload window without relying on timing.
+      caller = Task.async(fn -> Security.module_info(:module) end)
+      assert Task.await(caller, 5_000) == Arbor.Security
+
       assert {:module, Arbor.Security} = :code.load_abs(abs_path)
+      assert :erlang.check_old_code(Arbor.Security)
+      wait_until(fn -> :code.soft_purge(Arbor.Security) end, 500)
+      refute :erlang.check_old_code(Arbor.Security)
       assert function_exported?(Arbor.Security, :sign_with_authority, 2)
 
-      # Retained reference still works via named dispatch after reload.
+      # The former code is gone before the retained reference signs again.
       assert {:ok, %SignedRequest{} = signed} =
                Security.sign_with_authority(authority, "arbor://test/signing/post-reload")
 
       assert signed.agent_id == ctx.agent_id
+      assert signed.payload == "arbor://test/signing/post-reload"
       agent_id = ctx.agent_id
       assert {:ok, ^agent_id} = Security.verify_request(signed)
     end
