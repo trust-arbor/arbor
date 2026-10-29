@@ -645,8 +645,11 @@ defmodule Arbor.Orchestrator.Config do
   Base directory for coding-task pipeline manifests, status, and checkpoints.
 
   `Arbor.Orchestrator.CodingTaskExecutor` creates a deterministic, path-safe
-  child directory for each task. Defaults to a dedicated directory under the
-  system temporary directory.
+  child directory for each task. Defaults to `$ARBOR_HOME/logs/coding_tasks`
+  (or `~/.arbor/logs/coding_tasks` when `ARBOR_HOME` is unset). A configured
+  or default directory is admitted only when it is owned by the current user
+  and is neither group- nor world-writable; missing directories are created
+  with mode `0700`.
   """
   @spec coding_pipeline_logs_root() :: String.t()
   def coding_pipeline_logs_root do
@@ -661,6 +664,53 @@ defmodule Arbor.Orchestrator.Config do
         default_coding_pipeline_logs_root()
     end
   end
+
+  @doc false
+  @spec ensure_private_coding_pipeline_logs_root(String.t()) ::
+          :ok | {:error, :invalid_coding_pipeline_logs_root}
+  def ensure_private_coding_pipeline_logs_root(path) when is_binary(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        assert_private_coding_logs_stat(stat)
+
+      {:ok, _stat} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+
+      {:error, :enoent} ->
+        create_private_coding_pipeline_logs_root(path)
+
+      {:error, _reason} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+    end
+  end
+
+  def ensure_private_coding_pipeline_logs_root(_path),
+    do: {:error, :invalid_coding_pipeline_logs_root}
+
+  @doc false
+  @spec admit_private_coding_pipeline_logs_root(String.t()) ::
+          :ok | {:error, :invalid_coding_pipeline_logs_root | :enoent | :eio}
+  def admit_private_coding_pipeline_logs_root(path) when is_binary(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        assert_private_coding_logs_stat(stat)
+
+      {:ok, _stat} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+
+      {:error, :enoent} ->
+        {:error, :enoent}
+
+      {:error, :eio} ->
+        {:error, :eio}
+
+      {:error, _reason} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+    end
+  end
+
+  def admit_private_coding_pipeline_logs_root(_path),
+    do: {:error, :invalid_coding_pipeline_logs_root}
 
   @doc """
   Explicit trusted roots that may contain repositories for structured coding
@@ -930,7 +980,100 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   defp default_coding_pipeline_logs_root do
-    Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+    Path.join([arbor_data_home(), "logs", "coding_tasks"])
+  end
+
+  defp arbor_data_home do
+    case System.get_env("ARBOR_HOME") do
+      home when is_binary(home) and home != "" -> Path.expand(home)
+      _ -> Path.expand("~/.arbor")
+    end
+  end
+
+  defp create_private_coding_pipeline_logs_root(path) do
+    case File.mkdir_p(path) do
+      :ok ->
+        case File.chmod(path, 0o700) do
+          :ok ->
+            case File.lstat(path, time: :posix) do
+              {:ok, %File.Stat{type: :directory} = stat} ->
+                assert_private_coding_logs_stat(stat)
+
+              _other ->
+                {:error, :invalid_coding_pipeline_logs_root}
+            end
+
+          {:error, _reason} ->
+            {:error, :invalid_coding_pipeline_logs_root}
+        end
+
+      {:error, _reason} ->
+        {:error, :invalid_coding_pipeline_logs_root}
+    end
+  end
+
+  defp assert_private_coding_logs_stat(%File.Stat{uid: uid, mode: mode})
+       when is_integer(uid) and is_integer(mode) do
+    case current_euid() do
+      {:ok, euid} when euid == uid and Bitwise.band(mode, 0o022) == 0 ->
+        :ok
+
+      _other ->
+        {:error, :invalid_coding_pipeline_logs_root}
+    end
+  end
+
+  defp assert_private_coding_logs_stat(_stat),
+    do: {:error, :invalid_coding_pipeline_logs_root}
+
+  @euid_probe_retries 4
+
+  defp current_euid do
+    case Process.get({__MODULE__, :euid}) do
+      uid when is_integer(uid) ->
+        {:ok, uid}
+
+      _other ->
+        case probe_euid() do
+          {:ok, uid} = ok ->
+            Process.put({__MODULE__, :euid}, uid)
+            ok
+
+          :error ->
+            :error
+        end
+    end
+  end
+
+  defp probe_euid do
+    probe_euid_attempt(System.tmp_dir!(), @euid_probe_retries)
+  end
+
+  defp probe_euid_attempt(_dir, 0), do: :error
+
+  defp probe_euid_attempt(dir, remaining) when remaining > 0 do
+    name = ".arbor-euid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(dir, name)
+
+    case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} ->
+        _ = :file.close(io)
+
+        try do
+          case File.lstat(path, time: :posix) do
+            {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
+            _other -> :error
+          end
+        after
+          _ = File.rm(path)
+        end
+
+      {:error, :eexist} ->
+        probe_euid_attempt(dir, remaining - 1)
+
+      {:error, _reason} ->
+        :error
+    end
   end
 
   defp configured_coding_roots(key, kind) do

@@ -227,11 +227,14 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
 
     with true <- is_binary(configured) and configured != "",
          expanded = Path.expand(configured),
+         :ok <- Config.admit_private_coding_pipeline_logs_root(expanded),
          {:ok, canonical} <- SafePath.resolve_real(expanded),
-         true <- File.dir?(canonical) do
+         true <- File.dir?(canonical),
+         :ok <- Config.admit_private_coding_pipeline_logs_root(canonical) do
       {:ok, canonical}
     else
       {:error, :enoent} -> {:error, :not_coding_root}
+      {:error, :invalid_coding_pipeline_logs_root} -> {:error, :not_coding_root}
       {:error, _} -> {:error, :unavailable}
       false -> {:error, :not_coding_root}
       _ -> {:error, :unavailable}

@@ -21,7 +21,10 @@ defmodule Arbor.Agent.XaiVoiceAuthoritySecurityRegressionTest do
   test "security regression: mic capture is not a fixed shared /tmp path" do
     beam =
       case :code.get_object_code(XaiVoiceOrchestrator) do
-        {:module, _mod, bin, _filename} ->
+        {_mod, bin, _filename} when is_binary(bin) ->
+          bin
+
+        {:module, _mod, bin, _filename} when is_binary(bin) ->
           bin
 
         :error ->

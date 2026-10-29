@@ -1257,6 +1257,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defp restore(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
   defp restore(key, value), do: Application.put_env(:arbor_orchestrator, key, value)
 
+  defp default_coding_pipeline_logs_root do
+    home =
+      case System.get_env("ARBOR_HOME") do
+        value when is_binary(value) and value != "" -> Path.expand(value)
+        _ -> Path.expand("~/.arbor")
+      end
+
+    Path.join([home, "logs", "coding_tasks"])
+  end
+
   defp with_compiler_semantic_preflight_trace(fun) do
     parent = self()
 
@@ -8731,8 +8741,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert is_binary(Config.coding_pipeline_path())
       assert String.ends_with?(Config.coding_pipeline_path(), "coding-change-v1.dot")
 
-      assert Config.coding_pipeline_logs_root() ==
-               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+      assert Config.coding_pipeline_logs_root() == default_coding_pipeline_logs_root()
     end
 
     test "coding pipeline logs root accepts a configured path and rejects blank values" do
@@ -8741,8 +8750,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, "  ")
 
-      assert Config.coding_pipeline_logs_root() ==
-               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+      assert Config.coding_pipeline_logs_root() == default_coding_pipeline_logs_root()
     end
   end
 
