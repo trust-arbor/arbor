@@ -44,6 +44,36 @@ umbrella — Mix must resolve and compile the project before it can run it, so t
 dependencies have to exist first. Skipping it fails with
 `Can't continue due to errors on dependencies`.
 
+### Optional voice
+
+The default build excludes `arbor_voice` and `arbor_multimedia` from dependency
+resolution, compilation, and application startup. The dashboard works without
+them and hides local voice controls when the voice libraries are unavailable.
+Leaving old voice dependencies in `deps/` does not enable them automatically.
+The shared `mix.lock` retains pins for both build modes; an unused-lock check in
+core mode will also report the optional voice dependency closure.
+
+Voice currently requires the pinned `membrane_core` and
+`membrane_portaudio_plugin` forks declared in `apps/arbor_multimedia/mix.exs`.
+They are hosted on a private network and are not available to public users.
+If you have access, enable voice **in your shell before running Mix**:
+
+```bash
+export ARBOR_VOICE=true
+./bin/mix deps.get
+./bin/mix compile
+ARBOR_AUDIO_DRIVER=native ./bin/mix arbor.start
+```
+
+Keep `ARBOR_VOICE=true` set for subsequent Mix commands, including voice tests
+and release builds. This is a build selector, so putting it only in `.env` is
+too late. `ARBOR_AUDIO_DRIVER=native` selects host audio at runtime; it does not
+fetch or enable the optional apps. Enabling voice without access to the forks
+will fail during `deps.get`; leave `ARBOR_VOICE` unset (or set it to `false`)
+to run core Arbor. Restart your own Arbor node after changing the build selector.
+Existing microphone permissions, provider credentials, and voice capability
+requirements still apply.
+
 ## 2. Setup
 
 ```bash

@@ -1,4 +1,5 @@
 Code.require_file(Path.join(__DIR__, "build_support/mix_project_paths.exs"))
+Code.require_file(Path.join(__DIR__, "build_support/optional_apps.exs"))
 
 defmodule Arbor.MixProject do
   use Mix.Project
@@ -8,6 +9,7 @@ defmodule Arbor.MixProject do
 
     [
       apps_path: "apps",
+      apps: Arbor.OptionalApps.apps(Path.join(__DIR__, "apps")),
       build_path: paths[:build_path],
       deps_path: paths[:deps_path],
       version: "2.0.0-dev",

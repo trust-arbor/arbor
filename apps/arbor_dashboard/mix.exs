@@ -1,4 +1,5 @@
 Code.require_file(Path.expand("../../build_support/mix_project_paths.exs", __DIR__))
+Code.require_file(Path.expand("../../build_support/optional_apps.exs", __DIR__))
 
 defmodule Arbor.Dashboard.MixProject do
   use Mix.Project
@@ -76,5 +77,6 @@ defmodule Arbor.Dashboard.MixProject do
       {:lazy_html, ">= 0.1.0", only: :test},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
+    |> Arbor.OptionalApps.filter_deps()
   end
 end

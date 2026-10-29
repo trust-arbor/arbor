@@ -66,6 +66,10 @@ it prefers those instead.
 Use `./bin/mix` so Mix runs under the pinned toolchain. `ARBOR_DB=postgres` is
 opt-in, not the getting-started path.
 
+Voice is optional and excluded from the default build, including its unpublished
+native audio dependencies. See [optional voice setup](docs/QUICKSTART.md#optional-voice)
+to enable it on a host with access to those libraries.
+
 ## Testing
 
 ```bash
