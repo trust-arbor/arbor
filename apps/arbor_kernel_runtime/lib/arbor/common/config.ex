@@ -111,6 +111,22 @@ defmodule Arbor.Common.Config do
   @spec project_context_enabled?() :: term()
   def project_context_enabled?, do: get(:project_context_enabled, false)
 
+  @doc """
+  Approved filesystem roots for trusted instruction and context files.
+
+  Combined with the agent's config directory (`ARBOR_HOME` or `~/.arbor`)
+  when loading `AGENTS.md`, `CLAUDE.md`, and skill prompt files. Default
+  is `[]` — fail closed to the agent config directory only. Non-binary
+  entries are ignored.
+  """
+  @spec instruction_trusted_roots() :: [String.t()]
+  def instruction_trusted_roots do
+    case get(:instruction_trusted_roots, []) do
+      roots when is_list(roots) -> Enum.filter(roots, &is_binary/1)
+      _ -> []
+    end
+  end
+
   @doc "Whether the skill catalog is enabled (default false)."
   @spec skill_catalog_enabled?() :: term()
   def skill_catalog_enabled?, do: get(:skill_catalog_enabled, true)

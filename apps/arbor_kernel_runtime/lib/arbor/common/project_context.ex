@@ -18,13 +18,21 @@ defmodule Arbor.Common.ProjectContext do
 
   ## Trust boundary
 
-  Repository context files are untrusted instructions supplied by the checked-out project.
-  Enabling this feature deliberately grants those files prompt influence; it does not make
-  their contents system policy or authorization. Callers must keep capability, trust, and
-  approval enforcement outside the prompt and must not treat this text as proof of authority.
+  Repository context files are untrusted instructions supplied by the checked-out project
+  unless their canonical path is inside an approved folder: configured
+  `instruction_trusted_roots` plus the agent's own config directory. Enabling this
+  feature still does not make those contents system policy or authorization. Callers
+  must keep capability, trust, and approval enforcement outside the prompt and must
+  not treat this text as proof of authority.
+
+  Paths are canonicalized with symlinks resolved and compared segment-safely.
+  Files outside the approved set are skipped so an untrusted workspace cannot
+  inject trusted instructions.
   """
 
   require Logger
+
+  alias Arbor.Common.InstructionTrust
 
   @project_filenames ["AGENTS.md", "CLAUDE.md"]
   @default_globals ["~/.arbor/AGENTS.md", "~/.claude/CLAUDE.md"]
@@ -40,17 +48,21 @@ defmodule Arbor.Common.ProjectContext do
       (default `#{inspect(@default_globals)}`)
     * `:filenames` — per-directory candidates, first-present wins (default
       `#{inspect(@project_filenames)}`)
+    * `:trusted_roots` — approved folders for trusted instruction files
+      (default `Arbor.Common.Config.instruction_trusted_roots/0`)
+    * `:agent_config_dir` — agent-owned config directory, always approved
+      (default `$ARBOR_HOME` or `~/.arbor`)
   """
   @spec load(Path.t(), keyword()) :: String.t()
   def load(workdir, opts \\ []) do
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
     globals = Keyword.get(opts, :globals, @default_globals)
     filenames = Keyword.get(opts, :filenames, @project_filenames)
+    trust_opts = trust_opts(opts)
 
     (global_paths(globals) ++ project_paths(workdir, filenames))
     |> Enum.uniq()
-    |> Enum.map(fn path -> {path, read(path)} end)
-    |> Enum.reject(fn {_path, content} -> content == "" end)
+    |> Enum.flat_map(&admit_trusted(&1, trust_opts))
     |> take_within_budget(max_bytes)
     |> Enum.map_join("\n\n", fn {path, content} -> label(path, content) end)
   rescue
@@ -106,6 +118,32 @@ defmodule Arbor.Common.ProjectContext do
     filenames
     |> Enum.map(&Path.join(dir, &1))
     |> Enum.find(&File.regular?/1)
+  end
+
+  defp trust_opts(opts) do
+    []
+    |> maybe_put(:trusted_roots, Keyword.get(opts, :trusted_roots))
+    |> maybe_put(:agent_config_dir, Keyword.get(opts, :agent_config_dir))
+    |> maybe_put(:additional_roots, Keyword.get(opts, :additional_roots))
+  end
+
+  defp maybe_put(kw, _key, nil), do: kw
+  defp maybe_put(kw, key, value), do: Keyword.put(kw, key, value)
+
+  defp admit_trusted(path, trust_opts) do
+    content = read(path)
+
+    cond do
+      content == "" ->
+        []
+
+      InstructionTrust.trusted?(path, trust_opts) ->
+        [{path, content}]
+
+      true ->
+        Logger.debug("[ProjectContext] skipped untrusted instruction file: #{path}")
+        []
+    end
   end
 
   defp read(path) do
