@@ -195,7 +195,10 @@ executor can spend variable time constructing an execution manifest and hashing
 loaded BEAM identities before its runner starts. Wait for the runner-start
 message with a realistic bounded timeout, distinguish an early owner result
 from a startup timeout, and only then kill the owner and assert linked-child
-termination. A short fixed delay tests code-server scheduling rather than
+termination. Include synchronous durable admission in that observation budget,
+and monitor and clean up spawned callers before fixture teardown; otherwise a
+short receive failure can cause teardown errors that look like authority loss.
+A short fixed delay tests code-server scheduling rather than
 cancellation semantics (found 2026-07-28 when an independently reviewed
 candidate crossed a brittle two-second startup assertion).
 
