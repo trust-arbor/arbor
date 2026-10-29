@@ -215,15 +215,20 @@ defmodule Arbor.Contracts.Security.Capability do
   @doc """
   Check if `child_constraints` are at-least-as-restrictive as `parent_constraints`.
 
-  For each key present in `child`:
-    - If `parent` lacks the key, parent imposes no limit on it — any child
-      value is more restrictive (subset).
-    - If `parent` has the key with the same value, that's equality (subset).
-    - For integer keys like `:rate_limit` / `:max_uses` / `:max_size`, child
-      must be `<=` parent (tighter limit).
+  A child is a subset only if **every parent limit is present** and at least
+  as strict. Omitting a parent key (rate, budget, max size, expiry, approval,
+  and so on) is widening by omission — not a subset.
+
+  For each key present in `parent`:
+    - The child must set the same key. Missing keys are not inherited here;
+      use `inherit_constraints/2` when constructing a delegated grant.
+    - For integer keys like `:rate_limit` / `:budget` / `:max_uses` /
+      `:max_size` / `:expiry`, child must be `<=` parent (tighter limit).
     - For `:requires_approval`, child=true is always permitted; if parent=true
       then child must also be true (can't remove approval requirement).
     - Otherwise, the rule is conservative: NOT subset.
+
+  Extra child-only keys are allowed (they only add restrictions).
 
   Returns `true` if child is a valid subset, `false` if it widens any constraint.
 
@@ -242,21 +247,46 @@ defmodule Arbor.Contracts.Security.Capability do
       true
 
       iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.constraints_subset?(%{}, %{rate_limit: 100})
+      false
+
+      iex> alias Arbor.Contracts.Security.Capability
       iex> Capability.constraints_subset?(%{requires_approval: false}, %{requires_approval: true})
       false
   """
   @spec constraints_subset?(map(), map()) :: boolean()
   def constraints_subset?(child, parent) when is_map(child) and is_map(parent) do
-    Enum.all?(child, fn {key, child_value} ->
-      case Map.fetch(parent, key) do
-        # Parent imposes no limit on this key — child adding a limit is restriction
-        :error -> true
-        {:ok, parent_value} -> constraint_value_subset?(key, child_value, parent_value)
+    Enum.all?(parent, fn {key, parent_value} ->
+      case Map.fetch(child, key) do
+        :error -> false
+        {:ok, child_value} -> constraint_value_subset?(key, child_value, parent_value)
       end
     end)
   end
 
   def constraints_subset?(_, _), do: false
+
+  @doc """
+  Fill omitted child limits from `parent` without allowing a child to widen.
+
+  Parent keys the child omits are copied in. When both set a key, the child
+  value is kept only if it is at least as strict as the parent; otherwise the
+  parent value wins. Extra child-only keys are kept.
+  """
+  @spec inherit_constraints(map(), map()) :: map()
+  def inherit_constraints(child, parent) when is_map(child) and is_map(parent) do
+    Map.merge(parent, child, fn key, parent_value, child_value ->
+      if constraint_value_subset?(key, child_value, parent_value) do
+        child_value
+      else
+        parent_value
+      end
+    end)
+  end
+
+  def inherit_constraints(child, _parent) when is_map(child), do: child
+  def inherit_constraints(_child, parent) when is_map(parent), do: parent
+  def inherit_constraints(_child, _parent), do: %{}
 
   defp constraint_value_subset?(:requires_approval, child, parent)
        when is_boolean(child) and is_boolean(parent) do

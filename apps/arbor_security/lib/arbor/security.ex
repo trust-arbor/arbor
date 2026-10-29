@@ -6532,11 +6532,62 @@ defmodule Arbor.Security do
     end
   end
 
-  defp maybe_enforce_constraints(cap, principal_id, resource_uri) do
-    if Config.constraint_enforcement_enabled?() and cap.constraints != %{} do
-      Constraint.enforce(cap.constraints, principal_id, resource_uri)
+  # Spendable limits (rate_limit, budget, and any other integer quota the
+  # enforcer understands) are counted against the *root* grant. Walking
+  # `parent_capability_id` to the grant with no parent keeps one shared
+  # counter for the whole delegation tree instead of minting a fresh bucket
+  # per child principal. Omitted child keys inherit from ancestors so a
+  # stored child cannot drop a parent limit by leaving it out.
+  @max_grant_chain_walk 10
+
+  defp maybe_enforce_constraints(cap, _principal_id, resource_uri) do
+    if Config.constraint_enforcement_enabled?() do
+      case inherited_constraints_and_root(cap) do
+        {:ok, constraints, _root} when constraints == %{} ->
+          :ok
+
+        {:ok, constraints, root} ->
+          Constraint.enforce(constraints, root.id, resource_uri)
+
+        {:error, _reason} = error ->
+          error
+      end
     else
       :ok
+    end
+  end
+
+  defp inherited_constraints_and_root(%Capability{} = cap) do
+    walk_grant_ancestors(cap, MapSet.new(), cap.constraints)
+  end
+
+  defp walk_grant_ancestors(%Capability{parent_capability_id: nil} = cap, _seen, constraints) do
+    {:ok, constraints, cap}
+  end
+
+  defp walk_grant_ancestors(%Capability{} = cap, seen, constraints) do
+    cond do
+      MapSet.member?(seen, cap.id) ->
+        {:error, :delegation_cycle}
+
+      MapSet.size(seen) >= @max_grant_chain_walk ->
+        {:error, :delegation_chain_too_deep}
+
+      true ->
+        case CapabilityStore.get(cap.parent_capability_id) do
+          {:ok, %Capability{} = parent} ->
+            walk_grant_ancestors(
+              parent,
+              MapSet.put(seen, cap.id),
+              Capability.inherit_constraints(constraints, parent.constraints)
+            )
+
+          {:error, :not_found} ->
+            {:error, :parent_capability_unavailable}
+
+          {:error, reason} ->
+            {:error, {:parent_capability_unavailable, reason}}
+        end
     end
   end
 

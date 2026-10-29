@@ -128,7 +128,15 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
     test "child adding a new key that parent doesn't constrain IS subset" do
       # Parent imposes no limit → child adding a limit is restriction
       assert Capability.constraints_subset?(%{max_size: 1024}, %{})
-      assert Capability.constraints_subset?(%{rate_limit: 50}, %{requires_approval: true})
+
+      # Child must still carry every parent limit; adding rate_limit does not
+      # license dropping requires_approval.
+      refute Capability.constraints_subset?(%{rate_limit: 50}, %{requires_approval: true})
+
+      assert Capability.constraints_subset?(
+               %{rate_limit: 50, requires_approval: true},
+               %{requires_approval: true}
+             )
     end
 
     test "child=true subset of parent=false for :requires_approval" do
@@ -161,14 +169,31 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
              )
     end
 
-    test "empty child is subset of any parent" do
-      assert Capability.constraints_subset?(%{}, %{rate_limit: 100})
+    test "empty child is subset only of an unconstrained parent" do
+      refute Capability.constraints_subset?(%{}, %{rate_limit: 100})
       assert Capability.constraints_subset?(%{}, %{})
     end
 
     test "non-map inputs return false" do
       refute Capability.constraints_subset?(nil, %{})
       refute Capability.constraints_subset?(%{}, nil)
+    end
+
+    test "inherit_constraints/2 copies omitted parent limits and rejects widening" do
+      inherited =
+        Capability.inherit_constraints(%{rate_limit: 1}, %{
+          rate_limit: 10,
+          budget: 5,
+          max_size: 1024,
+          requires_approval: true
+        })
+
+      assert inherited.rate_limit == 1
+      assert inherited.budget == 5
+      assert inherited.max_size == 1024
+      assert inherited.requires_approval == true
+
+      assert Capability.inherit_constraints(%{rate_limit: 99}, %{rate_limit: 10}).rate_limit == 10
     end
 
     test "security regression: omitting a parent integer limit is not a subset" do

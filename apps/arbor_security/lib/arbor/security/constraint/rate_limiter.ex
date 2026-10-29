@@ -2,9 +2,10 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   @moduledoc """
   Token bucket rate limiter for capability constraint enforcement.
 
-  Tracks per-`{principal_id, resource_uri}` token buckets. Each bucket holds
+  Tracks per-`{budget_key, resource_uri}` token buckets. Each bucket holds
   up to `max_tokens` tokens and refills at a steady rate over the configured
-  refill period.
+  refill period. Authorization keys `budget_key` by the **root** capability
+  id so delegated children share one tree-wide budget.
 
   Uses `System.monotonic_time(:millisecond)` internally to avoid clock-jump
   sensitivity.
@@ -36,16 +37,16 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   end
 
   @doc """
-  Consume one token from the bucket for `{principal_id, resource_uri}`.
+  Consume one token from the bucket for `{budget_key, resource_uri}`.
 
   If the bucket doesn't exist, it is lazily created with `max_tokens` capacity.
   Returns `:ok` if a token was available, `{:error, :rate_limited}` otherwise.
   """
   @spec consume(String.t(), String.t(), pos_integer()) ::
           :ok | {:error, :rate_limited | :rate_limiter_unavailable}
-  def consume(principal_id, resource_uri, max_tokens) do
+  def consume(budget_key, resource_uri, max_tokens) do
     owner_call(
-      {:consume, {principal_id, resource_uri}, max_tokens},
+      {:consume, {budget_key, resource_uri}, max_tokens},
       {:error, :rate_limiter_unavailable}
     )
   end
@@ -54,8 +55,8 @@ defmodule Arbor.Security.Constraint.RateLimiter do
   Check remaining tokens without consuming.
   """
   @spec remaining(String.t(), String.t(), pos_integer()) :: non_neg_integer()
-  def remaining(principal_id, resource_uri, max_tokens) do
-    owner_call({:remaining, {principal_id, resource_uri}, max_tokens}, 0)
+  def remaining(budget_key, resource_uri, max_tokens) do
+    owner_call({:remaining, {budget_key, resource_uri}, max_tokens}, 0)
   end
 
   if Mix.env() == :test do

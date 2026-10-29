@@ -20,7 +20,9 @@ defmodule Arbor.Security.Constraint do
   Evaluation order (stateless first, stateful last):
   1. `time_window` — is the current hour within the allowed window?
   2. `allowed_paths` — does the resource URI match an allowed path pattern?
-  3. `rate_limit` — consume a token from the rate limiter
+  3. `rate_limit` — consume a token from the rate limiter (callers should
+     pass the root grant id as `principal_id` / budget key so delegated
+     children share one tree-wide bucket)
   4. `requires_approval` — always `:ok` (Phase 5 placeholder)
   """
   @spec enforce(map(), String.t(), String.t()) ::
