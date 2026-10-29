@@ -615,12 +615,14 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert_receive {:DOWN, ^owner_ref, :process, ^owner_pid, :killed}, 1_000
       assert_receive {:DOWN, ^broker_ref, :process, ^broker_pid, _reason}, 1_000
 
+      # Registration precedes init/1 claiming the authenticated owner directory.
+      # Wait for a broker round trip before asserting that old authority is gone.
       wait_until(fn ->
         new_owner = Process.whereis(SigningAuthorityStateOwner)
         new_broker = Process.whereis(SigningAuthorityBroker)
 
         is_pid(new_owner) and new_owner != owner_pid and is_pid(new_broker) and
-          new_broker != broker_pid
+          new_broker != broker_pid and is_map(SigningAuthorityBroker.debug_state())
       end)
 
       assert {:error, :authority_not_found} =
