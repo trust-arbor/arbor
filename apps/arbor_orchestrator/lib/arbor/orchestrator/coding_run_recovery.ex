@@ -233,11 +233,20 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
          :ok <- Config.admit_private_coding_pipeline_logs_root(canonical) do
       {:ok, canonical}
     else
-      {:error, :enoent} -> {:error, :not_coding_root}
-      {:error, :invalid_coding_pipeline_logs_root} -> {:error, :not_coding_root}
-      {:error, _} -> {:error, :unavailable}
-      false -> {:error, :not_coding_root}
-      _ -> {:error, :unavailable}
+      {:error, :enoent} ->
+        {:error, :unavailable}
+
+      {:error, :invalid_coding_pipeline_logs_root} ->
+        {:error, :unavailable}
+
+      {:error, _} ->
+        {:error, :unavailable}
+
+      false ->
+        {:error, :not_coding_root}
+
+      _ ->
+        {:error, :unavailable}
     end
   rescue
     _ -> {:error, :unavailable}
