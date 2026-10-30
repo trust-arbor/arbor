@@ -220,6 +220,12 @@ defmodule Arbor.Trust.EventStoreTest do
     end
 
     test "returns paginated result when cursor key is present", %{agent_id: agent_id} do
+      assert Application.get_application(Arbor.Common.Pagination.Cursor) == :arbor_support
+      assert :arbor_support in Application.spec(:arbor_trust, :applications)
+
+      refute Arbor.Common.Pagination.Cursor in (Application.spec(:arbor_kernel_runtime, :modules) ||
+                                                  [])
+
       {:ok, result} =
         EventStore.get_events(agent_id: agent_id, cursor: nil, limit: 3)
 
@@ -279,6 +285,8 @@ defmodule Arbor.Trust.EventStoreTest do
       last_p1_ts = List.last(page1.events).timestamp
       first_p2_ts = hd(page2.events).timestamp
       assert DateTime.compare(first_p2_ts, last_p1_ts) == :gt
+
+      assert_tied_timestamp_pagination(:asc, ["evt_cursor_a", "evt_cursor_b", "evt_cursor_c"])
     end
 
     test "descending pagination works", %{agent_id: agent_id} do
@@ -300,15 +308,27 @@ defmodule Arbor.Trust.EventStoreTest do
       last_p1_ts = List.last(page1.events).timestamp
       first_p2_ts = hd(page2.events).timestamp
       assert DateTime.compare(first_p2_ts, last_p1_ts) == :lt
+
+      assert_tied_timestamp_pagination(:desc, ["evt_cursor_c", "evt_cursor_b", "evt_cursor_a"])
     end
 
-    test "empty result returns nil cursor" do
+    test "empty result returns nil cursor", %{agent_id: agent_id} do
       {:ok, result} =
         EventStore.get_events(agent_id: "nonexistent_cursor_agent", cursor: nil, limit: 10)
 
       assert result.events == []
       assert result.next_cursor == nil
       assert result.has_more == false
+
+      for order <- [:asc, :desc], cursor <- ["invalid", "123:", "123x:evt_cursor_b"] do
+        assert {:ok, %{events: [], next_cursor: nil, has_more: false}} =
+                 EventStore.get_events(
+                   agent_id: agent_id,
+                   cursor: cursor,
+                   limit: 3,
+                   order: order
+                 )
+      end
     end
 
     test "all pages combined cover all events", %{agent_id: agent_id} do
@@ -449,14 +469,10 @@ defmodule Arbor.Trust.EventStoreTest do
     test "returns recent negative events across all agents" do
       # Record a negative event with recent timestamp
       negative_event =
-        create_event("neg_agent", :action_failure,
-          timestamp: DateTime.utc_now()
-        )
+        create_event("neg_agent", :action_failure, timestamp: DateTime.utc_now())
 
       positive_event =
-        create_event("pos_agent", :action_success,
-          timestamp: DateTime.utc_now()
-        )
+        create_event("pos_agent", :action_success, timestamp: DateTime.utc_now())
 
       :ok = EventStore.record_event(negative_event)
       :ok = EventStore.record_event(positive_event)
@@ -472,9 +488,7 @@ defmodule Arbor.Trust.EventStoreTest do
     test "respects limit" do
       for i <- 1..10 do
         event =
-          create_event("neg_limit_#{i}", :security_violation,
-            timestamp: DateTime.utc_now()
-          )
+          create_event("neg_limit_#{i}", :security_violation, timestamp: DateTime.utc_now())
 
         :ok = EventStore.record_event(event)
       end
@@ -497,6 +511,49 @@ defmodule Arbor.Trust.EventStoreTest do
       assert stats.cache_size >= 1
       assert stats.memory_bytes > 0
     end
+  end
+
+  defp assert_tied_timestamp_pagination(order, [first_id, middle_id, last_id] = expected_ids) do
+    agent_id = "agent_cursor_ties_#{order}"
+
+    for id <- ["evt_cursor_b", "evt_cursor_a", "evt_cursor_c"] do
+      event =
+        create_event(agent_id, :action_success,
+          id: id,
+          timestamp: ~U[2024-01-01 10:00:00.123456Z]
+        )
+
+      assert :ok = EventStore.record_event(event)
+    end
+
+    assert {:ok, page1} =
+             EventStore.get_events(agent_id: agent_id, cursor: nil, limit: 2, order: order)
+
+    assert Enum.map(page1.events, & &1.id) == [first_id, middle_id]
+    assert page1.next_cursor == "1704103200123:evt_cursor_b"
+    assert page1.has_more == true
+
+    assert {:ok, page2} =
+             EventStore.get_events(
+               agent_id: agent_id,
+               cursor: page1.next_cursor,
+               limit: 2,
+               order: order
+             )
+
+    assert Enum.map(page2.events, & &1.id) == [last_id]
+    assert page2.next_cursor == "1704103200123:#{last_id}"
+    assert page2.has_more == false
+
+    assert {:ok, %{events: [], next_cursor: nil, has_more: false}} =
+             EventStore.get_events(
+               agent_id: agent_id,
+               cursor: page2.next_cursor,
+               limit: 2,
+               order: order
+             )
+
+    assert collect_all_paginated_ids(agent_id, 1, order) == expected_ids
   end
 
   # Helper to collect all event IDs across paginated results
