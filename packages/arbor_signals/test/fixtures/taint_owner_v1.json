@@ -1,0 +1,27 @@
+{
+  "payload": {
+    "a": [
+      1,
+      true,
+      null
+    ],
+    "z": "π"
+  },
+  "envelope": {
+    "payload_encoding": "canonical_json_v1",
+    "payload_sha256": "71bd17f72b7094e9b88e72ce13a3ecb59c9cdeeb99d4d2c174ad027d8b55f45e",
+    "taint": {
+      "chain": [
+        "source_b"
+      ],
+      "confidence": "plausible",
+      "level": "untrusted",
+      "sanitizations": 1,
+      "sensitivity": "restricted",
+      "source": "source_a"
+    },
+    "version": 1
+  },
+  "envelope_json": "{\"payload_encoding\":\"canonical_json_v1\",\"payload_sha256\":\"71bd17f72b7094e9b88e72ce13a3ecb59c9cdeeb99d4d2c174ad027d8b55f45e\",\"taint\":{\"chain\":[\"source_b\"],\"confidence\":\"plausible\",\"level\":\"untrusted\",\"sanitizations\":1,\"sensitivity\":\"restricted\",\"source\":\"source_a\"},\"version\":1}",
+  "canonical_payload": "{\"a\":[1,true,null],\"z\":\"π\"}"
+}

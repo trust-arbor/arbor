@@ -18,7 +18,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},
     Arbor.Signals => %{
       app: :arbor_signals,
-      deps: [Jason, Logger, TypedStruct],
+      deps: [Arbor.Contracts, Jason, Logger, TypedStruct],
       exports: :all
     },
     Arbor.Monitor => %{

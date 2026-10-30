@@ -4,7 +4,7 @@ defmodule Arbor.Signals.MixProject do
   def project do
     [
       app: :arbor_signals,
-      version: "0.1.0-dev",
+      version: "0.2.0-dev",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -25,6 +25,7 @@ defmodule Arbor.Signals.MixProject do
 
   defp deps do
     [
+      {:arbor_kernel, "~> 2.0.0-dev"},
       {:jason, "~> 1.4"},
       {:typed_struct, "~> 0.3", runtime: false},
       {:telemetry, "~> 1.0"},

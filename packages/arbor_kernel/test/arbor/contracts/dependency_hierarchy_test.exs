@@ -50,14 +50,18 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   end
 
   defp dep_graph(root, env) when is_binary(root) and is_map(env) do
+    projects = tracked_mix_files(root, env)
+    known_apps = MapSet.new(projects, &Path.basename(Path.dirname(&1)))
+
     {graph, _owners} =
-      Enum.reduce(tracked_mix_files(root, env), {%{}, %{}}, fn path, {graph, owners} ->
+      Enum.reduce(projects, {%{}, %{}}, fn path, {graph, owners} ->
         app = Path.basename(Path.dirname(path))
 
         assert not Map.has_key?(owners, app),
                "duplicate application owner #{app}: #{inspect(Map.get(owners, app))} and #{path}"
 
-        {Map.put(graph, app, in_umbrella_deps(path, root)), Map.put(owners, app, path)}
+        {Map.put(graph, app, in_umbrella_deps(path, root, known_apps)),
+         Map.put(owners, app, path)}
       end)
 
     for {owner, deps} <- graph, dependency <- deps do
@@ -188,7 +192,7 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
     end
   end
 
-  defp in_umbrella_deps(path, root) do
+  defp in_umbrella_deps(path, root, known_apps \\ MapSet.new()) do
     ast = path |> File.read!() |> Code.string_to_quoted!()
 
     {_ast, deps} =
@@ -216,8 +220,112 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
           {node, acc}
       end)
 
-    Enum.uniq(deps)
+    published_deps =
+      ast
+      |> published_dependency_declarations()
+      |> Enum.flat_map(fn
+        {dep, requirement} when is_atom(dep) and is_binary(requirement) ->
+          published_repository_dep(dep, requirement, [], known_apps)
+
+        {:{}, _metadata, [dep, requirement, opts]} when is_atom(dep) and is_list(opts) ->
+          published_repository_dep(dep, requirement, opts, known_apps)
+
+        _ ->
+          []
+      end)
+
+    Enum.uniq(deps ++ published_deps)
   end
+
+  defp published_repository_dep(dep, requirement, opts, known_apps) do
+    name = Atom.to_string(dep)
+
+    if is_binary(requirement) and String.starts_with?(name, "arbor_") and
+         MapSet.member?(known_apps, name) and
+         not Enum.any?([:path, :git, :github, :hex], &Keyword.has_key?(opts, &1)) do
+      [name]
+    else
+      []
+    end
+  end
+
+  # Published tuples resemble keyword metadata; inspect only returned dependency
+  # lists and statically reached helpers, preserving legacy path/umbrella parsing.
+  defp published_dependency_declarations(ast) do
+    nodes = block_expressions(ast)
+
+    functions =
+      Enum.reduce(nodes, %{}, fn
+        {kind, _metadata, [{name, _context, args}, body]}, acc
+        when kind in [:def, :defp] and is_atom(name) and args in [nil, []] ->
+          Map.update(acc, name, [Keyword.get(body, :do)], &[Keyword.get(body, :do) | &1])
+
+        _, acc ->
+          acc
+      end)
+
+    deps =
+      functions
+      |> Map.get(:deps, [])
+      |> Enum.flat_map(&dependency_list(&1, functions, MapSet.new([:deps])))
+
+    project_deps =
+      functions
+      |> Map.get(:project, [])
+      |> Enum.flat_map(fn body ->
+        case return_expression(body) do
+          entries when is_list(entries) ->
+            Enum.flat_map(entries, fn
+              {:deps, value} -> dependency_list(value, functions, MapSet.new())
+              _ -> []
+            end)
+
+          _ ->
+            []
+        end
+      end)
+
+    nested_deps =
+      Enum.flat_map(nodes, fn
+        {:defmodule, _metadata, [_module, body]} ->
+          published_dependency_declarations(Keyword.get(body, :do))
+
+        _ ->
+          []
+      end)
+
+    deps ++ project_deps ++ nested_deps
+  end
+
+  defp dependency_list({:__block__, _metadata, expressions}, functions, seen),
+    do: dependency_list(List.last(expressions), functions, seen)
+
+  defp dependency_list(entries, _functions, _seen) when is_list(entries), do: entries
+
+  defp dependency_list({:++, _metadata, [left, right]}, functions, seen),
+    do: dependency_list(left, functions, seen) ++ dependency_list(right, functions, seen)
+
+  defp dependency_list({:|>, _metadata, [entries, _filter]}, functions, seen),
+    do: dependency_list(entries, functions, seen)
+
+  defp dependency_list({name, _metadata, args}, functions, seen)
+       when is_atom(name) and args in [nil, []] do
+    if MapSet.member?(seen, name) do
+      []
+    else
+      functions
+      |> Map.get(name, [])
+      |> Enum.flat_map(&dependency_list(&1, functions, MapSet.put(seen, name)))
+    end
+  end
+
+  defp dependency_list(_dynamic, _functions, _seen), do: []
+
+  defp return_expression({:__block__, _metadata, expressions}), do: List.last(expressions)
+  defp return_expression(expression), do: expression
+
+  defp block_expressions({:__block__, _metadata, expressions}), do: expressions
+  defp block_expressions(expression), do: [expression]
 
   defp repository_path_dep?(dep, opts, project_path, root) do
     case Keyword.get(opts, :path) do
@@ -321,6 +429,126 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
     assert graph["arbor_signals"] == []
     assert Enum.sort(graph["arbor_shell"]) == ["arbor_kernel", "arbor_signals"]
     assert compute_levels(graph)["arbor_shell"] == 1
+  end
+
+  test "published dependencies use only tracked or attested project owners" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+
+    # An on-disk project is not an owner until the selected inventory admits it.
+    untracked = Path.join(fixture.linked, "packages/arbor_untracked/mix.exs")
+    File.mkdir_p!(Path.dirname(untracked))
+    File.write!(untracked, "defmodule Untracked do def deps, do: [] end")
+
+    nested = Path.join(fixture.linked, "packages/arbor_nested/examples/standalone/mix.exs")
+    File.mkdir_p!(Path.dirname(nested))
+    File.write!(nested, "defmodule Nested do def deps, do: [] end")
+    git!(fixture.linked, ["add", "packages/arbor_nested/examples/standalone/mix.exs"])
+
+    inventory_paths = [
+      "apps/arbor_kernel/mix.exs",
+      "apps/arbor_shell/mix.exs",
+      "packages/arbor_nested/examples/standalone/mix.exs"
+    ]
+
+    assert {:ok, inventory} = SourceInventory.build(String.duplicate("e", 40), inventory_paths)
+    assert {:ok, bytes} = SourceInventory.encode(inventory)
+    manifest = Path.join(fixture.scratch, "versioned-source-inventory.json")
+    File.write!(manifest, bytes)
+
+    modes = [
+      %{},
+      %{"ARBOR_MIX_CONTAINED" => "1", "ARBOR_SOURCE_INVENTORY_PATH" => manifest}
+    ]
+
+    for declaration <- [
+          "{:arbor_kernel, \"~> 0.1.0-dev\"}",
+          "{:arbor_kernel, \"~> 0.1.0-dev\", runtime: false}"
+        ] do
+      File.write!(Path.join(fixture.linked, "apps/arbor_shell/mix.exs"), """
+      defmodule Shell.MixProject do
+        def deps do
+          [
+            #{declaration},
+            {:arbor_unknown, "~> 0.1.0"},
+            {:external, "~> 1.0"},
+            {:arbor_untracked, "~> 0.1.0"},
+            {:arbor_nested, "~> 0.1.0"}
+          ]
+        end
+      end
+      """)
+
+      for env <- modes do
+        graph = dep_graph(fixture.linked, env)
+        assert graph == %{"arbor_kernel" => [], "arbor_shell" => ["arbor_kernel"]}
+        assert compute_levels(graph) == %{"arbor_kernel" => 0, "arbor_shell" => 1}
+      end
+    end
+  end
+
+  test "dependency-like metadata does not create hierarchy edges" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+    project = Path.join(fixture.linked, "apps/arbor_shell/mix.exs")
+
+    File.write!(project, """
+    defmodule Shell.MixProject do
+      @labels [arbor_kernel: "Kernel"]
+      @versions [arbor_kernel: "~> 2.0.0-dev", arbor_shell: "~> 0.1.0"]
+      @examples [{:arbor_kernel, "~> 2.0.0-dev", runtime: false}]
+      def project, do: [deps: deps(), package: [arbor_kernel: "~> 2.0.0-dev"]]
+      defp labels, do: [arbor_kernel: "~> 2.0.0-dev"]
+
+      defp deps do
+        _labels = [arbor_kernel: "~> 2.0.0-dev"]
+        [{:external, "~> 1.0", metadata: [arbor_kernel: "~> 2.0.0-dev"]}]
+      end
+    end
+    """)
+
+    assert dep_graph(fixture.linked, %{}) == %{"arbor_kernel" => [], "arbor_shell" => []}
+
+    for declaration <- [
+          "[{:arbor_kernel, \"~> 2.0.0-dev\"}]",
+          "core_deps() ++ optional_deps()"
+        ] do
+      File.write!(project, """
+      defmodule Shell.MixProject do
+        def project, do: [deps: #{declaration}, package: [arbor_shell: "~> 0.1.0"]]
+        defp core_deps, do: [{:arbor_kernel, "~> 2.0.0-dev"}] |> Enum.uniq()
+        defp optional_deps, do: repeated_deps()
+        defp repeated_deps, do: optional_deps()
+        defp labels, do: [arbor_shell: "~> 0.1.0"]
+      end
+      """)
+
+      graph = dep_graph(fixture.linked, %{})
+      assert graph == %{"arbor_kernel" => [], "arbor_shell" => ["arbor_kernel"]}
+      assert compute_levels(graph) == %{"arbor_kernel" => 0, "arbor_shell" => 1}
+    end
+  end
+
+  test "version requirements cannot hide a foreign or dynamic source override" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+
+    for declaration <- [
+          "{:arbor_kernel, \"~> 0.1.0\", path: \"../../../arbor_kernel\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", path: dependency_path()}",
+          "{:arbor_kernel, \"~> 0.1.0\", git: \"https://example.invalid/kernel.git\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", github: \"external/kernel\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", hex: :external_kernel}",
+          "{:arbor_kernel, dependency_version()}"
+        ] do
+      File.write!(Path.join(fixture.linked, "apps/arbor_shell/mix.exs"), """
+      defmodule Shell.MixProject do
+        def deps, do: [#{declaration}]
+      end
+      """)
+
+      assert dep_graph(fixture.linked, %{}) == %{"arbor_kernel" => [], "arbor_shell" => []}
+    end
   end
 
   test "duplicate application/package owners fail closed" do

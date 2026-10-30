@@ -3,7 +3,7 @@ defmodule Arbor.Signals.IndependenceSourceGuardTest do
 
   @moduletag :fast
 
-  test "production sources have no static dependency on another Arbor library" do
+  test "production sources depend only on Kernel's canonical taint contracts" do
     root = package_root(__DIR__)
     files = Path.wildcard(Path.join(root, "lib/**/*.ex"))
     assert length(files) >= 27
@@ -13,6 +13,19 @@ defmodule Arbor.Signals.IndependenceSourceGuardTest do
 
       {_ast, dependencies} =
         Macro.prewalk(ast, [], fn
+          {:use, meta, [{:__aliases__, _alias_meta, [:Boundary]} = boundary, opts]}, acc
+          when is_list(opts) ->
+            opts =
+              Keyword.update(opts, :deps, [], fn deps ->
+                Enum.reject(deps, &boundary_root?/1)
+              end)
+
+            {{:use, meta, [boundary, opts]}, acc}
+
+          {:__aliases__, _meta, [:Arbor, :Contracts, :Security, owner]} = node, acc
+          when owner in [:Taint, :TaintEnvelope] ->
+            {node, acc}
+
           {:__aliases__, _meta, [:Arbor, namespace | _parts]} = node, acc
           when namespace != :Signals ->
             {node, [Macro.to_string(node) | acc]}
@@ -21,7 +34,12 @@ defmodule Arbor.Signals.IndependenceSourceGuardTest do
             name = Atom.to_string(literal)
 
             if String.starts_with?(name, "Elixir.Arbor.") and
-                 not String.starts_with?(name, "Elixir.Arbor.Signals") do
+                 name != "Elixir.Arbor.Signals" and
+                 not String.starts_with?(name, "Elixir.Arbor.Signals.") and
+                 name not in [
+                   "Elixir.Arbor.Contracts.Security.Taint",
+                   "Elixir.Arbor.Contracts.Security.TaintEnvelope"
+                 ] do
               {literal, [name | acc]}
             else
               {literal, acc}
@@ -35,6 +53,10 @@ defmodule Arbor.Signals.IndependenceSourceGuardTest do
              "#{Path.relative_to(path, root)} depends on #{inspect(Enum.uniq(dependencies))}"
     end
   end
+
+  defp boundary_root?({:__aliases__, _meta, [:Arbor, :Contracts]}), do: true
+  defp boundary_root?(Arbor.Contracts), do: true
+  defp boundary_root?(_other), do: false
 
   defp package_root(dir) do
     cond do

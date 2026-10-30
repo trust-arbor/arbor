@@ -1,7 +1,7 @@
 defmodule Arbor.Signals.TaintStructTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Signals.Contracts.Taint, as: TaintStruct
+  alias Arbor.Contracts.Security.Taint, as: TaintStruct
   alias Arbor.Signals.Taint
 
   @moduletag :fast
