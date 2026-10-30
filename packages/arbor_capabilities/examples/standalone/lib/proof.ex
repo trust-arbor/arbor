@@ -54,7 +54,7 @@ defmodule CapabilitiesStandaloneConsumer.Proof do
           CapabilitiesStandaloneConsumer.PeerProof.run_owned!(fn ->
             Security.sign_with_authority(
               authority!(state["child"]),
-              "arbor://standalone/peer-proof"
+              "arbor://standalone/read/peer-proof"
             )
           end)
       end
@@ -280,7 +280,7 @@ defmodule CapabilitiesStandaloneConsumer.Proof do
     )
 
     operator_authority = authority!(operator.agent_id)
-    authorize!(operator.agent_id, operator_authority, "arbor://standalone/operator-proof")
+    authorize!(operator.agent_id, operator_authority, "arbor://standalone/read/operator-proof")
 
     ensure(
       Security.identity_status(state["child"]) == {:ok, :active},
@@ -488,7 +488,7 @@ defmodule CapabilitiesStandaloneConsumer.Proof do
   end
 
   defp decision_and_nonce!(principal, authority, actor) do
-    resource = "arbor://standalone/single-use"
+    resource = "arbor://standalone/read/single-use"
 
     {:ok, capability} =
       Security.grant(
@@ -522,7 +522,7 @@ defmodule CapabilitiesStandaloneConsumer.Proof do
 
     authorize!(principal, authority, resource)
     deny_authorize!(principal, authority, resource)
-    rate_resource = "arbor://standalone/rate-limited"
+    rate_resource = "arbor://standalone/read/rate-limited"
 
     {:ok, _} =
       Security.grant(
