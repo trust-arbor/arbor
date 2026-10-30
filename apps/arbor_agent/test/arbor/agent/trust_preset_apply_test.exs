@@ -23,7 +23,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   ## Test-env setup notes
 
   `arbor_agent`'s app supervisor does not bring up Security or Trust on test boot
-  (`config :arbor_security/:arbor_trust, start_children: false`). This test starts
+  (`config :arbor_capabilities/:arbor_trust, start_children: false`). This test starts
   the exact chain `Lifecycle.create/2` exercises: the Security identity ceremony +
   signing-key store (mirroring `IdentityAliasesTest`), the agent profile store
   (mirroring `ReconcilerTest` / `ManagerTest`), and Trust `Store` + `Manager`
@@ -52,18 +52,18 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     # exit.
     prev_security =
       for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
-        {key, Application.get_env(:arbor_security, key)}
+        {key, Application.get_env(:arbor_capabilities, key)}
       end
 
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
 
     on_exit(fn ->
       for {key, value} <- prev_security do
         if is_nil(value),
-          do: Application.delete_env(:arbor_security, key),
-          else: Application.put_env(:arbor_security, key, value)
+          do: Application.delete_env(:arbor_capabilities, key),
+          else: Application.put_env(:arbor_capabilities, key, value)
       end
     end)
 
@@ -108,7 +108,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     # GenServers below do the work. Added under the already-running (empty)
     # Arbor.Security.Supervisor, tolerating already-started for combined runs.
     security_backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},

@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
@@ -209,7 +212,7 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
 
   setup do
     set_env(
-      :arbor_security,
+      :arbor_capabilities,
       :identity_alias_resolver,
       Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
     )
@@ -770,12 +773,12 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
   # persistence suite. It never points a store or master key at a user's tree.
   defp persistent_root! do
     root = Path.join(System.tmp_dir!(), "arbor_memory_root_#{System.unique_integer([:positive])}")
-    previous_mode = Application.fetch_env(:arbor_security, :system_authority_mode)
-    previous_key = Application.fetch_env(:arbor_security, :master_key_path)
+    previous_mode = Application.fetch_env(:arbor_capabilities, :system_authority_mode)
+    previous_key = Application.fetch_env(:arbor_capabilities, :master_key_path)
 
     on_exit(fn ->
-      restore_env(:arbor_security, :system_authority_mode, previous_mode)
-      restore_env(:arbor_security, :master_key_path, previous_key)
+      restore_env(:arbor_capabilities, :system_authority_mode, previous_mode)
+      restore_env(:arbor_capabilities, :master_key_path, previous_key)
       stop_root_store!()
       Arbor.Security.TestBootstrap.restore_supervised_tree!()
 
@@ -788,8 +791,8 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
     end)
 
     assert {:ok, identity} = Arbor.Security.SystemAuthority.identity_for_test()
-    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
-    Application.put_env(:arbor_security, :master_key_path, Path.join(root, "master.key"))
+    Application.put_env(:arbor_capabilities, :system_authority_mode, :persistent)
+    Application.put_env(:arbor_capabilities, :master_key_path, Path.join(root, "master.key"))
     replace_root_store!(root)
     # Keep the ephemeral root that already signed this test's admissions. A new
     # key would make those grants fail closed as an invalid admission.

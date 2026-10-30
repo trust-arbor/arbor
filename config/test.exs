@@ -4,7 +4,7 @@ config :arbor_kernel_runtime, expose_test_fixtures: true
 config :arbor_support, expose_test_fixtures: true
 config :arbor_signals, expose_test_fixtures: true
 
-config :arbor_security,
+config :arbor_capabilities,
   session_token_secret: "arbor-test-session-token-secret-32-bytes-minimum",
   # Test fixtures deliberately create arbitrary OIDC subjects. Production
   # defaults to provider subject/domain allowlists.
@@ -79,7 +79,7 @@ config :arbor_trust,
   start_children: false,
   action_profile_provider: nil
 
-config :arbor_security,
+config :arbor_capabilities,
   start_children: false,
   # Distributed state synchronization is exercised by its focused regression
   # suite. Other app tests start isolated security stores without a Signals bus.

@@ -23,7 +23,7 @@ defmodule Arbor.Memory.HybridSearchTest do
       {:arbor_memory, :hybrid_knowledge_search},
       {:arbor_llm, :trusted_proxy_endpoints},
       {:arbor_llm, :pipeline},
-      {:arbor_security, :egress_gate_enforcing}
+      {:arbor_capabilities, :egress_gate_enforcing}
     ]
 
     previous =
@@ -33,7 +33,7 @@ defmodule Arbor.Memory.HybridSearchTest do
     Application.put_env(:arbor_memory, :hybrid_knowledge_search, route())
     Application.put_env(:arbor_llm, :trusted_proxy_endpoints, %{"lm_studio" => [@base]})
     Application.delete_env(:arbor_llm, :pipeline)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
     Req.Test.set_req_test_to_shared()
     Req.default_options(plug: {Req.Test, __MODULE__}, retry: false)
 

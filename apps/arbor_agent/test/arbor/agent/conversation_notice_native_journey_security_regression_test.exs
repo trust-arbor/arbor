@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
@@ -198,15 +201,16 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
 
   setup %{root: root} = tags do
     for {app, key, value} <- [
-          {:arbor_security, :identity_verification, true},
-          {:arbor_security, :capability_signing_required, true},
-          {:arbor_security, :constraint_enforcement_enabled, true},
-          {:arbor_security, :policy_enforcer_enabled, true},
-          {:arbor_security, :approval_guard_enabled, true},
-          {:arbor_security, :reflex_checking_enabled, true},
-          {:arbor_security, :uri_registry_enforcement, true},
-          {:arbor_security, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
-          {:arbor_security, :native_notice_source_authorizer, Arbor.Agent.NoticeSourceAuthority},
+          {:arbor_capabilities, :identity_verification, true},
+          {:arbor_capabilities, :capability_signing_required, true},
+          {:arbor_capabilities, :constraint_enforcement_enabled, true},
+          {:arbor_capabilities, :policy_enforcer_enabled, true},
+          {:arbor_capabilities, :approval_guard_enabled, true},
+          {:arbor_capabilities, :reflex_checking_enabled, true},
+          {:arbor_capabilities, :uri_registry_enforcement, true},
+          {:arbor_capabilities, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
+          {:arbor_capabilities, :native_notice_source_authorizer,
+           Arbor.Agent.NoticeSourceAuthority},
           {:arbor_trust, :policy_module, Arbor.Trust.Policy},
           {:arbor_trust, :policy_enforcer_enabled, true},
           {:arbor_trust, :approval_guard_enabled, true},
@@ -234,11 +238,11 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
 
     # Use actual public OIDC registration with owned idempotent cleanup; the
     # deliberate retirement case must not fail later on a second deregistration.
-    set_env(:arbor_security, :strict_identity_mode, true)
-    set_env(:arbor_security, :session_token_module, Arbor.Security.SessionToken)
+    set_env(:arbor_capabilities, :strict_identity_mode, true)
+    set_env(:arbor_capabilities, :session_token_module, Arbor.Security.SessionToken)
 
     set_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "native-notice-test-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     )

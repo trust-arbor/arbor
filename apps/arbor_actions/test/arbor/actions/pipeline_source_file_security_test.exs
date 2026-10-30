@@ -21,7 +21,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
   """
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     start_trust_infrastructure()
 
     workdir =

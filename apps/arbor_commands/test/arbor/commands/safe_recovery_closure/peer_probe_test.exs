@@ -9,7 +9,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbeTest do
 
   setup do
     previous_system_env = System.fetch_env(@env)
-    previous_app_env = Application.fetch_env(:arbor_security, :authority_state_root)
+    previous_app_env = Application.fetch_env(:arbor_capabilities, :authority_state_root)
     previous_runtime = Application.fetch_env(:arbor_kernel, :kernel_runtime)
 
     on_exit(fn ->
@@ -27,7 +27,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbeTest do
     System.put_env(@env, path)
 
     assert :ok = PeerProbe.__test_install_ephemeral_authority_root__()
-    assert Application.get_env(:arbor_security, :authority_state_root) == path
+    assert Application.get_env(:arbor_capabilities, :authority_state_root) == path
   end
 
   test "rejects a missing root without selecting a fallback" do
@@ -143,10 +143,10 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbeTest do
   defp restore_system_env(:error), do: System.delete_env(@env)
 
   defp restore_app_env({:ok, value}),
-    do: Application.put_env(:arbor_security, :authority_state_root, value)
+    do: Application.put_env(:arbor_capabilities, :authority_state_root, value)
 
   defp restore_app_env(:error),
-    do: Application.delete_env(:arbor_security, :authority_state_root)
+    do: Application.delete_env(:arbor_capabilities, :authority_state_root)
 
   defp restore_runtime({:ok, value}),
     do: Application.put_env(:arbor_kernel, :kernel_runtime, value)

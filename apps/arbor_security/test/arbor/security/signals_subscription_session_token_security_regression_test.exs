@@ -21,10 +21,10 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
     backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -64,23 +64,23 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
 
   setup do
     prev = %{
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      strict: Application.get_env(:arbor_security, :strict_identity_mode),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      uri: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      secret: Application.get_env(:arbor_security, :session_token_secret),
-      token_mod: Application.get_env(:arbor_security, :session_token_module)
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      strict: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      uri: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      secret: Application.get_env(:arbor_capabilities, :session_token_secret),
+      token_mod: Application.get_env(:arbor_capabilities, :session_token_module)
     }
 
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "k1f-test-secret-at-least-thirty-two-bytes-#{System.unique_integer([:positive])}"
     )
@@ -169,7 +169,7 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
     grant!(human_id, @resource)
     assert {:ok, token} = SessionToken.generate(human_id)
 
-    Application.put_env(:arbor_security, :session_token_module, RejectingSessionToken)
+    Application.put_env(:arbor_capabilities, :session_token_module, RejectingSessionToken)
 
     assert {:error, _reason} =
              Security.authorize(human_id, @resource, :subscribe, session_token: token)
@@ -212,6 +212,6 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
     :ok
   end
 
-  defp restore_security(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

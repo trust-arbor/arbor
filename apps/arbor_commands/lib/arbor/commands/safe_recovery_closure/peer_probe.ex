@@ -178,7 +178,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   defp install_ephemeral_authority_root do
     with {:ok, root} <- fetch_ephemeral_authority_root(),
          :ok <- validate_ephemeral_authority_root(root) do
-      Application.put_env(:arbor_security, :authority_state_root, root)
+      Application.put_env(:arbor_capabilities, :authority_state_root, root)
     end
   end
 

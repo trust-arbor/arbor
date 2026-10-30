@@ -1,0 +1,115 @@
+defmodule Arbor.Security.Identity.VerifierTest do
+  use ExUnit.Case, async: false
+  @moduletag :fast
+
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.SignalTransport
+
+  setup do
+    {:ok, identity} = Identity.generate()
+    :ok = Registry.register_fixture(identity)
+
+    {:ok, identity: identity}
+  end
+
+  describe "verify/1" do
+    test "valid signed request succeeds", %{identity: identity} do
+      {:ok, signed} = SignedRequest.sign("test payload", identity.agent_id, identity.private_key)
+
+      assert {:ok, agent_id} = Verifier.verify(signed)
+      assert agent_id == identity.agent_id
+    end
+
+    test "unknown agent returns error" do
+      {:ok, unregistered} = Identity.generate()
+      {:ok, signed} = SignedRequest.sign("test", unregistered.agent_id, unregistered.private_key)
+
+      assert {:error, :unknown_agent} = Verifier.verify(signed)
+    end
+
+    test "invalid signature returns error", %{identity: identity} do
+      {:ok, signed} = SignedRequest.sign("test", identity.agent_id, identity.private_key)
+
+      # Tamper with the signature
+      tampered = %{signed | signature: :crypto.strong_rand_bytes(byte_size(signed.signature))}
+
+      assert {:error, :invalid_signature} = Verifier.verify(tampered)
+    end
+
+    test "expired timestamp returns error", %{identity: identity} do
+      # Create a request with an old timestamp
+      old_timestamp = DateTime.add(DateTime.utc_now(), -120, :second)
+      nonce = :crypto.strong_rand_bytes(16)
+
+      # Build the request manually to control the timestamp
+      request_for_signing = %SignedRequest{
+        payload: "old request",
+        agent_id: identity.agent_id,
+        timestamp: old_timestamp,
+        nonce: nonce,
+        signature: <<>>
+      }
+
+      message = SignedRequest.signing_payload(request_for_signing)
+      signature = :crypto.sign(:eddsa, :sha512, message, [identity.private_key, :ed25519])
+      signed = %{request_for_signing | signature: signature}
+
+      assert {:error, :expired_timestamp} = Verifier.verify(signed)
+    end
+
+    test "replayed nonce returns error", %{identity: identity} do
+      {:ok, signed} = SignedRequest.sign("test", identity.agent_id, identity.private_key)
+
+      # First verification should succeed
+      assert {:ok, _} = Verifier.verify(signed)
+
+      # Same nonce should be rejected
+      assert {:error, :replayed_nonce} = Verifier.verify(signed)
+    end
+
+    test "hostile partial and malformed request structs return typed errors", %{
+      identity: identity
+    } do
+      {:ok, signed} = SignedRequest.sign("test", identity.agent_id, identity.private_key)
+
+      assert {:error, :malformed_request} =
+               Verifier.verify(%{__struct__: SignedRequest, payload: "partial"})
+
+      assert {:error, :malformed_request} =
+               Verifier.verify(%{signed | timestamp: %{DateTime.utc_now() | month: 13}})
+
+      assert {:error, :malformed_request} = Verifier.verify(%{signed | signature: <<1>>})
+      assert {:error, :malformed_request} = Verifier.verify(%{})
+    end
+
+    test "security regression: valid signed request is denied when peers are present", %{
+      identity: identity
+    } do
+      transport = Application.fetch_env(:arbor_capabilities, :signal_transport)
+      Application.put_env(:arbor_capabilities, :signal_transport, nil)
+
+      on_exit(fn ->
+        case transport do
+          {:ok, provider} -> Application.put_env(:arbor_capabilities, :signal_transport, provider)
+          :error -> Application.delete_env(:arbor_capabilities, :signal_transport)
+        end
+      end)
+
+      assert SignalTransport.capture() == {:ok, nil}
+      assert Node.list() == []
+
+      Arbor.Security.Config.inject_test_cluster_peers_present(true)
+
+      try do
+        {:ok, signed} = SignedRequest.sign("clustered", identity.agent_id, identity.private_key)
+
+        assert {:error, :cluster_replay_protection_unavailable} = Verifier.verify(signed)
+      after
+        Arbor.Security.Config.inject_test_cluster_peers_present(false)
+      end
+    end
+  end
+end

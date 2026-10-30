@@ -25,10 +25,10 @@ defmodule Arbor.Scheduler.OwnedRoutineSecurityRegressionTest do
        f do
     intent = F.intent!(f)
     old = DateTime.add(DateTime.utc_now(), -120)
-    F.env(:arbor_security, :timestamp_max_drift_seconds, 300)
+    F.env(:arbor_capabilities, :timestamp_max_drift_seconds, 300)
     proof = F.proof!(f.owner, :enqueue, intent, timestamp: old)
     assert {:ok, job} = Scheduler.enqueue_routine(intent, proof)
-    Application.put_env(:arbor_security, :timestamp_max_drift_seconds, 60)
+    Application.put_env(:arbor_capabilities, :timestamp_max_drift_seconds, 60)
 
     assert :ok = Supervisor.terminate_child(f.repo_supervisor, Repo)
     assert {:ok, _} = Supervisor.restart_child(f.repo_supervisor, Repo)

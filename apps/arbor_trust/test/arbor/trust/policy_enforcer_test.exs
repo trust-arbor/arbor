@@ -45,14 +45,14 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     ensure_started(Arbor.Security.SystemAuthority)
 
     prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
-    prev_security_enforcer = Application.get_env(:arbor_security, :policy_enforcer_enabled)
+    prev_security_enforcer = Application.get_env(:arbor_capabilities, :policy_enforcer_enabled)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
     prev_profile_overrides = Application.get_env(:arbor_trust, :capability_profile_overrides)
     prev_action_profile_provider = Application.get_env(:arbor_trust, :action_profile_provider)
 
     on_exit(fn ->
       restore(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
-      restore(:arbor_security, :policy_enforcer_enabled, prev_security_enforcer)
+      restore(:arbor_capabilities, :policy_enforcer_enabled, prev_security_enforcer)
       restore(:arbor_trust, :policy_module, prev_policy)
       restore(:arbor_trust, :capability_profile_overrides, prev_profile_overrides)
       restore(:arbor_trust, :action_profile_provider, prev_action_profile_provider)
@@ -66,15 +66,15 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
   describe "enabled?/0" do
     test "uses compatibility fallback from security config" do
       Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
-      Application.put_env(:arbor_security, :policy_enforcer_enabled, false)
+      Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, false)
       refute PolicyEnforcer.enabled?()
 
-      Application.put_env(:arbor_security, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, true)
       assert PolicyEnforcer.enabled?()
     end
 
     test "trust config overrides compatibility fallback" do
-      Application.put_env(:arbor_security, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
 
       refute PolicyEnforcer.enabled?()

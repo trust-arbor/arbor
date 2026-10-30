@@ -380,7 +380,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
       {:arbor_orchestrator, :coding_pipeline_logs_root},
       {:arbor_orchestrator, :coding_reconciliation_resource_facade},
       {:arbor_orchestrator, :security_module},
-      {:arbor_security, :identity_verification},
+      {:arbor_capabilities, :identity_verification},
       {:arbor_trust, :policy_enforcer_enabled}
     ]
 
@@ -409,7 +409,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
     )
 
     Application.put_env(:arbor_orchestrator, :security_module, Security)
-    Application.put_env(:arbor_security, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
     previous
   end

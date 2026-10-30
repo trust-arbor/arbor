@@ -63,7 +63,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     network_egress: %{
       id: :egress_gate,
       layer: :soft,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "EgressGate tier, taint, and destination decision",
       decision_path: :egress_gate,
       authorize4_dependent?: false
@@ -71,7 +71,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     filesystem_write: %{
       id: :file_guard,
       layer: :soft,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "FileGuard path-scope and traversal check",
       decision_path: :file_guard,
       authorize4_dependent?: false
@@ -87,7 +87,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     administrative_mutation: %{
       id: :capability_gate,
       layer: :soft,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "capability authorization for identity, governance, or trust mutation",
       decision_path: :security_authorize,
       authorize4_dependent?: true
@@ -95,7 +95,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     financial: %{
       id: :capability_gate,
       layer: :soft,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "capability authorization for metered or financial effects",
       decision_path: :security_authorize,
       authorize4_dependent?: true
@@ -146,7 +146,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     administrative_mutation: %{
       id: :non_agent_admin_boundary,
       layer: :hard,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "non-agent-owned administrative boundary for privileged writes",
       decision_path: :operator_admin_boundary,
       authorize4_dependent?: false
@@ -154,7 +154,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
     financial: %{
       id: :budget_or_payment_boundary,
       layer: :hard,
-      owner: :arbor_security,
+      owner: :arbor_capabilities,
       mechanism: "non-agent-owned budget or payment boundary",
       decision_path: :operator_budget_boundary,
       authorize4_dependent?: false

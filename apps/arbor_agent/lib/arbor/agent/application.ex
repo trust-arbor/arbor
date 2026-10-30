@@ -15,7 +15,7 @@ defmodule Arbor.Agent.Application do
     # and `start_children: false` (test) must not silently disable an
     # authorization input.
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :identity_alias_resolver,
       Arbor.Agent.IdentityAliasResolver
     )

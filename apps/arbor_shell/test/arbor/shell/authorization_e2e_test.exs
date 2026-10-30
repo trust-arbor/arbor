@@ -18,17 +18,17 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
   setup do
     # Disable features that interfere with minimal authorization tests
-    prev_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
-    prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
-    prev_identity = Application.get_env(:arbor_security, :strict_identity_mode)
-    prev_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
-    prev_receipts = Application.get_env(:arbor_security, :invocation_receipts_enabled)
+    prev_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled)
+    prev_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    prev_identity = Application.get_env(:arbor_capabilities, :strict_identity_mode)
+    prev_approval = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
+    prev_receipts = Application.get_env(:arbor_capabilities, :invocation_receipts_enabled)
 
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
 
     agent_id = ContainmentFixture.install!()
 
@@ -609,8 +609,8 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     end
   end
 
-  defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_config(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_config(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 
   # Restore Application env deterministically so compound_shell_enabled never
   # leaks across tests (async: false shared process state).

@@ -70,7 +70,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
       assert %CapabilityProfile{owner: :arbor_shell, uri_prefix: "arbor://shell"} =
                CapabilityProfileRegistry.profile_for("arbor://shell/exec")
 
-      assert %CapabilityProfile{owner: :arbor_security, uri_prefix: "arbor://fs/write"} =
+      assert %CapabilityProfile{owner: :arbor_capabilities, uri_prefix: "arbor://fs/write"} =
                CapabilityProfileRegistry.profile_for("arbor://fs/write")
     end
 

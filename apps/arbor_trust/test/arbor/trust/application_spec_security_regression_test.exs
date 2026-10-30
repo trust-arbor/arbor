@@ -58,7 +58,7 @@ defmodule Arbor.Trust.ApplicationSpecSecurityRegressionTest do
         ApplicationSpecPeer.prepare_restricted!(
           control,
           :arbor_trust,
-          [:arbor_kernel, :arbor_security, :arbor_trust],
+          [:arbor_kernel, :arbor_capabilities, :arbor_trust],
           Mix.Project.build_path()
         )
 

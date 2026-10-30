@@ -45,7 +45,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorCallOutcomeSecurityRegressionTest do
   end
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     unless Process.whereis(TrustStore), do: start_supervised!(TrustStore)
@@ -69,13 +69,13 @@ defmodule Arbor.Orchestrator.ActionsExecutorCallOutcomeSecurityRegressionTest do
     Process.register(self(), :executor_call_outcome_probe)
 
     env = [
-      {:arbor_security, :reflex_checking_enabled, false},
-      {:arbor_security, :capability_signing_required, false},
-      {:arbor_security, :identity_verification, false},
-      {:arbor_security, :strict_identity_mode, false},
-      {:arbor_security, :uri_registry_enforcement, false},
-      {:arbor_security, :consensus_escalation_enabled, false},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :reflex_checking_enabled, false},
+      {:arbor_capabilities, :capability_signing_required, false},
+      {:arbor_capabilities, :identity_verification, false},
+      {:arbor_capabilities, :strict_identity_mode, false},
+      {:arbor_capabilities, :uri_registry_enforcement, false},
+      {:arbor_capabilities, :consensus_escalation_enabled, false},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, true}
     ]

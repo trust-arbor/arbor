@@ -1,4 +1,7 @@
-Code.require_file("../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+Code.require_file(
+  "../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+  __DIR__
+)
 
 defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
   @moduledoc """
@@ -64,9 +67,9 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
       )
 
     previous_memory = memory_child!()
-    previous_resolver = Application.fetch_env(:arbor_security, :identity_alias_resolver)
-    previous_mode = Application.fetch_env(:arbor_security, :system_authority_mode)
-    previous_key = Application.fetch_env(:arbor_security, :master_key_path)
+    previous_resolver = Application.fetch_env(:arbor_capabilities, :identity_alias_resolver)
+    previous_mode = Application.fetch_env(:arbor_capabilities, :system_authority_mode)
+    previous_key = Application.fetch_env(:arbor_capabilities, :master_key_path)
     {:ok, supervisor} = Supervisor.start_link([], strategy: :one_for_one)
     Process.unlink(supervisor)
 
@@ -91,13 +94,13 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
     remove_root_store!()
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :identity_alias_resolver,
       Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver
     )
 
-    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
-    Application.put_env(:arbor_security, :master_key_path, Path.join(root, "master.key"))
+    Application.put_env(:arbor_capabilities, :system_authority_mode, :persistent)
+    Application.put_env(:arbor_capabilities, :master_key_path, Path.join(root, "master.key"))
 
     root_opts = [
       name: @root_name,
@@ -298,6 +301,6 @@ defmodule Arbor.Memory.Test.PrivateSnapshotFixture do
     :ok
   end
 
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_security, key, value)
-  defp restore_env(key, :error), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_capabilities, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_capabilities, key)
 end

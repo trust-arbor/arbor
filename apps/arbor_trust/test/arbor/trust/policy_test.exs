@@ -582,14 +582,14 @@ defmodule Arbor.Trust.PolicyTest do
   defp restore_env(_app, key, value), do: Application.put_env(:arbor_trust, key, value)
 
   defp put_security_env(key, value) do
-    previous = Application.get_env(:arbor_security, key)
-    Application.put_env(:arbor_security, key, value)
+    previous = Application.get_env(:arbor_capabilities, key)
+    Application.put_env(:arbor_capabilities, key, value)
 
     on_exit(fn ->
       if is_nil(previous) do
-        Application.delete_env(:arbor_security, key)
+        Application.delete_env(:arbor_capabilities, key)
       else
-        Application.put_env(:arbor_security, key, previous)
+        Application.put_env(:arbor_capabilities, key, previous)
       end
     end)
   end

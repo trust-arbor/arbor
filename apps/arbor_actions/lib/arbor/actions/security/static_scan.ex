@@ -36,7 +36,7 @@ defmodule Arbor.Actions.Security.StaticScan do
 
   # Path fragments whose findings are hard-capped to :high risk (never
   # auto-remediated) — mirrors Finding.high_risk_location?/1.
-  @high_risk_markers ["arbor_security", "capability", "trust", "auth"]
+  @high_risk_markers ["arbor_security", "arbor_capabilities", "capability", "trust", "auth"]
 
   @type summary :: %{
           total: non_neg_integer(),

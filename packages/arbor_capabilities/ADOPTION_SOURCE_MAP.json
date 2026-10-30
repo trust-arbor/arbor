@@ -1,0 +1,1122 @@
+{
+  "schema": "arbor.capabilities.adoption-source-map.v1",
+  "source_commit": "3fbe6596fa2da06480fbdd75c3b516815d79a9d3",
+  "source_owner": "apps/arbor_security",
+  "target_owner": "packages/arbor_capabilities",
+  "scope": "Production source rows only. Test dispositions are maintained by the separate integration/QA lease.",
+  "module_identity_policy": "Preserve all Arbor.Security module identities, root supervisor/child IDs, ETS/persistent keys, cryptographic algorithms, signed domains, wire and durable identities. Canonical app/config owner is :arbor_capabilities.",
+  "dispositions": [
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security.ex",
+      "source_sha256": "b428b44c65e09d7fe39b9138b720fda66fedcc9ab1164082d7e65cb7666bdeba",
+      "source_git_blob_oid": "f39a84de2759531a505b2e536439646ee353224d",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Add strict independent Security Boundary exporting the historical ABI; remove consumer-owned SkillImporter/Signals behaviours and only their implementation annotations, preserving function bodies.",
+        "Document boot authority supplied by the trusted RuntimeHost contract.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings.",
+        "Admit Mix and TypedStruct only at compile time; admit ExUnit only in the literal test-build Boundary declaration; depend on the isolated OIDC.Config boundary for its preserved runtime environment fallback."
+      ],
+      "target_sha256": "7b9f799cbc47764ff91633b454e67ad5a8ec932112e1ed3bb227c0f12ffa70d8"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/adapters/signals_transport.ex",
+      "source_sha256": "63fa0c8f9c2ec7a1c93ca29117df92ee1df48867f93286959f9053695835986d",
+      "source_git_blob_oid": "4ea5e6502e9c431e3567c7cacb40d51342c6f7df",
+      "target_path": "packages/arbor_capabilities_signals/lib/arbor/security/adapters/signals_transport.ex",
+      "disposition": "consumer_owned_integration_move",
+      "permitted_changes": [
+        "Move concrete Signals transport to the consumer-owned integration package; add its independent Boundary without changing transport bodies."
+      ],
+      "target_sha256": "c7c05b54dae457afeec76bd2d8b6a1c75011485d0e093665e0e0fb9312bdd7b4"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/application.ex",
+      "source_sha256": "467111d9e1be75c96b8e319b5c0bb4fbb58fded50792761537aa8054823b035e",
+      "source_git_blob_oid": "476851d09bdedc3d55565967d3699bf1548160cf",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/application.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Prepare trusted RuntimeHost before any authority claims/freezes; preserve original host gate-first startup and all authority phases, while standalone omits only the host gate."
+      ],
+      "target_sha256": "ee28ccd340af3b21252e3bf11d752503d5233fec452da781f65e1c092d42ebce"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/approval_receipt_broker.ex",
+      "source_sha256": "cb732226779ab92b663d104e66e723e3f226bf490e2a2d889b24e955fb5d9b5c",
+      "source_git_blob_oid": "f0b4bd3480531c3191e3bd506948bab55521f6a4",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/approval_receipt_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "37289c109ed439567d11917d2528c50567bbcf10c06c443febe65e624ae4c7cd"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_core.ex",
+      "source_sha256": "bad36b2ef4be61c5e8f3f190777fbf8c7f8464c9aa9340ca262ee1881c4403ef",
+      "source_git_blob_oid": "9e49c73569ae249e8e878711a7dcd9054f2df5c9",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "bad36b2ef4be61c5e8f3f190777fbf8c7f8464c9aa9340ca262ee1881c4403ef"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_file.ex",
+      "source_sha256": "079a619cea5cea5d25668c0d064cd1bf33f1ed955d83553842d8b76e2025872b",
+      "source_git_blob_oid": "4c4a060afd8f4f698bf2f7913bc2a71467373892",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_file.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "079a619cea5cea5d25668c0d064cd1bf33f1ed955d83553842d8b76e2025872b"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_file_core.ex",
+      "source_sha256": "f2622c4fab0bae44f28bf1df3b696ee1169c71f27fb6838fa26f033b4de6c8a4",
+      "source_git_blob_oid": "7c42a5a4d433150f2ebd63c22149c9a40331063e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_file_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "f2622c4fab0bae44f28bf1df3b696ee1169c71f27fb6838fa26f033b4de6c8a4"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_file_proofs.ex",
+      "source_sha256": "17d73cf5dfa028b5d11424a86f8ecb8870cd7db512508cc2de270dc948d7b835",
+      "source_git_blob_oid": "65a9e051d6412b97a850d64861b9f2d3b2aa7066",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_file_proofs.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "00f1bec267c8e85b47f96ec6bd50285c23aeeef15162f873647cb2e529f53cab"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_owner.ex",
+      "source_sha256": "ceaa1c3acd550f8123d9a827c69149fd8fa427c0f78c4e40710e8f43620d9a5e",
+      "source_git_blob_oid": "2bc5cb62c758602045bfeafc1181b7f856406a8a",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "db143fff96b53447a3c6cbf53704b191a8666102a07cc38d9385e0ee180dd6bc"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_journal_recovery.ex",
+      "source_sha256": "4cf721ed04662d0ba192544e66b3db31102907e634f5836f6ea2e2c3c9ecfe34",
+      "source_git_blob_oid": "aaae618caeaa7d8c10e21b1b04f34da2b536401e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_journal_recovery.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "4cf721ed04662d0ba192544e66b3db31102907e634f5836f6ea2e2c3c9ecfe34"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_retirement_ledger.ex",
+      "source_sha256": "77857a3c6a77394a4a150eb7448791fd14300099a74a66e8938a1cc0c221d3bf",
+      "source_git_blob_oid": "ae8179e684237c519d341407399e2fb32d9219da",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_retirement_ledger.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "77857a3c6a77394a4a150eb7448791fd14300099a74a66e8938a1cc0c221d3bf"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/audit_retirement_ledger_core.ex",
+      "source_sha256": "c1757c4d8b93294fb1cb13d0277e0ca23c35ebfc6ce59ce81fa5d199e2169237",
+      "source_git_blob_oid": "d8a22ca218c8266c82851b69e602c27c1c95fad4",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/audit_retirement_ledger_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c1757c4d8b93294fb1cb13d0277e0ca23c35ebfc6ce59ce81fa5d199e2169237"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/auth_decision.ex",
+      "source_sha256": "7cfbc776fc9d92b908f5cad93d1b58b515863e0f29eee1b87416b91af1c8dea5",
+      "source_git_blob_oid": "f124e5548b2dd80d38c4ae23bcd03182696c4de8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/auth_decision.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "eafed47b935e51b76dff9f4fb44bf2dae0e81d02cc486c26a4c89dd64cdc1027"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/authority_audit_consumer.ex",
+      "source_sha256": "258b40724ed50b2689afd63494e5c968c89f3905894adb2c3f04c07ff4897d44",
+      "source_git_blob_oid": "858e11ff5282fac7974b05a8e7c7c442abe3edb5",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/authority_audit_consumer.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "258b40724ed50b2689afd63494e5c968c89f3905894adb2c3f04c07ff4897d44"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/authority_store.ex",
+      "source_sha256": "cfc9f0ca0109d415c64ca6ec334d7d13f78c775c0f2e1ba5830718b5bc6e7236",
+      "source_git_blob_oid": "b64463235ea6278cec474f37a15b9cde696ae8ad",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/authority_store.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "18812d409c345050d68420f09538890a8f07b59497a1cdc7f9c0d82cd28ddb79"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/capability/signer.ex",
+      "source_sha256": "9f76b6de8615416726d77d52e6dce26967f545654f629dbbbf5a9decd69f6067",
+      "source_git_blob_oid": "39ddfe6aed54b7bb9af7f16fd879f0c1f7ef1580",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/capability/signer.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "9f76b6de8615416726d77d52e6dce26967f545654f629dbbbf5a9decd69f6067"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/capability_audit_core.ex",
+      "source_sha256": "d6fa9631e716c98d48586a894b19df16e52c70894f7a2be75808b1b6931826be",
+      "source_git_blob_oid": "71ec34a529b3b105c8bb66ff607481f937e017f8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/capability_audit_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "d6fa9631e716c98d48586a894b19df16e52c70894f7a2be75808b1b6931826be"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/capability_mutation_audit.ex",
+      "source_sha256": "0530b729853116945b53f1615c5f6382c19553d6b59eb23e9c76752dda9d28b2",
+      "source_git_blob_oid": "aa496cfc4373879a50214c7b04b56c9e2c254e7b",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/capability_mutation_audit.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "0530b729853116945b53f1615c5f6382c19553d6b59eb23e9c76752dda9d28b2"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/capability_store.ex",
+      "source_sha256": "b2f0ea45de03ee0895252091017e45162e5faafd3229f04c18953cb637c6ac3a",
+      "source_git_blob_oid": "35199a0f6992cdc1be2a23ffbd48880ddc2b80dd",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/capability_store.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "182ff050d6e30f123384a35f53421dd436576e05b3484528b2d4932bb2045df6"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/capability_store/serializer.ex",
+      "source_sha256": "09eac11d066ee08234195caf1a3231e5521e0aa0815cd0d2de40b4701597be13",
+      "source_git_blob_oid": "f44d21346d31804fa222fe37706e28264e3d759c",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/capability_store/serializer.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "09eac11d066ee08234195caf1a3231e5521e0aa0815cd0d2de40b4701597be13"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/channel_authority_broker.ex",
+      "source_sha256": "9df70fecc8987f6f2df60eefe2b4408e29213fd5c1711170c63c2d8b23639fc7",
+      "source_git_blob_oid": "563d896c6b647f58339b6b0749d1e185d10f7e9f",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/channel_authority_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "07cccf6296e466e6de33afa379ac1737268c9584e79e950a31ae833ac583a9c5"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/config.ex",
+      "source_sha256": "a70cf0263147a2c58dd3c7e719003953593699d53244656166b0005f3cc8c63f",
+      "source_git_blob_oid": "d24367c7b8c4608049d7611bc62982576e58f912",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/config.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace concrete product defaults with nil; require explicit absolute authority roots; route startup-profile reads through Core Runtime and reject invalid profiles before root freeze.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings.",
+        "Use an explicit Runtime alias for the new runtime-port calls; no behavior or authority change."
+      ],
+      "target_sha256": "edf2002a2cfbe1ff850ccfcb2251189153f070a353dd0ca0a5ef847d0e1e7e66"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/constraint.ex",
+      "source_sha256": "a0d3ebd00f7f43442c5becf08b6ca36a5b1bd3741042042c70407b3f6a35dfaa",
+      "source_git_blob_oid": "8b973e2c3d8b37e53310af813cc4b1a435127602",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/constraint.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "a0d3ebd00f7f43442c5becf08b6ca36a5b1bd3741042042c70407b3f6a35dfaa"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/constraint/rate_limiter.ex",
+      "source_sha256": "27a2011b1b58880b39b00bcfce340ad1e04fe0a2a455f4bbd67030f62896055d",
+      "source_git_blob_oid": "e36a5524a3fa6231b761d892dff7c2e1bcca8ab6",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/constraint/rate_limiter.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "014fb5640e52974a462352b36b6df287bd8bf9052f9110ef2f86240cacc9e9fe"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/audit_journal.ex",
+      "source_sha256": "ccf4fab10324fc1e11cdfb009ee3306a23fe88a208b7e92be1f71989bf468d57",
+      "source_git_blob_oid": "a7f396a2df769d8f4b1917c010a5f0d2b0eae813",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/audit_journal.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "ccf4fab10324fc1e11cdfb009ee3306a23fe88a208b7e92be1f71989bf468d57"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/event_log_adapter.ex",
+      "source_sha256": "df35945e2caf110ea86d416616d836925c1eb4b30904d48cc9bd4a9db4284d47",
+      "source_git_blob_oid": "9056bf61afe85393a56448d3ab0bf9274773aaa8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/event_log_adapter.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "796a964794a2bdd544ddd335b41d74312faaec889bbae457eead73979479b550"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/interaction_router.ex",
+      "source_sha256": "19fefa9f9a0fac524b8fa9edb4134217fc6610628955e8c0789c6c7f2bfdbf81",
+      "source_git_blob_oid": "92d07a4b5b069e5abb5dcc2811fbdc57a344f08b",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/interaction_router.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "f17d88b8d39d19c795f00f34260b53fd28d03c956f1d227451fc134ba7c3f4af"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/native_notice_source_authorizer.ex",
+      "source_sha256": "fd853f64320690ee3c823f305b3c5f6faa98c841c78e18b1d8f578ee53929296",
+      "source_git_blob_oid": "6438adcfa54131cdc677b6cdead4f32d7a9e11c2",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/native_notice_source_authorizer.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "fd853f64320690ee3c823f305b3c5f6faa98c841c78e18b1d8f578ee53929296"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/operator_resolver.ex",
+      "source_sha256": "9a2e59d34561221e843be5883f57f7caf4ffdd28c3deb015c06366c3515a0f14",
+      "source_git_blob_oid": "e420cfe4618cb514a3721849002d6c56a4668941",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/operator_resolver.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "9a2e59d34561221e843be5883f57f7caf4ffdd28c3deb015c06366c3515a0f14"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/private_goal_snapshot.ex",
+      "source_sha256": "5d085c531f74a79aa24d1fe0dd2303ae546d23d5d28149c9a6a7b951205af58f",
+      "source_git_blob_oid": "f3a0e1a1b38ca5feb20886c67048d26d86187a62",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/private_goal_snapshot.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "5d085c531f74a79aa24d1fe0dd2303ae546d23d5d28149c9a6a7b951205af58f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/private_memory_admission.ex",
+      "source_sha256": "be88e7557916b1f7b6164743a58f6707dbde8c9236820fdba0428fabf67dc5e4",
+      "source_git_blob_oid": "044d1ba4867e95bd288afd2bbba72fefdf5467db",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/private_memory_admission.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "be88e7557916b1f7b6164743a58f6707dbde8c9236820fdba0428fabf67dc5e4"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/private_memory_record.ex",
+      "source_sha256": "8af086f7e018dc72361bf871cf5041f187622131b1b465371c3a30587c56052f",
+      "source_git_blob_oid": "e9fb9a87339ecbe055349e47fa77d4508fb57085",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/private_memory_record.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "8af086f7e018dc72361bf871cf5041f187622131b1b465371c3a30587c56052f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/private_memory_source.ex",
+      "source_sha256": "0e1148da489185a53c025651e913282479111858187d043d85235ed723f508cd",
+      "source_git_blob_oid": "2034471655ee04ad86c016ee4d3feaaf95661f8b",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/private_memory_source.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "0e1148da489185a53c025651e913282479111858187d043d85235ed723f508cd"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/private_relationship_snapshot.ex",
+      "source_sha256": "097f27ab13195ac64f3bb68f0591d26f80a8daed5100e6e9854934349734fde9",
+      "source_git_blob_oid": "f8083831fc43ad8e42cf1a3d1c0f9171594024c5",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/private_relationship_snapshot.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "097f27ab13195ac64f3bb68f0591d26f80a8daed5100e6e9854934349734fde9"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/signal_transport.ex",
+      "source_sha256": "e85fbc18b58e284de841156b02c5c3aa6e768af5edfe017b4561cf7189cd9baf",
+      "source_git_blob_oid": "da017bb41b48ddaf863aa766a314cffa4e2b1c5d",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/signal_transport.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "e85fbc18b58e284de841156b02c5c3aa6e768af5edfe017b4561cf7189cd9baf"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/contracts/uri_prefix_provider.ex",
+      "source_sha256": "c92d2ddce2432e3f3c80798fa28367b37029cebe86e9c8a8103f47fb38d1fb74",
+      "source_git_blob_oid": "dff7c7c7164c95d50d14216dcaf67dd3b474ce60",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/uri_prefix_provider.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c92d2ddce2432e3f3c80798fa28367b37029cebe86e9c8a8103f47fb38d1fb74"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/conversation_notice_core.ex",
+      "source_sha256": "cfc133bf5ba41f60998878bd891a76bed6c2153234fd0d754288c9be41b1a8b6",
+      "source_git_blob_oid": "9111fa54f017e54b30133040d35646658ef88434",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/conversation_notice_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "cfc133bf5ba41f60998878bd891a76bed6c2153234fd0d754288c9be41b1a8b6"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/conversation_notice_read_core.ex",
+      "source_sha256": "70719be79de4dca446889ee57117eaff53f2530cd0115332db6b7abf14b62bdf",
+      "source_git_blob_oid": "472a83765d1a550f6e794ad5e133941fc183cda7",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/conversation_notice_read_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "70719be79de4dca446889ee57117eaff53f2530cd0115332db6b7abf14b62bdf"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/conversation_session.ex",
+      "source_sha256": "0204102863a379c3685c96ae3bd245f915219ac6864d6d9a05b7b4580c85650a",
+      "source_git_blob_oid": "1f43a34140fdfddee95c1b7ebaf9df2609cac00a",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/conversation_session.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "0204102863a379c3685c96ae3bd245f915219ac6864d6d9a05b7b4580c85650a"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/crypto.ex",
+      "source_sha256": "862897143c196ae7ad955214c0c58cee00c4b5a94aa6717028b748ce58eb57a5",
+      "source_git_blob_oid": "ba8f9f5ace72091606f19fefca2db367f00539a8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/crypto.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "862897143c196ae7ad955214c0c58cee00c4b5a94aa6717028b748ce58eb57a5"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/delivery_receipt_broker.ex",
+      "source_sha256": "82f1fb56b57fc8e4b6a40ace5424826ac04b58910041d410bd4db2c60038f14d",
+      "source_git_blob_oid": "8a453c8032ef196391de4785f35ad0e26a483923",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/delivery_receipt_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "19e76f736ec42dd1331965df1221ac08dd054146e161f7dadd8b25da3bfe36d3"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/disclosure_capability.ex",
+      "source_sha256": "ffc6e41c78e2092f3c96a51b893cd2cdc178716cee657bfb715be2d3d747a6ec",
+      "source_git_blob_oid": "4b0700b9c91098a27d1a6a3002cd26064e8e59e1",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/disclosure_capability.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "a65af55ccf73d009580e006614a16d1e285d65892b9ceae511eee1506e5d100c"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/double_ratchet.ex",
+      "source_sha256": "b582b13cbaae58686e3a08808841b42fcc64c0c9d3ea4a2367e12581d2f45c37",
+      "source_git_blob_oid": "ad9293092f459c81cd670b2251a2ee18228530a5",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/double_ratchet.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "b582b13cbaae58686e3a08808841b42fcc64c0c9d3ea4a2367e12581d2f45c37"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/egress_gate.ex",
+      "source_sha256": "e050fcf16403cfb6466354f0cd7707ac58c653047caabf9f693a05b204a642cd",
+      "source_git_blob_oid": "623454953b5c36d66b09aa7e65a0be6cbb124382",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/egress_gate.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "2f3ed3aed7fd17921f49a5df56a1f69d3b710057c90403894c14be0e49aee69d"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/escalation.ex",
+      "source_sha256": "e367c7f552e3331674d95e8c2d0a65659d009f428c479b8ce19e787c634dc69d",
+      "source_git_blob_oid": "2d48fcc8bd92d7c3bd05e84f09e064d0fc874b95",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/escalation.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "f0d81c757bc6be1584fe6256897f9e91ba0649c05965637788c523cce0bb47df"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/events.ex",
+      "source_sha256": "df90d87a8de622769495f6261ff2a2e7286c3989c80ca32aae1018604f6dea47",
+      "source_git_blob_oid": "2136469ef12e056bd7853f92d5c5203ea5f8c28e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/events.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "df90d87a8de622769495f6261ff2a2e7286c3989c80ca32aae1018604f6dea47"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/extension/platform_activation_authorization.ex",
+      "source_sha256": "5582be48d6039a648e47efc25a3389c295deb0f1f593c6a9063c2d8d24ec2a6a",
+      "source_git_blob_oid": "8a85ecf88fe96b467361e69d7a22aeaf85bd1c49",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/extension/platform_activation_authorization.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Route boot/start-profile reads through the trusted runtime port; reject invalid profiles instead of falling back.",
+        "Use an explicit Runtime alias for the new runtime-port calls; no behavior or authority change."
+      ],
+      "target_sha256": "41cd71b6c60749cd62c4cd3c713af066accd1e695a0608571d181069b125c457"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/extension/platform_activation_authorization_core.ex",
+      "source_sha256": "8d9573fab40b8c943427795e2255732e9f1e4326343a00e1d59260216aa61cea",
+      "source_git_blob_oid": "7a03fcc5cdf03312d0106760083dca75b1891b7e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/extension/platform_activation_authorization_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "8d9573fab40b8c943427795e2255732e9f1e4326343a00e1d59260216aa61cea"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/extension_envelopes.ex",
+      "source_sha256": "f8f14900150599a5589b44704ab863468ad1eea6fb553d678bbc221737423cbc",
+      "source_git_blob_oid": "6ffbaf476845a94be039f0b0fb2460acbda9d61c",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/extension_envelopes.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "f8f14900150599a5589b44704ab863468ad1eea6fb553d678bbc221737423cbc"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/file_guard.ex",
+      "source_sha256": "e25b1b21cf8d1935a720f2ed9930661cd43b60994f02b2a02a890b51109b1f13",
+      "source_git_blob_oid": "a9a0741ac1e813507ba2524efd7c61063129a1df",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/file_guard.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "e25b1b21cf8d1935a720f2ed9930661cd43b60994f02b2a02a890b51109b1f13"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity/default_registration_policy.ex",
+      "source_sha256": "946d5c5c7753e3cca1f0808639c3781eb2225705012965f6ef564beadef0c6a4",
+      "source_git_blob_oid": "b231b3ae214e176c160ab66130cd9cb77be39967",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity/default_registration_policy.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "082ac34b6ff55d9ea30befb660dedb2f83dfd8796f15d5cebfc63fd7c2fac510"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
+      "source_sha256": "bfb2bae1925a66ba970bc4c5adfe7eafff089e9548d9b0dc29087718cb9ef0a9",
+      "source_git_blob_oid": "417367e20069d45181c170f0a0f530c588dbe0b1",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity/nonce_cache.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "a025f245467443daf023ddfdfa5131aa268ed977ec797a9a7b74defa2c297188"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity/registry.ex",
+      "source_sha256": "b0276beba282daf7d24627372b66b9b5afe7d12d39d7649796879d49a10e3f33",
+      "source_git_blob_oid": "b6b904bd0eb00acc05db7703b7d7272c83f11715",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity/registry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "b9ed3b3b771d382a362315ee36d15d4adf759168561154a7d01c74e60fd31050"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity/replay_peers.ex",
+      "source_sha256": "7a5d037aeb1a8ad6a74d7aafa440dbd780efbd5c90baf963137a14fa3fdfc899",
+      "source_git_blob_oid": "82ca84ea2e26e53857ab39dbeba5dc648a08cc9e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity/replay_peers.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Bind the local exact owner to Capabilities and treat either Capabilities or legacy Security on a remote peer as replay authority; only absence of both is foreign."
+      ],
+      "target_sha256": "d33ebf7bc7e6ac7dd69ca88537e4b7fb58e0486f31192651253da8f4e5265dd3"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity/verifier.ex",
+      "source_sha256": "665643eef6f55f409348df7e892c8cb63c792ae7b0a0fc3dd84de009e1531d20",
+      "source_git_blob_oid": "86cd2e48f074d4e4c94d9b8d0043e4a2673b98ee",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity/verifier.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "665643eef6f55f409348df7e892c8cb63c792ae7b0a0fc3dd84de009e1531d20"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/identity_alias.ex",
+      "source_sha256": "e545c19170e9f948ed08b2e4515d109e1d4fa983aa5e019b91964e168a16ceaf",
+      "source_git_blob_oid": "db7ed5ab79d8c1a6b38068973547111c9022f990",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/identity_alias.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "7b1460183640ef5c1f0d0a9b0f840e9f7adf00cfc7d519d07ced0147265d7882"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/invocation_audit.ex",
+      "source_sha256": "b7b3f8b3095e3f47080fc76eb6b2fde3c9e2d83855f610c0467ffc119e8878d5",
+      "source_git_blob_oid": "beb26e93ba649a60da6a33925c235c67620d364f",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/invocation_audit.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "b7b3f8b3095e3f47080fc76eb6b2fde3c9e2d83855f610c0467ffc119e8878d5"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/invocation_receipt_broker.ex",
+      "source_sha256": "acdc98ef5cae740fec50ea12408459dea391f8d7d7c300033ebf4b034d6643a8",
+      "source_git_blob_oid": "a4b17928cbb701fa2defd7c1cc0ddc2f007a30e7",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/invocation_receipt_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "f1e7dffaceb3a669bc3b62080b7735225d964f829486b45784171b36a1b68975"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/issuer_registry.ex",
+      "source_sha256": "556434962cf897651604e3b6d28f7ee02676734a1b3b2fedcfc84be29205a3fe",
+      "source_git_blob_oid": "4ce67e444ccb37c56e24998ab024d915119d80f8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/issuer_registry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "7dce456950bdabbaab2e8cf73730a4d5d29c8839bb20a1ab6f4b27c65827ca8f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/kernel.ex",
+      "source_sha256": "c34f02c30e7f828ab7346e8ba5013d9d8452ccbf96cf305aa6f3b1a0b6de6cbe",
+      "source_git_blob_oid": "bef728744d99f4aeed99aa03fa9a8871affa2639",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/kernel.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c34f02c30e7f828ab7346e8ba5013d9d8452ccbf96cf305aa6f3b1a0b6de6cbe"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/key_file.ex",
+      "source_sha256": "b096244169cca4a9544df5ceeef01931248c296020f0c18e79d05e1542aa3f1f",
+      "source_git_blob_oid": "12ef1db042c33d24db9bfd37c96c857d5cf88de4",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/key_file.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "b096244169cca4a9544df5ceeef01931248c296020f0c18e79d05e1542aa3f1f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/keychain.ex",
+      "source_sha256": "2254e1a8cb3a0298fc8dda12fcd10744eba3edaa9caf9dfed58018182a9eb97f",
+      "source_git_blob_oid": "9365563e83885feaa1a17dd4351de7bee8a8daea",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/keychain.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "2254e1a8cb3a0298fc8dda12fcd10744eba3edaa9caf9dfed58018182a9eb97f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/master_key_access_owner.ex",
+      "source_sha256": "ef5aed23e78631cacfc74a0ad301fb3956ae9ef68dd489a1fa345fafbdff9e45",
+      "source_git_blob_oid": "f887b02850b976f82043d16c8bb6bd27fbc56be7",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/master_key_access_owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "a80702aa05ea6a169cb1251b11eecc20bc14e731ee6df460f4a3d7a91e902fea"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/mcp_server_approval_core.ex",
+      "source_sha256": "24cb8d7f35060a86ff1ec05a226000f67b3ac8404169f348387205318120c0e8",
+      "source_git_blob_oid": "176226237b0b1f8bcef5c4901a2d17aa02de59f0",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/mcp_server_approval_core.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "24cb8d7f35060a86ff1ec05a226000f67b3ac8404169f348387205318120c0e8"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/native_conversation_notices.ex",
+      "source_sha256": "3faaa4c8fe0e83d95f8ffd84e2498a513228f06c14aa1bae6e112dac8e7bd636",
+      "source_git_blob_oid": "58c8e62e9e6ecd2fa13d3b7edf0f5efcc9450fcb",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/native_conversation_notices.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "3faaa4c8fe0e83d95f8ffd84e2498a513228f06c14aa1bae6e112dac8e7bd636"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/native_notice_broker.ex",
+      "source_sha256": "d284f0185609ed7025f72ed6b58bad32900e7c63f5ec43feaf800f694161d3db",
+      "source_git_blob_oid": "c8cde135cb8e172392a2c2184554b7073fc12e6f",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/native_notice_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "6d57596cb7fb31eaae5e9417a40f5dff0f670d8a4dd57530b12ca6ae953b827f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc.ex",
+      "source_sha256": "f4a39ae891d41946df7822a19adce4dcd11713c80f8a86d1e6d0adbb06a3f175",
+      "source_git_blob_oid": "a2f7048f9afa1dd456fcad099950d913723b30a1",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "f4a39ae891d41946df7822a19adce4dcd11713c80f8a86d1e6d0adbb06a3f175"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/adapter.ex",
+      "source_sha256": "c17e670f57ee015319f4b278b478b5218b35f5e6dc48889f0ce82f78962174f7",
+      "source_git_blob_oid": "48cf20ddf4e062d3251a1d9ac598f165da7de19b",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/adapter.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c17e670f57ee015319f4b278b478b5218b35f5e6dc48889f0ce82f78962174f7"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/auth_code_flow.ex",
+      "source_sha256": "1da41cf977331582f87d60ace6238a404aa59ac893017781c57a61fc285b1fe9",
+      "source_git_blob_oid": "ec6a588f4f5025a2383cfe4e928f16dbf37a7f1c",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/auth_code_flow.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "1da41cf977331582f87d60ace6238a404aa59ac893017781c57a61fc285b1fe9"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/config.ex",
+      "source_sha256": "ec61e3eda9b6b22c4fbf7f7427f47100d8e280e9a2b421d9d0970cc37b70b0fd",
+      "source_git_blob_oid": "0ba61a41e3d34a866d46b28cbce0139eda16cb5e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/config.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Add independent strict top-level OIDC.Config Boundary for the existing guarded runtime Mix.env/0 fallback and optional OIDC provider literal; no Core backedge or behavior change.",
+        "Declare the optional OIDC leaf Boundary dependency only when its module is available at compile time; retain strict checking, the same exports and byte-identical runtime selector/config/HTTP fallback behavior when the provider is absent."
+      ],
+      "target_sha256": "ebb807bc4e4f4c8d7af7a7fdd2c556d2aec89808d26e9b5b1682bc9dcec49d6f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/device_flow.ex",
+      "source_sha256": "a2f6e16cf3e9a59c5c8cd4f1f6c9ec8ad9b669cbad0c5d6944e966135115ce6b",
+      "source_git_blob_oid": "f037cf72f2856329827687ce89467dfdeca88c84",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/device_flow.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "a2f6e16cf3e9a59c5c8cd4f1f6c9ec8ad9b669cbad0c5d6944e966135115ce6b"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/discovery.ex",
+      "source_sha256": "d46875d2fce01270cae9e3b6afc7262f3b4a10c0c6a57ce239fa90893c1b90e0",
+      "source_git_blob_oid": "7512daa8fb1494afa9b219c4077d5f04c2d454c1",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/discovery.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "d46875d2fce01270cae9e3b6afc7262f3b4a10c0c6a57ce239fa90893c1b90e0"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/identity_store.ex",
+      "source_sha256": "2becac9d6d0059308095bfaee49bfbf3f11f39437873f6916b11d2766bc0b2e0",
+      "source_git_blob_oid": "d8a81c6f82c3be266bbf31c5eb3f6174f84f35dc",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/identity_store.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "2becac9d6d0059308095bfaee49bfbf3f11f39437873f6916b11d2766bc0b2e0"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/jwks_cache.ex",
+      "source_sha256": "f11bbec4dbf490f19fd3751b233b8db6fd557c271823dc25fd081f61f893aaf4",
+      "source_git_blob_oid": "9c651dd5773317c4981996ff8e2769bda89346a2",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/jwks_cache.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "561933f99b2aa3b13dd78abaa80fdb86283a0c276f343dee5dbbe8fbc60e2714"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/token_cache_owner.ex",
+      "source_sha256": "fd1f8f4816d39323c59d07a35d5b8b1f1603b52f3f716b70b36ddb551e662820",
+      "source_git_blob_oid": "169dc6c3997a56679c29eb4ff87d95ad8dadffff",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/token_cache_owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "b80eadf223928f3dc532226b11dfd398d423eca059426cb717bbfc30b4b14a9f"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/oidc/token_verifier.ex",
+      "source_sha256": "7a313023dc76fd9c040afd36f3b64ca1f44c7c4189c762146725c74b73748c75",
+      "source_git_blob_oid": "46cefe72d43e3e1fb99eb05d915b4361510db3c6",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/oidc/token_verifier.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "7a313023dc76fd9c040afd36f3b64ca1f44c7c4189c762146725c74b73748c75"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/private_memory.ex",
+      "source_sha256": "e35dc38bf9bf65f55dd9dd6433fc8f244d87f612827a187976214ec93bc7a8e6",
+      "source_git_blob_oid": "0dbc00ef43e63ec3acf478ac794dcb9bcbccd924",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/private_memory.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "e35dc38bf9bf65f55dd9dd6433fc8f244d87f612827a187976214ec93bc7a8e6"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/private_state.ex",
+      "source_sha256": "f585a322d582bdb80e0b4facd57380b3d31f6779b0f2a8032a3e9d3f9664a086",
+      "source_git_blob_oid": "cf8287aab3ea47783674f96c4c4cee668c840350",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/private_state.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "f585a322d582bdb80e0b4facd57380b3d31f6779b0f2a8032a3e9d3f9664a086"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/provider_gate.ex",
+      "source_sha256": "4b1c7e5e1934169ac57264715fc5e452eb7d90874493ce97fef20f8fcb3f72c0",
+      "source_git_blob_oid": "ec11085a4fa8b4b502f1fde0de05590693cec572",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/provider_gate.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Delegate provider gate declaration to the trusted runtime port; do not copy KernelRuntime gate implementation.",
+        "Use an explicit Runtime alias for the new runtime-port calls; no behavior or authority change."
+      ],
+      "target_sha256": "5d00862406b583e4ef1bf5bdf451f10102605a1ae6ca9223253d21e6493af6ef"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/receipt_issuance_proof.ex",
+      "source_sha256": "c5ab5e8d9c51c6669c78d7b4b0309d5522f869b0906cb150e1146b142fc88083",
+      "source_git_blob_oid": "5f10985acd702177f809cde596a907ee317b11d5",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/receipt_issuance_proof.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c5ab5e8d9c51c6669c78d7b4b0309d5522f869b0906cb150e1146b142fc88083"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/reflex.ex",
+      "source_sha256": "86cfe83c76ea54d37d916ca656bdd760309f69734f44d36734c380b37e2303ba",
+      "source_git_blob_oid": "8d1010e171ee60850dd520c5913daa1a714c8bc4",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/reflex.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "86cfe83c76ea54d37d916ca656bdd760309f69734f44d36734c380b37e2303ba"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/reflex/builtin.ex",
+      "source_sha256": "f7d0480ffc72ca1ac1cac546fc22aef80f3022612c348361d4bcc834492edce9",
+      "source_git_blob_oid": "beb1d725a2c0994dc5f45536f97d3e10857558cb",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/reflex/builtin.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "f7d0480ffc72ca1ac1cac546fc22aef80f3022612c348361d4bcc834492edce9"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/reflex/registry.ex",
+      "source_sha256": "52dbb25b84b320904726efa261f79e78f17e8dc1e3419bc846c43893fed30f54",
+      "source_git_blob_oid": "02bf6ab2007b4988ff2fc1b22c2bb6bcf11ce2d7",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/reflex/registry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "f7ea7bb2529102155b50cdce6f8f0f239ed19325892375efadda8ccb93c96564"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
+      "source_sha256": "ca97961ed956ffc3c86df19bc860d91e2ec52eeb3bb1410ad69844f52dd36235",
+      "source_git_blob_oid": "59554fdcfee625d1aabb2584b4f8e01de7a0fe0c",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/revocation_fence.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "ca97961ed956ffc3c86df19bc860d91e2ec52eeb3bb1410ad69844f52dd36235"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/role.ex",
+      "source_sha256": "50a1bdccd5519b2367c2fb1b708eeb3482f8e9ed6cdfb43dab4eca2f9563e684",
+      "source_git_blob_oid": "3534aa8bf1a6106e9933db694e13377f193e85ff",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/role.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "2a1c488d3ab48b0733c4767bf36233088b4744552df18676451bbbcd07b60e4c"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/routine_owner_request.ex",
+      "source_sha256": "32e4008ea479e20c9dfc02b1f39378953f6e69af5f454285b5433a2e90215ca2",
+      "source_git_blob_oid": "3dd4f4274b40619cf37c63fcb590803f81009307",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/routine_owner_request.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "32e4008ea479e20c9dfc02b1f39378953f6e69af5f454285b5433a2e90215ca2"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/session_registry.ex",
+      "source_sha256": "83b309eaaf776b3f286ebe4abd36c14960765981c2b831a716c660e8aae27fda",
+      "source_git_blob_oid": "c709758257a92ce7dadad706e4b89bb87044be70",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/session_registry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "39f42bb99d502ac7aa3aca8a3548198f13c9371d4dc3dba26f42b1c207bd7af7"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/session_token.ex",
+      "source_sha256": "8bcbd024bd9abc5f231f15647cbd094540a4ff2fd6f22325851d1053c6621514",
+      "source_git_blob_oid": "51654b83c86667987b94da6baff7565d78f2ec01",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/session_token.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "59eabf90b46016fa23aee9b53061a1354e2889d996cbfaf464608d2ad81f3059"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signal_sync.ex",
+      "source_sha256": "d9fe2bca1d12c9cf5c298165d6985ba9e57adc760f59c6c06bf707fa9223212d",
+      "source_git_blob_oid": "890068851dba59e89d61ced8c1a4aef477f472c8",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signal_sync.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "d9fe2bca1d12c9cf5c298165d6985ba9e57adc760f59c6c06bf707fa9223212d"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signal_transport.ex",
+      "source_sha256": "7142e6fe2c32f00f97fd3e96bd54c7dcbba9b7d16ab0b45176d5d8f3291cb463",
+      "source_git_blob_oid": "e090b4f43c2802d03ce959b8b6f42abaec7d3530",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signal_transport.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "7142e6fe2c32f00f97fd3e96bd54c7dcbba9b7d16ab0b45176d5d8f3291cb463"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signing_authority_broker.ex",
+      "source_sha256": "f6326143e9f581f0f240dfb9162c9d7a156364a8058e928868d6d214c0a0da2e",
+      "source_git_blob_oid": "a0879fb75973eba74bb47a97f6a3a3f5aef2e6c4",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signing_authority_broker.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "c20ef255c877bd259ef02795a76e2e22048fd62c197daad9daf6eab22d33d618"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signing_authority_state_owner.ex",
+      "source_sha256": "d90d75b736723ce78d94b074557c36fa0444488e1e151f0ecfb9d1b3ab6b7947",
+      "source_git_blob_oid": "f627959ee11c8fbe6baf09c84fe96fb90b507efb",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signing_authority_state_owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "ea7dec5ca71af28dd6ef6cc2a0105cd2464587da05b13779abbed97b92947363"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signing_key_store.ex",
+      "source_sha256": "9243ec691a8347f120faf701b2f66ae0d4bf1621a5586dbd6e097d2e56aa547a",
+      "source_git_blob_oid": "089a97901938ccc972542910a9a0903ae3ddf536",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signing_key_store.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "4e881c1bccda747051939dfe804a5af2dd47dd82b758067524afdc591bed6694"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/signing_key_store/owner.ex",
+      "source_sha256": "69d95783045b0ea455b63ab5d14ca90b0d787922f3186877c676e77ccbfb03a5",
+      "source_git_blob_oid": "7571d019ae186ae953be7271ef171da6c00f5433",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/signing_key_store/owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "012e6347c69b71ac5dc6f21d8a8c05a19d6cf6d2958b223052f413088e78ade5"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/store/bounded_inventory.ex",
+      "source_sha256": "d32e8a37f8df8353f4d70aef8a4ef260ccf121f4c0f46805f70a25b546526b76",
+      "source_git_blob_oid": "f62a29ac1d34c95cb8c80fe592f7104d8324e6ef",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/store/bounded_inventory.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "d32e8a37f8df8353f4d70aef8a4ef260ccf121f4c0f46805f70a25b546526b76"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/store/json_file.ex",
+      "source_sha256": "323cf77f6a85b84b55dd627174cd2a297c0b72087b20a338c6eec7f8d093595f",
+      "source_git_blob_oid": "dd935ee0ec2dd84fde67fa1d650afe3b20291c4c",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/store/json_file.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "f0f7428264b9e9208404efd5b978457a9c111c10a43e932436953151dcd65aec"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/store/record_authenticator.ex",
+      "source_sha256": "caf0e79d722a9a555ff1e6282f65c6cd8a3ecf344434b7514fb156a23b54e059",
+      "source_git_blob_oid": "cc067db4d43c97908c0eef5414871cce80dbdce2",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/store/record_authenticator.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "caf0e79d722a9a555ff1e6282f65c6cd8a3ecf344434b7514fb156a23b54e059"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/store/revocation_ledger.ex",
+      "source_sha256": "cd280db2dc66c091efd6b4447ee9587ca19ff8ec7f9122426523e378f61d39d5",
+      "source_git_blob_oid": "2e5c623a70851f07cd8181c448e385332e100e8e",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/store/revocation_ledger.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "1059b0d6fb5d126f041ae0f46fdda210be7afa878c432ee10aad0c077077878c"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/subagent_isolation.ex",
+      "source_sha256": "1f708a7c9baa32488d2ba2392e6ef76d17a4fad01dec14d5272c7ef50cd41598",
+      "source_git_blob_oid": "73c02f7e806422752d4afd47e91dc4ccff6191be",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/subagent_isolation.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "1f708a7c9baa32488d2ba2392e6ef76d17a4fad01dec14d5272c7ef50cd41598"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/supervised_owner.ex",
+      "source_sha256": "a01fa5919650d6823cbe84f78491d3fb5815ece16b04e92bb25802b1a2384249",
+      "source_git_blob_oid": "d16ac4678900206a493b8e9b523a17a3fa736217",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/supervised_owner.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "a01fa5919650d6823cbe84f78491d3fb5815ece16b04e92bb25802b1a2384249"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/system_authority.ex",
+      "source_sha256": "3595a8317b80d7b7e037d77adde6a57ef20a0ecadc38ae357b3c4836308e5163",
+      "source_git_blob_oid": "6bd6b5d842c5028b98d10246b15da9d43106b054",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/system_authority.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "76a7d4ae51542ccfbe49865195527402d570ce46ac275845b6f01318162b8933"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/telemetry.ex",
+      "source_sha256": "ff9fc7b036dbc812ef9519860d8268cb2fca43168a08a1c8737103fdb449adfa",
+      "source_git_blob_oid": "6f051b0ca864f3046d70104dabba03ad81c53250",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/telemetry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "a2e63d28672057460fc77826808f48ae64324fba863b5b00882c770fc82f9697"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/terminal_login.ex",
+      "source_sha256": "73757f0f53455f08601e5d16183831bde772709df17775ffbc69b44a53786abb",
+      "source_git_blob_oid": "13c1eb431accfd5cf3424704b4e434371c71acca",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/terminal_login.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Replace authenticated-call facade operations and diagnostic MFA identities with the same public Arbor.Custody APIs."
+      ],
+      "target_sha256": "15699edfc907b083025faed8f3b5a3ae44e0f14e3a205556ef98b675ce2372a1"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/test_audit_consumer.ex",
+      "source_sha256": "068573a67bfe2c5d1bc04563015919c191f691ed951318efe82d79ba611f1d56",
+      "source_git_blob_oid": "608dd0bbc33de0ae5a70e524c217384f66c03267",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/test_audit_consumer.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities."
+      ],
+      "target_sha256": "3ddd94ddbba00a61e521350fe3d4c2c6bc72831e0c7bfc1b69b27cebc5118b3b"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/test_bootstrap.ex",
+      "source_sha256": "e52cf399654879a81bc8261f1558735fa0fd29ca0b22b700fea7753479015f51",
+      "source_git_blob_oid": "e819081b7efd17e7f1e19be96ce0a1c900e95587",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/test_bootstrap.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Route boot/start-profile reads through the trusted runtime port; reject invalid profiles instead of falling back.",
+        "Use an explicit Runtime alias for the new runtime-port calls; no behavior or authority change."
+      ],
+      "target_sha256": "618d3f9a92ce19535814a99f74ab490ca0b341d5124215b0990aa6d9e4540b2e"
+    },
+    {
+      "source_path": "apps/arbor_security/lib/arbor/security/uri_registry.ex",
+      "source_sha256": "853e8996451e66a6ec60f67efe856d4948d0489519b085f159594e1d4c5c3698",
+      "source_git_blob_oid": "3198b7116c3f8ec4c10e715ccfe91531240b49d6",
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/uri_registry.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Canonicalize only configuration namespace, exact OTP application metadata and supervised-owner provenance to :arbor_capabilities; preserve suffixed table/tag identities.",
+        "Update current package-ownership documentation/comments to Capabilities; retain historical references and all wire/durable strings."
+      ],
+      "target_sha256": "34d69725eaa944fdc8e7db15a9ab6110cb210d9cf4cc7ac33dbb2e5291aa6cc1"
+    }
+  ],
+  "added_sources": [
+    {
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/contracts/runtime_host.ex",
+      "disposition": "new_capabilities_owned_runtime_host_port",
+      "target_sha256": "577b5e77e422b53b315f4ada058d3a7e29137adf76721182ce533d3afbe69121"
+    },
+    {
+      "target_path": "packages/arbor_capabilities/lib/arbor/security/runtime.ex",
+      "disposition": "new_capabilities_owned_runtime_host_port",
+      "target_sha256": "db4ac8679203382b40a2d93425cc9a4f064975354f6d4fba9b8f63f40e423d5e",
+      "permitted_changes": [
+        "Apply repository formatting after the extraction checkpoint; preserve algorithms, module identities and semantic transformations recorded above.",
+        "Express the single-clause Runtime provider startup with/else as equivalent case branches; retain every provider/result guard and returned error shape."
+      ]
+    }
+  ],
+  "build_boundary_qualification": {
+    "reason": "First fresh standalone strict compile exposed 103 Mix references, 4 TypedStruct macro references and 1 test-only ExUnit.after_suite reference.",
+    "core_phase_policy": "Mix/TypedStruct compile-only; ExUnit test build only; all existing algorithms and environment gates unchanged.",
+    "runtime_oidc_config_policy": "Independent strict top-level reader admits its existing guarded runtime Mix fallback and literal optional OIDC default; Core depends on this reader, reader does not depend on Core.",
+    "manifest_change": "Explicit public typed_struct ~>0.3 runtime:false tool dependency; pinned public lock record unchanged."
+  },
+  "generated_test_configuration": {
+    "target_path": "packages/arbor_capabilities/config/test.exs",
+    "target_sha256": "ce89bf7a5115f54056b18b70f2f3d45fd732b990a29594b274c264d5455cf141",
+    "scope": "Test-only explicit closed role descriptors include all four identity-registration roles. Added external-role names are unoccupied, so exact supervision checks deny without a focused owner. No production defaults or validator changes."
+  }
+}

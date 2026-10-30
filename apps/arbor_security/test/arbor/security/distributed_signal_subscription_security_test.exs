@@ -31,12 +31,12 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
   @stores [Registry, NonceCache, CapabilityStore]
 
   setup do
-    original_distributed_signals = Application.get_env(:arbor_security, :distributed_signals)
+    original_distributed_signals = Application.get_env(:arbor_capabilities, :distributed_signals)
 
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:authorizer, Arbor.Signals.Adapters.CapabilityAuthorizer)
     Arbor.Signals.Config.Testing.delete(:allow_open_authorizer)
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
     ensure_signals_children()
     restart_security_stores()
 
@@ -115,8 +115,8 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
   end
 
   test "security regression: authenticated remote nonce expiry is bounded by the local TTL" do
-    previous = Application.get_env(:arbor_security, :nonce_ttl_seconds)
-    Application.put_env(:arbor_security, :nonce_ttl_seconds, 0)
+    previous = Application.get_env(:arbor_capabilities, :nonce_ttl_seconds)
+    Application.put_env(:arbor_capabilities, :nonce_ttl_seconds, 0)
     on_exit(fn -> restore_security_env(:nonce_ttl_seconds, previous) end)
 
     nonce = :crypto.strong_rand_bytes(16)
@@ -305,6 +305,6 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
     end
   end
 
-  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

@@ -24,11 +24,11 @@ defmodule Arbor.Scheduler.OwnedRoutineWireSecurityRegressionTest do
        f do
     intent = F.intent!(f)
     old = DateTime.add(DateTime.utc_now(), -120)
-    F.env(:arbor_security, :timestamp_max_drift_seconds, 300)
+    F.env(:arbor_capabilities, :timestamp_max_drift_seconds, 300)
     proof = F.proof!(f.owner, :enqueue, intent, timestamp: old)
     assert proof.payload =~ <<0>>
     assert {:ok, job} = Scheduler.enqueue_routine(intent, proof)
-    Application.put_env(:arbor_security, :timestamp_max_drift_seconds, 60)
+    Application.put_env(:arbor_capabilities, :timestamp_max_drift_seconds, 60)
 
     assert :ok = Supervisor.terminate_child(f.repo_supervisor, Repo)
     assert {:ok, _} = Supervisor.restart_child(f.repo_supervisor, Repo)
@@ -95,10 +95,10 @@ defmodule Arbor.Scheduler.OwnedRoutineWireSecurityRegressionTest do
          f do
       intent = F.intent!(f)
       old = DateTime.add(DateTime.utc_now(), -120)
-      F.env(:arbor_security, :timestamp_max_drift_seconds, 300)
+      F.env(:arbor_capabilities, :timestamp_max_drift_seconds, 300)
       proof = F.proof!(f.owner, :enqueue, intent, timestamp: old)
       assert {:ok, job} = Scheduler.enqueue_routine(intent, proof)
-      Application.put_env(:arbor_security, :timestamp_max_drift_seconds, 60)
+      Application.put_env(:arbor_capabilities, :timestamp_max_drift_seconds, 60)
       legacy = legacy_wire(proof)
       row = Repo.get!(Oban.Job, job.id)
       args = put_in(row.args, ["owned_routine", "proof"], legacy)

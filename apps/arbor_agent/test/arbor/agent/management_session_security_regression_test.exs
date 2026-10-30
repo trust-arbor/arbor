@@ -143,7 +143,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
        ctx do
     target = Fixture.target!()
     Fixture.grant!(ctx.human_id, :stop, target.target)
-    Fixture.set_env(:arbor_security, :identity_verification, false)
+    Fixture.set_env(:arbor_capabilities, :identity_verification, false)
     {result, effects} = observe(:stop, ctx, target, session_token: nil)
     assert effects == []
     assert {:error, {:unauthorized, _}} = result
@@ -171,7 +171,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
     assert {:error, :replayed_nonce} = Security.verify_request(signed)
     destroy = Fixture.target!()
     Humans.grant!(ctx.human_id, "arbor://agent/lifecycle/destroy")
-    Fixture.set_env(:arbor_security, :identity_verification, false)
+    Fixture.set_env(:arbor_capabilities, :identity_verification, false)
 
     assert {:error, {:unauthorized, :capability_mutation_unauthorized}} =
              Agents.authorize_destroy(ctx.human_id, destroy.target)
@@ -196,7 +196,7 @@ defmodule Arbor.Agent.ManagementSessionSecurityRegressionTest do
        ctx do
     target = Fixture.target!()
     Fixture.grant!(ctx.human_id, :stop, target.target)
-    Fixture.set_env(:arbor_security, :invocation_audit_mode, :required)
+    Fixture.set_env(:arbor_capabilities, :invocation_audit_mode, :required)
     audit_before = Fixture.audit_count!(ctx.human_id)
 
     {result, effects} =

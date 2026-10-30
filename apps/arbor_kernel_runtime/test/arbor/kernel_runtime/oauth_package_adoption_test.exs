@@ -37,7 +37,15 @@ defmodule Arbor.KernelRuntime.OAuthPackageAdoptionTest do
 
     applications = Application.spec(:arbor_oauth, :applications) || []
 
-    for provider <- [:arbor_kernel_runtime, :arbor_security, :arbor_llm, :req, :finch, :mint] do
+    for provider <- [
+          :arbor_kernel_runtime,
+          :arbor_security,
+          :arbor_capabilities,
+          :arbor_llm,
+          :req,
+          :finch,
+          :mint
+        ] do
       refute provider in applications
     end
   end

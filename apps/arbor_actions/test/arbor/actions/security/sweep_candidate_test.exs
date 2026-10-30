@@ -75,6 +75,53 @@ defmodule Arbor.Actions.Security.SweepCandidateTest do
   end
 
   describe "S1 sweep" do
+    @tag :capabilities_path_risk_security_regression
+    test "security regression: adopted Capabilities siblings retain high finding risk" do
+      %{dir: dir, seed_file: seed_file, sibling_file: sibling_file} = s1_fixture_tree()
+      source = File.read!(sibling_file)
+
+      expected =
+        Map.new(
+          [
+            {"packages/arbor_capabilities/lib/arbor/security/crypto.ex", :high},
+            {"packages/arbor_capabilities_signals/lib/arbor/capabilities/signals.ex", :high},
+            {"packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc.ex", :high},
+            {"apps/arbor_security/lib/arbor/security/crypto.ex", :high},
+            {"apps/example/lib/capability.ex", :high},
+            {"apps/arbor_trust/lib/policy.ex", :high},
+            {"apps/example/lib/auth.ex", :high},
+            {"apps/example/lib/crypto.ex", :medium}
+          ],
+          fn {relative, expected_risk} ->
+            file = Path.join(dir, relative)
+            File.mkdir_p!(Path.dirname(file))
+            File.write!(file, source)
+            {Path.relative_to(file, File.cwd!(), force: true), expected_risk}
+          end
+        )
+
+      seed = s1_seed(Path.relative_to(seed_file, File.cwd!(), force: true))
+      candidate = s1_candidate(seed)
+      scan_root = Path.relative_to(dir, File.cwd!(), force: true)
+
+      assert {:ok, result} =
+               SweepCandidate.run(%{candidate: candidate, finding: seed, root: scan_root}, %{})
+
+      assert result.seed_excluded == true
+      assert result.hit_count == map_size(expected) + 1
+      assert result.summary == nil
+      findings = Map.new(result.siblings, &{&1.location[:file], &1})
+
+      for {file, expected_risk} <- expected do
+        assert %Finding{} = finding = Map.fetch!(findings, file)
+        assert finding.actionability[:risk_class] == expected_risk, file
+        assert finding.actionability[:auto_fixable] == false
+      end
+
+      sibling = Path.relative_to(sibling_file, File.cwd!(), force: true)
+      assert findings[sibling].actionability[:risk_class] == :medium
+    end
+
     test "finds the planted sibling, excludes the seed, ignores the clean function" do
       %{dir: dir, seed_file: seed_file, sibling_file: sibling_file} = s1_fixture_tree()
       seed = s1_seed(seed_file)

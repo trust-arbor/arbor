@@ -228,9 +228,12 @@ defmodule Arbor.Actions.Security.SweepCandidate do
 
   # Mirror StaticScan/Finding.high_risk_location? markers.
   defp risk_class(file) do
-    if Enum.any?(["arbor_security", "capability", "trust", "auth"], &String.contains?(file, &1)),
-      do: :high,
-      else: :medium
+    if Enum.any?(
+         ["arbor_security", "arbor_capabilities", "capability", "trust", "auth"],
+         &String.contains?(file, &1)
+       ),
+       do: :high,
+       else: :medium
   end
 
   # ---------------------------------------------------------------------------

@@ -33,6 +33,8 @@ defmodule Arbor.Scheduler.MixProject do
 
   defp deps do
     [
+      {:arbor_capabilities, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities", runtime: false, env: Mix.env()},
       {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
       # Umbrella deps
       {:arbor_kernel_runtime, in_umbrella: true},

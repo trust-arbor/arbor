@@ -42,26 +42,27 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     ensure_trust_started()
 
     prev = %{
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      receipts: Application.get_env(:arbor_security, :invocation_receipts_enabled),
-      delegation: Application.get_env(:arbor_security, :delegation_chain_verification_enabled),
-      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      receipts: Application.get_env(:arbor_capabilities, :invocation_receipts_enabled),
+      delegation:
+        Application.get_env(:arbor_capabilities, :delegation_chain_verification_enabled),
+      uri_registry: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
       trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
       trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       allow_permissive_baseline: Application.get_env(:arbor_trust, :allow_permissive_baseline)
     }
 
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
-    Application.put_env(:arbor_security, :delegation_chain_verification_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :delegation_chain_verification_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
     Application.delete_env(:arbor_trust, :policy_module)
@@ -484,8 +485,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     if Process.whereis(module), do: :ok, else: start_supervised!({module, opts})
   end
 
-  defp restore_security(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security(key, value), do: Application.put_env(:arbor_capabilities, key, value)
   defp restore_trust(key, nil), do: Application.delete_env(:arbor_trust, key)
   defp restore_trust(key, value), do: Application.put_env(:arbor_trust, key, value)
 

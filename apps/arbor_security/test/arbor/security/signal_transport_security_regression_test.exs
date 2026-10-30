@@ -16,15 +16,15 @@ defmodule Arbor.Security.SignalTransportSecurityRegressionTest do
   setup do
     security_snapshot =
       Map.new([:signal_transport, :distributed_signals], fn key ->
-        {key, Application.fetch_env(:arbor_security, key)}
+        {key, Application.fetch_env(:arbor_capabilities, key)}
       end)
 
     signals_snapshot = SignalsConfig.Testing.snapshot_namespace()
 
     on_exit(fn ->
       Enum.each(security_snapshot, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
 
       SignalsConfig.Testing.restore_namespace(signals_snapshot)
@@ -33,13 +33,13 @@ defmodule Arbor.Security.SignalTransportSecurityRegressionTest do
     end)
 
     :ok = Signals.restore_runtime_fixture()
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
     assert Signals.security_sync_transport_configured?()
     :ok
   end
 
   test "security regression: explicit nil transport is local-only despite configured Signals" do
-    Application.put_env(:arbor_security, :signal_transport, nil)
+    Application.put_env(:arbor_capabilities, :signal_transport, nil)
 
     refute SecurityConfig.distributed_signals_enabled?()
 
@@ -49,7 +49,7 @@ defmodule Arbor.Security.SignalTransportSecurityRegressionTest do
 
   test "security regression: a configured unavailable provider cannot use ambient Signals" do
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :signal_transport,
       Arbor.Security.SignalTransportSecurityRegressionTest.UnavailableProvider
     )
@@ -83,7 +83,7 @@ defmodule Arbor.Security.SignalTransportSecurityRegressionTest do
   end
 
   test "security regression: nil transport starts all stores locally without weakening replay" do
-    Application.put_env(:arbor_security, :signal_transport, nil)
+    Application.put_env(:arbor_capabilities, :signal_transport, nil)
 
     for store <- [Registry, NonceCache, CapabilityStore] do
       assert :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, store)

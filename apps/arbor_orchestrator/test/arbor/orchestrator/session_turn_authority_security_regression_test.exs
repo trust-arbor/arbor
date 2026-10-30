@@ -37,7 +37,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
   defmodule OwnerResolver do
     def resolve(id) do
-      case Application.get_env(:arbor_security, :session_owner_test_aliases, %{}) do
+      case Application.get_env(:arbor_capabilities, :session_owner_test_aliases, %{}) do
         aliases when is_map(aliases) -> {:ok, Map.get(aliases, id, id)}
         _ -> {:error, :alias_store_unavailable}
       end
@@ -121,12 +121,12 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     ensure_signals_stack!()
 
     backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -168,26 +168,26 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
   setup do
     prev = %{
-      resolver: Application.get_env(:arbor_security, :identity_alias_resolver),
-      aliases: Application.get_env(:arbor_security, :session_owner_test_aliases),
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      strict: Application.get_env(:arbor_security, :strict_identity_mode),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      uri: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      secret: Application.get_env(:arbor_security, :session_token_secret)
+      resolver: Application.get_env(:arbor_capabilities, :identity_alias_resolver),
+      aliases: Application.get_env(:arbor_capabilities, :session_owner_test_aliases),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      strict: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      uri: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      secret: Application.get_env(:arbor_capabilities, :session_token_secret)
     }
 
-    Application.put_env(:arbor_security, :identity_alias_resolver, OwnerResolver)
-    Application.put_env(:arbor_security, :session_owner_test_aliases, %{})
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :identity_alias_resolver, OwnerResolver)
+    Application.put_env(:arbor_capabilities, :session_owner_test_aliases, %{})
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       test_session_secret("vp05d2a1p2-test-secret-")
     )
@@ -218,8 +218,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     }
   end
 
-  defp restore(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 
   # unique_integer stays small for a whole suite, so the old prefix plus that
   # suffix was under the 32-byte session-secret minimum.
@@ -908,7 +908,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     grant!(ctx.agent_id, "arbor://memory/write/#{ctx.agent_id}")
 
     previous_policy =
-      for app <- [:arbor_security, :arbor_trust],
+      for app <- [:arbor_capabilities, :arbor_trust],
           key <- [:policy_enforcer_enabled, :approval_guard_enabled] do
         previous = Application.fetch_env(app, key)
         Application.put_env(app, key, false)
@@ -1916,7 +1916,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     secondary = register_active_human!()
     grant!(secondary, ctx.resource)
 
-    Application.put_env(:arbor_security, :session_owner_test_aliases, %{secondary => ctx.human_id})
+    Application.put_env(:arbor_capabilities, :session_owner_test_aliases, %{
+      secondary => ctx.human_id
+    })
 
     {queued, first, first_authority, _admission, _from} = queue_private_turn!(ctx)
     second_from = {self(), make_ref()}
@@ -1946,7 +1948,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     original_aliases = %{ctx.human_id => primary}
 
     for aliases_after <- [original_aliases, %{}, :offline] do
-      Application.put_env(:arbor_security, :session_owner_test_aliases, original_aliases)
+      Application.put_env(:arbor_capabilities, :session_owner_test_aliases, original_aliases)
       {queued, message, authority, _admission, _from} = queue_private_turn!(ctx)
       token = make_ref()
 
@@ -1958,7 +1960,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
           turn_token: token
       }
 
-      Application.put_env(:arbor_security, :session_owner_test_aliases, aliases_after)
+      Application.put_env(:arbor_capabilities, :session_owner_test_aliases, aliases_after)
 
       assert {:reply, reply, after_poll} =
                Session.handle_call(
@@ -2034,11 +2036,13 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     primary = register_active_human!()
 
     for aliases_after <- [%{}, :offline] do
-      Application.put_env(:arbor_security, :session_owner_test_aliases, %{ctx.human_id => primary})
+      Application.put_env(:arbor_capabilities, :session_owner_test_aliases, %{
+        ctx.human_id => primary
+      })
 
       {queued, _message, authority, admission, {_, tag}} = queue_private_turn!(ctx)
       assert authority.canonical_owner_id == primary
-      Application.put_env(:arbor_security, :session_owner_test_aliases, aliases_after)
+      Application.put_env(:arbor_capabilities, :session_owner_test_aliases, aliases_after)
 
       assert {:noreply, refused} =
                Session.handle_info(:drain_queue, %{queued | turn_in_flight: false})
@@ -2378,7 +2382,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     ensure_event_registry!()
     put_orchestrator_cap!(ctx.agent_id)
     primary = register_active_human!()
-    Application.put_env(:arbor_security, :session_owner_test_aliases, %{ctx.human_id => primary})
+
+    Application.put_env(:arbor_capabilities, :session_owner_test_aliases, %{
+      ctx.human_id => primary
+    })
 
     previous = Application.fetch_env(:arbor_orchestrator, :private_conversation_memory)
 
@@ -2496,10 +2503,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   defp deny_completion_binding!(ctx, :revocation), do: Security.revoke_fixture(ctx.chat_cap.id)
 
   defp deny_completion_binding!(_ctx, :unlink),
-    do: Application.put_env(:arbor_security, :session_owner_test_aliases, %{})
+    do: Application.put_env(:arbor_capabilities, :session_owner_test_aliases, %{})
 
   defp deny_completion_binding!(_ctx, :resolver_outage),
-    do: Application.put_env(:arbor_security, :session_owner_test_aliases, :offline)
+    do: Application.put_env(:arbor_capabilities, :session_owner_test_aliases, :offline)
 
   defp queue_private_turn!(ctx, opts \\ []) do
     from = Keyword.get(opts, :from, {self(), make_ref()})

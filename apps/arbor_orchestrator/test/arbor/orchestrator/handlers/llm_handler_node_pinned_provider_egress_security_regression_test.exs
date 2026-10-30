@@ -50,16 +50,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerNodePinnedProviderEgressSecurity
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
     # Real trust defaults: on-host egress is allowed, an external provider asks.
     # A fresh agent has no standing, so the tier the gate classifies decides.
-    prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    prev_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
       RecordingDispatcher.stop()
 
       case prev_enforce do
-        nil -> Application.delete_env(:arbor_security, :egress_gate_enforcing)
-        v -> Application.put_env(:arbor_security, :egress_gate_enforcing, v)
+        nil -> Application.delete_env(:arbor_capabilities, :egress_gate_enforcing)
+        v -> Application.put_env(:arbor_capabilities, :egress_gate_enforcing, v)
       end
     end)
 

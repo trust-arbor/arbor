@@ -171,8 +171,10 @@ defmodule Arbor.Voice.NativeDeskE2E do
       session_token_secret: "sealed-e2e-session-secret"
     ]
 
-    previous = for {key, _} <- overrides, do: {key, Application.fetch_env(:arbor_security, key)}
-    for {key, value} <- overrides, do: Application.put_env(:arbor_security, key, value)
+    previous =
+      for {key, _} <- overrides, do: {key, Application.fetch_env(:arbor_capabilities, key)}
+
+    for {key, value} <- overrides, do: Application.put_env(:arbor_capabilities, key, value)
 
     suffix = System.unique_integer([:positive])
     oidc = OIDCTestHelper.issue_identity(subject: "native-e2e-#{suffix}")
@@ -228,7 +230,7 @@ defmodule Arbor.Voice.NativeDeskE2E do
       _ = Security.deregister_identity_fixture(user)
       oidc.cleanup.()
 
-      for {app, entries} <- [{:arbor_security, previous}, {:arbor_voice, before_voice}],
+      for {app, entries} <- [{:arbor_capabilities, previous}, {:arbor_voice, before_voice}],
           {key, old} <- entries do
         case old do
           {:ok, value} -> Application.put_env(app, key, value)

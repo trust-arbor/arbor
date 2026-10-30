@@ -4,9 +4,9 @@ defmodule Arbor.Actions.InvocationReceiptTest do
 
   defmodule Sink do
     def persist_security_invocation(event) do
-      send(Application.fetch_env!(:arbor_security, :receipt_observer), {:event, event})
+      send(Application.fetch_env!(:arbor_capabilities, :receipt_observer), {:event, event})
 
-      if Application.get_env(:arbor_security, :receipt_fail) == event["stage"],
+      if Application.get_env(:arbor_capabilities, :receipt_fail) == event["stage"],
         do: {:error, :unavailable},
         else: {:ok, event["id"]}
     end
@@ -14,16 +14,16 @@ defmodule Arbor.Actions.InvocationReceiptTest do
 
   setup do
     keys = [:invocation_audit_mode, :invocation_audit_sink, :receipt_observer, :receipt_fail]
-    prior = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
-    Application.put_env(:arbor_security, :invocation_audit_mode, :required)
-    Application.put_env(:arbor_security, :invocation_audit_sink, Sink)
-    Application.put_env(:arbor_security, :receipt_observer, self())
-    Application.delete_env(:arbor_security, :receipt_fail)
+    prior = Map.new(keys, &{&1, Application.fetch_env(:arbor_capabilities, &1)})
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :required)
+    Application.put_env(:arbor_capabilities, :invocation_audit_sink, Sink)
+    Application.put_env(:arbor_capabilities, :receipt_observer, self())
+    Application.delete_env(:arbor_capabilities, :receipt_fail)
 
     on_exit(fn ->
       Enum.each(prior, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
     end)
 
@@ -57,7 +57,7 @@ defmodule Arbor.Actions.InvocationReceiptTest do
   end
 
   test "missing initial ACK cannot create a receipt claiming execution" do
-    Application.put_env(:arbor_security, :receipt_fail, "attempt")
+    Application.put_env(:arbor_capabilities, :receipt_fail, "attempt")
 
     assert %{result: {:error, :invocation_audit_unavailable}, invocation_id: nil} =
              Arbor.Actions.authorize_and_execute_with_receipt(
@@ -70,7 +70,7 @@ defmodule Arbor.Actions.InvocationReceiptTest do
   end
 
   test "terminal audit failure retains exact action refusal but does not invent durable completion" do
-    Application.put_env(:arbor_security, :receipt_fail, "outcome")
+    Application.put_env(:arbor_capabilities, :receipt_fail, "outcome")
 
     assert %{result: {:error, _}, invocation_id: id} =
              Arbor.Actions.authorize_and_execute_with_receipt(

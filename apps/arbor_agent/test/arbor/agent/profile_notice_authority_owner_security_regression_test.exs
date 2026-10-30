@@ -163,8 +163,8 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
     )
 
     Backend.clear()
-    previous = Application.fetch_env(:arbor_security, :native_notice_source_authorizer)
-    Application.put_env(:arbor_security, :native_notice_source_authorizer, ProfileSource)
+    previous = Application.fetch_env(:arbor_capabilities, :native_notice_source_authorizer)
+    Application.put_env(:arbor_capabilities, :native_notice_source_authorizer, ProfileSource)
     dir = Path.join(System.tmp_dir!(), "notice_profile_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     old_dir = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
@@ -172,7 +172,7 @@ defmodule Arbor.Agent.ProfileNoticeAuthorityOwnerSecurityRegressionTest do
 
     on_exit(fn ->
       Backend.clear()
-      restore(:arbor_security, :native_notice_source_authorizer, previous)
+      restore(:arbor_capabilities, :native_notice_source_authorizer, previous)
       restore(:arbor_agent, :legacy_agents_dir, old_dir)
       File.rm_rf!(dir)
     end)

@@ -8,7 +8,7 @@ defmodule Arbor.Actions.MemoryTest do
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
     # Ensure ETS tables exist (test env uses start_children: false)
     for table <- [
@@ -44,7 +44,7 @@ defmodule Arbor.Actions.MemoryTest do
     end
 
     # Disable capability signing requirement for tests
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     :ok
   end

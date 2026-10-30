@@ -172,9 +172,9 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
     Application.put_env(:arbor_orchestrator, :recovery_enabled, false)
     Application.put_env(:arbor_orchestrator, :discover_local_providers, false)
     Application.put_env(:arbor_orchestrator, :preflight_models_on_start, false)
-    Application.put_env(:arbor_security, :master_key_path, Path.join(disk_root, "master.key"))
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :capability_signing_required, true)
+    Application.put_env(:arbor_capabilities, :master_key_path, Path.join(disk_root, "master.key"))
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, true)
 
     Application.put_env(
       :arbor_orchestrator,

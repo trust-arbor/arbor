@@ -53,7 +53,7 @@ defmodule Arbor.Orchestrator.Session.PrivateGoalPromptSecurityRegressionTest do
   end
 
   setup do
-    set_env(:arbor_security, :identity_verification, true)
+    set_env(:arbor_capabilities, :identity_verification, true)
     set_env(:arbor_orchestrator, :preprocessor_enabled, false)
     set_env(:arbor_orchestrator, :private_conversation_memory, enabled: false)
     set_env(:arbor_orchestrator, :_private_goal_observer, self())

@@ -246,11 +246,11 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
 
     backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -298,34 +298,37 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
     RealSecurityProbe.ensure!()
     RealSecurityProbe.reset()
 
-    original_identity = Application.get_env(:arbor_security, :identity_verification, true)
-    original_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
-    original_strict = Application.get_env(:arbor_security, :strict_identity_mode, false)
-    original_signing = Application.get_env(:arbor_security, :capability_signing_required, true)
-    prev_secret = Application.get_env(:arbor_security, :session_token_secret)
+    original_identity = Application.get_env(:arbor_capabilities, :identity_verification, true)
+    original_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled, true)
+    original_strict = Application.get_env(:arbor_capabilities, :strict_identity_mode, false)
+
+    original_signing =
+      Application.get_env(:arbor_capabilities, :capability_signing_required, true)
+
+    prev_secret = Application.get_env(:arbor_capabilities, :session_token_secret)
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "agent-dispatch-facade-secret-" <>
         Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     )
 
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     on_exit(fn ->
       case prev_secret do
-        nil -> Application.delete_env(:arbor_security, :session_token_secret)
-        v -> Application.put_env(:arbor_security, :session_token_secret, v)
+        nil -> Application.delete_env(:arbor_capabilities, :session_token_secret)
+        v -> Application.put_env(:arbor_capabilities, :session_token_secret, v)
       end
 
-      Application.put_env(:arbor_security, :identity_verification, original_identity)
-      Application.put_env(:arbor_security, :reflex_checking_enabled, original_reflex)
-      Application.put_env(:arbor_security, :strict_identity_mode, original_strict)
-      Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+      Application.put_env(:arbor_capabilities, :identity_verification, original_identity)
+      Application.put_env(:arbor_capabilities, :reflex_checking_enabled, original_reflex)
+      Application.put_env(:arbor_capabilities, :strict_identity_mode, original_strict)
+      Application.put_env(:arbor_capabilities, :capability_signing_required, original_signing)
     end)
 
     :ok

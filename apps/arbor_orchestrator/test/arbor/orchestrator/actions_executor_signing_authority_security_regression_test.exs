@@ -20,22 +20,22 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     {:ok, _} = Application.ensure_all_started(:arbor_shell)
 
     previous = %{
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      capability_signing: Application.get_env(:arbor_security, :capability_signing_required),
-      strict_identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      capability_signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      strict_identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
       approval_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     }
 
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
 
@@ -87,12 +87,12 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
       _ = Security.delete_signing_key_fixture(identity.agent_id)
       _ = Security.deregister_identity_fixture(identity.agent_id)
       File.rm_rf(root)
-      restore_env(:arbor_security, :identity_verification, previous.identity_verification)
-      restore_env(:arbor_security, :capability_signing_required, previous.capability_signing)
-      restore_env(:arbor_security, :strict_identity_mode, previous.strict_identity)
-      restore_env(:arbor_security, :uri_registry_enforcement, previous.uri_registry)
-      restore_env(:arbor_security, :reflex_checking_enabled, previous.reflex)
-      restore_env(:arbor_security, :consensus_escalation_enabled, previous.escalation)
+      restore_env(:arbor_capabilities, :identity_verification, previous.identity_verification)
+      restore_env(:arbor_capabilities, :capability_signing_required, previous.capability_signing)
+      restore_env(:arbor_capabilities, :strict_identity_mode, previous.strict_identity)
+      restore_env(:arbor_capabilities, :uri_registry_enforcement, previous.uri_registry)
+      restore_env(:arbor_capabilities, :reflex_checking_enabled, previous.reflex)
+      restore_env(:arbor_capabilities, :consensus_escalation_enabled, previous.escalation)
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard)
       restore_env(:arbor_trust, :policy_enforcer_enabled, previous.policy_enforcer)
     end)

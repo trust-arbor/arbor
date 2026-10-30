@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Memory.PrivateConversationSQLiteTest do
@@ -45,15 +48,15 @@ defmodule Arbor.Memory.PrivateConversationSQLiteTest do
     File.mkdir_p!(root)
 
     settings = [
-      {:arbor_security, :identity_alias_resolver,
+      {:arbor_capabilities, :identity_alias_resolver,
        Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver},
       {:arbor_memory, :strict_vector_seam, Arbor.Memory.StrictVectorSeam.Default},
       {:arbor_memory, :private_memory_security, Security},
       {:arbor_persistence_host, :vector_store_backend, Arbor.Persistence.VectorStore.Ecto},
       {:arbor_persistence_host, :vector_store_repo, Repo},
-      {:arbor_security, :identity_verification, true},
-      {:arbor_security, :system_authority_mode, :persistent},
-      {:arbor_security, :master_key_path, Path.join(root, "master.key")}
+      {:arbor_capabilities, :identity_verification, true},
+      {:arbor_capabilities, :system_authority_mode, :persistent},
+      {:arbor_capabilities, :master_key_path, Path.join(root, "master.key")}
     ]
 
     previous =

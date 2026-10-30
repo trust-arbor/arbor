@@ -26,7 +26,7 @@ defmodule Arbor.Common.NodeRegistry do
       # Production — multi-node
       config :arbor_kernel, common: [
         trust_zones: %{
-          :"security@host" => %{zone: 2, apps: [:arbor_security, :arbor_trust]},
+          :"security@host" => %{zone: 2, apps: [:arbor_capabilities, :arbor_trust]},
           :"worker@host"   => %{zone: 1, apps: [:arbor_agent, :arbor_ai]},
           :"gateway@host"  => %{zone: 0, apps: [:arbor_gateway]}
         }

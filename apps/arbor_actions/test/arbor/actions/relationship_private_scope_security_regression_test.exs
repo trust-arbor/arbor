@@ -11,7 +11,7 @@ defmodule Arbor.Actions.RelationshipPrivateScopeSecurityRegressionTest do
   @timeout 5_000
 
   setup do
-    for app <- [:arbor_security, :arbor_trust],
+    for app <- [:arbor_capabilities, :arbor_trust],
         key <- [:policy_enforcer_enabled, :approval_guard_enabled] do
       previous = Application.fetch_env(app, key)
       Application.put_env(app, key, false)

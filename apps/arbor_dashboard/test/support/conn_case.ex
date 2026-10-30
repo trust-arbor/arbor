@@ -19,7 +19,7 @@ defmodule Arbor.Dashboard.ConnCase do
     # Clear OIDC config so OidcAuth plug allows open access in tests.
     # Without this, .env file OIDC settings leak into test env via runtime.exs,
     # causing all LiveView tests to get redirected to /auth/login.
-    Application.put_env(:arbor_security, :oidc, [])
+    Application.put_env(:arbor_capabilities, :oidc, [])
 
     # Pin require_auth OFF for every LiveView mount. The OidcAuth plug returns a
     # fail-closed 503 when require_auth is true and no OIDC provider is configured

@@ -62,8 +62,8 @@ defmodule Arbor.Agent.AuthorizationTest do
 
   setup do
     settings =
-      Enum.map(@security_settings, fn {key, value} -> {:arbor_security, key, value} end) ++
-        [{:arbor_security, :consensus_module, ApprovalProbe}]
+      Enum.map(@security_settings, fn {key, value} -> {:arbor_capabilities, key, value} end) ++
+        [{:arbor_capabilities, :consensus_module, ApprovalProbe}]
 
     old = Enum.map(settings, fn {app, key, _} -> {app, key, Application.fetch_env(app, key)} end)
     Enum.each(settings, fn {app, key, value} -> Application.put_env(app, key, value) end)
@@ -152,7 +152,7 @@ defmodule Arbor.Agent.AuthorizationTest do
     fixture = fixture(:restore, ctx)
     uri = resource(:restore, fixture.target)
     grant(ctx.caller, uri, false)
-    Application.put_env(:arbor_security, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
     {:ok, signed} = SignedRequest.sign(uri, ctx.caller, ctx.identity.private_key)
     assert {:ok, caller} = Security.verify_request(signed)
     assert caller == ctx.caller
@@ -171,7 +171,7 @@ defmodule Arbor.Agent.AuthorizationTest do
        ctx do
     fixture = fixture(:restore, ctx)
     grant(ctx.caller, resource(:restore, fixture.target), false)
-    Application.put_env(:arbor_security, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
     {result, effects, _} = observe(fn -> invoke(:restore, ctx, fixture) end)
     assert {:error, {:unauthorized, :missing_signed_request}} = result
     assert effects == []

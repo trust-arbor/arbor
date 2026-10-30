@@ -1,0 +1,197 @@
+defmodule Arbor.Security.SessionTokenTest do
+  @moduledoc """
+  Tests for `Arbor.Security.SessionToken`, including the C4 review fix:
+  the HMAC is verified over the raw transported payload bytes BEFORE any
+  `binary_to_term`, so untrusted/garbage input is never deserialized.
+  """
+
+  use ExUnit.Case, async: false
+  @moduletag :fast
+
+  alias Arbor.Security.SessionToken
+
+  setup do
+    prev = Application.get_env(:arbor_capabilities, :session_token_secret)
+
+    Application.put_env(
+      :arbor_capabilities,
+      :session_token_secret,
+      "test-session-secret-at-least-thirty-two-bytes-#{:rand.uniform(1_000_000)}"
+    )
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:arbor_capabilities, :session_token_secret)
+        v -> Application.put_env(:arbor_capabilities, :session_token_secret, v)
+      end
+    end)
+
+    :ok
+  end
+
+  describe "generate/2 and verify/1 round-trip" do
+    test "a freshly generated token verifies to its principal" do
+      {:ok, token} = SessionToken.generate("human_abc123")
+      assert {:ok, "human_abc123"} = SessionToken.verify(token)
+    end
+
+    test "expired token is rejected" do
+      {:ok, token} = SessionToken.generate("human_x")
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      now = System.os_time(:second)
+
+      payload =
+        bytes
+        |> :erlang.binary_to_term([:safe])
+        |> Map.merge(%{iat: now - 120, exp: now - 60})
+
+      expired_bytes = :erlang.term_to_binary(payload)
+      secret = Application.fetch_env!(:arbor_capabilities, :session_token_secret)
+      signature = :crypto.mac(:hmac, :sha256, secret, expired_bytes)
+      expired = Base.url_encode64(signature <> expired_bytes, padding: false)
+
+      assert {:error, :token_expired} = SessionToken.verify(expired)
+    end
+
+    @tag :security_regression
+    test "security regression: default session lifetime is one hour" do
+      assert {:ok, token} = SessionToken.generate("human_short_lived")
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      payload = :erlang.binary_to_term(bytes, [:safe])
+      assert payload.exp - payload.iat == 3_600
+    end
+
+    @tag :terminal_session_expiry_cap
+    test "security regression: authenticated expiry caps the actual signed v2 payload" do
+      expiry = System.os_time(:second) + 30
+      assert {:ok, token} = SessionToken.generate("human_x", ttl: 900, max_expires_at: expiry)
+      assert {:ok, "human_x"} = SessionToken.verify(token)
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(token, padding: false)
+
+      assert %{v: 2, exp: ^expiry} = :erlang.binary_to_term(bytes, [:safe])
+
+      assert {:ok, shorter} = SessionToken.generate("human_x", ttl: 5, max_expires_at: expiry)
+
+      {:ok, <<_signature::binary-size(32), bytes::binary>>} =
+        Base.url_decode64(shorter, padding: false)
+
+      assert :erlang.binary_to_term(bytes, [:safe]).exp < expiry
+    end
+
+    @tag :terminal_session_expiry_cap
+    test "security regression: invalid or elapsed authentication bounds cannot mint a token" do
+      for bound <- [nil, "future", 0, -1, System.os_time(:second), 253_402_300_800] do
+        assert {:error, :invalid_expiry_bound} =
+                 SessionToken.generate("human_x", max_expires_at: bound)
+      end
+    end
+  end
+
+  describe "configuration_status/0" do
+    @tag :security_regression
+    test "security regression: rejects the committed development secret" do
+      Application.put_env(
+        :arbor_capabilities,
+        :session_token_secret,
+        "arbor-dev-session-token-secret-change-in-prod"
+      )
+
+      assert {:error, :insecure_session_token_secret} = SessionToken.configuration_status()
+
+      assert_raise RuntimeError, ~r/session token configuration rejected/, fn ->
+        SessionToken.generate("human_rejected")
+      end
+    end
+
+    @tag :security_regression
+    test "security regression: rejects missing and short secrets" do
+      Application.delete_env(:arbor_capabilities, :session_token_secret)
+      assert {:error, :session_token_secret_missing} = SessionToken.configuration_status()
+
+      Application.put_env(:arbor_capabilities, :session_token_secret, "too-short")
+      assert {:error, :invalid_session_token_secret} = SessionToken.configuration_status()
+    end
+  end
+
+  describe "tamper resistance" do
+    test "a token signed with a different secret does not verify" do
+      {:ok, token} = SessionToken.generate("human_x")
+
+      # Re-key: the existing token's HMAC no longer matches.
+      Application.put_env(
+        :arbor_capabilities,
+        :session_token_secret,
+        "a-completely-different-session-secret-at-least-32-bytes"
+      )
+
+      assert {:error, :invalid_signature} = SessionToken.verify(token)
+    end
+
+    test "flipping a byte in the token invalidates it" do
+      {:ok, token} = SessionToken.generate("human_x")
+      {:ok, raw} = Base.url_decode64(token, padding: false)
+
+      # Flip a byte in the payload region (after the 32-byte HMAC prefix).
+      <<sig::binary-size(32), first, rest::binary>> = raw
+      tampered = Base.url_encode64(sig <> <<Bitwise.bxor(first, 0xFF)>> <> rest, padding: false)
+
+      assert {:error, _} = SessionToken.verify(tampered)
+      refute match?({:ok, _}, SessionToken.verify(tampered))
+    end
+  end
+
+  describe "MAC checked before deserialization (C4 regression guard)" do
+    # The security property: untrusted bytes are NEVER fed to binary_to_term
+    # before the HMAC is verified. A token whose payload region is arbitrary
+    # (not even a valid erlang term) and whose signature is wrong must be
+    # rejected with :invalid_signature — proving the MAC gate runs first. If
+    # verification were reordered to deserialize first, this same input would
+    # surface as :invalid_binary (or worse, materialize an attacker term).
+
+    test "garbage payload + wrong signature → :invalid_signature, no crash" do
+      garbage_sig = :crypto.strong_rand_bytes(32)
+      garbage_payload = :crypto.strong_rand_bytes(64)
+      token = Base.url_encode64(garbage_sig <> garbage_payload, padding: false)
+
+      assert {:error, :invalid_signature} = SessionToken.verify(token)
+    end
+
+    test "too-short token is rejected cleanly" do
+      short = Base.url_encode64(:crypto.strong_rand_bytes(10), padding: false)
+      assert {:error, :malformed_token} = SessionToken.verify(short)
+    end
+
+    test "non-base64 input is rejected cleanly" do
+      assert {:error, :invalid_base64} = SessionToken.verify("!!!not base64!!!")
+    end
+
+    test "non-binary input is rejected" do
+      assert {:error, :invalid_token} = SessionToken.verify(:not_a_token)
+    end
+
+    test "oversized binary is rejected before Base64/HMAC work" do
+      oversized = String.duplicate("A", 4097)
+      assert {:error, :invalid_token} = SessionToken.verify(oversized)
+    end
+
+    test "empty binary is rejected before Base64/HMAC work" do
+      assert {:error, :invalid_token} = SessionToken.verify("")
+    end
+
+    test "generated tokens stay under the 4096-byte bound" do
+      {:ok, token} = SessionToken.generate("human_bound_check")
+      assert is_binary(token)
+      assert byte_size(token) > 0
+      assert byte_size(token) <= 4096
+      assert {:ok, "human_bound_check"} = SessionToken.verify(token)
+    end
+  end
+end

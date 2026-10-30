@@ -1808,7 +1808,7 @@ defmodule Arbor.Actions do
     # decision): resolve the action's effect class + runtime egress tier and
     # thread them into auth_opts so the egress gate in AuthDecision can fire,
     # then emit observability telemetry for boundary-crossing egress. The gate
-    # itself is inert unless `:arbor_security, :egress_gate_enforcing` is on —
+    # itself is inert unless `:arbor_capabilities, :egress_gate_enforcing` is on —
     # this resolves + observes regardless, so the gate can land dark.
     effect_class = Egress.effect_class_for(action_module)
     egress_tier = Egress.egress_tier_for(action_module, params, clean_context)
@@ -3905,7 +3905,7 @@ defmodule Arbor.Actions do
   # and gather data first. `gate_intent` records what the gate would do.
   defp maybe_observe_egress(action_module, egress_tier, context) do
     if Classification.external_egress?(egress_tier) do
-      on_prem? = Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
+      on_prem? = Application.get_env(:arbor_capabilities, :gate_on_premises_egress, false) == true
       intent = Classification.gate_intent(egress_tier, on_prem?)
       TaintEvents.emit_egress_observed(action_module, egress_tier, intent, context)
     end
@@ -4329,7 +4329,7 @@ defmodule Arbor.Actions do
   """
   @spec register_action_uri_prefixes() :: :ok | {:error, term()}
   def register_action_uri_prefixes do
-    with {:ok, _started} <- Application.ensure_all_started(:arbor_security),
+    with {:ok, _started} <- Application.ensure_all_started(:arbor_capabilities),
          true <- Code.ensure_loaded?(Arbor.Security) do
       Arbor.Security.register_uri_provider(__MODULE__)
     else

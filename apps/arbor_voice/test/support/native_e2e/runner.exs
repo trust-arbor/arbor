@@ -3,7 +3,7 @@
 root = Path.expand("../../../../..", __DIR__)
 Code.require_file(Path.join(root, "apps/arbor_multimedia/test/native/sealed_runner.exs"))
 Code.prepend_paths(Path.wildcard(Path.join([to_string(:code.root_dir()), "lib", "*", "ebin"])))
-{:ok, _} = Application.ensure_all_started(:arbor_security)
+{:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 Code.require_file(Path.join(root, "apps/arbor_security/test/test_helper.exs"))
 Application.ensure_all_started(:telemetry)
 {:ok, _} = Arbor.Voice.Application.start(:normal, [])

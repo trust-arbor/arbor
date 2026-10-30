@@ -330,7 +330,7 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
   describe "Security restricted signals across nodes" do
     test "security regression: identity suspension emitted on A changes public status on B" do
-      {:ok, cluster} = start_cluster(2, "security_sync", [:arbor_security])
+      {:ok, cluster} = start_cluster(2, "security_sync", [:arbor_capabilities])
       on_exit(fn -> stop_cluster_if_alive(cluster) end)
 
       {:ok, [node_a, node_b]} = LocalCluster.nodes(cluster)

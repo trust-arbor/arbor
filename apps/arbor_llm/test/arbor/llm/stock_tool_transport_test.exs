@@ -18,8 +18,8 @@ defmodule Arbor.LLM.StockToolTransportTest do
       {:arbor_llm, :sensitivity_guarded_adapters},
       {:arbor_ai, :backend_capabilities},
       {:arbor_llm, Plugs.RateLimitBackoff},
-      {:arbor_security, :invocation_audit_mode},
-      {:arbor_security, :invocation_audit_sink},
+      {:arbor_capabilities, :invocation_audit_mode},
+      {:arbor_capabilities, :invocation_audit_sink},
       {:arbor_historian, :durable_event_log_target},
       {:arbor_orchestrator, :lm_studio}
     ]
@@ -30,8 +30,8 @@ defmodule Arbor.LLM.StockToolTransportTest do
     Application.delete_env(:arbor_llm, :pipeline)
     Application.delete_env(:arbor_llm, :rate_limit_backoff_dispatch_fn)
     Application.delete_env(:arbor_llm, Plugs.RateLimitBackoff)
-    Application.put_env(:arbor_security, :invocation_audit_mode, :required)
-    Application.put_env(:arbor_security, :invocation_audit_sink, Arbor.Historian)
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :required)
+    Application.put_env(:arbor_capabilities, :invocation_audit_sink, Arbor.Historian)
 
     Application.put_env(:arbor_historian, :durable_event_log_target, %{
       name: :identity_fixture,
@@ -110,9 +110,9 @@ defmodule Arbor.LLM.StockToolTransportTest do
     end
 
     Application.put_env(:arbor_llm, :tool_invocation_auditor, Arbor.Security)
-    Application.put_env(:arbor_security, :invocation_audit_mode, :disabled)
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :disabled)
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
-    Application.put_env(:arbor_security, :invocation_audit_mode, :required)
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :required)
     Application.put_env(:arbor_llm, :rate_limit_backoff_dispatch_fn, fn call -> call end)
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
   end

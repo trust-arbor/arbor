@@ -202,6 +202,41 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "Capabilities Core and Signals adapter are required exact physical inputs" do
+    oid = String.duplicate("b", 40)
+    required = required_triples(oid)
+
+    for package <- ~w(arbor_capabilities arbor_capabilities_signals) do
+      project = "packages/#{package}/mix.exs"
+      source = "packages/#{package}/lib/authority.ex"
+      test_source = "packages/#{package}/test/authority_test.exs"
+      adjacent = "packages/#{package}_other/lib/authority.ex"
+      embedded = "apps/#{package}/lib/authority.ex"
+
+      extras =
+        Enum.map([source, test_source, adjacent, embedded], fn path ->
+          %{path: path, mode: "100644", oid: oid}
+        end)
+
+      assert project in SourcePolicy.required_files()
+      assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+      assert project in paths
+      assert source in paths
+      assert test_source in paths
+      refute adjacent in paths
+      refute embedded in paths
+
+      assert {:error, :missing_required_input} =
+               SourcePolicy.select(Enum.reject(required, &(&1.path == project)) ++ extras)
+
+      assert SourcePolicy.ignored_generated_extra?("packages/#{package}/cover/report.html")
+      refute SourcePolicy.ignored_generated_extra?("packages/#{package}_other/cover/report.html")
+      refute SourcePolicy.ignored_generated_extra?("apps/#{package}/cover/report.html")
+      refute SourcePolicy.ignored_generated_extra?("packages/#{package}/coverup/report.html")
+    end
+  end
+
+  @tag :fast
   test "Support includes its native source without admitting adjacent roots" do
     oid = String.duplicate("a", 40)
     required = required_triples(oid)
@@ -735,6 +770,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_support/c_src/arbor_safe_path_reader.c", "native source\n"},
       {"packages/arbor_oauth/mix.exs", "oauth\n"},
       {"packages/arbor_oauth/lib/oauth.ex", "oauth source\n"},
+      {"packages/arbor_capabilities/mix.exs", "capabilities\n"},
+      {"packages/arbor_capabilities/lib/authority.ex", "capabilities source\n"},
+      {"packages/arbor_capabilities_signals/mix.exs", "capabilities signals\n"},
+      {"packages/arbor_capabilities_signals/lib/adapter.ex", "adapter source\n"},
       {"packages/arbor_capabilities_oidc/mix.exs", "oidc\n"},
       {"packages/arbor_capabilities_oidc/lib/oidc.ex", "oidc source\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},

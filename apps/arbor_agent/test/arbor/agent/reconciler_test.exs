@@ -11,7 +11,7 @@ defmodule Arbor.Agent.ReconcilerTest do
 
   ## Test-env setup notes
 
-  In an isolated run `config :arbor_security, start_children: false`, so the
+  In an isolated run `config :arbor_capabilities, start_children: false`, so the
   Identity Registry that `identity_present?/1` consults is not running. The full
   suite may already have bootstrapped it under `Arbor.Security.Supervisor`. Setup
   tracks which case applies: a test-owned registry is discarded by supervised

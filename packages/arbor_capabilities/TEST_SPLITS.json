@@ -1,0 +1,248 @@
+[
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/runtime_authority_root_config_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/runtime_authority_root_config_test.exs",
+    "source_sha256": "877238b06eaedd061569b25a20bd2c7e62c00b15b7acf85b29fc0ff8675f2c5f",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/runtime_authority_root_config_test.exs",
+    "original_source_sha256": "6ebb613425d9dedaf0de96a56e950adb26e2e7f01b6f9fe606d9d7c13fff4e40",
+    "final_destination_sha256": "877238b06eaedd061569b25a20bd2c7e62c00b15b7acf85b29fc0ff8675f2c5f"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/skill_import_reflex_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/skill_import_reflex_security_regression_test.exs",
+    "source_sha256": "df033977d6912815fd62f4a54d5896386ff1190af6be9b1562451e6139fe153b",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/skill_import_reflex_security_regression_test.exs",
+    "original_source_sha256": "df033977d6912815fd62f4a54d5896386ff1190af6be9b1562451e6139fe153b",
+    "final_destination_sha256": "3feb6a99f87ef68ad56319b9cf990fd85ce24f6a0aefe3799701dcd92cff5f83"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/provider_gate_lifecycle_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/provider_gate_lifecycle_security_regression_test.exs",
+    "source_sha256": "823742df7042a1616bb3b739f8cc65ea7c5149b83c12a840fb35f2dbb2445c77",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/provider_gate_lifecycle_security_regression_test.exs",
+    "original_source_sha256": "25a09256ed42d9169048dd4d3dc8f2590a3a721942eb9f799829975aaa26db8e",
+    "final_destination_sha256": "f6c1721331d04fddfef5880788ad958f3f6b1e086ee6ee73cbfdaed22cdba9cc"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/distributed_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/distributed_test.exs",
+    "source_sha256": "92b6f0003c489081b69681cdf154bde0a7c6e4a080b8c13ca8094052ab183ddd",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/distributed_test.exs",
+    "original_source_sha256": "66256479a5cb4052fc0f3135c916ee1d62b8b7586e2c654549e0b325934a4420",
+    "final_destination_sha256": "92b6f0003c489081b69681cdf154bde0a7c6e4a080b8c13ca8094052ab183ddd"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/distributed_signal_subscription_security_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/distributed_signal_subscription_security_test.exs",
+    "source_sha256": "ea496d9a3e024ed2e4fa61be97aee91908083e757b11961a5bb195c1cbcc26e3",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/distributed_signal_subscription_security_test.exs",
+    "original_source_sha256": "f6159eb5de6fb1c35b9a15ca169fcbcb9bcde2b4f5187f6c3889a2dde37a3348",
+    "final_destination_sha256": "ea496d9a3e024ed2e4fa61be97aee91908083e757b11961a5bb195c1cbcc26e3"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/security_sync_mailbox_authentication_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/security_sync_mailbox_authentication_security_regression_test.exs",
+    "source_sha256": "0805fe698cdbcde9a7e412770824d2860f730821b7a0e458bd89abaef6a488b9",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/security_sync_mailbox_authentication_security_regression_test.exs",
+    "original_source_sha256": "f5516fdb03192036832e0f8998e7e1fa91194fc3b6e0c282de52370e52aa0cd9",
+    "final_destination_sha256": "0805fe698cdbcde9a7e412770824d2860f730821b7a0e458bd89abaef6a488b9"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/signal_sync_undecryptable_delivery_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/signal_sync_undecryptable_delivery_security_regression_test.exs",
+    "source_sha256": "8e4c7f6d068b23173479e5258e5be052c57eede10f8badd062e3ff2df5a8be28",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/signal_sync_undecryptable_delivery_security_regression_test.exs",
+    "original_source_sha256": "8e4c7f6d068b23173479e5258e5be052c57eede10f8badd062e3ff2df5a8be28",
+    "final_destination_sha256": "8e4c7f6d068b23173479e5258e5be052c57eede10f8badd062e3ff2df5a8be28"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/nonce_seen_sync_type_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/nonce_seen_sync_type_security_regression_test.exs",
+    "source_sha256": "6e08654e1651469483640fd4f893d03ad89a28ff1425dd7e35123c702f4c4636",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/nonce_seen_sync_type_security_regression_test.exs",
+    "original_source_sha256": "efcd333b33b79b99e0034fcd06a5bb36a85e88655d61bf854120ab9f65019157",
+    "final_destination_sha256": "6e08654e1651469483640fd4f893d03ad89a28ff1425dd7e35123c702f4c4636"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/signal_transport_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/signal_transport_security_regression_test.exs",
+    "source_sha256": "b04353d1ddcec2db6fcd53bcc0e62a3d335550f7c3c775a87d1d4c99a331b873",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/signal_transport_security_regression_test.exs",
+    "original_source_sha256": "857bd291548611d04dcd92818b7637d6211cdc4e05c089e99cfe9bdf77938207",
+    "final_destination_sha256": "b04353d1ddcec2db6fcd53bcc0e62a3d335550f7c3c775a87d1d4c99a331b873"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/signals_subscription_session_token_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/signals_subscription_session_token_security_regression_test.exs",
+    "source_sha256": "aec170ebd9898ed5e4568eaa9ffb49d842cdc5e773c7250e272dd41da7e88df1",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/signals_subscription_session_token_security_regression_test.exs",
+    "original_source_sha256": "4852fba41733770c5012100e5cd65395c63e571015c94eaebef5a17372c6885b",
+    "final_destination_sha256": "aec170ebd9898ed5e4568eaa9ffb49d842cdc5e773c7250e272dd41da7e88df1"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/unconfigured_security_sync_start_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/unconfigured_security_sync_start_security_regression_test.exs",
+    "source_sha256": "00ccca2ba9d830c3a7478b558a753cb09685c3af33acd7cd7ccdbf8fc63a83c7",
+    "assertions": "All original assertions retained as actual product integration.",
+    "original_source": "apps/arbor_security/test/arbor/security/unconfigured_security_sync_start_security_regression_test.exs",
+    "original_source_sha256": "c009201a5f1d854f3c3d4f9dfdca8b2857253ad1590a1e46dd55a7f023ba9553",
+    "final_destination_sha256": "00ccca2ba9d830c3a7478b558a753cb09685c3af33acd7cd7ccdbf8fc63a83c7"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/oidc/config_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/oidc/config_host_test.exs",
+    "source_sha256": "6eaf97c51dd2bbd1b1abde60db3da470aa97a97df95c77c6a526ed2a3c149742",
+    "assertions": [
+      "  test \"security regression: runtime.exs stays app-agnostic while arbor.orchestrate uses the authority\" do",
+      "  test \"security regression: runtime config evaluates without Security application BEAMs\" do"
+    ],
+    "original_source": "apps/arbor_security/test/arbor/security/oidc/config_test.exs",
+    "original_source_sha256": "f20a2baeed50fbcba10e4a5585193c506e4c31c818011f7e1142a83d62ee6680",
+    "final_destination_sha256": "85d1e874e3cfcd9a6af8e68695c4fb5beebfc0fb9302f441cd9cd8067a883f62",
+    "final_retained_source_sha256": "200b9b3602e17d18f6b4bd1acd8bba35b9ccbc79bc96e20a5344f5d9806416a3"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/strict_identity_mode_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/strict_identity_config_host_test.exs",
+    "assertions": [
+      "  test \"security regression: development config does not allow arbitrary OIDC subjects\" do"
+    ],
+    "original_source": "apps/arbor_security/test/arbor/security/strict_identity_mode_test.exs",
+    "original_source_sha256": "01ed60bc06d7228a9e5384350c4f2f11326de98098b0a6150af0532dbb2ba932",
+    "final_destination_sha256": "fd90bfcf7fb50400eb2098132075caffde78c8f16f09c7101f4d47996fbf2680",
+    "final_retained_source_sha256": "3964c43acb6d5ee54ea0f8b53af236f314b04226fee08e46e54c2eb677aad4ee"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/template_authority_capability_mutation_security_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/template_authority_capability_mutation_signals_host_test.exs",
+    "backend_fixture": "packages/arbor_capabilities/test/support/template_cas_sandbox.ex",
+    "backend_sha256": "da244c00c5ebd6c53acbef824b66efabe3982cdfbce44fe226d30481df3e5c36",
+    "assertions": [
+      "  test \"security regression: applied acknowledged grant emits one store signal and one audit row\" do",
+      "  test \"security regression: applied acknowledged revoke emits one signal/row; absence emits none\" do",
+      "  test \"security regression: unauthenticated remote capability_granted does not project into live indexes\" do",
+      "  test \"security regression: idempotent grant convergence emits one signal, replay emits none\" do",
+      "  test \"security regression: idempotent revoke convergence emits one signal, replay emits none\" do",
+      "  test \"security regression: pre-C3A live state does not apply unauthenticated remote add or revoke\" do"
+    ],
+    "method": "Literal blocks and dependency-closed unchanged private helpers; all other tests stay Core.",
+    "original_source": "apps/arbor_security/test/arbor/security/template_authority_capability_mutation_security_regression_test.exs",
+    "original_source_sha256": "5f875415309212eb9ea910b336f8139aff21f9ba5286e1a72fc96bce6420e53f",
+    "final_destination_sha256": "f7162a2120ec1b07f7eda8bbef3462720573c395034c8cda54c8e1577f3c793f",
+    "final_retained_source_sha256": "fdc746893dac716af602211ba714bebe822ce6ec59890499a479c3dfd2883e30",
+    "unused_helper_cleanup": "Removed only the retained Core restore_application_env/3 helper; restore_application_env/2 remains used. No assertion removed."
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/capability_store_persistence_regression_test.exs",
+    "destination": "apps/arbor_security/test/arbor/security/capability_store_persistence_signals_host_test.exs",
+    "backend_fixture": "packages/arbor_capabilities/test/support/capability_persistence_backends.ex",
+    "backend_sha256": "8aa7eaf9dee5657ab625a421e5d0d0ececbbe1fedd465eb647d62dede20bea3b",
+    "assertions": [
+      "  @tag :fast"
+    ],
+    "original_source": "apps/arbor_security/test/arbor/security/capability_store_persistence_regression_test.exs",
+    "original_source_sha256": "fb1bd9356ec3390fd77c256c128ffa1db81616e76cceecec10ba05e8fe4955d3",
+    "final_destination_sha256": "f90dca640ae6d1eee1c9a4066811c6bda66a709c6b0951be2ae8de47bfbc5b74",
+    "final_retained_source_sha256": "ac7e15a339193639ecba14e3a89484def441e19db28c421171a1f77ceba9c67e",
+    "unused_helper_cleanup": "Removed only retained Core restore_security_env/2 and eventually/2 helpers, whose only callers moved with the Signals test. No assertion removed."
+  },
+  {
+    "source": "apps/arbor_kernel_runtime/test/support/application_spec_peer.ex",
+    "source_sha256": "0a74ca2a08be1519f1628bfca2ca56ee30dafebfb669d2517fc14af8e02f6c47",
+    "destination": "packages/arbor_capabilities/test/support/application_spec_peer.ex",
+    "changes": "Generic peer harness retained; canonical test namespace and standalone Core profile/config writer only.",
+    "original_source": "apps/arbor_kernel_runtime/test/support/application_spec_peer.ex",
+    "original_source_sha256": "0a74ca2a08be1519f1628bfca2ca56ee30dafebfb669d2517fc14af8e02f6c47",
+    "final_destination_sha256": "5a066687c752f5ecab2a51b5d7eeb5af2684af0657b9fbf7288a2b2a7ddcd3ab"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/signals_port_conformance_test.exs",
+    "destination": "packages/arbor_capabilities_signals/test/signals_contracts_test.exs",
+    "assertions": "Three unchanged Signals behavior membership assertions moved to actual adapter; all existing Core function/crypto assertions stay Core.",
+    "original_source": "apps/arbor_security/test/arbor/security/signals_port_conformance_test.exs",
+    "original_source_sha256": "f017d8a7a6837da6b9cf6e28ffd6aea654e305ec2389165564da63c65539d272",
+    "final_destination_sha256": "13d066c21f1398ce1ae10bb03a2456e6629cf41938b195ca3f16a0205ba3a53e",
+    "final_retained_source_sha256": "107a3b0692bbaefd789b35ac346327f3170e222d6c94a1607dc6a1d2063deb98"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/identity/replay_peers_test.exs",
+    "assertions": "All replay classification tests retained with actual canonical Core peer; obsolete KR boot prerequisite moved to Host startup coverage.",
+    "previous_prerequisite_sha256": "2fb0710f4cb9cbce88266024fac90284e26abad18a0cc2d1c7b0550a3afbe66a",
+    "original_source": "apps/arbor_security/test/arbor/security/identity/replay_peers_test.exs",
+    "original_source_sha256": "dc71ee180ddcbb7fc0479ada71893bb5754aa1c6a441e24e7d565ca70fee631a",
+    "final_retained_source_sha256": "14cffbdd4af44e9e0f0f83ec2a9740c6fcab740de1e257e53a3b286e17dcfc35"
+  },
+  {
+    "source": "apps/arbor_security/test/arbor/security/application_start_profile_test.exs",
+    "original_source_sha256": "1afc805bafbdf2ecedf7288b8e242e01cb3cc13bc97a97803445f64171566016",
+    "destination": "packages/arbor_capabilities/test/arbor/security/application_start_profile_test.exs",
+    "assertions": "All authority profile/store/hydration/audit ordering assertions remain Core using nil RuntimeHost and canonical profile. Product gate precedence/req assertions retained in Host ProviderGateLifecycle test.",
+    "final_destination_sha256": "4da3774d24d8953398e0ea6a005db2d7f6ce8510bfa347487f08d9adef1b637d"
+  },
+  {
+    "source": "apps/arbor_security/test/arbor/security/config_enforcement_toggle_freeze_security_regression_test.exs",
+    "destination": "packages/arbor_capabilities/test/arbor/security/config_enforcement_toggle_freeze_security_regression_test.exs",
+    "assertions": "All freeze claims retained; distributed toggle uses distributed_signals_requested? reader so transport availability is tested separately in retained real Host transport suites. Signals restore-only fixture calls removed from pure Config claim suites.",
+    "final_destination_sha256": "437e629eadb4d835b6e14834719f374e08780b5b80489253bb380b7cd8dbd113",
+    "transport_fixture": "The original second-freeze distributed_signals_enabled? == true assertion remains intact with a test-owned configured SignalTransport port. The fixture admits no subscriptions, publications or remote mutations; no Signals package reference/dependency is added."
+  },
+  {
+    "source": "apps/arbor_security/test/arbor/security/identity/replay_peers_test.exs",
+    "destination": "packages/arbor_capabilities/test/arbor/security/identity/replay_peers_test.exs",
+    "assertions": "Actual canonical-app replay-peer startup retains its request-refusal/classification assertions. Product signed boot prerequisite is exercised through Host Runtime prepare_startup; standalone peer fixture selects nil RuntimeHost plus activation-only Core profile.",
+    "final_destination_sha256": "14cffbdd4af44e9e0f0f83ec2a9740c6fcab740de1e257e53a3b286e17dcfc35"
+  },
+  {
+    "original_source": "apps/arbor_security/test/arbor/security/oidc_optional_adapter_security_regression_test.exs",
+    "original_source_sha256": "62dc5b0f67d18ace4f1f21c047836b5869cc3772aa8fc77afcab57956fc36b52",
+    "source": "packages/arbor_capabilities/test/arbor/security/oidc_optional_adapter_security_regression_test.exs",
+    "pre_split_canonical_source_sha256": "17809f53190cd3a9b7c230032466fbf1d1a920ed1528fda39ea316f2d925584d",
+    "destination": "apps/arbor_security/test/arbor/security/oidc_optional_adapter_host_security_regression_test.exs",
+    "assertions": {
+      "core": [
+        "security regression: host verification never accepts prepared claims or caller-provided keys",
+        "security regression: crashed configured adapters are unavailable without exception reflection"
+      ],
+      "host": [
+        "security regression: full Security works with OIDC and JWT ebins absent while configured policy stays closed"
+      ],
+      "all_original_assertion_lines_retained": true
+    },
+    "changes": "The two unit cases and CrashedAdapter remain Core with canonical config atoms. Literal full boot/KernelRuntime/provider/physical JWT omission integration and unchanged real PeerDriver/helpers move to Host; only enclosing test module name and unused outer attribute change.",
+    "final_destination_sha256": "abc1f1b75c92f45ad39c5c4d396affdefa87ca32aabbcb3ebf2bea5f9250331c",
+    "final_retained_source_sha256": "6e3ebab7c75dfefe36e5b4970603a267113397fd8a72a533983a5dd5240a16b2"
+  },
+  {
+    "source": "packages/arbor_capabilities/test/arbor/security/escalation_test.exs",
+    "original_source": "apps/arbor_security/test/arbor/security/escalation_test.exs",
+    "original_source_sha256": "0d91d9bcea342e0206d9f9a1c0a7503896c972d8a0ed1a22996a01bf7490e3f5",
+    "source_test_block_sha256": "e4d85dbb8d6c2a4b98d763357914c0bf8bbcc3b7c57d0ec0f4564df60e0238b2",
+    "destination": "apps/arbor_security/test/arbor/security/escalation_config_host_test.exs",
+    "tests": [
+      "config seam interaction_router defaults to Arbor.Comms.InteractionRouter"
+    ],
+    "assertions": "The original Config.interaction_router equality assertion and Module.concat Comms value are retained verbatim in Host. Host reads the actual Root config and selects its explicit trusted router; Core retains every escalation behavior test and adds absent-nil and explicitly configured test-router seam assertions.",
+    "changes": "The historical implicit product default is now an explicit Root composition choice. Only the Comms-default assertion moves; no production default or validator is weakened.",
+    "final_destination_sha256": "872c8beb837b25198a742ed0035500cacb351a7c0853ba8cd542427d30bed165",
+    "final_retained_source_sha256": "18997cb52654d7c98391a10500fce42f0bd995a566682ac4ce7007830bbe6bd9"
+  },
+  {
+    "source": "apps/arbor_security/test/arbor/security/oidc/device_flow_security_regression_test.exs",
+    "original_source": "apps/arbor_security/test/arbor/security/oidc/device_flow_security_regression_test.exs",
+    "original_source_sha256": "0e135634478ed33f27fc6b2db530453840ab88b7c75b0d6c6baccb73e6c48af1",
+    "destination": "packages/arbor_capabilities/test/arbor/security/oidc/device_flow_security_regression_test.exs",
+    "assertions": "Both original public device-flow refusal/body-redaction test blocks and every assertion remain unchanged.",
+    "changes": "File-local setup_all explicitly starts the public Finch/Req provider apps and the OAuth package public Pool child specification under ExUnit supervision. No KernelRuntime/Common Host startup or production Core provider default is introduced.",
+    "final_destination_sha256": "75cd40d39c0e5b67fd79aae53e92d1edd6aa0ff8c50d0e858cd43fa1eef7183a"
+  }
+]

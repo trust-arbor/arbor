@@ -103,7 +103,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     {:ok, _} = RecordingDispatcher.start()
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
 
-    prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
+    prev_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
     Application.put_env(:arbor_trust, :policy_module, NoEgressStandingPolicy)
 
@@ -114,8 +114,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       _ = RecordingDispatcher.stop()
 
       case prev_enforce do
-        nil -> Application.delete_env(:arbor_security, :egress_gate_enforcing)
-        v -> Application.put_env(:arbor_security, :egress_gate_enforcing, v)
+        nil -> Application.delete_env(:arbor_capabilities, :egress_gate_enforcing)
+        v -> Application.put_env(:arbor_capabilities, :egress_gate_enforcing, v)
       end
 
       case prev_policy do
@@ -141,7 +141,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
   end
 
   test "enforcing + no standing: compute-node LLM call HALTS before dispatch, surfaces a refusal" do
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     outcome = LlmHandler.execute(build_node(), build_context(), build_graph(), [])
 
@@ -202,7 +202,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
   end
 
   test "an allowed original provider cannot authorize a different router-selected provider" do
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     context =
       Arbor.Orchestrator.Engine.Context.new(%{
@@ -249,7 +249,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
   end
 
   test "router mode ignores a stale blocked session provider and authorizes the exact route" do
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     exact_local_route = %{
       provider: %Arbor.Contracts.LLM.ProviderEntry{

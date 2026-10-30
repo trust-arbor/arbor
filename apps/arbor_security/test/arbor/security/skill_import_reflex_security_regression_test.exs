@@ -16,7 +16,11 @@ defmodule Arbor.Security.SkillImportReflexSecurityRegressionTest do
     dir = scratch_dir!("arbor-skill-import")
 
     Arbor.Common.Config.Testing.isolate_namespace()
-    Arbor.Common.Config.Testing.put(:skill_import_security_module, Arbor.Security)
+
+    Arbor.Common.Config.Testing.put(
+      :skill_import_security_module,
+      Arbor.Security.Host.SkillSecurity
+    )
 
     on_exit(fn -> File.rm_rf(dir) end)
 

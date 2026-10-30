@@ -232,13 +232,13 @@ defmodule Arbor.Agent.AuthorizeStartSecurityRegressionTest do
   end
 
   defp put_security_env(key, value) do
-    previous = Application.fetch_env(:arbor_security, key)
-    Application.put_env(:arbor_security, key, value)
+    previous = Application.fetch_env(:arbor_capabilities, key)
+    Application.put_env(:arbor_capabilities, key, value)
 
     on_exit(fn ->
       case previous do
-        {:ok, old} -> Application.put_env(:arbor_security, key, old)
-        :error -> Application.delete_env(:arbor_security, key)
+        {:ok, old} -> Application.put_env(:arbor_capabilities, key, old)
+        :error -> Application.delete_env(:arbor_capabilities, key)
       end
     end)
   end

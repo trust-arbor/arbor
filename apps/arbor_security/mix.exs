@@ -14,44 +14,42 @@ defmodule ArborSecurity.MixProject do
       config_path: "../../config/config.exs",
       deps_path: paths[:deps_path],
       lockfile: "../../mix.lock",
-      elixir: "~> 1.17",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
+      compilers: [:boundary] ++ Mix.compilers(),
+      boundary: [default: [type: :strict, check: [aliases: true]]],
       deps: deps(),
-      docs: docs()
+      docs: [main: "Arbor.Security", extras: []]
     ]
   end
 
-  def application do
-    [
-      extra_applications: [:logger],
-      mod: {Arbor.Security.Application, []}
-    ]
-  end
+  # Product composition is passive. The canonical Capabilities application is
+  # the sole owner of the historical Security authority supervisor and modules.
+  def application, do: [extra_applications: [:logger]]
 
   defp deps do
     [
-      {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
-      {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"},
-      {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
+      # KernelRuntime must establish the product boot binding before Core starts.
+      {:arbor_kernel_runtime, in_umbrella: true},
+      {:arbor_capabilities, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities", env: Mix.env()},
+      {:arbor_capabilities_signals, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities_signals", runtime: false, env: Mix.env()},
       {:arbor_capabilities_oidc, "~> 0.1.0-dev",
        path: "../../packages/arbor_capabilities_oidc",
        optional: true,
        runtime: false,
        env: Mix.env()},
-      {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
-      {:arbor_kernel_runtime, in_umbrella: true},
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../../packages/arbor_kernel", env: Mix.env()},
+      {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
+      {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody", env: Mix.env()},
+      {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
+      {:arbor_signals, "~> 0.2.0-dev",
+       path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:plug_crypto, "~> 2.0"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
-    ]
-  end
-
-  defp docs do
-    [
-      main: "Arbor.Security",
-      extras: ["README.md"]
+      {:boundary, "~> 0.10", runtime: false}
     ]
   end
 end

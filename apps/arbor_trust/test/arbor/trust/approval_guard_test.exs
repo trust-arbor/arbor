@@ -68,18 +68,18 @@ defmodule Arbor.Trust.ApprovalGuardTest do
 
   setup do
     prev_trust_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
-    prev_security_guard = Application.get_env(:arbor_security, :approval_guard_enabled)
+    prev_security_guard = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
-    prev_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
+    prev_escalation = Application.get_env(:arbor_capabilities, :consensus_escalation_enabled)
 
     on_exit(fn ->
       restore(:arbor_trust, :approval_guard_enabled, prev_trust_guard)
-      restore(:arbor_security, :approval_guard_enabled, prev_security_guard)
+      restore(:arbor_capabilities, :approval_guard_enabled, prev_security_guard)
       restore(:arbor_trust, :policy_module, prev_policy)
-      restore(:arbor_security, :consensus_escalation_enabled, prev_escalation)
+      restore(:arbor_capabilities, :consensus_escalation_enabled, prev_escalation)
     end)
 
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
 
     :ok
   end
@@ -87,15 +87,15 @@ defmodule Arbor.Trust.ApprovalGuardTest do
   describe "enabled?/0" do
     test "uses compatibility fallback from security config" do
       Application.delete_env(:arbor_trust, :approval_guard_enabled)
-      Application.put_env(:arbor_security, :approval_guard_enabled, false)
+      Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
       refute ApprovalGuard.enabled?()
 
-      Application.put_env(:arbor_security, :approval_guard_enabled, true)
+      Application.put_env(:arbor_capabilities, :approval_guard_enabled, true)
       assert ApprovalGuard.enabled?()
     end
 
     test "trust config overrides compatibility fallback" do
-      Application.put_env(:arbor_security, :approval_guard_enabled, true)
+      Application.put_env(:arbor_capabilities, :approval_guard_enabled, true)
       Application.put_env(:arbor_trust, :approval_guard_enabled, false)
 
       refute ApprovalGuard.enabled?()
@@ -323,20 +323,20 @@ defmodule Arbor.Trust.ApprovalGuardTest do
       :operator_resolver
     ]
 
-    previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
+    previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_capabilities, &1)})
 
     on_exit(fn ->
       Enum.each(previous, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
     end)
 
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
-    Application.put_env(:arbor_security, :consensus_module, MockConsensus)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
-    Application.put_env(:arbor_security, :interaction_router, CapturingRouter)
-    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_module, MockConsensus)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_capabilities, :interaction_router, CapturingRouter)
+    Application.put_env(:arbor_capabilities, :operator_resolver, ExplicitOperatorResolver)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

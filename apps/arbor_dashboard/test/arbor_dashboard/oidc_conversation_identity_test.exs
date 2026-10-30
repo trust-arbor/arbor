@@ -30,15 +30,15 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
     env =
       Map.new(
         [:oidc, :master_key_path, :session_token_secret],
-        &{&1, Application.fetch_env(:arbor_security, &1)}
+        &{&1, Application.fetch_env(:arbor_capabilities, &1)}
       )
 
     previous_home = System.get_env("ARBOR_HOME")
     System.put_env("ARBOR_HOME", root)
-    Application.put_env(:arbor_security, :master_key_path, Path.join(root, "master.key"))
+    Application.put_env(:arbor_capabilities, :master_key_path, Path.join(root, "master.key"))
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "dashboard-oidc-regression-secret"
     )
@@ -89,7 +89,7 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
         %{"keys" => [Map.merge(public, %{"alg" => "ES256", "kid" => kid})]}
       )
 
-    Application.put_env(:arbor_security, :oidc, providers: [provider])
+    Application.put_env(:arbor_capabilities, :oidc, providers: [provider])
     subject = Security.derive_oidc_principal_id_fixture(claims)
 
     on_exit(fn ->
@@ -104,8 +104,8 @@ defmodule Arbor.Dashboard.OidcConversationIdentityTest do
       :ok = Security.delete_oidc_jwks_fixture(provider)
 
       Enum.each(env, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
 
       if previous_home,

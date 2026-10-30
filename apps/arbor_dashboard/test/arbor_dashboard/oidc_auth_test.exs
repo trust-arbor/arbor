@@ -18,9 +18,9 @@ defmodule Arbor.Dashboard.OidcAuthTest do
 
   # Clear OIDC config that may leak from .env file via runtime.exs
   setup do
-    original = Application.get_env(:arbor_security, :oidc, [])
-    Application.put_env(:arbor_security, :oidc, [])
-    on_exit(fn -> Application.put_env(:arbor_security, :oidc, original) end)
+    original = Application.get_env(:arbor_capabilities, :oidc, [])
+    Application.put_env(:arbor_capabilities, :oidc, [])
+    on_exit(fn -> Application.put_env(:arbor_capabilities, :oidc, original) end)
     :ok
   end
 
@@ -110,7 +110,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
 
   describe "when OIDC is configured with an http issuer" do
     test "security regression: explicitly disallowed http issuer does not redirect" do
-      Application.put_env(:arbor_security, :oidc,
+      Application.put_env(:arbor_capabilities, :oidc,
         providers: [
           %{issuer: "http://localhost:8080", client_id: "test-client", allow_http: false}
         ]
@@ -155,7 +155,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
     end
 
     test "security regression: a stale local-dev session is not accepted as OIDC proof" do
-      Application.put_env(:arbor_security, :oidc,
+      Application.put_env(:arbor_capabilities, :oidc,
         providers: [%{issuer: "https://issuer.invalid", client_id: "test"}]
       )
 

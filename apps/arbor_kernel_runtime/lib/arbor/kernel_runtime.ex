@@ -19,7 +19,11 @@ defmodule Arbor.KernelRuntime do
 
   alias Arbor.Common.Extension.Activation
   alias Arbor.KernelRuntime.BootProfileBinding
+  alias Arbor.KernelRuntime.Config
   alias Arbor.KernelRuntime.ProviderGate
+
+  @doc "The configured closed startup profile for product runtime composition."
+  def start_profile, do: Config.start_profile()
 
   @doc """
   Builds a permanent provider-gate child specification.

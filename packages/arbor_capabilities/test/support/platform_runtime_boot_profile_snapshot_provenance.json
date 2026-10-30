@@ -1,0 +1,22 @@
+{
+  "head": "3fbe6596fa2da06480fbdd75c3b516815d79a9d3",
+  "snapshot_file": "legacy-boot-profile-snapshot.json",
+  "snapshot_sha256": "f4fa1d7a759c4caaaeb782ca5f8c0d7f0db4c1dcdff86321f107a64b4c718bf5",
+  "captured_public_API": "Arbor.KernelRuntime.boot_profile/0 after actual legacy KernelRuntime startup and boot handshake in private VM",
+  "baseline_compile": "legacy-baseline-compile-01/state.json passed",
+  "capture": "legacy-public-env-01/state.json passed",
+  "sources": {
+    "config/test.exs": {
+      "sha256": "5f0e3a4a9a5e172dad065459f3cdf89c24b32efbaad136eb233e56896ab43edb",
+      "git_blob_oid": "a34730b1066a053693a4dcd13d8422bb102587a5"
+    },
+    "packages/arbor_kernel/test/fixtures/extension_envelopes/v1/boot_profile_manifest.json": {
+      "sha256": "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268",
+      "git_blob_oid": "19268f6c8f58ce68ba6304bdd66cbd427e31cb47"
+    },
+    "packages/arbor_kernel/test/fixtures/extension_envelopes/v1/boot_profile_signature.json": {
+      "sha256": "a59386b959907635d76907d1024501ef3d0ae4407806468aeebe39ea5bb72036",
+      "git_blob_oid": "38ed081dcd1323c16727a0ecbca4beef666a7f1d"
+    }
+  }
+}

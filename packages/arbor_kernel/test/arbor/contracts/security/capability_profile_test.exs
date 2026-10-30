@@ -5,7 +5,7 @@ defmodule Arbor.Contracts.Security.CapabilityProfileTest do
 
   @valid_attrs %{
     uri_prefix: "arbor://fs/write/",
-    owner: :arbor_security,
+    owner: :arbor_capabilities,
     blast_radius: :high,
     reversibility: :reversible,
     effect_class: :local_write,

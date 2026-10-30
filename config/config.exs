@@ -16,7 +16,11 @@ config :arbor_llm,
 config :bundlex, :disable_precompiled_os_deps, apps: [:membrane_portaudio_plugin]
 
 # Common configuration for all Arbor apps
-config :arbor_security,
+config :arbor_capabilities,
+  runtime_host: Arbor.Security.Host.Runtime,
+  consensus_module: Arbor.Consensus,
+  interaction_router: Arbor.Comms.InteractionRouter,
+  invocation_audit_sink: Arbor.Historian,
   operator_resolver: Arbor.Comms.Adapters.SecurityOperatorResolver,
   signal_transport: Arbor.Security.Adapters.SignalsTransport,
   native_notice_source_authorizer: Arbor.Agent.NoticeSourceAuthority,
@@ -87,19 +91,19 @@ config :arbor_security,
       purposes: [:voice_egress_grant]
     },
     system_authority: %{
-      application: :arbor_security,
+      application: :arbor_capabilities,
       path: [Arbor.Security.SystemAuthority],
       registered_name: Arbor.Security.SystemAuthority,
       purposes: []
     },
     signing_broker: %{
-      application: :arbor_security,
+      application: :arbor_capabilities,
       path: [Arbor.Security.SigningAuthorityBroker],
       registered_name: Arbor.Security.SigningAuthorityBroker,
       purposes: []
     },
     channel_broker: %{
-      application: :arbor_security,
+      application: :arbor_capabilities,
       path: [Arbor.Security.ChannelAuthorityBroker],
       registered_name: Arbor.Security.ChannelAuthorityBroker,
       purposes: []
@@ -294,13 +298,13 @@ config :arbor_signals,
   security_sync_subscribers: %{
     nonce_cache: %{
       owner: Arbor.Security.Identity.NonceCache,
-      supervisor: {:application, :arbor_security},
+      supervisor: {:application, :arbor_capabilities},
       child_id: Arbor.Security.Identity.NonceCache,
       events: [:nonce_seen]
     },
     capability_store: %{
       owner: Arbor.Security.CapabilityStore,
-      supervisor: {:application, :arbor_security},
+      supervisor: {:application, :arbor_capabilities},
       child_id: Arbor.Security.CapabilityStore,
       events: [
         :capability_granted,
@@ -312,7 +316,7 @@ config :arbor_signals,
     },
     identity_registry: %{
       owner: Arbor.Security.Identity.Registry,
-      supervisor: {:application, :arbor_security},
+      supervisor: {:application, :arbor_capabilities},
       child_id: Arbor.Security.Identity.Registry,
       events: [
         :identity_registered,
@@ -695,13 +699,13 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 # runbook in the decision doc; flipping blind can halt cloud heartbeats that
 # carry untrusted data):
 #
-#   config :arbor_security, egress_gate_enforcing: true
+#   config :arbor_capabilities, egress_gate_enforcing: true
 #   # single-operator default posture so normal cloud egress isn't gated — the
 #   # taint-exfil block (untrusted data -> external) + per-agent :block/:ask
 #   # tightening still apply:
 #   config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 #   # optionally gate homelab/LAN egress too (default off):
-#   # config :arbor_security, gate_on_premises_egress: true
+#   # config :arbor_capabilities, gate_on_premises_egress: true
 
 # Import environment-specific config
 # LLM provider fallback for reviewed graphs (council seats pin a preferred

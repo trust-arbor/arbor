@@ -83,18 +83,18 @@ defmodule Arbor.Agent.ProfileNoticeRestartSQLSecurityRegressionTest do
        ack_mode: :backend}
     )
 
-    old = Application.fetch_env(:arbor_security, :native_notice_source_authorizer)
-    Application.put_env(:arbor_security, :native_notice_source_authorizer, Source)
+    old = Application.fetch_env(:arbor_capabilities, :native_notice_source_authorizer)
+    Application.put_env(:arbor_capabilities, :native_notice_source_authorizer, Source)
     old_legacy = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
     Application.put_env(:arbor_agent, :legacy_agents_dir, dir)
 
     on_exit(fn ->
       case old do
         {:ok, value} ->
-          Application.put_env(:arbor_security, :native_notice_source_authorizer, value)
+          Application.put_env(:arbor_capabilities, :native_notice_source_authorizer, value)
 
         :error ->
-          Application.delete_env(:arbor_security, :native_notice_source_authorizer)
+          Application.delete_env(:arbor_capabilities, :native_notice_source_authorizer)
       end
 
       case old_legacy do

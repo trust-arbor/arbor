@@ -27,7 +27,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     previous_admission = Application.get_env(:arbor_llm, :opencode_zen_admission_path)
     previous_proxy = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
     previous_openai = System.get_env("OPENAI_API_KEY")
-    previous_egress = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+    previous_egress = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
 
     # These tests exercise the TRANSPORT (headers, credentials, admission), not
     # the egress gate. The gate correctly DENIES keyless egress at the shipped
@@ -35,7 +35,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     # separately in arbor_security's egress_gate_test. Without the allowance
     # here, no request ever reaches the capture server and every wire assertion
     # fails with `received?: false`. Grant it for the duration and restore.
-    Application.put_env(:arbor_security, :allow_opencode_zen_egress, true)
+    Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, true)
 
     ack_path =
       Path.join(System.tmp_dir!(), "opencode-zen-ack-#{System.unique_integer([:positive])}.json")
@@ -93,8 +93,9 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
         else: System.delete_env("OPENAI_API_KEY")
 
       if is_nil(previous_egress),
-        do: Application.delete_env(:arbor_security, :allow_opencode_zen_egress),
-        else: Application.put_env(:arbor_security, :allow_opencode_zen_egress, previous_egress)
+        do: Application.delete_env(:arbor_capabilities, :allow_opencode_zen_egress),
+        else:
+          Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, previous_egress)
     end)
 
     %{ack_path: ack_path}

@@ -12,11 +12,11 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
   @restart_timeout 3_000
 
   setup do
-    start_children = Application.fetch_env(:arbor_security, :start_children)
+    start_children = Application.fetch_env(:arbor_capabilities, :start_children)
     runtime = Application.fetch_env(:arbor_kernel, :kernel_runtime)
     current = Application.get_env(:arbor_kernel, :kernel_runtime, [])
 
-    Application.put_env(:arbor_security, :start_children, true)
+    Application.put_env(:arbor_capabilities, :start_children, true)
 
     Application.put_env(
       :arbor_kernel,
@@ -24,12 +24,12 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
       Keyword.put(current, :start_profile, :full)
     )
 
-    _ = Application.stop(:arbor_security)
-    assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    _ = Application.stop(:arbor_capabilities)
+    assert {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
     on_exit(fn ->
-      _ = Application.stop(:arbor_security)
-      restore_env(:arbor_security, :start_children, start_children)
+      _ = Application.stop(:arbor_capabilities)
+      restore_env(:arbor_capabilities, :start_children, start_children)
       restore_env(:arbor_kernel, :kernel_runtime, runtime)
       :ok = Arbor.Security.TestBootstrap.restore_supervised_tree!()
     end)
@@ -60,15 +60,20 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
       |> Enum.reverse()
 
     assert hd(start_ids) == Arbor.Security.ProviderGate
+    gate_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.ProviderGate))
+    store_index = Enum.find_index(start_ids, &(&1 == :arbor_security_capabilities))
+    assert is_integer(gate_index)
+    assert is_integer(store_index)
+    assert gate_index < store_index
 
     started = Application.started_applications() |> Enum.map(&elem(&1, 0))
     assert Enum.all?(@roots, &(&1 in started))
   end
 
   test "security regression: full static startup returns only after deferred Registry hydration and authority readiness" do
-    :ok = Application.stop(:arbor_security)
+    :ok = Application.stop(:arbor_capabilities)
 
-    assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    assert {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     assert is_pid(Process.whereis(Arbor.Security.TerminalLogin))
 
     agent_id = Arbor.Security.SystemAuthority.agent_id()
@@ -102,63 +107,63 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
   end
 
   test "security regression: conflicting authority role proof stops and removes the partial root" do
-    roles = Application.fetch_env!(:arbor_security, :signing_key_owner_roles)
+    roles = Application.fetch_env!(:arbor_capabilities, :signing_key_owner_roles)
     bad_roles = put_in(roles, [:system_authority, :path], [Arbor.Security.Identity.Registry])
 
-    :ok = Application.stop(:arbor_security)
-    Application.put_env(:arbor_security, :signing_key_owner_roles, bad_roles)
+    :ok = Application.stop(:arbor_capabilities)
+    Application.put_env(:arbor_capabilities, :signing_key_owner_roles, bad_roles)
 
     try do
       assert {:error,
-              {:arbor_security,
+              {:arbor_capabilities,
                {{:security_readiness_failed,
                  {:authority_registration_failed, :registration_conflict}},
                 {Arbor.Security.Application, :start, _}}}} =
-               Application.ensure_all_started(:arbor_security)
+               Application.ensure_all_started(:arbor_capabilities)
 
       refute Process.whereis(Arbor.Security.Supervisor)
       refute Process.whereis(Arbor.Security.SigningAuthorityBroker)
       refute Process.whereis(Arbor.Security.DeliveryReceiptBroker)
     after
-      Application.put_env(:arbor_security, :signing_key_owner_roles, roles)
-      assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+      Application.put_env(:arbor_capabilities, :signing_key_owner_roles, roles)
+      assert {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     end
   end
 
   test "actual gate-name collision keeps the typed error and starts no later child" do
-    :ok = Application.stop(:arbor_security)
+    :ok = Application.stop(:arbor_capabilities)
     {:ok, rogue} = Agent.start_link(fn -> :ok end, name: Arbor.Security.ProviderGate)
     Process.unlink(rogue)
 
     try do
       assert {:error,
-              {:arbor_security,
+              {:arbor_capabilities,
                {{:provider_gate_name_collision, ^rogue}, {Arbor.Security.Application, :start, _}}}} =
-               Application.ensure_all_started(:arbor_security)
+               Application.ensure_all_started(:arbor_capabilities)
 
       refute Process.whereis(Arbor.Security.Supervisor)
       refute Process.whereis(Arbor.Security.CapabilityStore)
     after
       Agent.stop(rogue)
-      assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+      assert {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     end
   end
 
   test "unrelated downstream collision remains an unrelated OTP error" do
-    :ok = Application.stop(:arbor_security)
+    :ok = Application.stop(:arbor_capabilities)
     {:ok, squat} = Agent.start_link(fn -> :ok end, name: Arbor.Security.DeliveryReceiptBroker)
     Process.unlink(squat)
 
     try do
-      assert {:error, {:arbor_security, {reason, {Arbor.Security.Application, :start, _}}}} =
-               Application.ensure_all_started(:arbor_security)
+      assert {:error, {:arbor_capabilities, {reason, {Arbor.Security.Application, :start, _}}}} =
+               Application.ensure_all_started(:arbor_capabilities)
 
       refute match?({:provider_gate_name_collision, _}, reason)
       assert inspect(reason) =~ inspect(Arbor.Security.DeliveryReceiptBroker)
       assert Process.alive?(squat)
     after
       Agent.stop(squat)
-      assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+      assert {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     end
   end
 

@@ -93,7 +93,7 @@ defmodule Arbor.Signals.ClusterTestHelpers do
       identity_registry: apply(Arbor.Security, :identity_security_sync_subscriber_fixture, [])
     })
 
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
   end
 
   @doc "Start Security's canonical test tree after signal infrastructure is running."

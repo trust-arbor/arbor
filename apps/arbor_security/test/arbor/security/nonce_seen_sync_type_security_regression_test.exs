@@ -49,8 +49,8 @@ defmodule Arbor.Security.NonceSeenSyncTypeSecurityRegressionTest do
   end
 
   test "security regression: NonceCache's nonce_seen crosses the relay unencrypted and is applied" do
-    previous = Application.get_env(:arbor_security, :distributed_signals)
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    previous = Application.get_env(:arbor_capabilities, :distributed_signals)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
     on_exit(fn -> restore_security_env(:distributed_signals, previous) end)
 
     nonce = :crypto.strong_rand_bytes(16)
@@ -135,6 +135,6 @@ defmodule Arbor.Security.NonceSeenSyncTypeSecurityRegressionTest do
     end
   end
 
-  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

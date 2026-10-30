@@ -54,10 +54,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
     backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -104,32 +104,35 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   end
 
   setup do
-    original_resolver = Application.fetch_env(:arbor_security, :identity_alias_resolver)
-    Application.put_env(:arbor_security, :identity_alias_resolver, UnlinkedIdentityResolver)
+    original_resolver = Application.fetch_env(:arbor_capabilities, :identity_alias_resolver)
+    Application.put_env(:arbor_capabilities, :identity_alias_resolver, UnlinkedIdentityResolver)
 
     on_exit(fn ->
       case original_resolver do
-        {:ok, value} -> Application.put_env(:arbor_security, :identity_alias_resolver, value)
-        :error -> Application.delete_env(:arbor_security, :identity_alias_resolver)
+        {:ok, value} -> Application.put_env(:arbor_capabilities, :identity_alias_resolver, value)
+        :error -> Application.delete_env(:arbor_capabilities, :identity_alias_resolver)
       end
     end)
 
-    original_identity = Application.get_env(:arbor_security, :identity_verification, true)
-    original_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
-    original_strict = Application.get_env(:arbor_security, :strict_identity_mode, false)
-    original_signing = Application.get_env(:arbor_security, :capability_signing_required, true)
+    original_identity = Application.get_env(:arbor_capabilities, :identity_verification, true)
+    original_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled, true)
+    original_strict = Application.get_env(:arbor_capabilities, :strict_identity_mode, false)
+
+    original_signing =
+      Application.get_env(:arbor_capabilities, :capability_signing_required, true)
+
     original_session_mod = Application.get_env(:arbor_agent, :orchestrator_session_module)
 
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     on_exit(fn ->
-      Application.put_env(:arbor_security, :identity_verification, original_identity)
-      Application.put_env(:arbor_security, :reflex_checking_enabled, original_reflex)
-      Application.put_env(:arbor_security, :strict_identity_mode, original_strict)
-      Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+      Application.put_env(:arbor_capabilities, :identity_verification, original_identity)
+      Application.put_env(:arbor_capabilities, :reflex_checking_enabled, original_reflex)
+      Application.put_env(:arbor_capabilities, :strict_identity_mode, original_strict)
+      Application.put_env(:arbor_capabilities, :capability_signing_required, original_signing)
 
       case original_session_mod do
         nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
@@ -608,21 +611,21 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
   setup context do
     if context[:conversation_ingress] do
-      previous = Application.fetch_env(:arbor_security, :session_token_secret)
+      previous = Application.fetch_env(:arbor_capabilities, :session_token_secret)
 
       Application.put_env(
-        :arbor_security,
+        :arbor_capabilities,
         :session_token_secret,
         "conversation-public-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       )
 
-      Application.put_env(:arbor_security, :identity_verification, true)
-      Application.put_env(:arbor_security, :capability_signing_required, true)
+      Application.put_env(:arbor_capabilities, :identity_verification, true)
+      Application.put_env(:arbor_capabilities, :capability_signing_required, true)
 
       on_exit(fn ->
         case previous do
-          {:ok, value} -> Application.put_env(:arbor_security, :session_token_secret, value)
-          :error -> Application.delete_env(:arbor_security, :session_token_secret)
+          {:ok, value} -> Application.put_env(:arbor_capabilities, :session_token_secret, value)
+          :error -> Application.delete_env(:arbor_capabilities, :session_token_secret)
         end
       end)
     end
@@ -1079,21 +1082,21 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     @describetag spec: "VOICE-17"
 
     setup do
-      prev_secret = Application.get_env(:arbor_security, :session_token_secret)
+      prev_secret = Application.get_env(:arbor_capabilities, :session_token_secret)
 
       Application.put_env(
-        :arbor_security,
+        :arbor_capabilities,
         :session_token_secret,
         "agent-msg-facade-secret-" <>
           Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       )
 
-      Application.put_env(:arbor_security, :identity_verification, true)
+      Application.put_env(:arbor_capabilities, :identity_verification, true)
 
       on_exit(fn ->
         case prev_secret do
-          nil -> Application.delete_env(:arbor_security, :session_token_secret)
-          v -> Application.put_env(:arbor_security, :session_token_secret, v)
+          nil -> Application.delete_env(:arbor_capabilities, :session_token_secret)
+          v -> Application.put_env(:arbor_capabilities, :session_token_secret, v)
         end
       end)
 

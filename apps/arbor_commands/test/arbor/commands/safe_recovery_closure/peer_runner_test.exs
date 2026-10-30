@@ -12,7 +12,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     root = fixture_release!()
     on_exit(fn -> File.rm_rf!(root) end)
 
-    original_authority_root = Application.fetch_env(:arbor_security, :authority_state_root)
+    original_authority_root = Application.fetch_env(:arbor_capabilities, :authority_state_root)
 
     assert {:ok, sample} =
              PeerRunner.__test_measure__(root, ["e0b3_fixture"], self())
@@ -26,7 +26,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     assert Path.type(authority_root) == :absolute
     refute File.exists?(authority_root)
 
-    assert Application.fetch_env(:arbor_security, :authority_state_root) ==
+    assert Application.fetch_env(:arbor_capabilities, :authority_state_root) ==
              original_authority_root
 
     refute Map.has_key?(sample, "cookie")
@@ -42,7 +42,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     refute "e0b3_fixture" in Enum.map(sample["pre_start"]["applications"], & &1["name"])
   end
 
-  test "security regression: current arbor_security starts in the real peer with an ephemeral root" do
+  test "security regression: passive Host starts canonical Core in the peer with an ephemeral root" do
     root = fixture_release!(include_security_apps?: true)
     on_exit(fn -> File.rm_rf!(root) end)
 
@@ -53,7 +53,20 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
 
     assert sample["observations"]["start_failures"] == []
     assert sample["observations"]["authority_root_configured"] == true
-    assert "arbor_security" in Enum.map(sample["post_start"]["applications"], & &1["name"])
+    started = Enum.map(sample["post_start"]["applications"], & &1["name"])
+    assert "arbor_security" in started
+    assert "arbor_capabilities" in started
+
+    assert %{
+             "module" => "Elixir.Arbor.Security.Application",
+             "application" => "arbor_capabilities"
+           } in sample["post_start"]["modules"]
+
+    refute %{
+             "module" => "Elixir.Arbor.Security.Application",
+             "application" => "arbor_security"
+           } in sample["post_start"]["modules"]
+
     refute inspect(sample) =~ "authority_root_unconfigured"
     refute inspect(sample) =~ authority_root
     refute File.exists?(authority_root)
@@ -196,7 +209,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
       # The peer VM loads only this sys.config. Carry the parent's plain
       # security settings (owner roles, receipt issuer, and the rest of the
       # boot table) and override the keys this fixture must isolate.
-      arbor_security:
+      arbor_capabilities:
         parent_security_config()
         |> Keyword.merge(
           start_children: true,
@@ -219,7 +232,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
   defp parent_security_config do
     dropped = [:authority_state_root, :revocation_ledger_path, :session_token_secret]
 
-    :arbor_security
+    :arbor_capabilities
     |> Application.get_all_env()
     |> Enum.filter(fn {key, value} -> key not in dropped and consultable?(value) end)
   end

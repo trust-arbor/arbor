@@ -134,7 +134,7 @@ defmodule Arbor.Actions.TaintEvents do
       action: action_module_to_string(action_module),
       egress_tier: egress_tier,
       gate_intent: intent,
-      enforcing: Application.get_env(:arbor_security, :egress_gate_enforcing, false) == true,
+      enforcing: Application.get_env(:arbor_capabilities, :egress_gate_enforcing, false) == true,
       taint_level: extract_taint_level(get_in_context(context, :taint)),
       taint_source: get_in_context(context, :taint_source),
       agent_id: Map.get(context, :agent_id)

@@ -19,6 +19,12 @@ jobs:
       # non-gating "LLM Tests" lane below. That's what lets the big inference box
       # stay off without reddening the merge gate.
       ARBOR_DB: postgres
+      # Public package sources for every Core owning-suite invocation below.
+      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
+      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
+      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
+      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
+      ARBOR_CAPABILITIES_OIDC_PATH: ${{ github.workspace }}/packages/arbor_capabilities_oidc
 
     steps:
       - name: Checkout
@@ -46,30 +52,90 @@ jobs:
           key: mix-test-${{ hashFiles('.tool-versions', 'mix.lock') }}
 
       - name: Install dependencies
-        run: mix deps.get
+        run: ./bin/mix deps.get
 
-      # App-local Security suite against a fresh MIX_BUILD_PATH. Must run
+      # The complete Core owning suite uses a fresh MIX_BUILD_PATH and must run
       # before the umbrella compile below, which would populate shared
       # `_build/test` (and the cache of that tree) with Persistence packages/Host,
-      # arbor_historian, arbor_comms, and Phoenix and mask upward deps.
-      - name: Security app-local suite (isolated fresh build)
+      # Kernel Runtime, Host, Signals, Historian, Comms and Phoenix and mask upward deps.
+      - name: Capabilities package owning suite (isolated fresh build)
         run: |
           set -euo pipefail
           REPO_ROOT="$(pwd -P)"
-          BUILD_PATH="$(mktemp -d "${TMPDIR:-/tmp}/arbor-security-app-local.XXXXXX")"
+          BUILD_PATH="$(mktemp -d "${TMPDIR:-/tmp}/arbor-capabilities-owning.XXXXXX")"
           BUILD_PATH="$(cd "$BUILD_PATH" && pwd -P)"
+          mkdir -p "$BUILD_PATH/tmp"
           DEPS_PATH="$(cd "$REPO_ROOT/deps" && pwd -P)"
           ERLANG_ROOT="$(mise where erlang)"
           ELIXIR_ROOT="$(mise where elixir)"
-          cleanup() { rm -rf "$BUILD_PATH"; }
+          EPMD_PID=""
+          cleanup() {
+            if [ -n "$EPMD_PID" ]; then
+              kill "$EPMD_PID" 2>/dev/null || true
+              wait "$EPMD_PID" 2>/dev/null || true
+            fi
+            rm -rf "$BUILD_PATH"
+          }
           trap cleanup EXIT
+
+          ERL_EPMD_PORT="$(python3 - <<'PY'
+          import socket
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              port = sock.getsockname()[1]
+          if port == 4369:
+              raise SystemExit("Private EPMD requires a non-default port")
+          print(port)
+          PY
+          )"
+          export ERL_EPMD_PORT
+          export ERL_EPMD_ADDRESS=127.0.0.1
+          CAPABILITIES_QA_COOKIE="$(python3 -c 'import secrets; print("capabilities_ci_" + secrets.token_hex(32))')"
+          export CAPABILITIES_QA_COOKIE
+          CUSTODY_QA_COOKIE_SHA256="$(python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ["CAPABILITIES_QA_COOKIE"].encode()).hexdigest())')"
+          export CUSTODY_QA_COOKIE_SHA256
+          unset ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS
+          export ERL_FLAGS="+S4:4 -setcookie $CAPABILITIES_QA_COOKIE -kernel inet_dist_use_interface {127,0,0,1}"
+
+          "$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -address 127.0.0.1 \
+            >"$BUILD_PATH/epmd.log" 2>&1 &
+          EPMD_PID=$!
+
+          assert_empty_owned_epmd() {
+            kill -0 "$EPMD_PID" 2>/dev/null || return 1
+            names="$("$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -names 2>/dev/null)" || return 1
+            [ "$names" = "epmd: up and running on port $ERL_EPMD_PORT with data:" ]
+          }
+
+          ready=0
+          for attempt in {1..100}; do
+            if ! kill -0 "$EPMD_PID" 2>/dev/null; then
+              echo "Owned private EPMD exited before readiness" >&2
+              exit 1
+            fi
+            if assert_empty_owned_epmd; then
+              ready=1
+              break
+            fi
+            sleep 0.05
+          done
+          if [ "$ready" != 1 ]; then
+            echo "Owned private EPMD did not become ready with an empty namespace" >&2
+            exit 1
+          fi
 
           set +e
           (
-            cd apps/arbor_security
+            cd packages/arbor_capabilities
             ARBOR_MIX_CONTAINED=1 \
               ARBOR_ERLANG_ROOT="$ERLANG_ROOT" \
               ARBOR_ELIXIR_ROOT="$ELIXIR_ROOT" \
+              ARBOR_KERNEL_PATH="$REPO_ROOT/packages/arbor_kernel" \
+              ARBOR_CUSTODY_PATH="$REPO_ROOT/packages/arbor_custody" \
+              ARBOR_SUPPORT_PATH="$REPO_ROOT/packages/arbor_support" \
+              ARBOR_OAUTH_PATH="$REPO_ROOT/packages/arbor_oauth" \
+              ARBOR_CAPABILITIES_OIDC_PATH="$REPO_ROOT/packages/arbor_capabilities_oidc" \
+              TMPDIR="$BUILD_PATH/tmp" \
               MIX_ENV=test \
               MIX_BUILD_PATH="$BUILD_PATH" \
               MIX_DEPS_PATH="$DEPS_PATH" \
@@ -77,6 +143,11 @@ jobs:
           )
           status=$?
           set -e
+
+          if ! assert_empty_owned_epmd; then
+            echo "Owned private EPMD exited or retained node registrations after the suite" >&2
+            status=1
+          fi
 
           compiled=""
           for lib_dir in "$BUILD_PATH/test/lib" "$BUILD_PATH/lib"; do
@@ -88,9 +159,9 @@ jobs:
             fi
           done
 
-          for forbidden in arbor_persistence arbor_persistence_host arbor_persistence_sql arbor_persistence_eventstore arbor_historian arbor_comms phoenix phoenix_pubsub; do
+          for forbidden in arbor_kernel_runtime arbor_security arbor_signals arbor_capabilities_signals arbor_persistence arbor_persistence_host arbor_persistence_sql arbor_persistence_eventstore arbor_historian arbor_comms phoenix phoenix_pubsub; do
             if echo "$compiled" | grep -qx "$forbidden"; then
-              echo "forbidden application compiled in app-local Security suite: $forbidden" >&2
+              echo "forbidden application compiled in standalone Capabilities suite: $forbidden" >&2
               exit 1
             fi
           done
@@ -98,14 +169,14 @@ jobs:
           exit $status
 
       - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
+        run: ./bin/mix compile --warnings-as-errors
 
       # Path dependencies' tests and owning construction checks are not run by
       # umbrella mix test or the local package-skipping pre-commit hook.
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_capabilities arbor_capabilities_signals arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -130,6 +201,7 @@ jobs:
 
       - name: Phase D coding-DOT maintainability (hermetic)
         run: |
+          CORE_DEPS_PATH="$PWD/deps"
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/semantic_preflight_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/compiler_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/facade_test.exs --timeout 120000
@@ -138,7 +210,7 @@ jobs:
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/profiles_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/validation_program_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/outcome_mapper_test.exs --timeout 120000
-          ./bin/mix test apps/arbor_security/test/arbor/security/uri_registry_test.exs --timeout 120000
+          (cd packages/arbor_capabilities && MIX_DEPS_PATH="$CORE_DEPS_PATH" ../../bin/mix test test/arbor/security/uri_registry_test.exs --timeout 120000)
           ./bin/mix test apps/arbor_actions/test/arbor/actions/security/uri_inventory_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_security_regression_pipeline_test.exs --timeout 120000
           ./bin/mix test apps/arbor_actions/test/arbor/actions/coding/security_regression_test.exs --only phase_d_security_regression --timeout 180000
@@ -150,6 +222,7 @@ jobs:
       - name: Agent-stack security regressions (required, hermetic)
         run: |
           set -euo pipefail
+          CORE_DEPS_PATH="$PWD/deps"
           ./bin/mix test apps/arbor_actions/test/arbor/actions/invocation_audit_security_regression_test.exs apps/arbor_actions/test/arbor/actions/invocation_receipt_test.exs apps/arbor_actions/test/arbor/actions/shell_filesystem_containment_security_regression_test.exs apps/arbor_actions/test/arbor/actions/shell_authorizer_boot_config_security_regression_test.exs apps/arbor_actions/test/arbor/actions/skill_version_security_regression_test.exs apps/arbor_actions/test/arbor/actions/scheduler_descriptor_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_llm/test/arbor/llm/tool_loop_invocation_audit_security_regression_test.exs apps/arbor_llm/test/arbor/llm/execution_provider_identity_test.exs apps/arbor_llm/test/arbor/llm/stock_tool_transport_test.exs --timeout 120000
           ./bin/mix test apps/arbor_ai/test/arbor/ai/acp_session/handler_store_outage_security_regression_test.exs apps/arbor_ai/test/arbor/ai/skill_prompt_security_regression_test.exs --timeout 120000
@@ -160,7 +233,8 @@ jobs:
           ./bin/mix test apps/arbor_gateway/test/arbor/gateway/skill_prompt_security_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/security_qualification_evidence_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/security_qualification_startup_config_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/session_turn_egress_p5_security_regression_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/heartbeat_service_test.exs --timeout 120000
           ./bin/mix test apps/arbor_shell/test/arbor/shell/agent_filesystem_containment_security_regression_test.exs --timeout 120000
-          ./bin/mix test apps/arbor_security/test/arbor/security/audit_mutation_v2_security_regression_test.exs apps/arbor_security/test/arbor/security/capability_audit_wiring_security_regression_test.exs apps/arbor_security/test/arbor/security/capability_audit_recovery_security_regression_test.exs --timeout 120000
+          (cd packages/arbor_capabilities && MIX_DEPS_PATH="$CORE_DEPS_PATH" ../../bin/mix test test/arbor/security/audit_mutation_v2_security_regression_test.exs test/arbor/security/capability_audit_wiring_security_regression_test.exs test/arbor/security/capability_audit_recovery_security_regression_test.exs --timeout 120000)
+          ./bin/mix test apps/arbor_security/test --timeout 120000
 
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
@@ -371,6 +445,41 @@ jobs:
 
       - name: OIDC formatting, strict compile, and complete protocol suites
         working-directory: packages/arbor_capabilities_oidc
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
+          ../../bin/mix test --timeout 120000
+
+  # This passive optional layer selects only public package source dependencies.
+  capabilities_signals:
+    name: Standalone Capabilities Signals adapters
+    runs-on: native
+    env:
+      MIX_ENV: test
+      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
+      ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
+      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
+      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
+      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
+      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
+      ARBOR_CAPABILITIES_OIDC_PATH: ${{ github.workspace }}/packages/arbor_capabilities_oidc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          command -v cc
+
+      - name: Adapter public dependencies
+        working-directory: packages/arbor_capabilities_signals
+        run: ../../bin/mix deps.get
+
+      - name: Adapter formatting, strict compile and owning contract tests
+        working-directory: packages/arbor_capabilities_signals
         run: |
           ../../bin/mix format --check-formatted
           ../../bin/mix compile --warnings-as-errors

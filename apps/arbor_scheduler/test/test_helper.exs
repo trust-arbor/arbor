@@ -1,6 +1,6 @@
 # Tests that touch arbor_security primitives (Identity.Registry, IssuerRegistry,
 # BufferedStore) need those children running: the umbrella test config sets
-# `:arbor_security, start_children: false`, so each app's test_helper opts in.
+# `:arbor_capabilities, start_children: false`, so each app's test_helper opts in.
 #
 # Use the canonical bootstrap rather than hand-rolling the tree. The previous
 # hand-rolled block started the four stores with a durable JSONFile backend and

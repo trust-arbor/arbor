@@ -79,23 +79,23 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
   end
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     unless Process.whereis(TrustStore), do: start_supervised!(TrustStore)
 
     keys = [
-      {:arbor_security, :reflex_checking_enabled, false},
-      {:arbor_security, :capability_signing_required, false},
-      {:arbor_security, :identity_verification, false},
-      {:arbor_security, :strict_identity_mode, false},
-      {:arbor_security, :uri_registry_enforcement, false},
-      {:arbor_security, :consensus_escalation_enabled, false},
-      {:arbor_security, :consensus_module, PendingApprovalProbe},
-      {:arbor_security, :interaction_router, PendingApprovalProbe},
-      {:arbor_security, :operator_resolver, ExplicitOperatorResolver},
-      {:arbor_security, :use_interaction_router_for_approval, true},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :reflex_checking_enabled, false},
+      {:arbor_capabilities, :capability_signing_required, false},
+      {:arbor_capabilities, :identity_verification, false},
+      {:arbor_capabilities, :strict_identity_mode, false},
+      {:arbor_capabilities, :uri_registry_enforcement, false},
+      {:arbor_capabilities, :consensus_escalation_enabled, false},
+      {:arbor_capabilities, :consensus_module, PendingApprovalProbe},
+      {:arbor_capabilities, :interaction_router, PendingApprovalProbe},
+      {:arbor_capabilities, :operator_resolver, ExplicitOperatorResolver},
+      {:arbor_capabilities, :use_interaction_router_for_approval, true},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, true}
     ]
@@ -147,7 +147,7 @@ defmodule Arbor.Actions.CallOutcomeSecurityRegressionTest do
                constraints: %{requires_approval: true}
              )
 
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
 
     assert %{
              result: {:ok, :pending_approval, "req_call_outcome_pending_contract"},

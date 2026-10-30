@@ -38,6 +38,8 @@ defmodule ArborCommands.MixProject do
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
+      {:arbor_capabilities, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities", runtime: false, env: Mix.env()},
       # L2 LLM diagnostics used directly by Mix.Tasks.Arbor.Doctor.
       {:arbor_llm, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},

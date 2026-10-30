@@ -140,7 +140,7 @@ defmodule Arbor.Actions.Egress do
 
   defp gate_on_premises?(opts) do
     Keyword.get_lazy(opts, :gate_on_premises, fn ->
-      Application.get_env(:arbor_security, :gate_on_premises_egress, false)
+      Application.get_env(:arbor_capabilities, :gate_on_premises_egress, false)
     end)
   end
 end

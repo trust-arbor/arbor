@@ -78,60 +78,60 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
     previous = %{
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
-      consensus_module: Application.get_env(:arbor_security, :consensus_module),
-      operator_resolver: Application.fetch_env(:arbor_security, :operator_resolver),
-      escalation_enabled: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      consensus_module: Application.get_env(:arbor_capabilities, :consensus_module),
+      operator_resolver: Application.fetch_env(:arbor_capabilities, :operator_resolver),
+      escalation_enabled: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
       interaction_router:
-        Application.get_env(:arbor_security, :use_interaction_router_for_approval),
-      signing_required: Application.get_env(:arbor_security, :capability_signing_required),
-      strict_identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
+        Application.get_env(:arbor_capabilities, :use_interaction_router_for_approval),
+      signing_required: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      strict_identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
       approval_timeout: Application.get_env(:arbor_orchestrator, :approval_timeout_ms),
       security_module: Application.get_env(:arbor_orchestrator, :security_module)
     }
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
-    Application.put_env(:arbor_security, :consensus_module, ConsensusStub)
-    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :consensus_module, ConsensusStub)
+    Application.put_env(:arbor_capabilities, :operator_resolver, ExplicitOperatorResolver)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
     Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 2_000)
     Application.delete_env(:arbor_orchestrator, :security_module)
 
     on_exit(fn ->
       case previous.operator_resolver do
-        {:ok, value} -> Application.put_env(:arbor_security, :operator_resolver, value)
-        :error -> Application.delete_env(:arbor_security, :operator_resolver)
+        {:ok, value} -> Application.put_env(:arbor_capabilities, :operator_resolver, value)
+        :error -> Application.delete_env(:arbor_capabilities, :operator_resolver)
       end
 
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
       restore_env(:arbor_trust, :policy_module, previous.policy_module)
-      restore_env(:arbor_security, :consensus_module, previous.consensus_module)
+      restore_env(:arbor_capabilities, :consensus_module, previous.consensus_module)
 
       restore_env(
-        :arbor_security,
+        :arbor_capabilities,
         :consensus_escalation_enabled,
         previous.escalation_enabled
       )
 
       restore_env(
-        :arbor_security,
+        :arbor_capabilities,
         :use_interaction_router_for_approval,
         previous.interaction_router
       )
 
       restore_env(
-        :arbor_security,
+        :arbor_capabilities,
         :capability_signing_required,
         previous.signing_required
       )
 
-      restore_env(:arbor_security, :strict_identity_mode, previous.strict_identity)
-      restore_env(:arbor_security, :identity_verification, previous.identity_verification)
+      restore_env(:arbor_capabilities, :strict_identity_mode, previous.strict_identity)
+      restore_env(:arbor_capabilities, :identity_verification, previous.identity_verification)
       restore_env(:arbor_orchestrator, :approval_timeout_ms, previous.approval_timeout)
       restore_env(:arbor_orchestrator, :security_module, previous.security_module)
     end)

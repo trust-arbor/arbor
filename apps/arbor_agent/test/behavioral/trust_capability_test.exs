@@ -128,8 +128,8 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
     test "reflex fires before capability check in authorize/4" do
       # Ensure reflex checking is enabled for this test (may be disabled globally in test.exs)
-      prev = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
-      Application.put_env(:arbor_security, :reflex_checking_enabled, true)
+      prev = Application.get_env(:arbor_capabilities, :reflex_checking_enabled, true)
+      Application.put_env(:arbor_capabilities, :reflex_checking_enabled, true)
 
       try do
         # Even with a valid capability, a dangerous command context should block
@@ -151,7 +151,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
         assert {:error, _} = result
       after
-        Application.put_env(:arbor_security, :reflex_checking_enabled, prev)
+        Application.put_env(:arbor_capabilities, :reflex_checking_enabled, prev)
       end
     end
   end
