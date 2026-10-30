@@ -225,16 +225,72 @@ defmodule OAuthStandaloneConsumer do
   defp start_pool! do
     ensure(Process.whereis(Pool.name()) == nil, "pool name was already occupied")
     {:ok, supervisor} = Supervisor.start_link([Pool], strategy: :one_for_one)
-    children = Supervisor.which_children(supervisor)
 
-    ensure(
-      Enum.any?(children, fn {id, pid, _, _} ->
-        id == Pool and pid == Process.whereis(Pool.name())
-      end),
-      "pool is not the host's child"
-    )
+    try do
+      pool_supervisor =
+        case supervisor_children!(supervisor) do
+          [{Pool, pid, _type, _modules}] when is_pid(pid) -> pid
+          _ -> raise "OAuth qualification failed: pool is not the host's exact child"
+        end
 
-    supervisor
+      # Finch's child spec defaults to :worker despite returning a supervisor.
+      ensure(
+        Process.alive?(pool_supervisor) and
+          :proc_lib.translate_initial_call(pool_supervisor) == {:supervisor, Finch, 1},
+        "pool child is not a live Finch supervisor"
+      )
+
+      registered = Process.whereis(Pool.name())
+
+      ensure(
+        is_pid(registered) and Process.alive?(registered) and
+          supervised_pid?([{pool_supervisor, 0}], registered, 32) and
+          Process.whereis(Pool.name()) == registered and Process.alive?(pool_supervisor),
+        "registered pool is not owned by the host's Finch supervisor"
+      )
+
+      supervisor
+    catch
+      kind, reason ->
+        stacktrace = __STACKTRACE__
+        stop_failed_pool!(supervisor)
+        :erlang.raise(kind, reason, stacktrace)
+    end
+  end
+
+  defp supervised_pid?([], _target, _remaining), do: false
+  defp supervised_pid?(_pending, _target, remaining) when remaining <= 0, do: false
+
+  defp supervised_pid?([{supervisor, depth} | pending], target, remaining) do
+    children = supervisor_children!(supervisor)
+    ensure(length(children) < remaining, "pool supervision tree exceeded its node bound")
+
+    if Enum.any?(children, fn {_id, pid, _type, _modules} -> pid == target end) do
+      Process.alive?(target)
+    else
+      descendants =
+        for {_id, pid, :supervisor, _modules} <- children,
+            is_pid(pid),
+            depth < 4,
+            do: {pid, depth + 1}
+
+      supervised_pid?(pending ++ descendants, target, remaining - length(children) - 1)
+    end
+  end
+
+  defp supervisor_children!(supervisor) do
+    children = GenServer.call(supervisor, :which_children, 1_000)
+    ensure(is_list(children), "pool child did not expose supervisor children")
+    children
+  end
+
+  defp stop_failed_pool!(supervisor) do
+    # Only this freshly created, locally owned supervisor may be stopped here.
+    try do
+      Supervisor.stop(supervisor, :normal, 10_000)
+    catch
+      :exit, {:noproc, _call} -> :ok
+    end
   end
 
   defp protocols! do

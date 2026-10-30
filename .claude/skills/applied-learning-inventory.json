@@ -2474,9 +2474,9 @@
         "Registry.lookup/2",
         "whereis/1"
       ],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "1a8f376f5fee38655c7ea11f18a7dd7db68a70f8edc2578856bb1ce43a5ad889",
+      "last_confirmed": "2026-10-29",
+      "confirmed_by": "standalone-transport-qualification-2026-10-29",
+      "content_sha256": "41102e0d13932a59c069edef72dc355d1d881f444f3c18aa574cb05096f6f5e8",
       "always_loaded": false
     },
     {

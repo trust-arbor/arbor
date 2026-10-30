@@ -72,7 +72,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 
 <!-- applied-learning: registry-disappearance-may-lag-synchronous-process-shutdown -->
 <a id="applied-learning-registry-disappearance-may-lag-synchronous-process-shutdown"></a>
-**Registry disappearance may lag synchronous process shutdown.** `Supervisor.stop/3` waits for the process tree to terminate, but a `Registry.lookup/2`-backed `whereis/1` can briefly retain the registration until its cleanup notification is processed. Tests that assert absence immediately after shutdown should use a short bounded eventual assertion while still checking security state such as identity suspension and capability revocation directly (found 2026-07-10 in exact-policy fail-closed cleanup tests).
+**Registry disappearance may lag synchronous process shutdown.** `Supervisor.stop/3` waits for the process tree to terminate, but a `Registry.lookup/2`-backed `whereis/1` can briefly retain the registration until its cleanup notification is processed. Tests that assert absence immediately after shutdown should use a short bounded eventual assertion while still checking security state such as identity suspension and capability revocation directly. A library's registered service name can also identify a descendant rather than the supervisor returned by its child spec; verify the exact child and bounded subtree membership instead of equating their PIDs (found 2026-07-10 in exact-policy fail-closed cleanup tests; extended 2026-10-29 during standalone transport qualification).
 
 <!-- applied-learning: publish-terminal-state-before-invoking-optional-cleanup-infrastructure -->
 <a id="applied-learning-publish-terminal-state-before-invoking-optional-cleanup-infrastructure"></a>
