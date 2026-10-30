@@ -3,8 +3,13 @@ defmodule Arbor.Trust.PolicyHost do
   VM-lifetime Trust policy-resolution host.
 
   Owns the immutable startup snapshot for security ceilings, permissive-baseline
-  posture, egress defaults, and capability-profile projection. Public Trust
+  posture, egress defaults, feature-domain ownership, and capability-profile projection. Public Trust
   policy resolution reads this snapshot only after a live ready handshake.
+
+  Legacy frozen claims without feature-domain ownership normalize to an empty
+  owner map on reads. Their stored slot and core policy remain unchanged; live
+  configuration is never consulted to augment an existing claim. An explicit
+  malformed owner field still makes the claim unavailable.
   """
 
   use GenServer
@@ -368,13 +373,16 @@ defmodule Arbor.Trust.PolicyHost do
          :ok <- admit_boolean(snapshot.action_profiles_admitted),
          :ok <- admit_mode_map(snapshot.security_ceilings, :binary),
          :ok <- admit_mode_map(snapshot.default_egress_modes, :atom),
-         :ok <- admit_profiles(snapshot.capability_profiles) do
+         :ok <- admit_profiles(snapshot.capability_profiles),
+         {:ok, feature_domain_owners} <-
+           Config.admit_feature_domain_owners(Map.get(snapshot, :feature_domain_owners, %{})) do
       {:ok,
        %{
          start_profile: snapshot.start_profile,
          security_ceilings: snapshot.security_ceilings,
          allow_permissive_baseline: snapshot.allow_permissive_baseline,
          default_egress_modes: snapshot.default_egress_modes,
+         feature_domain_owners: feature_domain_owners,
          capability_profiles: snapshot.capability_profiles,
          action_profiles_admitted: snapshot.action_profiles_admitted
        }}

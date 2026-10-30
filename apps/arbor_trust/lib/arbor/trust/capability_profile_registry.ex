@@ -68,14 +68,14 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   def profile_for(_uri), do: nil
 
   @doc """
-  Return coverage rows for canonical security-owned registry prefixes.
+  Return coverage rows for canonical and feature-registered URI prefixes.
 
   A row is complete when it has a profile, or when it has both an owner and an
   explicit `not_profileable_reason`.
   """
   @spec coverage_rows() :: [coverage_row()]
   def coverage_rows do
-    Arbor.Security.canonical_uri_prefixes()
+    Arbor.Security.registered_uri_prefixes()
     |> Enum.map(&canonicalize_prefix!/1)
     |> Enum.uniq()
     |> Enum.sort()
@@ -88,7 +88,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
     Enum.reject(coverage_rows(), &complete_row?/1)
   end
 
-  @doc "True when every canonical registered prefix has a profile or reason row."
+  @doc "True when every registered prefix has a profile or reason row."
   @spec coverage_complete?() :: boolean()
   def coverage_complete?, do: coverage_gaps() == []
 
@@ -200,10 +200,15 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "acp"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "orchestrator"}), do: :arbor_orchestrator
-  defp owner_for_parsed(%CapabilityUri{domain: "coding"}), do: :arbor_orchestrator
   defp owner_for_parsed(%CapabilityUri{domain: "pipeline"}), do: :arbor_orchestrator
   defp owner_for_parsed(%CapabilityUri{domain: "handler"}), do: :arbor_orchestrator
-  defp owner_for_parsed(_parsed), do: nil
+
+  defp owner_for_parsed(%CapabilityUri{domain: domain}) do
+    case PolicyHost.snapshot() do
+      {:ok, %{feature_domain_owners: owners}} -> Map.get(owners, domain)
+      _unavailable -> nil
+    end
+  end
 
   defp canonicalize_prefix!(uri_prefix) do
     uri_prefix

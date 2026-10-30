@@ -27,7 +27,8 @@ config :arbor_security,
     path: [Arbor.Trust.Supervisor, Arbor.Trust.ConfirmationTracker],
     registered_name: Arbor.Trust.ConfirmationTracker
   },
-  uri_registration_providers: [Arbor.Actions],
+  uri_registration_providers: [Arbor.Actions, Arbor.Orchestrator.CodingUriCatalog],
+  uri_bootstrap_providers: [Arbor.Orchestrator.CodingUriCatalog],
   signing_key_owner_roles: %{
     profile_owner: %{
       application: :arbor_agent,
@@ -569,6 +570,8 @@ config :arbor_kernel,
 # Full-profile action-namespace projection. Atom only; activation_only must
 # not invoke or load this module. arbor_trust must not depend on arbor_actions.
 config :arbor_trust, action_profile_provider: Arbor.Actions
+# Feature ownership is passive host data, admitted into the policy snapshot.
+config :arbor_trust, feature_domain_owners: %{"coding" => :arbor_orchestrator}
 config :arbor_trust, approval_evidence_provider: Arbor.Agent.ApprovalEvidence
 
 # Dashboard chat model configuration

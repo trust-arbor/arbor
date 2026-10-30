@@ -58,6 +58,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.CodingPlan.Reconciliation
   alias Arbor.Orchestrator.CodingPlan.SemanticPreflight
   alias Arbor.Orchestrator.CodingTaskExecutor
+  alias Arbor.Orchestrator.CodingUriCatalog
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
@@ -77,6 +78,27 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Validation.Validator
 
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
+
+  @doc "Return the fixed capability URI projection for coding reconciliation."
+  @spec capability_uri_prefixes() :: [String.t()]
+  defdelegate capability_uri_prefixes(), to: CodingUriCatalog
+
+  @doc """
+  Register the coding feature's fixed URI projection with Security.
+
+  The host must explicitly admit `CodingUriCatalog` as a URI provider. Callers
+  cannot supply prefixes. Refused registration is returned to the caller and
+  never replaced by broad registration of the coding namespace.
+
+  Normal host startup uses Security's configured `:uri_bootstrap_providers`;
+  this operation is an explicit registration entry point for trusted hosts and
+  tooling that compose services manually.
+  """
+  @spec register_coding_uri_prefixes() ::
+          :ok | {:error, :uri_registry_unavailable | :uri_mutation_unauthorized}
+  def register_coding_uri_prefixes do
+    Arbor.Security.register_uri_provider(CodingUriCatalog)
+  end
 
   @doc """
   Execute an action through the orchestrator's existing authorized executor.

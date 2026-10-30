@@ -10,7 +10,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.Classification
-  alias Arbor.Trust.Policy
+  alias Arbor.Trust.{CapabilityProfileRegistry, Policy, PolicyHost}
   import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
@@ -80,7 +80,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
       security_ceilings: Application.get_env(:arbor_trust, :security_ceilings),
       default_egress_modes: Application.get_env(:arbor_trust, :default_egress_modes),
       allow_permissive_baseline: Application.get_env(:arbor_trust, :allow_permissive_baseline),
-      action_profile_provider: Application.get_env(:arbor_trust, :action_profile_provider)
+      action_profile_provider: Application.get_env(:arbor_trust, :action_profile_provider),
+      feature_domain_owners: Application.fetch_env(:arbor_trust, :feature_domain_owners)
     }
 
     on_exit(fn -> restore_trust_app(originals) end)
@@ -171,6 +172,89 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
       |> Enum.map(& &1.uri_prefix)
 
     refute "arbor://action/browser/navigate" in profile_uris
+  end
+
+  test "security regression: retained legacy policy never adopts live feature ownership" do
+    Application.put_env(:arbor_trust, :feature_domain_owners, %{})
+    Application.put_env(:arbor_trust, :security_ceilings, %{"arbor://shell" => :ask})
+    Application.put_env(:arbor_trust, :default_egress_modes, %{external_provider: :ask})
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, false)
+    assert {:ok, _} = restart_trust!(:activation_only, false)
+    assert {:ok, original} = PolicyHost.snapshot()
+
+    # Represent the exact pre-feature VM-lifetime claim retained across reload.
+    # Test claims are public so the fixture can retain the old map unchanged.
+    legacy = Map.delete(original, :feature_domain_owners)
+    table = :arbor_trust_policy_host_claim
+    assert true = :ets.insert(table, {:claimed, legacy})
+    binding = Process.whereis(Arbor.Trust.PolicyHost)
+    owner = :ets.info(table, :owner)
+
+    Application.put_env(:arbor_trust, :feature_domain_owners, %{"coding" => :arbor_orchestrator})
+    Application.put_env(:arbor_trust, :security_ceilings, %{"arbor://shell" => :auto})
+    Application.put_env(:arbor_trust, :default_egress_modes, %{external_provider: :allow})
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+    normalized = Map.put(legacy, :feature_domain_owners, %{})
+    assert {:ok, ^normalized} = PolicyHost.snapshot()
+    assert {:ok, ^normalized} = PolicyHost.snapshot()
+
+    assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") ==
+             nil
+
+    assert Policy.effective_mode("agent_legacy_claim", "arbor://shell/exec/ls") == :ask
+    assert Policy.egress_mode("agent_legacy_claim", :external_provider) == :ask
+    assert :ets.lookup(table, :claimed) == [{:claimed, legacy}]
+    assert :ets.info(table, :owner) == owner
+    assert Process.whereis(Arbor.Trust.PolicyHost) == binding
+  end
+
+  test "security regression: explicit malformed feature ownership is not treated as legacy absence" do
+    assert {:ok, _} = restart_trust!(:activation_only, false)
+    assert {:ok, original} = PolicyHost.snapshot()
+    legacy = Map.delete(original, :feature_domain_owners)
+
+    for bad_owners <- [nil, false, true, [], %{"coding" => nil}, %{coding: :arbor_orchestrator}] do
+      corrupted = Map.put(legacy, :feature_domain_owners, bad_owners)
+      assert true = :ets.insert(:arbor_trust_policy_host_claim, {:claimed, corrupted})
+      assert {:error, :unavailable} = PolicyHost.snapshot()
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") ==
+               nil
+
+      assert Policy.effective_mode("agent_bad_feature_claim", "arbor://shell/exec/ls") == :block
+      assert :ets.lookup(:arbor_trust_policy_host_claim, :claimed) == [{:claimed, corrupted}]
+    end
+  end
+
+  test "security regression: feature-owner app atoms are never loaded by either startup profile" do
+    probe = unloaded_feature_owner_probe!()
+    owners = %{"coding" => probe}
+    Application.put_env(:arbor_trust, :feature_domain_owners, owners)
+
+    for {profile, action_provider} <- [{:full, nil}, {:activation_only, probe}] do
+      Application.put_env(:arbor_trust, :action_profile_provider, action_provider)
+      assert {:ok, _} = restart_trust!(profile, false)
+
+      assert {:ok,
+              %{
+                start_profile: ^profile,
+                feature_domain_owners: ^owners,
+                action_profiles_admitted: false
+              }} = PolicyHost.snapshot()
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") ==
+               probe
+
+      _ = CapabilityProfileRegistry.profiles()
+      refute_providers()
+      assert :code.is_loaded(probe) == false
+      refute :persistent_term.get({probe, :loaded}, false)
+    end
+
+    # Positive control: the code-path probe is loadable and its callback works.
+    assert {:module, ^probe} = Code.ensure_loaded(probe)
+    assert :persistent_term.get({probe, :loaded}, false)
   end
 
   test "full profile admits a preconfigured action provider without provider children" do
@@ -601,6 +685,49 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     assert Policy.tighten_public_opts(unknown, []) == {:ok, []}
   end
 
+  defp unloaded_feature_owner_probe! do
+    probe = :arbor_trust_feature_owner_load_probe
+    assert :code.is_loaded(probe) == false
+    :persistent_term.erase({probe, :loaded})
+
+    root =
+      Path.join(System.tmp_dir!(), "trust-feature-owner-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+
+    # Fixed literal Erlang forms compile without loading the module. Its
+    # on_load callback witnesses even a discarded Code.ensure_loaded? attempt.
+    forms = [
+      {:attribute, 1, :module, probe},
+      {:attribute, 1, :on_load, {:loaded, 0}},
+      {:attribute, 1, :export, [loaded: 0, action_namespace_capability_profiles: 0]},
+      {:function, 1, :loaded, 0,
+       [
+         {:clause, 1, [], [],
+          [
+            {:call, 1, {:remote, 1, {:atom, 1, :persistent_term}, {:atom, 1, :put}},
+             [{:tuple, 1, [{:atom, 1, probe}, {:atom, 1, :loaded}]}, {:atom, 1, true}]},
+            {:atom, 1, :ok}
+          ]}
+       ]},
+      {:function, 1, :action_namespace_capability_profiles, 0, [{:clause, 1, [], [], [{nil, 1}]}]}
+    ]
+
+    {:ok, ^probe, beam} = :compile.forms(forms, [:binary, :return_errors])
+    File.write!(Path.join(root, Atom.to_string(probe) <> ".beam"), beam)
+    assert true = :code.add_patha(String.to_charlist(root))
+
+    on_exit(fn ->
+      :code.del_path(String.to_charlist(root))
+      :code.purge(probe)
+      :code.delete(probe)
+      :persistent_term.erase({probe, :loaded})
+      File.rm_rf!(root)
+    end)
+
+    probe
+  end
+
   defp start_memory_profile_stack! do
     stop_named(Arbor.Trust.Manager)
     stop_named(Arbor.Trust.Store)
@@ -700,6 +827,11 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     restore_env(:default_egress_modes, originals.default_egress_modes)
     restore_env(:allow_permissive_baseline, originals.allow_permissive_baseline)
     restore_env(:action_profile_provider, originals.action_profile_provider)
+
+    case originals.feature_domain_owners do
+      {:ok, value} -> Application.put_env(:arbor_trust, :feature_domain_owners, value)
+      :error -> Application.delete_env(:arbor_trust, :feature_domain_owners)
+    end
 
     case originals.kernel_runtime do
       {:ok, value} -> Application.put_env(:arbor_kernel, :kernel_runtime, value)
