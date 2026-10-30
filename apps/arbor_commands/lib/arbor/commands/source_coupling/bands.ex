@@ -33,6 +33,8 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
     "arbor_cartographer" => "P",
     "arbor_llm" => "P",
     "arbor_security" => "P",
+    # OIDC retains the Security protocol band after physical extraction.
+    "arbor_capabilities_oidc" => "P",
     # Persistence adoption retains the family P band; reviewed successor scope:
     # docs/arbor/PLATFORM_INVENTORY_V2.md.
     "arbor_persistence" => "P",

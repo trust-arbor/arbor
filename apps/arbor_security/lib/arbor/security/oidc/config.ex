@@ -32,6 +32,22 @@ defmodule Arbor.Security.OIDC.Config do
 
   @app :arbor_security
 
+  @doc """
+  Trusted optional protocol provider, without consulting its availability.
+
+  An absent selector uses the extracted provider. A present selector is
+  authoritative, including `nil`, `false`, or an invalid value. Protocol
+  invocation fails closed for those values; configured OIDC policy stays
+  configured regardless of provider health.
+  """
+  @spec protocol_adapter() :: term()
+  def protocol_adapter do
+    case Application.fetch_env(@app, :oidc_adapter) do
+      {:ok, adapter} -> adapter
+      :error -> Arbor.Capabilities.OIDC
+    end
+  end
+
   @doc "Returns the full OIDC configuration map."
   @spec get() :: keyword()
   def get do

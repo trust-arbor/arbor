@@ -49,6 +49,115 @@ defmodule Arbor.Commands.SourceCoupling.OwnershipTest do
              )
   end
 
+  test "OIDC's conditional tuple helper declares its public OAuth dependency" do
+    source = """
+    defmodule Arbor.CapabilitiesOIDC.MixProject do
+      def project, do: [app: :arbor_capabilities_oidc, deps: deps()]
+
+      defp deps do
+        [
+          oauth_dependency(),
+          {:jason, "~> 1.4"},
+          {:joken, "~> 2.7", runtime: false},
+          {:plug_crypto, "~> 2.0", runtime: false},
+          {:boundary, "~> 0.10", runtime: false}
+        ]
+      end
+
+      defp oauth_dependency do
+        case System.get_env("ARBOR_OAUTH_PATH") do
+          nil -> {:arbor_oauth, "~> 0.1.0-dev"}
+          path -> {:arbor_oauth, "~> 0.1.0-dev", path: path, override: true}
+        end
+      end
+    end
+    """
+
+    assert {:ok, ["arbor_oauth"]} =
+             Ownership.in_umbrella_deps(
+               source,
+               "packages/arbor_capabilities_oidc/mix.exs",
+               MapSet.new(["arbor_oauth", "arbor_capabilities_oidc"])
+             )
+
+    # A possible public default proves no local edge without an admitted owner.
+    assert {:ok, []} =
+             Ownership.in_umbrella_deps(source, "packages/arbor_capabilities_oidc/mix.exs")
+  end
+
+  test "conditional list helpers resolve only dependency-position returns" do
+    source = """
+    defmodule Signals.MixProject do
+      def project, do: [deps: selected_deps()]
+      defp selected_deps do
+        case System.get_env("HIERARCHY_PACKAGE_LIST") do
+          nil -> base_deps() ++ optional_deps()
+          _configured -> []
+        end
+      end
+
+      defp base_deps, do: [package_dependency()]
+      defp package_dependency, do: {:arbor_kernel, "~> 2.0.0-dev"}
+      defp optional_deps, do: repeated_deps()
+      defp repeated_deps, do: optional_deps()
+    end
+    """
+
+    assert {:ok, ["arbor_kernel"]} =
+             Ownership.in_umbrella_deps(
+               source,
+               "packages/arbor_signals/mix.exs",
+               MapSet.new(["arbor_kernel", "arbor_signals"])
+             )
+  end
+
+  test "entry helpers do not promote metadata, nested lists, or unresolved sources" do
+    source = """
+    defmodule Signals.MixProject do
+      @versions [{:arbor_kernel, "~> 2.0.0-dev"}]
+      defp deps do
+        [metadata_entry(), nested_list(), attribute_entry(), dynamic_entry(),
+         foreign_entry(), dynamic_version(), returned_external(), cycle_a(),
+         Foreign.package_dependency()]
+      end
+
+      defp metadata_entry, do: {:external, "~> 1.0", metadata: [arbor_kernel: "~> 2.0.0-dev"]}
+      defp nested_list, do: [{:arbor_kernel, "~> 2.0.0-dev"}]
+      defp attribute_entry, do: @versions
+      defp unused_entry, do: {:arbor_kernel, "~> 2.0.0-dev"}
+      defp foreign_entry, do: {:arbor_kernel, "~> 2.0.0-dev", git: "https://example.invalid/kernel.git"}
+      defp dynamic_version, do: {:arbor_kernel, dependency_version()}
+      defp cycle_a, do: cycle_b()
+      defp cycle_b, do: cycle_a()
+
+      defp dynamic_entry do
+        case System.get_env("HIERARCHY_PACKAGE_PATH") do
+          nil -> {:arbor_kernel, "~> 2.0.0-dev", path: dependency_path()}
+          path -> {:arbor_kernel, "~> 2.0.0-dev", path: path}
+        end
+      end
+
+      defp returned_external do
+        _not_returned = {:arbor_kernel, "~> 2.0.0-dev"}
+        case {:arbor_kernel, "~> 2.0.0-dev"} do
+          {:arbor_kernel, "~> 2.0.0-dev"} -> {:external, "~> 1.0"}
+        end
+      end
+
+      defmodule Foreign do
+        def package_dependency, do: {:arbor_kernel, "~> 2.0.0-dev"}
+      end
+    end
+    """
+
+    assert {:ok, []} =
+             Ownership.in_umbrella_deps(
+               source,
+               "packages/arbor_signals/mix.exs",
+               MapSet.new(["arbor_kernel"])
+             )
+  end
+
   test "published version dependencies count only known repository owners" do
     known_apps = MapSet.new(["arbor_kernel", "arbor_signals"])
 

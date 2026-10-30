@@ -271,6 +271,89 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
     assert Enum.all?(edges, &(&1["level_direction"] == "level_downward"))
   end
 
+  test "optional OIDC adapter is a declared package owner retaining the Security P band" do
+    files = [
+      file("packages/arbor_oauth/mix.exs", mix("arbor_oauth", [])),
+      file("packages/arbor_oauth/lib/arbor/common/oauth/auth_code.ex", """
+      defmodule Arbor.Common.OAuth.AuthCode do
+        def generate_state, do: "state"
+      end
+      """),
+      file("packages/arbor_capabilities_oidc/mix.exs", """
+      defmodule OIDC.MixProject do
+        def project, do: [app: :arbor_capabilities_oidc, deps: deps()]
+
+        defp deps do
+          [
+            oauth_dependency(),
+            {:jason, "~> 1.4"},
+            {:joken, "~> 2.7", runtime: false},
+            {:plug_crypto, "~> 2.0", runtime: false},
+            {:boundary, "~> 0.10", runtime: false}
+          ]
+        end
+
+        defp oauth_dependency do
+          case System.get_env("ARBOR_OAUTH_PATH") do
+            nil -> {:arbor_oauth, "~> 0.1.0-dev"}
+            path -> {:arbor_oauth, "~> 0.1.0-dev", path: path, override: true}
+          end
+        end
+      end
+      """),
+      file("packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc.ex", """
+      defmodule Arbor.Capabilities.OIDC do
+        def generate_state, do: Arbor.Common.OAuth.AuthCode.generate_state()
+      end
+      """),
+      file("apps/arbor_security/mix.exs", """
+      defmodule Security.MixProject do
+        def deps do
+          [{:arbor_capabilities_oidc, "~> 0.1.0-dev",
+            path: "../../packages/arbor_capabilities_oidc", optional: true, runtime: false}]
+        end
+      end
+      """),
+      file("apps/arbor_security/lib/security.ex", """
+      defmodule Arbor.Security.Sample do
+        def state, do: Arbor.Capabilities.OIDC.generate_state()
+      end
+      """)
+    ]
+
+    assert {:ok, "P"} = Bands.band_of("arbor_capabilities_oidc")
+    assert {:ok, census} = Core.new(bundle(files))
+    assert census["gating_occurrences"] == []
+    assert census["dep_graph"]["arbor_security"] == ["arbor_capabilities_oidc"]
+    assert census["dep_graph"]["arbor_capabilities_oidc"] == ["arbor_oauth"]
+    assert census["levels"]["arbor_capabilities_oidc"] == 1
+
+    oauth_edges =
+      Enum.filter(census["occurrences"], fn edge ->
+        edge["from_app"] == "arbor_capabilities_oidc" and edge["to_app"] == "arbor_oauth"
+      end)
+
+    refute oauth_edges == []
+
+    for edge <- oauth_edges do
+      assert edge["declared"] == true
+      assert edge["to_band"] == "K"
+      assert edge["fate"] == "downward"
+      assert edge["level_direction"] == "level_downward"
+    end
+
+    edges = Enum.filter(census["occurrences"], &(&1["to_app"] == "arbor_capabilities_oidc"))
+    refute edges == []
+
+    for edge <- edges do
+      assert edge["from_app"] == "arbor_security"
+      assert edge["declared"] == true
+      assert edge["to_band"] == "P"
+      assert edge["fate"] == "intra_band"
+      assert edge["level_direction"] == "level_downward"
+    end
+  end
+
   test "duplicate app and package owners fail closed instead of overwriting the graph" do
     files = [
       file("apps/arbor_signals/mix.exs", mix("arbor_signals", [])),

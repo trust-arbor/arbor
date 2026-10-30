@@ -53,11 +53,14 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
                :telemetry
              ])
 
-    Enum.each([:joken, :joken_jwks, :req, :jose, :tesla, :finch, :mint], fn app ->
-      refute app in applications
-      refute app in optional
-      refute app in included
-    end)
+    Enum.each(
+      [:arbor_capabilities_oidc, :joken, :joken_jwks, :req, :jose, :tesla, :finch, :mint],
+      fn app ->
+        refute app in applications
+        refute app in optional
+        refute app in included
+      end
+    )
 
     assert optional == []
     assert included == []
@@ -169,8 +172,6 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     assert Process.whereis(Arbor.Security.ProviderGate)
 
     started = Application.started_applications() |> Enum.map(&elem(&1, 0))
-    assert :joken in started
-    assert :joken_jwks in started
     assert :req in started
 
     Enum.each(@named_stores, fn name ->

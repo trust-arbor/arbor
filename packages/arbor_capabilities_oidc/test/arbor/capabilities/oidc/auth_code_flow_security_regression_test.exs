@@ -1,4 +1,4 @@
-defmodule Arbor.Security.OIDC.AuthCodeFlowSecurityRegressionTest do
+defmodule Arbor.Capabilities.OIDC.AuthCodeFlowSecurityRegressionTest do
   @moduledoc """
   Public behavioural security regressions for the OIDC authorization-code flow.
 
@@ -20,8 +20,8 @@ defmodule Arbor.Security.OIDC.AuthCodeFlowSecurityRegressionTest do
 
   use ExUnit.Case, async: true
 
-  alias Arbor.Security.LoopbackHTTPServer, as: Server
-  alias Arbor.Security.OIDC.AuthCodeFlow
+  alias Arbor.Capabilities.OIDC.AuthCodeFlow
+  alias Arbor.Capabilities.OIDC.TestSupport.LoopbackHTTPServer, as: Server
 
   @moduletag :fast
   @moduletag :security

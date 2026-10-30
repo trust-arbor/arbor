@@ -377,3 +377,7 @@ discarded that disposition, hiding why a voice turn could finish silently. A
 stored transcript cannot retrospectively prove the presentation decision;
 observe closed verdict/equality metadata at the decision boundary and preserve
 the speech guard while designing any guarded synthesis fallback.
+
+<!-- applied-learning: cache-keys-must-bind-the-trusted-provider-selection -->
+<a id="applied-learning-cache-keys-must-bind-the-trusted-provider-selection"></a>
+**Cache keys must bind the trusted provider selection.** When introducing a configurable protocol or transport provider, include its resolved trusted identity in the cache descriptor before reusing keys or responses. The same issuer, URL, client ID and key ID do not establish the same key source after the provider changes. Keep selection in trusted configuration, ignore request-supplied overrides, and regress with two real signing keys sharing a key ID: fill through A, select B, verify B, reject A, and check actual fetch counts. (Found 2026-10-29 during OIDC adapter extraction when cached keys crossed the new protocol selector.)

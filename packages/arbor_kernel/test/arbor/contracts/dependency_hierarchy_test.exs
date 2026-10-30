@@ -300,13 +300,17 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   defp dependency_list({:__block__, _metadata, expressions}, functions, seen),
     do: dependency_list(List.last(expressions), functions, seen)
 
-  defp dependency_list(entries, _functions, _seen) when is_list(entries), do: entries
+  defp dependency_list(entries, functions, seen) when is_list(entries),
+    do: Enum.flat_map(entries, &dependency_entry(&1, functions, seen))
 
   defp dependency_list({:++, _metadata, [left, right]}, functions, seen),
     do: dependency_list(left, functions, seen) ++ dependency_list(right, functions, seen)
 
   defp dependency_list({:|>, _metadata, [entries, _filter]}, functions, seen),
     do: dependency_list(entries, functions, seen)
+
+  defp dependency_list({:case, _metadata, [_selector, clauses]}, functions, seen),
+    do: Enum.flat_map(case_returns(clauses), &dependency_list(&1, functions, seen))
 
   defp dependency_list({name, _metadata, args}, functions, seen)
        when is_atom(name) and args in [nil, []] do
@@ -320,6 +324,48 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   end
 
   defp dependency_list(_dynamic, _functions, _seen), do: []
+
+  # A helper in a dependency list must return one tuple, while a helper used
+  # as the list itself must return a list. Do not flatten nested lists or walk
+  # tuple options: those positions can contain dependency-shaped metadata.
+  defp dependency_entry({dep, _requirement} = entry, _functions, _seen) when is_atom(dep),
+    do: [entry]
+
+  defp dependency_entry({:{}, _metadata, [dep, _requirement, _opts]} = entry, _functions, _seen)
+       when is_atom(dep),
+       do: [entry]
+
+  defp dependency_entry({:__block__, _metadata, expressions}, functions, seen),
+    do: dependency_entry(List.last(expressions), functions, seen)
+
+  defp dependency_entry({:case, _metadata, [_selector, clauses]}, functions, seen),
+    do: Enum.flat_map(case_returns(clauses), &dependency_entry(&1, functions, seen))
+
+  defp dependency_entry({name, _metadata, args}, functions, seen)
+       when is_atom(name) and args in [nil, []] do
+    if MapSet.member?(seen, name) do
+      []
+    else
+      functions
+      |> Map.get(name, [])
+      |> Enum.flat_map(&dependency_entry(&1, functions, MapSet.put(seen, name)))
+    end
+  end
+
+  defp dependency_entry(_dynamic, _functions, _seen), do: []
+
+  # Without evaluating operator environment, conservatively retain possible
+  # branch returns. In particular, a public version dependency in the nil
+  # branch remains a known-owner edge even when another branch supplies a
+  # dynamic local override. Existing source admission filters each tuple.
+  defp case_returns(clauses) when is_list(clauses) do
+    clauses
+    |> Keyword.get(:do, [])
+    |> Enum.flat_map(fn
+      {:->, _metadata, [_patterns, body]} -> [body]
+      _other -> []
+    end)
+  end
 
   defp return_expression({:__block__, _metadata, expressions}), do: List.last(expressions)
   defp return_expression(expression), do: expression
@@ -485,6 +531,89 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
         assert compute_levels(graph) == %{"arbor_kernel" => 0, "arbor_shell" => 1}
       end
     end
+  end
+
+  test "returned dependency helpers preserve conditional public package edges" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+    project = Path.join(fixture.linked, "apps/arbor_shell/mix.exs")
+
+    for declaration <- [
+          "def deps, do: [package_dependency()]",
+          """
+          def deps, do: selected_deps()
+          defp selected_deps do
+            case System.get_env("HIERARCHY_PACKAGE_LIST") do
+              nil -> [package_dependency()]
+              _configured -> []
+            end
+          end
+          """
+        ] do
+      File.write!(project, """
+      defmodule Shell.MixProject do
+        def project, do: [deps: deps()]
+        #{declaration}
+
+        defp package_dependency do
+          case System.get_env("HIERARCHY_PACKAGE_PATH") do
+            nil -> {:arbor_kernel, "~> 2.0.0-dev"}
+            path -> {:arbor_kernel, "~> 2.0.0-dev", path: path, override: true}
+          end
+        end
+      end
+      """)
+
+      graph = dep_graph(fixture.linked, %{})
+      assert graph == %{"arbor_kernel" => [], "arbor_shell" => ["arbor_kernel"]}
+      assert compute_levels(graph) == %{"arbor_kernel" => 0, "arbor_shell" => 1}
+    end
+  end
+
+  test "entry helpers do not turn metadata or unresolved sources into dependency edges" do
+    fixture = linked_worktree_fixture()
+    on_exit(fn -> cleanup_linked_worktree_fixture(fixture) end)
+    project = Path.join(fixture.linked, "apps/arbor_shell/mix.exs")
+
+    File.write!(project, """
+    defmodule Shell.MixProject do
+      @versions [{:arbor_kernel, "~> 2.0.0-dev"}]
+      def deps do
+        [metadata_entry(), nested_list(), attribute_entry(), dynamic_entry(),
+         foreign_entry(), dynamic_version(), returned_external(), cycle_a(),
+         Foreign.package_dependency()]
+      end
+
+      defp metadata_entry, do: {:external, "~> 1.0", metadata: [arbor_kernel: "~> 2.0.0-dev"]}
+      defp nested_list, do: [{:arbor_kernel, "~> 2.0.0-dev"}]
+      defp attribute_entry, do: @versions
+      defp unused_entry, do: {:arbor_kernel, "~> 2.0.0-dev"}
+      defp foreign_entry, do: {:arbor_kernel, "~> 2.0.0-dev", git: "https://example.invalid/kernel.git"}
+      defp dynamic_version, do: {:arbor_kernel, dependency_version()}
+      defp cycle_a, do: cycle_b()
+      defp cycle_b, do: cycle_a()
+
+      defp dynamic_entry do
+        case System.get_env("HIERARCHY_PACKAGE_PATH") do
+          nil -> {:arbor_kernel, "~> 2.0.0-dev", path: dependency_path()}
+          path -> {:arbor_kernel, "~> 2.0.0-dev", path: path}
+        end
+      end
+
+      defp returned_external do
+        _not_returned = {:arbor_kernel, "~> 2.0.0-dev"}
+        case {:arbor_kernel, "~> 2.0.0-dev"} do
+          {:arbor_kernel, "~> 2.0.0-dev"} -> {:external, "~> 1.0"}
+        end
+      end
+
+      defmodule Foreign do
+        def package_dependency, do: {:arbor_kernel, "~> 2.0.0-dev"}
+      end
+    end
+    """)
+
+    assert dep_graph(fixture.linked, %{}) == %{"arbor_kernel" => [], "arbor_shell" => []}
   end
 
   test "dependency-like metadata does not create hierarchy edges" do
