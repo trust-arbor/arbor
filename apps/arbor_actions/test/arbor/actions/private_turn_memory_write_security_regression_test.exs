@@ -59,9 +59,9 @@ defmodule Arbor.Actions.PrivateTurnMemoryWriteSecurityRegressionTest do
 
   setup do
     settings = [
-      {:arbor_security, :policy_enforcer_enabled, false},
+      {:arbor_capabilities, :policy_enforcer_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, false},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_memory, :reflection_llm_module, LocalReflection}
     ]

@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.ConversationSignedBindingSecurityRegressionTest do
@@ -28,15 +31,15 @@ defmodule Arbor.Agent.ConversationSignedBindingSecurityRegressionTest do
 
     previous =
       for {key, value} <- overrides do
-        old = Application.fetch_env(:arbor_security, key)
-        Application.put_env(:arbor_security, key, value)
+        old = Application.fetch_env(:arbor_capabilities, key)
+        Application.put_env(:arbor_capabilities, key, value)
         {key, old}
       end
 
     on_exit(fn ->
       Enum.each(previous, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
     end)
 

@@ -188,10 +188,10 @@ defmodule Arbor.Dashboard.ConversationNavigationSecurityRegressionTest do
     :ok = Arbor.Security.restore_runtime_fixture()
 
     settings = [
-      {:arbor_security, :oidc,
+      {:arbor_capabilities, :oidc,
        [providers: [%{issuer: "https://navigation.fixture", client_id: "dashboard"}]]},
-      {:arbor_security, :session_token_secret, "isolated-navigation-session-secret"},
-      {:arbor_security, :session_token_module, SessionToken},
+      {:arbor_capabilities, :session_token_secret, "isolated-navigation-session-secret"},
+      {:arbor_capabilities, :session_token_module, SessionToken},
       {:arbor_dashboard, :session_auth_api, Arbor.Security}
     ]
 

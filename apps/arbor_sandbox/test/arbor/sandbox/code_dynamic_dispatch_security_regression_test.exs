@@ -68,7 +68,7 @@ defmodule Arbor.Sandbox.CodeDynamicDispatchSecurityRegressionTest do
     {":timer.apply_after", ~S|:timer.apply_after(0, :os, :cmd, [~c"id"])|},
     {":ets.delete", ~S|:ets.delete(:some_table)|},
     {":persistent_term.put", ~S|:persistent_term.put(:k, :v)|},
-    {":application.set_env", ~S|:application.set_env(:arbor_security, :x, false)|},
+    {":application.set_env", ~S|:application.set_env(:arbor_capabilities, :x, false)|},
     {":net_kernel.connect_node", ~S|:net_kernel.connect_node(:evil@host)|},
     {":compile.forms", ~S|:compile.forms([])|},
     {":erlang.spawn_opt", ~S|:erlang.spawn_opt(fn -> 1 end, [])|},

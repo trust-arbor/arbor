@@ -20,20 +20,22 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     ensure_security_started()
 
     # Save previous config values
-    prev_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
-    prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
-    prev_identity = Application.get_env(:arbor_security, :strict_identity_mode)
-    prev_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
-    prev_receipts = Application.get_env(:arbor_security, :invocation_receipts_enabled)
-    prev_delegation = Application.get_env(:arbor_security, :delegation_chain_verification_enabled)
+    prev_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled)
+    prev_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    prev_identity = Application.get_env(:arbor_capabilities, :strict_identity_mode)
+    prev_approval = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
+    prev_receipts = Application.get_env(:arbor_capabilities, :invocation_receipts_enabled)
+
+    prev_delegation =
+      Application.get_env(:arbor_capabilities, :delegation_chain_verification_enabled)
 
     # Disable security features that interfere with capability-focused tests
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
-    Application.put_env(:arbor_security, :delegation_chain_verification_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :delegation_chain_verification_enabled, false)
 
     {actor_identity, actor_authority} = actor_authority!()
     agent_id = actor_identity.agent_id
@@ -683,6 +685,6 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     end
   end
 
-  defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_config(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_config(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

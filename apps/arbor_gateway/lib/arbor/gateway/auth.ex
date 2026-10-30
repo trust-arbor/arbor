@@ -102,7 +102,7 @@ defmodule Arbor.Gateway.Auth do
   # generic so this cannot be used to enumerate or probe identities.
   defp describe_signature_failure(:cluster_replay_protection_unavailable) do
     "cluster_replay_protection_unavailable — this node is connected to a peer " <>
-      "running :arbor_security, so a captured request could be replayed there. " <>
+      "running :arbor_capabilities, so a captured request could be replayed there. " <>
       "Disconnect the peer (mix arbor.cluster disconnect <node>) or run single-node."
   end
 

@@ -1,0 +1,671 @@
+defmodule Arbor.Security.EgressGateTest do
+  @moduledoc """
+  Security regression tests for the egress gate (2026-06-14
+  URI-addressing-vs-classification decision).
+
+  The gate keys off the *resolved classification* threaded in via opts
+  (`:egress_tier`, `:egress_taint`), NOT off parsing the URI. It asserts, via
+  the public `AuthDecision.check/4` API (the real authorization path that
+  `Arbor.Security.authorize/4` → `authorize_and_execute/4` reach):
+
+  - **Dark by default**: with enforcement off, external egress is NOT gated, so
+    flipping the gate on can never silently break the running agents (whose
+    heartbeats make routine LLM egress).
+  - **Enforcing**: external-provider egress escalates to `:requires_approval`;
+    untrusted/hostile data flowing OUT to an external destination is hard-blocked;
+    on-host (local LLM) egress is never gated; on-premises is gated only under
+    the operator opt-in flag; external-peer follows policy standing; malformed
+    tiers fail closed.
+
+  These fail on a build without the egress gate (external egress would authorize
+  unconditionally) and pass with it.
+  """
+  use ExUnit.Case, async: false
+
+  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.{AuthDecision, CapabilityStore, EgressGate}
+
+  @resource "arbor://ai/generate"
+
+  defmodule MockConsensus do
+    def healthy?, do: true
+
+    def submit(%{proposer: _} = _proposal, _opts \\ []) do
+      {:ok, "proposal_#{System.unique_integer([:positive])}"}
+    end
+  end
+
+  setup do
+    prev_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    prev_onprem = Application.get_env(:arbor_capabilities, :gate_on_premises_egress)
+
+    on_exit(fn ->
+      restore(:egress_gate_enforcing, prev_enforce)
+      restore(:gate_on_premises_egress, prev_onprem)
+    end)
+
+    agent_id = "agent_egress_#{System.unique_integer([:positive])}"
+
+    {:ok, cap} =
+      Capability.new(
+        resource_uri: @resource,
+        principal_id: agent_id,
+        delegation_depth: 0,
+        constraints: %{},
+        metadata: %{test: true}
+      )
+
+    CapabilityStore.put_fixture(cap)
+
+    %{agent_id: agent_id, cap: cap}
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore(key, val), do: Application.put_env(:arbor_capabilities, key, val)
+
+  defp enforce!, do: Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
+
+  describe "dark by default (enforcement off)" do
+    test "external-provider egress is NOT gated — baseline authorized", %{agent_id: agent} do
+      # enforcing flag unset → default false
+      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider) ==
+               :authorized
+    end
+
+    test "untrusted data to external egress is NOT blocked while dark", %{agent_id: agent} do
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_taint: :untrusted
+             ) == :authorized
+    end
+  end
+
+  describe "enforcing: provider egress escalates to approval" do
+    test "external_provider → requires_approval", %{agent_id: agent} do
+      enforce!()
+
+      assert {:requires_approval, _cap} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
+    end
+
+    test "on_host (local LLM) is NOT gated", %{agent_id: agent} do
+      enforce!()
+      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :on_host) == :authorized
+    end
+
+    test "no egress tier supplied → not gated", %{agent_id: agent} do
+      enforce!()
+      assert AuthDecision.check(agent, @resource, :execute) == :authorized
+    end
+  end
+
+  describe "enforcing: taint conjunct hard-blocks exfiltration" do
+    test "untrusted data → external egress is blocked", %{agent_id: agent} do
+      enforce!()
+
+      assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :untrusted
+               )
+    end
+
+    test "hostile data → external egress is blocked", %{agent_id: agent} do
+      enforce!()
+
+      assert {:error, {:egress_blocked, :external_peer, :hostile}} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_peer,
+                 egress_taint: :hostile
+               )
+    end
+
+    test "trusted data → external egress is NOT blocked (still asks for provider)",
+         %{agent_id: agent} do
+      enforce!()
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
+    end
+
+    test "untrusted data → on_host egress is NOT blocked (stays local)", %{agent_id: agent} do
+      enforce!()
+
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :on_host,
+               egress_taint: :untrusted
+             ) == :authorized
+    end
+  end
+
+  describe "enforcing: on-premises is operator-configurable" do
+    test "on_premises is NOT gated by default (homelab/data-sovereignty)", %{agent_id: agent} do
+      enforce!()
+
+      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :on_premises) ==
+               :authorized
+    end
+
+    test "on_premises IS gated when operator opts in", %{agent_id: agent} do
+      enforce!()
+      Application.put_env(:arbor_capabilities, :gate_on_premises_egress, true)
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute, egress_tier: :on_premises)
+    end
+  end
+
+  describe "enforcing: external_peer follows policy standing" do
+    @tag spec: "SSEC-012"
+    test "security regression: external_peer without standing escalates to approval",
+         %{agent_id: agent} do
+      enforce!()
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_peer,
+                 egress_taint: :trusted
+               )
+    end
+
+    test "security regression: unknown or malformed tiers fail closed" do
+      enforce!()
+
+      for tier <- [nil, :external_providre, "external_provider"] do
+        assert {:block, :policy} =
+                 EgressGate.decide(
+                   "agent_egress_invalid_tier",
+                   tier,
+                   [egress_mode: :allow, egress_taint: :trusted],
+                   []
+                 )
+      end
+    end
+
+    test "security regression: malformed tiers fail closed while the general gate is dark" do
+      Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
+
+      for tier <- [nil, :external_providre, "external_provider"] do
+        assert {:block, :policy} =
+                 EgressGate.decide(
+                   "agent_egress_invalid_dark_tier",
+                   tier,
+                   [egress_mode: :allow, egress_taint: :trusted],
+                   []
+                 )
+      end
+    end
+  end
+
+  describe "enforcing: caller-supplied egress standing (layer 1)" do
+    test "caller-supplied external_provider :allow standing egresses freely",
+         %{agent_id: agent} do
+      enforce!()
+
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_taint: :trusted,
+               egress_mode: :allow
+             ) == :authorized
+    end
+
+    test "caller-supplied external_provider :block standing denies", %{agent_id: agent} do
+      enforce!()
+
+      assert {:error, {:egress_blocked, :external_provider, :policy}} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_mode: :block
+               )
+    end
+
+    test "missing egress standing still asks", %{agent_id: agent} do
+      enforce!()
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
+    end
+  end
+
+  describe "public authorize/4 egress :ask handoff" do
+    test "security regression: public authorize returns pending approval for unconstrained egress :ask",
+         %{agent_id: agent, cap: cap} do
+      previous = %{
+        enforcing: Application.get_env(:arbor_capabilities, :egress_gate_enforcing),
+        escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
+        module: Application.get_env(:arbor_capabilities, :consensus_module),
+        router: Application.get_env(:arbor_capabilities, :use_interaction_router_for_approval)
+      }
+
+      Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
+      Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_capabilities, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, false)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous.enforcing)
+        restore(:consensus_escalation_enabled, previous.escalation)
+        restore(:consensus_module, previous.module)
+        restore(:use_interaction_router_for_approval, previous.router)
+      end)
+
+      assert {:ok, :pending_approval, proposal_id} =
+               Arbor.Security.authorize(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted,
+                 verify_identity: false
+               )
+
+      assert is_binary(proposal_id)
+      assert String.starts_with?(proposal_id, "proposal_")
+
+      assert {:ok, stored} = CapabilityStore.get(cap.id)
+      refute stored.constraints[:requires_approval] == true
+      refute stored.constraints["requires_approval"] == true
+    end
+  end
+
+  describe "authorize_egress/3 — standalone compute-node path (no operation cap)" do
+    test "dark by default → :allow", %{agent_id: agent} do
+      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+    end
+
+    test "enforcing + no egress standing → requires_approval", %{agent_id: agent} do
+      enforce!()
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_taint: :trusted) ==
+               {:requires_approval, :egress}
+    end
+
+    test "security regression: trusted external_peer fails closed for unusable standing",
+         %{agent_id: agent} do
+      enforce!()
+
+      for opts <- [
+            [egress_taint: :trusted],
+            [egress_taint: :trusted, egress_mode: %{"mode" => "allow"}],
+            [egress_taint: :trusted, egress_mode: :unknown]
+          ] do
+        assert Arbor.Security.authorize_egress(agent, :external_peer, opts) ==
+                 {:requires_approval, :egress}
+      end
+    end
+
+    test "enforcing + caller supplies standing → :allow", %{agent_id: agent} do
+      enforce!()
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider,
+               egress_mode: :allow,
+               egress_taint: :trusted
+             ) ==
+               :allow
+    end
+
+    test "enforcing + on_host (local LLM) → :allow", %{agent_id: agent} do
+      enforce!()
+      assert Arbor.Security.authorize_egress(agent, :on_host) == :allow
+    end
+
+    test "enforcing + untrusted data → external → blocked", %{agent_id: agent} do
+      enforce!()
+
+      assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+               Arbor.Security.authorize_egress(agent, :external_provider,
+                 egress_taint: :untrusted
+               )
+    end
+
+    test "enforcing + agent holds a covering egress cap → :allow", %{agent_id: agent} do
+      enforce!()
+
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: @resource,
+          principal_id: agent,
+          delegation_depth: 0,
+          constraints: %{egress: %{max_tier: :external_provider}},
+          metadata: %{test: true}
+        )
+
+      CapabilityStore.put_fixture(cap)
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_taint: :trusted) ==
+               :allow
+    end
+  end
+
+  describe "enforcing: capability refinement (layer 2)" do
+    setup do
+      # A fresh agent whose ONLY cap carries an egress constraint, so it is the
+      # cap AuthDecision matches for the resource.
+      agent_id = "agent_egresscap_#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id}
+    end
+
+    defp grant_egress_cap(agent_id, egress_constraint) do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: @resource,
+          principal_id: agent_id,
+          delegation_depth: 0,
+          constraints: %{egress: egress_constraint},
+          metadata: %{test: true}
+        )
+
+      CapabilityStore.put_fixture(cap)
+    end
+
+    test "a cap with max_tier covering the request bypasses :ask", %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :external_provider})
+
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_taint: :trusted
+             ) ==
+               :authorized
+    end
+
+    test "a cap whose max_tier is below the request does NOT cover it (still asks)",
+         %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :on_premises})
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted
+               )
+    end
+
+    test "a destination-scoped cap covers a matching destination", %{agent_id: agent} do
+      enforce!()
+
+      grant_egress_cap(agent, %{max_tier: :external_provider, destinations: ["api.anthropic.com"]})
+
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_taint: :trusted,
+               egress_destination: "api.anthropic.com"
+             ) == :authorized
+    end
+
+    test "a destination-scoped cap does NOT cover a different destination", %{agent_id: agent} do
+      enforce!()
+
+      grant_egress_cap(agent, %{max_tier: :external_provider, destinations: ["api.anthropic.com"]})
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :trusted,
+                 egress_destination: "evil.example.com"
+               )
+    end
+
+    test "the taint hard-block is NOT bypassable by a covering cap", %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :external_provider})
+
+      assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :untrusted
+               )
+    end
+  end
+
+  describe "keyless OpenCode Zen destination allowance" do
+    test "security regression: shipped defaults deny OpenCode Zen while the general gate is dark" do
+      previous_allow = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      previous_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+
+      Application.delete_env(:arbor_capabilities, :egress_gate_enforcing)
+      Application.delete_env(:arbor_capabilities, :allow_opencode_zen_egress)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous_enforce)
+        restore(:allow_opencode_zen_egress, previous_allow)
+      end)
+
+      refute Application.get_env(:arbor_capabilities, :egress_gate_enforcing, false)
+      refute Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress, false)
+
+      assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
+               Arbor.Security.authorize_egress("agent_1", :external_provider,
+                 egress_destination: "opencode_zen"
+               )
+
+      for destination <- [
+            "opencode.ai",
+            "OpenCode.ai",
+            "OPENCODE.AI.",
+            "https://OpenCode.ai/v1/chat/completions",
+            "OpenCode.ai:443"
+          ] do
+        assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
+                 Arbor.Security.authorize_egress("agent_1", :external_provider,
+                   egress_destination: destination
+                 )
+      end
+    end
+
+    test "security regression: dark-launch still allows an existing destination when the gate is dark" do
+      previous_allow = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      previous_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+
+      Application.delete_env(:arbor_capabilities, :egress_gate_enforcing)
+      Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, false)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous_enforce)
+        restore(:allow_opencode_zen_egress, previous_allow)
+      end)
+
+      refute Application.get_env(:arbor_capabilities, :egress_gate_enforcing, false)
+
+      assert Arbor.Security.authorize_egress("agent_1", :external_provider,
+               egress_destination: "openrouter",
+               egress_mode: :allow
+             ) == :allow
+    end
+
+    test "security regression: request is refused when the allowance is absent" do
+      enforce!()
+      previous = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [],
+                 nil
+               )
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode.ai", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: request is allowed only when the explicit flag is set" do
+      enforce!()
+      previous = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, true)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [
+                   egress_destination: "opencode_zen",
+                   egress_mode: :allow,
+                   egress_taint: :trusted
+                 ],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: explicit allowance admits keyless even while the general gate is dark" do
+      previous_allow = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
+      Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, true)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous_allow) end)
+
+      assert Arbor.Security.authorize_egress("agent_1", :external_provider,
+               egress_destination: "opencode_zen",
+               egress_mode: :allow
+             ) == :allow
+    end
+
+    test "security regression: other providers are not gated by the keyless flag" do
+      enforce!()
+      previous = Application.get_env(:arbor_capabilities, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_capabilities, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "openrouter", egress_mode: :allow, egress_taint: :trusted],
+                 [],
+                 nil
+               )
+    end
+  end
+
+  describe "VP-05D2A0: decide/5 interactive-disclosure override (pure)" do
+    @tag spec: "VP-05D2A0"
+    test "a valid exact disclosure cap admits :untrusted on its exact route" do
+      enforce!()
+
+      assert EgressGate.decide(
+               "agent_1",
+               :external_provider,
+               [egress_taint: :untrusted] ++ route_opts(),
+               [],
+               disclosure_cap()
+             ) == :allow
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "the same cap cannot admit :hostile data" do
+      enforce!()
+
+      assert {:block, :hostile} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_taint: :hostile] ++ route_opts(),
+                 [],
+                 disclosure_cap()
+               )
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "the same cap cannot admit a different destination/provider/runtime/model" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts(%{egress_destination: "evil.example.com"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [], disclosure_cap())
+
+      opts2 = [egress_taint: :untrusted] ++ route_opts(%{egress_provider: "openai"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts2, [], disclosure_cap())
+
+      opts3 = [egress_taint: :untrusted] ++ route_opts(%{egress_runtime: "acp"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts3, [], disclosure_cap())
+
+      cap_with_model = disclosure_cap(%{model: "claude-sonnet-5"})
+      opts4 = [egress_taint: :untrusted, egress_model: "claude-opus-5"] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts4, [], cap_with_model)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "a nil disclosure cap never admits untrusted data" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [], nil)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test ":external_peer is never admitted, even with a valid cap" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_peer, opts, [], disclosure_cap())
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "ordinary caps in the candidate list can never perform this override" do
+      enforce!()
+
+      ordinary_cap = %{constraints: %{egress: %{max_tier: :external_provider}}}
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [ordinary_cap], nil)
+    end
+  end
+
+  defp disclosure_cap(route_overrides \\ %{}) do
+    disclosure =
+      %{
+        kind: :interactive_human,
+        destination: "api.anthropic.com",
+        provider: "anthropic",
+        runtime: "arbor"
+      }
+      |> Map.merge(route_overrides)
+
+    %{
+      resource_uri: "arbor://egress/disclose/#{System.unique_integer([:positive])}",
+      constraints: %{disclosure: disclosure}
+    }
+  end
+
+  defp route_opts(overrides \\ %{}) do
+    base = %{
+      egress_destination: "api.anthropic.com",
+      egress_provider: "anthropic",
+      egress_runtime: "arbor"
+    }
+
+    base |> Map.merge(overrides) |> Map.to_list()
+  end
+end

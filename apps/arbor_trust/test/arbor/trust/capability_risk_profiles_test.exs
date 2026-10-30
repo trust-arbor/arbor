@@ -29,7 +29,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
         |> Enum.find(&(&1.uri_prefix == "arbor://fs/write"))
 
       assert %CapabilityProfile{} = profile
-      assert profile.owner == :arbor_security
+      assert profile.owner == :arbor_capabilities
       assert profile.data_class == :confidential
       assert profile.graduation_eligible
       refute Map.has_key?(Map.from_struct(profile), :trust_floor)

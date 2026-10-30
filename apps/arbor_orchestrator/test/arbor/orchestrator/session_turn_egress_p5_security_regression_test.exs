@@ -166,7 +166,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     ensure_security_children!()
     :ok
   end
@@ -178,25 +178,25 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     ])
 
     prev = %{
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      strict: Application.get_env(:arbor_security, :strict_identity_mode),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      uri: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      secret: Application.get_env(:arbor_security, :session_token_secret),
-      egress: Application.get_env(:arbor_security, :egress_gate_enforcing),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      strict: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      uri: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      secret: Application.get_env(:arbor_capabilities, :session_token_secret),
+      egress: Application.get_env(:arbor_capabilities, :egress_gate_enforcing),
       dispatcher: Application.get_env(:arbor_orchestrator, :llm_dispatcher)
     }
 
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       test_session_secret("vp05d2a1p5-test-secret-")
     )
@@ -242,8 +242,8 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     }
   end
 
-  defp restore_sec(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_sec(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_sec(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_sec(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 
   # unique_integer stays small for a whole suite, so the old prefix plus that
   # suffix was under the 32-byte session-secret minimum.
@@ -619,7 +619,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
        %{agent_id: agent_id, call_counter: counter} do
     # Proves the fake boundary is live: without Session seam, dark gate admits.
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
 
     context =
       Arbor.Orchestrator.Engine.Context.new(%{
@@ -820,7 +820,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     assert :ok =
              Security.revoke(cap_id, actor_authority: Process.get(@actor_authority_key))
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     authorizer2 =
       build_authz!(
@@ -834,7 +834,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
       )
 
     assert {:error, _} = authorizer2.(route)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
   end
 
   test "security regression: hostile non-tool Session compute cannot use an external disclosure",
@@ -843,7 +843,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     # Only the final provider adapter is replaced, so the successful control
     # proves the same route and valid disclosure can actually reach provider I/O.
     Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     route = external_route()
     state = %{agent_id: agent_id, session_id: "session_hostile_non_tool"}
@@ -1227,8 +1227,8 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 lifecycle: success path revokes before public reply",
        %{agent_id: agent_id, human_id: human_id, agent_signer: signer} do
-    previous_resolver = Application.get_env(:arbor_security, :identity_alias_resolver)
-    Application.put_env(:arbor_security, :identity_alias_resolver, IdentityOwnerResolver)
+    previous_resolver = Application.get_env(:arbor_capabilities, :identity_alias_resolver)
+    Application.put_env(:arbor_capabilities, :identity_alias_resolver, IdentityOwnerResolver)
     on_exit(fn -> restore_sec(:identity_alias_resolver, previous_resolver) end)
 
     route = external_route()
@@ -1292,7 +1292,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute TurnEgress.fence_active?(fence)
     assert after_ok.turn_token == nil
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     assert {:error, _} =
              build_authz!(
@@ -1305,7 +1305,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
                disclosure_capability_id: cap_id
              ).(route)
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
 
     {_pid, ref} = from
     assert_receive {^ref, {:ok, _}}, 1_000
@@ -1572,7 +1572,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
       2_000 -> flunk("expected caller DOWN")
     end
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     assert {:error, _} =
              build_authz!(
@@ -1585,7 +1585,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
                disclosure_capability_id: cap_id
              ).(route)
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
   end
 
   test "VOICE-17 lifecycle: nil-authority caller DOWN deactivates fence, task continues",
@@ -1738,7 +1738,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 security regression: dark-gate Trust allow still requires validate_disclosure",
        %{agent_id: agent_id, human_id: human_id} do
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
     route = external_route()
     auth = authority!(human_id)
     state = %{agent_id: agent_id, session_id: "session_p5_validate"}
@@ -1830,7 +1830,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 security regression: unknown frozen tier fails closed even when gate dark",
        %{agent_id: agent_id} do
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
     fence = TurnEgress.new_fence()
     route = external_route()
 

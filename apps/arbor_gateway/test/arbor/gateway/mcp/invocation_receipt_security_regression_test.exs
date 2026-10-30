@@ -42,8 +42,8 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
 
     wait_until_connected!(@server)
 
-    previous = Application.get_env(:arbor_security, :invocation_receipts_enabled)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, true)
+    previous = Application.get_env(:arbor_capabilities, :invocation_receipts_enabled)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, true)
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "mcp-receipt-regression")
     :ok = Arbor.Security.register_identity_fixture(identity)
@@ -65,8 +65,8 @@ defmodule Arbor.Gateway.MCP.InvocationReceiptSecurityRegressionTest do
       :telemetry.detach(handler_id)
 
       if is_nil(previous),
-        do: Application.delete_env(:arbor_security, :invocation_receipts_enabled),
-        else: Application.put_env(:arbor_security, :invocation_receipts_enabled, previous)
+        do: Application.delete_env(:arbor_capabilities, :invocation_receipts_enabled),
+        else: Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, previous)
 
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       for cap <- caps, do: Arbor.Security.revoke_fixture(cap.id)

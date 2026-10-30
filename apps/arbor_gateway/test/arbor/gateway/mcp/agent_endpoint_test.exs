@@ -103,24 +103,24 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     ensure_security_started()
 
-    prev_identity = Application.get_env(:arbor_security, :identity_verification)
-    prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
-    prev_strict = Application.get_env(:arbor_security, :strict_identity_mode)
-    prev_uri = Application.get_env(:arbor_security, :uri_registry_enforcement)
-    prev_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
-    prev_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
-    prev_security_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
+    prev_identity = Application.get_env(:arbor_capabilities, :identity_verification)
+    prev_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    prev_strict = Application.get_env(:arbor_capabilities, :strict_identity_mode)
+    prev_uri = Application.get_env(:arbor_capabilities, :uri_registry_enforcement)
+    prev_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled)
+    prev_escalation = Application.get_env(:arbor_capabilities, :consensus_escalation_enabled)
+    prev_security_approval = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
     prev_trust_approval = Application.get_env(:arbor_trust, :approval_guard_enabled)
     prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     prev_shell_authorizer = Application.fetch_env(:arbor_shell, :agent_authorizer)
 
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
     Application.put_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
@@ -133,13 +133,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     on_exit(fn ->
       restore_env(:arbor_actions, :default_taint_policy, prev_taint_policy)
-      restore_env(:arbor_security, :identity_verification, prev_identity)
-      restore_env(:arbor_security, :capability_signing_required, prev_signing)
-      restore_env(:arbor_security, :strict_identity_mode, prev_strict)
-      restore_env(:arbor_security, :uri_registry_enforcement, prev_uri)
-      restore_env(:arbor_security, :reflex_checking_enabled, prev_reflex)
-      restore_env(:arbor_security, :consensus_escalation_enabled, prev_escalation)
-      restore_env(:arbor_security, :approval_guard_enabled, prev_security_approval)
+      restore_env(:arbor_capabilities, :identity_verification, prev_identity)
+      restore_env(:arbor_capabilities, :capability_signing_required, prev_signing)
+      restore_env(:arbor_capabilities, :strict_identity_mode, prev_strict)
+      restore_env(:arbor_capabilities, :uri_registry_enforcement, prev_uri)
+      restore_env(:arbor_capabilities, :reflex_checking_enabled, prev_reflex)
+      restore_env(:arbor_capabilities, :consensus_escalation_enabled, prev_escalation)
+      restore_env(:arbor_capabilities, :approval_guard_enabled, prev_security_approval)
       restore_env(:arbor_trust, :approval_guard_enabled, prev_trust_approval)
       restore_env(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
 
@@ -874,7 +874,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   end
 
   defp ensure_security_started do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     security_children = [

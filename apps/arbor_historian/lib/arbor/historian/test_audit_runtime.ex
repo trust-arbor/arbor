@@ -74,10 +74,14 @@ if Mix.env() == :test do
         opts: [repo: TestAuditRepo]
       })
 
-      Application.put_env(:arbor_security, :authority_audit_consumer_name, AuthorityAuditPuller)
+      Application.put_env(
+        :arbor_capabilities,
+        :authority_audit_consumer_name,
+        AuthorityAuditPuller
+      )
 
       Application.put_env(
-        :arbor_security,
+        :arbor_capabilities,
         :authority_audit_consumer_application,
         :arbor_historian
       )

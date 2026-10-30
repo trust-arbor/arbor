@@ -22,11 +22,11 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
   ]
 
   setup do
-    original_distributed_signals = Application.get_env(:arbor_security, :distributed_signals)
+    original_distributed_signals = Application.get_env(:arbor_capabilities, :distributed_signals)
     signals_snapshot = Config.Testing.snapshot_namespace()
 
     :ok = Signals.restore_runtime_fixture()
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
 
     on_exit(fn ->
       Config.Testing.restore_namespace(signals_snapshot)
@@ -45,7 +45,7 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
         map -> Config.Testing.put(:security_sync_subscribers, map)
       end
 
-      Application.put_env(:arbor_security, :distributed_signals, true)
+      Application.put_env(:arbor_capabilities, :distributed_signals, true)
 
       refute Config.security_sync_transport_configured?()
       refute Config.authenticated_security_sync_transport?()
@@ -77,7 +77,7 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
       }
     })
 
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    Application.put_env(:arbor_capabilities, :distributed_signals, true)
     assert Config.security_sync_transport_configured?()
     refute Config.authenticated_security_sync_transport?()
     refute Arbor.Signals.authenticated_security_sync_transport?()
@@ -133,6 +133,6 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
     end)
   end
 
-  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

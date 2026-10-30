@@ -130,7 +130,7 @@ defmodule Arbor.Dashboard.Live.AgentsManagementSecurityRegressionTest do
   end
 
   defp require_browser_auth! do
-    Fixture.set_env(:arbor_security, :oidc,
+    Fixture.set_env(:arbor_capabilities, :oidc,
       providers: [%{issuer: "https://management-session.fixture", client_id: "dashboard"}]
     )
 

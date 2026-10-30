@@ -124,7 +124,7 @@ defmodule Arbor.Persistence.ConversationNoticeStoreTest do
     original_activity =
       IsolatedRepo.get_by!(Engagement, engagement_id: scope.engagement_id).updated_at
 
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     assert :ok = Arbor.Security.TestBootstrap.start!()
 
     assert {:error, :native_notice_source_required} =
@@ -149,7 +149,7 @@ defmodule Arbor.Persistence.ConversationNoticeStoreTest do
   test "native security regression: existing exact storage facts cannot bypass fresh worker admission",
        %{scope: scope} do
     notice = value(scope, 1, "historical storage evidence is not a fresh source lease")
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     assert :ok = Arbor.Security.TestBootstrap.start!()
 
     assert {:ok, %{disposition: :inserted, notice: saved}} =

@@ -16,13 +16,13 @@ defmodule Arbor.Actions.EgressBlockReasonTest do
   alias Arbor.Actions.Web.Search
 
   setup do
-    previous = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    previous = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       if is_nil(previous),
-        do: Application.delete_env(:arbor_security, :egress_gate_enforcing),
-        else: Application.put_env(:arbor_security, :egress_gate_enforcing, previous)
+        do: Application.delete_env(:arbor_capabilities, :egress_gate_enforcing),
+        else: Application.put_env(:arbor_capabilities, :egress_gate_enforcing, previous)
     end)
 
     agent_id = "agent_egress_reason_#{System.unique_integer([:positive])}"

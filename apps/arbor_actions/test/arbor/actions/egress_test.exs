@@ -102,8 +102,8 @@ defmodule Arbor.Actions.EgressTest do
     end
 
     test "on_premises opt-in via application config" do
-      Application.put_env(:arbor_security, :gate_on_premises_egress, true)
-      on_exit(fn -> Application.delete_env(:arbor_security, :gate_on_premises_egress) end)
+      Application.put_env(:arbor_capabilities, :gate_on_premises_egress, true)
+      on_exit(fn -> Application.delete_env(:arbor_capabilities, :gate_on_premises_egress) end)
       assert Egress.gate_decision(:on_premises) == :ask
     end
   end

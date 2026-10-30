@@ -1,0 +1,452 @@
+{
+  "schema": "arbor.capabilities.platform-activation-test-split.v1",
+  "source_commit": "3fbe6596fa2da06480fbdd75c3b516815d79a9d3",
+  "source_path": "apps/arbor_security/test/arbor/security/platform_activation_authorization_security_regression_test.exs",
+  "source_sha256": "923f81c0a6b081b490ba40a386ebccc13c53290b0712d28e96ed37bf365fe9b6",
+  "core_target": "packages/arbor_capabilities/test/arbor/security/platform_activation_authorization_security_regression_test.exs",
+  "host_target": "apps/arbor_security/test/arbor/security/platform_activation_authorization_host_integration_test.exs",
+  "runtime_fixture": "packages/arbor_capabilities/test/support/platform_runtime_host.ex",
+  "preservation": "All original assertion lines remain in Core or Host. Tests other than the first are byte-identical blocks. First-test issuer prefix and host consumer tail are conserved literal blocks. Host adds public issuer setup assertions solely to supply its real consumer. Core changes only setup to select a scoped explicit RuntimeHost and restore the exact prior environment.",
+  "source_test_count": 9,
+  "core_test_count": 9,
+  "host_test_count": 1,
+  "host_literal_tail_sha256": "6a110c635681b7ba271f1dbcf83d7486946549f860e9a7c533e82a07362e5c10",
+  "tests": [
+    {
+      "source_test": "issues a canonical envelope from the live Platform authority",
+      "source_first_line": 47,
+      "source_test_block_sha256": "2a08e145387826b70888fb91fc1b0acf3e8910834ac7fa0b4282dd094a948ebd",
+      "core_disposition": "Issuer, broker, envelope, key-custody and invalid-input assertions preserved verbatim.",
+      "host_disposition": "The real Activation.stage/KR.authorize_platform_activation/Activation.commit tail is moved verbatim to the host counterpart."
+    },
+    {
+      "source_test": "wrong purpose, principal, and absent authority fail closed",
+      "source_first_line": 89,
+      "source_test_block_sha256": "797eb44b2c3e4e556c1ecf876643b2b722552b13f5f2a5098e8054be9b7bd298",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "closed authority, owner death, and identity status deny signing",
+      "source_first_line": 131,
+      "source_test_block_sha256": "86e3e3aa4fa2c6ad0e56d5359fe39b5797d74355a2b6d2500097eb98e4629635",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "missing or wrong stored key denies signing",
+      "source_first_line": 192,
+      "source_test_block_sha256": "2671c89c77fc895483ad0d6b3f850457a8a0cbaba07f18351bea5b735bccb686",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "malformed context, boot mismatch, and expiry bounds fail closed",
+      "source_first_line": 218,
+      "source_test_block_sha256": "1cf4b766735c2c3dbe776b3a36be0e321f438aa005ede7c292eb2f9b50064970",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "does not expose raw signing or agent-id acquisition",
+      "source_first_line": 295,
+      "source_test_block_sha256": "1707f0325ac9a1712d25391749a9fdde394f205bf73ed85e1e28502170298bc0",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "internal activation sign rejects a live non-platform purpose before key use",
+      "source_first_line": 328,
+      "source_test_block_sha256": "23eb51a25bc34003480f3e3fc59d8c6d3e14d9145734e7d2b2b0692e6c153b0e",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "security regression: platform authority cannot sign an arbitrary detached message",
+      "source_first_line": 344,
+      "source_test_block_sha256": "54b140878b30c4c0c311e5f62f29792fff740647415331306379627e783d9772",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    },
+    {
+      "source_test": "security regression: broker owns issuance time and refuses nonce reuse",
+      "source_first_line": 355,
+      "source_test_block_sha256": "59197688a79294563e9042eae4ed62da6ffc4a1b7c06e2dc555b3ac7d0847412",
+      "core_disposition": "Entire original test block retained verbatim.",
+      "host_disposition": null
+    }
+  ],
+  "source_assertions": [
+    {
+      "source_line": 18,
+      "assertion_line": "assert {:ok, snapshot} = Arbor.KernelRuntime.boot_profile()",
+      "destination": "host_consumer"
+    },
+    {
+      "source_line": 21,
+      "assertion_line": "assert principal_id == \"agent_\" <> snapshot[\"platform_key_id\"]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 48,
+      "assertion_line": "assert {:ok, authority} = open_authority(ctx, :platform_activation)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 49,
+      "assertion_line": "assert {:ok, digest} = Envelope.digest_of(ctx.transaction)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 51,
+      "assertion_line": "assert {:ok, envelope} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 58,
+      "assertion_line": "assert envelope[\"schema\"] == Envelope.signed_schema()",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 59,
+      "assertion_line": "assert envelope[\"domain\"] == Envelope.schema(:activation_authorization)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 60,
+      "assertion_line": "assert envelope[\"issuer_id\"] == ctx.agent_id",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 61,
+      "assertion_line": "assert envelope[\"key_id\"] == ctx.snapshot[\"platform_key_id\"]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 62,
+      "assertion_line": "assert envelope[\"payload\"][\"issuer_id\"] == ctx.agent_id",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 63,
+      "assertion_line": "assert envelope[\"payload\"][\"key_id\"] == ctx.snapshot[\"platform_key_id\"]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 64,
+      "assertion_line": "assert envelope[\"payload\"][\"boot_profile_sha256\"] == ctx.snapshot[\"manifest_sha256\"]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 65,
+      "assertion_line": "assert envelope[\"payload\"][\"boot_epoch\"] == ctx.snapshot[\"boot_epoch\"]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 66,
+      "assertion_line": "assert envelope[\"payload\"][\"transaction_sha256\"] == digest",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 68,
+      "assertion_line": "assert {:ok, ^envelope} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 71,
+      "assertion_line": "refute inspect(envelope) =~ Base.encode16(ctx.private_key, case: :lower)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 72,
+      "assertion_line": "refute inspect(authority) =~ Base.encode16(ctx.private_key, case: :lower)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 75,
+      "assertion_line": "refute Map.has_key?(snapshot, :signing_message)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 76,
+      "assertion_line": "refute Enum.any?(snapshot.entries, & &1.has_private_key?)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 81,
+      "assertion_line": "assert {:ok, authorized, [{:consume_nonce, _}]} =",
+      "destination": "host_consumer"
+    },
+    {
+      "source_line": 86,
+      "assertion_line": "assert {:error, \"not_ready\"} = Activation.commit(authorized)",
+      "destination": "host_consumer"
+    },
+    {
+      "source_line": 92,
+      "assertion_line": "assert {:error, :purpose_mismatch} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 102,
+      "assertion_line": "assert {:error, :principal_mismatch} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 109,
+      "assertion_line": "assert {:error, :invalid_authority} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 123,
+      "assertion_line": "assert {:error, :authority_not_found} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 133,
+      "assertion_line": "assert :ok = Security.close_signing_authority(authority)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 135,
+      "assertion_line": "assert {:error, :authority_not_found} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 159,
+      "assertion_line": "assert_receive {:authority, live}, 1_000",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 162,
+      "assertion_line": "assert_receive {:DOWN, ^ref, :process, ^owner, _}, 1_000",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 172,
+      "assertion_line": "assert :ok = Security.suspend_identity_fixture(ctx.agent_id, reason: \"test suspend\")",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 174,
+      "assertion_line": "assert {:error, :identity_suspended} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 181,
+      "assertion_line": "assert :ok = Security.resume_identity_fixture(ctx.agent_id)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 182,
+      "assertion_line": "assert :ok = Security.revoke_identity_fixture(ctx.agent_id, reason: \"test revoke\")",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 184,
+      "assertion_line": "assert {:error, :identity_revoked} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 194,
+      "assertion_line": "assert :ok = Security.delete_signing_key_fixture(ctx.agent_id)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 196,
+      "assertion_line": "assert {:error, reason} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 203,
+      "assertion_line": "assert reason in [:no_signing_key, :signing_key_unavailable]",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 208,
+      "assertion_line": "assert :ok = Security.store_signing_key_fixture(ctx.agent_id, other.private_key)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 210,
+      "assertion_line": "assert {:error, :signing_key_mismatch} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 221,
+      "assertion_line": "assert {:error, :mixed_option_keys} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 233,
+      "assertion_line": "assert {:error, :duplicate_attribute} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 240,
+      "assertion_line": "assert {:error, :forbidden_attribute} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 247,
+      "assertion_line": "assert {:error, :forbidden_attribute} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 259,
+      "assertion_line": "assert {:error, :boot_mismatch} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 266,
+      "assertion_line": "assert {:error, :forbidden_attribute} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 273,
+      "assertion_line": "assert {:error, :forbidden_attribute} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 280,
+      "assertion_line": "assert {:error, :invalid_nonce} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 287,
+      "assertion_line": "assert {:error, :invalid_id} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 298,
+      "assertion_line": "assert {:ok, %SignedRequest{}} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 301,
+      "assertion_line": "assert {:error, :invalid_resource_binding} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 304,
+      "assertion_line": "assert {:ok, list_payload} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 307,
+      "assertion_line": "assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, list_payload)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 309,
+      "assertion_line": "assert {:error, :invalid_routine_request} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 312,
+      "assertion_line": "assert {:error, :invalid_resource_binding} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 318,
+      "assertion_line": "assert {:error, :invalid_resource_binding} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 321,
+      "assertion_line": "refute function_exported?(Security, :sign_detached, 2)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 322,
+      "assertion_line": "refute function_exported?(SigningAuthorityBroker, :sign_detached, 2)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 324,
+      "assertion_line": "assert {:error, :possession_proof_required} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 331,
+      "assertion_line": "assert {:error, :purpose_mismatch} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 339,
+      "assertion_line": "refute Enum.any?(snapshot.entries, & &1.has_private_key?)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 340,
+      "assertion_line": "refute Map.has_key?(snapshot, :signing_message)",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 347,
+      "assertion_line": "assert {:error, :activation_reservation_missing} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 359,
+      "assertion_line": "assert {:ok, envelope} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 371,
+      "assertion_line": "assert issued_unix in before..after_issue",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 372,
+      "assertion_line": "assert DateTime.diff(expires_at, issued_at, :second) <= 60",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 374,
+      "assertion_line": "assert {:error, :activation_nonce_reused} =",
+      "destination": "core_issuer"
+    },
+    {
+      "source_line": 425,
+      "assertion_line": "defp wait_until(fun, 0), do: assert(fun.())",
+      "destination": "core_issuer"
+    }
+  ],
+  "snapshot_provenance": {
+    "method": "Exact public snapshot captured by the parent from Arbor.KernelRuntime.boot_profile/0 after actual legacy KernelRuntime startup and boot handshake in a private VM at the source commit. Copied byte-for-byte into an owned Core test data file; fixture reads no product/runtime source path and copies no validation/projection algorithm.",
+    "snapshot_target": "packages/arbor_capabilities/test/support/platform_runtime_boot_profile_snapshot.json",
+    "provenance_target": "packages/arbor_capabilities/test/support/platform_runtime_boot_profile_snapshot_provenance.json",
+    "snapshot_sha256": "f4fa1d7a759c4caaaeb782ca5f8c0d7f0db4c1dcdff86321f107a64b4c718bf5",
+    "captured_receipt": {
+      "head": "3fbe6596fa2da06480fbdd75c3b516815d79a9d3",
+      "snapshot_file": "legacy-boot-profile-snapshot.json",
+      "snapshot_sha256": "f4fa1d7a759c4caaaeb782ca5f8c0d7f0db4c1dcdff86321f107a64b4c718bf5",
+      "captured_public_API": "Arbor.KernelRuntime.boot_profile/0 after actual legacy KernelRuntime startup and boot handshake in private VM",
+      "baseline_compile": "legacy-baseline-compile-01/state.json passed",
+      "capture": "legacy-public-env-01/state.json passed",
+      "sources": {
+        "config/test.exs": {
+          "sha256": "5f0e3a4a9a5e172dad065459f3cdf89c24b32efbaad136eb233e56896ab43edb",
+          "git_blob_oid": "a34730b1066a053693a4dcd13d8422bb102587a5"
+        },
+        "packages/arbor_kernel/test/fixtures/extension_envelopes/v1/boot_profile_manifest.json": {
+          "sha256": "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268",
+          "git_blob_oid": "19268f6c8f58ce68ba6304bdd66cbd427e31cb47"
+        },
+        "packages/arbor_kernel/test/fixtures/extension_envelopes/v1/boot_profile_signature.json": {
+          "sha256": "a59386b959907635d76907d1024501ef3d0ae4407806468aeebe39ea5bb72036",
+          "git_blob_oid": "38ed081dcd1323c16727a0ecbca4beef666a7f1d"
+        }
+      }
+    },
+    "no_new_execution_in_this_lease": true
+  },
+  "target_sha256": {
+    "packages/arbor_capabilities/test/arbor/security/platform_activation_authorization_security_regression_test.exs": "135943e3d2a289d9e1a42cfe658f3271f7cc89d1fe81418be2036872e5134b4e",
+    "apps/arbor_security/test/arbor/security/platform_activation_authorization_host_integration_test.exs": "d516f7e17b0ce6fb1c4fd159efe93c561fd1f30481dc10f51d1a2a10a04421ec",
+    "packages/arbor_capabilities/test/support/platform_runtime_host.ex": "eba7e08f60664d4eda340b82895bd299b300e88bd5030527ac01674dc5da2775",
+    "packages/arbor_capabilities/test/support/platform_runtime_boot_profile_snapshot.json": "f4fa1d7a759c4caaaeb782ca5f8c0d7f0db4c1dcdff86321f107a64b4c718bf5",
+    "packages/arbor_capabilities/test/support/platform_runtime_boot_profile_snapshot_provenance.json": "8634d51cbec238ea705a707ae1dfc1298bae5f0ca1a296959eaa634e032aff4b"
+  }
+}

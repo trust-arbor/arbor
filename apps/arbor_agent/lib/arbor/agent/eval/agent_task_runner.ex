@@ -90,10 +90,10 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # Optionally flip Arbor's egress gate from dark (observe-only) to ENFORCING
       # for the whole batch. Local (LM Studio) LLM egress is :on_host → :allow, so
       # this doesn't break the model calls; external tainted egress → {:block}.
-      prior_egress = Application.get_env(:arbor_security, :egress_gate_enforcing, false)
+      prior_egress = Application.get_env(:arbor_capabilities, :egress_gate_enforcing, false)
 
       if opts[:enforce_egress],
-        do: Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+        do: Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
       try do
         # Load the model into memory BEFORE the samples, so recorded per-sample wall times reflect
@@ -108,7 +108,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         e -> {:error, {:run_failed, Exception.message(e)}}
       after
         if opts[:enforce_egress],
-          do: Application.put_env(:arbor_security, :egress_gate_enforcing, prior_egress)
+          do: Application.put_env(:arbor_capabilities, :egress_gate_enforcing, prior_egress)
       end
     else
       :error -> {:error, {:unknown_task, task_id}}

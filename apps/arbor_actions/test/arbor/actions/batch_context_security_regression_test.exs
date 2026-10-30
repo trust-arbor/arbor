@@ -103,14 +103,14 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
     refute Arbor.Actions.pipeline_internal_action?(child_action)
 
     previous_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
-    previous_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
+    previous_escalation = Application.get_env(:arbor_capabilities, :consensus_escalation_enabled)
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
 
     on_exit(fn ->
       restore_env(:arbor_trust, :approval_guard_enabled, previous_guard)
-      restore_env(:arbor_security, :consensus_escalation_enabled, previous_escalation)
+      restore_env(:arbor_capabilities, :consensus_escalation_enabled, previous_escalation)
     end)
 
     approval = %{

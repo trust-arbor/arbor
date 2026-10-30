@@ -9,7 +9,7 @@ defmodule Arbor.Actions.CommsAttachmentSecurityRegressionTest do
   # (`File.read!` / `--attachment=`), so a model could mail `~/.arbor/oauth/*`
   # to any recipient once `arbor://comms/send` was allowed.
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     :ok
   end
 

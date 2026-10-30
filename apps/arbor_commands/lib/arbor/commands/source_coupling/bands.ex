@@ -35,6 +35,9 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
     "arbor_cartographer" => "P",
     "arbor_llm" => "P",
     "arbor_security" => "P",
+    # The canonical authority and Signals adapter retain their Security family band.
+    "arbor_capabilities" => "P",
+    "arbor_capabilities_signals" => "P",
     # OIDC retains the Security protocol band after physical extraction.
     "arbor_capabilities_oidc" => "P",
     # Persistence adoption retains the family P band; reviewed successor scope:

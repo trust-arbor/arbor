@@ -27,8 +27,8 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
   @oidc_env_vars ~w(OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES OIDC_ALLOW_HTTP)
 
   setup do
-    previous_oidc = Application.get_env(:arbor_security, :oidc)
-    Application.delete_env(:arbor_security, :oidc)
+    previous_oidc = Application.get_env(:arbor_capabilities, :oidc)
+    Application.delete_env(:arbor_capabilities, :oidc)
 
     previous_env = Map.new(@oidc_env_vars, &{&1, System.get_env(&1)})
     Enum.each(@oidc_env_vars, &System.delete_env/1)
@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
   end
 
   test "security regression: device-flow failure is returned instead of anonymous execution" do
-    Application.put_env(:arbor_security, :oidc,
+    Application.put_env(:arbor_capabilities, :oidc,
       providers: [%{issuer: "https://issuer.invalid", client_id: "orchestrator-test"}],
       token_cache_path:
         Path.join(System.tmp_dir!(), "missing_orchestrator_oidc_#{System.unique_integer()}")
@@ -101,8 +101,8 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
     assert result.context["session.agent_id"] == identity.agent_id
   end
 
-  defp restore_oidc(nil), do: Application.delete_env(:arbor_security, :oidc)
-  defp restore_oidc(value), do: Application.put_env(:arbor_security, :oidc, value)
+  defp restore_oidc(nil), do: Application.delete_env(:arbor_capabilities, :oidc)
+  defp restore_oidc(value), do: Application.put_env(:arbor_capabilities, :oidc, value)
 
   # Canonical bootstrap: it freezes the authority root and starts the whole
   # topology in the required order, instead of a hand-copied subset that can

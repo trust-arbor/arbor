@@ -28,7 +28,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
   the link.
 
   This matters beyond tidiness. Signed-request auth refuses whenever a peer
-  running `:arbor_security` could accept the same captured request
+  running `:arbor_capabilities` could accept the same captured request
   (`Arbor.Security.Identity.ReplayPeers`), so a dev box left meshed with another
   Arbor gateway cannot use signed external-agent MCP at all. Disconnecting is
   the fix; note it only lasts until someone runs `connect` again or the node

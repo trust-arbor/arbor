@@ -30,8 +30,8 @@ defmodule Arbor.Orchestrator.NativeNoticeWorkerSecurityRegressionTest do
   end
 
   setup do
-    previous = Application.fetch_env(:arbor_security, :native_notice_source_authorizer)
-    Application.put_env(:arbor_security, :native_notice_source_authorizer, SourceAuthority)
+    previous = Application.fetch_env(:arbor_capabilities, :native_notice_source_authorizer)
+    Application.put_env(:arbor_capabilities, :native_notice_source_authorizer, SourceAuthority)
     {:ok, identity} = Identity.generate(name: "native-handoff")
     :ok = Security.register_identity_fixture(Identity.public_only(identity))
     :ok = Security.store_signing_key_fixture(identity.agent_id, identity.private_key)
@@ -39,10 +39,10 @@ defmodule Arbor.Orchestrator.NativeNoticeWorkerSecurityRegressionTest do
     on_exit(fn ->
       case previous do
         {:ok, value} ->
-          Application.put_env(:arbor_security, :native_notice_source_authorizer, value)
+          Application.put_env(:arbor_capabilities, :native_notice_source_authorizer, value)
 
         :error ->
-          Application.delete_env(:arbor_security, :native_notice_source_authorizer)
+          Application.delete_env(:arbor_capabilities, :native_notice_source_authorizer)
       end
 
       Security.delete_signing_key_fixture(identity.agent_id)

@@ -63,7 +63,7 @@ end
 
 if session_token_secret = System.get_env("ARBOR_SESSION_TOKEN_SECRET") do
   if session_token_secret != "" do
-    config :arbor_security, session_token_secret: session_token_secret
+    config :arbor_capabilities, session_token_secret: session_token_secret
   end
 end
 
@@ -331,13 +331,20 @@ end
 # ARBOR_DATA_DIR: worktree previews must name the existing authority directory,
 # not silently select a second root. Migration remains a separate operator action.
 if config_env() != :test do
+  # Preserve the original runtime-user key and independent revocation ledger
+  # defaults. Never capture the release builder's home in compiled config.
+  config :arbor_capabilities,
+    master_key_path: Path.join(System.user_home!(), ".arbor/security/master.key"),
+    revocation_ledger_path:
+      Path.join(System.user_home!(), ".arbor/security/capability_revocations.v1.json")
+
   case System.get_env("ARBOR_SECURITY_STATE_DIR") do
     dir when is_binary(dir) and dir != "" ->
       unless Path.type(dir) == :absolute do
         raise "ARBOR_SECURITY_STATE_DIR must be an absolute path"
       end
 
-      config :arbor_security, authority_state_root: dir
+      config :arbor_capabilities, authority_state_root: dir
 
     _unset ->
       :ok
@@ -349,7 +356,7 @@ if config_env() != :test do
         raise "ARBOR_SECURITY_REVOCATION_LEDGER_PATH must be an absolute path"
       end
 
-      config :arbor_security, revocation_ledger_path: path
+      config :arbor_capabilities, revocation_ledger_path: path
 
     _unset ->
       :ok
@@ -717,7 +724,7 @@ if oidc_issuer && oidc_client_id do
       oidc_config
     end
 
-  config :arbor_security, :oidc, oidc_config
+  config :arbor_capabilities, :oidc, oidc_config
 end
 
 # ============================================================================
@@ -889,7 +896,7 @@ if config_env() != :test do
   if Code.ensure_loaded?(Arbor.Security) do
     config :arbor_kernel,
       common: [
-        skill_import_security_module: Arbor.Security,
+        skill_import_security_module: Arbor.Security.Host.SkillSecurity,
         skill_security_module: Arbor.Security
       ]
   end
@@ -914,16 +921,16 @@ end
 if config_env() != :test do
   config :arbor_signals,
     durable_sink_module: Arbor.Historian,
-    security_module: Arbor.Security,
-    crypto_module: Arbor.Security,
-    identity_registry_module: Arbor.Security
+    security_module: Arbor.Capabilities.Signals,
+    crypto_module: Arbor.Capabilities.Signals,
+    identity_registry_module: Arbor.Capabilities.Signals
 end
 
 # ============================================================================
 # Security event log adapter (injected into arbor_security; nil by default in lib)
 # ============================================================================
 if config_env() != :test do
-  config :arbor_security, event_log_adapter: Arbor.Historian.Adapters.SecurityEventLog
+  config :arbor_capabilities, event_log_adapter: Arbor.Historian.Adapters.SecurityEventLog
 end
 
 # ============================================================================

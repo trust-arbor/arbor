@@ -10,14 +10,14 @@ defmodule Arbor.Trust.ProfileExitAuditTest do
   import Arbor.Trust.TestHelpers, only: [actor_authority!: 0]
 
   setup do
-    previous = Application.get_env(:arbor_security, :capability_signing_required)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    previous = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     on_exit(fn ->
       if is_nil(previous) do
-        Application.delete_env(:arbor_security, :capability_signing_required)
+        Application.delete_env(:arbor_capabilities, :capability_signing_required)
       else
-        Application.put_env(:arbor_security, :capability_signing_required, previous)
+        Application.put_env(:arbor_capabilities, :capability_signing_required, previous)
       end
     end)
   end

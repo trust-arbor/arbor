@@ -19,26 +19,28 @@ defmodule Arbor.Actions.ApprovalContextTest do
 
   setup do
     original_trust_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
-    original_security_guard = Application.get_env(:arbor_security, :approval_guard_enabled)
+    original_security_guard = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
     original_policy = Application.get_env(:arbor_trust, :policy_module)
-    original_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
-    original_consensus = Application.get_env(:arbor_security, :consensus_module)
-    original_router = Application.get_env(:arbor_security, :use_interaction_router_for_approval)
+    original_escalation = Application.get_env(:arbor_capabilities, :consensus_escalation_enabled)
+    original_consensus = Application.get_env(:arbor_capabilities, :consensus_module)
+
+    original_router =
+      Application.get_env(:arbor_capabilities, :use_interaction_router_for_approval)
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
-    Application.put_env(:arbor_security, :approval_guard_enabled, true)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
-    Application.put_env(:arbor_security, :consensus_module, CapturingConsensus)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_module, CapturingConsensus)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, false)
 
     on_exit(fn ->
       restore(:arbor_trust, :approval_guard_enabled, original_trust_guard)
-      restore(:arbor_security, :approval_guard_enabled, original_security_guard)
+      restore(:arbor_capabilities, :approval_guard_enabled, original_security_guard)
       restore(:arbor_trust, :policy_module, original_policy)
-      restore(:arbor_security, :consensus_escalation_enabled, original_escalation)
-      restore(:arbor_security, :consensus_module, original_consensus)
-      restore(:arbor_security, :use_interaction_router_for_approval, original_router)
+      restore(:arbor_capabilities, :consensus_escalation_enabled, original_escalation)
+      restore(:arbor_capabilities, :consensus_module, original_consensus)
+      restore(:arbor_capabilities, :use_interaction_router_for_approval, original_router)
     end)
 
     tmp_root = Path.expand(System.tmp_dir!())

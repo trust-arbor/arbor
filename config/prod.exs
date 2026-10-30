@@ -3,7 +3,7 @@ import Config
 config :logger, level: :info
 
 # Production security — all features enabled, fail-closed.
-config :arbor_security,
+config :arbor_capabilities,
   strict_identity_mode: true,
   identity_verification: true,
   capability_signing_required: true,

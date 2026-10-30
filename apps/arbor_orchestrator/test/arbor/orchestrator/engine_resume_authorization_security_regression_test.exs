@@ -215,18 +215,18 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
 
   test "security regression: SigningAuthority supplies a fresh resume identity proof", ctx do
     previous = %{
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      capability_signing: Application.get_env(:arbor_security, :capability_signing_required),
-      strict_identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled)
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      capability_signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      strict_identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled)
     }
 
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
 
     {:ok, identity} =
       Arbor.Contracts.Security.Identity.generate(name: "engine-resume-authority-proof")
@@ -314,6 +314,6 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
              )
   end
 
-  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

@@ -106,6 +106,30 @@ defmodule Arbor.Contracts.Security.FindingTest do
       assert Finding.high_risk_location?(f)
     end
 
+    test "capabilities package crypto, transport and token verification retain the hard cap" do
+      for path <- [
+            "packages/arbor_capabilities/lib/arbor/security/crypto.ex",
+            "packages/arbor_capabilities_signals/lib/arbor/security/adapters/signals_transport.ex",
+            "packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc/token_verifier.ex",
+            "apps/arbor_security/lib/arbor/security/crypto.ex"
+          ] do
+        finding = Finding.new(category: :other, title: "t", location: %{file: path})
+
+        assert Finding.high_risk_location?(finding), path
+      end
+    end
+
+    test "an unrelated package remains outside the hard cap" do
+      finding =
+        Finding.new(
+          category: :other,
+          title: "t",
+          location: %{file: "packages/arbor_widgets/lib/presenter.ex"}
+        )
+
+      refute Finding.high_risk_location?(finding)
+    end
+
     test "false for an ordinary app path" do
       f =
         Finding.new(

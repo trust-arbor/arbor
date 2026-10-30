@@ -21,12 +21,12 @@ defmodule Arbor.Commands.Test.SessionLifecycleHelpers do
   def setup_security_flags! do
     prev =
       for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
-        {key, Application.get_env(:arbor_security, key)}
+        {key, Application.get_env(:arbor_capabilities, key)}
       end
 
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
 
     prev
   end
@@ -34,8 +34,8 @@ defmodule Arbor.Commands.Test.SessionLifecycleHelpers do
   def restore_security_flags!(prev) do
     for {key, value} <- prev do
       if is_nil(value),
-        do: Application.delete_env(:arbor_security, key),
-        else: Application.put_env(:arbor_security, key, value)
+        do: Application.delete_env(:arbor_capabilities, key),
+        else: Application.put_env(:arbor_capabilities, key, value)
     end
   end
 
@@ -103,7 +103,7 @@ defmodule Arbor.Commands.Test.SessionLifecycleHelpers do
 
   def start_security_topology do
     security_backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},

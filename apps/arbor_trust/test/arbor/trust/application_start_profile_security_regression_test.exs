@@ -462,8 +462,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "caller egress_mode cannot weaken authorize_egress or authorize" do
-    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    previous_enforcing = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       restore_security_env(:egress_gate_enforcing, previous_enforcing)
@@ -487,8 +487,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "security regression: unknown egress tiers fail closed before Security" do
-    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    previous_enforcing = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       restore_security_env(:egress_gate_enforcing, previous_enforcing)
@@ -514,16 +514,16 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
   test "security regression: valid caller :auto cannot relax frozen :ask through authorize/4" do
     previous = %{
-      enforcing: Application.get_env(:arbor_security, :egress_gate_enforcing),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
-      module: Application.get_env(:arbor_security, :consensus_module),
-      router: Application.get_env(:arbor_security, :use_interaction_router_for_approval)
+      enforcing: Application.get_env(:arbor_capabilities, :egress_gate_enforcing),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
+      module: Application.get_env(:arbor_capabilities, :consensus_module),
+      router: Application.get_env(:arbor_capabilities, :use_interaction_router_for_approval)
     }
 
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
-    Application.put_env(:arbor_security, :consensus_module, MockConsensus)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_module, MockConsensus)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, false)
 
     on_exit(fn ->
       restore_security_env(:egress_gate_enforcing, previous.enforcing)
@@ -617,8 +617,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "security regression: :absent egress tier fails closed before Security" do
-    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    previous_enforcing = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       restore_security_env(:egress_gate_enforcing, previous_enforcing)
@@ -640,8 +640,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "security regression: supplied :absent and malformed proper-keyword values fail closed" do
-    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    previous_enforcing = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
       restore_security_env(:egress_gate_enforcing, previous_enforcing)
@@ -846,6 +846,6 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   defp restore_env(key, nil), do: Application.delete_env(:arbor_trust, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_trust, key, value)
 
-  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

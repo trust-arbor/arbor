@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 Code.require_file(
@@ -109,11 +112,11 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   end
 
   setup do
-    set_env(:arbor_security, :identity_verification, true)
-    set_env(:arbor_security, :policy_enforcer_enabled, false)
-    set_env(:arbor_security, :approval_guard_enabled, false)
-    set_env(:arbor_security, :reflex_checking_enabled, false)
-    set_env(:arbor_security, :uri_registry_enforcement, false)
+    set_env(:arbor_capabilities, :identity_verification, true)
+    set_env(:arbor_capabilities, :policy_enforcer_enabled, false)
+    set_env(:arbor_capabilities, :approval_guard_enabled, false)
+    set_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    set_env(:arbor_capabilities, :uri_registry_enforcement, false)
     set_env(:arbor_trust, :policy_enforcer_enabled, false)
     set_env(:arbor_trust, :approval_guard_enabled, false)
     set_env(:arbor_memory, :private_memory_security, Security)
@@ -595,7 +598,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
   test "enabled source attestation failure refuses append; explicit disabled mode performs no automatic embedding",
        ctx do
-    set_env(:arbor_security, :system_authority_mode, :ephemeral)
+    set_env(:arbor_capabilities, :system_authority_mode, :ephemeral)
     restart_root!()
 
     # The restarted authority has a new signing key. Capabilities signed by

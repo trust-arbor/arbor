@@ -103,7 +103,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
         id: "session-token-deserialize-before-verify",
         category: :crypto_weakness,
         fix_commit: "5db34585",
-        paths: ["apps/arbor_security/lib/arbor/security/session_token.ex"],
+        paths: ["packages/arbor_capabilities/lib/arbor/security/session_token.ex"],
         invariant:
           "A token's MAC must be verified BEFORE its payload is deserialized — " <>
             "never run binary_to_term on unverified, attacker-controlled bytes.",
@@ -120,7 +120,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
         id: "ed25519-wrong-digest-mode",
         category: :crypto_weakness,
         fix_commit: "58c6b68d",
-        paths: ["apps/arbor_security/lib/arbor/security/crypto.ex"],
+        paths: ["packages/arbor_capabilities/lib/arbor/security/crypto.ex"],
         invariant:
           "Pure Ed25519 signing/verification must use the :none digest (RFC 8032 hashes " <>
             "internally); :sha512 risks prehash semantics + breaks standard-verifier interop.",

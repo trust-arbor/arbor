@@ -58,7 +58,7 @@ defmodule Arbor.Agent.Eval.BugCase do
       name: "CapabilityStore glob wildcards",
       fix_commit: "45d7d8b3",
       pre_fix_commit: "f681e22f",
-      file: "apps/arbor_security/lib/arbor/security/capability_store.ex",
+      file: "packages/arbor_capabilities/lib/arbor/security/capability_store.ex",
       function: "authorizes_resource?/2",
       symptom:
         "Capability URIs with /** glob wildcards (e.g. arbor://fs/**) " <>
@@ -81,7 +81,7 @@ defmodule Arbor.Agent.Eval.BugCase do
 
       The bug is in the codebase at: {WORKTREE_PATH}
 
-      INVESTIGATE: Read the file at {WORKTREE_PATH}/apps/arbor_security/lib/arbor/security/capability_store.ex
+      INVESTIGATE: Read the file at {WORKTREE_PATH}/packages/arbor_capabilities/lib/arbor/security/capability_store.ex
       and find the function that matches capability resource URIs against requested resources.
       Determine why glob wildcard patterns (/**) are not being matched.
 

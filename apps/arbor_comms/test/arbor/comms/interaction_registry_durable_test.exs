@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Comms.InteractionRegistryDurableTest do

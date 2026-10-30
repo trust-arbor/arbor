@@ -192,15 +192,15 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
     end
 
     test "a stalled start fails immediately instead of waiting out the budget" do
-      result = {:stalled_start, :arbor_trust, [:arbor_trust], [:arbor_security]}
+      result = {:stalled_start, :arbor_trust, [:arbor_trust], [:arbor_capabilities]}
       assert Readiness.poll_decision(1_000_000, 0, result) == {:done_failed, result}
     end
 
     test "the stalled-start diagnostic names the stuck application" do
       message =
         Readiness.timeout_diagnostic(
-          {:stalled_start, :arbor_trust, [:arbor_trust, :arbor_agent], [:arbor_security]},
-          [:arbor_agent, :arbor_security, :arbor_trust],
+          {:stalled_start, :arbor_trust, [:arbor_trust, :arbor_agent], [:arbor_capabilities]},
+          [:arbor_agent, :arbor_capabilities, :arbor_trust],
           600_000
         )
 

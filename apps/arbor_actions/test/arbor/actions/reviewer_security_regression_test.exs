@@ -420,7 +420,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   defp ensure_trust_started do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     if Process.whereis(Arbor.Trust.Store) == nil do
@@ -455,38 +455,38 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
 
   defp security_config do
     %{
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
-      security_approval: Application.get_env(:arbor_security, :approval_guard_enabled),
-      receipts: Application.get_env(:arbor_security, :invocation_receipts_enabled),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
+      security_approval: Application.get_env(:arbor_capabilities, :approval_guard_enabled),
+      receipts: Application.get_env(:arbor_capabilities, :invocation_receipts_enabled),
       trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
       trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     }
   end
 
   defp configure_minimal_security do
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
   end
 
   defp restore_security_config(previous) do
-    restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
-    restore(:arbor_security, :capability_signing_required, previous.signing)
-    restore(:arbor_security, :strict_identity_mode, previous.identity)
-    restore(:arbor_security, :uri_registry_enforcement, previous.uri_registry)
-    restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
-    restore(:arbor_security, :approval_guard_enabled, previous.security_approval)
-    restore(:arbor_security, :invocation_receipts_enabled, previous.receipts)
+    restore(:arbor_capabilities, :reflex_checking_enabled, previous.reflex)
+    restore(:arbor_capabilities, :capability_signing_required, previous.signing)
+    restore(:arbor_capabilities, :strict_identity_mode, previous.identity)
+    restore(:arbor_capabilities, :uri_registry_enforcement, previous.uri_registry)
+    restore(:arbor_capabilities, :consensus_escalation_enabled, previous.escalation)
+    restore(:arbor_capabilities, :approval_guard_enabled, previous.security_approval)
+    restore(:arbor_capabilities, :invocation_receipts_enabled, previous.receipts)
     restore(:arbor_trust, :approval_guard_enabled, previous.trust_guard)
     restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
   end

@@ -101,14 +101,14 @@ defmodule Arbor.Trust.Config do
   Whether trust-policy JIT capability minting is enabled.
 
   During the A1 kernel/policy boundary move this reads the new trust-layer
-  key first and falls back to the historical `:arbor_security` key so existing
+  key first and falls back to the historical `:arbor_capabilities` key so existing
   dev/prod config keeps its behavior.
   """
   @spec policy_enforcer_enabled?() :: boolean()
   def policy_enforcer_enabled? do
     get(
       :policy_enforcer_enabled,
-      Application.get_env(:arbor_security, :policy_enforcer_enabled, true)
+      Application.get_env(:arbor_capabilities, :policy_enforcer_enabled, true)
     )
   end
 
@@ -116,13 +116,13 @@ defmodule Arbor.Trust.Config do
   Whether trust-policy approval gating is enabled.
 
   Reads `:arbor_trust, :approval_guard_enabled` first, then the historical
-  `:arbor_security` key for compatibility.
+  `:arbor_capabilities` key for compatibility.
   """
   @spec approval_guard_enabled?() :: boolean()
   def approval_guard_enabled? do
     get(
       :approval_guard_enabled,
-      Application.get_env(:arbor_security, :approval_guard_enabled, true)
+      Application.get_env(:arbor_capabilities, :approval_guard_enabled, true)
     )
   end
 

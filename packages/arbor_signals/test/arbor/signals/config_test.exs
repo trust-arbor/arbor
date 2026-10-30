@@ -75,7 +75,7 @@ defmodule Arbor.Signals.ConfigTest do
     Testing.put(:security_sync_subscribers, %{
       nonce_cache: %{
         owner: __MODULE__.FakeSecuritySyncOwner,
-        supervisor: {:application, :arbor_security},
+        supervisor: {:application, :arbor_capabilities},
         child_id: __MODULE__.FakeSecuritySyncOwner,
         events: [:nonce_seen]
       }
@@ -86,7 +86,7 @@ defmodule Arbor.Signals.ConfigTest do
     assert {:ok,
             %{
               owner: __MODULE__.FakeSecuritySyncOwner,
-              supervisor: {:application, :arbor_security},
+              supervisor: {:application, :arbor_capabilities},
               child_id: __MODULE__.FakeSecuritySyncOwner
             }} = Config.security_sync_owner_provenance(:nonce_cache, :nonce_seen)
 

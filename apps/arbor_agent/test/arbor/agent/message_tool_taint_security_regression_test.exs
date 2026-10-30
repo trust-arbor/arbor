@@ -130,7 +130,13 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   end
 
   setup_all do
-    for app <- [:arbor_security, :arbor_trust, :arbor_comms, :arbor_orchestrator, :arbor_agent] do
+    for app <- [
+          :arbor_capabilities,
+          :arbor_trust,
+          :arbor_comms,
+          :arbor_orchestrator,
+          :arbor_agent
+        ] do
       assert {:ok, _started} = Application.ensure_all_started(app)
     end
 
@@ -541,17 +547,17 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   end
 
   defp configure_security! do
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, true)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :policy_enforcer_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "message-tool-taint-selector-" <>
         Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
@@ -560,15 +566,15 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
   defp snapshot_env do
     for {app, key} <- [
-          {:arbor_security, :identity_verification},
-          {:arbor_security, :strict_identity_mode},
-          {:arbor_security, :capability_signing_required},
-          {:arbor_security, :reflex_checking_enabled},
-          {:arbor_security, :uri_registry_enforcement},
-          {:arbor_security, :policy_enforcer_enabled},
-          {:arbor_security, :approval_guard_enabled},
-          {:arbor_security, :egress_gate_enforcing},
-          {:arbor_security, :session_token_secret},
+          {:arbor_capabilities, :identity_verification},
+          {:arbor_capabilities, :strict_identity_mode},
+          {:arbor_capabilities, :capability_signing_required},
+          {:arbor_capabilities, :reflex_checking_enabled},
+          {:arbor_capabilities, :uri_registry_enforcement},
+          {:arbor_capabilities, :policy_enforcer_enabled},
+          {:arbor_capabilities, :approval_guard_enabled},
+          {:arbor_capabilities, :egress_gate_enforcing},
+          {:arbor_capabilities, :session_token_secret},
           {:arbor_ai, :session_turn_dot}
         ],
         into: %{} do

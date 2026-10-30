@@ -34,8 +34,8 @@ defmodule Arbor.Consensus.AuthorizationTest do
     end
 
     # Don't require capability signatures for these facade delegation tests.
-    original_signing = Application.get_env(:arbor_security, :capability_signing_required)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    original_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     Process.sleep(20)
 
@@ -45,9 +45,9 @@ defmodule Arbor.Consensus.AuthorizationTest do
 
     on_exit(fn ->
       if is_nil(original_signing) do
-        Application.delete_env(:arbor_security, :capability_signing_required)
+        Application.delete_env(:arbor_capabilities, :capability_signing_required)
       else
-        Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+        Application.put_env(:arbor_capabilities, :capability_signing_required, original_signing)
       end
     end)
 

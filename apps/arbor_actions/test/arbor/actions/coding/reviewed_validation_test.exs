@@ -39,7 +39,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
     {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
 
@@ -54,10 +54,10 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       interaction_router:
-        Application.get_env(:arbor_security, :use_interaction_router_for_approval),
-      operator_resolver: Application.fetch_env(:arbor_security, :operator_resolver),
-      signing_required: Application.get_env(:arbor_security, :capability_signing_required),
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
+        Application.get_env(:arbor_capabilities, :use_interaction_router_for_approval),
+      operator_resolver: Application.fetch_env(:arbor_capabilities, :operator_resolver),
+      signing_required: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
       approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms),
       orchestrator_approval_timeout:
         Application.get_env(:arbor_orchestrator, :approval_timeout_ms),
@@ -66,10 +66,10 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_module, AskNestedValidationPolicy)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
-    Application.put_env(:arbor_security, :operator_resolver, ExplicitOperatorResolver)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_capabilities, :operator_resolver, ExplicitOperatorResolver)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
     Application.put_env(:arbor_actions, :approval_timeout_ms, 3_000)
 
     on_exit(fn ->
@@ -77,18 +77,18 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
       restore_env(:arbor_trust, :policy_module, previous.policy_module)
 
       case previous.operator_resolver do
-        {:ok, resolver} -> Application.put_env(:arbor_security, :operator_resolver, resolver)
-        :error -> Application.delete_env(:arbor_security, :operator_resolver)
+        {:ok, resolver} -> Application.put_env(:arbor_capabilities, :operator_resolver, resolver)
+        :error -> Application.delete_env(:arbor_capabilities, :operator_resolver)
       end
 
       restore_env(
-        :arbor_security,
+        :arbor_capabilities,
         :use_interaction_router_for_approval,
         previous.interaction_router
       )
 
-      restore_env(:arbor_security, :capability_signing_required, previous.signing_required)
-      restore_env(:arbor_security, :identity_verification, previous.identity_verification)
+      restore_env(:arbor_capabilities, :capability_signing_required, previous.signing_required)
+      restore_env(:arbor_capabilities, :identity_verification, previous.identity_verification)
       restore_env(:arbor_actions, :approval_timeout_ms, previous.approval_timeout)
 
       restore_env(

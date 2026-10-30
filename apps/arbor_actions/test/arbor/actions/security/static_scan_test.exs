@@ -108,6 +108,32 @@ defmodule Arbor.Actions.Security.StaticScanTest do
     assert length(findings) == 1
   end
 
+  @tag :capabilities_path_risk_security_regression
+  test "security regression: adopted Capabilities paths retain high finding risk", %{dir: dir} do
+    for {relative, expected_risk} <- [
+          {"packages/arbor_capabilities/lib/arbor/security/crypto.ex", :high},
+          {"packages/arbor_capabilities_signals/lib/arbor/capabilities/signals.ex", :high},
+          {"packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc.ex", :high},
+          {"apps/arbor_security/lib/arbor/security/crypto.ex", :high},
+          {"apps/example/lib/capability.ex", :high},
+          {"apps/arbor_trust/lib/policy.ex", :high},
+          {"apps/example/lib/auth.ex", :high},
+          {"apps/example/lib/crypto.ex", :medium}
+        ] do
+      file = Path.join(dir, relative)
+      File.mkdir_p!(Path.dirname(file))
+      File.write!(file, @fail_open_source)
+      scan_file = Path.relative_to(file, File.cwd!(), force: true)
+
+      assert {[%Finding{} = finding], %{total: 1, recorded_to: nil}} =
+               StaticScan.scan(scan_file, record: false)
+
+      assert finding.location[:file] == scan_file
+      assert finding.actionability[:risk_class] == expected_risk, relative
+      assert finding.actionability[:auto_fixable] == false
+    end
+  end
+
   describe "RunStaticDetectors action" do
     test "returns a summary map with finding ids", %{dir: dir} do
       File.write!(Path.join(dir, "fixture.ex"), @fail_open_source)

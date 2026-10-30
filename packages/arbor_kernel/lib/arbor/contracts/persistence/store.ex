@@ -107,7 +107,7 @@ defmodule Arbor.Contracts.Persistence.Store do
 
   Any library can accept a store backend via configuration:
 
-      config :arbor_security, storage_backend: MyFileStore
+      config :arbor_capabilities, storage_backend: MyFileStore
 
   The same backend module can plug into security, checkpoints, memory,
   or any other system that persists data.

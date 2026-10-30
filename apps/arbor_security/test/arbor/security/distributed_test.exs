@@ -23,7 +23,7 @@ defmodule Arbor.Security.DistributedTest do
 
   describe "SystemAuthority mode config" do
     test "ephemeral mode is default in test env" do
-      assert Application.get_env(:arbor_security, :system_authority_mode) == :ephemeral
+      assert Application.get_env(:arbor_capabilities, :system_authority_mode) == :ephemeral
     end
 
     test "system authority has a valid keypair" do
@@ -327,7 +327,7 @@ defmodule Arbor.Security.DistributedTest do
 
   describe "signed-request acceptance fails closed on multi-node without authenticated transport" do
     setup do
-      # Sibling suites restart the :arbor_security application to exercise
+      # Sibling suites restart the :arbor_capabilities application to exercise
       # claim-table ownership. The test env sets `start_children: false`, so
       # the children test_helper.exs added are gone and nothing brings them
       # back — including the tracker the gate reads. An absent tracker fails
@@ -400,26 +400,26 @@ defmodule Arbor.Security.DistributedTest do
 
   describe "distributed config" do
     test "distributed_signals defaults to true when a sync transport is configured" do
-      original = Application.get_env(:arbor_security, :distributed_signals)
-      Application.delete_env(:arbor_security, :distributed_signals)
+      original = Application.get_env(:arbor_capabilities, :distributed_signals)
+      Application.delete_env(:arbor_capabilities, :distributed_signals)
 
       assert Arbor.Signals.Config.security_sync_transport_configured?()
       assert Arbor.Security.Config.distributed_signals_enabled?() == true
       refute Arbor.Signals.authenticated_security_sync_transport?()
 
       if original != nil do
-        Application.put_env(:arbor_security, :distributed_signals, original)
+        Application.put_env(:arbor_capabilities, :distributed_signals, original)
       end
     end
 
     test "system_authority_mode defaults to persistent" do
-      original = Application.get_env(:arbor_security, :system_authority_mode)
-      Application.delete_env(:arbor_security, :system_authority_mode)
+      original = Application.get_env(:arbor_capabilities, :system_authority_mode)
+      Application.delete_env(:arbor_capabilities, :system_authority_mode)
 
       assert Arbor.Security.Config.system_authority_mode() == :persistent
 
       if original != nil do
-        Application.put_env(:arbor_security, :system_authority_mode, original)
+        Application.put_env(:arbor_capabilities, :system_authority_mode, original)
       end
     end
   end

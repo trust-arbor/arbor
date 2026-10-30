@@ -29,18 +29,18 @@ defmodule Arbor.Memory.AuthorizationTest do
   setup_all do
     originals =
       Enum.map(@security_config_keys, fn key ->
-        {key, Application.get_env(:arbor_security, key)}
+        {key, Application.get_env(:arbor_capabilities, key)}
       end)
 
     for key <- @security_config_keys do
-      Application.put_env(:arbor_security, key, false)
+      Application.put_env(:arbor_capabilities, key, false)
     end
 
     on_exit(fn ->
       for {key, original} <- originals do
         case original do
-          nil -> Application.delete_env(:arbor_security, key)
-          val -> Application.put_env(:arbor_security, key, val)
+          nil -> Application.delete_env(:arbor_capabilities, key)
+          val -> Application.put_env(:arbor_capabilities, key, val)
         end
       end
     end)

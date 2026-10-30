@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest do
@@ -116,13 +119,13 @@ defmodule Arbor.Orchestrator.Session.TranscriptFreshnessSecurityRegressionTest d
 
   setup ctx do
     for {app, key, value} <- [
-          {:arbor_security, :identity_verification, true},
-          {:arbor_security, :identity_alias_resolver, OwnerResolver},
+          {:arbor_capabilities, :identity_verification, true},
+          {:arbor_capabilities, :identity_alias_resolver, OwnerResolver},
           {:arbor_orchestrator, :_freshness_aliases, %{}},
-          {:arbor_security, :policy_enforcer_enabled, false},
-          {:arbor_security, :approval_guard_enabled, false},
-          {:arbor_security, :reflex_checking_enabled, false},
-          {:arbor_security, :uri_registry_enforcement, false},
+          {:arbor_capabilities, :policy_enforcer_enabled, false},
+          {:arbor_capabilities, :approval_guard_enabled, false},
+          {:arbor_capabilities, :reflex_checking_enabled, false},
+          {:arbor_capabilities, :uri_registry_enforcement, false},
           {:arbor_trust, :policy_enforcer_enabled, false},
           {:arbor_orchestrator, :private_conversation_memory, false},
           {:arbor_orchestrator, :_freshness_observer, self()},

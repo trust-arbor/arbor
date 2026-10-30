@@ -17,11 +17,11 @@ defmodule Arbor.Signals.RuntimeWiringSourceShapeTest do
 
     assert chunk =~ "if config_env() != :test do"
     assert chunk =~ "durable_sink_module: Arbor.Historian"
-    assert chunk =~ "security_module: Arbor.Security"
-    assert chunk =~ "crypto_module: Arbor.Security"
-    assert chunk =~ "identity_registry_module: Arbor.Security"
+    assert chunk =~ "security_module: Arbor.Capabilities.Signals"
+    assert chunk =~ "crypto_module: Arbor.Capabilities.Signals"
+    assert chunk =~ "identity_registry_module: Arbor.Capabilities.Signals"
     refute chunk =~ "Code.ensure_loaded?(Arbor.Historian)"
-    refute chunk =~ "Code.ensure_loaded?(Arbor.Security)"
+    refute chunk =~ "Code.ensure_loaded?(Arbor.Capabilities.Signals)"
 
     refute test_config =~ "durable_sink_module"
     refute test_config =~ "security_module"

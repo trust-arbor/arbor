@@ -35,25 +35,25 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
 
   setup do
     keys = [
-      {:arbor_security, :oidc},
-      {:arbor_security, :session_token_secret},
-      {:arbor_security, :session_token_module},
+      {:arbor_capabilities, :oidc},
+      {:arbor_capabilities, :session_token_secret},
+      {:arbor_capabilities, :session_token_module},
       {:arbor_dashboard, :session_auth_api}
     ]
 
     previous = Map.new(keys, fn {app, key} -> {{app, key}, Application.fetch_env(app, key)} end)
 
-    Application.put_env(:arbor_security, :oidc,
+    Application.put_env(:arbor_capabilities, :oidc,
       providers: [%{issuer: "https://login.example", client_id: "dashboard"}]
     )
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "isolated-dashboard-session-secret"
     )
 
-    Application.put_env(:arbor_security, :session_token_module, SessionToken)
+    Application.put_env(:arbor_capabilities, :session_token_module, SessionToken)
     Application.put_env(:arbor_dashboard, :session_auth_api, Arbor.Security)
 
     on_exit(fn ->
@@ -109,7 +109,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
 
   test "security regression: session denial queues exact-subject private storage clearing before redirect" do
     assert {:cont, authorized} = Nav.on_mount(:default, %{}, session(:valid), socket())
-    Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
+    Application.put_env(:arbor_capabilities, :session_token_secret, "rotated-test-secret")
     assert {:halt, denied} = SessionAuth.guard_socket(authorized)
 
     assert Phoenix.LiveView.Utils.get_push_events(denied) == [
@@ -133,7 +133,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
     {:ok, view, _html} =
       live_isolated(conn, HookView, session: Map.put(session(:valid), "observer", self()))
 
-    Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
+    Application.put_env(:arbor_capabilities, :session_token_secret, "rotated-test-secret")
     render_click(view, "effect")
     assert_push_event(view, "conversation-access-denied", %{})
     assert_push_event(view, "conversation-home-clear", %{subject: @subject})
@@ -147,7 +147,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
     {:ok, view, _html} =
       live_isolated(conn, HookView, session: Map.put(session(:valid), "observer", self()))
 
-    Application.put_env(:arbor_security, :session_token_secret, "rotated-test-secret")
+    Application.put_env(:arbor_capabilities, :session_token_secret, "rotated-test-secret")
     send(view.pid, :effect)
     assert_push_event(view, "conversation-access-denied", %{})
     assert_push_event(view, "conversation-home-clear", %{subject: @subject})
@@ -156,7 +156,7 @@ defmodule Arbor.Dashboard.SessionAuthSecurityRegressionTest do
   end
 
   test "no-OIDC local mode remains available without creating a session proof" do
-    Application.put_env(:arbor_security, :oidc, [])
+    Application.put_env(:arbor_capabilities, :oidc, [])
     conn = request(%{})
     refute conn.halted
     refute get_session(conn, "session_token")

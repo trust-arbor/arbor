@@ -66,8 +66,8 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      true, :require_human, false, :cheap},
     {"arbor://code/hot_load", :arbor_actions, :critical, :irreversible, :process_spawn,
      :restricted, true, :require_human, false, :cheap},
-    {"arbor://fs/write", :arbor_security, :high, :reversible, :local_write, :confidential, true,
-     :require_human, true, :cheap},
+    {"arbor://fs/write", :arbor_capabilities, :high, :reversible, :local_write, :confidential,
+     true, :require_human, true, :cheap},
     {"arbor://action/git/commit", :arbor_actions, :high, :reversible, :local_write, :confidential,
      true, :require_human, true, :cheap},
     {"arbor://action/git/branch", :arbor_actions, :high, :reversible, :local_write, :confidential,
@@ -94,9 +94,9 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
   ]
 
   @low_friction_profile_specs [
-    {"arbor://fs/read", :arbor_security, :low, :read_only, :read, :confidential, true, :auto,
+    {"arbor://fs/read", :arbor_capabilities, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}},
-    {"arbor://fs/list", :arbor_security, :low, :read_only, :read, :confidential, true, :auto,
+    {"arbor://fs/list", :arbor_capabilities, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}},
     {"arbor://code/read", :arbor_actions, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}},

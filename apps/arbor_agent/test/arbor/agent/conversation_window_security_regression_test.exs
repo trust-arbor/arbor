@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.ConversationWindowSecurityRegressionTest do
@@ -23,14 +26,14 @@ defmodule Arbor.Agent.ConversationWindowSecurityRegressionTest do
 
   setup do
     settings = [
-      {:arbor_security, :identity_alias_resolver, OIDCTestHelper.UnlinkedIdentityResolver},
-      {:arbor_security, :identity_verification, true},
-      {:arbor_security, :strict_identity_mode, false},
-      {:arbor_security, :capability_signing_required, true},
-      {:arbor_security, :reflex_checking_enabled, false},
-      {:arbor_security, :uri_registry_enforcement, false},
-      {:arbor_security, :policy_enforcer_enabled, false},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :identity_alias_resolver, OIDCTestHelper.UnlinkedIdentityResolver},
+      {:arbor_capabilities, :identity_verification, true},
+      {:arbor_capabilities, :strict_identity_mode, false},
+      {:arbor_capabilities, :capability_signing_required, true},
+      {:arbor_capabilities, :reflex_checking_enabled, false},
+      {:arbor_capabilities, :uri_registry_enforcement, false},
+      {:arbor_capabilities, :policy_enforcer_enabled, false},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_comms, :conversation_persistence_module, WindowPersistence}
     ]
 

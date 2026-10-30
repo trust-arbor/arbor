@@ -161,8 +161,8 @@ defmodule Arbor.Consensus.Phase2APITest do
       assert Security.healthy?(),
              "Security must be up so the propose cap check runs through real enforcement"
 
-      original_signing = Application.get_env(:arbor_security, :capability_signing_required)
-      Application.put_env(:arbor_security, :capability_signing_required, false)
+      original_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+      Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
       {:ok, _cap} =
         Security.grant_fixture(
@@ -176,9 +176,9 @@ defmodule Arbor.Consensus.Phase2APITest do
         end
 
         if is_nil(original_signing) do
-          Application.delete_env(:arbor_security, :capability_signing_required)
+          Application.delete_env(:arbor_capabilities, :capability_signing_required)
         else
-          Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+          Application.put_env(:arbor_capabilities, :capability_signing_required, original_signing)
         end
       end)
 

@@ -53,18 +53,18 @@ defmodule Arbor.Historian.Adapters.SecurityEventLogTest do
     originals = %{
       durable: Application.fetch_env(:arbor_historian, :durable_event_log_target),
       hot: Application.fetch_env(:arbor_historian, :hot_event_log_target),
-      adapter: Application.fetch_env(:arbor_security, :event_log_adapter)
+      adapter: Application.fetch_env(:arbor_capabilities, :event_log_adapter)
     }
 
     configure_target(:durable_event_log_target, durable, ETS)
     configure_target(:hot_event_log_target, hot, ETS)
 
-    Application.put_env(:arbor_security, :event_log_adapter, SecurityEventLog)
+    Application.put_env(:arbor_capabilities, :event_log_adapter, SecurityEventLog)
 
     on_exit(fn ->
       restore(:arbor_historian, :durable_event_log_target, originals.durable)
       restore(:arbor_historian, :hot_event_log_target, originals.hot)
-      restore(:arbor_security, :event_log_adapter, originals.adapter)
+      restore(:arbor_capabilities, :event_log_adapter, originals.adapter)
     end)
 
     %{durable: durable, hot: hot, suffix: suffix}

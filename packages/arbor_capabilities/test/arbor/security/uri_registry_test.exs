@@ -1,0 +1,168 @@
+defmodule Arbor.Security.UriRegistryTest do
+  use ExUnit.Case, async: false
+
+  alias Arbor.Security.UriRegistry
+
+  defmodule ForgedProvider do
+    def capability_uri_prefixes, do: ["arbor://forged/provider"]
+  end
+
+  defmodule CodingProvider do
+    def capability_uri_prefixes do
+      ["arbor://coding/reconciliation/read", "arbor://coding/reconciliation/apply"]
+    end
+  end
+
+  setup do
+    unless Process.whereis(UriRegistry) do
+      start_supervised!({UriRegistry, registration_providers: [CodingProvider]})
+    end
+
+    original_enforcement = Application.get_env(:arbor_capabilities, :uri_registry_enforcement)
+
+    on_exit(fn ->
+      restore_env(:uri_registry_enforcement, original_enforcement)
+    end)
+
+    :ok
+  end
+
+  describe "registered?/1" do
+    test "security regression: singular action prefix does not match retired plural actions namespace" do
+      refute "arbor://action" in UriRegistry.canonical_prefixes()
+      refute UriRegistry.registered?("arbor://actions/execute/git.status")
+    end
+
+    test "matches canonical prefixes on segment boundaries" do
+      assert UriRegistry.registered?("arbor://fs/read/project/src")
+      refute UriRegistry.registered?("arbor://fs/reader/project/src")
+
+      assert UriRegistry.registered?("arbor://tool/use/websearch")
+      refute UriRegistry.registered?("arbor://tool/useful/websearch")
+
+      assert UriRegistry.registered?("arbor://agent/spawn_worker")
+      assert UriRegistry.registered?("arbor://agent/task/cancel/task_1")
+      assert UriRegistry.registered?("arbor://agent/task/steer/task_1")
+      assert UriRegistry.registered?("arbor://agent/task/adopt/task_1")
+      refute UriRegistry.registered?("arbor://agent/task/adoption/task_1")
+    end
+
+    test "matches feature-owned coding prefixes only after explicit provider registration" do
+      refute "arbor://coding/reconciliation/read" in UriRegistry.canonical_prefixes()
+      refute "arbor://coding/reconciliation/apply" in UriRegistry.canonical_prefixes()
+      assert :ok = Arbor.Security.register_uri_provider(CodingProvider)
+
+      assert UriRegistry.registered?("arbor://coding/reconciliation/read/task_1")
+      refute UriRegistry.registered?("arbor://coding/reconciliation/reader/task_1")
+
+      assert UriRegistry.registered?(
+               "arbor://coding/reconciliation/apply/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      assert UriRegistry.registered?(
+               "arbor://coding/reconciliation/apply/pending_approval/approval_" <>
+                 String.duplicate("a", 64)
+             )
+
+      assert UriRegistry.registered?(
+               "arbor://coding/reconciliation/apply/apple_container_unit/acu_v1_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/applyx/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/application/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/applyer/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+    end
+
+    test "supports trailing-slash canonical prefixes" do
+      assert UriRegistry.registered?("arbor://mcp/server")
+      refute UriRegistry.registered?("arbor://mcproxy/server")
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "VP-05D2A0: interactive-disclosure namespace is registered, segment-aware" do
+      token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      assert UriRegistry.registered?("arbor://egress/disclose/" <> token)
+
+      # Segment confusion: a different operation that merely shares a string
+      # prefix with "disclose" must NOT be treated as the disclosure namespace.
+      refute UriRegistry.registered?("arbor://egress/disclosed/" <> token)
+    end
+
+    @tag spec: "VP-05D2A2P3"
+    test "voice realtime xAI namespace is canonical and segment-aware" do
+      assert "arbor://voice/realtime/xai" in UriRegistry.canonical_prefixes()
+      assert UriRegistry.registered?("arbor://voice/realtime/xai/session_abc")
+      refute UriRegistry.registered?("arbor://voice/realtime/xai_attacker/session_abc")
+      refute UriRegistry.registered?("arbor://voice/realtime/xaiplayer/session_abc")
+    end
+
+    test "sandbox eval namespace is canonical and segment-aware" do
+      assert "arbor://sandbox/eval" in UriRegistry.canonical_prefixes()
+      assert UriRegistry.registered?("arbor://sandbox/eval")
+      refute UriRegistry.registered?("arbor://sandbox/evaluate")
+      refute UriRegistry.registered?("arbor://sandbox/eval_code")
+    end
+  end
+
+  describe "Arbor.Security.uri_registered?/1" do
+    test "security regression: caller-chosen runtime prefixes fail closed through the facade" do
+      prefix = "arbor://facade_runtime_#{System.unique_integer([:positive])}/op"
+
+      assert {:error, :uri_mutation_unauthorized} = Arbor.Security.register_uri_prefix(prefix)
+      assert Arbor.Security.uri_registered?("arbor://fs/read/project/src")
+      refute Arbor.Security.uri_registered?(prefix <> "/child")
+    end
+  end
+
+  describe "validate/1" do
+    test "valid unknown URIs honor enforcement mode" do
+      Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+      assert :ok = UriRegistry.validate("arbor://unknown/path")
+
+      Application.put_env(:arbor_capabilities, :uri_registry_enforcement, true)
+      assert {:error, :unregistered_uri} = UriRegistry.validate("arbor://unknown/path")
+    end
+
+    test "invalid URIs fail closed even when enforcement is disabled" do
+      Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+
+      assert {:error, {:invalid_uri, :invalid_scheme}} =
+               UriRegistry.validate("https://example.com")
+
+      assert {:error, {:invalid_uri, :empty_segment}} =
+               UriRegistry.validate("arbor://fs//read")
+    end
+  end
+
+  describe "register/1" do
+    test "security regression: direct caller-chosen runtime prefixes cannot mutate the registry" do
+      prefix = "arbor://custom_runtime_#{System.unique_integer([:positive])}/op"
+
+      assert {:error, :uri_mutation_unauthorized} = UriRegistry.register(prefix)
+      refute UriRegistry.registered?(prefix <> "/child")
+    end
+
+    test "security regression: an unconfigured provider cannot inject a fixed-looking prefix" do
+      assert {:error, :uri_mutation_unauthorized} =
+               UriRegistry.register_provider(ForgedProvider)
+
+      refute UriRegistry.registered?("arbor://forged/provider/child")
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_capabilities, key, value)
+end

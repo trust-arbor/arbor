@@ -22,7 +22,7 @@ defmodule Arbor.SandboxAuthorizeEvalSecurityRegressionTest do
   @eval_resource "arbor://sandbox/eval"
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
     unless Process.whereis(Arbor.Security.Identity.Registry) do
       start_supervised!({Arbor.Security.Identity.Registry, []})

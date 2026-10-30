@@ -37,7 +37,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
   end
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     if Process.whereis(Arbor.Trust.Store) == nil do
@@ -45,33 +45,33 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end
 
     prev = %{
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity_verification: Application.get_env(:arbor_capabilities, :identity_verification),
+      identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
       trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
       trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled),
       compound: Application.get_env(:arbor_shell, :compound_shell_enabled)
     }
 
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
 
     on_exit(fn ->
-      restore(:arbor_security, :reflex_checking_enabled, prev.reflex)
-      restore(:arbor_security, :capability_signing_required, prev.signing)
-      restore(:arbor_security, :identity_verification, prev.identity_verification)
-      restore(:arbor_security, :strict_identity_mode, prev.identity)
-      restore(:arbor_security, :uri_registry_enforcement, prev.uri_registry)
-      restore(:arbor_security, :consensus_escalation_enabled, prev.escalation)
+      restore(:arbor_capabilities, :reflex_checking_enabled, prev.reflex)
+      restore(:arbor_capabilities, :capability_signing_required, prev.signing)
+      restore(:arbor_capabilities, :identity_verification, prev.identity_verification)
+      restore(:arbor_capabilities, :strict_identity_mode, prev.identity)
+      restore(:arbor_capabilities, :uri_registry_enforcement, prev.uri_registry)
+      restore(:arbor_capabilities, :consensus_escalation_enabled, prev.escalation)
       restore(:arbor_trust, :approval_guard_enabled, prev.trust_guard)
       restore(:arbor_trust, :policy_enforcer_enabled, prev.trust_enforcer)
 

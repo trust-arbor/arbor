@@ -40,7 +40,11 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
   defmodule Sink do
     @moduledoc false
     def persist_security_invocation(event) do
-      send(Application.fetch_env!(:arbor_security, :tool_audit_outcome_owner), {:audit, event})
+      send(
+        Application.fetch_env!(:arbor_capabilities, :tool_audit_outcome_owner),
+        {:audit, event}
+      )
+
       {:ok, event["id"]}
     end
   end
@@ -73,7 +77,7 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
   end
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     unless Process.whereis(TrustStore), do: start_supervised!(TrustStore)
@@ -94,16 +98,16 @@ defmodule Arbor.Orchestrator.ToolLoopInvocationOutcomeAuditSecurityRegressionTes
 
     env = [
       {:arbor_llm, :tool_invocation_auditor, Arbor.Security},
-      {:arbor_security, :invocation_audit_mode, :required},
-      {:arbor_security, :invocation_audit_sink, Sink},
-      {:arbor_security, :tool_audit_outcome_owner, self()},
-      {:arbor_security, :reflex_checking_enabled, false},
-      {:arbor_security, :capability_signing_required, false},
-      {:arbor_security, :identity_verification, false},
-      {:arbor_security, :strict_identity_mode, false},
-      {:arbor_security, :uri_registry_enforcement, false},
-      {:arbor_security, :consensus_escalation_enabled, false},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :invocation_audit_mode, :required},
+      {:arbor_capabilities, :invocation_audit_sink, Sink},
+      {:arbor_capabilities, :tool_audit_outcome_owner, self()},
+      {:arbor_capabilities, :reflex_checking_enabled, false},
+      {:arbor_capabilities, :capability_signing_required, false},
+      {:arbor_capabilities, :identity_verification, false},
+      {:arbor_capabilities, :strict_identity_mode, false},
+      {:arbor_capabilities, :uri_registry_enforcement, false},
+      {:arbor_capabilities, :consensus_escalation_enabled, false},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, true}
     ]

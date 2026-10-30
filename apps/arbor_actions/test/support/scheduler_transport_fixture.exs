@@ -73,13 +73,13 @@ defmodule Arbor.Actions.SchedulerTransportFixture do
 
     overrides = [
       {:arbor_actions, :scheduler_module, SchedulerPeer},
-      {:arbor_security, :identity_verification, true},
-      {:arbor_security, :capability_signing_required, true},
-      {:arbor_security, :strict_identity_mode, false},
-      {:arbor_security, :uri_registry_enforcement, false},
-      {:arbor_security, :reflex_checking_enabled, false},
-      {:arbor_security, :consensus_escalation_enabled, false},
-      {:arbor_security, :approval_guard_enabled, false},
+      {:arbor_capabilities, :identity_verification, true},
+      {:arbor_capabilities, :capability_signing_required, true},
+      {:arbor_capabilities, :strict_identity_mode, false},
+      {:arbor_capabilities, :uri_registry_enforcement, false},
+      {:arbor_capabilities, :reflex_checking_enabled, false},
+      {:arbor_capabilities, :consensus_escalation_enabled, false},
+      {:arbor_capabilities, :approval_guard_enabled, false},
       {:arbor_trust, :approval_guard_enabled, false},
       {:arbor_trust, :policy_enforcer_enabled, false}
     ]

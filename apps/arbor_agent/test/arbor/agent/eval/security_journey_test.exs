@@ -9,11 +9,11 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     env = [
       {:arbor_trust, :policy_enforcer_enabled},
       {:arbor_trust, :approval_guard_enabled},
-      {:arbor_security, :capability_signing_required},
-      {:arbor_security, :identity_verification},
-      {:arbor_security, :strict_identity_mode},
-      {:arbor_security, :invocation_audit_mode},
-      {:arbor_security, :invocation_audit_sink},
+      {:arbor_capabilities, :capability_signing_required},
+      {:arbor_capabilities, :identity_verification},
+      {:arbor_capabilities, :strict_identity_mode},
+      {:arbor_capabilities, :invocation_audit_mode},
+      {:arbor_capabilities, :invocation_audit_sink},
       {:arbor_historian, :durable_event_log_target},
       {:arbor_llm, :tool_invocation_auditor},
       {:arbor_llm, :pipeline},
@@ -24,9 +24,9 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     old_client = LLM.Client.default_client()
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
-    Application.put_env(:arbor_security, :capability_signing_required, true)
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, true)
 
     # Only the policy-ACK regression needs a durable policy owner. The other
     # controls exercise SQL Eval/audit with a memory policy owner, avoiding
@@ -54,8 +54,8 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
        circuit_breaker: false, decay: false, event_store: false, persistence: :memory}
     )
 
-    Application.put_env(:arbor_security, :invocation_audit_mode, :required)
-    Application.put_env(:arbor_security, :invocation_audit_sink, Historian)
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :required)
+    Application.put_env(:arbor_capabilities, :invocation_audit_sink, Historian)
 
     Application.put_env(:arbor_historian, :durable_event_log_target, %{
       name: :journey_sql_audit,

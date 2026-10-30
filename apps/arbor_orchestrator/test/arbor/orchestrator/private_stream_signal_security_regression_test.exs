@@ -1,5 +1,9 @@
 Code.require_file("../../support/private_stream_branch_fixture.exs", __DIR__)
-Code.require_file("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+
+Code.require_file(
+  "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+  __DIR__
+)
 
 defmodule Arbor.Orchestrator.PrivateStreamSignalSecurityRegressionTest do
   use ExUnit.Case, async: false

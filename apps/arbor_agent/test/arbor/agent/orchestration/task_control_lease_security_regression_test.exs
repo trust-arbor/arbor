@@ -45,11 +45,11 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
   end
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
 
     backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      Application.get_env(:arbor_capabilities, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -90,17 +90,19 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
   end
 
   setup do
-    original_identity = Application.get_env(:arbor_security, :identity_verification, true)
-    original_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
-    original_strict = Application.get_env(:arbor_security, :strict_identity_mode, false)
-    original_signing = Application.get_env(:arbor_security, :capability_signing_required, true)
+    original_identity = Application.get_env(:arbor_capabilities, :identity_verification, true)
+    original_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled, true)
+    original_strict = Application.get_env(:arbor_capabilities, :strict_identity_mode, false)
+
+    original_signing =
+      Application.get_env(:arbor_capabilities, :capability_signing_required, true)
 
     authorization_posture = [
-      {:arbor_security, :policy_enforcer_enabled},
-      {:arbor_security, :approval_guard_enabled},
-      {:arbor_security, :consensus_escalation_enabled},
-      {:arbor_security, :uri_registry_enforcement},
-      {:arbor_security, :invocation_receipts_enabled},
+      {:arbor_capabilities, :policy_enforcer_enabled},
+      {:arbor_capabilities, :approval_guard_enabled},
+      {:arbor_capabilities, :consensus_escalation_enabled},
+      {:arbor_capabilities, :uri_registry_enforcement},
+      {:arbor_capabilities, :invocation_receipts_enabled},
       {:arbor_trust, :policy_enforcer_enabled},
       {:arbor_trust, :approval_guard_enabled}
     ]
@@ -112,10 +114,10 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
         {app, key, previous}
       end)
 
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
 
     supervisor_name = unique_name(:lease_sec_supervisor)
     store_name = unique_name(:lease_sec_store)
@@ -139,10 +141,10 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseSecurityRegressionTest do
     Process.delete({FakeInteractionRouter, :pending})
 
     on_exit(fn ->
-      Application.put_env(:arbor_security, :identity_verification, original_identity)
-      Application.put_env(:arbor_security, :reflex_checking_enabled, original_reflex)
-      Application.put_env(:arbor_security, :strict_identity_mode, original_strict)
-      Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+      Application.put_env(:arbor_capabilities, :identity_verification, original_identity)
+      Application.put_env(:arbor_capabilities, :reflex_checking_enabled, original_reflex)
+      Application.put_env(:arbor_capabilities, :strict_identity_mode, original_strict)
+      Application.put_env(:arbor_capabilities, :capability_signing_required, original_signing)
 
       Enum.each(previous_posture, fn
         {app, key, {:ok, value}} -> Application.put_env(app, key, value)

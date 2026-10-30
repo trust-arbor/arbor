@@ -1,7 +1,10 @@
 Code.require_file("../../support/conversation_journal_sqlite.exs", __DIR__)
 
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
@@ -56,7 +59,7 @@ defmodule Arbor.Comms.ConversationInteractionsSecurityRegressionTest do
              retry_base_ms: 1,
              retry_max_ms: 1
            ]},
-          {:arbor_security, :identity_alias_resolver,
+          {:arbor_capabilities, :identity_alias_resolver,
            Arbor.Security.OIDCTestHelper.UnlinkedIdentityResolver}
         ],
         do: set_env(app, key, value)

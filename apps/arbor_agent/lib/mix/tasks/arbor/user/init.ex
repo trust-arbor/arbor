@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Arbor.User.Init do
   **Production expects a working OIDC provider.** Do not use this there. Three
   independent gates enforce that, and only the third lives in this task:
 
-    1. `config :arbor_security, :allow_local_human_identity` must be `true`
+    1. `config :arbor_capabilities, :allow_local_human_identity` must be `true`
        (default `false`, set only in `dev.exs`)
     2. no OIDC provider may be configured — once a real login exists, use it
     3. `Mix.env()` must be `:dev`
@@ -136,7 +136,7 @@ defmodule Mix.Tasks.Arbor.User.Init do
         Local human identities are disabled.
 
         This is the default. It is enabled only in dev.exs via
-        `config :arbor_security, allow_local_human_identity: true`.
+        `config :arbor_capabilities, allow_local_human_identity: true`.
         """)
 
         exit({:shutdown, 1})

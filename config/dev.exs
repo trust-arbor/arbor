@@ -218,7 +218,8 @@ config :arbor_agent, :auto_start_agents, []
 
 # Security — all features enabled in dev.
 # Tests disable what they need; dev should match prod behavior.
-config :arbor_security,
+config :arbor_capabilities,
+  authority_state_root: Path.expand("../.arbor/security", __DIR__),
   identity_verification: true,
   capability_signing_required: true,
   # M3 review fix (2026-06-09): match prod (prod.exs already sets this).
@@ -242,7 +243,7 @@ config :arbor_security,
 
 # OIDC — Human identity authentication for CLI and orchestration.
 # Uncomment and configure for your OIDC provider (Zitadel, Google, GitHub, etc.)
-# config :arbor_security, :oidc,
+# config :arbor_capabilities, :oidc,
 #   device_flow: %{
 #     issuer: "https://your-provider.example.com",
 #     client_id: "your-client-id",
@@ -280,7 +281,7 @@ config :arbor_ai, :acp_pool_config,
 # don't egress. Default-allow posture lets normal cloud egress flow — the
 # always-on taint conjunct (untrusted/hostile -> external = block) and per-agent
 # egress_modes (:block/:ask) are the active protections.
-config :arbor_security, egress_gate_enforcing: true
+config :arbor_capabilities, egress_gate_enforcing: true
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 
 # DEV ONLY. Permits `mix arbor.user.init` to mint a human identity from local
@@ -288,13 +289,13 @@ config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 # the `:oidc_proof_required` rule that `Identity.Registry.register/2` enforces.
 # Production expects a working OIDC provider and must NEVER set this; the
 # facade additionally refuses whenever any OIDC provider is configured.
-config :arbor_security, allow_local_human_identity: true
+config :arbor_capabilities, allow_local_human_identity: true
 # DEV ONLY. Permits egress to the keyless OpenCode Zen free endpoint
 # (`opencode.ai`). Production must not set this; operators who want the
 # free tier there set it explicitly. Default is false — zero-config is
 # not zero-policy.
-config :arbor_security, allow_opencode_zen_egress: true
-# To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
+config :arbor_capabilities, allow_opencode_zen_egress: true
+# To also gate homelab/LAN egress: config :arbor_capabilities, gate_on_premises_egress: true
 
 # SpawnWorker capability intersection fails CLOSED by default — if a parent's permissions
 # can't be established (no trust profile / trust unavailable / error), a spawned worker is

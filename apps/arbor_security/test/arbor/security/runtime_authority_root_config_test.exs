@@ -70,7 +70,7 @@ defmodule Arbor.Security.RuntimeAuthorityRootConfigTest do
 
     expression = """
     config = Config.Reader.read!(#{inspect(@runtime_path)}, env: #{inspect(env)})
-    value = config |> Keyword.get(:arbor_security, []) |> Keyword.fetch(#{inspect(key)})
+    value = config |> Keyword.get(:arbor_capabilities, []) |> Keyword.fetch(#{inspect(key)})
     File.write!(#{inspect(result_path)}, :erlang.term_to_binary(value), [:exclusive])
     """
 

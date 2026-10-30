@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.Test.ManagementSessionFixture do
@@ -96,14 +99,14 @@ defmodule Arbor.Agent.Test.ManagementSessionFixture do
     ctx = Humans.setup!(store_signing_key: true)
 
     for {app, key, value} <- [
-          {:arbor_security, :uri_registry_enforcement, true},
-          {:arbor_security, :policy_enforcer_enabled, false},
-          {:arbor_security, :reflex_checking_enabled, false},
-          {:arbor_security, :approval_guard_enabled, false},
-          {:arbor_security, :egress_gate_enforcing, false},
-          {:arbor_security, :consensus_escalation_enabled, true},
-          {:arbor_security, :use_interaction_router_for_approval, false},
-          {:arbor_security, :consensus_module, ApprovalProbe},
+          {:arbor_capabilities, :uri_registry_enforcement, true},
+          {:arbor_capabilities, :policy_enforcer_enabled, false},
+          {:arbor_capabilities, :reflex_checking_enabled, false},
+          {:arbor_capabilities, :approval_guard_enabled, false},
+          {:arbor_capabilities, :egress_gate_enforcing, false},
+          {:arbor_capabilities, :consensus_escalation_enabled, true},
+          {:arbor_capabilities, :use_interaction_router_for_approval, false},
+          {:arbor_capabilities, :consensus_module, ApprovalProbe},
           {:arbor_agent, :legacy_agents_dir, root},
           {:arbor_historian, :durable_event_log_target,
            %{

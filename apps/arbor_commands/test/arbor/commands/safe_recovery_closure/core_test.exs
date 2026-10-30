@@ -1,6 +1,7 @@
 defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Commands.SafeRecoveryArtifact.Derive, as: ArtifactDerive
   alias Arbor.Commands.SafeRecoveryClosure.{Core, Encode}
 
   @moduletag :fast
@@ -60,6 +61,67 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
         |> Map.put("findings", [])
         |> Map.put("observations", %{"os_pid" => 1})
 
+      assert {:ok, ^evidence} = Core.project(injected)
+    end
+
+    test "security regression: actual Capabilities ownership leaves frozen v1 closure open" do
+      module = runtime_module(Arbor.Security)
+      assert module["application"] == "arbor_capabilities"
+      assert ArtifactDerive.application_class(module["application"]) == "unexpected_first_party"
+
+      candidate =
+        closed_candidate()
+        |> Map.update!("artifact_applications", fn apps ->
+          [
+            %{
+              "name" => module["application"],
+              "class" => ArtifactDerive.application_class(module["application"])
+            }
+            | apps
+          ]
+        end)
+        |> update_in(["post_start", "applications"], &[started(module["application"]) | &1])
+        |> update_in(["post_start", "modules"], &[module | &1])
+
+      assert {:ok, evidence} = Core.project(candidate)
+      assert evidence["schema"] == "arbor.packaging.safe_recovery_closure.evidence.v1"
+      assert evidence["version"] == 1
+      assert evidence["architecture_status"] == "blocked"
+      assert evidence["closure_status"] == "open"
+      refute "arbor_capabilities" in evidence["selected_applications"]
+
+      findings = Enum.map(evidence["findings"], &{&1["id"], &1["subject"]})
+      assert {"unexpected_first_party_started", "arbor_capabilities"} in findings
+      assert {"unexplained_module", "Elixir.Arbor.Security"} in findings
+    end
+
+    test "security regression: passive Host selection cannot explain the Core authority owner" do
+      host_spec = Application.spec(:arbor_security)
+      assert is_list(host_spec)
+      assert Keyword.get(host_spec, :mod, []) == []
+      refute Arbor.Security.Application in Keyword.fetch!(host_spec, :modules)
+
+      module = runtime_module(Arbor.Security.Application)
+      assert module["application"] == "arbor_capabilities"
+
+      # Preserve the historical selected-app snapshot and project the actual
+      # authority module owner. A familiar Host name must not explain Core code.
+      candidate =
+        closed_candidate()
+        |> update_in(["post_start", "modules"], &[module | &1])
+
+      assert {:ok, evidence} = Core.project(candidate)
+      assert "arbor_security" in evidence["selected_applications"]
+      refute "arbor_capabilities" in evidence["selected_applications"]
+      assert evidence["architecture_status"] == "blocked"
+      assert evidence["closure_status"] == "open"
+
+      assert Enum.any?(evidence["findings"], fn finding ->
+               finding["id"] == "unexplained_module" and
+                 finding["subject"] == "Elixir.Arbor.Security.Application"
+             end)
+
+      injected = evidence |> Map.put("closure_status", "closed") |> Map.put("findings", [])
       assert {:ok, ^evidence} = Core.project(injected)
     end
 
@@ -237,6 +299,12 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
   end
 
   defp started(name), do: %{"name" => name, "state" => "started"}
+
+  defp runtime_module(module) do
+    Code.ensure_loaded!(module)
+    assert {:ok, application} = :application.get_application(module)
+    %{"module" => Atom.to_string(module), "application" => Atom.to_string(application)}
+  end
 
   defp unexplained_modules(count) do
     for i <- 1..count do

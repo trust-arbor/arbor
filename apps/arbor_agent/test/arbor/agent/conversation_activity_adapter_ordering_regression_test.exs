@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
@@ -44,8 +47,13 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
       opts: [repo: Repo]
     })
 
-    set_env(:arbor_security, :authority_audit_consumer_name, Arbor.Historian.AuthorityAuditPuller)
-    set_env(:arbor_security, :authority_audit_consumer_application, :arbor_historian)
+    set_env(
+      :arbor_capabilities,
+      :authority_audit_consumer_name,
+      Arbor.Historian.AuthorityAuditPuller
+    )
+
+    set_env(:arbor_capabilities, :authority_audit_consumer_application, :arbor_historian)
 
     assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == nil
     # flush_authority_audit/0 only accepts the puller as a direct child of the
@@ -89,7 +97,7 @@ defmodule Arbor.Agent.ConversationActivityAdapterOrderingRegressionTest do
 
   setup do
     c = Humans.setup!()
-    set_env(:arbor_security, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver)
+    set_env(:arbor_capabilities, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver)
 
     set_env(:arbor_comms, :conversation_journal,
       backend: Arbor.Persistence.EventLog.Ecto,

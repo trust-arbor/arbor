@@ -474,7 +474,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   end
 
   defp ensure_oidc_config do
-    case Application.get_env(:arbor_security, :oidc) do
+    case Application.get_env(:arbor_capabilities, :oidc) do
       config when is_list(config) and config != [] ->
         :ok
 
@@ -525,7 +525,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
                 }),
               else: config
 
-          Application.put_env(:arbor_security, :oidc, config)
+          Application.put_env(:arbor_capabilities, :oidc, config)
         end
     end
   end

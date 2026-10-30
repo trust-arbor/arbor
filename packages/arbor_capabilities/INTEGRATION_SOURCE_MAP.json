@@ -1,0 +1,30 @@
+[
+  {
+    "original_source": "apps/arbor_security/lib/arbor/security/adapters/signals_transport.ex",
+    "original_source_sha256": "63fa0c8f9c2ec7a1c93ca29117df92ee1df48867f93286959f9053695835986d",
+    "destination": "packages/arbor_capabilities_signals/lib/arbor/security/adapters/signals_transport.ex",
+    "destination_sha256": "c7c05b54dae457afeec76bd2d8b6a1c75011485d0e093665e0e0fb9312bdd7b4",
+    "changes": "Exact original transport delegates and caller process; independent Boundary declaration added."
+  },
+  {
+    "original_source": "apps/arbor_kernel_runtime/test/support/application_spec_peer.ex",
+    "original_source_sha256": "0a74ca2a08be1519f1628bfca2ca56ee30dafebfb669d2517fc14af8e02f6c47",
+    "destination": "packages/arbor_capabilities/test/support/application_spec_peer.ex",
+    "destination_sha256": "5a066687c752f5ecab2a51b5d7eeb5af2684af0657b9fbf7288a2b2a7ddcd3ab",
+    "changes": "Exact generic harness with canonical test namespace and standalone profile writer; no KR build/source dependency."
+  },
+  {
+    "original_source": "apps/arbor_security/test/arbor/security/template_authority_capability_mutation_security_regression_test.exs",
+    "original_source_sha256": "5f875415309212eb9ea910b336f8139aff21f9ba5286e1a72fc96bce6420e53f",
+    "destination": "packages/arbor_capabilities/test/support/template_cas_sandbox.ex",
+    "destination_sha256": "da244c00c5ebd6c53acbef824b66efabe3982cdfbce44fe226d30481df3e5c36",
+    "changes": "Original passive truthful CAS backend module extracted unchanged except canonical configuration app atoms."
+  },
+  {
+    "original_source": "apps/arbor_security/test/arbor/security/capability_store_persistence_regression_test.exs",
+    "original_source_sha256": "fb1bd9356ec3390fd77c256c128ffa1db81616e76cceecec10ba05e8fe4955d3",
+    "destination": "packages/arbor_capabilities/test/support/capability_persistence_backends.ex",
+    "destination_sha256": "8aa7eaf9dee5657ab625a421e5d0d0ececbbe1fedd465eb647d62dede20bea3b",
+    "changes": "Original passive JSONFile backend fixtures extracted unchanged except canonical configuration app atoms and custody facade owner."
+  }
+]

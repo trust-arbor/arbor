@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.SessionCreationSQLContentionJourneyTest do
@@ -76,8 +79,13 @@ defmodule Arbor.Agent.SessionCreationSQLContentionJourneyTest do
       opts: [repo: Repo]
     })
 
-    set_env(:arbor_security, :authority_audit_consumer_name, Arbor.Historian.AuthorityAuditPuller)
-    set_env(:arbor_security, :authority_audit_consumer_application, :arbor_historian)
+    set_env(
+      :arbor_capabilities,
+      :authority_audit_consumer_name,
+      Arbor.Historian.AuthorityAuditPuller
+    )
+
+    set_env(:arbor_capabilities, :authority_audit_consumer_application, :arbor_historian)
 
     assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == nil
     start_authority_audit_puller!()
@@ -107,11 +115,11 @@ defmodule Arbor.Agent.SessionCreationSQLContentionJourneyTest do
 
   setup context do
     for {app, key, value} <- [
-          {:arbor_security, :identity_verification, true},
-          {:arbor_security, :capability_signing_required, true},
-          {:arbor_security, :strict_identity_mode, false},
-          {:arbor_security, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
-          {:arbor_security, :session_token_secret, :crypto.strong_rand_bytes(32)},
+          {:arbor_capabilities, :identity_verification, true},
+          {:arbor_capabilities, :capability_signing_required, true},
+          {:arbor_capabilities, :strict_identity_mode, false},
+          {:arbor_capabilities, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
+          {:arbor_capabilities, :session_token_secret, :crypto.strong_rand_bytes(32)},
           {:arbor_orchestrator, :private_conversation_memory, false},
           {:arbor_orchestrator, :preprocessor_enabled, false},
           {:arbor_orchestrator, :session_sql_observer, self()},

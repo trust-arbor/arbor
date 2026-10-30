@@ -53,26 +53,26 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
 
   setup do
     # Save original config values
-    original_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
-    original_signing = Application.get_env(:arbor_security, :capability_signing_required)
-    original_strict = Application.get_env(:arbor_security, :strict_identity_mode)
-    original_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
-    original_receipts = Application.get_env(:arbor_security, :invocation_receipts_enabled)
+    original_reflex = Application.get_env(:arbor_capabilities, :reflex_checking_enabled)
+    original_signing = Application.get_env(:arbor_capabilities, :capability_signing_required)
+    original_strict = Application.get_env(:arbor_capabilities, :strict_identity_mode)
+    original_approval = Application.get_env(:arbor_capabilities, :approval_guard_enabled)
+    original_receipts = Application.get_env(:arbor_capabilities, :invocation_receipts_enabled)
 
     # Disable security features that add complexity beyond what we're testing
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
 
     on_exit(fn ->
       # Restore original config
-      restore_env(:arbor_security, :reflex_checking_enabled, original_reflex)
-      restore_env(:arbor_security, :capability_signing_required, original_signing)
-      restore_env(:arbor_security, :strict_identity_mode, original_strict)
-      restore_env(:arbor_security, :approval_guard_enabled, original_approval)
-      restore_env(:arbor_security, :invocation_receipts_enabled, original_receipts)
+      restore_env(:arbor_capabilities, :reflex_checking_enabled, original_reflex)
+      restore_env(:arbor_capabilities, :capability_signing_required, original_signing)
+      restore_env(:arbor_capabilities, :strict_identity_mode, original_strict)
+      restore_env(:arbor_capabilities, :approval_guard_enabled, original_approval)
+      restore_env(:arbor_capabilities, :invocation_receipts_enabled, original_receipts)
 
       # Clean up capabilities granted during tests
       if Security.capability_authorization_available?(),

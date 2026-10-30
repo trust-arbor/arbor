@@ -29,9 +29,9 @@ defmodule Arbor.Dashboard.Live.MutationAuthorizationSecurityRegressionTest do
 
   setup do
     keys = [
-      {:arbor_security, :oidc},
-      {:arbor_security, :session_token_secret},
-      {:arbor_security, :session_token_module},
+      {:arbor_capabilities, :oidc},
+      {:arbor_capabilities, :session_token_secret},
+      {:arbor_capabilities, :session_token_module},
       {:arbor_dashboard, :mutation_security_api},
       {:arbor_dashboard, :mutation_test_observer},
       {:arbor_dashboard, :mutation_test_result}
@@ -46,17 +46,17 @@ defmodule Arbor.Dashboard.Live.MutationAuthorizationSecurityRegressionTest do
       end)
     end)
 
-    Application.put_env(:arbor_security, :oidc,
+    Application.put_env(:arbor_capabilities, :oidc,
       providers: [%{issuer: "https://login.example", client_id: "dashboard"}]
     )
 
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "isolated-mutation-session-secret"
     )
 
-    Application.put_env(:arbor_security, :session_token_module, SessionToken)
+    Application.put_env(:arbor_capabilities, :session_token_module, SessionToken)
     Application.put_env(:arbor_dashboard, :mutation_security_api, Arbor.Security)
     Application.put_env(:arbor_dashboard, :mutation_test_observer, self())
 

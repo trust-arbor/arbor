@@ -45,15 +45,15 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
   @unexpected_model "gpt-4o"
   @turn_timeout_ms 30_000
   @env_keys [
-    {:arbor_security, :identity_verification},
-    {:arbor_security, :strict_identity_mode},
-    {:arbor_security, :capability_signing_required},
-    {:arbor_security, :reflex_checking_enabled},
-    {:arbor_security, :uri_registry_enforcement},
-    {:arbor_security, :policy_enforcer_enabled},
-    {:arbor_security, :approval_guard_enabled},
-    {:arbor_security, :egress_gate_enforcing},
-    {:arbor_security, :session_token_secret},
+    {:arbor_capabilities, :identity_verification},
+    {:arbor_capabilities, :strict_identity_mode},
+    {:arbor_capabilities, :capability_signing_required},
+    {:arbor_capabilities, :reflex_checking_enabled},
+    {:arbor_capabilities, :uri_registry_enforcement},
+    {:arbor_capabilities, :policy_enforcer_enabled},
+    {:arbor_capabilities, :approval_guard_enabled},
+    {:arbor_capabilities, :egress_gate_enforcing},
+    {:arbor_capabilities, :session_token_secret},
     {:arbor_memory, :embedding_service_enabled},
     {:arbor_ai, :session_turn_dot},
     {:arbor_agent, :orchestrator_session_module},
@@ -950,19 +950,19 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
   end
 
   defp configure_security! do
-    Application.put_env(:arbor_security, :identity_verification, true)
-    Application.put_env(:arbor_security, :strict_identity_mode, true)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :policy_enforcer_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_capabilities, :identity_verification, true)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, true)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     # Since ddf05e470 the security application refuses to start with a session
     # secret shorter than 32 bytes (SessionToken.configuration_status/0).
     Application.put_env(
-      :arbor_security,
+      :arbor_capabilities,
       :session_token_secret,
       "j0-authenticated-baseline-" <> Base.encode16(:crypto.strong_rand_bytes(32))
     )

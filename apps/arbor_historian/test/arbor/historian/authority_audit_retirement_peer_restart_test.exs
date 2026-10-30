@@ -88,7 +88,7 @@ defmodule Arbor.Historian.AuthorityAuditRetirementPeerRestartTest do
         |> Config.Reader.read!(env: :test, target: :host)
         |> Application.put_all_env(persistent: true)
 
-        put_all(:arbor_security,
+        put_all(:arbor_capabilities,
           authority_state_root: root,
           storage_backend: Arbor.Security.Store.JSONFile,
           audit_journal_mode: :durable,

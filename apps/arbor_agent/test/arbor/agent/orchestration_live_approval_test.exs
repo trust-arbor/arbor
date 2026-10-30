@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/approval_answer_fixture.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
@@ -31,17 +34,17 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, true)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
-    Application.put_env(:arbor_security, :consensus_module, Arbor.Consensus)
-    Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
-    Application.put_env(:arbor_security, :policy_enforcer_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_capabilities, :consensus_module, Arbor.Consensus)
+    Application.put_env(:arbor_capabilities, :use_interaction_router_for_approval, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :policy_enforcer_enabled, false)
     Application.put_env(:arbor_consensus, :llm_topic_classification_enabled, false)
 
     unique = System.unique_integer([:positive])
@@ -304,17 +307,17 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
       {:arbor_trust, :policy_module},
       {:arbor_trust, :policy_enforcer_enabled},
       {:arbor_trust, :approval_evidence_provider},
-      {:arbor_security, :approval_guard_enabled},
-      {:arbor_security, :consensus_escalation_enabled},
-      {:arbor_security, :consensus_module},
-      {:arbor_security, :use_interaction_router_for_approval},
-      {:arbor_security, :capability_signing_required},
-      {:arbor_security, :identity_verification},
-      {:arbor_security, :strict_identity_mode},
-      {:arbor_security, :reflex_checking_enabled},
-      {:arbor_security, :uri_registry_enforcement},
-      {:arbor_security, :egress_gate_enforcing},
-      {:arbor_security, :policy_enforcer_enabled},
+      {:arbor_capabilities, :approval_guard_enabled},
+      {:arbor_capabilities, :consensus_escalation_enabled},
+      {:arbor_capabilities, :consensus_module},
+      {:arbor_capabilities, :use_interaction_router_for_approval},
+      {:arbor_capabilities, :capability_signing_required},
+      {:arbor_capabilities, :identity_verification},
+      {:arbor_capabilities, :strict_identity_mode},
+      {:arbor_capabilities, :reflex_checking_enabled},
+      {:arbor_capabilities, :uri_registry_enforcement},
+      {:arbor_capabilities, :egress_gate_enforcing},
+      {:arbor_capabilities, :policy_enforcer_enabled},
       {:arbor_consensus, :llm_topic_classification_enabled}
     ]
     |> Map.new(fn {app, key} -> {{app, key}, Application.get_env(app, key)} end)

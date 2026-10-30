@@ -34,19 +34,19 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
     ensure_shell_started()
 
     prev = %{
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      identity: Application.get_env(:arbor_security, :strict_identity_mode),
-      approval: Application.get_env(:arbor_security, :approval_guard_enabled),
-      receipts: Application.get_env(:arbor_security, :invocation_receipts_enabled),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      approval: Application.get_env(:arbor_capabilities, :approval_guard_enabled),
+      receipts: Application.get_env(:arbor_capabilities, :invocation_receipts_enabled),
       compound: Application.get_env(:arbor_shell, :compound_shell_enabled)
     }
 
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
-    Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :invocation_receipts_enabled, false)
 
     agent_id = ContainmentFixture.install!()
     grant_shell_capability(agent_id, "arbor://shell/exec/**")
@@ -682,6 +682,6 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
     end
   end
 
-  defp restore_security(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security(key, nil), do: Application.delete_env(:arbor_capabilities, key)
+  defp restore_security(key, value), do: Application.put_env(:arbor_capabilities, key, value)
 end

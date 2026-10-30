@@ -46,7 +46,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
           invocation_audit_mode: :required,
           invocation_audit_sink: Arbor.Historian
         ],
-        do: set_env(:arbor_security, key, value)
+        do: set_env(:arbor_capabilities, key, value)
 
     set_env(:arbor_shell, :agent_authorizer, Arbor.Actions.Shell)
     set_env(:arbor_orchestrator, :security_qualification_producer, EvidenceProducer)

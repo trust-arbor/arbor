@@ -18,35 +18,35 @@ defmodule Arbor.Historian.AuthorityAuditTestHelpers do
   end
 
   def isolate_legacy_events! do
-    previous = Application.fetch_env(:arbor_security, :event_log_adapter)
+    previous = Application.fetch_env(:arbor_capabilities, :event_log_adapter)
 
     on_exit(fn ->
       case previous do
-        {:ok, value} -> Application.put_env(:arbor_security, :event_log_adapter, value)
-        :error -> Application.delete_env(:arbor_security, :event_log_adapter)
+        {:ok, value} -> Application.put_env(:arbor_capabilities, :event_log_adapter, value)
+        :error -> Application.delete_env(:arbor_capabilities, :event_log_adapter)
       end
     end)
 
     # This collaborator handles the older observability stream only. The
     # authority mutation journal, SQL target, and content ACK remain real.
     # Set it explicitly instead of inheriting Security's test_helper config.
-    Application.put_env(:arbor_security, :event_log_adapter, LegacyEventLog)
+    Application.put_env(:arbor_capabilities, :event_log_adapter, LegacyEventLog)
   end
 
   def start_manual_puller! do
-    previous = Application.fetch_env(:arbor_security, :authority_audit_consumer_application)
+    previous = Application.fetch_env(:arbor_capabilities, :authority_audit_consumer_application)
 
     on_exit(fn ->
       case previous do
         {:ok, value} ->
-          Application.put_env(:arbor_security, :authority_audit_consumer_application, value)
+          Application.put_env(:arbor_capabilities, :authority_audit_consumer_application, value)
 
         :error ->
-          Application.delete_env(:arbor_security, :authority_audit_consumer_application)
+          Application.delete_env(:arbor_capabilities, :authority_audit_consumer_application)
       end
     end)
 
-    Application.put_env(:arbor_security, :authority_audit_consumer_application, :test)
+    Application.put_env(:arbor_capabilities, :authority_audit_consumer_application, :test)
     pid = start_supervised!({AuthorityAuditPuller, poll_interval_ms: 60_000})
     %{timer: timer} = :sys.get_state(pid)
 

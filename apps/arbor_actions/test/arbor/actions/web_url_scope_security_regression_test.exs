@@ -22,30 +22,30 @@ defmodule Arbor.Actions.WebUrlScopeSecurityRegressionTest do
   @url_b "http://127.0.0.1:8080/admin"
 
   setup do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
 
     unless Process.whereis(Arbor.Trust.Store), do: start_supervised!(Arbor.Trust.Store)
 
     previous = %{
-      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
-      signing: Application.get_env(:arbor_security, :capability_signing_required),
-      identity: Application.get_env(:arbor_security, :identity_verification),
-      strict: Application.get_env(:arbor_security, :strict_identity_mode),
-      uri: Application.get_env(:arbor_security, :uri_registry_enforcement),
-      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
-      security_approval: Application.get_env(:arbor_security, :approval_guard_enabled),
+      reflex: Application.get_env(:arbor_capabilities, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_capabilities, :capability_signing_required),
+      identity: Application.get_env(:arbor_capabilities, :identity_verification),
+      strict: Application.get_env(:arbor_capabilities, :strict_identity_mode),
+      uri: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
+      escalation: Application.get_env(:arbor_capabilities, :consensus_escalation_enabled),
+      security_approval: Application.get_env(:arbor_capabilities, :approval_guard_enabled),
       trust_approval: Application.get_env(:arbor_trust, :approval_guard_enabled),
       trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     }
 
-    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
-    Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_security, :identity_verification, false)
-    Application.put_env(:arbor_security, :strict_identity_mode, false)
-    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
-    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
-    Application.put_env(:arbor_security, :approval_guard_enabled, false)
+    Application.put_env(:arbor_capabilities, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_capabilities, :capability_signing_required, false)
+    Application.put_env(:arbor_capabilities, :identity_verification, false)
+    Application.put_env(:arbor_capabilities, :strict_identity_mode, false)
+    Application.put_env(:arbor_capabilities, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_capabilities, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_capabilities, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
 
@@ -60,13 +60,13 @@ defmodule Arbor.Actions.WebUrlScopeSecurityRegressionTest do
         Arbor.Trust.Store.delete_profile(agent_id)
       end
 
-      restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
-      restore(:arbor_security, :capability_signing_required, previous.signing)
-      restore(:arbor_security, :identity_verification, previous.identity)
-      restore(:arbor_security, :strict_identity_mode, previous.strict)
-      restore(:arbor_security, :uri_registry_enforcement, previous.uri)
-      restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
-      restore(:arbor_security, :approval_guard_enabled, previous.security_approval)
+      restore(:arbor_capabilities, :reflex_checking_enabled, previous.reflex)
+      restore(:arbor_capabilities, :capability_signing_required, previous.signing)
+      restore(:arbor_capabilities, :identity_verification, previous.identity)
+      restore(:arbor_capabilities, :strict_identity_mode, previous.strict)
+      restore(:arbor_capabilities, :uri_registry_enforcement, previous.uri)
+      restore(:arbor_capabilities, :consensus_escalation_enabled, previous.escalation)
+      restore(:arbor_capabilities, :approval_guard_enabled, previous.security_approval)
       restore(:arbor_trust, :approval_guard_enabled, previous.trust_approval)
       restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
     end)

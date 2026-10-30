@@ -6,7 +6,7 @@ defmodule Arbor.AI.AcpSession.HandlerStoreOutageSecurityRegressionTest do
   alias Arbor.Security
 
   setup_all do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     :ok = Security.TestBootstrap.start!()
   end
 

@@ -92,7 +92,13 @@ defmodule Arbor.Contracts.Security.Finding do
 
   # Libraries/paths where any change is hard-capped to :high risk (never
   # auto-merged) — the fox-henhouse guard.
-  @high_risk_path_markers ["arbor_security", "capability", "trust", "auth"]
+  @high_risk_path_markers [
+    "arbor_security",
+    "arbor_capabilities",
+    "capability",
+    "trust",
+    "auth"
+  ]
 
   typedstruct do
     @typedoc "A security finding"

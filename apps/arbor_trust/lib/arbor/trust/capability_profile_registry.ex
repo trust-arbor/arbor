@@ -158,7 +158,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   # Missing until 2026-08-06: without an owner the coverage row can be completed
   # by neither a profile nor an owner/reason pair, so arbor://egress/* silently
   # failed the coverage guard from the day it was registered (2026-08-03).
-  defp owner_for_parsed(%CapabilityUri{domain: "egress"}), do: :arbor_security
+  defp owner_for_parsed(%CapabilityUri{domain: "egress"}), do: :arbor_capabilities
   defp owner_for_parsed(%CapabilityUri{domain: "voice"}), do: :arbor_voice
   defp owner_for_parsed(%CapabilityUri{domain: "shell"}), do: :arbor_shell
   defp owner_for_parsed(%CapabilityUri{domain: "historian"}), do: :arbor_historian
@@ -176,7 +176,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "mcp_server"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "tool"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
-  defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_security
+  defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_capabilities
   defp owner_for_parsed(%CapabilityUri{domain: "code"}), do: :arbor_actions
   # arbor://forge/* was registered by forge packet 1a (contracts + detached
   # signing). Without an owner its coverage row can be completed by neither a

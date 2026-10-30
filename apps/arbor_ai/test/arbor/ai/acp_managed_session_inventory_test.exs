@@ -7,28 +7,28 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
   @moduletag :fast
 
   setup_all do
-    previous_start_children = Application.get_env(:arbor_security, :start_children)
+    previous_start_children = Application.get_env(:arbor_capabilities, :start_children)
     previous_signals = Arbor.Signals.Config.Testing.snapshot_namespace()
 
-    _ = Application.stop(:arbor_security)
+    _ = Application.stop(:arbor_capabilities)
     _ = Application.stop(:arbor_kernel_runtime)
     Arbor.Signals.Config.Testing.put(:start_children, true)
-    Application.put_env(:arbor_security, :start_children, true)
+    Application.put_env(:arbor_capabilities, :start_children, true)
 
     on_exit(fn ->
-      _ = Application.stop(:arbor_security)
+      _ = Application.stop(:arbor_capabilities)
       _ = Application.stop(:arbor_kernel_runtime)
       Arbor.Signals.Config.Testing.restore_namespace(previous_signals)
-      Application.put_env(:arbor_security, :start_children, previous_start_children)
+      Application.put_env(:arbor_capabilities, :start_children, previous_start_children)
 
       # Mix had already started these apps. Later tests expect the empty
       # signals supervisor to be running again after this module's stop.
       {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
-      {:ok, _} = Application.ensure_all_started(:arbor_security)
+      {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
     end)
 
     {:ok, _started_signals} = Application.ensure_all_started(:arbor_kernel_runtime)
-    {:ok, _started} = Application.ensure_all_started(:arbor_security)
+    {:ok, _started} = Application.ensure_all_started(:arbor_capabilities)
 
     {:ok, registry} = SessionRegistry.start_link([])
     on_exit(fn -> Process.exit(registry, :shutdown) end)

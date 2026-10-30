@@ -4,9 +4,12 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
 
   defmodule Sink do
     def persist_security_invocation(event) do
-      send(Application.fetch_env!(:arbor_security, :invocation_audit_test_owner), {:audit, event})
+      send(
+        Application.fetch_env!(:arbor_capabilities, :invocation_audit_test_owner),
+        {:audit, event}
+      )
 
-      case Application.get_env(:arbor_security, :invocation_audit_test_failure) do
+      case Application.get_env(:arbor_capabilities, :invocation_audit_test_failure) do
         true -> {:error, :unavailable}
         _ -> {:ok, event["id"]}
       end
@@ -21,16 +24,16 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
       :invocation_audit_test_failure
     ]
 
-    previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
-    Application.put_env(:arbor_security, :invocation_audit_mode, :required)
-    Application.put_env(:arbor_security, :invocation_audit_sink, Sink)
-    Application.put_env(:arbor_security, :invocation_audit_test_owner, self())
-    Application.delete_env(:arbor_security, :invocation_audit_test_failure)
+    previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_capabilities, &1)})
+    Application.put_env(:arbor_capabilities, :invocation_audit_mode, :required)
+    Application.put_env(:arbor_capabilities, :invocation_audit_sink, Sink)
+    Application.put_env(:arbor_capabilities, :invocation_audit_test_owner, self())
+    Application.delete_env(:arbor_capabilities, :invocation_audit_test_failure)
 
     on_exit(fn ->
       Enum.each(previous, fn
-        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
-        {key, :error} -> Application.delete_env(:arbor_security, key)
+        {key, {:ok, value}} -> Application.put_env(:arbor_capabilities, key, value)
+        {key, :error} -> Application.delete_env(:arbor_capabilities, key)
       end)
     end)
 
@@ -58,7 +61,7 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
   end
 
   test "security regression: unavailable required audit refuses public action before authorization" do
-    Application.put_env(:arbor_security, :invocation_audit_test_failure, true)
+    Application.put_env(:arbor_capabilities, :invocation_audit_test_failure, true)
 
     assert {:error, :invocation_audit_unavailable} =
              Arbor.Actions.authorize_and_execute(

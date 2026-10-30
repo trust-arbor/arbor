@@ -124,7 +124,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
          sensitivity_remote: [:public]
        }},
       {:arbor_ai, :backend_trust_levels, %{}},
-      {:arbor_security, :egress_gate_enforcing, true}
+      {:arbor_capabilities, :egress_gate_enforcing, true}
     ]
 
     previous =
@@ -245,7 +245,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
 
   test "security regression: malformed existing route callback cannot become permission" do
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, NativeDispatcher)
-    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
     outcome = execute(:ordinary, [], :confidential, nil, route_authorizer: :malformed)
     assert_refused(outcome)
   end

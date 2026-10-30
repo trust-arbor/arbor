@@ -68,6 +68,51 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
       assert :security_app in route.reasons
     end
 
+    test "capabilities package crypto, transport and token verification retain security review" do
+      for path <- [
+            "packages/arbor_capabilities/lib/arbor/security/crypto.ex",
+            "packages/arbor_capabilities_signals/lib/arbor/security/adapters/signals_transport.ex",
+            "packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc/token_verifier.ex",
+            "apps/arbor_security/lib/arbor/security/crypto.ex"
+          ] do
+        classification = BlastRadius.classify([path])
+
+        assert classification.blast_radius == :high, path
+        assert classification.authority_widening, path
+        assert :security_app in classification.reasons, path
+        assert :security_authority_surface in classification.reasons, path
+
+        route = BlastRadius.route(:keep, [path])
+
+        assert route.action == :human_review, path
+        assert route.human_required, path
+        assert route.blast_radius == :high, path
+        assert route.authority_widening, path
+        assert :security_app in route.reasons, path
+        assert :security_authority_surface in route.reasons, path
+      end
+    end
+
+    test "unrelated packages and adjacent package names remain low risk" do
+      for path <- [
+            "packages/arbor_widgets/lib/presenter.ex",
+            "packages/arbor_capabilities_demo/lib/client.ex",
+            "packages/arbor_capabilities_signals_demo/lib/client.ex",
+            "packages/arbor_capabilities_oidc_demo/lib/client.ex"
+          ] do
+        classification = BlastRadius.classify([path])
+
+        assert classification.blast_radius == :low, path
+        refute classification.authority_widening, path
+        assert classification.reasons == [], path
+
+        route = BlastRadius.route(:keep, [path])
+
+        assert route.action == :auto_proceed, path
+        refute route.human_required, path
+      end
+    end
+
     test "kernel security contracts retain authority review after package adoption" do
       for path <- [
             "packages/arbor_kernel/lib/arbor/contracts/security/signing_authority.ex",

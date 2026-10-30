@@ -1,5 +1,8 @@
 Code.require_file(
-  Path.expand("../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
+  Path.expand(
+    "../../../../../packages/arbor_capabilities/test/support/oidc_test_helper.ex",
+    __DIR__
+  )
 )
 
 defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
@@ -110,8 +113,13 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
       opts: [repo: Repo]
     })
 
-    set_env(:arbor_security, :authority_audit_consumer_name, Arbor.Historian.AuthorityAuditPuller)
-    set_env(:arbor_security, :authority_audit_consumer_application, :arbor_historian)
+    set_env(
+      :arbor_capabilities,
+      :authority_audit_consumer_name,
+      Arbor.Historian.AuthorityAuditPuller
+    )
+
+    set_env(:arbor_capabilities, :authority_audit_consumer_application, :arbor_historian)
 
     assert Process.whereis(Arbor.Historian.AuthorityAuditPuller) == nil,
            "Run this journey alone with its own authority audit consumer."
@@ -146,15 +154,15 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
 
   setup context do
     for {app, key, value} <- [
-          {:arbor_security, :identity_verification, true},
-          {:arbor_security, :capability_signing_required, true},
-          {:arbor_security, :strict_identity_mode, false},
-          {:arbor_security, :policy_enforcer_enabled, false},
-          {:arbor_security, :approval_guard_enabled, false},
-          {:arbor_security, :reflex_checking_enabled, false},
-          {:arbor_security, :uri_registry_enforcement, false},
-          {:arbor_security, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
-          {:arbor_security, :session_token_secret, :crypto.strong_rand_bytes(32)},
+          {:arbor_capabilities, :identity_verification, true},
+          {:arbor_capabilities, :capability_signing_required, true},
+          {:arbor_capabilities, :strict_identity_mode, false},
+          {:arbor_capabilities, :policy_enforcer_enabled, false},
+          {:arbor_capabilities, :approval_guard_enabled, false},
+          {:arbor_capabilities, :reflex_checking_enabled, false},
+          {:arbor_capabilities, :uri_registry_enforcement, false},
+          {:arbor_capabilities, :identity_alias_resolver, Arbor.Agent.IdentityAliasResolver},
+          {:arbor_capabilities, :session_token_secret, :crypto.strong_rand_bytes(32)},
           {:arbor_trust, :policy_enforcer_enabled, false},
           {:arbor_trust, :approval_guard_enabled, false},
           {:arbor_orchestrator, :private_conversation_memory, false},
@@ -1101,7 +1109,7 @@ defmodule Arbor.Agent.ConversationEntrypointJourneyTest do
     config = Application.get_env(:arbor_dashboard, endpoint, [])
     set_env(:arbor_dashboard, endpoint, Keyword.merge(config, server: false, check_origin: false))
 
-    set_env(:arbor_security, :oidc,
+    set_env(:arbor_capabilities, :oidc,
       providers: [%{issuer: "https://fixture.invalid", client_id: "fixture"}]
     )
 
