@@ -5,6 +5,93 @@ defmodule Arbor.Commands.SourceCoupling.OwnershipTest do
 
   @moduletag :fast
 
+  test "nondependency metadata cannot declare a published repository edge" do
+    source = """
+    defmodule Signals.MixProject do
+      @labels [arbor_kernel: "Kernel"]
+      @versions [arbor_kernel: "~> 2.0.0-dev"]
+      @examples [{:arbor_kernel, "~> 2.0.0-dev", runtime: false}]
+
+      def project, do: [deps: deps(), package: [arbor_kernel: "~> 2.0.0-dev"]]
+      defp labels, do: [arbor_kernel: "~> 2.0.0-dev"]
+
+      defp deps do
+        _labels = [arbor_kernel: "~> 2.0.0-dev"]
+        [{:external, "~> 1.0", metadata: [arbor_kernel: "~> 2.0.0-dev"]}]
+      end
+    end
+    """
+
+    assert {:ok, []} =
+             Ownership.in_umbrella_deps(
+               source,
+               "packages/arbor_signals/mix.exs",
+               MapSet.new(["arbor_kernel"])
+             )
+  end
+
+  test "published declarations follow returned project lists and static helpers only" do
+    source = """
+    defmodule Signals.MixProject do
+      def project, do: [deps: core_deps() ++ optional_deps()]
+      defp core_deps, do: [{:arbor_kernel, "~> 2.0.0-dev"}] |> Enum.uniq()
+      defp optional_deps, do: repeated_deps()
+      defp repeated_deps, do: optional_deps()
+      defp labels, do: [arbor_signals: "~> 0.2.0-dev"]
+    end
+    """
+
+    assert {:ok, ["arbor_kernel"]} =
+             Ownership.in_umbrella_deps(
+               source,
+               "packages/arbor_signals/mix.exs",
+               MapSet.new(["arbor_kernel", "arbor_signals"])
+             )
+  end
+
+  test "published version dependencies count only known repository owners" do
+    known_apps = MapSet.new(["arbor_kernel", "arbor_signals"])
+
+    for declaration <- [
+          "{:arbor_kernel, \"~> 0.1.0-dev\"}",
+          "{:arbor_kernel, \"~> 0.1.0-dev\", runtime: false}"
+        ] do
+      source = "defmodule Signals.MixProject do def deps, do: [#{declaration}] end"
+
+      assert {:ok, ["arbor_kernel"]} =
+               Ownership.in_umbrella_deps(source, "packages/arbor_signals/mix.exs", known_apps)
+    end
+
+    assert {:ok, []} =
+             Ownership.in_umbrella_deps(
+               ~s(def deps, do: [{:arbor_unknown, "~> 0.1.0"}, {:external, "~> 1.0"}]),
+               "packages/arbor_signals/mix.exs",
+               known_apps
+             )
+
+    # Without an owner inventory, a published package name proves no local edge.
+    assert {:ok, []} =
+             Ownership.in_umbrella_deps("def deps, do: [{:arbor_kernel, \"~> 0.1.0\"}]")
+  end
+
+  test "version requirements do not turn foreign or dynamic sources into local dependencies" do
+    known_apps = MapSet.new(["arbor_kernel"])
+
+    for declaration <- [
+          "{:arbor_kernel, \"~> 0.1.0\", path: \"../../../arbor_kernel\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", path: dependency_path()}",
+          "{:arbor_kernel, \"~> 0.1.0\", git: \"https://example.invalid/kernel.git\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", github: \"external/kernel\"}",
+          "{:arbor_kernel, \"~> 0.1.0\", hex: :external_kernel}",
+          "{:arbor_kernel, dependency_version()}"
+        ] do
+      source = "defmodule Signals.MixProject do def deps, do: [#{declaration}] end"
+
+      assert {:ok, []} =
+               Ownership.in_umbrella_deps(source, "packages/arbor_signals/mix.exs", known_apps)
+    end
+  end
+
   test "versioned adapter path dependencies preserve declared Core ownership and levels" do
     source = """
     defmodule Arbor.Persistence.SQL.MixProject do

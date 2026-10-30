@@ -33,6 +33,9 @@ defmodule Arbor.Signals.Config do
           relay_node_rate_limit: 1000
   """
 
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.TaintEnvelope
+
   require Logger
 
   @default_authorizer Arbor.Signals.Adapters.CapabilityAuthorizer
@@ -410,14 +413,33 @@ defmodule Arbor.Signals.Config do
   def channel_principal_authorizer,
     do: get(:channel_principal_authorizer, @default_authorizer)
 
-  @doc "Trusted provider for process-local taint values; defaults to the package contract."
-  @spec taint_module() :: module()
-  def taint_module, do: get(:taint_module, Arbor.Signals.Contracts.Taint)
+  @doc """
+  Trusted provider for process-local taint values; defaults to Kernel's canonical type.
 
-  @doc "Trusted provider for canonical durable provenance envelopes."
+  The former built-in Signals selector resolves to the canonical owner. Other
+  explicitly configured host providers retain their existing selection semantics.
+  """
+  @spec taint_module() :: module()
+  def taint_module do
+    case get(:taint_module, Taint) do
+      Arbor.Signals.Contracts.Taint -> Taint
+      provider -> provider
+    end
+  end
+
+  @doc """
+  Trusted provider for durable provenance envelopes; defaults to Kernel's owner.
+
+  The former built-in Signals selector resolves to the canonical owner without
+  coercing foreign process-local values.
+  """
   @spec taint_envelope_module() :: module()
-  def taint_envelope_module,
-    do: get(:taint_envelope_module, Arbor.Signals.Contracts.TaintEnvelope)
+  def taint_envelope_module do
+    case get(:taint_envelope_module, TaintEnvelope) do
+      Arbor.Signals.Contracts.TaintEnvelope -> TaintEnvelope
+      provider -> provider
+    end
+  end
 
   @doc "Trusted adapter for opaque authorization context values."
   @spec auth_context_module() :: module() | nil

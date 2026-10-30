@@ -25,7 +25,7 @@ defmodule Arbor.Signals.Contracts.AuthContext do
       # Pass the struct to the authorization decision function.
   """
 
-  alias Arbor.Signals.Contracts.Taint
+  alias Arbor.Contracts.Security.Taint
 
   @type trust_mode :: :block | :ask | :allow | :auto
 

@@ -265,6 +265,15 @@ defmodule Arbor.Commands.SourceCoupling.Core do
   defp validate_files(_), do: {:error, :invalid_files}
 
   defp partition_files(files) do
+    # Only admitted top-level Mix projects establish versioned first-party
+    # targets. Source-only owners, nested fixtures, and private integrations do
+    # not turn a same-named external package into a repository dependency.
+    known_apps =
+      files
+      |> Enum.map(&file_path/1)
+      |> Enum.filter(&(Ownership.mix_project_path?(&1) and not private_integrations_path?(&1)))
+      |> MapSet.new(&Path.basename(Path.dirname(&1)))
+
     Enum.reduce_while(files, {:ok, %{}, [], %{}}, fn f, {:ok, graph, sources, file_apps} ->
       path = file_path(f)
       bytes = file_bytes(f)
@@ -276,7 +285,7 @@ defmodule Arbor.Commands.SourceCoupling.Core do
 
         Ownership.mix_project_path?(path) ->
           with {:ok, app} <- Ownership.app_of_path(path),
-               {:ok, deps} <- Ownership.in_umbrella_deps(bytes, path),
+               {:ok, deps} <- Ownership.in_umbrella_deps(bytes, path, known_apps),
                :ok <- unique_project_owner(file_apps, app, path) do
             {:cont, {:ok, Map.put(graph, app, deps), sources, Map.put(file_apps, path, app)}}
           else

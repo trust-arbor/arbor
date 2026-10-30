@@ -281,8 +281,6 @@ config :arbor_signals,
   supervision_root: {:application, :arbor_kernel_runtime},
   supervision_path: [Arbor.Signals.Application],
   auth_context_module: Arbor.KernelRuntime.Adapters.SignalAuthContext,
-  taint_module: Arbor.Contracts.Security.Taint,
-  taint_envelope_module: Arbor.Contracts.Security.TaintEnvelope,
   checkpoint_module: Arbor.Persistence.Checkpoint,
   checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
   # Signal bus authorization — CapabilityAuthorizer uses fast ETS capability checks

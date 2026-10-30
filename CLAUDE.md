@@ -96,35 +96,36 @@ The harness periodically suggests TaskCreate / TaskUpdate. **Ignore them unless 
 
 Levels are by **longest dependency path** (an app's level = 1 + the max level of
 its in-umbrella deps). A library may only depend on libraries at a **lower**
-level. Audited from each `mix.exs` on 2026-08-15 (re-verified 2026-09-04) — the old 3-level grouping was
+level. Audited from each `mix.exs` on 2026-10-29 — the old 3-level grouping was
 badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_multimedia, arbor_signals, arbor_persistence  (zero first-party deps)
-L1  arbor_kernel_runtime, arbor_cartographer, arbor_web, arbor_persistence_sql, arbor_persistence_eventstore
-L2  arbor_llm, arbor_security
-L3  arbor_persistence_host, arbor_shell, arbor_sandbox
-L4  arbor_historian, arbor_trust, arbor_ai, arbor_comms, arbor_consensus
-L5  arbor_memory, arbor_scheduler
-L6  arbor_actions
-L7  arbor_orchestrator, arbor_agent, arbor_gateway
-L8  arbor_commands, arbor_voice
-L9  arbor_dashboard
+L0  arbor_kernel, arbor_custody, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L1  arbor_signals, arbor_persistence_sql, arbor_persistence_eventstore
+L2  arbor_kernel_runtime, arbor_cartographer, arbor_web
+L3  arbor_llm, arbor_security
+L4  arbor_persistence_host, arbor_shell, arbor_sandbox
+L5  arbor_historian, arbor_trust, arbor_ai, arbor_comms, arbor_consensus
+L6  arbor_memory, arbor_scheduler
+L7  arbor_actions
+L8  arbor_orchestrator, arbor_agent, arbor_gateway
+L9  arbor_commands, arbor_voice
+L10 arbor_dashboard
 ```
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
 `packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **Kernel, Multimedia, Signals, and Persistence core are L0.** Kernel owns
-  passive contracts, types, and identifiers. Signals lives in `packages/arbor_signals`;
-  Kernel Runtime (L1) composes its supervisor after boot admission alongside
+- **Kernel, Custody, Multimedia, and Persistence core are L0.** Kernel owns
+  passive contracts, types, and identifiers. Signals consumes Kernel taint;
+  Kernel Runtime (L2) composes its supervisor after boot admission alongside
   Common and Monitor. Multimedia owns device I/O.
-  Persistence core and adapters live in `packages/`; L3 Host retains product APIs and migrations.
-  In particular `arbor_orchestrator` is L7, not a low kernel — it really deps
+  Persistence core and adapters live in `packages/`; L4 Host retains product APIs and migrations.
+  In particular `arbor_orchestrator` is L8, not a low kernel — it really deps
   arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
   egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and
   only commands/dashboard/voice sit above it.
-- `arbor_consensus` is L4, not L5: its `mix.exs` does NOT declare `arbor_ai`
+- `arbor_consensus` is L5, not L6: its `mix.exs` does NOT declare `arbor_ai`
   (commented out, optional-at-runtime via a DI seam), so ai doesn't raise its
   compile-time level. The guard computes from real mix.exs and caught this.
 - `apps/arbor_integrations/` exists on dev machines but is **gitignored**

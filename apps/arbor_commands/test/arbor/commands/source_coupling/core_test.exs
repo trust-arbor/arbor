@@ -34,6 +34,112 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
     }
   end
 
+  test "published Kernel dependency is declared regardless of inventory order" do
+    files = [
+      file("packages/arbor_signals/mix.exs", """
+      defmodule Signals.MixProject do
+        def deps do
+          [
+            {:arbor_kernel, "~> 0.1.0-dev"},
+            {:arbor_unknown, "~> 0.1.0"},
+            {:arbor_source_only, "~> 0.1.0"},
+            {:arbor_nested, "~> 0.1.0"},
+            {:arbor_integrations, "~> 0.1.0"}
+          ]
+        end
+      end
+      """),
+      file("packages/arbor_kernel/mix.exs", mix("arbor_kernel", [])),
+      file("packages/arbor_nested/examples/standalone/mix.exs", mix("arbor_nested", [])),
+      file("apps/arbor_integrations/mix.exs", mix("arbor_integrations", [])),
+      file("packages/arbor_source_only/lib/source_only.ex", """
+      defmodule Arbor.SourceOnly do
+        def value, do: :external
+      end
+      """),
+      file("packages/arbor_kernel/lib/taint.ex", """
+      defmodule Arbor.Contracts.Security.Taint do
+        def trusted, do: :trusted
+      end
+      """),
+      file("packages/arbor_signals/lib/taint.ex", """
+      defmodule Arbor.Signals.TaintConsumer do
+        def trusted, do: Arbor.Contracts.Security.Taint.trusted()
+      end
+      """)
+    ]
+
+    for inventory <- [files, Enum.reverse(files)] do
+      assert {:ok, census} = Core.new(bundle(inventory))
+      assert census["dep_graph"]["arbor_signals"] == ["arbor_kernel"]
+      assert census["dep_graph"]["arbor_kernel"] == []
+      assert census["levels"]["arbor_kernel"] == 0
+      assert census["levels"]["arbor_signals"] == 1
+      refute Map.has_key?(census["dep_graph"], "arbor_unknown")
+      refute Map.has_key?(census["dep_graph"], "arbor_nested")
+      refute Map.has_key?(census["dep_graph"], "arbor_integrations")
+      assert census["gating_occurrences"] == []
+
+      assert Enum.any?(census["occurrences"], fn occurrence ->
+               occurrence["target"] == "Arbor.Contracts.Security.Taint" and
+                 occurrence["declared"] == true and
+                 occurrence["level_direction"] == "level_downward"
+             end)
+    end
+  end
+
+  test "dependency-like metadata cannot hide undeclared Kernel coupling" do
+    files = [
+      file("packages/arbor_signals/mix.exs", """
+      defmodule Signals.MixProject do
+        @labels [arbor_kernel: "Kernel"]
+        @versions [arbor_kernel: "~> 2.0.0-dev"]
+        @examples [{:arbor_kernel, "~> 2.0.0-dev", runtime: false}]
+        def project, do: [deps: deps(), package: [arbor_kernel: "~> 2.0.0-dev"]]
+        defp labels, do: [arbor_kernel: "~> 2.0.0-dev"]
+        defp deps, do: []
+      end
+      """),
+      file("packages/arbor_kernel/mix.exs", mix("arbor_kernel", [])),
+      file("packages/arbor_kernel/lib/taint.ex", """
+      defmodule Arbor.Contracts.Security.Taint do
+        def trusted, do: :trusted
+      end
+      """),
+      file("packages/arbor_signals/lib/taint.ex", """
+      defmodule Arbor.Signals.TaintConsumer do
+        def trusted, do: Arbor.Contracts.Security.Taint.trusted()
+      end
+      """)
+    ]
+
+    assert {:ok, census} = Core.new(bundle(files))
+    assert census["dep_graph"]["arbor_signals"] == []
+    assert census["levels"]["arbor_signals"] == 0
+
+    assert Enum.any?(census["gating_occurrences"], fn occurrence ->
+             occurrence["target"] == "Arbor.Contracts.Security.Taint" and
+               occurrence["declared"] == false
+           end)
+  end
+
+  test "published dependencies cannot conceal a repository cycle" do
+    files = [
+      file("packages/arbor_signals/mix.exs", """
+      defmodule Signals.MixProject do
+        def deps, do: [{:arbor_kernel, "~> 0.1.0-dev"}]
+      end
+      """),
+      file("packages/arbor_kernel/mix.exs", """
+      defmodule Kernel.MixProject do
+        def deps, do: [{:arbor_signals, "~> 0.1.0-dev"}]
+      end
+      """)
+    ]
+
+    assert {:error, {:cycle, _, _}} = Core.new(bundle(files))
+  end
+
   test "package sources and path dependencies participate in the canonical census" do
     files = [
       file("packages/arbor_signals/mix.exs", mix("arbor_signals", [])),

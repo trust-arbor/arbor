@@ -50,7 +50,7 @@ defmodule Arbor.Signals do
 
   use Boundary,
     top_level?: true,
-    deps: [Jason, Logger, TypedStruct],
+    deps: [Arbor.Contracts, Jason, Logger, TypedStruct],
     exports: :all
 
   @behaviour Arbor.Signals.Contracts.API

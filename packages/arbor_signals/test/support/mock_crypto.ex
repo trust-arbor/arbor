@@ -2,7 +2,7 @@ defmodule Arbor.Signals.Test.MockCrypto do
   @moduledoc """
   Test-local crypto fake for Signals.
 
-  arbor_signals is L1 and must not depend on arbor_security (L2).
+  Signals must not depend on the runtime Security application.
   Compatible encrypt/decrypt/seal/unseal using :crypto directly.
   """
 

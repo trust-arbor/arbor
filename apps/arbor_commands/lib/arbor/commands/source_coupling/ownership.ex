@@ -59,11 +59,12 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
     String.ends_with?(name, ".ex") or String.ends_with?(name, ".exs")
   end
 
-  @doc "Parse umbrella and repository-local path dependencies from mix.exs source bytes."
-  @spec in_umbrella_deps(binary(), String.t() | nil) :: {:ok, [String.t()]} | {:error, term()}
-  def in_umbrella_deps(bytes, project_path \\ nil)
+  @doc "Parse umbrella, repository-local path, and known versioned dependencies from mix.exs bytes."
+  @spec in_umbrella_deps(binary(), String.t() | nil, MapSet.t(String.t())) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def in_umbrella_deps(bytes, project_path \\ nil, known_apps \\ MapSet.new())
 
-  def in_umbrella_deps(bytes, project_path) when is_binary(bytes) do
+  def in_umbrella_deps(bytes, project_path, %MapSet{} = known_apps) when is_binary(bytes) do
     case Code.string_to_quoted(bytes, emit_warnings: false) do
       {:ok, ast} ->
         {_ast, deps} =
@@ -95,14 +96,118 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
               {node, acc}
           end)
 
-        {:ok, deps |> Enum.uniq() |> Enum.sort()}
+        published_deps =
+          ast
+          |> published_dependency_declarations()
+          |> Enum.flat_map(fn
+            {dep, requirement} when is_atom(dep) and is_binary(requirement) ->
+              published_repository_dependency(dep, requirement, [], known_apps)
+
+            {:{}, _metadata, [dep, requirement, opts]} when is_atom(dep) and is_list(opts) ->
+              published_repository_dependency(dep, requirement, opts, known_apps)
+
+            _ ->
+              []
+          end)
+
+        {:ok, (deps ++ published_deps) |> Enum.uniq() |> Enum.sort()}
 
       {:error, reason} ->
         {:error, {:mix_parse_error, reason}}
     end
   end
 
-  def in_umbrella_deps(_, _), do: {:error, :invalid_bytes}
+  def in_umbrella_deps(_, _, _), do: {:error, :invalid_bytes}
+
+  defp published_repository_dependency(dep, requirement, opts, known_apps) do
+    name = Atom.to_string(dep)
+
+    if is_binary(requirement) and String.starts_with?(name, "arbor_") and
+         MapSet.member?(known_apps, name) and
+         not Enum.any?([:path, :git, :github, :hex], &Keyword.has_key?(opts, &1)) do
+      [name]
+    else
+      []
+    end
+  end
+
+  # Published dependency tuples also resemble arbitrary keyword metadata. Only
+  # inspect returned dependency lists, never every tuple in the source file.
+  defp published_dependency_declarations(ast) do
+    nodes = block_expressions(ast)
+
+    functions =
+      Enum.reduce(nodes, %{}, fn
+        {kind, _metadata, [{name, _context, args}, body]}, acc
+        when kind in [:def, :defp] and is_atom(name) and args in [nil, []] ->
+          Map.update(acc, name, [Keyword.get(body, :do)], &[Keyword.get(body, :do) | &1])
+
+        _, acc ->
+          acc
+      end)
+
+    deps =
+      functions
+      |> Map.get(:deps, [])
+      |> Enum.flat_map(&dependency_list(&1, functions, MapSet.new([:deps])))
+
+    project_deps =
+      functions
+      |> Map.get(:project, [])
+      |> Enum.flat_map(fn body ->
+        case return_expression(body) do
+          entries when is_list(entries) ->
+            Enum.flat_map(entries, fn
+              {:deps, value} -> dependency_list(value, functions, MapSet.new())
+              _ -> []
+            end)
+
+          _ ->
+            []
+        end
+      end)
+
+    nested_deps =
+      Enum.flat_map(nodes, fn
+        {:defmodule, _metadata, [_module, body]} ->
+          published_dependency_declarations(Keyword.get(body, :do))
+
+        _ ->
+          []
+      end)
+
+    deps ++ project_deps ++ nested_deps
+  end
+
+  defp dependency_list({:__block__, _metadata, expressions}, functions, seen),
+    do: dependency_list(List.last(expressions), functions, seen)
+
+  defp dependency_list(entries, _functions, _seen) when is_list(entries), do: entries
+
+  defp dependency_list({:++, _metadata, [left, right]}, functions, seen),
+    do: dependency_list(left, functions, seen) ++ dependency_list(right, functions, seen)
+
+  defp dependency_list({:|>, _metadata, [entries, _filter]}, functions, seen),
+    do: dependency_list(entries, functions, seen)
+
+  defp dependency_list({name, _metadata, args}, functions, seen)
+       when is_atom(name) and args in [nil, []] do
+    if MapSet.member?(seen, name) do
+      []
+    else
+      functions
+      |> Map.get(name, [])
+      |> Enum.flat_map(&dependency_list(&1, functions, MapSet.put(seen, name)))
+    end
+  end
+
+  defp dependency_list(_dynamic, _functions, _seen), do: []
+
+  defp return_expression({:__block__, _metadata, expressions}), do: List.last(expressions)
+  defp return_expression(expression), do: expression
+
+  defp block_expressions({:__block__, _metadata, expressions}), do: expressions
+  defp block_expressions(expression), do: [expression]
 
   defp local_path_dependency?(name, opts, project_path) when is_binary(project_path) do
     case Keyword.get(opts, :path) do
