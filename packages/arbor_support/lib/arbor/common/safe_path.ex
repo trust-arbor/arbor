@@ -43,6 +43,8 @@ defmodule Arbor.Common.SafePath do
       {:error, :traversal_sequence}
   """
 
+  use Boundary, top_level?: true, deps: [], exports: [RootBinding, TraversalError]
+
   defmodule RootBinding do
     @moduledoc false
 
@@ -77,7 +79,7 @@ defmodule Arbor.Common.SafePath do
           | :descriptor_timeout
           | File.posix()
 
-  @test_env Application.compile_env(:arbor_kernel_runtime, :expose_test_fixtures, false)
+  @test_env Application.compile_env(:arbor_support, :expose_test_fixtures, false)
 
   @descriptor_ready_timeout 5_000
   @descriptor_read_timeout 30_000

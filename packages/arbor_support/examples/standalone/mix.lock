@@ -1,0 +1,3 @@
+%{
+  "boundary": {:hex, :boundary, "0.11.0", "56cff565b5565930765e02782281b022935fe8c2e1504543c8c1b44b85893b40", [:mix], [], "hexpm", "b9297a96ea14c0e63dbd77b8135e0d483f9c6f34ed1c9dee4b3fea82c596f55a"},
+}

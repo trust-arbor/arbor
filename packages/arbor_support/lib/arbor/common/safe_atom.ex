@@ -36,6 +36,8 @@ defmodule Arbor.Common.SafeAtom do
       %{name: "test", "unknown" => 1}
   """
 
+  use Boundary, top_level?: true, deps: [], exports: []
+
   @type result :: {:ok, atom()} | {:error, {:unknown_atom, String.t()}}
   @type allowed_result :: {:ok, atom()} | {:error, {:not_allowed, String.t() | atom()}}
 

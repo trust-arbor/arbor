@@ -425,6 +425,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              MapSet.new([
                :arbor_kernel_runtime,
                :arbor_security,
+               :arbor_support,
                :elixir,
                :jason,
                :kernel,

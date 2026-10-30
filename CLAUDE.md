@@ -94,14 +94,14 @@ The harness periodically suggests TaskCreate / TaskUpdate. **Ignore them unless 
 
 ## Library Hierarchy
 
-Levels are by **longest dependency path** (an app's level = 1 + the max level of
-its in-umbrella deps). A library may only depend on libraries at a **lower**
-level. Audited from each `mix.exs` on 2026-10-29 — the old 3-level grouping was
+Levels follow the **longest dependency path**: 1 + the maximum dependency level.
+Libraries depend only on **lower** levels. Audited from each `mix.exs` on
+2026-10-30 — the old 3-level grouping was
 badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
 L1  arbor_signals, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
 L2  arbor_kernel_runtime, arbor_cartographer, arbor_web
 L3  arbor_llm, arbor_security
@@ -116,10 +116,11 @@ L10 arbor_dashboard
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
 `packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **Kernel, Custody, OAuth, Multimedia, and Persistence core are L0.** Kernel owns
+- **Kernel, Custody, Support, OAuth, Multimedia, and Persistence are L0.** Kernel owns
   passive contracts, types, and identifiers. Signals consumes Kernel taint.
   Kernel Runtime (L2) composes Common, Signals, and Monitor after boot admission.
   OAuth is caller-started; Common owns its pool.
+  Support owns shared path, atom and redaction guards.
   Multimedia owns device I/O.
   Persistence core and adapters live in `packages/`; L4 Host retains product APIs and migrations.
   `arbor_orchestrator` is L8 and depends on

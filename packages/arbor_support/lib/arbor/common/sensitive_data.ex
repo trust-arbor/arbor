@@ -38,6 +38,8 @@ defmodule Arbor.Common.SensitiveData do
   - **OWASP** — Sensitive data exposure guidelines
   """
 
+  use Boundary, top_level?: true, deps: [], exports: []
+
   # ===========================================================================
   # PII Patterns
   # ===========================================================================

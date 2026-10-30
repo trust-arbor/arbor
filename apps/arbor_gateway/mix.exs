@@ -30,6 +30,7 @@ defmodule ArborGateway.MixProject do
 
   defp deps do
     [
+      {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_actions, in_umbrella: true},
       {:arbor_kernel_runtime, in_umbrella: true},

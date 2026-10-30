@@ -12,7 +12,19 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       exports: [SafeManagementSurface, Adapters.SignalAuthContext]
     },
     Arbor.Common => %{
-      deps: [Arbor.Common.OAuth, Arbor.Contracts, Arbor.Custody, Finch, Jason, Logger, Req, Zoi],
+      deps: [
+        Arbor.Common.OAuth,
+        Arbor.Common.SafeAtom,
+        Arbor.Common.SafePath,
+        Arbor.Common.SensitiveData,
+        Arbor.Contracts,
+        Arbor.Custody,
+        Finch,
+        Jason,
+        Logger,
+        Req,
+        Zoi
+      ],
       exports: :all
     },
     Arbor.Common.OAuth => %{
@@ -20,7 +32,17 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       deps: [Finch, Jason, Logger, Req],
       exports: :all
     },
-    Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},
+    Arbor.Common.SafeAtom => %{app: :arbor_support, deps: [], exports: []},
+    Arbor.Common.SafePath => %{
+      app: :arbor_support,
+      deps: [],
+      exports: [RootBinding, TraversalError]
+    },
+    Arbor.Common.SensitiveData => %{app: :arbor_support, deps: [], exports: []},
+    Arbor.Eval => %{
+      deps: [Arbor.Contracts, Arbor.Common, Arbor.Common.SensitiveData, Jason],
+      exports: :all
+    },
     Arbor.Signals => %{
       app: :arbor_signals,
       deps: [Arbor.Contracts, Jason, Logger, TypedStruct],
@@ -35,8 +57,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
   test "runtime kernel enables strict alias-aware Boundary compilation" do
     source = File.read!(Path.join(umbrella_root(), "apps/arbor_kernel_runtime/mix.exs"))
 
-    assert source =~
-             ~r/compilers:\s*\[:arbor_safe_path_reader,\s*:boundary\]\s*\+\+\s*Mix\.compilers\(\)/
+    assert source =~ ~r/compilers:\s*\[:boundary\]\s*\+\+\s*Mix\.compilers\(\)/
 
     assert source =~ ~r/type:\s*:strict/
     assert source =~ ~r/check:\s*\[aliases:\s*true\]/

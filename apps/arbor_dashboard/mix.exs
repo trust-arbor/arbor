@@ -38,6 +38,7 @@ defmodule Arbor.Dashboard.MixProject do
 
   defp deps do
     [
+      {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:conversation_kit, path: "../../packages/conversation_kit"},
       {:conversation_kit_arbor, path: "../../packages/conversation_kit_arbor"},
