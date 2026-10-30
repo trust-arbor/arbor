@@ -1,6 +1,8 @@
 defmodule Arbor.Signals.MixProject do
   use Mix.Project
 
+  @source_url "https://github.com/trust-arbor/arbor"
+
   def project do
     [
       app: :arbor_signals,
@@ -11,7 +13,12 @@ defmodule Arbor.Signals.MixProject do
       compilers: [:boundary] ++ Mix.compilers(),
       boundary: [default: [type: :strict, check: [aliases: true]]],
       description: "Bounded signals, secure channels and provenance for Elixir applications",
-      package: [licenses: ["MIT"], files: ~w(lib mix.exs README.md LICENSE)],
+      source_url: @source_url,
+      package: [
+        licenses: ["MIT"],
+        links: %{"GitHub" => @source_url},
+        files: ~w(lib mix.exs README.md LICENSE)
+      ],
       deps: deps()
     ]
   end
