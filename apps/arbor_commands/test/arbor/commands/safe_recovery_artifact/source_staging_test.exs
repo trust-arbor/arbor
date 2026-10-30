@@ -166,6 +166,42 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "OIDC is a required physical input with exact package ownership" do
+    oid = String.duplicate("f", 40)
+    required = required_triples(oid)
+    project = "packages/arbor_capabilities_oidc/mix.exs"
+    source = "packages/arbor_capabilities_oidc/lib/arbor/capabilities/oidc.ex"
+    test_source = "packages/arbor_capabilities_oidc/test/oidc_test.exs"
+    embedded = "apps/arbor_capabilities_oidc/lib/arbor/capabilities/oidc.ex"
+    adjacent = "packages/arbor_capabilities_oidc_other/lib/arbor/capabilities/oidc.ex"
+
+    extras =
+      Enum.map([source, test_source, embedded, adjacent], fn path ->
+        %{path: path, mode: "100644", oid: oid}
+      end)
+
+    assert project in SourcePolicy.required_files()
+    assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+    assert source in paths
+    assert test_source in paths
+    refute embedded in paths
+    refute adjacent in paths
+
+    assert {:error, :missing_required_input} =
+             SourcePolicy.select(Enum.reject(required, &(&1.path == project)) ++ extras)
+
+    assert SourcePolicy.ignored_generated_extra?(
+             "packages/arbor_capabilities_oidc/cover/report.html"
+           )
+
+    refute SourcePolicy.ignored_generated_extra?(
+             "packages/arbor_capabilities_oidc_other/cover/report.html"
+           )
+
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_capabilities_oidc/cover/report.html")
+  end
+
+  @tag :fast
   test "enforces the 4999 source-row bound before later work" do
     oid = String.duplicate("c", 40)
 
@@ -663,6 +699,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_custody/lib/custody.ex", "custody source\n"},
       {"packages/arbor_oauth/mix.exs", "oauth\n"},
       {"packages/arbor_oauth/lib/oauth.ex", "oauth source\n"},
+      {"packages/arbor_capabilities_oidc/mix.exs", "oidc\n"},
+      {"packages/arbor_capabilities_oidc/lib/oidc.ex", "oidc source\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},
       {"packages/arbor_signals/lib/signals.ex", "signals source\n"},
       {"packages/arbor_persistence/mix.exs", "persistence\n"},

@@ -32,14 +32,16 @@ defmodule ArborSecurity.MixProject do
     [
       {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"},
       {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
+      {:arbor_capabilities_oidc, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities_oidc",
+       optional: true,
+       runtime: false,
+       env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:plug_crypto, "~> 2.0"},
-      {:joken, "~> 2.6", runtime: false},
-      {:joken_jwks, "~> 1.6", runtime: false},
-      {:req, "~> 0.5", runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

@@ -1,8 +1,8 @@
-defmodule Arbor.Security.OIDC.DeviceFlowTest do
+defmodule Arbor.Capabilities.OIDC.DeviceFlowTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Security.OIDC.DeviceFlow
-  alias Arbor.Security.LoopbackHTTPServer, as: Server
+  alias Arbor.Capabilities.OIDC.DeviceFlow
+  alias Arbor.Capabilities.OIDC.TestSupport.LoopbackHTTPServer, as: Server
 
   @moduletag :fast
 
@@ -19,8 +19,9 @@ defmodule Arbor.Security.OIDC.DeviceFlowTest do
 
     test "returns error when issuer is unreachable" do
       config = %{
-        issuer: "https://nonexistent.arbor-test-oidc.invalid",
-        client_id: "test-client"
+        issuer: Server.closed_port_url(),
+        client_id: "test-client",
+        allow_http: true
       }
 
       assert {:error, {:http_request_failed, _}} = DeviceFlow.start(config)
@@ -97,8 +98,9 @@ defmodule Arbor.Security.OIDC.DeviceFlowTest do
   describe "refresh/2" do
     test "returns error when issuer is unreachable" do
       config = %{
-        issuer: "https://nonexistent.arbor-test-oidc.invalid",
-        client_id: "test-client"
+        issuer: Server.closed_port_url(),
+        client_id: "test-client",
+        allow_http: true
       }
 
       assert {:error, {:http_request_failed, _}} =

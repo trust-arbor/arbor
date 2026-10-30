@@ -204,7 +204,8 @@ defmodule Arbor.Security.OIDC.JwksCache do
          {:ok, max_bytes} <-
            optional_positive_integer(field(provider, :discovery_max_response_bytes)) do
       descriptor = {
-        :arbor_oidc_jwks_cache_v2,
+        :arbor_oidc_jwks_cache_v3,
+        Config.protocol_adapter(),
         issuer,
         client_id,
         field(provider, :allow_http, false) == true,

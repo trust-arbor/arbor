@@ -5,10 +5,10 @@
   "source_captured_on": "2026-08-03",
   "admission_cutover": "2026-10-16",
   "archive_root": ".claude/applied-learning-archive",
-  "entry_count": 806,
+  "entry_count": 808,
   "always_loaded_count": 12,
   "original_entry_count": 461,
-  "post_migration_entry_count": 345,
+  "post_migration_entry_count": 347,
   "entries": [
     {
       "source_ordinal": 1,
@@ -16615,6 +16615,54 @@
       "confirmed_by": null,
       "revisit_when": null,
       "content_sha256": "da7a69d222b0b4ada0b554af6aeb38dbe474b46560c03c82c7b77cce59c01f17",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 812,
+      "source_kind": "post-migration",
+      "slug": "static-dependency-guards-must-follow-returned-helper-declarations",
+      "title": "Static dependency guards must follow returned helper declarations.",
+      "topic": "filesystem-git",
+      "class": "correctness",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-static-dependency-guards-must-follow-returned-helper-declarations",
+      "created": "2026-10-29",
+      "source_session": "codex:01a17b3e-aa41-71a2-8fd7-2df90289d980",
+      "source_incident": "Static hierarchy and coupling scanners omitted a package dependency returned by a conditional zero-argument helper.",
+      "scope": [
+        "packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs",
+        "published_dependency_declarations/1",
+        "dependency_list/3",
+        "apps/arbor_commands/lib/arbor/commands/source_coupling/ownership.ex"
+      ],
+      "last_confirmed": "2026-10-29",
+      "confirmed_by": "codex-source-audit-2026-10-29",
+      "revisit_when": null,
+      "content_sha256": "dc41f323bb1d3735dbdce6c5bcc2705ec8e67676fb29cafed92de925cf70f8ba",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 813,
+      "source_kind": "post-migration",
+      "slug": "cache-keys-must-bind-the-trusted-provider-selection",
+      "title": "Cache keys must bind the trusted provider selection.",
+      "topic": "providers-oauth",
+      "class": "security-invariant",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-cache-keys-must-bind-the-trusted-provider-selection",
+      "created": "2026-10-29",
+      "source_session": "codex:01a17b3e-aa41-71a2-8fd7-2df90289d980",
+      "source_incident": "A changed trusted protocol selector reused cached JWKS from the preceding provider with the same key ID.",
+      "scope": [
+        "apps/arbor_security/lib/arbor/security/oidc/jwks_cache.ex",
+        "apps/arbor_security/test/arbor/security/oidc_protocol_cache_security_regression_test.exs"
+      ],
+      "last_confirmed": "2026-10-29",
+      "confirmed_by": "codex-oidc-cache-policy-regression",
+      "revisit_when": null,
+      "content_sha256": "3182fef0fce9c8c4e3a1d51ff346a56e45670cd566e1181119369f7cb0f4c41d",
       "always_loaded": false
     }
   ]

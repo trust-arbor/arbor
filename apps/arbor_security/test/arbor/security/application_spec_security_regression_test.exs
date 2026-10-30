@@ -8,7 +8,7 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
   alias Arbor.KernelRuntime.ApplicationSpecPeer
 
   @startup_timeout 15_000
-  @omitted [:joken, :joken_jwks, :req, :jose, :finch, :mint]
+  @omitted [:arbor_capabilities_oidc, :joken, :joken_jwks, :req, :jose, :finch, :mint]
   @required MapSet.new([
               :arbor_custody,
               :arbor_kernel_runtime,

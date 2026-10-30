@@ -182,13 +182,17 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
   defp dependency_list({:__block__, _metadata, expressions}, functions, seen),
     do: dependency_list(List.last(expressions), functions, seen)
 
-  defp dependency_list(entries, _functions, _seen) when is_list(entries), do: entries
+  defp dependency_list(entries, functions, seen) when is_list(entries),
+    do: Enum.flat_map(entries, &dependency_entry(&1, functions, seen))
 
   defp dependency_list({:++, _metadata, [left, right]}, functions, seen),
     do: dependency_list(left, functions, seen) ++ dependency_list(right, functions, seen)
 
   defp dependency_list({:|>, _metadata, [entries, _filter]}, functions, seen),
     do: dependency_list(entries, functions, seen)
+
+  defp dependency_list({:case, _metadata, [_selector, clauses]}, functions, seen),
+    do: Enum.flat_map(case_returns(clauses), &dependency_list(&1, functions, seen))
 
   defp dependency_list({name, _metadata, args}, functions, seen)
        when is_atom(name) and args in [nil, []] do
@@ -202,6 +206,48 @@ defmodule Arbor.Commands.SourceCoupling.Ownership do
   end
 
   defp dependency_list(_dynamic, _functions, _seen), do: []
+
+  # A helper in a dependency list must return one tuple, while a helper used
+  # as the list itself must return a list. Do not flatten nested lists or walk
+  # tuple options: those positions can contain dependency-shaped metadata.
+  defp dependency_entry({dep, _requirement} = entry, _functions, _seen) when is_atom(dep),
+    do: [entry]
+
+  defp dependency_entry({:{}, _metadata, [dep, _requirement, _opts]} = entry, _functions, _seen)
+       when is_atom(dep),
+       do: [entry]
+
+  defp dependency_entry({:__block__, _metadata, expressions}, functions, seen),
+    do: dependency_entry(List.last(expressions), functions, seen)
+
+  defp dependency_entry({:case, _metadata, [_selector, clauses]}, functions, seen),
+    do: Enum.flat_map(case_returns(clauses), &dependency_entry(&1, functions, seen))
+
+  defp dependency_entry({name, _metadata, args}, functions, seen)
+       when is_atom(name) and args in [nil, []] do
+    if MapSet.member?(seen, name) do
+      []
+    else
+      functions
+      |> Map.get(name, [])
+      |> Enum.flat_map(&dependency_entry(&1, functions, MapSet.put(seen, name)))
+    end
+  end
+
+  defp dependency_entry(_dynamic, _functions, _seen), do: []
+
+  # Without evaluating operator environment, conservatively retain possible
+  # branch returns. In particular, a public version dependency in the nil
+  # branch remains a known-owner edge even when another branch supplies a
+  # dynamic local override. Existing source admission filters each tuple.
+  defp case_returns(clauses) when is_list(clauses) do
+    clauses
+    |> Keyword.get(:do, [])
+    |> Enum.flat_map(fn
+      {:->, _metadata, [_patterns, body]} -> [body]
+      _other -> []
+    end)
+  end
 
   defp return_expression({:__block__, _metadata, expressions}), do: List.last(expressions)
   defp return_expression(expression), do: expression

@@ -8,7 +8,7 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
 
   use ExUnit.Case, async: false
 
-  @roots [:joken, :joken_jwks, :req]
+  @roots [:req]
   @restart_timeout 3_000
 
   setup do

@@ -102,7 +102,7 @@ badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 
 ```
 L0  arbor_kernel, arbor_custody, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
-L1  arbor_signals, arbor_persistence_sql, arbor_persistence_eventstore
+L1  arbor_signals, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
 L2  arbor_kernel_runtime, arbor_cartographer, arbor_web
 L3  arbor_llm, arbor_security
 L4  arbor_persistence_host, arbor_shell, arbor_sandbox

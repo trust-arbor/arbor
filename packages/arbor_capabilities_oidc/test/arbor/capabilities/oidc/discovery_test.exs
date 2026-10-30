@@ -1,4 +1,4 @@
-defmodule Arbor.Security.OIDC.DiscoveryTest do
+defmodule Arbor.Capabilities.OIDC.DiscoveryTest do
   @moduledoc """
   Security-owned endpoint trust: issuer shape validation (pre-IO) and the
   issuer-same-origin closed policy over a discovered document.
@@ -8,8 +8,8 @@ defmodule Arbor.Security.OIDC.DiscoveryTest do
 
   use ExUnit.Case, async: true
 
-  alias Arbor.Security.LoopbackHTTPServer, as: Server
-  alias Arbor.Security.OIDC.Discovery
+  alias Arbor.Capabilities.OIDC.Discovery
+  alias Arbor.Capabilities.OIDC.TestSupport.LoopbackHTTPServer, as: Server
 
   @moduletag :fast
 

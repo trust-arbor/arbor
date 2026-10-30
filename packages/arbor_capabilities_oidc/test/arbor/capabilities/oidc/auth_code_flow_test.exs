@@ -1,8 +1,8 @@
-defmodule Arbor.Security.OIDC.AuthCodeFlowTest do
+defmodule Arbor.Capabilities.OIDC.AuthCodeFlowTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Security.LoopbackHTTPServer, as: Server
-  alias Arbor.Security.OIDC.AuthCodeFlow
+  alias Arbor.Capabilities.OIDC.AuthCodeFlow
+  alias Arbor.Capabilities.OIDC.TestSupport.LoopbackHTTPServer, as: Server
 
   @moduletag :fast
 
