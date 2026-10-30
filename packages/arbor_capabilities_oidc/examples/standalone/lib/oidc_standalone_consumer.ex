@@ -190,7 +190,8 @@ defmodule OIDCStandaloneConsumer do
           })
         end,
         fn base ->
-          config = provider(base)
+          config = protocol_provider(base)
+          device_config = device_provider(base)
           state = @canary <> ":state"
           redirect = base <> "/callback"
 
@@ -234,18 +235,26 @@ defmodule OIDCStandaloneConsumer do
           ensure(
             match?(
               {:ok, _},
-              OIDC.verify(tokens["id_token"], Map.put(config, :expected_nonce, nonce))
+              OIDC.verify(
+                tokens["id_token"],
+                Map.put(verification_provider(base), :expected_nonce, nonce)
+              )
             ),
             "exchanged ID token was not actually verified"
           )
 
-          {:ok, device} = OIDC.start_device_flow(config)
+          {:ok, device} = OIDC.start_device_flow(device_config)
           ensure(device["device_code"] == @canary <> ":device", "device start failed")
-          ensure(token_result?(OIDC.poll_device_flow(config, device)), "device poll failed")
+
+          ensure(
+            token_result?(OIDC.poll_device_flow(device_config, device)),
+            "device poll failed"
+          )
+
           refresh = @canary <> ":refresh"
 
           ensure(
-            token_result?(OIDC.refresh_device_flow(config, refresh)),
+            token_result?(OIDC.refresh_device_flow(device_config, refresh)),
             "device refresh failed"
           )
 
@@ -323,7 +332,7 @@ defmodule OIDCStandaloneConsumer do
             end)
           end,
           fn base ->
-            config = provider(base)
+            config = verification_provider(base)
             old_token = signed(es, claims(base))
             new_token = signed(rsa, claims(base))
 
@@ -375,7 +384,12 @@ defmodule OIDCStandaloneConsumer do
     end
 
     issuer = "https://owned.invalid"
-    config = provider(issuer) |> Map.put(:allow_http, false) |> Map.put(:clock_skew_seconds, 0)
+
+    config =
+      verification_provider(issuer)
+      |> Map.put(:allow_http, false)
+      |> Map.put(:clock_skew_seconds, 0)
+
     baseline = claims(issuer, %{"nonce" => @canary <> ":nonce"})
     token = signed(es, baseline)
 
@@ -492,14 +506,14 @@ defmodule OIDCStandaloneConsumer do
               %{"/.well-known/openid-configuration" => {:reply, 200, [], Jason.encode!(document)}}
             end,
             fn base ->
-              config = provider(base)
+              config = protocol_provider(base)
               {verifier, _} = OIDC.generate_pkce()
 
               for operation <- [
                     fn -> OIDC.build_authorize_url(config, base <> "/callback", @canary, []) end,
                     fn -> OIDC.exchange_code(config, @canary, base <> "/callback", verifier) end,
-                    fn -> OIDC.start_device_flow(config) end,
-                    fn -> OIDC.verify(signed(key, claims(base)), config) end
+                    fn -> OIDC.start_device_flow(device_provider(base)) end,
+                    fn -> OIDC.verify(signed(key, claims(base)), verification_provider(base)) end
                   ] do
                 ensure(
                   operation.() == {:error, {:untrusted_endpoint, :issuer_origin_mismatch}},
@@ -539,7 +553,7 @@ defmodule OIDCStandaloneConsumer do
                     {:ok, _},
                     OIDC.verify(
                       signed(key, claims(base)),
-                      Map.put(provider(base), :trusted_origins, [trusted_base])
+                      Map.put(verification_provider(base), :trusted_origins, [trusted_base])
                     )
                   ),
                   "explicit trusted origin failed"
@@ -562,7 +576,7 @@ defmodule OIDCStandaloneConsumer do
               {:ok, _},
               OIDC.verify(
                 signed(key, claims(base)),
-                Map.put(provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
+                Map.put(verification_provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
               )
             ),
             "pinned same-origin JWKS failed"
@@ -639,7 +653,7 @@ defmodule OIDCStandaloneConsumer do
             match?(
               {:error, _},
               OIDC.fetch_jwks_uncached(
-                Map.put(provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
+                Map.put(verification_provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
               )
             ),
             "invalid JWKS document was admitted"
@@ -783,7 +797,7 @@ defmodule OIDCStandaloneConsumer do
              })}
         },
         fn base ->
-          config = Map.put(provider(base), :endpoints, %{token_endpoint: base <> "/token"})
+          config = Map.put(device_provider(base), :endpoints, %{token_endpoint: base <> "/token"})
 
           ensure(
             OIDC.poll_device_flow(config, %{
@@ -803,7 +817,7 @@ defmodule OIDCStandaloneConsumer do
       HTTPFixture.run(%{"/jwks" => {:body, [], String.duplicate("j", 8_192), 128, 5}}, fn base ->
         ensure(
           OIDC.fetch_jwks_uncached(
-            Map.put(provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
+            Map.put(verification_provider(base), :endpoints, %{jwks_uri: base <> "/jwks"})
           ) ==
             {:error, {:response_bytes_exceeded, 262_144}},
           "JWKS response byte cap changed"
@@ -830,16 +844,32 @@ defmodule OIDCStandaloneConsumer do
     }
   end
 
-  defp provider(issuer),
+  # Authorization-code admission deliberately rejects unknown provider keys.
+  # Keep device polling and JWT discovery options at their own public APIs.
+  defp protocol_provider(issuer),
     do: %{
       issuer: issuer,
       client_id: @client,
       client_secret: @canary <> ":secret",
       allow_http: true,
       scopes: ["openid", "email"],
-      timeout_ms: 1_000,
-      discovery_timeout_ms: 1_000,
-      poll_timeout_ms: 2_000
+      timeout_ms: 1_000
+    }
+
+  defp device_provider(issuer),
+    do:
+      Map.merge(protocol_provider(issuer), %{
+        discovery_timeout_ms: 1_000,
+        poll_timeout_ms: 2_000
+      })
+
+  defp verification_provider(issuer),
+    do: %{
+      issuer: issuer,
+      client_id: @client,
+      client_secret: @canary <> ":secret",
+      allow_http: true,
+      discovery_timeout_ms: 1_000
     }
 
   defp exchange_http(response, maximum \\ 65_536, timeout \\ 1_000) do
@@ -850,7 +880,7 @@ defmodule OIDCStandaloneConsumer do
     {verifier, _} = OIDC.generate_pkce()
 
     config =
-      provider(base)
+      protocol_provider(base)
       |> Map.put(:endpoints, %{token_endpoint: base <> "/token"})
       |> Map.put(:max_response_bytes, maximum)
       |> Map.put(:timeout_ms, timeout)
