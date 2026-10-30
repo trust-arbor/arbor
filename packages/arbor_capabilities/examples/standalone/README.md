@@ -89,3 +89,11 @@ start that issuer or claim approval authority. This satisfies the explicit
 startup contract without adding a default or an authority fallback. The
 optional authority-audit consumer remains unconfigured and cannot read or
 retire the authority journal through its separate owner port.
+
+Cold peer setup uses OTP's standard-I/O alternative channel to start and
+validate each actual authority before connecting distribution. The fresh
+connection then exercises normal production discovery: a bounded wait requires
+an affirmative foreign classification, and the public replay gate awaits the
+authority probe before signed-request refusal. The production fixture does not
+call test-only cache resets, inspect private classification state, or change
+probe timing policy.

@@ -22,37 +22,37 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     {:ok, _} = :net_kernel.start([name, :shortnames])
 
     try do
-      with_peer("foreign", fn node ->
-        ensure(
-          Enum.all?([:arbor_security, :arbor_capabilities], &(&1 not in applications(node))),
-          "foreign peer ran authority"
-        )
+      with_peer(
+        "foreign",
+        fn peer ->
+          ensure(
+            Enum.all?(
+              [:arbor_security, :arbor_capabilities],
+              &(&1 not in peer_applications(peer))
+            ),
+            "foreign peer ran authority"
+          )
+        end,
+        fn node ->
+          await_classification!(node, :foreign)
+          ensure(not ReplayPeers.peers_present?(), "affirmatively foreign peer was refused")
+          {:ok, signed} = request_factory.()
 
-        :ok = ReplayPeers.forget(node)
+          ensure(
+            match?({:ok, _}, Security.verify_signed_request_authenticity(signed)),
+            "foreign peer blocked valid signed request"
+          )
+        end
+      )
 
-        ensure(
-          ReplayPeers.classification(node) == :foreign,
-          "affirmatively foreign peer was refused"
-        )
-
-        {:ok, signed} = request_factory.()
-
-        ensure(
-          match?({:ok, _}, Security.verify_signed_request_authenticity(signed)),
-          "foreign peer blocked valid signed request"
-        )
-      end)
-
-      with_peer("new_core", fn node ->
-        install_new_core!(node)
+      with_peer("new_core", &install_new_core!/1, fn node ->
         refuse!(node, request_factory)
       end)
 
       legacy =
         System.fetch_env!("CAPABILITIES_QA_LEGACY_MANIFEST") |> File.read!() |> Jason.decode!()
 
-      with_peer("legacy", fn node ->
-        install_legacy!(node, legacy)
+      with_peer("legacy", fn peer -> install_legacy!(peer, legacy) end, fn node ->
         refuse!(node, request_factory)
       end)
 
@@ -76,8 +76,12 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
   end
 
   defp refuse!(node, request_factory) do
-    :ok = ReplayPeers.forget(node)
-    _verdict = ReplayPeers.classification(node)
+    ensure(
+      ReplayPeers.peers_present?(),
+      "authority peer was not discovered by the public replay gate"
+    )
+
+    await_classification!(node, :replay_peer)
     # The factory acquires a fresh stored-key owner-bound authority here,
     # proving local possession remains available while this authority peer is up.
     {:ok, signed} = request_factory.()
@@ -94,8 +98,8 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     )
   end
 
-  defp install_new_core!(node) do
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()], 5_000)
+  defp install_new_core!(peer) do
+    :ok = :peer.call(peer, :code, :add_paths, [:code.get_path()], 5_000)
     state = Path.join(System.fetch_env!("CAPABILITIES_COLD_STATE_ROOT"), "new-peer")
 
     for directory <- [
@@ -107,10 +111,10 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
       File.chmod!(directory, 0o700)
     end
 
-    :ok = :erpc.call(node, System, :put_env, ["CAPABILITIES_COLD_STATE_ROOT", state], 5_000)
+    :ok = :peer.call(peer, System, :put_env, ["CAPABILITIES_COLD_STATE_ROOT", state], 5_000)
 
     for {key, value} <- Application.get_all_env(:arbor_capabilities) do
-      :ok = :erpc.call(node, Application, :put_env, [:arbor_capabilities, key, value], 5_000)
+      :ok = :peer.call(peer, Application, :put_env, [:arbor_capabilities, key, value], 5_000)
     end
 
     {:ok, roles} = Config.signing_key_owner_roles()
@@ -122,26 +126,26 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
           revocation_ledger_path: Path.join(state, "independent-revocations/ledger.json"),
           signing_key_owner_roles: roles
         ] do
-      :ok = :erpc.call(node, Application, :put_env, [:arbor_capabilities, key, value], 5_000)
+      :ok = :peer.call(peer, Application, :put_env, [:arbor_capabilities, key, value], 5_000)
     end
 
-    {:ok, _} = :erpc.call(node, Application, :ensure_all_started, [:arbor_capabilities], 30_000)
+    {:ok, _} = :peer.call(peer, Application, :ensure_all_started, [:arbor_capabilities], 30_000)
 
     ensure(
-      :arbor_security not in applications(node),
+      :arbor_security not in peer_applications(peer),
       "new peer accidentally relied on the legacy host app"
     )
 
     ensure(
-      :erpc.call(node, :application, :get_application, [Security], 5_000) ==
+      :peer.call(peer, :application, :get_application, [Security], 5_000) ==
         {:ok, :arbor_capabilities},
       "new authority code belongs to the wrong application"
     )
 
-    actual_owners!(node, :arbor_capabilities)
+    actual_owners!(peer, :arbor_capabilities)
   end
 
-  defp install_legacy!(node, manifest) do
+  defp install_legacy!(peer, manifest) do
     ensure(
       manifest["schema"] == "arbor.capabilities.legacy-build.v1",
       "invalid legacy manifest schema"
@@ -162,8 +166,8 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
       |> Enum.uniq()
 
     ensure(ebins != [], "legacy manifest has no application code paths")
-    :ok = :erpc.call(node, :code, :add_paths, [system_paths() ++ ebins], 5_000)
-    {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:elixir], 10_000)
+    :ok = :peer.call(peer, :code, :add_paths, [system_paths() ++ ebins], 5_000)
+    {:ok, _} = :peer.call(peer, :application, :ensure_all_started, [:elixir], 10_000)
     bytes = File.read!(manifest["peer_env_path"])
     ensure(hash(bytes) == manifest["peer_env_sha256"], "legacy peer configuration changed")
     {:ok, [configuration]} = :file.consult(String.to_charlist(manifest["peer_env_path"]))
@@ -191,23 +195,23 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     )
 
     for {application, values} <- configuration, {key, value} <- values do
-      :ok = :erpc.call(node, Application, :put_env, [application, key, value], 5_000)
+      :ok = :peer.call(peer, Application, :put_env, [application, key, value], 5_000)
     end
 
-    {:ok, _} = :erpc.call(node, Application, :ensure_all_started, [:arbor_security], 30_000)
+    {:ok, _} = :peer.call(peer, Application, :ensure_all_started, [:arbor_security], 30_000)
 
     ensure(
-      :arbor_capabilities not in applications(node),
+      :arbor_capabilities not in peer_applications(peer),
       "legacy peer accidentally loaded new Core"
     )
 
     ensure(
-      :erpc.call(node, :application, :get_application, [Security], 5_000) ==
+      :peer.call(peer, :application, :get_application, [Security], 5_000) ==
         {:ok, :arbor_security},
       "legacy peer did not use actual old Security ownership"
     )
 
-    beam = :erpc.call(node, :code, :which, [Security], 5_000) |> List.to_string() |> Path.expand()
+    beam = :peer.call(peer, :code, :which, [Security], 5_000) |> List.to_string() |> Path.expand()
     relative = Path.relative_to(beam, build_root)
 
     ensure(
@@ -215,14 +219,14 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
       "legacy authority loaded outside the recorded build"
     )
 
-    {:ok, actual_bytes} = :erpc.call(node, :file, :read_file, [String.to_charlist(beam)], 5_000)
+    {:ok, actual_bytes} = :peer.call(peer, :file, :read_file, [String.to_charlist(beam)], 5_000)
 
     ensure(
       hash(actual_bytes) == manifest["files"][relative],
       "legacy authority BEAM differs from recorded baseline"
     )
 
-    actual_owners!(node, :arbor_security)
+    actual_owners!(peer, :arbor_security)
   end
 
   defp system_paths do
@@ -237,20 +241,20 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     end)
   end
 
-  defp actual_owners!(node, application) do
+  defp actual_owners!(peer, application) do
     ensure(
       match?(
         {:ok, {Arbor.Security.Application, _}},
-        :erpc.call(node, :application, :get_key, [application, :mod], 5_000)
+        :peer.call(peer, :application, :get_key, [application, :mod], 5_000)
       ),
       "authority peer application callback was not the actual authority tree"
     )
 
-    supervisor = :erpc.call(node, Process, :whereis, [Arbor.Security.Supervisor], 5_000)
+    supervisor = :peer.call(peer, Process, :whereis, [Arbor.Security.Supervisor], 5_000)
 
     ensure(
       is_pid(supervisor) and
-        :erpc.call(node, :application, :get_application, [supervisor], 5_000) ==
+        :peer.call(peer, :application, :get_application, [supervisor], 5_000) ==
           {:ok, application},
       "authority supervisor belongs to the wrong application"
     )
@@ -262,13 +266,13 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
           Arbor.Security.Identity.ReplayPeers
         ] do
       ensure(
-        is_pid(:erpc.call(node, Process, :whereis, [owner], 5_000)),
+        is_pid(:peer.call(peer, Process, :whereis, [owner], 5_000)),
         "authority peer lacked a real owner"
       )
     end
   end
 
-  defp with_peer(label, operation) do
+  defp with_peer(label, initialize, operation) do
     # The three labels above are fixed; this never converts external input to atoms.
     name = String.to_atom("capabilities_cold_#{label}_#{System.unique_integer([:positive])}")
 
@@ -281,6 +285,13 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
       })
 
     try do
+      initialize.(peer)
+
+      ensure(
+        node not in Node.list(:connected),
+        "peer setup connected distribution before discovery"
+      )
+
       ensure(Node.connect(node), "owned peer did not connect")
       assert_peer_cookie!(node)
       operation.(node)
@@ -324,6 +335,29 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     ensure(matched?, "owned peer must receive exactly one current synthetic cookie")
   end
 
+  defp await_classification!(node, expected) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    await_classification!(node, expected, deadline)
+  end
+
+  defp await_classification!(node, expected, deadline) do
+    ensure(node in Node.list(:connected), "owned peer disconnected before discovery")
+
+    if ReplayPeers.classification(node) == expected do
+      :ok
+    else
+      ensure(
+        System.monotonic_time(:millisecond) < deadline,
+        "production peer discovery did not become ready"
+      )
+
+      receive do
+      after
+        10 -> await_classification!(node, expected, deadline)
+      end
+    end
+  end
+
   defp await_disconnected!(node, remaining) do
     if node in Node.list(:connected) do
       ensure(remaining > 0, "owned peer stayed connected after stop")
@@ -337,8 +371,8 @@ defmodule CapabilitiesStandaloneConsumer.PeerProof do
     end
   end
 
-  defp applications(node),
-    do: :erpc.call(node, :application, :which_applications, [], 5_000) |> Enum.map(&elem(&1, 0))
+  defp peer_applications(peer),
+    do: :peer.call(peer, :application, :which_applications, [], 5_000) |> Enum.map(&elem(&1, 0))
 
   defp hash(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
   defp ensure(true, _label), do: :ok
