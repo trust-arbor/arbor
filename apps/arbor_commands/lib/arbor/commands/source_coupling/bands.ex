@@ -22,6 +22,8 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
     "arbor_kernel_runtime" => "K",
     # Caller-owned OTP custody retains the extracted Common mechanism band.
     "arbor_custody" => "K",
+    # Shared safety primitives retain their extracted Common mechanism band.
+    "arbor_support" => "K",
     # Provider-neutral OAuth retains the extracted Common mechanism band.
     "arbor_oauth" => "K",
     # L0 device I/O. Same rank as the kernel; voice depends downward on it.

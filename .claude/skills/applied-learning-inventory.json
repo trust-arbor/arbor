@@ -10725,9 +10725,9 @@
         "apps/arbor_actions/test/arbor/actions/batch_context_security_regression_test.exs",
         "apps/arbor_historian/test/support/authority_audit_test_helpers.ex"
       ],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "10792ed88ec0d73cf58f45ef5c0300ff94e18fc663d2bc2987ca0a059a6be70e",
+      "last_confirmed": "2026-10-30",
+      "confirmed_by": "effective-runtime-path-audit",
+      "content_sha256": "170abf45556f353a697e131e5b87a31b4d43317a41ff24aa0e620baa69178f78",
       "always_loaded": false,
       "revisit_when": null
     },

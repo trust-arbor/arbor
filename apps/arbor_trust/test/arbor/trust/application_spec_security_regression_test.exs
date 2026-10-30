@@ -20,6 +20,7 @@ defmodule Arbor.Trust.ApplicationSpecSecurityRegressionTest do
   @required MapSet.new([
               :arbor_kernel_runtime,
               :arbor_security,
+              :arbor_support,
               :elixir,
               :jason,
               :kernel,

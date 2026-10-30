@@ -1,0 +1,91 @@
+{
+  "schema": "arbor.support.adoption-source-map.v1",
+  "source_commit": "14c2566fb63bf7e3efb36a745c8b139779458e19",
+  "source_owner": "apps/arbor_kernel_runtime",
+  "target_owner": "packages/arbor_support",
+  "module_identity_policy": "Preserve Arbor.Common.SafePath, SafeAtom, SensitiveData, nested structs/exceptions and NativeReaderArtifact.",
+  "dispositions": [
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/safe_path.ex",
+      "source_sha256": "3b61a18b2124013c9f4abc5e633614d6018726bb50a93a8789c926e2374c8638",
+      "source_git_blob_oid": "a9bd8f68c7bc77dec3fd24d4587ab16ebc032a58",
+      "target_path": "packages/arbor_support/lib/arbor/common/safe_path.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Add an independent strict top-level Boundary without changing public identities or algorithms.",
+        "Read expose_test_fixtures from :arbor_support instead of :arbor_kernel_runtime."
+      ],
+      "target_sha256": "ff4035ea2b8ec0c73fa0b0ef4fc549868d434ed98f9325e3d5c998dc29faa161"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/test/arbor/common/safe_path_test.exs",
+      "source_sha256": "13a194e698d7a90f5ec0bb623eea1e09b552824a928042789dbe48ad8c1db62a",
+      "source_git_blob_oid": "9aa5b7c303435796915c5c16f7b9c17346a04687",
+      "target_path": "packages/arbor_support/test/arbor/common/safe_path_test.exs",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "13a194e698d7a90f5ec0bb623eea1e09b552824a928042789dbe48ad8c1db62a"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/safe_atom.ex",
+      "source_sha256": "f6915dfc38f06130c6bd9ec9dbcddbcbf300f967b753cd035f6013a83f801dd8",
+      "source_git_blob_oid": "c1c062f0175bcf2ccd5a7c40418d43e7c4e68539",
+      "target_path": "packages/arbor_support/lib/arbor/common/safe_atom.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Add an independent strict top-level Boundary without changing public identities or algorithms."
+      ],
+      "target_sha256": "333a9017c85ea6fba6f85d8fb2adf0a2ab0f2c4f3999ba784b6c0e626dea2558"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/test/arbor/common/safe_atom_test.exs",
+      "source_sha256": "c3ce062db33c53e11edc037c55fd524e7f2df9d771baeaa10f498f456054a85c",
+      "source_git_blob_oid": "8a67ed3aa3bd8149cbde785facad8e5367344bee",
+      "target_path": "packages/arbor_support/test/arbor/common/safe_atom_test.exs",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "c3ce062db33c53e11edc037c55fd524e7f2df9d771baeaa10f498f456054a85c"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/sensitive_data.ex",
+      "source_sha256": "c0aedc5f8b69d71a4e323844442e096274bd8fb852711c59741b92e749d0566a",
+      "source_git_blob_oid": "c0ced959553428119fecb79ab21b09ea8493462f",
+      "target_path": "packages/arbor_support/lib/arbor/common/sensitive_data.ex",
+      "disposition": "physical_move",
+      "permitted_changes": [
+        "Add an independent strict top-level Boundary without changing public identities or algorithms."
+      ],
+      "target_sha256": "e89aa18127fdf9f60be0cd3da9bcc39d88d14aba2b0c4498066bb2e77f831745"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/test/arbor/common/sensitive_data_test.exs",
+      "source_sha256": "0b19d35dffcfb2dfabe527fd3745c3ac0a5f21714ee68dafa41fa97fdc756afe",
+      "source_git_blob_oid": "783e18d3f7ab9183234af46725e01774832065cc",
+      "target_path": "packages/arbor_support/test/arbor/common/sensitive_data_test.exs",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "0b19d35dffcfb2dfabe527fd3745c3ac0a5f21714ee68dafa41fa97fdc756afe"
+    },
+    {
+      "source_path": "apps/arbor_kernel_runtime/c_src/arbor_safe_path_reader.c",
+      "source_sha256": "92b4b75987cf8c001e48a86f5dcd8dddaa897725e919846ad61e17b84a32e18a",
+      "source_git_blob_oid": "0359887bee269a98cac16ae577d7ebcb9f0612c8",
+      "target_path": "packages/arbor_support/c_src/arbor_safe_path_reader.c",
+      "disposition": "physical_move",
+      "permitted_changes": [],
+      "target_sha256": "92b4b75987cf8c001e48a86f5dcd8dddaa897725e919846ad61e17b84a32e18a"
+    }
+  ],
+  "native_compiler": {
+    "source_path": "apps/arbor_kernel_runtime/mix.exs",
+    "source_project_sha256": "093f911cb255d56007ce5a8942ab58a7b59ab308158fd7a1d65c6a6f8a9fc286",
+    "source_compiler_sha256": "7644860765a3e5f31d6a4dbee3cd1b70b849c29b6ff190b16952fed9971da6a4",
+    "source_first_line": 119,
+    "source_last_line": 236,
+    "target_path": "packages/arbor_support/mix.exs",
+    "disposition": "Move compiler module; switch app/generated owner to :arbor_support and register generated source against final Mix build config. Native compile/embed/hash/temporary-file and clean semantics retained.",
+    "source_project_git_blob_oid": "a2c1f856b2068981c9313a0de9ac9c609698e886",
+    "build_integration_review_point": "Mix.ProjectStack.merge_config/1 is a pinned build-only Mix internal, invoked only by run/1 for :arbor_support after dependency config finalization. It appends/deduplicates generated_dir without discarding existing elixirc_paths. clean/0 does not mutate project configuration.",
+    "target_project_sha256": "8dad9985114649027a557db27478ffafecf8fa8ef902b0b2cff46b2b2e607a72"
+  }
+}

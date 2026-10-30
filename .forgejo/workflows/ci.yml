@@ -105,7 +105,7 @@ jobs:
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_kernel arbor_oauth arbor_capabilities_oidc arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -298,6 +298,42 @@ jobs:
 
       - name: OAuth formatting, strict compile, and complete primitive suites
         working-directory: packages/arbor_oauth
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
+          ../../bin/mix test --timeout 120000
+
+  # Safety primitives and their C reader compile in their standalone owner.
+  support:
+    name: Standalone safety support
+    runs-on: native
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          command -v cc
+
+      - name: Cache standalone package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/arbor_support/deps
+            packages/arbor_support/_build
+          key: support-${{ runner.os }}-${{ hashFiles('packages/arbor_support/mix.exs', 'packages/arbor_support/mix.lock', 'packages/arbor_support/c_src/*', '.tool-versions') }}
+
+      - name: Support package dependencies (committed standalone lock)
+        working-directory: packages/arbor_support
+        run: ../../bin/mix deps.get --check-locked
+
+      - name: Support formatting, strict compile, and complete primitive suites
+        working-directory: packages/arbor_support
         run: |
           ../../bin/mix format --check-formatted
           ../../bin/mix compile --warnings-as-errors

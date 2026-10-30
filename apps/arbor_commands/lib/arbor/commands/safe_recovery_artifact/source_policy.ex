@@ -8,6 +8,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_persistence_host/",
     "apps/arbor_trust/",
     "packages/arbor_custody/",
+    "packages/arbor_support/",
     "packages/arbor_oauth/",
     "packages/arbor_capabilities_oidc/",
     "packages/arbor_signals/",
@@ -16,7 +17,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
   ]
   @app_names ~w(arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust)
   @package_names ~w(
-    arbor_kernel arbor_custody arbor_oauth arbor_capabilities_oidc arbor_signals
+    arbor_kernel arbor_custody arbor_support arbor_oauth arbor_capabilities_oidc arbor_signals
     arbor_persistence arbor_persistence_sql
   )
   @ignored_generated_dirs ~w(.elixir_ls cover)
@@ -25,6 +26,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "packages/arbor_kernel/mix.exs",
     "apps/arbor_kernel_runtime/mix.exs",
     "packages/arbor_custody/mix.exs",
+    "packages/arbor_support/mix.exs",
+    "packages/arbor_support/c_src/arbor_safe_path_reader.c",
     "packages/arbor_oauth/mix.exs",
     "packages/arbor_capabilities_oidc/mix.exs",
     "packages/arbor_signals/mix.exs",

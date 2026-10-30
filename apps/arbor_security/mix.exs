@@ -30,6 +30,7 @@ defmodule ArborSecurity.MixProject do
 
   defp deps do
     [
+      {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
       {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"},
       {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
       {:arbor_capabilities_oidc, "~> 0.1.0-dev",

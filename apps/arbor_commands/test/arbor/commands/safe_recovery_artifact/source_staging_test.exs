@@ -202,6 +202,39 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "Support includes its native source without admitting adjacent roots" do
+    oid = String.duplicate("a", 40)
+    required = required_triples(oid)
+    project = "packages/arbor_support/mix.exs"
+    source = "packages/arbor_support/lib/arbor/common/safe_path.ex"
+    native = "packages/arbor_support/c_src/arbor_safe_path_reader.c"
+    adjacent = "packages/arbor_support_other/c_src/arbor_safe_path_reader.c"
+    embedded = "apps/arbor_support/lib/arbor/common/safe_path.ex"
+
+    extras =
+      Enum.map([source, adjacent, embedded], fn path ->
+        %{path: path, mode: "100644", oid: oid}
+      end)
+
+    assert project in SourcePolicy.required_files()
+    assert native in SourcePolicy.required_files()
+    assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+    assert source in paths
+    assert native in paths
+    refute adjacent in paths
+    refute embedded in paths
+
+    assert {:error, :missing_required_input} =
+             SourcePolicy.select(Enum.reject(required, &(&1.path == project)) ++ extras)
+
+    assert {:error, :missing_required_input} =
+             SourcePolicy.select(Enum.reject(required, &(&1.path == native)) ++ extras)
+
+    assert SourcePolicy.ignored_generated_extra?("packages/arbor_support/cover/report.html")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_support_other/cover/report.html")
+  end
+
+  @tag :fast
   test "enforces the 4999 source-row bound before later work" do
     oid = String.duplicate("c", 40)
 
@@ -697,6 +730,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_kernel/lib/a.ex", "arbor_kernel\n"},
       {"packages/arbor_custody/mix.exs", "custody\n"},
       {"packages/arbor_custody/lib/custody.ex", "custody source\n"},
+      {"packages/arbor_support/mix.exs", "support\n"},
+      {"packages/arbor_support/lib/support.ex", "support source\n"},
+      {"packages/arbor_support/c_src/arbor_safe_path_reader.c", "native source\n"},
       {"packages/arbor_oauth/mix.exs", "oauth\n"},
       {"packages/arbor_oauth/lib/oauth.ex", "oauth source\n"},
       {"packages/arbor_capabilities_oidc/mix.exs", "oidc\n"},

@@ -12,6 +12,7 @@ defmodule Arbor.KernelRuntime.ApplicationSpecSecurityRegressionTest do
               :arbor_custody,
               :arbor_kernel,
               :arbor_oauth,
+              :arbor_support,
               :crypto,
               :elixir,
               :jason,

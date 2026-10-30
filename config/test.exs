@@ -1,6 +1,7 @@
 import Config
 
 config :arbor_kernel_runtime, expose_test_fixtures: true
+config :arbor_support, expose_test_fixtures: true
 config :arbor_signals, expose_test_fixtures: true
 
 config :arbor_security,

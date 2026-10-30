@@ -44,6 +44,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
                :arbor_custody,
                :arbor_kernel_runtime,
                :arbor_oauth,
+               :arbor_support,
                :elixir,
                :jason,
                :kernel,
