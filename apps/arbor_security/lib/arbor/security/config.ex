@@ -643,6 +643,67 @@ defmodule Arbor.Security.Config do
     Application.get_env(@app, :operator_resolver)
   end
 
+  @doc false
+  def uri_registration_providers do
+    Application.get_env(@app, :uri_registration_providers, [])
+  end
+
+  @doc """
+  Admit the fixed URI-provider configuration once for an application startup.
+
+  The application retains these options in the URI registry child spec, so
+  registry restart replays that admitted configuration. The library has no
+  bootstrap providers. Activation-only admits data but never activates a provider.
+  """
+  @spec uri_registry_start_opts(:full | :activation_only) ::
+          {:ok, keyword()} | {:error, :invalid_uri_registry_configuration}
+  def uri_registry_start_opts(profile) do
+    admit_uri_registry_start_opts(
+      profile,
+      uri_registration_providers(),
+      Application.get_env(@app, :uri_bootstrap_providers, [])
+    )
+  end
+
+  @doc false
+  @spec admit_uri_registry_start_opts(term(), term(), term()) ::
+          {:ok, keyword()} | {:error, :invalid_uri_registry_configuration}
+  def admit_uri_registry_start_opts(profile, providers, bootstrap)
+      when profile in [:full, :activation_only] do
+    with {:ok, providers} <- uri_provider_modules(providers),
+         {:ok, bootstrap} <- uri_provider_modules(bootstrap),
+         true <- Enum.all?(bootstrap, &(&1 in providers)) do
+      {:ok,
+       [
+         start_profile: profile,
+         registration_providers: providers,
+         bootstrap_providers: if(profile == :full, do: bootstrap, else: [])
+       ]}
+    else
+      _ -> {:error, :invalid_uri_registry_configuration}
+    end
+  end
+
+  def admit_uri_registry_start_opts(_profile, _providers, _bootstrap),
+    do: {:error, :invalid_uri_registry_configuration}
+
+  defp uri_provider_modules(nil), do: {:ok, []}
+  defp uri_provider_modules(providers), do: uri_provider_modules(providers, [], 0)
+
+  defp uri_provider_modules([], acc, _count), do: {:ok, Enum.reverse(acc)}
+
+  defp uri_provider_modules([provider | rest], acc, count)
+       when is_atom(provider) and provider not in [nil, true, false] and count < 32 do
+    if provider in acc do
+      {:error, :invalid_uri_registry_configuration}
+    else
+      uri_provider_modules(rest, [provider | acc], count + 1)
+    end
+  end
+
+  defp uri_provider_modules(_providers, _acc, _count),
+    do: {:error, :invalid_uri_registry_configuration}
+
   # ===========================================================================
   # Quota Configuration (Phase 7)
   # ===========================================================================

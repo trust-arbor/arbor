@@ -118,6 +118,71 @@ defmodule Arbor.Trust.ConfigTest do
     end
   end
 
+  describe "feature_domain_owners startup data" do
+    setup do
+      previous =
+        Map.new([:feature_domain_owners, :action_profile_provider], fn key ->
+          {key, Application.fetch_env(:arbor_trust, key)}
+        end)
+
+      Application.put_env(:arbor_trust, :action_profile_provider, nil)
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {key, {:ok, value}} -> Application.put_env(:arbor_trust, key, value)
+          {key, :error} -> Application.delete_env(:arbor_trust, key)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "library default contains no feature-domain owner" do
+      Application.delete_env(:arbor_trust, :feature_domain_owners)
+      assert Config.feature_domain_owners() == %{}
+
+      for profile <- [:full, :activation_only] do
+        assert {:ok, %{feature_domain_owners: owners}} = Config.startup_policy_snapshot(profile)
+        assert owners == %{}
+      end
+    end
+
+    test "both closed profiles admit exact data-only ownership annotations" do
+      owners = %{"coding" => :arbor_orchestrator, "my_feature_2" => :custom_feature_app}
+      Application.put_env(:arbor_trust, :feature_domain_owners, owners)
+
+      for profile <- [:full, :activation_only] do
+        assert {:ok, %{feature_domain_owners: ^owners}} = Config.startup_policy_snapshot(profile)
+      end
+    end
+
+    test "security regression: malformed or over-limit feature ownership fails startup admission" do
+      malformed = [
+        nil,
+        [],
+        [{"coding", :arbor_orchestrator}],
+        %{coding: :arbor_orchestrator},
+        %{"Coding" => :arbor_orchestrator},
+        %{"arbor://coding" => :arbor_orchestrator},
+        %{"coding/read" => :arbor_orchestrator},
+        %{"coding/*" => :arbor_orchestrator},
+        %{" coding" => :arbor_orchestrator},
+        %{"" => :arbor_orchestrator},
+        %{<<255>> => :arbor_orchestrator},
+        %{String.duplicate("x", 65) => :arbor_orchestrator},
+        Map.new(1..129, &{"feature_#{&1}", :feature_app})
+      ]
+
+      invalid_owners =
+        Enum.map([nil, true, false, :"", "feature_app", 1, %{}, []], &%{"coding" => &1})
+
+      for owners <- malformed ++ invalid_owners, profile <- [:full, :activation_only] do
+        Application.put_env(:arbor_trust, :feature_domain_owners, owners)
+        assert {:error, :malformed_policy_snapshot} = Config.startup_policy_snapshot(profile)
+      end
+    end
+  end
+
   describe "base_capabilities/0 — A1 proactive notify channel" do
     test "the universal baseline grants arbor://comms/notify/session with a rate-limit constraint" do
       caps = Config.base_capabilities()

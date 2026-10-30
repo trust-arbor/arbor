@@ -302,6 +302,16 @@ another one. It doubles as user documentation — anyone standing up agents need
   failure in the 2026-08-22 heartbeat incident: `PruneStaleIntents` existed in source
   and DOT but was absent from `all_actions/0`, so lookup failed and its derived URI
   was never registered.
+- **Feature catalogs:** coding reconciliation prefixes come from
+  `Arbor.Orchestrator.CodingUriCatalog`. The host admits fixed providers through
+  `:uri_registration_providers` and activates them in full-profile startup through
+  `:uri_bootstrap_providers`. The supervisor retains those options for restart;
+  activation-only never loads or invokes a provider. Trust's
+  `:feature_domain_owners` is data admitted into its immutable policy snapshot.
+  Namespace registration supplies membership, while signed grants and the
+  feature's own authority checks still govern effects.
+  Existing VM-lifetime policy claims keep their frozen settings: a legacy claim
+  has no feature ownership until a fresh binding, and never adopts live config.
 
 ## 9. Native ACP tool callbacks need subtree authority
 

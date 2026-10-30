@@ -43,13 +43,16 @@ defmodule Arbor.Security.UriRegistry do
 
   Provider modules must be explicitly configured in
   `:uri_registration_providers` and export `capability_uri_prefixes/0`.
-  Callers never supply prefixes to the registry.
+  Callers never supply prefixes to the registry. Full-profile startup activates
+  `:uri_bootstrap_providers` from the host's admitted allowlist. The supervisor
+  retains that configuration for restart replay. Activation-only startup and
+  runtime registration never load or invoke providers.
   """
 
   use GenServer
 
   alias Arbor.Contracts.Security.CapabilityUri
-  alias Arbor.Security.SupervisedOwner
+  alias Arbor.Security.{Config, SupervisedOwner}
 
   require Logger
 
@@ -124,12 +127,6 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/task/cancel",
     "arbor://agent/task/steer",
     "arbor://agent/task/adopt",
-
-    # Coding reconciliation read path and exact source-owned CAS apply URIs.
-    # Global Orchestrator/Mix --apply stays disabled until every resource kind
-    # has equivalent owner-side proof and the fault canaries converge.
-    "arbor://coding/reconciliation/read",
-    "arbor://coding/reconciliation/apply",
 
     # Comms facade
     "arbor://comms/send",
@@ -259,7 +256,9 @@ defmodule Arbor.Security.UriRegistry do
   end
 
   def child_spec(opts) do
-    opts = test_fixture_child_opts(opts)
+    # Retain data-only admission inputs in the supervisor specification. An
+    # owner restart must not sample a later Application environment.
+    opts = opts |> snapshot_start_opts() |> test_fixture_child_opts()
 
     %{
       id: __MODULE__,
@@ -346,13 +345,37 @@ defmodule Arbor.Security.UriRegistry do
 
   @impl true
   def init(opts) do
-    :ok = maybe_register_test_fixture(opts)
-    {:ok, %{provider_prefixes: %{}}}
+    opts = snapshot_start_opts(opts)
+
+    with {:ok, admitted} <-
+           Config.admit_uri_registry_start_opts(
+             Keyword.fetch!(opts, :start_profile),
+             Keyword.fetch!(opts, :registration_providers),
+             Keyword.fetch!(opts, :bootstrap_providers)
+           ),
+         {:ok, state} <- bootstrap_state(admitted) do
+      :ok = maybe_register_test_fixture(opts)
+      {:ok, state}
+    else
+      {:error, reason} -> {:stop, reason}
+    end
   end
 
   @impl true
-  def handle_call({:register_provider, provider}, _from, state) do
-    case load_provider_prefixes(provider) do
+  def handle_call(
+        {:register_provider, _provider},
+        _from,
+        %{start_profile: :activation_only} = state
+      ) do
+    {:reply, {:error, :uri_mutation_unauthorized}, state}
+  end
+
+  def handle_call(
+        {:register_provider, provider},
+        _from,
+        %{start_profile: :full, registration_providers: providers} = state
+      ) do
+    case load_provider_prefixes(provider, providers) do
       {:ok, prefixes} ->
         new_state = put_in(state, [:provider_prefixes, provider], MapSet.new(prefixes))
         {:reply, :ok, new_state}
@@ -360,6 +383,13 @@ defmodule Arbor.Security.UriRegistry do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # A plain module reload can leave the pre-snapshot state serving reads.
+  # Its profile/allowlist was never frozen; refuse new activation until an owner
+  # restart admits configuration, preserving existing membership without a crash.
+  def handle_call({:register_provider, _provider}, _from, state) do
+    {:reply, {:error, :uri_registry_unavailable}, state}
   end
 
   def handle_call(:list_runtime, _from, state) do
@@ -399,8 +429,8 @@ defmodule Arbor.Security.UriRegistry do
     Enum.any?(@canonical_prefixes, &CapabilityUri.prefix_match?(&1, uri))
   end
 
-  defp load_provider_prefixes(provider) do
-    with true <- provider in configured_providers(),
+  defp load_provider_prefixes(provider, configured_providers) do
+    with true <- provider in configured_providers,
          true <- Code.ensure_loaded?(provider),
          true <- function_exported?(provider, :capability_uri_prefixes, 0),
          prefixes <- apply(provider, :capability_uri_prefixes, []),
@@ -415,16 +445,30 @@ defmodule Arbor.Security.UriRegistry do
     _, _ -> {:error, :uri_mutation_unauthorized}
   end
 
-  defp configured_providers do
-    case Application.get_env(:arbor_security, :uri_registration_providers, []) do
-      providers when is_list(providers) ->
-        providers
-        |> Enum.filter(&(is_atom(&1) and not is_nil(&1)))
-        |> Enum.take(32)
+  defp snapshot_start_opts(opts) do
+    opts
+    |> Keyword.put_new(:start_profile, :full)
+    |> Keyword.put_new_lazy(:registration_providers, &Config.uri_registration_providers/0)
+    |> Keyword.put_new(:bootstrap_providers, [])
+  end
 
-      _ ->
-        []
-    end
+  defp bootstrap_state(opts) do
+    state = %{
+      provider_prefixes: %{},
+      start_profile: Keyword.fetch!(opts, :start_profile),
+      registration_providers: Keyword.fetch!(opts, :registration_providers)
+    }
+
+    Enum.reduce_while(Keyword.fetch!(opts, :bootstrap_providers), {:ok, state}, fn provider,
+                                                                                   {:ok, acc} ->
+      case load_provider_prefixes(provider, acc.registration_providers) do
+        {:ok, prefixes} ->
+          {:cont, {:ok, put_in(acc, [:provider_prefixes, provider], MapSet.new(prefixes))}}
+
+        {:error, _reason} ->
+          {:halt, {:error, :uri_bootstrap_failed}}
+      end
+    end)
   end
 
   defp validate_provider_prefixes(prefixes)

@@ -7,9 +7,15 @@ defmodule Arbor.Security.UriRegistryTest do
     def capability_uri_prefixes, do: ["arbor://forged/provider"]
   end
 
+  defmodule CodingProvider do
+    def capability_uri_prefixes do
+      ["arbor://coding/reconciliation/read", "arbor://coding/reconciliation/apply"]
+    end
+  end
+
   setup do
     unless Process.whereis(UriRegistry) do
-      start_supervised!({UriRegistry, []})
+      start_supervised!({UriRegistry, registration_providers: [CodingProvider]})
     end
 
     original_enforcement = Application.get_env(:arbor_security, :uri_registry_enforcement)
@@ -39,6 +45,12 @@ defmodule Arbor.Security.UriRegistryTest do
       assert UriRegistry.registered?("arbor://agent/task/steer/task_1")
       assert UriRegistry.registered?("arbor://agent/task/adopt/task_1")
       refute UriRegistry.registered?("arbor://agent/task/adoption/task_1")
+    end
+
+    test "matches feature-owned coding prefixes only after explicit provider registration" do
+      refute "arbor://coding/reconciliation/read" in UriRegistry.canonical_prefixes()
+      refute "arbor://coding/reconciliation/apply" in UriRegistry.canonical_prefixes()
+      assert :ok = Arbor.Security.register_uri_provider(CodingProvider)
 
       assert UriRegistry.registered?("arbor://coding/reconciliation/read/task_1")
       refute UriRegistry.registered?("arbor://coding/reconciliation/reader/task_1")

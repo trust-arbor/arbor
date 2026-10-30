@@ -11,6 +11,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
   @moduletag :fast
 
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
@@ -65,6 +66,16 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     restart_security!(:activation_only)
     refute Process.whereis(Arbor.Security.ProviderGate)
 
+    assert {:ok, %{start: {Arbor.Security.UriRegistry, :start_link, [uri_opts]}}} =
+             :supervisor.get_childspec(Arbor.Security.Supervisor, Arbor.Security.UriRegistry)
+
+    assert uri_opts[:start_profile] == :activation_only
+    assert uri_opts[:bootstrap_providers] == []
+
+    for provider <- uri_opts[:registration_providers] do
+      assert {:error, :uri_mutation_unauthorized} = Arbor.Security.register_uri_provider(provider)
+    end
+
     Enum.each(@named_stores, fn name ->
       assert Process.whereis(name) == nil
     end)
@@ -111,7 +122,20 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
   end
 
   test ":full starts all named AuthorityStores" do
+    assert {:ok, expected_uri_opts} = Config.uri_registry_start_opts(:full)
     restart_security!(:full)
+
+    assert {:ok, %{start: {Arbor.Security.UriRegistry, :start_link, [uri_opts]}}} =
+             :supervisor.get_childspec(Arbor.Security.Supervisor, Arbor.Security.UriRegistry)
+
+    for key <- [:start_profile, :registration_providers, :bootstrap_providers] do
+      assert uri_opts[key] == expected_uri_opts[key]
+    end
+
+    for provider <- expected_uri_opts[:bootstrap_providers],
+        prefix <- provider.capability_uri_prefixes() do
+      assert Arbor.Security.uri_registered?(prefix)
+    end
 
     Enum.each(@named_stores, fn name ->
       assert is_pid(Process.whereis(name))

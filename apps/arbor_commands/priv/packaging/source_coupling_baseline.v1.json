@@ -17,6 +17,17 @@
         ],
         "rationale": "Five Comms-to-Security references are now covered by the declared lower-layer dependency; Security-to-Comms operator lookup was replaced by the host port. Original census provenance/counts and all unrelated allowances remain unchanged."
       }
+    ],
+    "reviewed_additions": [
+      {
+        "scan_manifest_digest": "f8a3745c32c58764a3450a668eb1a6e68086e9deaf18edf27a6d1baa12ede8d7",
+        "added_entry_keys": [
+          "apps/arbor_trust/lib/arbor/trust/config.ex|Arbor.Trust.Config|Arbor.Contracts.Security.CapabilityUri|alias|code",
+          "apps/arbor_trust/lib/arbor/trust/config.ex|Arbor.Trust.Config|Arbor.Contracts.Security.CapabilityUri|remote|code",
+          "apps/arbor_trust/lib/arbor/trust/config.ex|Arbor.Trust.Config|Arbor.Contracts.Security.CapabilityUri|struct|code"
+        ],
+        "rationale": "Bounded feature-domain admission uses the passive Kernel canonical URI parser and struct. Trust already receives Kernel through its single Kernel Runtime dependency as required by CONTRACT_RULES section10. These three downward contract references add no upward or runtime feature dependency. Original census metadata and all unrelated allowances are preserved."
+      }
     ]
   },
   "policy": {
@@ -29156,6 +29167,48 @@
       "to_band": "K"
     },
     {
+      "file": "apps/arbor_trust/lib/arbor/trust/config.ex",
+      "from_module": "Arbor.Trust.Config",
+      "target": "Arbor.Contracts.Security.CapabilityUri",
+      "kind": "alias",
+      "class": "code",
+      "from_app": "arbor_trust",
+      "to_app": "arbor_kernel",
+      "from_band": "P",
+      "to_band": "K",
+      "fate": "downward",
+      "level_direction": "level_downward",
+      "occurrence_count": 1
+    },
+    {
+      "file": "apps/arbor_trust/lib/arbor/trust/config.ex",
+      "from_module": "Arbor.Trust.Config",
+      "target": "Arbor.Contracts.Security.CapabilityUri",
+      "kind": "remote",
+      "class": "code",
+      "from_app": "arbor_trust",
+      "to_app": "arbor_kernel",
+      "from_band": "P",
+      "to_band": "K",
+      "fate": "downward",
+      "level_direction": "level_downward",
+      "occurrence_count": 1
+    },
+    {
+      "file": "apps/arbor_trust/lib/arbor/trust/config.ex",
+      "from_module": "Arbor.Trust.Config",
+      "target": "Arbor.Contracts.Security.CapabilityUri",
+      "kind": "struct",
+      "class": "code",
+      "from_app": "arbor_trust",
+      "to_app": "arbor_kernel",
+      "from_band": "P",
+      "to_band": "K",
+      "fate": "downward",
+      "level_direction": "level_downward",
+      "occurrence_count": 1
+    },
+    {
       "class": "code",
       "fate": "downward",
       "file": "apps/arbor_trust/lib/arbor/trust/config.ex",
@@ -30072,5 +30125,5 @@
       "reason": "dynamic_module_concat"
     }
   ],
-  "entries_digest": "6493199d9797386ee26085c8a8207c99732dbdb006537115fa19b0ebb0cfc31d"
+  "entries_digest": "dc34745c58d54a2d6ba607104e71feb0d60d3c0d7a423fc80ce08c5c3c4a3e6c"
 }

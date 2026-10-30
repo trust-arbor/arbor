@@ -3,7 +3,7 @@ defmodule Arbor.Security.Application do
 
   use Application
 
-  alias Arbor.Security.ProviderGate
+  alias Arbor.Security.{Config, ProviderGate}
 
   require Logger
 
@@ -40,13 +40,14 @@ defmodule Arbor.Security.Application do
 
     with {:ok, snapshot} <- Arbor.Security.Config.startup_store_snapshot(:application),
          {:ok, profile} <- admit_profile(snapshot.start_profile),
+         {:ok, uri_registry_opts} <- Config.uri_registry_start_opts(profile),
          {:ok, signing_key_owner_roles} <- Arbor.Security.Config.signing_key_owner_roles(),
          {:ok, default_startup_timeout} <- Arbor.Security.Config.startup_timeout_ms(),
          {:ok, capability_startup_timeout} <-
            Arbor.Security.Config.startup_timeout_ms(snapshot.capabilities_hydration_limit) do
       children =
         children_from_snapshot(
-          snapshot,
+          Map.put(snapshot, :uri_registry_opts, uri_registry_opts),
           signing_authority_owner_token,
           system_authority_registration_token,
           signing_key_owner_roles
@@ -540,7 +541,7 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.InvocationReceiptBroker, []},
       {Arbor.Security.Reflex.Registry, []},
-      {Arbor.Security.UriRegistry, []},
+      {Arbor.Security.UriRegistry, Map.fetch!(snapshot, :uri_registry_opts)},
       # Ephemeral one-use delivery receipts and terminal login credentials.
       # Receipt loss also retires dependent terminal sessions fail-closed.
       {Arbor.Security.DeliveryReceiptBroker, []},

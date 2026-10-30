@@ -1,8 +1,8 @@
 defmodule Arbor.Trust.CapabilityProfileRegistryTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Security.CapabilityProfile
-  alias Arbor.Trust.CapabilityProfileRegistry
+  alias Arbor.Contracts.Security.{CapabilityProfile, CapabilityUri}
+  alias Arbor.Trust.{CapabilityProfileRegistry, PolicyHost}
 
   @moduletag :fast
 
@@ -26,9 +26,14 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
     end
   end
 
+  defmodule FeaturePrefixProvider do
+    def capability_uri_prefixes, do: ["arbor://fixture_feature/review"]
+  end
+
   setup do
     originals = %{
       provider: Application.get_env(:arbor_trust, :action_profile_provider),
+      feature_owners: Application.fetch_env(:arbor_trust, :feature_domain_owners),
       start_children: Application.get_env(:arbor_trust, :start_children),
       kernel_runtime: Application.fetch_env(:arbor_kernel, :kernel_runtime)
     }
@@ -36,6 +41,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
     on_exit(fn ->
       restore_env(:action_profile_provider, originals.provider)
       restore_env(:start_children, originals.start_children)
+
+      case originals.feature_owners do
+        {:ok, value} -> Application.put_env(:arbor_trust, :feature_domain_owners, value)
+        :error -> Application.delete_env(:arbor_trust, :feature_domain_owners)
+      end
 
       case originals.kernel_runtime do
         {:ok, value} -> Application.put_env(:arbor_kernel, :kernel_runtime, value)
@@ -100,6 +110,77 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
         |> Enum.map(& &1.uri_prefix)
 
       assert "arbor://action/browser/navigate" in profile_uris
+    end
+  end
+
+  describe "feature-domain ownership" do
+    test "security regression: coding has no implicit owner when the feature is absent" do
+      Application.delete_env(:arbor_trust, :feature_domain_owners)
+      rebind_trust!()
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") == nil
+      assert CapabilityProfileRegistry.profile_for("arbor://coding/reconciliation/read") == nil
+      assert CapabilityProfileRegistry.owner_for("arbor://shell/exec") == :arbor_shell
+    end
+
+    test "configured feature owners are frozen and cannot override core ownership" do
+      owners = %{"coding" => :arbor_orchestrator, "shell" => :feature_shell_shadow}
+      Application.put_env(:arbor_trust, :feature_domain_owners, owners)
+      rebind_trust!()
+
+      assert {:ok, %{feature_domain_owners: ^owners}} = PolicyHost.snapshot()
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") ==
+               :arbor_orchestrator
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding_other/reconciliation/read") ==
+               nil
+
+      assert CapabilityProfileRegistry.owner_for("arbor://shell/exec") == :arbor_shell
+      assert CapabilityProfileRegistry.profile_for("arbor://coding/reconciliation/read") == nil
+
+      Application.put_env(:arbor_trust, :feature_domain_owners, %{
+        "coding" => :changed_after_start
+      })
+
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") ==
+               :arbor_orchestrator
+
+      assert {:ok, %{feature_domain_owners: ^owners}} = PolicyHost.snapshot()
+
+      _ = Application.stop(:arbor_trust)
+      assert CapabilityProfileRegistry.owner_for("arbor://coding/reconciliation/read") == nil
+    end
+
+    test "coverage includes a feature's runtime prefix without granting it a risk profile" do
+      refute Process.whereis(Arbor.Security.UriRegistry)
+      owners = %{"fixture_feature" => :feature_app}
+      Application.put_env(:arbor_trust, :feature_domain_owners, owners)
+      rebind_trust!()
+
+      start_supervised!(
+        {Arbor.Security.UriRegistry,
+         start_profile: :full,
+         registration_providers: [FeaturePrefixProvider],
+         bootstrap_providers: [FeaturePrefixProvider]}
+      )
+
+      prefix = "arbor://fixture_feature/review"
+      refute prefix in Arbor.Security.canonical_uri_prefixes()
+      assert prefix in Arbor.Security.registered_uri_prefixes()
+      rows = CapabilityProfileRegistry.coverage_rows()
+      row = Enum.find(rows, &(&1.uri_prefix == prefix))
+      assert row.owner == :feature_app
+      assert row.profile == nil
+      assert row.not_profileable_reason =~ "owned by feature_app"
+
+      expected =
+        Arbor.Security.registered_uri_prefixes()
+        |> Enum.map(&(CapabilityUri.parse!(&1) |> CapabilityUri.canonical()))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert Enum.map(rows, & &1.uri_prefix) == expected
     end
   end
 

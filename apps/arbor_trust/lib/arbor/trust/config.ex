@@ -25,7 +25,7 @@ defmodule Arbor.Trust.Config do
         }
   """
 
-  alias Arbor.Contracts.Security.Classification
+  alias Arbor.Contracts.Security.{CapabilityUri, Classification}
 
   # Default anti-spam budget for the A1 proactive notify channel
   # (arbor://comms/notify/session), applied as a :rate_limit constraint on the
@@ -36,6 +36,8 @@ defmodule Arbor.Trust.Config do
   # budget); a drift guard in arbor_agent's lifecycle test asserts they match.
   # (We can't read NotifySession here — arbor_actions is L6, above arbor_trust L4.)
   @notify_session_rate_limit 30
+  @max_feature_domains 128
+  @max_feature_domain_bytes 64
 
   @egress_mode_defaults Map.new(Classification.egress_tiers(), fn tier ->
                           {tier,
@@ -143,6 +145,44 @@ defmodule Arbor.Trust.Config do
   end
 
   @doc """
+  Trusted feature-domain ownership annotations, frozen by the policy host.
+
+  The library default is empty. Keys are canonical domain names (not URI
+  prefixes), and values are application atoms. This is data only: admitting an
+  owner never loads or invokes it. Built-in domain owners retain precedence.
+  """
+  @spec feature_domain_owners() :: map()
+  def feature_domain_owners, do: get(:feature_domain_owners, %{})
+
+  @doc false
+  @spec admit_feature_domain_owners(term()) ::
+          {:ok, %{String.t() => atom()}} | {:error, :malformed_policy_snapshot}
+  def admit_feature_domain_owners(owners)
+      when is_map(owners) and map_size(owners) <= @max_feature_domains do
+    if Enum.all?(owners, fn {domain, owner} ->
+         canonical_feature_domain?(domain) and is_atom(owner) and owner not in [nil, true, false] and
+           Atom.to_string(owner) != ""
+       end) do
+      {:ok, owners}
+    else
+      {:error, :malformed_policy_snapshot}
+    end
+  end
+
+  def admit_feature_domain_owners(_owners), do: {:error, :malformed_policy_snapshot}
+
+  defp canonical_feature_domain?(domain)
+       when is_binary(domain) and byte_size(domain) in 1..@max_feature_domain_bytes do
+    String.valid?(domain) and
+      match?(
+        {:ok, %CapabilityUri{segments: [^domain], wildcard: :none}},
+        CapabilityUri.parse("arbor://" <> domain)
+      )
+  end
+
+  defp canonical_feature_domain?(_domain), do: false
+
+  @doc """
   Library default egress standing used when a profile omits a tier.
   """
   @spec egress_mode_defaults() :: %{atom() => :block | :ask | :allow | :auto}
@@ -158,13 +198,15 @@ defmodule Arbor.Trust.Config do
     include_action_provider? = start_profile == :full and not is_nil(action_profile_provider())
 
     with {:ok, security_ceilings} <- merge_security_ceilings(),
-         {:ok, default_egress_modes} <- merge_egress_defaults() do
+         {:ok, default_egress_modes} <- merge_egress_defaults(),
+         {:ok, feature_domain_owners} <- admit_feature_domain_owners(feature_domain_owners()) do
       {:ok,
        %{
          start_profile: start_profile,
          security_ceilings: security_ceilings,
          allow_permissive_baseline: get(:allow_permissive_baseline, false) == true,
          default_egress_modes: default_egress_modes,
+         feature_domain_owners: feature_domain_owners,
          capability_profiles:
            Arbor.Trust.CapabilityProfileRegistry.project_profiles(
              include_action_provider: include_action_provider?
