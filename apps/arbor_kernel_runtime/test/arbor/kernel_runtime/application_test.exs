@@ -51,6 +51,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   @required_apps MapSet.new([
                    :arbor_custody,
                    :arbor_kernel,
+                   :arbor_oauth,
                    :crypto,
                    :elixir,
                    :jason,

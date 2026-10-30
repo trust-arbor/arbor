@@ -21,7 +21,11 @@ defmodule Arbor.Common.OAuth.HttpClient do
   Callers may pass `:http_client` explicitly. Otherwise the adapter comes from
   application config, defaulting to the bundled `Req` adapter:
 
-      config :arbor_kernel, common: [oauth_http_client: Arbor.Common.OAuth.HttpClient.Req]
+      config :arbor_oauth, :http_client, Arbor.Common.OAuth.HttpClient.Req
+
+  An explicitly configured package value is authoritative, including an invalid
+  value or `nil`. Only when that key is absent does configuration fall back to
+  the legacy `:arbor_kernel, :common` `:oauth_http_client` setting.
 
   ## Error vocabulary
 
@@ -36,6 +40,7 @@ defmodule Arbor.Common.OAuth.HttpClient do
       closed validation reasons
   """
 
+  alias Arbor.Common.OAuth.Config
   alias Arbor.Common.OAuth.HttpClient.{Request, Response}
 
   @default_adapter Arbor.Common.OAuth.HttpClient.Req
@@ -257,7 +262,7 @@ defmodule Arbor.Common.OAuth.HttpClient do
   end
 
   defp adapter_from_config do
-    case Arbor.Common.Config.oauth_http_client() do
+    case Config.http_client() do
       module when is_atom(module) ->
         if Code.ensure_loaded?(module) and function_exported?(module, :request, 1) do
           {:ok, module}

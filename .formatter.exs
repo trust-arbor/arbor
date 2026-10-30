@@ -16,6 +16,7 @@ breeze_locals =
     "apps/*",
     "packages/arbor_kernel",
     "packages/arbor_custody",
+    "packages/arbor_oauth",
     "packages/arbor_signals",
     "packages/arbor_persistence",
     "packages/arbor_persistence_sql",

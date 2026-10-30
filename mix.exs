@@ -39,6 +39,8 @@ defmodule Arbor.MixProject do
        path: "packages/arbor_kernel", env: Mix.env(), override: true},
       {:arbor_custody, "~> 0.1.0-dev",
        path: "packages/arbor_custody", env: Mix.env(), override: true},
+      {:arbor_oauth, "~> 0.1.0-dev",
+       path: "packages/arbor_oauth", env: Mix.env(), override: true},
       {:arbor_signals,
        path: "packages/arbor_signals", runtime: false, env: Mix.env(), override: true},
       {:arbor_persistence, path: "packages/arbor_persistence", env: Mix.env(), override: true},

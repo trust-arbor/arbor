@@ -222,6 +222,55 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
              "downward"
   end
 
+  test "OAuth modules retain their package owner below the legacy Common namespace" do
+    files = [
+      file("packages/arbor_oauth/mix.exs", mix("arbor_oauth", [])),
+      file("packages/arbor_oauth/lib/arbor/common/oauth/auth_code.ex", """
+      defmodule Arbor.Common.OAuth.AuthCode do
+        def generate_state, do: "state"
+      end
+      """)
+    ]
+
+    files =
+      files ++
+        Enum.flat_map(
+          [
+            {"arbor_kernel_runtime", "Arbor.Common"},
+            {"arbor_security", "Arbor.Security"},
+            {"arbor_llm", "Arbor.LLM"}
+          ],
+          fn {app, module} ->
+            [
+              file("apps/#{app}/mix.exs", """
+              defmodule #{module}.MixProject do
+                def deps, do: [{:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth"}]
+              end
+              """),
+              file("apps/#{app}/lib/consumer.ex", """
+              defmodule #{module} do
+                def state, do: Arbor.Common.OAuth.AuthCode.generate_state()
+              end
+              """)
+            ]
+          end
+        )
+
+    assert {:ok, "K"} = Bands.band_of("arbor_oauth")
+    assert {:ok, census} = Core.new(bundle(files))
+    assert census["gating_occurrences"] == []
+    edges = Enum.filter(census["occurrences"], &(&1["to_app"] == "arbor_oauth"))
+
+    assert edges |> Enum.map(& &1["from_app"]) |> Enum.uniq() |> Enum.sort() == [
+             "arbor_kernel_runtime",
+             "arbor_llm",
+             "arbor_security"
+           ]
+
+    assert Enum.all?(edges, &(&1["declared"] == true and &1["to_band"] == "K"))
+    assert Enum.all?(edges, &(&1["level_direction"] == "level_downward"))
+  end
+
   test "duplicate app and package owners fail closed instead of overwriting the graph" do
     files = [
       file("apps/arbor_signals/mix.exs", mix("arbor_signals", [])),

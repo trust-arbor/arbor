@@ -105,7 +105,7 @@ jobs:
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_kernel arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+          Enum.each(~w(arbor_kernel arbor_oauth arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -265,6 +265,42 @@ jobs:
           export ARBOR_HOME="$runtime_root/home"
           export ARBOR_DATA_DIR="$runtime_root/data"
           export ARBOR_ENV_PATH="$runtime_root/empty.env"
+          ../../bin/mix test --timeout 120000
+
+  # OAuth's primitive suites moved out of Kernel Runtime and are not discovered
+  # by the umbrella test runner. Compile and exercise their own package closure.
+  oauth:
+    name: Standalone OAuth
+    runs-on: native
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Cache standalone package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/arbor_oauth/deps
+            packages/arbor_oauth/_build
+          key: oauth-${{ runner.os }}-${{ hashFiles('packages/arbor_oauth/mix.exs', 'packages/arbor_oauth/mix.lock', '.tool-versions') }}
+
+      - name: OAuth package dependencies (committed standalone lock)
+        working-directory: packages/arbor_oauth
+        run: ../../bin/mix deps.get --check-locked
+
+      - name: OAuth formatting, strict compile, and complete primitive suites
+        working-directory: packages/arbor_oauth
+        run: |
+          ../../bin/mix format --check-formatted
+          ../../bin/mix compile --warnings-as-errors
           ../../bin/mix test --timeout 120000
 
   # Signals must stay usable without compiling or starting the Arbor host.

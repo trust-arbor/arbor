@@ -105,7 +105,7 @@ defmodule Arbor.Common.Config do
 
   @doc "OAuth HTTP adapter module (default `Arbor.Common.OAuth.HttpClient.Req`)."
   @spec oauth_http_client() :: term()
-  def oauth_http_client, do: get(:oauth_http_client, Arbor.Common.OAuth.HttpClient.Req)
+  defdelegate oauth_http_client, to: Arbor.Common.OAuth.Config, as: :http_client
 
   @doc "Whether project-context auto-load is enabled (default false)."
   @spec project_context_enabled?() :: term()

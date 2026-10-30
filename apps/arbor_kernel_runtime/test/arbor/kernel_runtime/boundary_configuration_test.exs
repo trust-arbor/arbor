@@ -12,7 +12,12 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       exports: [SafeManagementSurface, Adapters.SignalAuthContext]
     },
     Arbor.Common => %{
-      deps: [Arbor.Contracts, Arbor.Custody, Finch, Jason, Logger, Req, Zoi],
+      deps: [Arbor.Common.OAuth, Arbor.Contracts, Arbor.Custody, Finch, Jason, Logger, Req, Zoi],
+      exports: :all
+    },
+    Arbor.Common.OAuth => %{
+      app: :arbor_oauth,
+      deps: [Finch, Jason, Logger, Req],
       exports: :all
     },
     Arbor.Eval => %{deps: [Arbor.Contracts, Arbor.Common, Jason], exports: :all},

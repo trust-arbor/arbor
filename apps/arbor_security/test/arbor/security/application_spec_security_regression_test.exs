@@ -12,6 +12,7 @@ defmodule Arbor.Security.ApplicationSpecSecurityRegressionTest do
   @required MapSet.new([
               :arbor_custody,
               :arbor_kernel_runtime,
+              :arbor_oauth,
               :elixir,
               :jason,
               :kernel,

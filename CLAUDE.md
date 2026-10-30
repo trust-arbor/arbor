@@ -101,7 +101,7 @@ badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L0  arbor_kernel, arbor_custody, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
 L1  arbor_signals, arbor_persistence_sql, arbor_persistence_eventstore
 L2  arbor_kernel_runtime, arbor_cartographer, arbor_web
 L3  arbor_llm, arbor_security
@@ -116,12 +116,13 @@ L10 arbor_dashboard
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
 `packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **Kernel, Custody, Multimedia, and Persistence core are L0.** Kernel owns
-  passive contracts, types, and identifiers. Signals consumes Kernel taint;
-  Kernel Runtime (L2) composes its supervisor after boot admission alongside
-  Common and Monitor. Multimedia owns device I/O.
+- **Kernel, Custody, OAuth, Multimedia, and Persistence core are L0.** Kernel owns
+  passive contracts, types, and identifiers. Signals consumes Kernel taint.
+  Kernel Runtime (L2) composes Common, Signals, and Monitor after boot admission.
+  OAuth is caller-started; Common owns its pool.
+  Multimedia owns device I/O.
   Persistence core and adapters live in `packages/`; L4 Host retains product APIs and migrations.
-  In particular `arbor_orchestrator` is L8, not a low kernel — it really deps
+  `arbor_orchestrator` is L8 and depends on
   arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
   egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and
   only commands/dashboard/voice sit above it.

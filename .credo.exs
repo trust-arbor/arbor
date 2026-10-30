@@ -19,6 +19,8 @@
           "packages/arbor_kernel/test/",
           "packages/arbor_custody/lib/",
           "packages/arbor_custody/test/",
+          "packages/arbor_oauth/lib/",
+          "packages/arbor_oauth/test/",
           "packages/arbor_signals/lib/",
           "packages/arbor_signals/test/",
           "packages/arbor_persistence/lib/",
