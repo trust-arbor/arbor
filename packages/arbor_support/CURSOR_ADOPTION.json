@@ -1,0 +1,49 @@
+{
+  "schema": "arbor.support.cursor-adoption.v1",
+  "source_commit": "655a0528f92af1e29add0bdf627391bccf6cffa6",
+  "scope": "Relocate only the existing stdlib-only pagination cursor and its owning tests from KernelRuntime to passive Support. Preserve canonical Arbor.Common.Pagination.Cursor identity and all API/encoding/filtering behavior.",
+  "module": "Arbor.Common.Pagination.Cursor",
+  "source_owner": "arbor_kernel_runtime",
+  "target_owner": "arbor_support",
+  "permitted_changes": [
+    "Physical source and owning-test relocation.",
+    "One independent strict top-level Boundary declaration with empty dependency/export lists.",
+    "Support package README and description document cursor ownership."
+  ],
+  "files": [
+    {
+      "source_commit": "655a0528f92af1e29add0bdf627391bccf6cffa6",
+      "source_path": "apps/arbor_kernel_runtime/lib/arbor/common/pagination/cursor.ex",
+      "source_git_blob_oid": "21a586c351f52cf8e78a76d86f0fd38bb3d12007",
+      "source_sha256": "f61847d798970e91a1ee4022aad1113fe04be75a9ffec7906b041a71fa4511b5",
+      "target_path": "packages/arbor_support/lib/arbor/common/pagination/cursor.ex",
+      "target_sha256": "293bd7ab0649f842c0285272ccc937da1ffb52e04ebe589558238fa06ef28c05",
+      "disposition": "moved; independent strict top-level Boundary declaration added; all existing documentation/functions/specs/guards preserved"
+    },
+    {
+      "source_commit": "655a0528f92af1e29add0bdf627391bccf6cffa6",
+      "source_path": "apps/arbor_kernel_runtime/test/arbor/common/pagination/cursor_test.exs",
+      "source_git_blob_oid": "78eaa3e24547384cf6e647824cad005dd31a970d",
+      "source_sha256": "c8cdecbd9058a44d7b5e3f226d4301b88fad74fe7826c5d666cf6305aa136233",
+      "target_path": "packages/arbor_support/test/arbor/common/pagination/cursor_test.exs",
+      "target_sha256": "c8cdecbd9058a44d7b5e3f226d4301b88fad74fe7826c5d666cf6305aa136233",
+      "disposition": "moved byte-for-byte; all existing tests/assertions/tags preserved"
+    }
+  ],
+  "test_conservation": {
+    "original_tests": 28,
+    "owning_test_bytes_unchanged": true,
+    "implementation_mirror_tests_added": false
+  },
+  "unchanged": [
+    "Public module identity and function signatures.",
+    "Timestamp-ms/ID cursor encoding and colon-bearing IDs.",
+    "Microsecond DateTime filtering precision.",
+    "Timestamp and ID tie-break ordering.",
+    "Invalid and empty-ID cursor denial; filter failures return empty lists.",
+    "Nil-cursor passthrough.",
+    "Support runtime passivity, dependencies, native reader and compiler.",
+    "Historical ADOPTION_SOURCE_MAP.json."
+  ],
+  "verification": "Source-only byte conservation; no BEAM, builds or tests executed for this lease."
+}

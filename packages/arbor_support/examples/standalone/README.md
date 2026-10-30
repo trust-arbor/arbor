@@ -1,7 +1,8 @@
 # Standalone safety-support consumer
 
-This consumer calls the actual `Arbor.Common.SafePath`, `SafeAtom`, and
-`SensitiveData` public APIs from `arbor_support`. It has no Arbor product or
+This consumer calls the actual `Arbor.Common.SafePath`, `SafeAtom`,
+`SensitiveData`, and `Arbor.Common.Pagination.Cursor` public APIs from
+`arbor_support`. It has no Arbor product or
 Kernel Runtime dependency. Starting the support package starts no callback,
 registered role, HTTP provider, or authority owner.
 
@@ -19,6 +20,18 @@ creating attacker-selected atoms, known-key map projection, secret and PII
 redaction, entropy, and Luhn signatures. Its report contains only check names,
 counts, module ownership and artifact/code-path hashes; synthetic data and
 file content are not returned.
+
+Seven Cursor acceptance groups run in both the unpacked consumer and the
+source-hidden ERTS release. They prove unchanged `timestamp_ms:id` encoding
+from integer/DateTime inputs, IDs containing colons, parsing round trips,
+millisecond/microsecond precision, strict ascending/descending timestamp and
+equal-time ID predicates, stable input order, and nil-cursor passthrough.
+Malformed encoded cursor strings fail closed to empty results in both filter
+APIs. The fixture exercises the current binary-input DateTime parser contract;
+it does not claim a new total API for arbitrary nonbinary DateTime input.
+The actual Cursor BEAM must belong to `arbor_support`; the higher-level
+`Arbor.Common.Pagination` module and Kernel Runtime remain unavailable, and
+compiled/loaded/started first-party closure stays exactly Support.
 
 Cold qualification builds a real Hex archive containing source and C inputs,
 validates its checksums, exact members and metadata, and compiles the unpacked

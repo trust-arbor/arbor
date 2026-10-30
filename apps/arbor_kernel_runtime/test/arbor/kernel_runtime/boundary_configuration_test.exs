@@ -27,6 +27,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       ],
       exports: :all
     },
+    Arbor.Common.Pagination.Cursor => %{app: :arbor_support, deps: [], exports: []},
     Arbor.Common.OAuth => %{
       app: :arbor_oauth,
       deps: [Finch, Jason, Logger, Req],

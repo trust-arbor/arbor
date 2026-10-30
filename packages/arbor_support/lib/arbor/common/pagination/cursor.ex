@@ -32,6 +32,8 @@ defmodule Arbor.Common.Pagination.Cursor do
       passes? = Cursor.passes_filter?(record_ts_ms, record_id, cursor, :desc)
   """
 
+  use Boundary, top_level?: true, deps: [], exports: []
+
   @doc """
   Parse a cursor string into {timestamp_ms, id}.
 

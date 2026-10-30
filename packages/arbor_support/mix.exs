@@ -12,7 +12,8 @@ defmodule Arbor.Support.MixProject do
       compilers: [:arbor_safe_path_reader, :boundary] ++ Mix.compilers(),
       boundary: [default: [type: :strict, check: [aliases: true]]],
       deps: [{:boundary, "~> 0.10", runtime: false}],
-      description: "Safe filesystem, atom conversion and sensitive-data helpers for Elixir",
+      description:
+        "Filesystem safety, atom conversion, redaction and pagination cursors for Elixir",
       source_url: @source_url,
       package: [
         licenses: ["MIT"],

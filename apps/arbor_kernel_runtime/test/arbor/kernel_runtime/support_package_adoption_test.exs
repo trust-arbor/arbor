@@ -4,6 +4,7 @@ defmodule Arbor.KernelRuntime.SupportPackageAdoptionTest do
   @moduletag :fast
 
   @modules [
+    Arbor.Common.Pagination.Cursor,
     Arbor.Common.SafeAtom,
     Arbor.Common.SafePath,
     Arbor.Common.SafePath.RootBinding,
@@ -55,9 +56,12 @@ defmodule Arbor.KernelRuntime.SupportPackageAdoptionTest do
     assert support_project =~ "Mix.Tasks.Compile.ArborSafePathReader"
     assert File.regular?(Path.join(support_root, "c_src/arbor_safe_path_reader.c"))
 
-    for filename <- ["safe_atom.ex", "safe_path.ex", "sensitive_data.ex"] do
+    for filename <- ["pagination/cursor.ex", "safe_atom.ex", "safe_path.ex", "sensitive_data.ex"] do
       refute File.exists?(Path.join(runtime_root, "lib/arbor/common/#{filename}"))
       assert File.regular?(Path.join(support_root, "lib/arbor/common/#{filename}"))
     end
+
+    refute File.exists?(Path.join(runtime_root, "test/arbor/common/pagination/cursor_test.exs"))
+    assert File.regular?(Path.join(support_root, "test/arbor/common/pagination/cursor_test.exs"))
   end
 end

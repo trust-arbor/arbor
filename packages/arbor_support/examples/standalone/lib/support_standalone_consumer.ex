@@ -1,10 +1,12 @@
 defmodule SupportStandaloneConsumer do
   @moduledoc "Public safety-helper qualification without an Arbor product runtime."
 
+  alias Arbor.Common.Pagination.Cursor
   alias Arbor.Common.{SafeAtom, SafePath, SensitiveData}
   alias Arbor.Common.SafePath.NativeReaderArtifact
 
   @modules [
+    Cursor,
     SafeAtom,
     SafePath,
     SafePath.RootBinding,
@@ -14,6 +16,7 @@ defmodule SupportStandaloneConsumer do
   ]
   @forbidden [
     Arbor.Common,
+    Arbor.Common.Pagination,
     Arbor.KernelRuntime,
     Arbor.Security,
     Arbor.Contracts,
@@ -100,6 +103,7 @@ defmodule SupportStandaloneConsumer do
     readers_before = reader_directories()
     paths!(fixture)
     atoms!()
+    cursor_check_groups = cursors!()
     sensitive_data!()
     ensure(reader_directories() == readers_before, "native reader materialization was stranded")
     :ok = Application.stop(:arbor_support)
@@ -116,9 +120,11 @@ defmodule SupportStandaloneConsumer do
         "escape symlink, exact leaf and replaced bound-root refusals",
         "opened file descriptors retain original bytes across root and ancestor replacement",
         "existing and allowed atoms only; unknown bounded keys remain strings",
+        "Cursor wire format, timestamp precision, strict tie ordering and invalid-cursor refusal",
         "PII and secret scan/redaction, entropy and Luhn signatures",
         "passive application stop and restart"
       ],
+      "cursor_check_groups" => cursor_check_groups,
       "code_paths" => paths,
       "compiled_applications" => compiled_applications(),
       "loaded_applications" => app_names(Application.loaded_applications()),
@@ -353,6 +359,142 @@ defmodule SupportStandaloneConsumer do
     false
   rescue
     ArgumentError -> true
+  end
+
+  defp cursors! do
+    timestamp = ~U[2024-01-13 12:00:00.123456Z]
+    milliseconds = 1_705_147_200_123
+    identifier = "record:with:colons"
+    encoded = "1705147200123:record:with:colons"
+
+    ensure(
+      Cursor.generate(timestamp, identifier) == encoded,
+      "DateTime cursor wire format changed"
+    )
+
+    ensure(
+      Cursor.generate(milliseconds, identifier) == encoded,
+      "integer cursor wire format changed"
+    )
+
+    ensure(
+      Cursor.parse(encoded) == {:ok, {milliseconds, identifier}},
+      "cursor parse round trip changed"
+    )
+
+    ensure(Cursor.parse("-1:before") == {:ok, {-1, "before"}}, "signed timestamp parsing changed")
+
+    millisecond_time = DateTime.truncate(timestamp, :millisecond)
+
+    ensure(
+      Cursor.parse_datetime(encoded) == {:ok, {millisecond_time, identifier}},
+      "millisecond DateTime cursor round trip changed"
+    )
+
+    micro_cursor = Integer.to_string(DateTime.to_unix(timestamp, :microsecond)) <> ":b"
+
+    ensure(
+      Cursor.parse_datetime(micro_cursor, precision: :microsecond) == {:ok, {timestamp, "b"}},
+      "microsecond DateTime cursor round trip changed"
+    )
+
+    for {order, passing, refused} <- [{:asc, "c", "a"}, {:desc, "a", "c"}] do
+      ensure(
+        Cursor.passes_filter?(milliseconds, passing, milliseconds, "b", order),
+        "equal-time cursor ID ordering changed"
+      )
+
+      ensure(
+        not Cursor.passes_filter?(milliseconds, refused, milliseconds, "b", order),
+        "reverse equal-time cursor ID was included"
+      )
+
+      ensure(
+        not Cursor.passes_filter?(milliseconds, "b", milliseconds, "b", order),
+        "cursor boundary record was repeated"
+      )
+    end
+
+    records = [
+      %{timestamp: DateTime.add(millisecond_time, -1, :millisecond), id: "older"},
+      %{timestamp: millisecond_time, id: "a"},
+      %{timestamp: millisecond_time, id: "b"},
+      %{timestamp: millisecond_time, id: "c"},
+      %{timestamp: DateTime.add(millisecond_time, 1, :millisecond), id: "newer"}
+    ]
+
+    opts = [timestamp_fn: & &1.timestamp, id_fn: & &1.id]
+    boundary = Cursor.generate(millisecond_time, "b")
+    invalid_cursors = ["invalid", "abc:record", "123junk:record", "123:", ""]
+
+    for invalid <- invalid_cursors do
+      ensure(Cursor.parse(invalid) == :error, "malformed encoded cursor parsed")
+      ensure(Cursor.parse_datetime(invalid) == :error, "malformed DateTime cursor parsed")
+    end
+
+    for invalid <- [nil, 123, %{}] do
+      ensure(Cursor.parse(invalid) == :error, "nonbinary cursor parsed")
+    end
+
+    for {order, expected} <- [asc: ["c", "newer"], desc: ["older", "a"]] do
+      ensure(
+        Enum.map(Cursor.filter_records(records, boundary, order, opts), & &1.id) == expected,
+        "millisecond cursor selection or stable input ordering changed"
+      )
+
+      ensure(
+        Enum.map(Cursor.filter_records_datetime(records, boundary, order, opts), & &1.id) ==
+          expected,
+        "DateTime cursor selection or stable input ordering changed"
+      )
+
+      ensure(
+        Cursor.filter_records(records, nil, order, []) == records,
+        "nil cursor did not preserve the input records"
+      )
+
+      ensure(
+        Cursor.filter_records_datetime(records, nil, order, []) == records,
+        "nil DateTime cursor did not preserve the input records"
+      )
+
+      for invalid <- invalid_cursors do
+        ensure(
+          Cursor.filter_records(records, invalid, order, opts) == [],
+          "malformed cursor did not fail closed"
+        )
+
+        ensure(
+          Cursor.filter_records_datetime(records, invalid, order, opts) == [],
+          "malformed DateTime cursor did not fail closed"
+        )
+      end
+    end
+
+    micro_records = [
+      %{timestamp: DateTime.add(timestamp, -1, :microsecond), id: "z_before"},
+      %{timestamp: timestamp, id: "a"},
+      %{timestamp: timestamp, id: "b"},
+      %{timestamp: timestamp, id: "c"},
+      %{timestamp: DateTime.add(timestamp, 1, :microsecond), id: "a_after"}
+    ]
+
+    for {order, expected} <- [asc: ["c", "a_after"], desc: ["z_before", "a"]] do
+      selected =
+        Cursor.filter_records_datetime(
+          micro_records,
+          micro_cursor,
+          order,
+          Keyword.put(opts, :precision, :microsecond)
+        )
+
+      ensure(
+        Enum.map(selected, & &1.id) == expected,
+        "microsecond cursor precision or equal-time ID ordering changed"
+      )
+    end
+
+    7
   end
 
   defp sensitive_data! do

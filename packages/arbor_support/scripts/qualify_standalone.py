@@ -61,6 +61,7 @@ true = Enum.all?(requirements, fn requirement ->
 end)
 false = Enum.any?(requirements, &String.starts_with?(&1["name"], "arbor_"))
 result = SupportStandaloneConsumer.verify!()
+7 = Map.fetch!(result, "cursor_check_groups")
 root = Path.expand(System.fetch_env!("ARBOR_SUPPORT_PATH")) <> "/"
 sources = Map.new(Map.fetch!(result, "code_paths"), fn {name, _beam} ->
   module = String.to_existing_atom(name)
@@ -90,6 +91,7 @@ false = Node.alive?()
 true = System.version() == System.fetch_env!("SUPPORT_COLD_ELIXIR_VERSION")
 true = List.to_string(:erlang.system_info(:otp_release)) == System.fetch_env!("SUPPORT_COLD_OTP_MAJOR")
 result = SupportStandaloneConsumer.verify!(require_no_mix: true)
+7 = Map.fetch!(result, "cursor_check_groups")
 root = Path.expand(System.fetch_env!("SUPPORT_COLD_RELEASE_ROOT")) <> "/"
 true = Enum.all?(:code.get_path(), fn path ->
   String.starts_with?(Path.expand(List.to_string(path)) <> "/", root)
@@ -322,6 +324,8 @@ def main():
         path for path in published["arbor_support"]
         if path in ("mix.exs", "README.md", "LICENSE") or path.endswith((".ex", ".c", ".h"))
     }, "Published package contains a generated or non-source input")
+    require("lib/arbor/common/pagination/cursor.ex" in published["arbor_support"],
+            "Published package omitted its public Cursor source")
     c_source = "c_src/arbor_safe_path_reader.c"
     require(c_source in published["arbor_support"], "Published package omitted its native C input")
     runner_path = Path(__file__).resolve()
@@ -534,6 +538,9 @@ def main():
                        if line.startswith("SUPPORT_QUALIFICATION_RESULT=")]
             require(len(results) == 1, f"Missing/ambiguous qualification result: {label}")
             state[label] = results[0]
+            require(results[0].get("cursor_check_groups") == 7, f"Missing public Cursor acceptance groups: {label}")
+            require("Elixir.Arbor.Common.Pagination.Cursor" in results[0]["code_paths"],
+                    f"Missing support-owned Cursor module proof: {label}")
         require(state["source-hidden-release-verify"]["mix_available"] is False, "Mix is present in release")
         require(state["consumer-verify"]["native_binary_sha256"] ==
                 state["source-hidden-release-verify"]["native_binary_sha256"],
