@@ -136,6 +136,36 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "OAuth is a required physical input without admitting adjacent package or app roots" do
+    oid = String.duplicate("e", 40)
+    required = required_triples(oid)
+    project = "packages/arbor_oauth/mix.exs"
+    source = "packages/arbor_oauth/lib/arbor/common/oauth.ex"
+    test_source = "packages/arbor_oauth/test/oauth_test.exs"
+    embedded = "apps/arbor_oauth/lib/arbor/common/oauth.ex"
+    adjacent = "packages/arbor_oauth_other/lib/arbor/common/oauth.ex"
+
+    extras =
+      Enum.map([source, test_source, embedded, adjacent], fn path ->
+        %{path: path, mode: "100644", oid: oid}
+      end)
+
+    assert project in SourcePolicy.required_files()
+    assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+    assert source in paths
+    assert test_source in paths
+    refute embedded in paths
+    refute adjacent in paths
+
+    assert {:error, :missing_required_input} =
+             SourcePolicy.select(Enum.reject(required, &(&1.path == project)) ++ extras)
+
+    assert SourcePolicy.ignored_generated_extra?("packages/arbor_oauth/cover/report.html")
+    refute SourcePolicy.ignored_generated_extra?("packages/arbor_oauth_other/cover/report.html")
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_oauth/cover/report.html")
+  end
+
+  @tag :fast
   test "enforces the 4999 source-row bound before later work" do
     oid = String.duplicate("c", 40)
 
@@ -631,6 +661,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_kernel/lib/a.ex", "arbor_kernel\n"},
       {"packages/arbor_custody/mix.exs", "custody\n"},
       {"packages/arbor_custody/lib/custody.ex", "custody source\n"},
+      {"packages/arbor_oauth/mix.exs", "oauth\n"},
+      {"packages/arbor_oauth/lib/oauth.ex", "oauth source\n"},
       {"packages/arbor_signals/mix.exs", "signals\n"},
       {"packages/arbor_signals/lib/signals.ex", "signals source\n"},
       {"packages/arbor_persistence/mix.exs", "persistence\n"},

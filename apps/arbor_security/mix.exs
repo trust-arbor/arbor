@@ -31,6 +31,7 @@ defmodule ArborSecurity.MixProject do
   defp deps do
     [
       {:arbor_custody, "~> 0.1.0-dev", path: "../../packages/arbor_custody"},
+      {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:jason, "~> 1.4"},

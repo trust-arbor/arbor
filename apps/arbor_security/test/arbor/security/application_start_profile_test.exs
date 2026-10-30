@@ -43,6 +43,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
              MapSet.new([
                :arbor_custody,
                :arbor_kernel_runtime,
+               :arbor_oauth,
                :elixir,
                :jason,
                :kernel,
