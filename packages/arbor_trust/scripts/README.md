@@ -142,6 +142,31 @@ requires prior VMs to have exited, journal pending count zero and a completed
 SQL WAL checkpoint. The candidate ERTS release must then reopen the exact predecessor-touched
 copy and repeat its refusal/receipt checks. Missing manifest/proof means HOLD.
 
+Authenticated state includes an absolute ledger-path digest. Attack and compatible
+rollback copies therefore execute at the original canonical state path. With all
+owned commands exited, the runner clones the complete tree (including empty
+directories, hidden files and exact modes), parks the pristine original directory,
+and mounts the independent copy through exclusive directory renames. It never
+re-signs markers, converts state or admits a relocated ledger. Only the pinned
+macOS exclusive-rename primitive is supported; there is no replacing-rename fallback.
+
+Each branch has an exclusive receipt under `state-mounts/<label>` with full
+byte/type/mode/inode inventories and move intent/progress. Both attacks use fresh
+copies of the same pristine state; the namespace attack replaces only its copied
+selected namespace and retains the displaced copy separately. One rollback mount
+spans the actual predecessor and candidate reopen continuously. In `finally`, after
+the exact owned command has exited, the mutated copy is retained and the original
+directory is restored and verified. An unknown occupant, live command or missing
+original means HOLD without deletion or overwrite. Root-directory rename ctime is
+audited; descendant identities, hashes and modes remain strict. Receipts report
+execution and retained paths separately: retained evidence is not transportable
+rollback state. Existing HOLDs and the sealed predecessor driver remain unchanged.
+
+Cleanup logging failures do not block safe physical restoration. The runner
+accumulates audit/rename errors, reobserves directory identities, restores the
+original wherever safe, and then holds. A failed write or fsync can leave the
+receipt incomplete; restoration is not a crash-proof logging or successful-run claim.
+
 Acceptance requires the 2300-pair retirement workload, independent conflict and
 namespace-only attack branches, actual predecessor rollback, source/API review,
 strict compilation, runtime receipts and complete-slice Grok review. These
