@@ -69,7 +69,7 @@ defmodule Arbor.Commands.PlatformInventory.EncodeTest do
                Encode.entries_digest([entry2])
     end
 
-    test "rejects an app outside the closed eleven-owner set" do
+    test "rejects an app outside the closed physical-owner set" do
       entry = Map.put(valid_entry(), "app", "arbor_dashboard")
 
       assert {:error, {:invalid_field, "app", :unknown_app}} = Encode.entries_digest([entry])

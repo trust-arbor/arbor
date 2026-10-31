@@ -1,0 +1,310 @@
+{
+  "schema": "arbor.historian.adoption-source-map.v1",
+  "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+  "authoritative_source": "Current Main, not frozen sibling implementation",
+  "production_source_dispositions": [
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "1718be17314f8279bb2ef0778c40d1171c604e71",
+      "source_sha256": "e58da264a107c441487bd245bd463879c3e79941e6defe909dd68d4ab053215b",
+      "target_path": "packages/arbor_historian/lib/arbor/historian.ex",
+      "target_sha256": "4b08549654c9a4d1be5971528ee3a22ebebff03e1b35772ab7efadef05838bcb",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/adapters/security_event_log.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "efb47f2d3bead573cb8f87835e1dc4f5cd50b719",
+      "source_sha256": "8ca97124dba207533a83ac6dd29d6cfe38b6310508aea12d33f06d6587674adb",
+      "target_path": "apps/arbor_historian_host/lib/arbor/historian/adapters/security_event_log.ex",
+      "target_sha256": "3a1aba3efbfbcc0f6e2024f73e82013917c9b34051d5e4516324fc787fc20139",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Historical concrete adapter moved to passive Host with an independent strict Boundary and direct generic Persistence.Core calls preserving the identical old product-facade delegation arguments."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/application.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "357ffcdf676d040f3fd45f79bb4f28fc35e06ad3",
+      "source_sha256": "4185ea5702f1a5546af842bdf392335b4f5ad2edf6bf5c165a53b61e726c6042",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/application.ex",
+      "target_sha256": "244eef6a2471c237d08a8d5a70409ba02c724c9c21ff042e39ed783f30fad50f",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/authority_audit_puller.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "6c52838b468c9b6fdd65806e75fafc6435fa635a",
+      "source_sha256": "07e1fa378a637a2617f0c8ed37500530387b9b8b676e052441d6898af34d5caf",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/authority_audit_puller.ex",
+      "target_sha256": "136c4b7c237aa12837d22e58904dbe2d13439f5b2162c0e8af6884c5ea6ae56d",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/config.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "fbddd0eebb37c91aacdbf6e8bf6e92f491ba2f6d",
+      "source_sha256": "780e933df685ee0805985229f5cab1027c077d29c300894a073cbcf9334e19c2",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/config.ex",
+      "target_sha256": "c926afbd6d2159556ee8005d94959541ee14b22799802dd50e855c5d579d4713",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/durable_signal_sink.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "5670f5824939eca1e6d31d974a669b80bed3e2ee",
+      "source_sha256": "164abbb8f5455176025c04b1d5d6b04b721293071d2c6ccd7ee20d5130cb45b3",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/durable_signal_sink.ex",
+      "target_sha256": "51736dc2b91e44df190f2d96bec7bc721edbe46b189031dfcebcb6b259af2bf5",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/event.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "8ac25b9701ffd7d5532fb15919aff6fd9405ce27",
+      "source_sha256": "92d868ff069eb6ea4e012fdf9392597a27104b6c1e21c97440a118b2d9e7a904",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/event.ex",
+      "target_sha256": "92d868ff069eb6ea4e012fdf9392597a27104b6c1e21c97440a118b2d9e7a904",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/event_converter.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "d372f7dfb4217ee0754c502783dbca73d7cdbc40",
+      "source_sha256": "ffd7d7119b4f998a37a23a5848e6c16548c9d89f390d7ead17febbe527098a11",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/event_converter.ex",
+      "target_sha256": "ffd7d7119b4f998a37a23a5848e6c16548c9d89f390d7ead17febbe527098a11",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/history_entry.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "b44efd1a9e40b0f92441b9110516b7eb0b604426",
+      "source_sha256": "05679a43a477a984f0a3e04fa45df5ef0c4b7fbb5dff5fd329817177fc0c048f",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/history_entry.ex",
+      "target_sha256": "80c4fbf04d6914d34974cd9566fbcbbd081e2f25da2c68c697211f41b336eb8b",
+      "bytes_unchanged": false,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/query_engine.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "d9f6f11ccb624f5d296e65b0260bea910d56ba97",
+      "source_sha256": "3ad53c945f6b776a541b3afcb16405df1b0eb28ff97b7c9782a6e75218dd2688",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/query_engine.ex",
+      "target_sha256": "f3581dc8e289c93d4123838e36e1f5ea4bddec75f555a0d66a3615bbb8beb2b7",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "7da1b6fe227a1eefc6433a2e6cd8515931a69ccb",
+      "source_sha256": "6d89bc208d7617dcc61b5447b9a18cfb99daee86b141813f1e8f87dc1448f7a1",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
+      "target_sha256": "6d89bc208d7617dcc61b5447b9a18cfb99daee86b141813f1e8f87dc1448f7a1",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/security_invocation_sink.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "e629e3627dbc3af4b6d9ca639c75ee8b2f3be503",
+      "source_sha256": "08a7d3aacf897713a152141e2d9e3586c4f5180aeeb6e330f360383b9ee11d8c",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/security_invocation_sink.ex",
+      "target_sha256": "6fb1b0067948a7ab8ae4ed7120e3a8041a2c809ad256615e47cbb05358201380",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/stream_content.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "fe1c05c15fa8848762e8b1f3f06d8e802802b3e7",
+      "source_sha256": "06b34a29524fcf672f88b503bed3322151a0915f6f3c3fe79df8fd5d567b1d50",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/stream_content.ex",
+      "target_sha256": "bed940c8ee0dfded979bdb9e3a10dcd0111aa31715907e9abc1dd4839bd70687",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Physical package ownership, narrow strict Boundary/owned port call sites, explicit provider/target defaults, or direct generic Persistence.Core facade in place of its identical product delegate. No copied algorithms."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/stream_content/core.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "7228b0ee13f85f3ba23d52c5dc1ca229b9d43db6",
+      "source_sha256": "2dd473e72b48a7fc6f3da80f94094b79b9a46eba0a8bc8ac99bdf1c4adc51143",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/stream_content/core.ex",
+      "target_sha256": "2dd473e72b48a7fc6f3da80f94094b79b9a46eba0a8bc8ac99bdf1c4adc51143",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/stream_ids.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "606e473513d795dbe058ff9d10bcda11b72256e2",
+      "source_sha256": "c88e006f050a8e406533d6e09d673728b4d9ad9a36a978d554b02e1f6a99bdc8",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/stream_ids.ex",
+      "target_sha256": "c88e006f050a8e406533d6e09d673728b4d9ad9a36a978d554b02e1f6a99bdc8",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/stream_registry.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "35f352f59c0fa4d596a04ea8c1481ed3de8ea83c",
+      "source_sha256": "313c98f317faa8973ca172512af577d47adf86e9b755c9b87ed5f152d28ffd6a",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/stream_registry.ex",
+      "target_sha256": "313c98f317faa8973ca172512af577d47adf86e9b755c9b87ed5f152d28ffd6a",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/taint_query.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "f82d56b0ab795ec9b4f96f3dda53c50c87534a10",
+      "source_sha256": "de4699af3b8141c1d4d09591e66dfd727c5040ddf436eca18196355e395089a9",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/taint_query.ex",
+      "target_sha256": "de4699af3b8141c1d4d09591e66dfd727c5040ddf436eca18196355e395089a9",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/test_audit_runtime.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "1a4f687023ef4b5aa46889a437cab8fdc137e360",
+      "source_sha256": "c52daa564561dd12baee651a61c5d95636a5831d02b9fd8fa986da9bab47463b",
+      "target_path": "apps/arbor_historian_host/test/support/test_audit_runtime.ex",
+      "target_sha256": "ef64c9ab472838bce754a321d6dffc84573c9a676d5fcd1cecece0042e24634d",
+      "bytes_unchanged": false,
+      "permitted_changes": [
+        "Product-only SQL fixture moved to Host test support; independent test Boundary declarations; migrations selected from canonical public SQL package."
+      ]
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/timeline.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "bfe7c98e44b7d80f5599881c09c0851541d62e51",
+      "source_sha256": "cd0dc12cc1ec6ac89e65410d7cdcf7769e87a02c1da331974738fd1b9d5726d1",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/timeline.ex",
+      "target_sha256": "cd0dc12cc1ec6ac89e65410d7cdcf7769e87a02c1da331974738fd1b9d5726d1",
+      "bytes_unchanged": true,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/lib/arbor/historian/timeline/span.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "f4c494259c2f1385d947b0f31d44ad9ce34fa8fa",
+      "source_sha256": "5bd2b5c01cf2bf682d5185be4e40b796347d10f14a4ef9b303cde42ea629bd8d",
+      "target_path": "packages/arbor_historian/lib/arbor/historian/timeline/span.ex",
+      "target_sha256": "3dbc8b76865337b59345397abbea0c9104d370347a34c87e817a8d3db22a4a2e",
+      "bytes_unchanged": false,
+      "permitted_changes": []
+    },
+    {
+      "source_path": "apps/arbor_historian/mix.exs",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "ffe3a60cbc53896207a3524340de91c9e396f068",
+      "source_sha256": "26a009452c73d04aa9aac9bfb4a9185e19c0d9e8a89b19b26561556c44347872",
+      "disposition": "Product-embedded manifest replaced by independent active canonical package and passive product host manifests.",
+      "targets": {
+        "packages/arbor_historian/mix.exs": "b0f415402c1c2f8b71e0cd34ba0d1f9708afda1ddb956bc4382d93be020e6263",
+        "apps/arbor_historian_host/mix.exs": "b5d60f441de94f83d581370d40ca921380914b7494172b3f0a69267ab03b612a"
+      }
+    }
+  ],
+  "test_support_dispositions": [
+    {
+      "source_path": "apps/arbor_historian/test/support/authority_audit_test_helpers.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "9dbe304b04459c6d1c711bd0cedc3db64fca3735",
+      "source_sha256": "b4b1b51fcfcb7ebfeb3d3e28c26507b8d51ab164e327c94177001a45daec5eea",
+      "target_path": "apps/arbor_historian_host/test/support/authority_audit_test_helpers.ex",
+      "target_sha256": "010f0e999ae049b4338440b108cd718948c6326a42a6cd565ee51a5bf517777e",
+      "bytes_unchanged": false,
+      "disposition": "Owning test bootstrap/helper relocated; provider bindings explicit; actual SQL/Capabilities helpers remain product-only."
+    },
+    {
+      "source_path": "apps/arbor_historian/test/support/historian_test_helpers.ex",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "fb446c717c929828cd3c5f2dfd169ff12cd0ca24",
+      "source_sha256": "3decd0f832e6f71197cd5a8592567247eda794567a5c85e7060c8391460c2768",
+      "target_path": "packages/arbor_historian/test/support/historian_test_helpers.ex",
+      "target_sha256": "3decd0f832e6f71197cd5a8592567247eda794567a5c85e7060c8391460c2768",
+      "bytes_unchanged": true,
+      "disposition": "Owning test bootstrap/helper relocated; provider bindings explicit; actual SQL/Capabilities helpers remain product-only."
+    },
+    {
+      "source_path": "apps/arbor_historian/test/test_helper.exs",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "source_git_blob_oid": "3741979c134da33d31ba23226c3ea5e8bbc393e3",
+      "source_sha256": "baa90ab8c8ef7c38cc7e8220ba030d18e35ccef9ba1a269d0e2c2d80f74ddd5f",
+      "target_path": "packages/arbor_historian/test/test_helper.exs",
+      "target_sha256": "1e76df25d8d464a5f8b1651eedc4c3b6163d58ba9241e819492cd30f973ddb99",
+      "bytes_unchanged": false,
+      "disposition": "Owning test bootstrap/helper relocated; provider bindings explicit; actual SQL/Capabilities helpers remain product-only."
+    }
+  ],
+  "added_boundary_sources": {
+    "apps/arbor_historian_host/lib/arbor/historian/host.ex": "3242c0b5371c11f353040db5a600a46c80e5de9b76f488e684c666ce1087cea5",
+    "apps/arbor_historian_host/lib/arbor/historian/host/authority_source.ex": "fd645be2c32980c499c50d4af82b92ecc5dab10a93dd9f3101e6692c52da4ebb",
+    "apps/arbor_historian_host/lib/arbor/historian/host/authorizer.ex": "66b24b8022d9653ac46cab574a9e54223246ef2907c6ee91ec3e112e66ec44f1",
+    "apps/arbor_historian_host/lib/arbor/historian/host/durable_sink.ex": "e5fc47076c56c26fe452493b81d6811970fdb10329d0595be7e036667b424485",
+    "apps/arbor_historian_host/lib/arbor/historian/host/observation.ex": "4e5c817e8a79305d030619a66ca2732b2e5d35e7c40cc9bc5e76797dcbe023f2",
+    "packages/arbor_historian/lib/arbor/historian/contracts/authority_source.ex": "1a7a4f2534eb733f3e9cf1bf48ff3cdea8b7e93f9ec3e50210c1cf1bacc9141f",
+    "packages/arbor_historian/lib/arbor/historian/contracts/authorizer.ex": "dd7298776a02cdf4ff1862ef24d39dc922ab52a7c8e053283df3bcd6590faba7",
+    "packages/arbor_historian/lib/arbor/historian/contracts/observation.ex": "3519b82c139cb74845a492509f9e5485409244cf938709ea22829e67d029a8be",
+    "packages/arbor_historian/lib/arbor/historian/ports/authority_source.ex": "6c077db84fb56a1a2fb99c275eebee1ef51be97fba3b71baa9339d393127d7ce",
+    "packages/arbor_historian/lib/arbor/historian/ports/authorizer.ex": "30687741e70a40556d998051194ee0aabf40b164c27fa00c3b8274f8f0636338",
+    "packages/arbor_historian/lib/arbor/historian/ports/observation.ex": "10baca0e38d0df4e94111b8c9a65f83ca8ec1743696a6be1869c2c7f619773ff"
+  },
+  "identity_notes": [
+    "Canonical :arbor_historian and all historical mechanism/struct/supervisor/child/stream/event/intent identities retained.",
+    "Actual puller remains direct child of the canonical application; inline source adapter retains caller PID.",
+    "Persistence generic product methods were verified direct delegates to Arbor.Persistence.Core with identical arguments. Core paths call that public package facade directly.",
+    "SecurityInvocationSink.identity/0 fingerprints the actual generic Core implementation instead of loading the product facade. This changes implementation evidence, not event/intent encodings or domains.",
+    "Only optional observation and fixed trusted authority providers are abstracted; no per-request provider selection.",
+    "Root recorded baseline fixture failure: synthetic TestAuditConsumer overwrote actual puller name/app. Host SQL fixtures now bind/restore both selectors before mutations and call bootstrap audit_consumer:false; production gate unchanged."
+  ],
+  "runtime_qualification": "Runtime qualification is recorded separately in run-specific receipts; this map attests source disposition only.",
+  "inherited_test_fixture_policy_corrections": [
+    {
+      "target_path": "apps/arbor_historian_host/test/arbor/historian/authority_audit_retirement_database_test.exs",
+      "source_commit": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+      "classification": "Inherited test/API policy contradiction; test-only correction, production unchanged",
+      "original_success_assertion": "assert :ok = Historian.delete_stream_content(g_stream)",
+      "added_public_policy_assertion": "assert {:error, :delete_not_supported} = Historian.delete_stream_content(g_stream)",
+      "corrected_success_assertion": "assert :ok = Persistence.purge_stream(@target_name, EctoEventLog, g_stream, repo: SinkRepo)",
+      "scope": "Only exact test-owned SQL stream, same configured EventLog target/backend/Repo. Generic public operation retains the original success gate for the deliberate storage-loss attack; no raw SQL or production guard change.",
+      "later_assertions_byte_unchanged": true,
+      "original_names_tags_workload_deadlines_preserved": true,
+      "historical_source_assertion_hashes_unchanged": true,
+      "byte_identical_fafa_stream_content_core_sha256": "2dd473e72b48a7fc6f3da80f94094b79b9a46eba0a8bc8ac99bdf1c4adc51143",
+      "failure_receipt": "tmp/verification/trust-historian-adoption-20261030/historian-host-durable-02/sql-durability.log",
+      "prior_baseline_mask": "baseline-historian-durable-01 stopped in audit_source_unavailable because synthetic consumer selectors masked this later stale expectation; source comparison proves denial already existed at fafa, no fresh baseline run claimed."
+    }
+  ],
+  "readability_adjustments": "Extraction-only lint fixes use aliases for new Runtime/Observation/ProfileSync/ProfileStore/Persistence.Core calls and order newly added aliases. Trust Store.init uses case for the closed ProfileSync :ok/{:error, reason} protocol, preserving subscription-before-ETS initialization and exact stop behavior; malformed returns still fail closed."
+}

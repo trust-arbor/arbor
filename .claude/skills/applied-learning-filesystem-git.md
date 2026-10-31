@@ -454,3 +454,15 @@ remote during diagnosis without authorization.
 <!-- applied-learning: static-dependency-guards-must-follow-returned-helper-declarations -->
 <a id="applied-learning-static-dependency-guards-must-follow-returned-helper-declarations"></a>
 **Static dependency guards must follow returned helper declarations.** When reading manifests as AST, follow the dependency lists and the statically reached helpers that produce their entries, including conditional return branches. Counting only literal list elements can silently classify a dependent package as L0. Restrict traversal to returned dependency entries and lists, bound helper recursion, and ignore selectors, patterns, unrelated metadata and unused helpers. Keep foreign or dynamic source overrides subject to their existing admission checks. Regress legal helper syntax and false-positive cases before treating the computed hierarchy as evidence. (Found 2026-10-29 when an adapter's versioned dependency was hidden in a tuple-returning helper.)
+
+<!-- applied-learning: read-only-imports-can-write-generated-files -->
+<a id="applied-learning-read-only-imports-can-write-generated-files"></a>
+**Read-only imports can write generated files.** Python imports may create a
+sibling bytecode cache even when the imported module only supplies inspection
+helpers. During immutable-source or clean-worktree verification, disable bytecode
+generation before importing (`python -B` or `sys.dont_write_bytecode = True`).
+Check source cleanliness after observational commands too. Retain accidental
+generated artifacts in owned ignored evidence, without changing reviewed source
+or broadening ignore rules to make a gate pass. (Found 2026-10-30 when importing
+a qualification guard dirtied an otherwise frozen candidate; the pre-merge check
+stopped before changing Main.)

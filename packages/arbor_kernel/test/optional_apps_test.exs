@@ -27,6 +27,10 @@ defmodule Arbor.OptionalAppsTest do
 
     assert :arbor_dashboard in apps
     assert :arbor_agent in apps
+    assert :arbor_trust_host in apps
+    assert :arbor_historian_host in apps
+    refute :arbor_trust in apps
+    refute :arbor_historian in apps
     refute Enum.any?(@voice_apps, &(&1 in apps))
 
     enabled = Arbor.OptionalApps.apps(path, %{"ARBOR_VOICE" => "true"})

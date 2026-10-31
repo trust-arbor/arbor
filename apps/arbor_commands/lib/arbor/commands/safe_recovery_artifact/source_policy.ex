@@ -6,7 +6,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_kernel_runtime/",
     "apps/arbor_security/",
     "apps/arbor_persistence_host/",
-    "apps/arbor_trust/",
+    "apps/arbor_trust_host/",
+    "apps/arbor_historian_host/",
+    "packages/arbor_trust/",
+    "packages/arbor_historian/",
     "packages/arbor_custody/",
     "packages/arbor_support/",
     "packages/arbor_oauth/",
@@ -17,9 +20,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "packages/arbor_persistence/",
     "packages/arbor_persistence_sql/"
   ]
-  @app_names ~w(arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust)
+  @app_names ~w(arbor_kernel_runtime arbor_security arbor_persistence_host arbor_trust_host arbor_historian_host)
   @package_names ~w(
-    arbor_kernel arbor_custody arbor_support arbor_oauth arbor_capabilities
+    arbor_kernel arbor_custody arbor_support arbor_oauth arbor_capabilities arbor_trust arbor_historian
     arbor_capabilities_signals arbor_capabilities_oidc arbor_signals
     arbor_persistence arbor_persistence_sql
   )
@@ -40,7 +43,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "packages/arbor_persistence_sql/mix.exs",
     "apps/arbor_security/mix.exs",
     "apps/arbor_persistence_host/mix.exs",
-    "apps/arbor_trust/mix.exs",
+    "packages/arbor_trust/mix.exs",
+    "packages/arbor_historian/mix.exs",
+    "apps/arbor_trust_host/mix.exs",
+    "apps/arbor_historian_host/mix.exs",
     "build_support/mix_project_paths.exs",
     "config/config.exs",
     "config/prod.exs",

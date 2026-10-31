@@ -1,0 +1,11 @@
+{
+  "actual_source": "packages/arbor_capabilities/examples/standalone/lib/proof.ex",
+  "actual_source_sha256": "a4ef3d3e2180134dde95590aa3236c049a12df5b7088fefa334f959863709097",
+  "adaptations": [
+    "Fixture namespace/app name only",
+    "Exact nine-canonical-app runtime closure",
+    "Peers case omitted because actual predecessor peer qualification is separate and already owned by Core",
+    "Added fixture-only public actor context using same real possession proof/open authority API; no tokens serialized"
+  ],
+  "copy_sha256": "ad250e5b274154c91510ab9c30509b5725f1c993662034adf71f92903304ac38"
+}

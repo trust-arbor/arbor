@@ -36,7 +36,7 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   @file_atom_keys [:path, :blob_oid, :mode, :byte_size, :bytes]
   @file_string_keys ["path", "blob_oid", "mode", "byte_size", "bytes"]
 
-  @doc "Reviewed eleven-owner Platform v2 inventory scope."
+  @doc "Reviewed physical-owner Platform v2 inventory scope."
   @spec platform_apps() :: [String.t()]
   def platform_apps, do: @platform_apps
 

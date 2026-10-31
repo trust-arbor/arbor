@@ -571,6 +571,31 @@ config :arbor_kernel,
 
 # Full-profile action-namespace projection. Atom only; activation_only must
 # not invoke or load this module. arbor_trust must not depend on arbor_actions.
+# Product composition supplies concrete lifecycle, diagnostics and authority-sync ports.
+# Canonical Trust/Historian remain the active application and role owners.
+config :arbor_trust,
+  runtime_host: Arbor.Trust.Host.Runtime,
+  observation: Arbor.Trust.Host.Observation,
+  profile_sync_transport: Arbor.Trust.Host.ProfileSync,
+  pubsub: Arbor.Core.PubSub,
+  profile_store: [
+    mode: :durable,
+    backend: Arbor.Persistence.QueryableStore.Postgres,
+    backend_opts: [repo: Arbor.Persistence.Repo],
+    collection: "trust_profiles",
+    buffered_name: :arbor_trust_profiles
+  ]
+
+config :arbor_historian,
+  authorizer: Arbor.Historian.Host.Authorizer,
+  authority_source: Arbor.Historian.Host.AuthoritySource,
+  event_provider: Arbor.Historian.Host.Observation,
+  durable_event_log_target: %{
+    name: :historian_durable_event_log,
+    backend: Arbor.Persistence.EventLog.Ecto,
+    opts: [repo: Arbor.Persistence.Repo]
+  }
+
 config :arbor_trust, action_profile_provider: Arbor.Actions
 # Feature ownership is passive host data, admitted into the policy snapshot.
 config :arbor_trust, feature_domain_owners: %{"coding" => :arbor_orchestrator}

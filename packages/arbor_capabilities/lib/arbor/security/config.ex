@@ -754,7 +754,8 @@ defmodule Arbor.Security.Config do
 
   A1 moved JIT policy minting out of `arbor_security`; `authorize/4` no longer
   consults this flag. `Arbor.Trust.Config.policy_enforcer_enabled?/0` reads the
-  trust key first and falls back to this historical key during config migration.
+  Trust-owned key only. This historical reader remains a compatibility surface
+  and no longer configures the Trust mechanism.
   """
   @spec policy_enforcer_enabled?() :: boolean()
   def policy_enforcer_enabled? do

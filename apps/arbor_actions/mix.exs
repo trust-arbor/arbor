@@ -41,7 +41,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_persistence_host, in_umbrella: true},
       # L2 — public LLM eval-subject catalog (`Arbor.LLM.eval_subject/1`).
@@ -49,7 +51,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_llm, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
       {:arbor_sandbox, in_umbrella: true},
-      {:arbor_historian, in_umbrella: true},
+      {:arbor_historian, "~> 0.1.0",
+       path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
+      {:arbor_historian_host, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
       # L4 — public HITL facade (`Arbor.Comms.await_interaction_response/3`).
       # Legal: actions (L6) may depend on lower levels only.

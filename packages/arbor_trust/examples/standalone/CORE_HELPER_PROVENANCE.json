@@ -1,0 +1,13 @@
+{
+  "adaptations": "Only provisioner module identity and surrounding consumer context/state management; all production Security/Kernel/Trust module identities preserved. Explicit first-install local host mode, not OIDC production qualification. Acceptance requires per-attempt source/build/runtime receipts.",
+  "destination": "packages/arbor_trust/examples/standalone/lib/core_context.ex",
+  "destination_sha256": "b1fd35137dfc64e3ef963d91b32803b584961b02043cd7446b9a8fa45f2a6d52",
+  "reused_private_helper_bodies": [
+    "prepare_operator_genesis!/0",
+    "operator/0",
+    "enroll!/2",
+    "authority!/1"
+  ],
+  "source": "packages/arbor_capabilities/examples/standalone/lib/proof.ex",
+  "source_sha256": "a4ef3d3e2180134dde95590aa3236c049a12df5b7088fefa334f959863709097"
+}

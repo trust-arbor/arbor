@@ -55,7 +55,9 @@ defmodule ArborCommands.MixProject do
       {:arbor_ai, in_umbrella: true},
       # L4 trust facade — coding-grant closes execution-principal trust rules
       # through Arbor.Trust.explain/2 and Arbor.Trust.set_rule/3 (L8 → L4).
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
       # L1 signals facade — coding-benchmark approval accounting queries
       # interaction audit events by task correlation_id.
       {:jason, "~> 1.4"},

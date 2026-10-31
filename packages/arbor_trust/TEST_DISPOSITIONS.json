@@ -1,0 +1,3902 @@
+{
+  "schema": "arbor.trust.test_dispositions.v1",
+  "base": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+  "owning_suite_source_files": 44,
+  "support_and_helper_source_files": 2,
+  "original_named_test_and_property_forms": 697,
+  "current_named_test_and_property_forms": 705,
+  "original_assertion_lines_all_conserved_with_multiplicity": true,
+  "test_labels_conserved_after_explicit_renames": true,
+  "label_renames": [
+    {
+      "file": "packages/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+      "old": "uses compatibility fallback from security config",
+      "new": "reads the Trust-owned setting without a Capabilities fallback",
+      "reason": "Only the authorized two-flag ownership migration removes Capabilities fallbacks; original false/true assertions retained."
+    },
+    {
+      "file": "packages/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+      "old": "trust config overrides compatibility fallback",
+      "new": "Capabilities settings cannot override the Trust-owned setting",
+      "reason": "Only the authorized two-flag ownership migration removes Capabilities fallbacks; original false/true assertions retained."
+    },
+    {
+      "file": "packages/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+      "old": "uses compatibility fallback from security config",
+      "new": "reads the Trust-owned setting without a Capabilities fallback",
+      "reason": "Only the authorized two-flag ownership migration removes Capabilities fallbacks; original false/true assertions retained."
+    },
+    {
+      "file": "packages/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+      "old": "trust config overrides compatibility fallback",
+      "new": "Capabilities settings cannot override the Trust-owned setting",
+      "reason": "Only the authorized two-flag ownership migration removes Capabilities fallbacks; original false/true assertions retained."
+    },
+    {
+      "file": "packages/arbor_trust/test/arbor/trust/config_test.exs",
+      "old": "returns default PubSub module when no app env set",
+      "new": "omits PubSub integration when no app env is configured",
+      "reason": "Package default is explicit nil; original product Arbor.Core.PubSub assertion retained in Host package_host_adoption_test.exs."
+    }
+  ],
+  "new_bounds": [
+    {
+      "kind": "test",
+      "label": "configured unavailable or malformed runtime fails before PolicyHost can claim authority"
+    },
+    {
+      "kind": "test",
+      "label": "standalone activation owns the real canonical PolicyHost without a product gate"
+    },
+    {
+      "kind": "test",
+      "label": "full startup refuses an absent durable profile store instead of selecting a product backend"
+    },
+    {
+      "kind": "test",
+      "label": "configured invalidation transport failure refuses Store startup before cache ownership"
+    },
+    {
+      "kind": "test",
+      "label": "post-commit transport failure is observable without undoing an acknowledged local write"
+    },
+    {
+      "kind": "test",
+      "label": "canonical application closure contains no product runtime or concrete transport"
+    },
+    {
+      "kind": "test",
+      "label": "passive product composition preserves canonical Trust module and process owners"
+    },
+    {
+      "kind": "test",
+      "label": "product composition explicitly retains the previous PubSub binding"
+    }
+  ],
+  "rows": [
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/application_spec_security_regression_test.exs",
+      "source_git_blob": "619290461a3dab0177aab875caa35c5e9f419e6a",
+      "source_sha256": "3763055c3aece21b7668f32f036295b06a32aaea579b7e556caccbc185b70d76",
+      "source_bytes": 3358,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/application_spec_security_regression_test.exs",
+          "final_destination_sha256": "250fbf8872d54ca0bab07296197391a117652c03f1b82b9bf07433c6e7c76d24",
+          "bytes": 3329
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: consulted .app required set omits persistence and pubsub"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: activation_only peer does not start or load provider apps"
+        }
+      ],
+      "original_assertion_line_count": 15,
+      "original_assertion_lines_sha256": "805cff1392bd5effb34c4443b757a9796e08240278db9d0923e11605fe67c67f",
+      "original_tag_lines": [
+        "@tag :fast",
+        "@tag :slow",
+        "@tag :integration",
+        "@tag :security_regression"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/application_start_profile_security_regression_test.exs",
+      "source_git_blob": "104e695926910e84fdfe6bedbe03a4b725c1942c",
+      "source_sha256": "ba412cf0aab7133dad47bff27e17f371f386ab88568cd728d1c21882eca67b43",
+      "source_bytes": 31815,
+      "disposition": "literal_product_assertion_split",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/application_start_profile_security_regression_test.exs",
+          "final_destination_sha256": "a3acdb54e8ff7e318e434fe58086fe225e30ccd918a453c58bbb02408388dea5",
+          "bytes": 31774
+        },
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/application_start_profile_host_integration_test.exs",
+          "final_destination_sha256": "feea6beb7b8c299a91abc6f0b32708d1b5ce48a74bd7a88bc0c74a559e913dd5",
+          "bytes": 1937
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "activation_only starts only the policy host and stays healthy without providers"
+        },
+        {
+          "kind": "test",
+          "label": "post-start env and action providers cannot weaken an activation-only host"
+        },
+        {
+          "kind": "test",
+          "label": ":full starts the policy host plus the provider tree"
+        },
+        {
+          "kind": "test",
+          "label": ":full with start_children false still starts the policy host"
+        },
+        {
+          "kind": "test",
+          "label": "activation_only with start_children false starts only the policy host"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: retained legacy policy never adopts live feature ownership"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: explicit malformed feature ownership is not treated as legacy absence"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: feature-owner app atoms are never loaded by either startup profile"
+        },
+        {
+          "kind": "test",
+          "label": "full profile admits a preconfigured action provider without provider children"
+        },
+        {
+          "kind": "test",
+          "label": "full profile with start_children true still admits a preconfigured action provider"
+        },
+        {
+          "kind": "test",
+          "label": "caller more-specific :auto cannot weaken the frozen shell ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "unknown or malformed start profiles fail closed even when start_children is false"
+        },
+        {
+          "kind": "test",
+          "label": "host loss fails closed"
+        },
+        {
+          "kind": "test",
+          "label": "bind rejects a frozen start_profile that does not match the requested profile"
+        },
+        {
+          "kind": "test",
+          "label": "preconfigured action provider is not invoked on activation_only"
+        },
+        {
+          "kind": "test",
+          "label": "post-start permissive-baseline env cannot weaken a frozen host"
+        },
+        {
+          "kind": "test",
+          "label": "malformed startup egress overrides fail closed"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: startup default_egress_modes rejects keys outside Classification.egress_tiers/0"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: arbor_trust required runtime applications omit persistence and pubsub"
+        },
+        {
+          "kind": "test",
+          "label": "caller egress_mode cannot weaken authorize_egress or authorize"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: unknown egress tiers fail closed before Security"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: valid caller :auto cannot relax frozen :ask through authorize/4"
+        },
+        {
+          "kind": "test",
+          "label": "malformed ceiling and permissive opts fail closed"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: malformed option containers return typed closed outcomes"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: :absent egress tier fails closed before Security"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: supplied :absent and malformed proper-keyword values fail closed"
+        }
+      ],
+      "original_assertion_line_count": 134,
+      "original_assertion_lines_sha256": "f1c75f9226f35e0b07abf9ad4cde0fd3c00f30586ccebc9213fcb231ff55f3b9",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_context_test.exs",
+      "source_git_blob": "01b1ab17ad29e111d2321af0c5e9c9f4f444b351",
+      "source_sha256": "fe67fb602c383d8f3853f02131807e80c58c14477966065d63b167d5fccb4b67",
+      "source_bytes": 6098,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_context_test.exs",
+          "final_destination_sha256": "fe67fb602c383d8f3853f02131807e80c58c14477966065d63b167d5fccb4b67",
+          "bytes": 6098
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "flattens the explanation and profile into a JSON-clean map"
+        },
+        {
+          "kind": "test",
+          "label": "irreversible profiles report graduation_threshold :never"
+        },
+        {
+          "kind": "test",
+          "label": "omits matched_rule when no user rule matched"
+        },
+        {
+          "kind": "test",
+          "label": "records a policy error instead of dropping the explanation"
+        },
+        {
+          "kind": "test",
+          "label": "fails soft when a lookup raises or exits"
+        },
+        {
+          "kind": "test",
+          "label": "only forwards admissible explain options"
+        },
+        {
+          "kind": "test",
+          "label": "summarises a profile and derives the graduation threshold"
+        },
+        {
+          "kind": "test",
+          "label": "returns nil for non-profiles"
+        },
+        {
+          "kind": "test",
+          "label": "an unknown agent still gets an explanation and the ceiling"
+        }
+      ],
+      "original_assertion_line_count": 34,
+      "original_assertion_lines_sha256": "aac5bd98499eab4c125e8324ce4f4ab771bbbf56d247f19f1b6c850ec304bc8b",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_evidence_security_regression_test.exs",
+      "source_git_blob": "37d4054fdc274b350798635c994b0114d3a5b28d",
+      "source_sha256": "7e089bc534b60ef51ad551aea6eedb5b927842a64e0ad2099723b2fe549d9022",
+      "source_bytes": 6957,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_evidence_security_regression_test.exs",
+          "final_destination_sha256": "7e089bc534b60ef51ad551aea6eedb5b927842a64e0ad2099723b2fe549d9022",
+          "bytes": 6957
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: unknown answers increment once without human graduation"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: caller scope and human flags cannot manufacture evidence"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: source mutation cannot reuse an already counted request"
+        },
+        {
+          "kind": "test",
+          "label": "rejection and rework reset the streak; duplicate replay after reset stays inert"
+        },
+        {
+          "kind": "test",
+          "label": "owner-qualified human evidence counts once; unknown answers and rejection break its streak"
+        },
+        {
+          "kind": "test",
+          "label": "missing or unavailable source refuses caller-authored approvals"
+        }
+      ],
+      "original_assertion_line_count": 37,
+      "original_assertion_lines_sha256": "bc1effdd7d8bb8b7b27b807356744108a0db3c034eb4eb07d22e3ed8c020410f",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_guard_always_locked_floor_security_regression_test.exs",
+      "source_git_blob": "cb1e9fcab28eac915a8dea19b464b593f4f883dc",
+      "source_sha256": "ee09c67c6583633a654543a6b812b51c22aefccaeb70cc1c0d5cf66a947b660f",
+      "source_bytes": 2310,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_guard_always_locked_floor_security_regression_test.exs",
+          "final_destination_sha256": "ee09c67c6583633a654543a6b812b51c22aefccaeb70cc1c0d5cf66a947b660f",
+          "bytes": 2310
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression (F-015): #{uri} is never unattended even when policy resolves :auto"
+        },
+        {
+          "kind": "test",
+          "label": "the floor is segment-aware: a sibling namespace with the same prefix bytes is not locked"
+        }
+      ],
+      "original_assertion_line_count": 3,
+      "original_assertion_lines_sha256": "149fbf0946595c6ac407f5b789688af29694155aaf65935eb857593062e49c57",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+      "source_git_blob": "9148c0b48f358d9e7647f2901aca9522feea0c9c",
+      "source_sha256": "58d7aef62eef6c3ed19518f4ed0c8220de0d8b7a2812130f74351fcadbbbfcba",
+      "source_bytes": 12218,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+          "final_destination_sha256": "199a6d1758d084e8e9d230019b02bdce6ca1f0d94e17a08a69d7c90911b2b590",
+          "bytes": 12322
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "uses compatibility fallback from security config"
+        },
+        {
+          "kind": "test",
+          "label": "trust config overrides compatibility fallback"
+        },
+        {
+          "kind": "test",
+          "label": "falls through to cap constraints when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "auto policy approves a normal capability"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: auto policy does not bypass per-cap requires_approval"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: exact approved invocation bypasses an auto-policy capability constraint once"
+        },
+        {
+          "kind": "test",
+          "label": "gated policy escalates"
+        },
+        {
+          "kind": "test",
+          "label": "approved invocation bypasses gated policy only for exact request principal and resource"
+        },
+        {
+          "kind": "test",
+          "label": "gated escalation carries the trust explanation and capability risk profile"
+        },
+        {
+          "kind": "test",
+          "label": "capability-constraint escalation also carries the trust context"
+        },
+        {
+          "kind": "test",
+          "label": "deny policy blocks"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: a raising trust policy fails closed, never auto-approves"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: an exiting trust policy fails closed, never auto-approves"
+        }
+      ],
+      "original_assertion_line_count": 31,
+      "original_assertion_lines_sha256": "2a854fa7adbe363025962432170b04ffadb9f52ef08677dd7abd29311fe23a35",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authority_enumeration_test.exs",
+      "source_git_blob": "1f5d53ba775b585aa476879f22c07c9e0a79800e",
+      "source_sha256": "cffa947fa4148c42952f774ddce43e2150da2f96890bb4bf7359cd3bc8595d9c",
+      "source_bytes": 8109,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authority_enumeration_test.exs",
+          "final_destination_sha256": "cffa947fa4148c42952f774ddce43e2150da2f96890bb4bf7359cd3bc8595d9c",
+          "bytes": 8109
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns held caps plus profile-mintable candidate URIs without minting"
+        },
+        {
+          "kind": "test",
+          "label": "does not treat a missing trust profile as policy-mintable"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: missing profile stays unmintable when the enforcer is on"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: leftover permissive policy defaults cannot mint for an unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "does not report policy-mintable URIs when policy enforcer is disabled"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: unprofiled auto rules are not policy-mintable"
+        }
+      ],
+      "original_assertion_line_count": 40,
+      "original_assertion_lines_sha256": "8b61c63cde54b1876696bd4a3bc0daed80f628986bf73104e0322e39fcc0ffd6",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authority_test.exs",
+      "source_git_blob": "34efdb4c589b2261379b4e5f52e2614f86c3bfcf",
+      "source_sha256": "10299802e27567ef5418e252a66b704d39a5745c643a1afd3d31dd101e42c3f4",
+      "source_bytes": 11887,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authority_test.exs",
+          "final_destination_sha256": "2b313f8800231fbf2f6d4f88400fc73686bbfc0b1bc8b4da0d8a1e36f329597f",
+          "bytes": 11903
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "creates profile with default (cautious) preset"
+        },
+        {
+          "kind": "test",
+          "label": "returns baseline for unmatched URI"
+        },
+        {
+          "kind": "test",
+          "label": "returns specific rule for matched URI"
+        },
+        {
+          "kind": "test",
+          "label": "security ceiling overrides user preference"
+        },
+        {
+          "kind": "test",
+          "label": "longest prefix match wins"
+        },
+        {
+          "kind": "test",
+          "label": "arbor://agent/discover_tools is :auto even with an :ask baseline (agents must discover their own tools without an approval prompt)"
+        },
+        {
+          "kind": "test",
+          "label": "an explicit profile rule still overrides the discover_tools infra-auto default"
+        },
+        {
+          "kind": "test",
+          "label": "A1: proactive notify is allowed by default (cautious preset, no ceiling caps it)"
+        },
+        {
+          "kind": "test",
+          "label": "regression: a '/**' allow rule under a :block baseline actually fires (was fail-closed)"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: a '/** block' rule under an :allow baseline fails OPEN pre-fix"
+        },
+        {
+          "kind": "test",
+          "label": "most-specific path rule wins (granular path trust: allow a project, ask for a subtree)"
+        },
+        {
+          "kind": "test",
+          "label": "on a canonical-length collision (bare vs '/**' for the same op) the most restrictive wins"
+        },
+        {
+          "kind": "test",
+          "label": "returns most restrictive mode"
+        },
+        {
+          "kind": "test",
+          "label": "explicitly resets baseline and merges preset rules"
+        },
+        {
+          "kind": "test",
+          "label": "preserves user-customized rules across preset application"
+        },
+        {
+          "kind": "test",
+          "label": "freeze sets frozen state"
+        },
+        {
+          "kind": "test",
+          "label": "unfreeze clears frozen state"
+        },
+        {
+          "kind": "test",
+          "label": "returns resolution chain"
+        },
+        {
+          "kind": "test",
+          "label": "formats profile for display"
+        },
+        {
+          "kind": "test",
+          "label": "round-trips a fresh profile preserving all material fields"
+        },
+        {
+          "kind": "test",
+          "label": "round-trips a profile with custom rules"
+        },
+        {
+          "kind": "test",
+          "label": "from_persistence accepts string-keyed maps (e.g. JSONB roundtrip)"
+        },
+        {
+          "kind": "test",
+          "label": "from_persistence coerces invalid rule modes to :ask (safe default)"
+        },
+        {
+          "kind": "test",
+          "label": "from_persistence rejects data without an agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "a /** rule is canonicalized to the bare prefix and warns loudly"
+        },
+        {
+          "kind": "test",
+          "label": "a bare rule is stored unchanged with no warning"
+        }
+      ],
+      "original_assertion_line_count": 54,
+      "original_assertion_lines_sha256": "e15466bdc3ce1e54862b6b775b94c85daf2a1b621f96a656ee1a86e3b6b6f243",
+      "original_tag_lines": [
+        "@tag spec: \"TRUST-10\"",
+        "@tag spec: \"TRUST-4,TRUST-10\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authorization_boundary_test.exs",
+      "source_git_blob": "7de46a3d128bb7597caa408ab7db735c441dc049",
+      "source_sha256": "d07bc3ba9fba02b8ec28eb74487103891380832921ea3c934b3130898bd305df",
+      "source_bytes": 2740,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authorization_boundary_test.exs",
+          "final_destination_sha256": "d07bc3ba9fba02b8ec28eb74487103891380832921ea3c934b3130898bd305df",
+          "bytes": 2740
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: Security.authorize does not mint from trust policy"
+        },
+        {
+          "kind": "test",
+          "label": "Trust.authorize explicitly mints before kernel authorization"
+        }
+      ],
+      "original_assertion_line_count": 5,
+      "original_assertion_lines_sha256": "6872e134ae985913311ce96c101c87bdfe4fc45186f071076babf4ab415ffd2f",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authorization_policy_integration_test.exs",
+      "source_git_blob": "3a5648b7bd7a3671b7a03bc86be3c7faaba69bca",
+      "source_sha256": "1b99fa3214fd53c1dbacbf6a4a1b4516056bc5cd33c27229b0e2227ab764a1a9",
+      "source_bytes": 17430,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authorization_policy_integration_test.exs",
+          "final_destination_sha256": "1b99fa3214fd53c1dbacbf6a4a1b4516056bc5cd33c27229b0e2227ab764a1a9",
+          "bytes": 17430
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: trust-gated shell cap does not auto-authorize"
+        },
+        {
+          "kind": "test",
+          "label": "trust-auto URI with a held cap authorizes"
+        },
+        {
+          "kind": "test",
+          "label": "TRUST-15 security regression: hostile taint gates held auto capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: low-risk read auto-grants with profile constraints"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: irreversible profile-backed actions escalate instead of auto-run"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: permissive baseline alone cannot mint unprofiled caps"
+        },
+        {
+          "kind": "test",
+          "label": "B8 security regression: score state alone cannot widen authorization"
+        },
+        {
+          "kind": "test",
+          "label": "B8 negative control: explicit profile policy can still widen authorization"
+        },
+        {
+          "kind": "test",
+          "label": "security ceilings gate code/write even for permissive profiles"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: trust-ask minting does not encode kernel approval constraints"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: explicit authenticated sync revokes stale policy caps"
+        },
+        {
+          "kind": "test",
+          "label": "pre-approved bounded code/write cap bypasses the ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "pre-approved shell cap still requires approval because shell is always locked"
+        },
+        {
+          "kind": "test",
+          "label": "trust subsystem error fails closed to gated"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: trust policy sees normalized file_path before minting"
+        },
+        {
+          "kind": "test",
+          "label": "workspace file_path trust grants are minted against workspace-relative URIs"
+        }
+      ],
+      "original_assertion_line_count": 44,
+      "original_assertion_lines_sha256": "686e37e39b812ef88fd79f7e0560a8f46ffdeb4e30dcd087e2ed6048e405154d",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/baseline_constraint_test.exs",
+      "source_git_blob": "764c8b5cccb51bfa70d2c70b50ba5dc0a35ff355",
+      "source_sha256": "3edb9cb6810583a3f71bae5951f7c1abef001990b5771558b8b6a0f3cea3bf25",
+      "source_bytes": 1874,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/baseline_constraint_test.exs",
+          "final_destination_sha256": "3edb9cb6810583a3f71bae5951f7c1abef001990b5771558b8b6a0f3cea3bf25",
+          "bytes": 1874
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "an :auto baseline never resolves as the effective default (P1)"
+        },
+        {
+          "kind": "test",
+          "label": "an :allow baseline coerces to :block without the opt-in flag"
+        },
+        {
+          "kind": "test",
+          "label": "an :allow baseline stays :allow WITH config :arbor_trust, :allow_permissive_baseline"
+        },
+        {
+          "kind": "test",
+          "label": ":block and :ask baselines pass through unchanged"
+        },
+        {
+          "kind": "test",
+          "label": "a per-URI :auto RULE under a :block baseline still resolves :auto (only the baseline is constrained)"
+        }
+      ],
+      "original_assertion_line_count": 6,
+      "original_assertion_lines_sha256": "9cd4bf2226daff8eff9c8fbd9c239de7c6e95d78f98f461428a30d5915717101",
+      "original_tag_lines": []
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/behaviour_test.exs",
+      "source_git_blob": "8902682220c4afc0146735c75a7d7110492844ab",
+      "source_sha256": "272731127db59450fa27c15cf8093e76fc6ab0e4faa201fa8b6c57581addd418",
+      "source_bytes": 740,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/behaviour_test.exs",
+          "final_destination_sha256": "272731127db59450fa27c15cf8093e76fc6ab0e4faa201fa8b6c57581addd418",
+          "bytes": 740
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "declares the expected callbacks"
+        }
+      ],
+      "original_assertion_line_count": 5,
+      "original_assertion_lines_sha256": "e279f3fc407ae0a1969b42ed78898eaca07bbbdef10b487cfa759037ce89a37e",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_enforcement_matrix_audit_only_test.exs",
+      "source_git_blob": "9ee24a9495bbdbc00f70c6d08f2e7ee218fa7185",
+      "source_sha256": "e7dd3b87ddc802966de2987d15395121000a0742f57bd2e38bdc50ca5441eaa3",
+      "source_bytes": 2661,
+      "disposition": "literal_product_assertion_split",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_enforcement_matrix_audit_only_test.exs",
+          "final_destination_sha256": "8a6c8f66d0383076385a1dd79c5617c5e89871a8afbb93814a43544c76ee0fde",
+          "bytes": 1218
+        },
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/capability_enforcement_matrix_source_host_test.exs",
+          "final_destination_sha256": "cd2966bba5fb4b97765c5fc282d0e3244a5934e08869716a50dcfc640b0115c6",
+          "bytes": 1609
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "matrix API is read-only and does not authorize"
+        },
+        {
+          "kind": "test",
+          "label": "no production module outside arbor_trust consults the matrix"
+        }
+      ],
+      "original_assertion_line_count": 14,
+      "original_assertion_lines_sha256": "b8b3791634aa8ddd2c7f551b26e2453a298ba833db0bd19dfa4121fa2e9bf95e",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_enforcement_matrix_test.exs",
+      "source_git_blob": "b18ca57813e2a3747cec53133ee41dd07fd46e5f",
+      "source_sha256": "9652f6c238f4519fd8cd1297070789db5fcb529c380bab67f9ab28e65b291376",
+      "source_bytes": 3332,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_enforcement_matrix_test.exs",
+          "final_destination_sha256": "9652f6c238f4519fd8cd1297070789db5fcb529c380bab67f9ab28e65b291376",
+          "bytes": 3332
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "covers every declared high-risk profile with soft and hard gates"
+        },
+        {
+          "kind": "test",
+          "label": "declares hard-gate targets separate from the authorize/4 decision path"
+        },
+        {
+          "kind": "test",
+          "label": "declares the expected K5 class pairings"
+        },
+        {
+          "kind": "test",
+          "label": "returns the most-specific high-risk profile covering a URI"
+        },
+        {
+          "kind": "test",
+          "label": "fails closed for URIs without a high-risk profile"
+        },
+        {
+          "kind": "test",
+          "label": "exposes the enforcement matrix without requiring internal module access"
+        }
+      ],
+      "original_assertion_line_count": 29,
+      "original_assertion_lines_sha256": "1ca3e2eb2e07414557088e54b9cf687db36a35e23e1538dbb1eed51bcbe1b3df",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_grant_owner_security_regression_test.exs",
+      "source_git_blob": "18b128f338a0ce697a001660ab10c0efa1685ff0",
+      "source_sha256": "19445532cd0eb07b24aa784228fb9bcd9e18688ff9c9e7c1c6286a6051928ec7",
+      "source_bytes": 14391,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_security_regression_test.exs",
+          "final_destination_sha256": "19445532cd0eb07b24aa784228fb9bcd9e18688ff9c9e7c1c6286a6051928ec7",
+          "bytes": 14391
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: grant payload is a bounded canonical CapabilityUri"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: forged target and resource are denied"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: grant requests are one-use and blocked requests consume their nonce"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: owner stays dormant without a live operator provision"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: raw owner control messages are denied without restarting custody"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: state inspection and replacement cannot expose or redirect grant authority"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: nonce capacity fails closed before a second grant"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: supervised grant owner bootstraps after exact child admission"
+        }
+      ],
+      "original_assertion_line_count": 53,
+      "original_assertion_lines_sha256": "65064368a91c49084f44f5f46d6521984d9abb7e16fbb529b4833e23b8126f85",
+      "original_tag_lines": [
+        "@moduletag spec: \"SSEC-004\"",
+        "@moduletag :fast",
+        "@tag spec: \"SSEC-004\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_lifecycle_e2e_test.exs",
+      "source_git_blob": "20cdf961d4a4949ea020f6fb7380ba374ea88f72",
+      "source_sha256": "4153951e296b9aa02281c829f187d176760aad7139db22513cf8e26c11935307",
+      "source_bytes": 24297,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_lifecycle_e2e_test.exs",
+          "final_destination_sha256": "4153951e296b9aa02281c829f187d176760aad7139db22513cf8e26c11935307",
+          "bytes": 24297
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "agent with granted capability is authorized"
+        },
+        {
+          "kind": "test",
+          "label": "agent without capability is unauthorized"
+        },
+        {
+          "kind": "test",
+          "label": "capability for one resource does not authorize another"
+        },
+        {
+          "kind": "test",
+          "label": "revoking a capability blocks subsequent authorization"
+        },
+        {
+          "kind": "test",
+          "label": "revoking a non-existent capability returns error"
+        },
+        {
+          "kind": "test",
+          "label": "expired capability is not authorized"
+        },
+        {
+          "kind": "test",
+          "label": "capability with future expiry is authorized"
+        },
+        {
+          "kind": "test",
+          "label": "capability with max_uses is auto-revoked after limit"
+        },
+        {
+          "kind": "test",
+          "label": "capability without max_uses allows unlimited authorizations"
+        },
+        {
+          "kind": "test",
+          "label": "capability with future not_before is not yet valid"
+        },
+        {
+          "kind": "test",
+          "label": "capability with past not_before is valid"
+        },
+        {
+          "kind": "test",
+          "label": "concrete grant does not cover its subtree (C8 hardening)"
+        },
+        {
+          "kind": "test",
+          "label": "single-level wildcard /* matches one segment of sub-resources"
+        },
+        {
+          "kind": "test",
+          "label": "glob wildcard /** matches deeply nested resources"
+        },
+        {
+          "kind": "test",
+          "label": "exact match does not match unrelated resources"
+        },
+        {
+          "kind": "test",
+          "label": "wildcard prefix match is boundary-aware"
+        },
+        {
+          "kind": "test",
+          "label": "delegated capability authorizes the delegatee"
+        },
+        {
+          "kind": "test",
+          "label": "delegation_depth: 0 prevents further delegation"
+        },
+        {
+          "kind": "test",
+          "label": "revoking parent does not automatically revoke delegated cap (use cascade_revoke for that)"
+        },
+        {
+          "kind": "test",
+          "label": "cascade_revoke removes parent and delegated capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "session-scoped capability works in correct session"
+        },
+        {
+          "kind": "test",
+          "label": "session-scoped capability fails in wrong session"
+        },
+        {
+          "kind": "test",
+          "label": "session-scoped capability fails when no session provided"
+        },
+        {
+          "kind": "test",
+          "label": "unscoped capability works regardless of session context"
+        },
+        {
+          "kind": "test",
+          "label": "grant -> authorize -> revoke -> verify revoked"
+        }
+      ],
+      "original_assertion_line_count": 47,
+      "original_assertion_lines_sha256": "2c35e8d9529eaaabc5a284b295c7481b4f1e1f3500f1f48e574db80b9aa68aad",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_profile_registry_test.exs",
+      "source_git_blob": "2528c744e4ce296745cddc961a19a96e052468b0",
+      "source_sha256": "b9bd9ffa5a80fb63e9333167adace4ab90a26ea8fee0b81a3853c1839fc8a458",
+      "source_bytes": 8032,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_profile_registry_test.exs",
+          "final_destination_sha256": "837e1dba0ea6a7ec62363b5f3f6694ca78cd5722f74486762180172179b0df64",
+          "bytes": 8171
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "every canonical registered prefix has a profile or explicit owner/reason row"
+        },
+        {
+          "kind": "test",
+          "label": "high-risk registered prefixes resolve to contract profiles"
+        },
+        {
+          "kind": "test",
+          "label": "non-profiled registered prefixes carry owning library annotations"
+        },
+        {
+          "kind": "test",
+          "label": "absent action provider annotates arbor://action ownership without granting a profile"
+        },
+        {
+          "kind": "test",
+          "label": "runtime action profile provider participates in profile resolution after host rebind"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: coding has no implicit owner when the feature is absent"
+        },
+        {
+          "kind": "test",
+          "label": "configured feature owners are frozen and cannot override core ownership"
+        },
+        {
+          "kind": "test",
+          "label": "coverage includes a feature's runtime prefix without granting it a risk profile"
+        }
+      ],
+      "original_assertion_line_count": 33,
+      "original_assertion_lines_sha256": "def8f0114867dc210dab0d2e933e25bbc07f486ae78bf983cf2324c35620d5e5",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_risk_profiles_test.exs",
+      "source_git_blob": "eb7afc62c3dabd3f946fe6cdbe846171e934c63c",
+      "source_sha256": "88df5f824ed0ba49b6dba84d93d886266914cd0b1f5607897098cf7aa9ab6811",
+      "source_bytes": 9367,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_risk_profiles_test.exs",
+          "final_destination_sha256": "88df5f824ed0ba49b6dba84d93d886266914cd0b1f5607897098cf7aa9ab6811",
+          "bytes": 9367
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns Level-0 CapabilityProfile structs with the resolved field set"
+        },
+        {
+          "kind": "test",
+          "label": "declares low-friction read profiles with default constraints"
+        },
+        {
+          "kind": "test",
+          "label": "layers operator profile overrides over inline defaults"
+        },
+        {
+          "kind": "test",
+          "label": "rejects operator profile overrides for unknown profile URIs"
+        },
+        {
+          "kind": "test",
+          "label": "rejects operator profile overrides with wildcard URIs"
+        },
+        {
+          "kind": "test",
+          "label": "rejects non-map operator profile overrides"
+        },
+        {
+          "kind": "test",
+          "label": "generates ceilings from declared high-risk profiles"
+        },
+        {
+          "kind": "test",
+          "label": "covers the highest-blast-radius URI classes"
+        },
+        {
+          "kind": "test",
+          "label": "maps profile default approval to ceiling mode"
+        },
+        {
+          "kind": "test",
+          "label": "every profile has non-ceiling policy projections"
+        },
+        {
+          "kind": "test",
+          "label": "every high-risk profile has a security ceiling projection"
+        },
+        {
+          "kind": "test",
+          "label": "derives graduation thresholds from profile metadata"
+        },
+        {
+          "kind": "test",
+          "label": "projects constraints, delegation, and approval defaults"
+        },
+        {
+          "kind": "test",
+          "label": "operator profile overrides flow through all projections"
+        }
+      ],
+      "original_assertion_line_count": 73,
+      "original_assertion_lines_sha256": "89e4e4a6c78c207cece603baa89729afbcde076c75280f6ae5ae25086cfdf12b",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_authority_security_regression_test.exs",
+      "source_git_blob": "17f7a78bfe1e3412a6b23b4a00ce08692fc76c1f",
+      "source_sha256": "9f6cfb6d308386b46cf92d4709bc952c1b78eafe60987da66b8bdf1b27335075",
+      "source_bytes": 1469,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_authority_security_regression_test.exs",
+          "final_destination_sha256": "9f6cfb6d308386b46cf92d4709bc952c1b78eafe60987da66b8bdf1b27335075",
+          "bytes": 1469
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: public capability sync cannot mint with ambient process authority"
+        }
+      ],
+      "original_assertion_line_count": 3,
+      "original_assertion_lines_sha256": "7c997a0d84383f0e6fcfd31a030e2fc882c59756fa1865f93b3bb66b23daf65b",
+      "original_tag_lines": [
+        "@moduletag spec: \"KSEC-002,SSEC-004\"",
+        "@moduletag :fast",
+        "@tag spec: \"KSEC-002,SSEC-004\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_integration_test.exs",
+      "source_git_blob": "23789e5c997d082796df0caa49b82e1fe185a7fb",
+      "source_sha256": "8d05e9ea36d84315ff6061f24519f77512d79557ddd1e477c64b1ff55ff78dbf",
+      "source_bytes": 11238,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_integration_test.exs",
+          "final_destination_sha256": "8d05e9ea36d84315ff6061f24519f77512d79557ddd1e477c64b1ff55ff78dbf",
+          "bytes": 11238
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "recording many approvals never mints capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "syncing grants baseline capabilities with valid signatures"
+        },
+        {
+          "kind": "test",
+          "label": "synced capabilities record their caller and have system authority as issuer"
+        },
+        {
+          "kind": "test",
+          "label": "synced capabilities can be used for authorize/4"
+        },
+        {
+          "kind": "test",
+          "label": "synced capabilities work with can?/3"
+        },
+        {
+          "kind": "test",
+          "label": "synced capability signatures are valid"
+        },
+        {
+          "kind": "test",
+          "label": "tampered synced capability fails verification"
+        },
+        {
+          "kind": "test",
+          "label": "freeze event does not revoke without an authenticated caller"
+        },
+        {
+          "kind": "test",
+          "label": "an authenticated caller can resync baseline capabilities after unfreeze"
+        },
+        {
+          "kind": "test",
+          "label": "recording success events does not mutate the profile"
+        }
+      ],
+      "original_assertion_line_count": 25,
+      "original_assertion_lines_sha256": "820bdeb5df8ba3bafcfc1b6e5c728e0c47bb7c8db5feb725366ffdf4a469a781",
+      "original_tag_lines": [
+        "@moduletag :integration"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_test.exs",
+      "source_git_blob": "ac46a8ed2ab54fde825ad1d671e3d186ad6ed204",
+      "source_sha256": "a97defb10d3806c3db0b02780a572d9b70c82fea8048954072fd23c1e6dd4275",
+      "source_bytes": 24436,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_test.exs",
+          "final_destination_sha256": "a97defb10d3806c3db0b02780a572d9b70c82fea8048954072fd23c1e6dd4275",
+          "bytes": 24436
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "starts with enabled: false"
+        },
+        {
+          "kind": "test",
+          "label": "initializes with enabled: true and schedules subscription"
+        },
+        {
+          "kind": "test",
+          "label": "initializes with enabled: false without scheduling subscription"
+        },
+        {
+          "kind": "test",
+          "label": "defaults to enabled: true"
+        },
+        {
+          "kind": "test",
+          "label": "retry_count starts at 0"
+        },
+        {
+          "kind": "test",
+          "label": "handles missing PubSub gracefully (retry scheduling)"
+        },
+        {
+          "kind": "test",
+          "label": "retries subscription and increments retry count when PubSub unavailable"
+        },
+        {
+          "kind": "test",
+          "label": "stops retrying after max retries (10)"
+        },
+        {
+          "kind": "test",
+          "label": "incrementally increases retry count"
+        },
+        {
+          "kind": "test",
+          "label": "retry at count 9 still retries (under max)"
+        },
+        {
+          "kind": "test",
+          "label": "ignores tier_changed event when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "ignores trust_frozen event when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "ignores trust_unfrozen event when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "ignores profile_created event when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "ignores unknown event types when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "tier_changed event handles missing service gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "trust_frozen event is observed without revoking"
+        },
+        {
+          "kind": "test",
+          "label": "trust_unfrozen event is observed without minting"
+        },
+        {
+          "kind": "test",
+          "label": "profile_created event is observed without minting"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with tier change metadata is inert"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event without tier metadata is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with same old and new tier is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "handles unknown messages without crashing"
+        },
+        {
+          "kind": "test",
+          "label": "legacy GenServer call cannot use ambient server authority"
+        },
+        {
+          "kind": "test",
+          "label": "exits when Manager is not running"
+        },
+        {
+          "kind": "test",
+          "label": "has expected fields"
+        },
+        {
+          "kind": "test",
+          "label": "defaults are nil"
+        },
+        {
+          "kind": "test",
+          "label": "tier_changed (#{label}) is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "trust_frozen with security_violation reason"
+        },
+        {
+          "kind": "test",
+          "label": "trust_frozen with circuit_breaker reason"
+        },
+        {
+          "kind": "test",
+          "label": "trust_frozen with empty metadata"
+        },
+        {
+          "kind": "test",
+          "label": "trust_unfrozen does not restore capabilities from an ambient event"
+        },
+        {
+          "kind": "test",
+          "label": "trust_unfrozen with extra metadata"
+        },
+        {
+          "kind": "test",
+          "label": "profile_created does not grant capabilities from an ambient event"
+        },
+        {
+          "kind": "test",
+          "label": "profile_created with no tier metadata"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with tier promotion metadata is inert"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with tier demotion metadata is inert"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with only previous_tier does nothing"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event with only new_tier does nothing"
+        },
+        {
+          "kind": "test",
+          "label": "running GenServer handles unknown messages without crash"
+        },
+        {
+          "kind": "test",
+          "label": "running GenServer handles trust events when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "max retries exceeded logs warning and stops retrying"
+        },
+        {
+          "kind": "test",
+          "label": "retries above max are all no-ops"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities with agent_ prefix is denied at the ambient server boundary"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities with non-prefixed agent_id is denied at the ambient server boundary"
+        },
+        {
+          "kind": "test",
+          "label": "agent IDs with prefix are preserved in generated capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "agent IDs without prefix still work in generated capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities for existing agent with prefix"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities for existing agent without prefix"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities for frozen agent"
+        },
+        {
+          "kind": "test",
+          "label": "sync_capabilities for non-existent agent creates profile"
+        },
+        {
+          "kind": "test",
+          "label": "expected_capabilities for existing agent"
+        },
+        {
+          "kind": "test",
+          "label": "expected_capabilities for non-existent agent returns error"
+        },
+        {
+          "kind": "test",
+          "label": "trust_unfrozen event with Manager running remains non-authoritative"
+        },
+        {
+          "kind": "test",
+          "label": "profile_created event with Manager running remains non-authoritative"
+        }
+      ],
+      "original_assertion_line_count": 65,
+      "original_assertion_lines_sha256": "b53d81022b87328460acfd20b75642dcf3a2ba6b786bd5e580f216424c4b3bc5",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/circuit_breaker_test.exs",
+      "source_git_blob": "2fe0327f544d6d41ee773d1188feb4e86f3e282f",
+      "source_sha256": "22fbf1ed2a30a43686544bf1a0d4fecee2819df3b0edc557db4d9484dc4fc026",
+      "source_bytes": 12390,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/circuit_breaker_test.exs",
+          "final_destination_sha256": "13b93d524d1283f5b8ca7bf3441e80f94580c6be592cc3c7346da09ea33e08b1",
+          "bytes": 12395
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "starts the circuit breaker GenServer"
+        },
+        {
+          "kind": "test",
+          "label": "returns :closed for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns :closed for agent with no events"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok for agent in closed state"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "does not trip circuit below threshold"
+        },
+        {
+          "kind": "test",
+          "label": "trips circuit when rapid failure threshold is reached"
+        },
+        {
+          "kind": "test",
+          "label": "trips circuit when failures exceed threshold"
+        },
+        {
+          "kind": "test",
+          "label": "does not trip circuit below security violation threshold"
+        },
+        {
+          "kind": "test",
+          "label": "trips circuit when security violation threshold is reached"
+        },
+        {
+          "kind": "test",
+          "label": "does not trip circuit below test failure threshold"
+        },
+        {
+          "kind": "test",
+          "label": "trips circuit when test failure threshold is reached"
+        },
+        {
+          "kind": "test",
+          "label": "does not trip circuit on rollback spike (only logs warning)"
+        },
+        {
+          "kind": "test",
+          "label": "accepts metadata with events"
+        },
+        {
+          "kind": "test",
+          "label": "resets an open circuit back to closed"
+        },
+        {
+          "kind": "test",
+          "label": "reset is idempotent for closed circuits"
+        },
+        {
+          "kind": "test",
+          "label": "circuit transitions from open to half_open after freeze duration"
+        },
+        {
+          "kind": "test",
+          "label": "half_open circuit still blocks checks"
+        },
+        {
+          "kind": "test",
+          "label": "returns the current configuration"
+        },
+        {
+          "kind": "test",
+          "label": "circuit states are independent per agent"
+        },
+        {
+          "kind": "test",
+          "label": "cleanup message does not crash the GenServer"
+        },
+        {
+          "kind": "test",
+          "label": "cleanup removes old events and retains recent ones"
+        },
+        {
+          "kind": "test",
+          "label": "auto_close from half_open transitions to closed"
+        },
+        {
+          "kind": "test",
+          "label": "auto_close on closed circuit is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "auto_close on open circuit is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "half_open message on closed circuit is a no-op"
+        },
+        {
+          "kind": "test",
+          "label": "half_open message on already half_open circuit stays half_open"
+        },
+        {
+          "kind": "test",
+          "label": "rollback spike logs warning but does not freeze"
+        }
+      ],
+      "original_assertion_line_count": 54,
+      "original_assertion_lines_sha256": "112dd7e1a722416c671416903065df503aa5ef95569646dd7d1872bd9567a00c",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/config_test.exs",
+      "source_git_blob": "553f3ffd4fd294bb370781e897c6d879b74ab4a6",
+      "source_sha256": "79e5e2af0fc954db0a22077cb95c0fb311221d6694eb297bbb7f2f24b308bbc1",
+      "source_bytes": 7316,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/config_test.exs",
+          "final_destination_sha256": "f67a4aa6c53d86ab55f7ab9e79ccf7e87a349982d0c01d3d89ae2fcced95ee6a",
+          "bytes": 7307
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns default PubSub module when no app env set"
+        },
+        {
+          "kind": "test",
+          "label": "returns overridden PubSub module from app env"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty map as default when no app env set"
+        },
+        {
+          "kind": "test",
+          "label": "returns overridden capability templates from app env"
+        },
+        {
+          "kind": "test",
+          "label": "returns default circuit breaker config when no app env set"
+        },
+        {
+          "kind": "test",
+          "label": "returns overridden circuit breaker config from app env"
+        },
+        {
+          "kind": "test",
+          "label": "library default contains no feature-domain owner"
+        },
+        {
+          "kind": "test",
+          "label": "both closed profiles admit exact data-only ownership annotations"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: malformed or over-limit feature ownership fails startup admission"
+        },
+        {
+          "kind": "test",
+          "label": "the universal baseline grants arbor://comms/notify/session with a rate-limit constraint"
+        },
+        {
+          "kind": "test",
+          "label": "expands self-scoped URIs to the agent id"
+        }
+      ],
+      "original_assertion_line_count": 16,
+      "original_assertion_lines_sha256": "2205048746b1ef938dbb1ae1320e249edef9bffea07331ed00c1824bfbdaea7f",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/confirmation_tracker_test.exs",
+      "source_git_blob": "10ea82bbacddcc68e427fcd5d6d7572f2c4f58d0",
+      "source_sha256": "b09eb6cb9a4366de32f826e84562f1c0e43a617161ab8de8b92a2f68367d4011",
+      "source_bytes": 19270,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/confirmation_tracker_test.exs",
+          "final_destination_sha256": "b09eb6cb9a4366de32f826e84562f1c0e43a617161ab8de8b92a2f68367d4011",
+          "bytes": 19270
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "increments approval count and streak"
+        },
+        {
+          "kind": "test",
+          "label": "increments streak on consecutive approvals"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok for unknown URIs (no matching prefix)"
+        },
+        {
+          "kind": "test",
+          "label": "sets last_confirmation timestamp"
+        },
+        {
+          "kind": "test",
+          "label": "resets streak to 0"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok for unknown URIs"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: unverified approvals cannot satisfy the human threshold"
+        },
+        {
+          "kind": "test",
+          "label": "unverified approvals remain advisory above the threshold"
+        },
+        {
+          "kind": "test",
+          "label": "not graduated before reaching threshold"
+        },
+        {
+          "kind": "test",
+          "label": "rejection resets graduation progress"
+        },
+        {
+          "kind": "test",
+          "label": "rejection leaves unverified approvals unqualified"
+        },
+        {
+          "kind": "test",
+          "label": "unverified approvals never set a graduation timestamp"
+        },
+        {
+          "kind": "test",
+          "label": "shell NEVER graduates regardless of approvals"
+        },
+        {
+          "kind": "test",
+          "label": "governance NEVER graduates regardless of approvals"
+        },
+        {
+          "kind": "test",
+          "label": "locked prefixes cannot graduate"
+        },
+        {
+          "kind": "test",
+          "label": "unlocking does not manufacture human evidence"
+        },
+        {
+          "kind": "test",
+          "label": "locking keeps unverified approvals unqualified"
+        },
+        {
+          "kind": "test",
+          "label": "reverting clears advisory progress without qualifying it"
+        },
+        {
+          "kind": "test",
+          "label": "clears all confirmation history for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "does not affect other agents"
+        },
+        {
+          "kind": "test",
+          "label": "returns profile-derived thresholds for high-risk URI prefixes"
+        },
+        {
+          "kind": "test",
+          "label": "returns default (5) for unknown prefixes"
+        },
+        {
+          "kind": "test",
+          "label": "resolves sub-prefixes to parent threshold"
+        },
+        {
+          "kind": "test",
+          "label": "configuration can override or add threshold prefixes"
+        },
+        {
+          "kind": "test",
+          "label": "resolves full URI to tracking prefix"
+        },
+        {
+          "kind": "test",
+          "label": "returns nil for unknown URIs"
+        },
+        {
+          "kind": "test",
+          "label": "does not match sibling URI text"
+        },
+        {
+          "kind": "test",
+          "label": "picks longest matching prefix"
+        },
+        {
+          "kind": "test",
+          "label": "returns false for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns false for unknown URI"
+        },
+        {
+          "kind": "test",
+          "label": "returns false when tracker not running"
+        },
+        {
+          "kind": "test",
+          "label": "network-egress threshold does not qualify unverified answers"
+        },
+        {
+          "kind": "test",
+          "label": "configured non-profiled threshold remains advisory"
+        },
+        {
+          "kind": "test",
+          "label": "critical profiles never graduate"
+        },
+        {
+          "kind": "test",
+          "label": "unverified approvals do not return a graduation suggestion"
+        },
+        {
+          "kind": "test",
+          "label": "further unverified approvals stay advisory"
+        },
+        {
+          "kind": "test",
+          "label": "unverified approvals after rejection still cannot suggest"
+        }
+      ],
+      "original_assertion_line_count": 75,
+      "original_assertion_lines_sha256": "16da4079791a97066d93f0d19960d01c78e7708bd0702f9ab2fe7c457868110b",
+      "original_tag_lines": [
+        "@moduletag :fast",
+        "@tag spec: \"TRUST-7\"",
+        "@tag spec: \"TRUST-7\"",
+        "@tag spec: \"TRUST-8\"",
+        "@tag spec: \"TRUST-8\"",
+        "@tag spec: \"TRUST-9\"",
+        "@tag spec: \"TRUST-9\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_converter_test.exs",
+      "source_git_blob": "49bebb2d2f59c94dfced4e01e3fd69d26ed5a0f9",
+      "source_sha256": "56d25202e71daf72c9c437ad808bfa71a0fb652a7c372d2acdf5401093de694c",
+      "source_bytes": 10617,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_converter_test.exs",
+          "final_destination_sha256": "e8bd1f8eb22f8be1fc83fbe61efe8fe0bef3fbacb2d941d12749a5877f88e239",
+          "bytes": 10651
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "converts a trust event to a persistence event"
+        },
+        {
+          "kind": "test",
+          "label": "converts a persistence event back to a trust event"
+        },
+        {
+          "kind": "test",
+          "label": "roundtrip preserves all fields"
+        },
+        {
+          "kind": "test",
+          "label": "returns trust:agent_id format"
+        },
+        {
+          "kind": "test",
+          "label": "handles string keys in data map"
+        },
+        {
+          "kind": "test",
+          "label": "handles mixed atom and string keys in data map"
+        },
+        {
+          "kind": "test",
+          "label": "handles nil event_type"
+        },
+        {
+          "kind": "test",
+          "label": "handles nil scores"
+        },
+        {
+          "kind": "test",
+          "label": "handles missing optional fields in data"
+        },
+        {
+          "kind": "test",
+          "label": "handles unknown event type string"
+        },
+        {
+          "kind": "test",
+          "label": "handles empty string event type"
+        },
+        {
+          "kind": "test",
+          "label": "handles all known event type strings"
+        },
+        {
+          "kind": "test",
+          "label": "preserves reason field"
+        },
+        {
+          "kind": "test",
+          "label": "preserves delta field"
+        },
+        {
+          "kind": "test",
+          "label": "handles nil metadata"
+        },
+        {
+          "kind": "test",
+          "label": "preserves event id through conversion"
+        },
+        {
+          "kind": "test",
+          "label": "preserves timestamp through conversion"
+        },
+        {
+          "kind": "test",
+          "label": "roundtrip with string keys preserves core data"
+        }
+      ],
+      "original_assertion_line_count": 56,
+      "original_assertion_lines_sha256": "6b0baee701bc8f5f922767c6c98f05ab8d6c1f01416c6af582c901ea5d17d673",
+      "original_tag_lines": []
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_handler_test.exs",
+      "source_git_blob": "052ccca68a875351d08898d59eb9b0dc2d103b52",
+      "source_sha256": "530e2ef64f87a5721bf525512f4f73529b73693240d01a698ef70e364e66e90c",
+      "source_bytes": 16657,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_handler_test.exs",
+          "final_destination_sha256": "dbceb817e4332e5a6389478e51bf4906cdd3d8f099886eb9f164f85c17579a9b",
+          "bytes": 16723
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "starts with enabled: false"
+        },
+        {
+          "kind": "test",
+          "label": "initializes state with enabled flag"
+        },
+        {
+          "kind": "test",
+          "label": "defaults to enabled: true"
+        },
+        {
+          "kind": "test",
+          "label": "init with enabled: true attempts PubSub subscription without crashing"
+        },
+        {
+          "kind": "test",
+          "label": "enable sets enabled to true"
+        },
+        {
+          "kind": "test",
+          "label": "disable sets enabled to false"
+        },
+        {
+          "kind": "test",
+          "label": "enabled? returns current enabled status"
+        },
+        {
+          "kind": "test",
+          "label": "handles :action_executed with success status when enabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles :action_executed with failure status when enabled"
+        },
+        {
+          "kind": "test",
+          "label": "ignores :action_executed when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles :action_executed without agent_id gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "handles :cluster_event :agent_started"
+        },
+        {
+          "kind": "test",
+          "label": "handles :cluster_event :agent_failed"
+        },
+        {
+          "kind": "test",
+          "label": "ignores cluster events when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles :self_test_completed with passed result"
+        },
+        {
+          "kind": "test",
+          "label": "handles :self_test_completed with failed result"
+        },
+        {
+          "kind": "test",
+          "label": "handles :self_test_passed event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :self_test_failed event"
+        },
+        {
+          "kind": "test",
+          "label": "ignores test events when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles :rollback_executed event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :improvement_applied event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :reload_succeeded event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :reload_failed event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :compilation_succeeded event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :compilation_failed event"
+        },
+        {
+          "kind": "test",
+          "label": "ignores improvement events when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles rollback event without agent_id gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "handles improvement event without agent_id gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "handles :authorization_denied with policy_violation reason"
+        },
+        {
+          "kind": "test",
+          "label": "ignores :authorization_denied without policy_violation reason"
+        },
+        {
+          "kind": "test",
+          "label": "handles :policy_violation event"
+        },
+        {
+          "kind": "test",
+          "label": "handles :policy_violation without principal_id gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "ignores security events when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "unknown messages are handled without crashing"
+        },
+        {
+          "kind": "test",
+          "label": "has expected fields"
+        },
+        {
+          "kind": "test",
+          "label": "default values are nil"
+        },
+        {
+          "kind": "test",
+          "label": "starts disabled and can be enabled"
+        },
+        {
+          "kind": "test",
+          "label": "can be disabled after enabling"
+        },
+        {
+          "kind": "test",
+          "label": "enable is idempotent"
+        },
+        {
+          "kind": "test",
+          "label": "disable is idempotent"
+        },
+        {
+          "kind": "test",
+          "label": "action_executed success maps to action_success"
+        },
+        {
+          "kind": "test",
+          "label": "action_executed failure maps to action_failure"
+        },
+        {
+          "kind": "test",
+          "label": "self_test_completed with passed result maps to test_passed"
+        },
+        {
+          "kind": "test",
+          "label": "self_test_completed with failed result maps to test_failed"
+        },
+        {
+          "kind": "test",
+          "label": "rollback_executed maps to rollback_executed"
+        },
+        {
+          "kind": "test",
+          "label": "improvement_applied maps to improvement_applied"
+        },
+        {
+          "kind": "test",
+          "label": "authorization_denied with policy_violation maps to security_violation"
+        }
+      ],
+      "original_assertion_line_count": 61,
+      "original_assertion_lines_sha256": "1640659e910e48ff9ae0ec2faea692349bbdc9eaaf1bb61ad479c8917f793449",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_store_test.exs",
+      "source_git_blob": "939415a924fe2a005d488cd6e964dcb85a08355c",
+      "source_sha256": "c53365be12f4ccff2b4c90cfbd47c55f5fbe62ccc2100da005cd601ba532ecd7",
+      "source_bytes": 18794,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_store_test.exs",
+          "final_destination_sha256": "c53365be12f4ccff2b4c90cfbd47c55f5fbe62ccc2100da005cd601ba532ecd7",
+          "bytes": 18794
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "starts the EventStore GenServer"
+        },
+        {
+          "kind": "test",
+          "label": "creates ETS tables on start"
+        },
+        {
+          "kind": "test",
+          "label": "stops cleanly"
+        },
+        {
+          "kind": "test",
+          "label": "records a single event"
+        },
+        {
+          "kind": "test",
+          "label": "recorded event can be retrieved by ID"
+        },
+        {
+          "kind": "test",
+          "label": "records events with different types"
+        },
+        {
+          "kind": "test",
+          "label": "records multiple events atomically"
+        },
+        {
+          "kind": "test",
+          "label": "records multiple events successfully"
+        },
+        {
+          "kind": "test",
+          "label": "filters by agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "filters by event_type"
+        },
+        {
+          "kind": "test",
+          "label": "respects limit"
+        },
+        {
+          "kind": "test",
+          "label": "returns events sorted descending by default"
+        },
+        {
+          "kind": "test",
+          "label": "returns events sorted ascending when requested"
+        },
+        {
+          "kind": "test",
+          "label": "returns all events when no filter"
+        },
+        {
+          "kind": "test",
+          "label": "returns {:error, :not_found} for unknown event ID"
+        },
+        {
+          "kind": "test",
+          "label": "retrieves cached event by ID"
+        },
+        {
+          "kind": "test",
+          "label": "returns paginated result when cursor key is present"
+        },
+        {
+          "kind": "test",
+          "label": "returns legacy list when cursor key is absent"
+        },
+        {
+          "kind": "test",
+          "label": "second page continues from cursor"
+        },
+        {
+          "kind": "test",
+          "label": "has_more is false on last page"
+        },
+        {
+          "kind": "test",
+          "label": "ascending pagination works"
+        },
+        {
+          "kind": "test",
+          "label": "descending pagination works"
+        },
+        {
+          "kind": "test",
+          "label": "empty result returns nil cursor"
+        },
+        {
+          "kind": "test",
+          "label": "all pages combined cover all events"
+        },
+        {
+          "kind": "test",
+          "label": "returns timeline for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty timeline for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "timeline events include time_to_next_ms"
+        },
+        {
+          "kind": "test",
+          "label": "returns score progression for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty progression for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns aggregate stats for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns system-wide statistics"
+        },
+        {
+          "kind": "test",
+          "label": "returns recent negative events across all agents"
+        },
+        {
+          "kind": "test",
+          "label": "respects limit"
+        },
+        {
+          "kind": "test",
+          "label": "returns store-level statistics"
+        }
+      ],
+      "original_assertion_line_count": 103,
+      "original_assertion_lines_sha256": "af865cfc4530aa383d6ff6e6aa30147d4e8010e942a92ffc98d33d8ecdbe26a8",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/graduation_core_test.exs",
+      "source_git_blob": "2d12c390b1bde98328851d57ad283c070e79e376",
+      "source_sha256": "7e505cbbcf70f2db84a666d8a9447319eb61cfcfcc4f384119cb3141d973c5f0",
+      "source_bytes": 2994,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/graduation_core_test.exs",
+          "final_destination_sha256": "7e505cbbcf70f2db84a666d8a9447319eb61cfcfcc4f384119cb3141d973c5f0",
+          "bytes": 2994
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "accept returns a persist effect; decline returns only a locked successor"
+        },
+        {
+          "kind": "test",
+          "label": "zero threshold still requires verified human evidence and immutable profile revision"
+        },
+        {
+          "kind": "test",
+          "label": "sensitive effects never graduate even when threshold configuration says zero"
+        }
+      ],
+      "original_assertion_line_count": 11,
+      "original_assertion_lines_sha256": "7750529b1dda1963b1ed1cf318cd24b1f39139877402800a2a5b16d6a975c06b",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/graduation_security_regression_test.exs",
+      "source_git_blob": "c0eccccddf2ed2be858def399d89159deb2f951a",
+      "source_sha256": "907650b44e042f3ed58ac4df569807213e02915117bb30af6a1b66eb124ec6e9",
+      "source_bytes": 13811,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/graduation_security_regression_test.exs",
+          "final_destination_sha256": "907650b44e042f3ed58ac4df569807213e02915117bb30af6a1b66eb124ec6e9",
+          "bytes": 13811
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: legacy acceptance and unverified counters cannot promote"
+        },
+        {
+          "kind": "test",
+          "label": "status and exact duplicate are read-only; current explicit acceptance persists once"
+        },
+        {
+          "kind": "test",
+          "label": "new evidence and reset invalidate old suggestion identifiers"
+        },
+        {
+          "kind": "test",
+          "label": "forged, wrong-human, expired or revoked authority leaves suggestion pending"
+        },
+        {
+          "kind": "test",
+          "label": "read and decisions require their own exact target scope"
+        },
+        {
+          "kind": "test",
+          "label": "failed durable write does not consume the current suggestion; retry succeeds"
+        },
+        {
+          "kind": "test",
+          "label": "decline locks this prefix and cannot be replayed into acceptance"
+        },
+        {
+          "kind": "test",
+          "label": "a timed out write remains uncertain and later acknowledgement is reflected by current profile"
+        },
+        {
+          "kind": "test",
+          "label": "serialized Store boundary rechecks authority after an acceptance has queued"
+        },
+        {
+          "kind": "test",
+          "label": "system ceilings, never-graduate profiles and current profile changes override evidence"
+        }
+      ],
+      "original_assertion_line_count": 55,
+      "original_assertion_lines_sha256": "032ad36dd98d8e6b24bc984c47299ba109101db3a5fa7a70c6b0cd9909584fb2",
+      "original_tag_lines": [
+        "@moduletag :fast",
+        "@tag fast: false",
+        "@tag :slow"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/manager_test.exs",
+      "source_git_blob": "0844729d4f513f6dc38661746a2521926125ee42",
+      "source_sha256": "b99124a21ab19a1095d91e247bfb0d7456baa35c98c8b094c1485a7cfcdba418",
+      "source_bytes": 23656,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/manager_test.exs",
+          "final_destination_sha256": "937733665f4056bc992142381f36b895fce9658eb2a4d9fe6e35b3678c033de9",
+          "bytes": 23728
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "creates a new trust profile for a valid agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "created profile has timestamps set"
+        },
+        {
+          "kind": "test",
+          "label": "a failed Store write returns the error without recording or broadcasting creation"
+        },
+        {
+          "kind": "test",
+          "label": "a trust event for an unknown agent whose profile write fails is dropped without a crash"
+        },
+        {
+          "kind": "test",
+          "label": "returns :not_found for a non-existent agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns the profile after creation"
+        },
+        {
+          "kind": "test",
+          "label": "returns the same profile data that was created"
+        },
+        {
+          "kind": "test",
+          "label": "common event types are accepted and leave the profile retrievable"
+        },
+        {
+          "kind": "test",
+          "label": "auto-creates profile for unknown agent on event"
+        },
+        {
+          "kind": "test",
+          "label": "freezes a trust profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-existent agent"
+        },
+        {
+          "kind": "test",
+          "label": "unfreezes a frozen profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-existent agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty list when no profiles exist"
+        },
+        {
+          "kind": "test",
+          "label": "returns created profiles"
+        },
+        {
+          "kind": "test",
+          "label": "supports limit option"
+        },
+        {
+          "kind": "test",
+          "label": "deletes an existing profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok for non-existent profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns a Store deletion failure and does not record a deletion event"
+        },
+        {
+          "kind": "test",
+          "label": "returns events for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty list for agent with no events"
+        },
+        {
+          "kind": "test",
+          "label": "runs without error (cast)"
+        },
+        {
+          "kind": "test",
+          "label": "unknown event type doesn't crash"
+        },
+        {
+          "kind": "test",
+          "label": "handle_info :check_circuit_breaker processes without crash"
+        },
+        {
+          "kind": "test",
+          "label": "rapid failures trigger circuit breaker check"
+        },
+        {
+          "kind": "test",
+          "label": "does nothing when circuit_breaker is disabled"
+        },
+        {
+          "kind": "test",
+          "label": "rollbacks above the old threshold do NOT mutate the profile"
+        },
+        {
+          "kind": "test",
+          "label": "handles event store being disabled gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "freeze and unfreeze work with event_store disabled"
+        },
+        {
+          "kind": "test",
+          "label": "delete works with event_store disabled"
+        },
+        {
+          "kind": "test",
+          "label": "handles profile with nil last_activity_at without crash"
+        },
+        {
+          "kind": "test",
+          "label": "does not mutate profiles with old last_activity_at"
+        },
+        {
+          "kind": "test",
+          "label": "is a no-op when decay is disabled"
+        },
+        {
+          "kind": "test",
+          "label": "3+ security violations trigger freeze"
+        }
+      ],
+      "original_assertion_line_count": 72,
+      "original_assertion_lines_sha256": "15b5fa2ae207697434b4af28e16da570f5bfb84bd3400b26b96d7c9f747eb3de",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+      "source_git_blob": "7f94b1fe95fd108b1c2df1b5c2af748afb0c66b8",
+      "source_sha256": "df7538858d9ed8590a622d689578cdcc0e678a925d16b531bf5a3c5e6820c5ab",
+      "source_bytes": 11144,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+          "final_destination_sha256": "82232c82d3dac53b860fc3b337336f3ed452bfc7de42b91962649a33c1d388a0",
+          "bytes": 11249
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "uses compatibility fallback from security config"
+        },
+        {
+          "kind": "test",
+          "label": "trust config overrides compatibility fallback"
+        },
+        {
+          "kind": "test",
+          "label": "returns an existing capability without minting"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: caller-owned mutation authority cannot self-mint"
+        },
+        {
+          "kind": "test",
+          "label": "resolves profile default constraints when a capability profile matches"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: high-risk auto standing does not mint a missing capability"
+        },
+        {
+          "kind": "test",
+          "label": "B6 security regression: unprofiled auto standing does not mint baseline-only capability"
+        },
+        {
+          "kind": "test",
+          "label": "B2 regression: action namespace profiles feed policy grant specs"
+        },
+        {
+          "kind": "test",
+          "label": "resolves an ask-mode grant spec without minting"
+        },
+        {
+          "kind": "test",
+          "label": "denies when policy mode is :block"
+        },
+        {
+          "kind": "test",
+          "label": "denies when disabled"
+        },
+        {
+          "kind": "test",
+          "label": "keeps mode-stamped ask grants while policy still asks"
+        },
+        {
+          "kind": "test",
+          "label": "revokes legacy no-approval trust grants when policy now asks"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: revocation failures are returned and not counted as synced"
+        }
+      ],
+      "original_assertion_line_count": 32,
+      "original_assertion_lines_sha256": "95db0a855ff583b1dc605a2f98eedf99dfaea7713192c3ae56e1de75308ec3a9",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/policy_test.exs",
+      "source_git_blob": "57c90a7176a7728b2e9bea948031b6773e2fb3f4",
+      "source_sha256": "fe14da104b52a5221f96beca028a965a619cc6105cbe7232508471502257a130",
+      "source_bytes": 22402,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/policy_test.exs",
+          "final_destination_sha256": "fe14da104b52a5221f96beca028a965a619cc6105cbe7232508471502257a130",
+          "bytes": 22402
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "block maps to deny"
+        },
+        {
+          "kind": "test",
+          "label": "ask maps to gated"
+        },
+        {
+          "kind": "test",
+          "label": "allow maps to auto"
+        },
+        {
+          "kind": "test",
+          "label": "auto maps to auto"
+        },
+        {
+          "kind": "test",
+          "label": "returns baseline and rules for each preset"
+        },
+        {
+          "kind": "test",
+          "label": "cautious preset has ask baseline and blocks shell"
+        },
+        {
+          "kind": "test",
+          "label": "full_trust preset has ask baseline (P1)"
+        },
+        {
+          "kind": "test",
+          "label": "returns mode from profile rules"
+        },
+        {
+          "kind": "test",
+          "label": "returns baseline for unmatched URIs"
+        },
+        {
+          "kind": "test",
+          "label": "security ceiling overrides user preference"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ask for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "cautious preset gates shell exec"
+        },
+        {
+          "kind": "test",
+          "label": "hands_off preset gates writes due to security ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "hands_off preset asks for unmatched URIs (P1 baseline :ask)"
+        },
+        {
+          "kind": "test",
+          "label": "returns true when profile doesn't block"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for cautious shell exec (ask mode is allowed but gated)"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for ask mode (allowed but gated)"
+        },
+        {
+          "kind": "test",
+          "label": "returns false for unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for :ask mode"
+        },
+        {
+          "kind": "test",
+          "label": "returns false for :auto mode"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for fs/write due to security ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for :ask mode on shell exec (cautious allows exec with approval)"
+        },
+        {
+          "kind": "test",
+          "label": "auto for auto-mode capability"
+        },
+        {
+          "kind": "test",
+          "label": "gated for ask-mode capability"
+        },
+        {
+          "kind": "test",
+          "label": "shell_exec is always gated via security ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "gated when cautious profile asks for shell exec"
+        },
+        {
+          "kind": "test",
+          "label": "gated for unknown agent (fail closed)"
+        },
+        {
+          "kind": "test",
+          "label": "gated for fs/write due to security ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "conservative library defaults when profile has no egress_modes"
+        },
+        {
+          "kind": "test",
+          "label": "an explicit profile egress_modes map wins"
+        },
+        {
+          "kind": "test",
+          "label": "authorize_egress passes profile egress standing into the security kernel"
+        },
+        {
+          "kind": "test",
+          "label": "Trust.authorize passes profile egress standing into operation authorization"
+        },
+        {
+          "kind": "test",
+          "label": "a deployment can set a system-wide default posture via config"
+        },
+        {
+          "kind": "test",
+          "label": "unknown agent falls to defaults (fail-closed for external)"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: accepting without current human proof leaves the profile unchanged"
+        },
+        {
+          "kind": "test",
+          "label": "revoking removes the graduation rule from the profile"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: legacy acceptance cannot add a rule for a never-graduate resource"
+        },
+        {
+          "kind": "test",
+          "label": "returns resolution chain"
+        },
+        {
+          "kind": "test",
+          "label": "applies the frozen ceiling for an unknown agent"
+        },
+        {
+          "kind": "test",
+          "label": "grants the universal baseline capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "granted capabilities are signed and stored"
+        },
+        {
+          "kind": "test",
+          "label": "granted capabilities have correct resource URIs with agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "revokes all capabilities"
+        },
+        {
+          "kind": "test",
+          "label": "revoke on agent with no capabilities returns 0"
+        },
+        {
+          "kind": "test",
+          "label": "shell_exec never auto-approved even at full_trust"
+        },
+        {
+          "kind": "test",
+          "label": "shell exec gated at cautious preset"
+        },
+        {
+          "kind": "test",
+          "label": "governance always gated even at full_trust"
+        },
+        {
+          "kind": "test",
+          "label": "security ceilings cannot be overridden by profile rules"
+        },
+        {
+          "kind": "test",
+          "label": "profile mode progression is monotonic for presets"
+        }
+      ],
+      "original_assertion_line_count": 74,
+      "original_assertion_lines_sha256": "e0153c848ceeab5fe62cfc0d20e16599a5fe2ed3003029f05193c15eff273c8c",
+      "original_tag_lines": [
+        "@moduletag :fast",
+        "@tag spec: \"TRUST-3\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/presets_historian_security_category_test.exs",
+      "source_git_blob": "56d608c21addc13b79e89eab527c8734398ed8e7",
+      "source_sha256": "f65745c414d5b03733f1eaade63d7053da5163b4d945d8e155dc1322c0ff6f92",
+      "source_bytes": 927,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/presets_historian_security_category_test.exs",
+          "final_destination_sha256": "f65745c414d5b03733f1eaade63d7053da5163b4d945d8e155dc1322c0ff6f92",
+          "bytes": 927
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "cautious, balanced and hands_off keep the security category at :ask"
+        },
+        {
+          "kind": "test",
+          "label": "full_trust is the operator's explicit choice and is left alone"
+        }
+      ],
+      "original_assertion_line_count": 2,
+      "original_assertion_lines_sha256": "4c2282e8607b188d574bedde4475215de57f80c869d89845a24e20e796bd4787",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_exit_audit_test.exs",
+      "source_git_blob": "44e456b6071283f07e00c6b949fbbbc08b15dbb6",
+      "source_sha256": "b543c9e24618ddc3bb84e255d83277bc539a26a140babc51183889b1e250a49f",
+      "source_bytes": 4360,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_exit_audit_test.exs",
+          "final_destination_sha256": "b543c9e24618ddc3bb84e255d83277bc539a26a140babc51183889b1e250a49f",
+          "bytes": 4360
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "security regression: reports legacy baseline and auto rule without explicit cap"
+        },
+        {
+          "kind": "test",
+          "label": "does not report auto rule when an equivalent explicit wildcard cap is held"
+        },
+        {
+          "kind": "test",
+          "label": "canonicalizes legacy glob trust rules before suggesting capability bundles"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: migration demotes ungrantable invalid-principal auto rules"
+        }
+      ],
+      "original_assertion_line_count": 17,
+      "original_assertion_lines_sha256": "1692861294424ad5c347a0a5ab36291f8048f5c8e0cb55ba4ecdea5922155dde",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_integration_test.exs",
+      "source_git_blob": "378489ea3fe3f4653cf0b32d05b11f11a3de7bf8",
+      "source_sha256": "b796b184cd6d1f61765ac0945a06fba67db9a4d6b8fad86402666e6aa3af77b2",
+      "source_bytes": 22098,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_integration_test.exs",
+          "final_destination_sha256": "eb246c7cf4e2ea4c8715613e7dd07310e49502e0b4d647379f56a2b70a0725b5",
+          "bytes": 22952
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "profile with granular shell rules resolves correctly per URI"
+        },
+        {
+          "kind": "test",
+          "label": "baseline propagates as default for all unmatched URIs"
+        },
+        {
+          "kind": "test",
+          "label": "shell :auto user preference capped to :ask by default ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "governance :auto user preference capped to :ask by default ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "user :block is more restrictive than ceiling :ask, so block wins"
+        },
+        {
+          "kind": "test",
+          "label": "non-shell URIs are not capped when no ceiling applies"
+        },
+        {
+          "kind": "test",
+          "label": "custom ceilings can restrict any URI prefix"
+        },
+        {
+          "kind": "test",
+          "label": "model constraint further restricts beyond user preference and ceiling"
+        },
+        {
+          "kind": "test",
+          "label": "model constraint uses longest prefix match"
+        },
+        {
+          "kind": "test",
+          "label": "all three layers combine: most restrictive wins"
+        },
+        {
+          "kind": "test",
+          "label": "model :block overrides even when user and ceiling are permissive"
+        },
+        {
+          "kind": "test",
+          "label": ":cautious preset gates shell exec, auto-allows reads"
+        },
+        {
+          "kind": "test",
+          "label": ":balanced preset allows writes with notification, asks for git"
+        },
+        {
+          "kind": "test",
+          "label": ":hands_off preset auto-runs most, asks for shell and governance"
+        },
+        {
+          "kind": "test",
+          "label": ":full_trust preset auto-allows most, but shell/governance still capped"
+        },
+        {
+          "kind": "test",
+          "label": ":full_trust with default security ceilings still caps shell to :ask"
+        },
+        {
+          "kind": "test",
+          "label": "shows all layers for a rule-matched URI"
+        },
+        {
+          "kind": "test",
+          "label": "shows nil model ceiling when no model_class provided"
+        },
+        {
+          "kind": "test",
+          "label": "shows baseline when no rule matches"
+        },
+        {
+          "kind": "test",
+          "label": "shows ceiling overriding user preference"
+        },
+        {
+          "kind": "test",
+          "label": "empty rules: baseline propagates, but P1 coerces :allow/:auto to :block"
+        },
+        {
+          "kind": "test",
+          "label": "conflicting prefixes: most specific wins"
+        },
+        {
+          "kind": "test",
+          "label": "nil model_class means model constraints are ignored"
+        },
+        {
+          "kind": "test",
+          "label": "profile with no fields defaults gracefully"
+        },
+        {
+          "kind": "test",
+          "label": "explain with empty profile returns sensible defaults"
+        },
+        {
+          "kind": "test",
+          "label": "very long URI prefix chains resolve correctly"
+        },
+        {
+          "kind": "test",
+          "label": "model constraints with multiple model classes are independent"
+        },
+        {
+          "kind": "test",
+          "label": "preset profile with model constraints applied end-to-end"
+        }
+      ],
+      "original_assertion_line_count": 90,
+      "original_assertion_lines_sha256": "cb2e8f6808043ec57c0161c6e0fefbc60b64ae0ba508e055d478612b0a6f89f2",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_resolver_security_ceilings_config_test.exs",
+      "source_git_blob": "87d8e161c92eec4829360680e9b123db133daf38",
+      "source_sha256": "d111cfc70341b60d12afd20951564f859eb53c827257bac95b06479838ec8be0",
+      "source_bytes": 852,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_resolver_security_ceilings_config_test.exs",
+          "final_destination_sha256": "d111cfc70341b60d12afd20951564f859eb53c827257bac95b06479838ec8be0",
+          "bytes": 852
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "application config overlays generated defaults instead of replacing them"
+        }
+      ],
+      "original_assertion_line_count": 3,
+      "original_assertion_lines_sha256": "2fea53c19c591881b906c83bfb7b973d0d6645c86145b54834002cfb0d8251d7",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_resolver_test.exs",
+      "source_git_blob": "760d97ef08c80f49ee641ae058a04da8a6cfaf9d",
+      "source_sha256": "67f29f2d6d526a5e5f8b531039ee7f3ada68016506872eb3d23e3845b3e0c92b",
+      "source_bytes": 14540,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_resolver_test.exs",
+          "final_destination_sha256": "67f29f2d6d526a5e5f8b531039ee7f3ada68016506872eb3d23e3845b3e0c92b",
+          "bytes": 14540
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns baseline when no rules match"
+        },
+        {
+          "kind": "test",
+          "label": "matches exact prefix"
+        },
+        {
+          "kind": "test",
+          "label": "does not match sibling URI text that shares the prefix"
+        },
+        {
+          "kind": "test",
+          "label": "matches child paths only at slash segment boundaries"
+        },
+        {
+          "kind": "test",
+          "label": "matches longest prefix"
+        },
+        {
+          "kind": "test",
+          "label": "returns baseline for empty rules"
+        },
+        {
+          "kind": "test",
+          "label": "prefix match is greedy (matches child paths)"
+        },
+        {
+          "kind": "property",
+          "label": "security regression: prefix rules never bleed into sibling URI segments"
+        },
+        {
+          "kind": "test",
+          "label": "block beats everything"
+        },
+        {
+          "kind": "test",
+          "label": "ask beats allow and auto"
+        },
+        {
+          "kind": "test",
+          "label": "allow beats auto"
+        },
+        {
+          "kind": "test",
+          "label": "auto alone returns auto"
+        },
+        {
+          "kind": "test",
+          "label": "ignores nil values"
+        },
+        {
+          "kind": "test",
+          "label": "all nil returns :ask as default"
+        },
+        {
+          "kind": "test",
+          "label": "empty list returns :ask as default"
+        },
+        {
+          "kind": "test",
+          "label": "block is at least as restrictive as anything"
+        },
+        {
+          "kind": "test",
+          "label": "auto is only as restrictive as auto"
+        },
+        {
+          "kind": "test",
+          "label": "ask is at least as restrictive as ask, allow, auto"
+        },
+        {
+          "kind": "test",
+          "label": "uses baseline when no rules match"
+        },
+        {
+          "kind": "test",
+          "label": "user preference is used when no ceiling applies"
+        },
+        {
+          "kind": "test",
+          "label": "security ceiling caps user preference"
+        },
+        {
+          "kind": "test",
+          "label": "custom security ceilings override defaults"
+        },
+        {
+          "kind": "test",
+          "label": "user rules and security ceilings do not match sibling URI text"
+        },
+        {
+          "kind": "test",
+          "label": "model constraint applies when model_class provided"
+        },
+        {
+          "kind": "test",
+          "label": "model constraints do not match sibling URI text"
+        },
+        {
+          "kind": "test",
+          "label": "most restrictive of all three layers wins"
+        },
+        {
+          "kind": "test",
+          "label": "hostile operation taint degrades high-risk auto standing to ask"
+        },
+        {
+          "kind": "test",
+          "label": "profile-derived identity effects also degrade under hostile taint"
+        },
+        {
+          "kind": "test",
+          "label": "defaults to :ask baseline when not specified"
+        },
+        {
+          "kind": "test",
+          "label": "returns full resolution chain"
+        },
+        {
+          "kind": "test",
+          "label": "shows security ceiling impact"
+        },
+        {
+          "kind": "test",
+          "label": "shows boundary-aware behavior for user rules and security ceilings"
+        },
+        {
+          "kind": "test",
+          "label": "shows boundary-aware behavior for model constraints"
+        },
+        {
+          "kind": "test",
+          "label": "shows TRUST-15 taint conjunct impact"
+        },
+        {
+          "kind": "test",
+          "label": "shell requires at least :ask"
+        },
+        {
+          "kind": "test",
+          "label": "governance requires at least :ask"
+        },
+        {
+          "kind": "test",
+          "label": ":cautious blocks shell, auto-allows reads"
+        },
+        {
+          "kind": "test",
+          "label": ":balanced allows file writes, asks for shell"
+        },
+        {
+          "kind": "test",
+          "label": ":hands_off allows most, asks for shell and governance"
+        },
+        {
+          "kind": "test",
+          "label": ":full_trust auto-allows most, asks for shell and governance"
+        },
+        {
+          "kind": "test",
+          "label": "unknown preset defaults to :cautious (most secure)"
+        },
+        {
+          "kind": "test",
+          "label": "Profile struct has new trust profile fields"
+        },
+        {
+          "kind": "test",
+          "label": "effective_mode works with Profile struct"
+        },
+        {
+          "kind": "test",
+          "label": "effective_mode works with Profile struct with custom rules"
+        }
+      ],
+      "original_assertion_line_count": 87,
+      "original_assertion_lines_sha256": "3406fbf57a52b51684b1f75c0a7c164f866208a04fa7800732a8782eb96bd7c6",
+      "original_tag_lines": [
+        "@moduletag :fast",
+        "@tag spec: \"TRUST-5\"",
+        "@tag spec: \"TRUST-5\"",
+        "@tag spec: \"TRUST-1\"",
+        "@tag spec: \"TRUST-15\"",
+        "@tag spec: \"TRUST-15\""
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_test.exs",
+      "source_git_blob": "a1cc3fa1999abdc8ae97aa84d658221e50d8e3e7",
+      "source_sha256": "92e74547c3b5069430c0eca77a20bfd868bd047902cde4c1285fd4e418946a7b",
+      "source_bytes": 3798,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_test.exs",
+          "final_destination_sha256": "92e74547c3b5069430c0eca77a20bfd868bd047902cde4c1285fd4e418946a7b",
+          "bytes": 3798
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "creates a new profile with valid agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "initializes authorization rule fields"
+        },
+        {
+          "kind": "test",
+          "label": "sets created_at and updated_at timestamps"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for empty string agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-string agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "sets frozen to true with reason"
+        },
+        {
+          "kind": "test",
+          "label": "preserves other profile fields"
+        },
+        {
+          "kind": "test",
+          "label": "sets frozen to false and clears reason and timestamp"
+        },
+        {
+          "kind": "test",
+          "label": "preserves other profile fields"
+        },
+        {
+          "kind": "test",
+          "label": "converts profile struct to a plain map"
+        },
+        {
+          "kind": "test",
+          "label": "includes all fields"
+        },
+        {
+          "kind": "test",
+          "label": "does not include removed score/points fields"
+        }
+      ],
+      "original_assertion_line_count": 36,
+      "original_assertion_lines_sha256": "8b38ba2938dc26e4d4fbafcebba2273efa09becdc000ee7c4f94b6868810185d",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/provider_gate_lifecycle_security_regression_test.exs",
+      "source_git_blob": "d82c6815237dbd12c8a07401a7902585057afd16",
+      "source_sha256": "78855d19e3ccacad1916bef2172fcb8f0d0b6a209f66bd0db4401fcd4b94f8b4",
+      "source_bytes": 4096,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/provider_gate_lifecycle_security_regression_test.exs",
+          "final_destination_sha256": "78855d19e3ccacad1916bef2172fcb8f0d0b6a209f66bd0db4401fcd4b94f8b4",
+          "bytes": 4096
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "app-owned module declares the exact shared child specification"
+        },
+        {
+          "kind": "test",
+          "label": "full topology keeps the symbolic gate between host and consumers"
+        },
+        {
+          "kind": "test",
+          "label": "actual gate-name collision keeps the typed error and starts no later child"
+        },
+        {
+          "kind": "test",
+          "label": "unrelated downstream collision remains an unrelated OTP error"
+        }
+      ],
+      "original_assertion_line_count": 15,
+      "original_assertion_lines_sha256": "fa160b971acc7ac8fe18f679bec5ccec627aecf71b2f689f34e9db210b84d1f6",
+      "original_tag_lines": []
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/store_distributed_test.exs",
+      "source_git_blob": "dc76efd8a4614c68e19dfcddf2ae5c6b7a709348",
+      "source_sha256": "66e297888c378a210e6c36dfe0129e5140cdaaf5e1513afc9082b22e164e8384",
+      "source_bytes": 2290,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/store_distributed_test.exs",
+          "final_destination_sha256": "d27dc7757c567f28d969b265a2db9984922e5b99ce7ea1ea47ce5d8b0dfea976",
+          "bytes": 2485
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "invalidates profile cache on remote profile_updated signal"
+        },
+        {
+          "kind": "test",
+          "label": "deletes profile cache on remote profile_deleted signal"
+        },
+        {
+          "kind": "test",
+          "label": "ignores signals from own node"
+        },
+        {
+          "kind": "test",
+          "label": "handles unknown signal types gracefully"
+        }
+      ],
+      "original_assertion_line_count": 5,
+      "original_assertion_lines_sha256": "15ccf6648c85ed8630a34c6eac6da7a8e1ead70bd6e1790feeb6edca72ad943e",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/store_test.exs",
+      "source_git_blob": "1ff6b426f9372f0bc74c3fbfb62d49b9291ead38",
+      "source_sha256": "c582ab70e2265e4ae447f690bda157d34b40abb0731e3bf7825a95e4ce88a503",
+      "source_bytes": 14670,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/store_test.exs",
+          "final_destination_sha256": "c582ab70e2265e4ae447f690bda157d34b40abb0731e3bf7825a95e4ce88a503",
+          "bytes": 14670
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "starts the store GenServer"
+        },
+        {
+          "kind": "test",
+          "label": "creates ETS table on start"
+        },
+        {
+          "kind": "test",
+          "label": "stops cleanly and cleans up ETS table"
+        },
+        {
+          "kind": "test",
+          "label": "stores and retrieves a profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns {:error, :not_found} for missing profile"
+        },
+        {
+          "kind": "test",
+          "label": "overwrites an existing profile"
+        },
+        {
+          "kind": "test",
+          "label": "stores multiple different profiles"
+        },
+        {
+          "kind": "test",
+          "label": "durable persistence failure is returned and does not populate the cache"
+        },
+        {
+          "kind": "test",
+          "label": "durable backend failure is returned and does not populate the cache"
+        },
+        {
+          "kind": "test",
+          "label": "durability regression: trust record id is domain-scoped, not the agent key"
+        },
+        {
+          "kind": "test",
+          "label": "returns true for stored profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns false for missing profile"
+        },
+        {
+          "kind": "test",
+          "label": "deletes an existing profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns :ok when deleting a non-existent profile"
+        },
+        {
+          "kind": "test",
+          "label": "durable deletion failure remains deny-all after a store restart"
+        },
+        {
+          "kind": "test",
+          "label": "successful durable deletion removes the persisted profile"
+        },
+        {
+          "kind": "test",
+          "label": "exact recovery replaces only a failed-delete tombstone"
+        },
+        {
+          "kind": "test",
+          "label": "exact recovery does not thaw an unrelated freeze"
+        },
+        {
+          "kind": "test",
+          "label": "profile_disabled signal installs a deny-all tombstone on a peer cache"
+        },
+        {
+          "kind": "test",
+          "label": "lists all stored profiles"
+        },
+        {
+          "kind": "test",
+          "label": "returns empty list when no profiles exist"
+        },
+        {
+          "kind": "test",
+          "label": "respects limit option"
+        },
+        {
+          "kind": "test",
+          "label": "sorts profiles by agent_id"
+        },
+        {
+          "kind": "test",
+          "label": "updates a profile using an update function"
+        },
+        {
+          "kind": "test",
+          "label": "returns {:error, :not_found} for missing profile"
+        },
+        {
+          "kind": "test",
+          "label": "freezes and unfreezes a profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns cache statistics"
+        },
+        {
+          "kind": "test",
+          "label": "tracks writes"
+        },
+        {
+          "kind": "test",
+          "label": "direct ETS reads bypass GenServer (no hit tracking)"
+        },
+        {
+          "kind": "test",
+          "label": "tracks cache misses"
+        },
+        {
+          "kind": "test",
+          "label": "tracks deletes"
+        }
+      ],
+      "original_assertion_line_count": 76,
+      "original_assertion_lines_sha256": "a550653f6ed58540d33073913799803757d1e0a212c182d63b357bfa063a7e17",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/supervisor_test.exs",
+      "source_git_blob": "319b1d05d68435b352698cdebf890973d090f138",
+      "source_sha256": "05da079d941d90be3778c4a4b38e35752e80857385d2a1ca6e786854b8a5a6b7",
+      "source_bytes": 2542,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/supervisor_test.exs",
+          "final_destination_sha256": "7fad4ff1243658fce2058cdaea5a0e2c69b1a72eee15d4c6fbb7e2903accafd7",
+          "bytes": 2562
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns true when supervisor is started"
+        },
+        {
+          "kind": "test",
+          "label": "returns status map for all components"
+        },
+        {
+          "kind": "test",
+          "label": "supervisor reports as running"
+        },
+        {
+          "kind": "test",
+          "label": "core components report as running"
+        },
+        {
+          "kind": "test",
+          "label": "disabled supervisor starts no children"
+        },
+        {
+          "kind": "test",
+          "label": "enabled supervisor builds children list"
+        },
+        {
+          "kind": "test",
+          "label": "optional components can be disabled"
+        }
+      ],
+      "original_assertion_line_count": 15,
+      "original_assertion_lines_sha256": "c94e0ddbf206bd50708f11406ec4b949d62b2b83fe8a3658b82730bb1d9c0b28",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/taint_conjunct_test.exs",
+      "source_git_blob": "93c4fee1cf44be2ec1f0ef6decfa299def1d92d8",
+      "source_sha256": "326b0ffe2b5960837e1c781f60f325802d8a7727b778de048d5ccf765cd6126c",
+      "source_bytes": 4002,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/taint_conjunct_test.exs",
+          "final_destination_sha256": "326b0ffe2b5960837e1c781f60f325802d8a7727b778de048d5ccf765cd6126c",
+          "bytes": 4002
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "TRUST-15 degrades high-risk effects with untrusted or hostile taint"
+        },
+        {
+          "kind": "test",
+          "label": "does not degrade reads, local writes, derived data, or trusted data"
+        },
+        {
+          "kind": "test",
+          "label": "falls back to capability profile effect class by URI"
+        },
+        {
+          "kind": "test",
+          "label": "uses the worst level from a taint map"
+        },
+        {
+          "kind": "test",
+          "label": "unreadable operation taint degrades high-risk effects to :ask"
+        },
+        {
+          "kind": "test",
+          "label": "through ProfileResolver, an :auto rule becomes :ask for unreadable taint"
+        },
+        {
+          "kind": "test",
+          "label": "absent taint stays no-signal: callers that do not track taint are unchanged"
+        }
+      ],
+      "original_assertion_line_count": 13,
+      "original_assertion_lines_sha256": "222c7783afe2a52df68dcbbcf2b6ccae41bff0f52625b9af02e2c840c93c73a8",
+      "original_tag_lines": [
+        "@moduletag :fast"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust_test.exs",
+      "source_git_blob": "f0d774c9101503f557d0d2bbcd161b682b7cb489",
+      "source_sha256": "5b4aa2cc575d4d6e55cfa386acb76b7502a0e1ad2acadb35324c847a5cdc6953",
+      "source_bytes": 12434,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust_test.exs",
+          "final_destination_sha256": "5b4aa2cc575d4d6e55cfa386acb76b7502a0e1ad2acadb35324c847a5cdc6953",
+          "bytes": 12434
+        }
+      ],
+      "original_named_forms": [
+        {
+          "kind": "test",
+          "label": "returns true when Manager is running"
+        },
+        {
+          "kind": "test",
+          "label": "creates a profile via the facade"
+        },
+        {
+          "kind": "test",
+          "label": "profile has correct initial state"
+        },
+        {
+          "kind": "test",
+          "label": "returns created profile"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-existent profile"
+        },
+        {
+          "kind": "test",
+          "label": "accepts action_success event without mutating counters"
+        },
+        {
+          "kind": "test",
+          "label": "accepts security_violation event without mutating the profile"
+        },
+        {
+          "kind": "test",
+          "label": "accepts test_passed / test_failed events without mutating the profile"
+        },
+        {
+          "kind": "test",
+          "label": "accepts metadata with events"
+        },
+        {
+          "kind": "test",
+          "label": "defaults metadata to empty map"
+        },
+        {
+          "kind": "test",
+          "label": "freezes an agent's trust"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-existent agent"
+        },
+        {
+          "kind": "test",
+          "label": "unfreezes an agent's trust"
+        },
+        {
+          "kind": "test",
+          "label": "returns error for non-existent agent"
+        },
+        {
+          "kind": "test",
+          "label": "lists all profiles"
+        },
+        {
+          "kind": "test",
+          "label": "returns events for an agent"
+        },
+        {
+          "kind": "test",
+          "label": "supports limit option"
+        },
+        {
+          "kind": "test",
+          "label": "runs without error"
+        },
+        {
+          "kind": "test",
+          "label": "explain reports user_match nil before a rule and the prefix after set_rule"
+        },
+        {
+          "kind": "test",
+          "label": "set_rule rejects a bad mode and a missing profile"
+        },
+        {
+          "kind": "test",
+          "label": "refuses glob, wildcard, bare-namespace, traversal, and unparseable prefixes"
+        },
+        {
+          "kind": "test",
+          "label": "accepts a bare coding leaf and stores the exact prefix"
+        },
+        {
+          "kind": "test",
+          "label": "security regression: glob prefix is not canonicalized to a namespace-root rule"
+        },
+        {
+          "kind": "test",
+          "label": "create, record events, freeze, unfreeze"
+        },
+        {
+          "kind": "test",
+          "label": "security violations no longer mutate the profile"
+        }
+      ],
+      "original_assertion_line_count": 63,
+      "original_assertion_lines_sha256": "f94e9ff8c3ad27f6c653dfc0bc7b0c56bd04d9e543bd6056241eeba81423d9ab",
+      "original_tag_lines": [
+        "@moduletag :fast",
+        "@tag :security_regression"
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/support/test_helpers.ex",
+      "source_git_blob": "52ad0311f3f33110257376e4508dcbf5dd0857e5",
+      "source_sha256": "b334bb84f89463d5ad7e4db279512950fe91c63317717231348912c7d66cd23b",
+      "source_bytes": 4396,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/support/test_helpers.ex",
+          "final_destination_sha256": "ed08eba2f76a7a068df3922264f64c9a7dc2ff1d2c8f667f0edd7ae14d48e5ae",
+          "bytes": 4475
+        }
+      ],
+      "original_named_forms": [],
+      "original_assertion_line_count": 0,
+      "original_assertion_lines_sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "original_tag_lines": []
+    },
+    {
+      "source_path": "apps/arbor_trust/test/test_helper.exs",
+      "source_git_blob": "f54b3ba041ba893c6758670d89f2bb0de456e030",
+      "source_sha256": "0f081b8094ec5782d16ae530bf62076283049beaeeac3ea347f13f8902856b5d",
+      "source_bytes": 445,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/test_helper.exs",
+          "final_destination_sha256": "011fba5c4fef4c1f9192fe42b413e2ae4b23eeeb5d9b9617d7f47aada7b09ffd",
+          "bytes": 444
+        }
+      ],
+      "original_named_forms": [],
+      "original_assertion_line_count": 0,
+      "original_assertion_lines_sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "original_tag_lines": []
+    }
+  ],
+  "source_changes_required_by_boundary": [
+    "KR runtime namespace selectors in owning policy/startup tests become Trust runtime selectors with explicit nil Host; actual KR peer/gate assertions remain Host.",
+    "Required application sets replace old product KR/Security owners with passive Kernel; Persistence/Capabilities and optional PubSub remain runtime:false.",
+    "The literal full provider-tree test is in Host with all original assertions; owning policy/activation/startup claims remain package-owned.",
+    "The matrix production source guard now scans actual apps and packages in Host; public read-only matrix assertions stay owning.",
+    "Configured pubsub:nil denotes omitted event ingestion/freeze sync, never a healthy subscription. Actual product pubsub assertion is Host-owned.",
+    "Owning Manager PubSub fixtures explicitly start the optional third-party application; rejected Store startup probe traps initialization links while asserting the exact public error and absent process/cache ownership."
+  ],
+  "fixture_provenance": "Existing Trust.TestHelpers retained with only a test-tooling Boundary. Graduation fixture remains actual Capabilities-owned source loaded only from product Host suite; no new Security behavior stub or foreign-source import in owning package.",
+  "qualification": "Static test conservation only; execution results are recorded separately in run-specific receipts.",
+  "new_test_files": [
+    {
+      "path": "packages/arbor_trust/test/arbor/trust/package_runtime_ports_test.exs",
+      "final_destination_sha256": "e45420b11eb809ee3512ec00e2f98a97945e66992e71912e94e10f84599563be",
+      "named_forms": [
+        "configured unavailable or malformed runtime fails before PolicyHost can claim authority",
+        "standalone activation owns the real canonical PolicyHost without a product gate",
+        "full startup refuses an absent durable profile store instead of selecting a product backend",
+        "configured invalidation transport failure refuses Store startup before cache ownership",
+        "post-commit transport failure is observable without undoing an acknowledged local write",
+        "canonical application closure contains no product runtime or concrete transport"
+      ]
+    },
+    {
+      "path": "apps/arbor_trust_host/test/arbor/trust/package_host_adoption_test.exs",
+      "final_destination_sha256": "f67ee3717a32bb5231dadee6a405b904316b0c9a7250836856c7631d0f8722ce",
+      "named_forms": [
+        "passive product composition preserves canonical Trust module and process owners",
+        "product composition explicitly retains the previous PubSub binding"
+      ]
+    },
+    {
+      "path": "apps/arbor_trust_host/test/test_helper.exs",
+      "final_destination_sha256": "597fae5d044c66a025b6d5db9dfa311e37348fd0e6304310ed5fb579a72bd582",
+      "bytes": 200,
+      "named_forms": [],
+      "disposition": "New explicit product Host test bootstrap; canonical package helper remains separately conserved."
+    }
+  ],
+  "owning_durable_tests_retained": [
+    "packages/arbor_trust/test/arbor/trust/store_test.exs",
+    "packages/arbor_trust/test/arbor/trust/manager_test.exs",
+    "packages/arbor_trust/test/arbor/trust/capability_grant_owner_security_regression_test.exs"
+  ],
+  "whole_host_reasons": {
+    "application_spec_security_regression_test.exs": "actual KernelRuntime restricted-peer product boot composition; active canonical Core app metadata assertions updated to its independent closure",
+    "provider_gate_lifecycle_security_regression_test.exs": "actual KernelRuntime name-first provider-root lifecycle and product SQL/PubSub roots",
+    "graduation_security_regression_test.exs": "actual production OIDC/JWT/Capabilities answered-human approval fixture; imports remain product-only"
+  }
+}

@@ -11,7 +11,7 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
     test "classifies security, trust, contracts, engine, manifest, and migrations as high risk" do
       high_risk_paths = [
         "apps/arbor_security/lib/arbor/security.ex",
-        "apps/arbor_trust/lib/arbor/trust.ex",
+        "packages/arbor_trust/lib/arbor/trust.ex",
         "packages/arbor_kernel/lib/arbor/contracts/security/capability.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine/checkpoint.ex",
@@ -93,12 +93,38 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
       end
     end
 
+    test "canonical Trust and Historian mechanisms and hosts retain authority review" do
+      for {path, app_reason, authority_reason} <- [
+            {"packages/arbor_trust/lib/arbor/trust/policy_host.ex", :trust_app,
+             :trust_authority_surface},
+            {"apps/arbor_trust_host/lib/arbor/trust/host/runtime.ex", :trust_app,
+             :trust_authority_surface},
+            {"apps/arbor_trust/lib/arbor/trust.ex", :trust_app, :trust_authority_surface},
+            {"packages/arbor_historian/lib/arbor/historian/authority_audit_puller.ex",
+             :historian_app, :historian_authority_surface},
+            {"apps/arbor_historian_host/lib/arbor/historian/host/authority_source.ex",
+             :historian_app, :historian_authority_surface}
+          ] do
+        route = BlastRadius.route(:keep, [path])
+        assert route.action == :human_review, path
+        assert route.human_required, path
+        assert route.blast_radius == :high, path
+        assert route.authority_widening, path
+        assert app_reason in route.reasons, path
+        assert authority_reason in route.reasons, path
+      end
+    end
+
     test "unrelated packages and adjacent package names remain low risk" do
       for path <- [
             "packages/arbor_widgets/lib/presenter.ex",
             "packages/arbor_capabilities_demo/lib/client.ex",
             "packages/arbor_capabilities_signals_demo/lib/client.ex",
-            "packages/arbor_capabilities_oidc_demo/lib/client.ex"
+            "packages/arbor_capabilities_oidc_demo/lib/client.ex",
+            "packages/arbor_trust_demo/lib/client.ex",
+            "packages/arbor_historian_demo/lib/client.ex",
+            "apps/arbor_trust_host_demo/lib/client.ex",
+            "apps/arbor_historian_host_demo/lib/client.ex"
           ] do
         classification = BlastRadius.classify([path])
 

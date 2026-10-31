@@ -77,7 +77,10 @@ config :arbor_gateway, start_server: false, mcp_client_enabled: false
 # inject a mock and rebound the host.
 config :arbor_trust,
   start_children: false,
-  action_profile_provider: nil
+  action_profile_provider: nil,
+  # These policy mechanisms are Trust-owned; preserve the existing test defaults.
+  policy_enforcer_enabled: false,
+  approval_guard_enabled: false
 
 config :arbor_capabilities,
   start_children: false,
@@ -94,11 +97,6 @@ config :arbor_capabilities,
   strict_identity_mode: false,
   # Reflex infrastructure not started when start_children: false.
   reflex_checking_enabled: false,
-  # PolicyEnforcer needs Trust system running — disable in tests.
-  # Tests that need it opt in explicitly.
-  policy_enforcer_enabled: false,
-  # ApprovalGuard needs Consensus + Trust — disable in tests.
-  approval_guard_enabled: false,
   # URI registry enforcement needs the GenServer running.
   uri_registry_enforcement: false,
   # Egress gate stays DARK in tests — the egress gate tests toggle enforcing

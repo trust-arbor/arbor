@@ -42,6 +42,36 @@ defmodule Arbor.Commands.PlatformInventory.PackageScopePipelineTest do
     assert {:ok, _json} = Encode.encode_report(report)
   end
 
+  test "Trust and Historian package and host sources reach the physical review projector" do
+    root = repository!()
+
+    family = [
+      {"packages/arbor_trust/lib/arbor/trust/policy_host.ex", "arbor_trust"},
+      {"packages/arbor_historian/lib/arbor/historian/authority_audit_puller.ex",
+       "arbor_historian"},
+      {"apps/arbor_trust_host/lib/arbor/trust/host/runtime.ex", "arbor_trust_host"},
+      {"apps/arbor_historian_host/lib/arbor/historian/host/authority_source.ex",
+       "arbor_historian_host"}
+    ]
+
+    for {path, _owner} <- family, do: source!(root, path)
+    source!(root, "packages/arbor_trust/test/ignored.ex")
+    source!(root, "packages/arbor_support/lib/unrelated.ex")
+    source!(root, "apps/arbor_trust_host_other/lib/unrelated.ex")
+    git!(root, ["add", "."])
+
+    assert {:ok, inventory} = GitInventory.load_selected_blobs(root, Core.platform_apps())
+
+    assert Enum.sort(Enum.map(inventory.files, & &1.path)) ==
+             Enum.sort(Enum.map(family, &elem(&1, 0)))
+
+    assert {:ok, report} = Core.project(inventory)
+    assert Map.new(report["entries"], &{&1["path"], &1["app"]}) == Map.new(family)
+    assert report["counts"]["total_files"] == 4
+    assert report["counts"]["unreviewed_files"] == 4
+    assert {:ok, _json} = Encode.encode_report(report)
+  end
+
   test "old review paths cannot silently qualify the new physical owners" do
     root = repository!()
     path = "packages/arbor_persistence/lib/core.ex"

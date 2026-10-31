@@ -2,7 +2,7 @@ defmodule Arbor.Commands.PlatformInventory.Scope do
   @moduledoc """
   Reviewed v2 successor to the original nine-application E0A source scope.
 
-  Persistence and Security retain their complete families across package and
+  Persistence, Security, Trust and Historian retain complete families across package and
   host owners. Every former production source remains selected. The
   physical roots are explicit, so an old embedded copy cannot silently join
   the package's source set. Historical v1 E0A receipts are not rewritten.
@@ -10,10 +10,10 @@ defmodule Arbor.Commands.PlatformInventory.Scope do
 
   @umbrella_apps ~w(
     arbor_cartographer arbor_llm arbor_security arbor_persistence_host
-    arbor_shell arbor_sandbox arbor_historian arbor_trust
+    arbor_shell arbor_sandbox arbor_historian_host arbor_trust_host
   )
   @package_apps ~w(
-    arbor_capabilities arbor_capabilities_signals
+    arbor_capabilities arbor_capabilities_signals arbor_trust arbor_historian
     arbor_persistence arbor_persistence_sql arbor_persistence_eventstore
   )
   @platform_apps Enum.sort(@umbrella_apps ++ @package_apps)

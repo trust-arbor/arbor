@@ -48,7 +48,9 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_web, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
-      {:arbor_historian, in_umbrella: true},
+      {:arbor_historian, "~> 0.1.0",
+       path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
+      {:arbor_historian_host, in_umbrella: true},
 
       # Level 1
       {:arbor_persistence_host, in_umbrella: true},
@@ -57,7 +59,9 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_security, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
 
       # Standalone
       {:arbor_comms, in_umbrella: true},

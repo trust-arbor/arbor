@@ -1,0 +1,632 @@
+defmodule Arbor.Trust.ManagerTest do
+  use ExUnit.Case, async: false
+
+  @moduletag :fast
+
+  alias Arbor.Trust.EventStore
+  alias Arbor.Trust.Manager
+  alias Arbor.Trust.Store
+
+  defmodule FailingDeleteBackend do
+    def delete(_key, _opts), do: {:error, :simulated_delete_failure}
+  end
+
+  defmodule FailingPutBackend do
+    def put(_key, _record, _opts), do: {:error, :simulated_put_failure}
+    def get(_key, _opts), do: {:error, :not_found}
+  end
+
+  setup do
+    # Start EventStore
+    start_supervised!({EventStore, []})
+
+    # Start Store (ETS-based, no dependencies)
+    start_supervised!({Store, []})
+
+    # Start Manager (depends on Store, EventStore)
+    start_supervised!(
+      {Manager,
+       [
+         circuit_breaker: false,
+         decay: false,
+         event_store: true
+       ]}
+    )
+
+    :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # create_trust_profile/1
+  # ---------------------------------------------------------------------------
+
+  describe "create_trust_profile/1" do
+    test "creates a new trust profile for a valid agent_id" do
+      assert {:ok, profile} = Manager.create_trust_profile("agent_001")
+      assert profile.agent_id == "agent_001"
+      assert profile.frozen == false
+    end
+
+    test "created profile has timestamps set" do
+      {:ok, profile} = Manager.create_trust_profile("agent_ts")
+      assert %DateTime{} = profile.created_at
+      assert %DateTime{} = profile.updated_at
+    end
+  end
+
+  describe "security regression: profile creation requires an acknowledged Store write" do
+    setup do
+      # Trust tests do not run the application PubSub, so give the Manager a
+      # private one to broadcast on and restore the configured name afterwards.
+      {:ok, _started} = Application.ensure_all_started(:phoenix_pubsub)
+      pubsub = :"trust_manager_test_pubsub_#{System.unique_integer([:positive])}"
+      start_supervised!({Phoenix.PubSub, name: pubsub})
+      previous = Application.fetch_env(:arbor_trust, :pubsub)
+      Application.put_env(:arbor_trust, :pubsub, pubsub)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_trust, :pubsub, value)
+          :error -> Application.delete_env(:arbor_trust, :pubsub)
+        end
+      end)
+
+      :ok = Phoenix.PubSub.subscribe(pubsub, "trust:events")
+
+      :sys.replace_state(Store, fn state ->
+        %{
+          state
+          | persistence_mode: :durable,
+            durable_backend: FailingPutBackend,
+            durable_backend_opts: [],
+            durable_collection: "trust_profiles"
+        }
+      end)
+
+      :ok
+    end
+
+    test "a failed Store write returns the error without recording or broadcasting creation" do
+      agent_id = "agent_create_write_failure"
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_put_failure}} =
+               Manager.create_trust_profile(agent_id)
+
+      assert {:error, :not_found} = Manager.get_trust_profile(agent_id)
+      assert {:ok, events} = Manager.get_events(agent_id)
+      refute Enum.any?(events, &(&1.event_type == :profile_created))
+      refute_received {:trust_event, ^agent_id, :profile_created, _}
+
+      # Positive control: the same channel carries creation once a write succeeds.
+      :sys.replace_state(Store, &%{&1 | persistence_mode: :memory, durable_backend: nil})
+      assert {:ok, _profile} = Manager.create_trust_profile(agent_id)
+      assert_received {:trust_event, ^agent_id, :profile_created, _}
+    end
+
+    test "a trust event for an unknown agent whose profile write fails is dropped without a crash" do
+      agent_id = "agent_event_write_failure"
+      manager = Process.whereis(Manager)
+      ref = Process.monitor(manager)
+
+      :ok = Manager.record_trust_event(agent_id, :action_success, %{})
+
+      # This call queues behind the cast, so it observes the cast's outcome.
+      assert {:error, :not_found} = Manager.get_trust_profile(agent_id)
+      refute_received {:DOWN, ^ref, :process, ^manager, _}
+
+      assert {:ok, events} = Manager.get_events(agent_id)
+      assert events == []
+      refute_received {:trust_event, ^agent_id, _, _}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # get_trust_profile/1
+  # ---------------------------------------------------------------------------
+
+  describe "get_trust_profile/1" do
+    test "returns :not_found for a non-existent agent" do
+      assert {:error, :not_found} = Manager.get_trust_profile("nonexistent")
+    end
+
+    test "returns the profile after creation" do
+      {:ok, _} = Manager.create_trust_profile("agent_get")
+      assert {:ok, profile} = Manager.get_trust_profile("agent_get")
+      assert profile.agent_id == "agent_get"
+    end
+
+    test "returns the same profile data that was created" do
+      {:ok, created} = Manager.create_trust_profile("agent_same")
+      {:ok, fetched} = Manager.get_trust_profile("agent_same")
+      assert created.agent_id == fetched.agent_id
+      assert created.baseline == fetched.baseline
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # record_trust_event/3 - action_success
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # record_trust_event/3 — score/counter mutation removed (tiers phase 3b),
+  # and the counter/score fields themselves removed (post-tier cleanup).
+  #
+  # Recording a trust event no longer mutates the profile. Events are recorded
+  # for audit/observability and feed the circuit breaker, not the profile.
+  # ---------------------------------------------------------------------------
+
+  describe "record_trust_event/3 does not mutate the profile" do
+    test "common event types are accepted and leave the profile retrievable" do
+      {:ok, _} = Manager.create_trust_profile("agent_events")
+
+      for event_type <- [
+            :action_success,
+            :action_failure,
+            :security_violation,
+            :test_passed,
+            :test_failed,
+            :rollback_executed,
+            :improvement_applied,
+            :proposal_submitted,
+            :proposal_approved,
+            :installation_success
+          ] do
+        :ok = Manager.record_trust_event("agent_events", event_type, %{})
+      end
+
+      Process.sleep(50)
+
+      # The profile is unchanged behaviorally: still retrievable, not frozen,
+      # baseline/rules intact. (There are no score/counter fields to assert on —
+      # they were removed; events flow to the audit log + circuit breaker.)
+      {:ok, profile} = Manager.get_trust_profile("agent_events")
+      assert profile.agent_id == "agent_events"
+      refute profile.frozen
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # record_trust_event/3 - auto-creates profile for unknown agent
+  # ---------------------------------------------------------------------------
+
+  describe "security regression: record_trust_event/3 auto-creation without a Manager self-call" do
+    test "auto-creates profile for unknown agent on event" do
+      # The cast handler used to call create_trust_profile/1, a GenServer.call
+      # back into the Manager itself, which exits with :calling_self.
+      manager = Process.whereis(Manager)
+      ref = Process.monitor(manager)
+
+      :ok = Manager.record_trust_event("agent_auto", :action_success, %{})
+
+      # This call queues behind the cast, so it observes the cast's outcome.
+      assert {:ok, profile} = Manager.get_trust_profile("agent_auto")
+      assert profile.agent_id == "agent_auto"
+      refute_received {:DOWN, ^ref, :process, ^manager, _}
+      assert Process.whereis(Manager) == manager
+
+      assert {:ok, events} = Manager.get_events("agent_auto")
+      event_types = Enum.map(events, & &1.event_type)
+      assert :profile_created in event_types
+      assert :action_success in event_types
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # check_trust_authorization/2
+  # ---------------------------------------------------------------------------
+
+  # check_trust_authorization/2 was removed (tiers-retirement phase 3c) — there
+  # is no trust-tier band to check against. Authorization runs on the granular
+  # baseline/rules + capability checks. The frozen-agent gate is covered by the
+  # freeze_trust/get_trust_profile tests below.
+
+  # ---------------------------------------------------------------------------
+  # freeze_trust/2 and unfreeze_trust/1
+  # ---------------------------------------------------------------------------
+
+  describe "freeze_trust/2" do
+    test "freezes a trust profile" do
+      {:ok, _} = Manager.create_trust_profile("agent_freeze")
+
+      assert :ok = Manager.freeze_trust("agent_freeze", :security_violation)
+
+      {:ok, profile} = Manager.get_trust_profile("agent_freeze")
+      assert profile.frozen == true
+      assert profile.frozen_reason == :security_violation
+      assert %DateTime{} = profile.frozen_at
+    end
+
+    test "returns error for non-existent agent" do
+      assert {:error, :not_found} = Manager.freeze_trust("nonexistent_freeze", :reason)
+    end
+  end
+
+  describe "unfreeze_trust/1" do
+    test "unfreezes a frozen profile" do
+      {:ok, _} = Manager.create_trust_profile("agent_unfreeze")
+      :ok = Manager.freeze_trust("agent_unfreeze", :test_reason)
+
+      assert :ok = Manager.unfreeze_trust("agent_unfreeze")
+
+      {:ok, profile} = Manager.get_trust_profile("agent_unfreeze")
+      assert profile.frozen == false
+      assert profile.frozen_reason == nil
+      assert profile.frozen_at == nil
+    end
+
+    test "returns error for non-existent agent" do
+      assert {:error, :not_found} = Manager.unfreeze_trust("nonexistent_unfreeze")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # list_profiles/0 and list_profiles/1
+  # ---------------------------------------------------------------------------
+
+  describe "list_profiles/0 and list_profiles/1" do
+    test "returns empty list when no profiles exist" do
+      {:ok, profiles} = Manager.list_profiles()
+      assert is_list(profiles)
+    end
+
+    test "returns created profiles" do
+      {:ok, _} = Manager.create_trust_profile("agent_list_a")
+      {:ok, _} = Manager.create_trust_profile("agent_list_b")
+
+      {:ok, profiles} = Manager.list_profiles()
+      agent_ids = Enum.map(profiles, & &1.agent_id)
+      assert "agent_list_a" in agent_ids
+      assert "agent_list_b" in agent_ids
+    end
+
+    test "supports limit option" do
+      for i <- 1..5 do
+        {:ok, _} = Manager.create_trust_profile("agent_limit_#{i}")
+      end
+
+      {:ok, profiles} = Manager.list_profiles(limit: 2)
+      assert length(profiles) <= 2
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # delete_trust_profile/1
+  # ---------------------------------------------------------------------------
+
+  describe "delete_trust_profile/1" do
+    test "deletes an existing profile" do
+      {:ok, _} = Manager.create_trust_profile("agent_delete")
+      assert :ok = Manager.delete_trust_profile("agent_delete")
+      assert {:error, :not_found} = Manager.get_trust_profile("agent_delete")
+    end
+
+    test "returns :ok for non-existent profile" do
+      assert :ok = Manager.delete_trust_profile("nonexistent_delete")
+    end
+
+    test "returns a Store deletion failure and does not record a deletion event" do
+      {:ok, _} = Manager.create_trust_profile("agent_delete_failure")
+
+      :sys.replace_state(Store, fn state ->
+        %{
+          state
+          | persistence_mode: :durable,
+            durable_backend: FailingDeleteBackend,
+            durable_backend_opts: [],
+            durable_collection: "trust_profiles"
+        }
+      end)
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_delete_failure}} =
+               Manager.delete_trust_profile("agent_delete_failure")
+
+      assert {:ok, %{frozen: true, baseline: :block}} =
+               Store.get_profile("agent_delete_failure")
+
+      assert {:ok, events} = Manager.get_events("agent_delete_failure")
+      refute Enum.any?(events, &(&1.event_type == :profile_deleted))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # get_events/2
+  # ---------------------------------------------------------------------------
+
+  describe "get_events/2" do
+    test "returns events for an agent" do
+      {:ok, _} = Manager.create_trust_profile("agent_events")
+
+      :ok = Manager.record_trust_event("agent_events", :action_success, %{})
+      Process.sleep(50)
+
+      {:ok, events} = Manager.get_events("agent_events")
+      assert is_list(events)
+      # Should have at least the profile_created event and the action_success event
+      assert events != []
+    end
+
+    test "returns empty list for agent with no events" do
+      {:ok, events} = Manager.get_events("nonexistent_events")
+      assert events == []
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # run_decay_check/0
+  # ---------------------------------------------------------------------------
+
+  describe "run_decay_check/0" do
+    test "runs without error (cast)" do
+      assert :ok = Manager.run_decay_check()
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Additional event types
+  #
+  # The scoring/points feedback loop was removed (tiers-retirement phase 3b):
+  # recording a trust event no longer mutates the profile counters. Events are
+  # still recorded for audit/observability and feed the circuit breaker.
+  # ---------------------------------------------------------------------------
+
+  describe "record_trust_event/3 does not mutate profile counters" do
+    test "unknown event type doesn't crash" do
+      {:ok, _} = Manager.create_trust_profile("agent_unknown_event")
+      :ok = Manager.record_trust_event("agent_unknown_event", :some_unknown_event, %{})
+      Process.sleep(50)
+
+      # Manager should still work
+      {:ok, profile} = Manager.get_trust_profile("agent_unknown_event")
+      assert profile.agent_id == "agent_unknown_event"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Circuit breaker integration
+  # ---------------------------------------------------------------------------
+
+  describe "circuit breaker integration" do
+    test "handle_info :check_circuit_breaker processes without crash" do
+      stop_supervised!(Manager)
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_cb_test")
+
+      # Send check_circuit_breaker message directly
+      send(Process.whereis(Manager), {:check_circuit_breaker, "agent_cb_test"})
+      Process.sleep(50)
+
+      # Manager should still be working
+      {:ok, profile} = Manager.get_trust_profile("agent_cb_test")
+      assert profile.agent_id == "agent_cb_test"
+    end
+
+    test "rapid failures trigger circuit breaker check" do
+      stop_supervised!(Manager)
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_cb_rapid")
+
+      # Record 5+ rapid failures to trigger circuit breaker
+      for _ <- 1..6 do
+        :ok = Manager.record_trust_event("agent_cb_rapid", :action_failure, %{})
+        Process.sleep(10)
+      end
+
+      Process.sleep(200)
+
+      # The circuit breaker triggers check_circuit_breaker which calls freeze_trust
+      # via GenServer.call back to itself from handle_info, causing a self-call exit.
+      # The Manager process terminates and is restarted by the supervisor.
+      # Verify the Manager is still functional after restart.
+      # The profile may or may not exist depending on restart timing.
+      case Manager.get_trust_profile("agent_cb_rapid") do
+        {:ok, profile} ->
+          # If profile survived, it recorded failures
+          assert profile.agent_id == "agent_cb_rapid"
+
+        {:error, :not_found} ->
+          # Profile lost after Manager restart is acceptable
+          assert true
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # handle_info :check_circuit_breaker when disabled
+  # ---------------------------------------------------------------------------
+
+  describe "handle_info :check_circuit_breaker when disabled" do
+    test "does nothing when circuit_breaker is disabled" do
+      # Default setup has circuit_breaker: false
+      {:ok, _} = Manager.create_trust_profile("agent_cb_disabled")
+
+      send(Process.whereis(Manager), {:check_circuit_breaker, "agent_cb_disabled"})
+      Process.sleep(50)
+
+      # Profile should not be frozen
+      {:ok, profile} = Manager.get_trust_profile("agent_cb_disabled")
+      assert profile.frozen == false
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Circuit breaker: rollbacks no longer demote tier (tier-minting kill sweep)
+  # ---------------------------------------------------------------------------
+
+  describe "circuit breaker rollbacks (tier-minting kill sweep, P0 gate #1)" do
+    test "rollbacks above the old threshold do NOT mutate the profile" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_demote")
+
+      for _ <- 1..25 do
+        :ok = Manager.record_trust_event("agent_demote", :action_success, %{})
+        Process.sleep(5)
+      end
+
+      Process.sleep(100)
+
+      {:ok, profile_before} = Manager.get_trust_profile("agent_demote")
+      baseline_before = profile_before.baseline
+      rules_before = profile_before.rules
+
+      # Record 4 rollbacks — the old code demoted tier (and minted/stripped
+      # capabilities) at the rollbacks >= 3 threshold. That path is gone.
+      for _ <- 1..4 do
+        :ok = Manager.record_trust_event("agent_demote", :rollback_executed, %{})
+        Process.sleep(10)
+      end
+
+      Process.sleep(300)
+
+      {:ok, profile} = Manager.get_trust_profile("agent_demote")
+      assert profile.agent_id == "agent_demote"
+      # The authorization profile is unchanged — rollbacks never mint/strip
+      # capabilities or move trust anymore.
+      assert profile.baseline == baseline_before
+      assert profile.rules == rules_before
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # persist_to_event_store edge cases
+  # ---------------------------------------------------------------------------
+
+  describe "persist_to_event_store with event_store disabled" do
+    test "handles event store being disabled gracefully" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
+
+      # All operations that persist events should work fine with event_store disabled
+      {:ok, _} = Manager.create_trust_profile("agent_no_es")
+      :ok = Manager.record_trust_event("agent_no_es", :action_success, %{})
+      Process.sleep(50)
+
+      {:ok, profile} = Manager.get_trust_profile("agent_no_es")
+      assert profile.agent_id == "agent_no_es"
+    end
+
+    test "freeze and unfreeze work with event_store disabled" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_freeze_no_es")
+      assert :ok = Manager.freeze_trust("agent_freeze_no_es", :test_reason)
+
+      {:ok, frozen} = Manager.get_trust_profile("agent_freeze_no_es")
+      assert frozen.frozen == true
+
+      assert :ok = Manager.unfreeze_trust("agent_freeze_no_es")
+
+      {:ok, unfrozen} = Manager.get_trust_profile("agent_freeze_no_es")
+      assert unfrozen.frozen == false
+    end
+
+    test "delete works with event_store disabled" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_del_no_es")
+      assert :ok = Manager.delete_trust_profile("agent_del_no_es")
+      assert {:error, :not_found} = Manager.get_trust_profile("agent_del_no_es")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # run_decay_check with nil last_activity_at and active decay
+  # ---------------------------------------------------------------------------
+
+  describe "run_decay_check/0 is a no-op (trust decay removed)" do
+    test "handles profile with nil last_activity_at without crash" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_nil_activity")
+
+      # Manually update profile to have nil last_activity_at and old created_at
+      Store.update_profile("agent_nil_activity", fn profile ->
+        %{
+          profile
+          | last_activity_at: nil,
+            created_at: DateTime.add(DateTime.utc_now(), -30, :day)
+        }
+      end)
+
+      :ok = Manager.run_decay_check()
+      Process.sleep(100)
+
+      # Should handle nil last_activity_at without crash
+      {:ok, profile} = Manager.get_trust_profile("agent_nil_activity")
+      assert profile.agent_id == "agent_nil_activity"
+    end
+
+    test "does not mutate profiles with old last_activity_at" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_old_activity")
+
+      # Set old last_activity
+      Store.update_profile("agent_old_activity", fn profile ->
+        %{profile | last_activity_at: DateTime.add(DateTime.utc_now(), -20, :day)}
+      end)
+
+      :ok = Manager.run_decay_check()
+      Process.sleep(100)
+
+      {:ok, profile} = Manager.get_trust_profile("agent_old_activity")
+      assert profile.agent_id == "agent_old_activity"
+      assert profile.baseline == :ask
+    end
+
+    test "is a no-op when decay is disabled" do
+      # Default setup has decay: false
+      {:ok, _} = Manager.create_trust_profile("agent_no_decay")
+      :ok = Manager.run_decay_check()
+      Process.sleep(50)
+
+      {:ok, profile} = Manager.get_trust_profile("agent_no_decay")
+      assert profile.agent_id == "agent_no_decay"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Circuit breaker - security violations path
+  # ---------------------------------------------------------------------------
+
+  describe "circuit breaker security violations path" do
+    test "3+ security violations trigger freeze" do
+      stop_supervised!(Manager)
+
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
+
+      {:ok, _} = Manager.create_trust_profile("agent_sec_cb")
+
+      # Record 4 security violations
+      for _ <- 1..4 do
+        :ok = Manager.record_trust_event("agent_sec_cb", :security_violation, %{})
+        Process.sleep(10)
+      end
+
+      Process.sleep(300)
+
+      # Agent may be frozen or manager may have restarted - either way it should work
+      case Manager.get_trust_profile("agent_sec_cb") do
+        {:ok, profile} ->
+          assert profile.agent_id == "agent_sec_cb"
+
+        {:error, :not_found} ->
+          # Profile lost after Manager restart is acceptable
+          assert true
+      end
+    end
+  end
+end
