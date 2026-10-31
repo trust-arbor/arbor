@@ -42,13 +42,14 @@ defmodule Arbor.LLM.Eval.SubjectTest do
     end
 
     def complete(%Request{model: "slow-complete-deadline"}, _opts) do
-      Process.sleep(200)
+      owner = Process.whereis(Arbor.LLM.Eval.SubjectTest.DeadlineProbe)
+      send(owner, {:deadline_probe_started, self()})
 
-      if owner = Process.whereis(Arbor.LLM.Eval.SubjectTest.DeadlineProbe) do
-        send(owner, :late_complete_side_effect)
+      receive do
+        {:release_complete, ^owner} ->
+          send(owner, :late_complete_side_effect)
+          {:ok, %Response{text: "late", usage: %{}, raw: %{}}}
       end
-
-      {:ok, %Response{text: "late", usage: %{}, raw: %{}}}
     end
 
     def complete(%Request{} = request, opts) do
@@ -138,6 +139,12 @@ defmodule Arbor.LLM.Eval.SubjectTest do
   defp client do
     Client.new()
     |> Client.register_adapter(TestAdapter)
+  end
+
+  defp stop_deadline_probe(pid) do
+    monitor = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 1_000
   end
 
   describe "run/2" do
@@ -422,18 +429,39 @@ defmodule Arbor.LLM.Eval.SubjectTest do
           do: Process.unregister(Arbor.LLM.Eval.SubjectTest.DeadlineProbe)
       end)
 
+      owner = self()
+      run_ref = make_ref()
       started = System.monotonic_time(:millisecond)
 
-      assert Subject.run("hello",
-               client: client(),
-               provider: "eval_test",
-               model: "slow-complete-deadline",
-               timeout: 50
-             ) == {:error, {:request_deadline_exceeded, 50}}
+      {runner, runner_monitor} =
+        spawn_monitor(fn ->
+          result =
+            Subject.run("hello",
+              client: client(),
+              provider: "eval_test",
+              model: "slow-complete-deadline",
+              timeout: 50
+            )
+
+          send(owner, {run_ref, result})
+        end)
+
+      on_exit(fn -> stop_deadline_probe(runner) end)
+      assert_receive {:deadline_probe_started, worker}, 1_000
+      on_exit(fn -> stop_deadline_probe(worker) end)
+      worker_monitor = Process.monitor(worker)
+
+      assert_receive {^run_ref, result}, 1_000
+      assert result == {:error, {:request_deadline_exceeded, 50}}
 
       elapsed = System.monotonic_time(:millisecond) - started
       assert elapsed >= 40
-      assert elapsed < 175
+
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, reason}, 1_000
+      assert reason in [:killed, :noproc]
+      assert_receive {:DOWN, ^runner_monitor, :process, ^runner, :normal}, 1_000
+
+      send(worker, {:release_complete, owner})
       refute_receive :late_complete_side_effect, 250
     end
 

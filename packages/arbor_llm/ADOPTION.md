@@ -106,10 +106,11 @@ correction also preserves metadata-stripped AST equality. The 147 explicit raw-c
 differences remain labeled as the earlier pre-format stage; they do not claim
 final raw identity.
 
-The later 47 owning-case fixture corrections select finite policies or repair
-caller-owned test setup without changing assertions, case names, tags or timing
-budgets. Their separate source proofs and the final formatted target hashes are
-bound by the map. Historical tooling receipts record 11 LLM and 13 Support stdlib
+At the recorded 47 owning-case fixture-correction stage, finite policies and
+caller-owned setup repairs left assertions, case names, tags and timing budgets
+unchanged. Those stage-specific proofs and formatted target hashes remain
+bound by the map; the separate later Subject exception is described below.
+Historical tooling receipts record 11 LLM and 13 Support stdlib
 cases, followed by a separately preserved 14-LLM/79-Trust tooling snapshot.
 The current scoped dotenv guard has 24 LLM stdlib cases, including 10 temporary
 context cases that leave unused Home dotenv inputs unqueried while retaining
@@ -124,3 +125,25 @@ fixture `with` with an equivalent `case`. Source records preserve the previous
 target pins; a separate 18-file Root formatting receipt establishes AST equality
 only between the edited and formatted sources. Earlier owning, API and
 compilation receipts remain tied to their recorded revisions.
+
+The user-authorized Subject deadline/cancellation reliability exception changes
+one preserved owning case and its test adapter/cleanup. It replaces only the
+fragile host wall-time assertion `elapsed < 175` with actual provider-lifecycle
+oracles: the announced provider execution PID blocks until a test-owned release,
+its monitored termination must precede that release and teardown, and the public
+Subject runner must exit normally. The product `timeout: 50`, exact
+`{:error, {:request_deadline_exceeded, 50}}`, `elapsed >= 40`, and
+`refute_receive :late_complete_side_effect, 250` remain. The 1000ms harness waits
+bound observation and cleanup; they do not increase the product deadline.
+
+All 29 Subject case identities/order/tags remain, and the other 28 case chunks
+are byte-identical to the prior target. The map retains that `5a8df1ab...` target
+and all historical source facts separately from this deliberate assertion and
+fixture change. Earlier setup-only assertion/budget-preservation and formatting
+proofs remain historical; they do not assert that all original assertions or
+timing assertions are byte-identical in the current target. The map binds actual
+Root formatting and AST evidence (29 named tests, 74 assert-family and three
+refute-family forms), the passing whole Subject file, and two negative controls
+that fail at the intended deadline/cancellation assertions. The full owning run
+remains failed with two other test-fixture issues under investigation. These
+scoped receipts supply no full-suite or cold qualification credit.

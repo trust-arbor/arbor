@@ -30,7 +30,8 @@
     "Post-format raw chunks may differ. Formatting phases01/02/03 cover136/7/11 inputs and establish metadata-stripped AST equality only between each phase before/after inputs. Historical per-target formatting records and the47-case correction stage identify the respective scope.",
     "The147 explicit prior_stage01_before_format_chunk_sha256 values retain the initial reviewed pre-format stage. A missing value means raw equality to source_chunk_sha256 only at that prior stage, not after subsequent fixture corrections or formatting. Current formatted bodies are bound by current destination file hashes.",
     "Additional cases in preserved target files are listed separately. New source/test files outside this historical map, including active structural test additions and cold examples, are not exhaustively enumerated here.",
-    "This ledger itself supplies no compilation, owning-test, runtime-closure, native, product-release or publication qualification. Separately bound synthetic tooling test receipts do not establish those gates."
+    "This ledger itself supplies no compilation, owning-test, runtime-closure, native, product-release or publication qualification. Separately bound synthetic tooling test receipts do not establish those gates.",
+    "Historical assertion/budget-preservation and formatting proofs remain scoped to their recorded stages. The separate user-authorized Subject deadline reliability stage deliberately replaces only elapsed<175 with actual provider-lifecycle oracles while preserving timeout50/exact error/lower40/late250; current destination hashes advance separately, not historical source facts."
   ],
   "files": [
     {
@@ -2907,8 +2908,8 @@
         {
           "path": "packages/arbor_llm/test/arbor/llm/eval/subject_test.exs",
           "owner_application": "arbor_llm",
-          "sha256": "5a8df1abcf6b8d7ec152e1544bff3f4ed8dbc7aee6890f81b88c6e8739d1529e",
-          "bytes": 24166,
+          "sha256": "b941b4354cfe2b25d5de2ccce4575b651a8ae0044118c4abce5fca3ef939c086",
+          "bytes": 25110,
           "prior_stage02_target": {
             "sha256": "7dedf66217b34b1d1af26eb8e52249c82a8fa18940ed3998010eec8780b0ff80",
             "bytes": 21531
@@ -2918,7 +2919,12 @@
             "before_sha256": "4b828e88563266e7e16a764dd060aff8e93af8ce6202aabfcda099979647acbb",
             "after_sha256": "5a8df1abcf6b8d7ec152e1544bff3f4ed8dbc7aee6890f81b88c6e8739d1529e",
             "metadata_stripped_ast_equal": true
-          }
+          },
+          "prior_to_subject_deadline_reliability_target": {
+            "sha256": "5a8df1abcf6b8d7ec152e1544bff3f4ed8dbc7aee6890f81b88c6e8739d1529e",
+            "bytes": 24166
+          },
+          "current_observation_stage": "user_authorized_Subject_deadline_reliability_exception_draft02"
         }
       ],
       "disposition": "package_owning_test_move",
@@ -5633,7 +5639,7 @@
                 },
                 {
                   "ordinal": 5,
-                  "label": "Arbor uses req_llm names directly — 'google' is the gemini provider",
+                  "label": "Arbor uses req_llm names directly \u2014 'google' is the gemini provider",
                   "source_lines": [
                     78,
                     90
@@ -5651,7 +5657,7 @@
                 },
                 {
                   "ordinal": 7,
-                  "label": "operator escape hatch — provider+model still produce a dispatchable spec",
+                  "label": "operator escape hatch \u2014 provider+model still produce a dispatchable spec",
                   "source_lines": [
                     105,
                     112
@@ -5926,7 +5932,7 @@
                 },
                 {
                   "ordinal": 37,
-                  "label": "plain text response → single text part",
+                  "label": "plain text response \u2192 single text part",
                   "source_lines": [
                     408,
                     418
@@ -6142,7 +6148,7 @@
                 },
                 {
                   "ordinal": 61,
-                  "label": "tool_choice 'auto' is NOT forwarded — providers default to auto when tools present",
+                  "label": "tool_choice 'auto' is NOT forwarded \u2014 providers default to auto when tools present",
                   "source_lines": [
                     834,
                     847
@@ -6205,7 +6211,7 @@
                 },
                 {
                   "ordinal": 68,
-                  "label": "content chunk → :delta event with :text",
+                  "label": "content chunk \u2192 :delta event with :text",
                   "source_lines": [
                     964,
                     969
@@ -6214,7 +6220,7 @@
                 },
                 {
                   "ordinal": 69,
-                  "label": "thinking chunk → :delta with :thinking",
+                  "label": "thinking chunk \u2192 :delta with :thinking",
                   "source_lines": [
                     971,
                     976
@@ -6223,7 +6229,7 @@
                 },
                 {
                   "ordinal": 70,
-                  "label": "tool_call chunk → :tool_call event with name + arguments",
+                  "label": "tool_call chunk \u2192 :tool_call event with name + arguments",
                   "source_lines": [
                     978,
                     989
@@ -6232,7 +6238,7 @@
                 },
                 {
                   "ordinal": 71,
-                  "label": "meta chunk → :step_finish with metadata as data",
+                  "label": "meta chunk \u2192 :step_finish with metadata as data",
                   "source_lines": [
                     991,
                     996
@@ -6585,7 +6591,7 @@
                 },
                 {
                   "ordinal": 3,
-                  "label": "absent API key → provider absent from routing table",
+                  "label": "absent API key \u2192 provider absent from routing table",
                   "source_lines": [
                     92,
                     109
@@ -8228,7 +8234,7 @@
                 },
                 {
                   "ordinal": 2,
-                  "label": "primary failure (eligible) → returns error since chain is empty",
+                  "label": "primary failure (eligible) \u2192 returns error since chain is empty",
                   "source_lines": [
                     37,
                     45
@@ -8237,7 +8243,7 @@
                 },
                 {
                   "ordinal": 3,
-                  "label": "primary failure (non-eligible) → returns error",
+                  "label": "primary failure (non-eligible) \u2192 returns error",
                   "source_lines": [
                     47,
                     55
@@ -8255,7 +8261,7 @@
                 },
                 {
                   "ordinal": 5,
-                  "label": "eligible primary error → first fallback runs",
+                  "label": "eligible primary error \u2192 first fallback runs",
                   "source_lines": [
                     76,
                     96
@@ -8273,7 +8279,7 @@
                 },
                 {
                   "ordinal": 7,
-                  "label": "stops at first eligible→non-eligible boundary in the chain",
+                  "label": "stops at first eligible\u2192non-eligible boundary in the chain",
                   "source_lines": [
                     118,
                     140
@@ -8282,7 +8288,7 @@
                 },
                 {
                   "ordinal": 8,
-                  "label": "all attempts fail → returns last error",
+                  "label": "all attempts fail \u2192 returns last error",
                   "source_lines": [
                     142,
                     158
@@ -8300,7 +8306,7 @@
                 },
                 {
                   "ordinal": 10,
-                  "label": "all chain entries skip → returns the original primary error",
+                  "label": "all chain entries skip \u2192 returns the original primary error",
                   "source_lines": [
                     188,
                     196
@@ -8336,7 +8342,7 @@
                 },
                 {
                   "ordinal": 14,
-                  "label": "default eligibility uses Retry.fallback_eligible? — confirms :timeout eligible",
+                  "label": "default eligibility uses Retry.fallback_eligible? \u2014 confirms :timeout eligible",
                   "source_lines": [
                     266,
                     280
@@ -11956,7 +11962,7 @@
                 },
                 {
                   "ordinal": 3,
-                  "label": "DOES NOT short-circuit on halted — every plug gets the call",
+                  "label": "DOES NOT short-circuit on halted \u2014 every plug gets the call",
                   "source_lines": [
                     84,
                     95
@@ -12051,7 +12057,7 @@
                 },
                 {
                   "ordinal": 6,
-                  "label": "ALSO fires on halted calls — that's the point of an observability plug",
+                  "label": "ALSO fires on halted calls \u2014 that's the point of an observability plug",
                   "source_lines": [
                     106,
                     115
@@ -12180,7 +12186,7 @@
               "cases": [
                 {
                   "ordinal": 1,
-                  "label": "identical call shape → identical hash",
+                  "label": "identical call shape \u2192 identical hash",
                   "source_lines": [
                     55,
                     69
@@ -12189,7 +12195,7 @@
                 },
                 {
                   "ordinal": 2,
-                  "label": "different model → different hash",
+                  "label": "different model \u2192 different hash",
                   "source_lines": [
                     71,
                     76
@@ -12198,7 +12204,7 @@
                 },
                 {
                   "ordinal": 3,
-                  "label": "different operation → different hash even with same request",
+                  "label": "different operation \u2192 different hash even with same request",
                   "source_lines": [
                     78,
                     83
@@ -12589,7 +12595,7 @@
               "cases": [
                 {
                   "ordinal": 1,
-                  "label": "halted: true → returns call unchanged",
+                  "label": "halted: true \u2192 returns call unchanged",
                   "source_lines": [
                     81,
                     84
@@ -12598,7 +12604,7 @@
                 },
                 {
                   "ordinal": 2,
-                  "label": ":stream operation → skips retry (streams are stateful)",
+                  "label": ":stream operation \u2192 skips retry (streams are stateful)",
                   "source_lines": [
                     86,
                     89
@@ -12607,7 +12613,7 @@
                 },
                 {
                   "ordinal": 3,
-                  "label": "success result → no-op",
+                  "label": "success result \u2192 no-op",
                   "source_lines": [
                     91,
                     94
@@ -12616,7 +12622,7 @@
                 },
                 {
                   "ordinal": 4,
-                  "label": "non-rate-limit error → no-op",
+                  "label": "non-rate-limit error \u2192 no-op",
                   "source_lines": [
                     96,
                     99
@@ -12625,7 +12631,7 @@
                 },
                 {
                   "ordinal": 5,
-                  "label": "ProviderError with 400 status → no-op",
+                  "label": "ProviderError with 400 status \u2192 no-op",
                   "source_lines": [
                     101,
                     111
@@ -12697,7 +12703,7 @@
                 },
                 {
                   "ordinal": 13,
-                  "label": "max_retries reached → returns last error",
+                  "label": "max_retries reached \u2192 returns last error",
                   "source_lines": [
                     221,
                     235
@@ -12969,7 +12975,7 @@
                 },
                 {
                   "ordinal": 5,
-                  "label": "STILL fires on halted calls — observability is the point",
+                  "label": "STILL fires on halted calls \u2014 observability is the point",
                   "source_lines": [
                     105,
                     122
@@ -13362,7 +13368,7 @@
                 },
                 {
                   "ordinal": 4,
-                  "label": "exact match → :ok",
+                  "label": "exact match \u2192 :ok",
                   "source_lines": [
                     34,
                     37
@@ -13371,7 +13377,7 @@
                 },
                 {
                   "ordinal": 5,
-                  "label": "base loaded under a different quant → {:wrong_quant, served}",
+                  "label": "base loaded under a different quant \u2192 {:wrong_quant, served}",
                   "source_lines": [
                     39,
                     42
@@ -13380,7 +13386,7 @@
                 },
                 {
                   "ordinal": 6,
-                  "label": "base loaded as a bare id (one quant) → :unverified_quant",
+                  "label": "base loaded as a bare id (one quant) \u2192 :unverified_quant",
                   "source_lines": [
                     44,
                     47
@@ -13389,7 +13395,7 @@
                 },
                 {
                   "ordinal": 7,
-                  "label": "base not loaded at all → :missing",
+                  "label": "base not loaded at all \u2192 :missing",
                   "source_lines": [
                     49,
                     52
@@ -13398,7 +13404,7 @@
                 },
                 {
                   "ordinal": 8,
-                  "label": "empty loaded list → :missing",
+                  "label": "empty loaded list \u2192 :missing",
                   "source_lines": [
                     54,
                     56
@@ -13407,7 +13413,7 @@
                 },
                 {
                   "ordinal": 9,
-                  "label": "exact tag match → :ok",
+                  "label": "exact tag match \u2192 :ok",
                   "source_lines": [
                     60,
                     62
@@ -13416,7 +13422,7 @@
                 },
                 {
                   "ordinal": 10,
-                  "label": "bare name matches the loaded :latest tag → :ok (Ollama's default tag)",
+                  "label": "bare name matches the loaded :latest tag \u2192 :ok (Ollama's default tag)",
                   "source_lines": [
                     64,
                     66
@@ -13425,7 +13431,7 @@
                 },
                 {
                   "ordinal": 11,
-                  "label": "explicit tag that isn't loaded → :missing (even if another tag is)",
+                  "label": "explicit tag that isn't loaded \u2192 :missing (even if another tag is)",
                   "source_lines": [
                     68,
                     70
@@ -13434,7 +13440,7 @@
                 },
                 {
                   "ordinal": 12,
-                  "label": "bare name with no matching :latest → :missing",
+                  "label": "bare name with no matching :latest \u2192 :missing",
                   "source_lines": [
                     72,
                     75
@@ -16986,7 +16992,7 @@
                 },
                 {
                   "ordinal": 6,
-                  "label": "detects PII — email address",
+                  "label": "detects PII \u2014 email address",
                   "source_lines": [
                     58,
                     65
@@ -17004,7 +17010,7 @@
                 },
                 {
                   "ordinal": 8,
-                  "label": "handles mixed findings — takes highest sensitivity",
+                  "label": "handles mixed findings \u2014 takes highest sensitivity",
                   "source_lines": [
                     76,
                     85
@@ -17526,5 +17532,97 @@
       "guards_preserved": "Dotenv admission is checked for consumed repository, launch cwd, work and command cwd. Home .erlang/.iex.exs still rejected; unused Home .env is not queried or modified.",
       "qualification_limit": "Temporary synthetic stdlib tests only; no operator Home inputs, Mix/ERTS/native/archive/consumer/cold/runtime qualification."
     }
-  }
+  },
+  "test_reliability_source_stages": [
+    {
+      "stage": "user_authorized_Subject_deadline_cancellation_reliability_exception",
+      "status": "ROOT_FORMAT_AND_TARGETED_REGRESSION_BOUND_FULL_OWNING_HOLD",
+      "scope": "One preserved owning case and its exact adapter fixture/test-owned cleanup; no production source or timeout/deadline implementation change.",
+      "path": "packages/arbor_llm/test/arbor/llm/eval/subject_test.exs",
+      "owner_application": "arbor_llm",
+      "prior_portable_map_sha256": "d05b86990c52f1b53d48adfbb9269cba65c8bac4fae4f9258e235f5cd443e9bf",
+      "prior_target_sha256": "5a8df1abcf6b8d7ec152e1544bff3f4ed8dbc7aee6890f81b88c6e8739d1529e",
+      "prior_target_bytes": 24166,
+      "draft_target_sha256": "b941b4354cfe2b25d5de2ccce4575b651a8ae0044118c4abce5fca3ef939c086",
+      "draft_target_bytes": 25110,
+      "case_label": "security regression: nonstreaming adapters share one owned absolute deadline",
+      "original_case_ordinal": 13,
+      "source_proposal_ledger_sha256": "82468702a02d0cedbae0187e7b25a626a70051e8b773f83b190c9978bd18c09d",
+      "source_proposal_patch_sha256": "09d0c97df3454d58e609b3c6840ad4bd0f262711a90ddc3de174ab0f60517797",
+      "independent_source_review_sha256": "d25de98a79ba71c57828cab125a5c8fc06d2085ac2e083c491db7ca68e19c61f",
+      "authorization": "Explicit user-authorized test-only reliability correction.",
+      "removed_assertion": "assert elapsed < 175",
+      "preserved_behavior_assertions": [
+        "timeout: 50",
+        "{:error, {:request_deadline_exceeded, 50}}",
+        "assert elapsed >= 40",
+        "refute_receive :late_complete_side_effect, 250"
+      ],
+      "replacement_oracles": [
+        "The actual provider execution PID announces entry and blocks on a test-owned late release.",
+        "Its monitored DOWN (:killed or :noproc) must occur before release and before any teardown.",
+        "The separately monitored public Subject runner must terminate normally.",
+        "Existing no-late-effect refusal is challenged after termination."
+      ],
+      "cleanup": "Standard ExUnit on_exit callbacks registered as each owned PID becomes known; fresh cleanup monitor, kill only captured owned PID, bounded matching DOWN. Cleanup cannot satisfy the preceding body oracle or replace an existing body failure.",
+      "harness_wait_ms": 1000,
+      "harness_wait_scope": "Receive/cleanup liveness only; no product timeout increase or host-throughput guarantee.",
+      "case_conservation": {
+        "named_cases_before": 29,
+        "named_cases_after": 29,
+        "labels_and_order_unchanged": true,
+        "other28_case_chunks_byte_identical_to_prior_target": true,
+        "tags_and_async_unchanged": true,
+        "chunk_comparison_scope": "Exact static slices between same-indent test declarations; not a new AST or runtime claim.",
+        "prior_changed_case_chunk_sha256": "2516091247d826d6ca16128e0ee34cfa2e2c9e36dd4cc94f6e3569b86c6fa8d2",
+        "draft_changed_case_chunk_sha256": "af3aba49510c5158898f4844def7f6ed3b846159a1c13fcde8c018541c57056c"
+      },
+      "historical_facts_unchanged": "All original source/blob/SHA/count/tag/case-chunk facts, original1009/3464/111 totals, incoming8/lower87 inventories, and recorded formatting/47-case/readability stage facts remain immutable. Their assertion/budget-preservation claims apply only to those stages.",
+      "assertion_preservation_limit": "This current exception deliberately changes one assertion/fixture. It does not claim all original assertions or timing assertions remain byte-identical in the current target, nor prior-to-current AST equality.",
+      "current_derived_AST_counts": {
+        "status": "ROOT_ACTUAL_AST_CENSUS_BOUND",
+        "named_test_forms": 29,
+        "assert_macro_forms": 74,
+        "refute_macro_forms": 3,
+        "macro_breakdown": {
+          "assert": 66,
+          "assert_raise": 2,
+          "assert_receive": 6,
+          "refute": 2,
+          "refute_receive": 1
+        },
+        "tags": "[moduletag: :fast, tag: :llm_local]",
+        "exunit_case_options": "[[async: false]]",
+        "census_receipt_sha256": "b4d9238c643efd4bf011eebec416450cb35bcaa1a87c49588431a9430602870c"
+      },
+      "final_formatted_target": {
+        "sha256": "b941b4354cfe2b25d5de2ccce4575b651a8ae0044118c4abce5fca3ef939c086",
+        "bytes": 25110,
+        "format_AST_receipt_sha256": "2b65cd17fd5e44a06227cc19f584496636f1f6ae102572f456b2c144e71b42dc",
+        "format_state_sha256": "db8c5f61caaaaf5e7dee9ff3cac3493c85d9b20ae98e28ab6f9db9e5760dc915",
+        "ast_equal": true,
+        "before_after_AST_sha256": "d40773f6c897fd30389daaeba9235c6c08b6f0900d64a46dd1c8c42015de84e7"
+      },
+      "runtime_qualification": {
+        "source_staged_tree": "315fc925e88314edd46e1cf130cc6e1224d846b4",
+        "strict_compile_exit": 0,
+        "whole_Subject": {
+          "tests": 28,
+          "failures": 0,
+          "excluded_llm_local": 1
+        },
+        "negative_controls": "Both exact private Deadline mutations compiled strictly then failed at their intended assertions; cleanup and preservation passed.",
+        "Root_classification_receipt_sha256": "21b10f5259a1fbabeb1eff26dda96f78cf19e83ccffb69f94ac6686595015972",
+        "full_owning": {
+          "tests": 1032,
+          "failures": 2,
+          "excluded_llm_local": 1,
+          "status": "HOLD; stale signal-source assertion and public-output sensitivity fixture under investigation",
+          "state_receipt_sha256": "2c94ed26cd5206a3078dbdb2e6234575eb4699acab5888ee929d722cea5ad8ea"
+        },
+        "cold_credit": false,
+        "old175ms_failures": "Retained as failures; no retry or reinterpretation."
+      }
+    }
+  ]
 }
