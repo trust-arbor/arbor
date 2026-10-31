@@ -7,6 +7,7 @@ build artifacts, publishes, changes HOME, mutates Git or removes source/evidence
 A real predecessor rollback release is mandatory for composed final acceptance.
 """
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -23,8 +24,8 @@ import time
 sys.dont_write_bytecode = True
 
 from cold_support import (require, sha, save_json, git, git_state, metadata,
-                          build_metadata, operator_state, source_files, copy_files,
-                          names, unpack_archive)
+                          MAIN_BUILD_POLICIES, main_build_snapshot, compare_main_build_snapshots,
+                          operator_state, source_files, copy_files, names, unpack_archive)
 
 BASE = "fafa2689158f29f6aa20ccc03ad8b41052a900b6"
 PACKAGES = {
@@ -231,6 +232,50 @@ def fixture_source_root(repository, context):
     return path
 
 
+def require_prepared_main_build_policy(args, manifest):
+    require(args.main_build_policy in MAIN_BUILD_POLICIES, "Unknown Main build policy")
+    require(manifest.get("main_build_policy") == args.main_build_policy,
+            "Run Main build policy differs from prepared inputs")
+    initial = manifest.get("guard_before", {}).get("main_build")
+    require(isinstance(initial, dict) and initial.get("policy") == args.main_build_policy,
+            "Prepared Main build snapshot policy differs")
+    require(compare_main_build_snapshots(initial, initial)["accepted"],
+            "Prepared Main build snapshot is malformed")
+
+
+def record_main_build_guard(work, sequence, label, initial, root, policy):
+    """Retain one immutable Main-build comparison, including capture failure."""
+    require(type(sequence) is int and sequence >= 1 and isinstance(label, str) and label,
+            "Invalid Main build guard identity")
+    current = None
+    capture_error = None
+    try:
+        current = main_build_snapshot(root, policy)
+        comparison = compare_main_build_snapshots(initial, current)
+    except Exception as error:
+        capture_error = {"type": type(error).__name__, "reason": str(error)}
+        # Do not follow/re-read an unsafe replacement just to manufacture an
+        # after-hash. All initial cache records remain bound; current is explicit
+        # unavailable evidence and the guard refuses before the next command.
+        initial_caches = initial.get("cache_audit", {}) if isinstance(initial, dict) else {}
+        comparison = {"accepted": False, "reasons": ["Main build snapshot capture failed"],
+                      "cache_audit": {path: {"before": copy.deepcopy(value), "after": None,
+                          "capture_error": dict(capture_error)} for path, value in initial_caches.items()}}
+    record = {"schema": "arbor.main-build.guard-comparison.v1", "domain": "Main_build",
+              "sequence": sequence, "guard_label": label, "policy": policy,
+              "initial_snapshot": initial, "current_snapshot": current,
+              "accepted": comparison["accepted"], "reasons": comparison["reasons"],
+              "cache_audit": comparison["cache_audit"], "capture_error": capture_error}
+    folder = work / "main-build-guards"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    path = folder / f"{sequence:04d}.json"
+    with path.open("x") as output:
+        output.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    return comparison, {"guard_label": label, "path": str(path.relative_to(work)),
+                        "sha256": sha(path.read_bytes()), "accepted": comparison["accepted"],
+                        "reasons": comparison["reasons"]}
+
+
 def prepare(args):
     repository, main, fixture_root, cache = args.repository, args.main_root, args.fixtures_root, args.deps_source_cache
     require(repository != main and not (repository / ".env").exists(), "Use a candidate without dotenv")
@@ -276,7 +321,7 @@ def prepare(args):
     require(args.hex_archive.name.startswith("hex-"), "Pin installed Hex tool archive")
     runner_files = {name: sha((Path(__file__).parent / name).read_bytes())
                     for name in (Path(__file__).name, "cold_support.py", NATIVE_PROBE)}
-    before = {"main": git_state(main), "candidate": git_state(repository), "main_build": build_metadata(main / "_build"),
+    before = {"main": git_state(main), "candidate": git_state(repository), "main_build": main_build_snapshot(main / "_build", args.main_build_policy),
               "main_dotenv": metadata(main / ".env"), "operator": operator_state()}
     work = args.work_dir
     work.mkdir(mode=0o700, parents=True)
@@ -312,7 +357,7 @@ def prepare(args):
     save_json(work / "expected-metadata.json", expected_metadata)
     manifest = {"schema": "arbor.trust-historian.cold-inputs.v1", "args": {key: str(value) if isinstance(value, Path) else value
                  for key, value in vars(args).items() if key not in ("prepare", "run")},
-                "guard_before": before, "published": published, "fixtures": fixtures, "dependency_sources": dependencies,
+                "main_build_policy": args.main_build_policy, "guard_before": before, "published": published, "fixtures": fixtures, "dependency_sources": dependencies,
                 "hex_tool": hex_files, "tool_sha256": {name: sha(path.read_bytes()) for name, path in tool_paths.items()},
                 "runner_files": runner_files, "native_sdk": sdk, "tool_versions_sha256": sha(tool_versions), "otp": otp, "elixir": elixir,
                 "root_public_lock_sha256": sha(public_lock), "rollback_manifest_sha256": sha(args.rollback_manifest.read_bytes()) if args.rollback_manifest else None,
@@ -327,23 +372,31 @@ def run(args):
     manifest_path = work / "source-manifest.json"
     pinned_manifest = manifest_path.read_bytes()
     manifest = json.loads(pinned_manifest)
+    require_prepared_main_build_policy(args, manifest)
     require(manifest["args"] == {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()
                                 if key not in ("prepare", "run")}, "Run arguments differ from prepared inputs")
     state = json.loads((work / "results.json").read_text())
     require(state["status"] == "prepared" and state["source_manifest_sha256"] == sha(pinned_manifest), "Attempt already ran or manifest changed")
     cookie = "paired_cold_" + secrets.token_hex(32)
     cookie_sha = sha(cookie.encode())
-    state.update(status="running", cookie_sha256=cookie_sha, steps=[])
+    state.update(status="running", cookie_sha256=cookie_sha, steps=[], main_build_guards=[])
     daemon = daemon_log = None
     port = None
     save = lambda: save_json(work / "results.json", state)
 
-    def guard():
+    def guard(label):
+        comparison, reference = record_main_build_guard(
+            work, len(state["main_build_guards"]) + 1, label,
+            manifest["guard_before"]["main_build"], args.main_root / "_build", args.main_build_policy)
+        state["main_build_guards"].append(reference)
+        save()
         require(manifest_path.read_bytes() == pinned_manifest, "Prepared manifest changed")
-        actual = {"main": git_state(args.main_root), "candidate": git_state(args.repository),
-                  "main_build": build_metadata(args.main_root / "_build"), "main_dotenv": metadata(args.main_root / ".env"),
-                  "operator": operator_state()}
-        require(actual == manifest["guard_before"], "Main/candidate/build/stash/operator guard changed; HOLD")
+        require(comparison["accepted"], "Main build policy guard changed; HOLD: " + "; ".join(comparison["reasons"]))
+        actual_other_guards = {"main": git_state(args.main_root), "candidate": git_state(args.repository),
+                               "main_dotenv": metadata(args.main_root / ".env"), "operator": operator_state()}
+        initial_other_guards = {key: value for key, value in manifest["guard_before"].items() if key != "main_build"}
+        require(actual_other_guards == initial_other_guards,
+                "Main/candidate/stash/dotenv/operator guard changed; HOLD")
         require(sha(args.initial_manifest.read_bytes()) == args.initial_manifest_sha256, "Initial manifest changed")
         if args.rollback_manifest:
             require(sha(args.rollback_manifest.read_bytes()) == manifest["rollback_manifest_sha256"], "Pinned predecessor manifest changed")
@@ -426,7 +479,7 @@ def run(args):
         return env
 
     def command(label, cwd, env, argv, mix=True):
-        guard()
+        guard("before:" + label)
         require(daemon.poll() is None and names(port) == "", "Owned EPMD is not empty before command")
         require(not (cwd / ".env").exists() and Path(env["ARBOR_ENV_PATH"]).read_bytes() == b"", "Unexpected dotenv input")
         if mix:
@@ -463,14 +516,14 @@ def run(args):
         entry.update(exit_code=code, elapsed_seconds=round(time.monotonic() - began, 3), status="passed" if code == 0 else "failed",
                      stdout_sha256=sha(output.read_bytes()), stderr_sha256=sha(errors.read_bytes()))
         save()
-        guard()
+        guard("after:" + label)
         require(daemon.poll() is None and names(port) == "", "Owned EPMD is not empty after command")
         print("END", label, code, flush=True)
         require(code == 0, label + " failed; HOLD; inspect retained private logs; no retry/fallback")
         return output
 
     try:
-        guard()
+        guard("run-start")
         require(args.rollback_manifest is not None, "Composed acceptance requires an actual predecessor rollback manifest; HOLD")
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
@@ -610,7 +663,7 @@ def run(args):
                 save()
         run_candidate_attacks(work, state, command, env_for, cookie)
         run_rollback(args.rollback_manifest, work, state, command, env_for, cookie)
-        guard()
+        guard("acceptance-final")
         state["status"] = "passed"
     except BaseException as error:
         state.update(status="HOLD", error=f"{type(error).__name__}: {error}")
@@ -633,7 +686,7 @@ def run(args):
         if daemon_log:
             daemon_log.close()
         try:
-            guard()
+            guard("cleanup-final")
             state["final_guards_passed"] = True
         except BaseException as error:
             state.update(status="HOLD", final_guard_error=str(error))
@@ -746,7 +799,7 @@ def run_rollback(path, work, state, command, env_for, cookie):
     state["rollback"] = {"manifest_sha256": sha(data), "predecessor": rows[0], "candidate_reopened": parse_result(log)}
 
 
-def main():
+def build_argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--prepare", action="store_true")
@@ -758,7 +811,12 @@ def main():
     for option in ("head", "main-head", "branch", "initial-manifest-sha256"):
         parser.add_argument("--" + option, required=True)
     parser.add_argument("--timeout", type=int, default=900)
-    args = parser.parse_args()
+    parser.add_argument("--main-build-policy", choices=MAIN_BUILD_POLICIES, default="strict")
+    return parser
+
+
+def main():
+    args = build_argument_parser().parse_args()
     for key, value in vars(args).items():
         if isinstance(value, Path):
             require(value.expanduser().is_absolute(), "All pinned paths must be absolute: " + key)

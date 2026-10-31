@@ -40,6 +40,49 @@ before and after commands. No Historian consumer copy belongs below Trust.
 The per-attempt input manifest must bind the exact canonical source paths and
 SHA-256 digests before any compilation or runtime gate.
 
+Main's ignored build uses `--main-build-policy strict` by default. That policy
+retains the original `build_metadata` fingerprint and refuses any recorded
+metadata change. A fresh, reviewed attempt may explicitly select
+`--main-build-policy reviewed-boundary-view-v2` at preparation. The choice is
+pinned in the arguments, input manifest and initial snapshot; `--run` refuses a
+different choice before starting the attempt. There is no environment override
+or arbitrary path list. Existing strict HOLD receipts keep their original meaning.
+
+The reviewed policy classifies only these seven existing operational cache files
+under Main's `_build`:
+
+```text
+dev/lib/arbor_support/.mix/compile.boundary_view_v2
+dev/lib/arbor_kernel/.mix/compile.boundary_view_v2
+dev/lib/arbor_signals/.mix/compile.boundary_view_v2
+dev/lib/arbor_oauth/.mix/compile.boundary_view_v2
+dev/lib/arbor_capabilities_oidc/.mix/compile.boundary_view_v2
+dev/lib/arbor_capabilities/.mix/compile.boundary_view_v2
+dev/lib/arbor_capabilities_signals/.mix/compile.boundary_view_v2
+```
+
+Only their content, `mtime` and `ctime` may differ. Each must remain the same
+single-link regular file with unchanged device, inode, type, mode, owner, group,
+size and link count. The root and its ancestors must be canonical directories;
+cache symlinks, hard links, missing files, replacement files and changing reads
+refuse the snapshot. All other build entries and directory metadata remain strict,
+including BEAMs, app metadata, native libraries, resources and other manifests.
+These seven Main caches are never inputs to private qualification builds. This
+classification is limited to the reviewed Boundary writer and complete seven-file
+delta identified during the earlier attempts; it grants no credit to those attempts.
+
+Every labeled run guard retains an exclusive `main-build-guards/NNNN.json`
+receipt with the immutable preparation snapshot, current snapshot, accepted flag,
+reasons and full before/after SHA-256 and stat records for all seven caches under
+the reviewed policy. It writes the receipt before checking acceptance, including
+when another build entry changed. If a safe snapshot cannot be captured, the
+receipt retains all initial records and records unavailable current evidence and
+the capture error; the guard refuses without following an unsafe replacement.
+`results.json` pins each receipt's path and hash. Comparisons always use the
+original preparation snapshot. Main/candidate Git, index, stash, dotenv,
+operator, tools, archives, sources and private runtime gates remain separate and
+unchanged. The policy adds no retry, rebase, pacing change or weaker workload.
+
 The native lane requires explicit `--sdk-root` (the pinned `MacOSX27.0.sdk`)
 and `--developer-dir` inputs. Preparation records the SDK settings, critical C
 headers and libSystem linker-stub hashes, plus the exact harmless C probe source.
