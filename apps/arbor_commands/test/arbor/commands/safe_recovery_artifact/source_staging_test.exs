@@ -15,7 +15,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     "arbor_kernel_runtime",
     "arbor_security",
     "arbor_persistence_host",
-    "arbor_trust"
+    "arbor_trust_host",
+    "arbor_historian_host"
   ]
 
   setup_all do
@@ -237,6 +238,39 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   end
 
   @tag :fast
+  test "Trust and Historian families remain exact physical review inputs across packages and hosts" do
+    oid = String.duplicate("c", 40)
+    required = required_triples(oid)
+
+    for family <- ~w(trust historian), scope <- ["packages", "apps"] do
+      owner = if scope == "packages", do: "arbor_#{family}", else: "arbor_#{family}_host"
+      project = "#{scope}/#{owner}/mix.exs"
+      source = "#{scope}/#{owner}/lib/authority.ex"
+      test_source = "#{scope}/#{owner}/test/authority_test.exs"
+      adjacent = "#{scope}/#{owner}_other/lib/authority.ex"
+      retired = "apps/arbor_#{family}/lib/authority.ex"
+
+      extras =
+        Enum.map([source, test_source, adjacent, retired], &%{path: &1, mode: "100644", oid: oid})
+
+      assert project in SourcePolicy.required_files()
+      assert {:ok, paths} = SourcePolicy.select(required ++ extras)
+      assert source in paths
+      assert test_source in paths
+      refute adjacent in paths
+      refute retired in paths
+
+      assert {:error, :missing_required_input} =
+               SourcePolicy.select(Enum.reject(required, &(&1.path == project)) ++ extras)
+
+      assert SourcePolicy.ignored_generated_extra?("#{scope}/#{owner}/cover/report.html")
+      refute SourcePolicy.ignored_generated_extra?("#{scope}/#{owner}_other/cover/report.html")
+    end
+
+    refute SourcePolicy.selected_path?("packages/arbor_agent/lib/unrelated.ex")
+  end
+
+  @tag :fast
   test "Support includes its native source without admitting adjacent roots" do
     oid = String.duplicate("a", 40)
     required = required_triples(oid)
@@ -367,19 +401,19 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     overlay = "overlay-bytes"
     digest = sha256_hex(overlay)
 
-    File.write!(Path.join(root, "apps/arbor_trust/lib/a.ex"), "staged\n")
-    git!(root, ["add", "--", "apps/arbor_trust/lib/a.ex"])
+    File.write!(Path.join(root, "packages/arbor_trust/lib/a.ex"), "staged\n")
+    git!(root, ["add", "--", "packages/arbor_trust/lib/a.ex"])
 
     assert {:error, :selected_index_drift} = stage!(root, overlay, digest)
 
-    git!(root, ["reset", "HEAD", "--", "apps/arbor_trust/lib/a.ex"])
-    git!(root, ["checkout", "--", "apps/arbor_trust/lib/a.ex"])
-    File.write!(Path.join(root, "apps/arbor_trust/lib/a.ex"), "unstaged\n")
+    git!(root, ["reset", "HEAD", "--", "packages/arbor_trust/lib/a.ex"])
+    git!(root, ["checkout", "--", "packages/arbor_trust/lib/a.ex"])
+    File.write!(Path.join(root, "packages/arbor_trust/lib/a.ex"), "unstaged\n")
 
     assert {:error, :selected_worktree_drift} = stage!(root, overlay, digest)
 
-    File.write!(Path.join(root, "apps/arbor_trust/lib/a.ex"), "trust\n")
-    File.write!(Path.join(root, "apps/arbor_trust/lib/new.ex"), "untracked\n")
+    File.write!(Path.join(root, "packages/arbor_trust/lib/a.ex"), "trust\n")
+    File.write!(Path.join(root, "packages/arbor_trust/lib/new.ex"), "untracked\n")
 
     assert {:error, reason} = stage!(root, overlay, digest)
     assert reason in [:selected_untracked, :selected_index_drift]
@@ -398,7 +432,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     assert {:ok, lease} = stage!(root, overlay, digest)
     on_exit(fn -> SafeRecoveryArtifact.release_source_for_test(lease) end)
 
-    git!(root, ["mv", "apps/arbor_trust/lib/a.ex", "apps/arbor_trust/lib/moved.ex"])
+    git!(root, ["mv", "packages/arbor_trust/lib/a.ex", "packages/arbor_trust/lib/moved.ex"])
     assert {:error, reason} = stage!(root, overlay, digest)
     assert reason in [:selected_index_drift, :selected_worktree_drift]
   end
@@ -602,7 +636,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     generated = [
       "apps/arbor_persistence_host/.elixir_ls/build/cache",
       "apps/arbor_security/cover/report.html",
-      "apps/arbor_trust/erl_crash.dump",
+      "packages/arbor_trust/erl_crash.dump",
       "packages/arbor_custody/.elixir_ls/build/cache",
       "packages/arbor_custody/cover/report.html",
       "packages/arbor_custody/erl_crash.dump",
@@ -782,6 +816,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_persistence/lib/core.ex", "core source\n"},
       {"packages/arbor_persistence_sql/mix.exs", "persistence sql\n"},
       {"packages/arbor_persistence_sql/lib/sql.ex", "sql source\n"},
+      {"packages/arbor_trust/mix.exs", "arbor_trust\n"},
+      {"packages/arbor_trust/lib/a.ex", "trust\n"},
+      {"packages/arbor_historian/mix.exs", "arbor_historian\n"},
+      {"packages/arbor_historian/lib/a.ex", "historian\n"},
       {"mix.lock", "lock\n"},
       {".tool-versions", "erlang 28.4.1\n"},
       {"bin/mix", "#!/bin/sh\n"},
@@ -797,7 +835,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       Enum.flat_map(@apps, fn app ->
         [
           {"apps/#{app}/mix.exs", app <> "\n"},
-          {"apps/#{app}/lib/a.ex", if(app == "arbor_trust", do: "trust\n", else: app <> "\n")}
+          {"apps/#{app}/lib/a.ex", app <> "\n"}
         ]
       end)
 

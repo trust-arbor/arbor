@@ -920,7 +920,7 @@ end
 # ============================================================================
 if config_env() != :test do
   config :arbor_signals,
-    durable_sink_module: Arbor.Historian,
+    durable_sink_module: Arbor.Historian.Host.DurableSink,
     security_module: Arbor.Capabilities.Signals,
     crypto_module: Arbor.Capabilities.Signals,
     identity_registry_module: Arbor.Capabilities.Signals

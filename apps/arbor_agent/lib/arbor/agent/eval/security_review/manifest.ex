@@ -65,8 +65,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
         category: :capability_overmatch,
         fix_commit: "50a37699",
         paths: [
-          "apps/arbor_trust/lib/arbor/trust/authority.ex",
-          "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex"
+          "packages/arbor_trust/lib/arbor/trust/authority.ex",
+          "packages/arbor_trust/lib/arbor/trust/profile_resolver.ex"
         ],
         invariant:
           "Capability URI prefix matching must respect path boundaries — " <>

@@ -1,0 +1,7 @@
+{
+  "copy": "lib/trust_proof.ex",
+  "copy_sha256": "94ef963dcfd2a2f3c585374f832fe450300f4d7ce9b56aab9002e14b6fcd8300",
+  "policy": "Exact shared qualification fixture copy, not production algorithm copy.",
+  "source": "packages/arbor_trust/examples/standalone/lib/composed_trust_proof.ex",
+  "source_sha256": "94ef963dcfd2a2f3c585374f832fe450300f4d7ce9b56aab9002e14b6fcd8300"
+}

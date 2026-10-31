@@ -349,7 +349,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
 
     for rel <-
           Arbor.Commands.SafeRecoveryArtifact.SourcePolicy.required_files() ++
-            ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_trust/lib/trust.ex"] do
+            ["mix.exs", "apps/arbor_commands/mix.exs", "packages/arbor_trust/lib/trust.ex"] do
       write_rel!(root, rel, "# marker\n")
     end
 

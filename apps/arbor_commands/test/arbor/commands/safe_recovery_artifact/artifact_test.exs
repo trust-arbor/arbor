@@ -138,7 +138,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ArtifactTest do
       observed: observed
     } do
       _ = plant_artifact!(root, observed)
-      commit_file!(root, "apps/arbor_trust/lib/extra.ex", "defmodule Extra do\nend\n")
+      commit_file!(root, "packages/arbor_trust/lib/extra.ex", "defmodule Extra do\nend\n")
 
       assert {:error, {:input_count_mismatch, committed, observed_count}} =
                SafeRecoveryArtifact.check_for_test(
@@ -154,11 +154,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ArtifactTest do
     test "an amended selected file fails closed on the digest", %{root: root, observed: observed} do
       _ = plant_artifact!(root, observed)
 
-      File.write!(Path.join(root, "apps/arbor_trust/lib/trust.ex"), "defmodule T do\nend\n")
+      File.write!(Path.join(root, "packages/arbor_trust/lib/trust.ex"), "defmodule T do\nend\n")
       git!(root, ["add", "-A"])
       git!(root, ["commit", "--quiet", "-m", "amend"])
 
-      assert {:error, {:input_digest_mismatch, "apps/arbor_trust/lib/trust.ex"}} =
+      assert {:error, {:input_digest_mismatch, "packages/arbor_trust/lib/trust.ex"}} =
                SafeRecoveryArtifact.check_for_test(
                  root: root,
                  overlay_size: byte_size(@overlay_bytes),
@@ -381,7 +381,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ArtifactTest do
 
   defp marker_files do
     Arbor.Commands.SafeRecoveryArtifact.SourcePolicy.required_files() ++
-      ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_trust/lib/trust.ex"]
+      ["mix.exs", "apps/arbor_commands/mix.exs", "packages/arbor_trust/lib/trust.ex"]
   end
 
   defp plant_artifact!(root, observed) do

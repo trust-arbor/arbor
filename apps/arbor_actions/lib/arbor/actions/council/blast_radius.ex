@@ -50,6 +50,10 @@ defmodule Arbor.Actions.Council.BlastRadius do
         {"packages/arbor_capabilities_signals/", :security_app},
         {"packages/arbor_capabilities_oidc/", :security_app},
         {"apps/arbor_trust/", :trust_app},
+        {"packages/arbor_trust/", :trust_app},
+        {"apps/arbor_trust_host/", :trust_app},
+        {"packages/arbor_historian/", :historian_app},
+        {"apps/arbor_historian_host/", :historian_app},
         {"apps/arbor_kernel/", :contracts_app},
         {"packages/arbor_kernel/", :contracts_app},
         {"apps/arbor_orchestrator/lib/arbor/orchestrator/engine", :dot_engine}
@@ -71,6 +75,10 @@ defmodule Arbor.Actions.Council.BlastRadius do
         {"packages/arbor_capabilities_signals/", :security_authority_surface},
         {"packages/arbor_capabilities_oidc/", :security_authority_surface},
         {"apps/arbor_trust/", :trust_authority_surface},
+        {"packages/arbor_trust/", :trust_authority_surface},
+        {"apps/arbor_trust_host/", :trust_authority_surface},
+        {"packages/arbor_historian/", :historian_authority_surface},
+        {"apps/arbor_historian_host/", :historian_authority_surface},
         {"apps/arbor_kernel/lib/arbor/contracts/security/", :security_contract_surface},
         {"packages/arbor_kernel/lib/arbor/contracts/security/", :security_contract_surface}
       ]

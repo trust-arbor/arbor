@@ -48,9 +48,13 @@ defmodule ArborAgent.MixProject do
       # L4 public conversation admission/replay facade; Agent remains L7.
       {:arbor_comms, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
-      {:arbor_historian, in_umbrella: true},
+      {:arbor_historian, "~> 0.1.0",
+       path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
+      {:arbor_historian_host, in_umbrella: true},
       {:arbor_actions, in_umbrella: true},
       # L3 — public spawn-capable timeout ceiling for legacy coding envelope bounds.
       {:arbor_shell, in_umbrella: true},

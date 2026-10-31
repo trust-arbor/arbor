@@ -100,12 +100,12 @@ only on lower levels. Audited from each `mix.exs` on 2026-10-30.
 
 ```
 L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
-L1  arbor_signals, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
+L1  arbor_signals, arbor_historian, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
 L2  arbor_capabilities, arbor_kernel_runtime, arbor_cartographer, arbor_web
-L3  arbor_capabilities_signals, arbor_llm
+L3  arbor_capabilities_signals, arbor_llm, arbor_trust
 L4  arbor_security
 L5  arbor_persistence_host, arbor_shell, arbor_sandbox
-L6  arbor_historian, arbor_trust, arbor_ai, arbor_comms, arbor_consensus
+L6  arbor_historian_host, arbor_trust_host, arbor_ai, arbor_comms, arbor_consensus
 L7  arbor_memory, arbor_scheduler
 L8  arbor_actions
 L9  arbor_orchestrator, arbor_agent, arbor_gateway

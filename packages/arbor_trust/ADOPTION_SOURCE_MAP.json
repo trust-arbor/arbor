@@ -1,0 +1,1249 @@
+{
+  "schema": "arbor.trust.adoption_source_map.v1",
+  "base": "fafa2689158f29f6aa20ccc03ad8b41052a900b6",
+  "authoritative_source": "actual Main, not frozen sibling implementation",
+  "original_file_count": 82,
+  "original_mechanism_files": 33,
+  "original_operator_tasks": 2,
+  "canonical_application": "arbor_trust",
+  "canonical_module_root": "Arbor.Trust",
+  "host_application": "arbor_trust_host",
+  "rows": [
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust.ex",
+      "source_git_blob": "db85fdbcce1a4e3a2cd834f8eeb0ebd037340717",
+      "source_sha256": "a73d182a0928016a7399c63152c3322a4a578708fbffd8c01cc58ab370a749dd",
+      "source_bytes": 29817,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust.ex",
+          "final_destination_sha256": "9bd8b9ec07aee6dfa1d5879d598bfd85a404461d5689e3be8ed501e784ddab55",
+          "bytes": 30184
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/application.ex",
+      "source_git_blob": "fd899fec375571bfc0b2f193f8b7861b6354cb00",
+      "source_sha256": "cedac5ce0bbf55dd897e05d830ad71035a951ed1718c13e9fb1ba1fdcf649a13",
+      "source_bytes": 1832,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/application.ex",
+          "final_destination_sha256": "fa7bd93e931083592515c84d206c5a128e0ff525ecd9693e8f5ae2de15d58b56",
+          "bytes": 2146
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/approval_context.ex",
+      "source_git_blob": "b4218e0dd36eb7c3eb16ebc0306f1c2fb88cc47a",
+      "source_sha256": "a445b94b515fa1e06cc9e33e87a6294fab5d66d66dfa9014954b9bd941caa585",
+      "source_bytes": 5789,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/approval_context.ex",
+          "final_destination_sha256": "a445b94b515fa1e06cc9e33e87a6294fab5d66d66dfa9014954b9bd941caa585",
+          "bytes": 5789
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/approval_evidence_core.ex",
+      "source_git_blob": "d4aa301b586893802a9e55575dab56e01726f78e",
+      "source_sha256": "34e9bbe79e6e52b4aa349d30b306c7e0ba3cefbb3649265173c2129b628b1465",
+      "source_bytes": 2532,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/approval_evidence_core.ex",
+          "final_destination_sha256": "34e9bbe79e6e52b4aa349d30b306c7e0ba3cefbb3649265173c2129b628b1465",
+          "bytes": 2532
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/approval_guard.ex",
+      "source_git_blob": "4c03db8b1d9bb3bed60ae050c0eb21fdac72ccac",
+      "source_sha256": "86b135ffff718d8906002b9276f5dc5a5170fba8447d245898f60a5c89a942a8",
+      "source_bytes": 10294,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/approval_guard.ex",
+          "final_destination_sha256": "98b4e6327d9d386748f3dfa47c20ae91c5cafa75f675d6f76d579be7032eed86",
+          "bytes": 10324
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/authority.ex",
+      "source_git_blob": "950a348a15224c567b62b36169cd43b1b32b1fe8",
+      "source_sha256": "b8b99eae75c3217f8e6ef3c5d083be3f3f6f887fb70445154fdb6ae7e7761ace",
+      "source_bytes": 17250,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/authority.ex",
+          "final_destination_sha256": "b8b99eae75c3217f8e6ef3c5d083be3f3f6f887fb70445154fdb6ae7e7761ace",
+          "bytes": 17250
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
+      "source_git_blob": "c719281c56c82ca2f7116de3fea719a86165d3ac",
+      "source_sha256": "2d50108867f07c503df4e5da654d9e01134129efc9b178adbeb89866bb7ba235",
+      "source_bytes": 5586,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
+          "final_destination_sha256": "2d50108867f07c503df4e5da654d9e01134129efc9b178adbeb89866bb7ba235",
+          "bytes": 5586
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/behaviour.ex",
+      "source_git_blob": "ca82847a4e419a923506c26dae47707f78db88c3",
+      "source_sha256": "a016ca68e26c763515bd5f652b6fb7d6b932cb7d34053a6f3e319dd94244599b",
+      "source_bytes": 1396,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/behaviour.ex",
+          "final_destination_sha256": "a016ca68e26c763515bd5f652b6fb7d6b932cb7d34053a6f3e319dd94244599b",
+          "bytes": 1396
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
+      "source_git_blob": "3c83d08975da2a71752c60cb6993d065877cf6ec",
+      "source_sha256": "38495c43f036b6f9566d8b6794e9d4228c0a813ef853b5a66de98f6dab50bc4b",
+      "source_bytes": 8471,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
+          "final_destination_sha256": "38495c43f036b6f9566d8b6794e9d4228c0a813ef853b5a66de98f6dab50bc4b",
+          "bytes": 8471
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_grant_owner.ex",
+      "source_git_blob": "5dd1f12b81bb2d38dda27a448fa8d25a38b4be09",
+      "source_sha256": "2f763897a35bae80a828c92380f6ae01aae2ed35eae1536704fc97cccb2ccedf",
+      "source_bytes": 17401,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_grant_owner.ex",
+          "final_destination_sha256": "2f763897a35bae80a828c92380f6ae01aae2ed35eae1536704fc97cccb2ccedf",
+          "bytes": 17401
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_grant_request.ex",
+      "source_git_blob": "63fab5112dee5f8f79471e284a92d222dad465aa",
+      "source_sha256": "f669c16b28a82833572ea194ba3e0455e2eef1be8c115094889aa70b5dce8afb",
+      "source_bytes": 6057,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_grant_request.ex",
+          "final_destination_sha256": "f669c16b28a82833572ea194ba3e0455e2eef1be8c115094889aa70b5dce8afb",
+          "bytes": 6057
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_profile_registry.ex",
+      "source_git_blob": "f918684951460299da394e04c8c1e8c6a1d65390",
+      "source_sha256": "baeb5487c7b33e519f98d215bbd2c002b8f6f9ac0d9f0d3001cb1f019294435d",
+      "source_bytes": 10498,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_profile_registry.ex",
+          "final_destination_sha256": "baeb5487c7b33e519f98d215bbd2c002b8f6f9ac0d9f0d3001cb1f019294435d",
+          "bytes": 10498
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_risk_profiles.ex",
+      "source_git_blob": "8f7c93439e93a4f99bfad3f806972e9f90d1ce70",
+      "source_sha256": "70df945b559f18123e3fd710172c9daa633f858532aec81f47d4a4bc86f91220",
+      "source_bytes": 16473,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_risk_profiles.ex",
+          "final_destination_sha256": "70df945b559f18123e3fd710172c9daa633f858532aec81f47d4a4bc86f91220",
+          "bytes": 16473
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_sync.ex",
+      "source_git_blob": "6cd2289571bbf5d7e7db05da6b8159103600cf83",
+      "source_sha256": "321d4f4587522b601de1d7128fb9f199b45f6f8c6bb3500019e0fb2983c97faf",
+      "source_bytes": 8808,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/capability_sync.ex",
+          "final_destination_sha256": "1b8d5240283ca95d28c53b742e6a46464ab5e14b07f940b5fb03ac3f9beebe3c",
+          "bytes": 9052
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
+      "source_git_blob": "553ec8bae6dce0ebb423e959e8774a3bcebd5a4e",
+      "source_sha256": "aa65d697dccafb7f2453c4a88dd772057908bf177b5ad2551bc1fecb73ba4235",
+      "source_bytes": 9267,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
+          "final_destination_sha256": "06c9fbeb5ac2c2ef5678bd39d55646bcb28bf0e52a6c592d5866ac97bf74d976",
+          "bytes": 9254
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/config.ex",
+      "source_git_blob": "9416073d8c1d67232c9d9e1f4ab28a8bfb784f64",
+      "source_sha256": "5745d5537eb59d331db1296a386464e50c8aaed9e4132f4a9f7f5ee9993f303a",
+      "source_bytes": 11550,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/config.ex",
+          "final_destination_sha256": "882ce5fc247092429a1d5a56288fddc5d6b6960f4298b5762349a8ff988d1474",
+          "bytes": 11060
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
+      "source_git_blob": "c3660b087775dbb7e7f088c1ef1fa5e97c01fa67",
+      "source_sha256": "74f464c043a2ad1fbd5da206159c81e552c84507aab11b684279f1f656217651",
+      "source_bytes": 24447,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
+          "final_destination_sha256": "fbb294e3be5b6f50b498a3d4047dd66aa24cf6e2dc1cba75b52f19db6ed665b0",
+          "bytes": 24458
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/contracts/approval_evidence_provider.ex",
+      "source_git_blob": "913eb9096cbc70cb65babe6b3dc16da8fc3bf3e6",
+      "source_sha256": "89d4c03ac5f7c384054d0d6b9d95eb06caf337100a79615b20e875ae6774b397",
+      "source_bytes": 696,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/contracts/approval_evidence_provider.ex",
+          "final_destination_sha256": "89d4c03ac5f7c384054d0d6b9d95eb06caf337100a79615b20e875ae6774b397",
+          "bytes": 696
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/event_converter.ex",
+      "source_git_blob": "224724df3c4efa24443619405e17f806e912e236",
+      "source_sha256": "e41c985e8f9387662de28572a4319d5f6f46058b949ad5ae193fd5af185685ec",
+      "source_bytes": 2475,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/event_converter.ex",
+          "final_destination_sha256": "c41ec5e4273a36251f01e3597189838cb9c6f223ca1722d04d310bb4007e34af",
+          "bytes": 2474
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/event_handler.ex",
+      "source_git_blob": "105ceeb7937db5e2a22b5439d8b10789a6c72b47",
+      "source_sha256": "7d9f5758a9e6f4418cea6eb5e92063b55c877f92112619cc08a1875ac8245d4e",
+      "source_bytes": 8161,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/event_handler.ex",
+          "final_destination_sha256": "871cfd6d0e954ba36f254a322a2094b2d793815fb6ccfd853eedb7c3d96fc354",
+          "bytes": 8221
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/event_store.ex",
+      "source_git_blob": "60b32c297585a7283faf537fc487e81b59304b90",
+      "source_sha256": "9768393bbc58e9504f61aa5141cdbb759c21f389ac989081e06261db9747a60b",
+      "source_bytes": 22055,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/event_store.ex",
+          "final_destination_sha256": "cb56a56b683cfa27f16d7c84234849971dd7a2241d5f7d18f70655c44d3ffbfb",
+          "bytes": 22068
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/graduation_core.ex",
+      "source_git_blob": "3b59edfd676d7f988346275a80e4964a726bda09",
+      "source_sha256": "4db9367e1a5dd7e87a39e9d770054a68b7d07c3e4f422f590adfb09990e912e2",
+      "source_bytes": 5128,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/graduation_core.ex",
+          "final_destination_sha256": "4db9367e1a5dd7e87a39e9d770054a68b7d07c3e4f422f590adfb09990e912e2",
+          "bytes": 5128
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/manager.ex",
+      "source_git_blob": "7d0aa9b429ed5893feb113d2fc9810933f178df8",
+      "source_sha256": "fee95fef1c8f40f52e151ac15b908f83ae63cd7ad759d59ab6f5a216855fc5b6",
+      "source_bytes": 12871,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/manager.ex",
+          "final_destination_sha256": "9867a9b3640f14296ed90cc37c0a80746a2479b653f98b89fac3c7e9de4e8c39",
+          "bytes": 12974
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/policy.ex",
+      "source_git_blob": "02cc7eace5feeabb6b586865239cbfbedd2cb261",
+      "source_sha256": "d26a58542522189dd8f12747729e021de2bf2599ba2938336cf56704fa4ec0f2",
+      "source_bytes": 18457,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/policy.ex",
+          "final_destination_sha256": "9bfceb5bd1abd2545bcab2d76e2cca82c412137d01063e0f4bad0a316e7aea4f",
+          "bytes": 18468
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/policy_enforcer.ex",
+      "source_git_blob": "58fd793dc21488edd38108fcf893163638a70d9f",
+      "source_sha256": "af9a05b764a55570b9da867ed2150bcba4512c9ce2394273932033d9fce94ab0",
+      "source_bytes": 10912,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/policy_enforcer.ex",
+          "final_destination_sha256": "af9a05b764a55570b9da867ed2150bcba4512c9ce2394273932033d9fce94ab0",
+          "bytes": 10912
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/policy_host.ex",
+      "source_git_blob": "fc0055b4956312ecf018717707ac5a3852e25fdf",
+      "source_sha256": "ce24c13fcf6a6f376985fb01fa841c9a94f9417d56cbf8fc77c2f37861c1ae44",
+      "source_bytes": 11641,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/policy_host.ex",
+          "final_destination_sha256": "ce24c13fcf6a6f376985fb01fa841c9a94f9417d56cbf8fc77c2f37861c1ae44",
+          "bytes": 11641
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/presets.ex",
+      "source_git_blob": "936d15505a37ca9582c40909c4a542da16fe1329",
+      "source_sha256": "150ceb9fbd330ddca8452a7a450af0afc64e71ee82f2f9f341a54f2180a2a550",
+      "source_bytes": 6827,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/presets.ex",
+          "final_destination_sha256": "150ceb9fbd330ddca8452a7a450af0afc64e71ee82f2f9f341a54f2180a2a550",
+          "bytes": 6827
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
+      "source_git_blob": "919e95bcb56aadfa957776bcf389c472fa5eb172",
+      "source_sha256": "33b96f30bea966479ddb35cf806a6dedd059692170f35fba269d419401522979",
+      "source_bytes": 10392,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
+          "final_destination_sha256": "33b96f30bea966479ddb35cf806a6dedd059692170f35fba269d419401522979",
+          "bytes": 10392
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex",
+      "source_git_blob": "d9a319fff504f1e25740f956da5efcf88804f88c",
+      "source_sha256": "8ef163666574c99530b06b46180daaa70b7023207f0219d2852f22c29b02cb09",
+      "source_bytes": 11034,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/profile_resolver.ex",
+          "final_destination_sha256": "8ef163666574c99530b06b46180daaa70b7023207f0219d2852f22c29b02cb09",
+          "bytes": 11034
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/provider_gate.ex",
+      "source_git_blob": "30834bb85d34d53d6adc0451bb96a1b2bc2a1301",
+      "source_sha256": "f1a554d4a1d26ffbbba7ccfadaa2a0f2a9d97fad537f9a997c5d7ed2e5662227",
+      "source_bytes": 463,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/provider_gate.ex",
+          "final_destination_sha256": "56270580d5076884f189a0df12409874a97834051b8279da82d142e589c54645",
+          "bytes": 419
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/store.ex",
+      "source_git_blob": "10728db0190a2f9ba9d723ad6f4974febbc7fc60",
+      "source_sha256": "fc6ff3c4e3546db98cafab1b9702fcca32b9f6c09a54028392f15649a1bdeda6",
+      "source_bytes": 19132,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/store.ex",
+          "final_destination_sha256": "8456efc41ffcae02d36d3250551f8cc312755592998f766ea73b2a3a617f3383",
+          "bytes": 19106
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/supervisor.ex",
+      "source_git_blob": "82f55f46d929a254edf371d7b37ddb1996ce6024",
+      "source_sha256": "ca0cd57cf94444848b911b1cd89a09d23e3040951cdf9f9891949bf3a710cb7e",
+      "source_bytes": 5593,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/supervisor.ex",
+          "final_destination_sha256": "b95446286c3d95c22715c0f3e14b4e11942f1e7d84c3ccde8db7502f9d20abc0",
+          "bytes": 5319
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/arbor/trust/taint_conjunct.ex",
+      "source_git_blob": "157d9dd0b50352b1d7c3a7f555ea6f0039aa1813",
+      "source_sha256": "cbbf9d797f8735066b2c739068a1931cac28704b4cd79457c8a6d202fb5a8d4e",
+      "source_bytes": 6054,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/lib/arbor/trust/taint_conjunct.ex",
+          "final_destination_sha256": "cbbf9d797f8735066b2c739068a1931cac28704b4cd79457c8a6d202fb5a8d4e",
+          "bytes": 6054
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/mix/tasks/arbor.trust.audit_profiles.ex",
+      "source_git_blob": "642236132e19c83e7991e68c416f1b1aaa18ba38",
+      "source_sha256": "c8ab0f6c8766b1ce2bbdb8d9c5b6f53c696e1024b42c2109fc6daf97942913d1",
+      "source_bytes": 9292,
+      "disposition": "product_operator_task_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles.ex",
+          "final_destination_sha256": "c8ab0f6c8766b1ce2bbdb8d9c5b6f53c696e1024b42c2109fc6daf97942913d1",
+          "bytes": 9292
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/lib/mix/tasks/arbor.trust.grant_owner.ex",
+      "source_git_blob": "5c075d9028e383745a7a6d3f04d2f04cbd7356ee",
+      "source_sha256": "9ca1afb594cd8b8922a7e78fe28c8564fad10e87ee161b1ce9bc9dcbed4a1b3e",
+      "source_bytes": 3293,
+      "disposition": "product_operator_task_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_commands/lib/mix/tasks/arbor.trust.grant_owner.ex",
+          "final_destination_sha256": "9ca1afb594cd8b8922a7e78fe28c8564fad10e87ee161b1ce9bc9dcbed4a1b3e",
+          "bytes": 3293
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/mix.exs",
+      "source_git_blob": "a70f0af6a85b5875b06ef91d7bde819ee75a28ef",
+      "source_sha256": "797739f415af4a04c43121534772f126aa3c97bb82c2e605513aa9014bf19b12",
+      "source_bytes": 2978,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/mix.exs",
+          "final_destination_sha256": "fd589e37c116e256b904e3a322fa8f92eced35356b79af1cf0925f00de57f40b",
+          "bytes": 2384
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/application_spec_security_regression_test.exs",
+      "source_git_blob": "619290461a3dab0177aab875caa35c5e9f419e6a",
+      "source_sha256": "3763055c3aece21b7668f32f036295b06a32aaea579b7e556caccbc185b70d76",
+      "source_bytes": 3358,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/application_spec_security_regression_test.exs",
+          "final_destination_sha256": "250fbf8872d54ca0bab07296197391a117652c03f1b82b9bf07433c6e7c76d24",
+          "bytes": 3329
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/application_start_profile_security_regression_test.exs",
+      "source_git_blob": "104e695926910e84fdfe6bedbe03a4b725c1942c",
+      "source_sha256": "ba412cf0aab7133dad47bff27e17f371f386ab88568cd728d1c21882eca67b43",
+      "source_bytes": 31815,
+      "disposition": "literal_product_assertion_split",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/application_start_profile_security_regression_test.exs",
+          "final_destination_sha256": "a3acdb54e8ff7e318e434fe58086fe225e30ccd918a453c58bbb02408388dea5",
+          "bytes": 31774
+        },
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/application_start_profile_host_integration_test.exs",
+          "final_destination_sha256": "feea6beb7b8c299a91abc6f0b32708d1b5ce48a74bd7a88bc0c74a559e913dd5",
+          "bytes": 1937
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_context_test.exs",
+      "source_git_blob": "01b1ab17ad29e111d2321af0c5e9c9f4f444b351",
+      "source_sha256": "fe67fb602c383d8f3853f02131807e80c58c14477966065d63b167d5fccb4b67",
+      "source_bytes": 6098,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_context_test.exs",
+          "final_destination_sha256": "fe67fb602c383d8f3853f02131807e80c58c14477966065d63b167d5fccb4b67",
+          "bytes": 6098
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_evidence_security_regression_test.exs",
+      "source_git_blob": "37d4054fdc274b350798635c994b0114d3a5b28d",
+      "source_sha256": "7e089bc534b60ef51ad551aea6eedb5b927842a64e0ad2099723b2fe549d9022",
+      "source_bytes": 6957,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_evidence_security_regression_test.exs",
+          "final_destination_sha256": "7e089bc534b60ef51ad551aea6eedb5b927842a64e0ad2099723b2fe549d9022",
+          "bytes": 6957
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_guard_always_locked_floor_security_regression_test.exs",
+      "source_git_blob": "cb1e9fcab28eac915a8dea19b464b593f4f883dc",
+      "source_sha256": "ee09c67c6583633a654543a6b812b51c22aefccaeb70cc1c0d5cf66a947b660f",
+      "source_bytes": 2310,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_guard_always_locked_floor_security_regression_test.exs",
+          "final_destination_sha256": "ee09c67c6583633a654543a6b812b51c22aefccaeb70cc1c0d5cf66a947b660f",
+          "bytes": 2310
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+      "source_git_blob": "9148c0b48f358d9e7647f2901aca9522feea0c9c",
+      "source_sha256": "58d7aef62eef6c3ed19518f4ed0c8220de0d8b7a2812130f74351fcadbbbfcba",
+      "source_bytes": 12218,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/approval_guard_test.exs",
+          "final_destination_sha256": "199a6d1758d084e8e9d230019b02bdce6ca1f0d94e17a08a69d7c90911b2b590",
+          "bytes": 12322
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authority_enumeration_test.exs",
+      "source_git_blob": "1f5d53ba775b585aa476879f22c07c9e0a79800e",
+      "source_sha256": "cffa947fa4148c42952f774ddce43e2150da2f96890bb4bf7359cd3bc8595d9c",
+      "source_bytes": 8109,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authority_enumeration_test.exs",
+          "final_destination_sha256": "cffa947fa4148c42952f774ddce43e2150da2f96890bb4bf7359cd3bc8595d9c",
+          "bytes": 8109
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authority_test.exs",
+      "source_git_blob": "34efdb4c589b2261379b4e5f52e2614f86c3bfcf",
+      "source_sha256": "10299802e27567ef5418e252a66b704d39a5745c643a1afd3d31dd101e42c3f4",
+      "source_bytes": 11887,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authority_test.exs",
+          "final_destination_sha256": "2b313f8800231fbf2f6d4f88400fc73686bbfc0b1bc8b4da0d8a1e36f329597f",
+          "bytes": 11903
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authorization_boundary_test.exs",
+      "source_git_blob": "7de46a3d128bb7597caa408ab7db735c441dc049",
+      "source_sha256": "d07bc3ba9fba02b8ec28eb74487103891380832921ea3c934b3130898bd305df",
+      "source_bytes": 2740,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authorization_boundary_test.exs",
+          "final_destination_sha256": "d07bc3ba9fba02b8ec28eb74487103891380832921ea3c934b3130898bd305df",
+          "bytes": 2740
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/authorization_policy_integration_test.exs",
+      "source_git_blob": "3a5648b7bd7a3671b7a03bc86be3c7faaba69bca",
+      "source_sha256": "1b99fa3214fd53c1dbacbf6a4a1b4516056bc5cd33c27229b0e2227ab764a1a9",
+      "source_bytes": 17430,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/authorization_policy_integration_test.exs",
+          "final_destination_sha256": "1b99fa3214fd53c1dbacbf6a4a1b4516056bc5cd33c27229b0e2227ab764a1a9",
+          "bytes": 17430
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/baseline_constraint_test.exs",
+      "source_git_blob": "764c8b5cccb51bfa70d2c70b50ba5dc0a35ff355",
+      "source_sha256": "3edb9cb6810583a3f71bae5951f7c1abef001990b5771558b8b6a0f3cea3bf25",
+      "source_bytes": 1874,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/baseline_constraint_test.exs",
+          "final_destination_sha256": "3edb9cb6810583a3f71bae5951f7c1abef001990b5771558b8b6a0f3cea3bf25",
+          "bytes": 1874
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/behaviour_test.exs",
+      "source_git_blob": "8902682220c4afc0146735c75a7d7110492844ab",
+      "source_sha256": "272731127db59450fa27c15cf8093e76fc6ab0e4faa201fa8b6c57581addd418",
+      "source_bytes": 740,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/behaviour_test.exs",
+          "final_destination_sha256": "272731127db59450fa27c15cf8093e76fc6ab0e4faa201fa8b6c57581addd418",
+          "bytes": 740
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_enforcement_matrix_audit_only_test.exs",
+      "source_git_blob": "9ee24a9495bbdbc00f70c6d08f2e7ee218fa7185",
+      "source_sha256": "e7dd3b87ddc802966de2987d15395121000a0742f57bd2e38bdc50ca5441eaa3",
+      "source_bytes": 2661,
+      "disposition": "literal_product_assertion_split",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_enforcement_matrix_audit_only_test.exs",
+          "final_destination_sha256": "8a6c8f66d0383076385a1dd79c5617c5e89871a8afbb93814a43544c76ee0fde",
+          "bytes": 1218
+        },
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/capability_enforcement_matrix_source_host_test.exs",
+          "final_destination_sha256": "cd2966bba5fb4b97765c5fc282d0e3244a5934e08869716a50dcfc640b0115c6",
+          "bytes": 1609
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_enforcement_matrix_test.exs",
+      "source_git_blob": "b18ca57813e2a3747cec53133ee41dd07fd46e5f",
+      "source_sha256": "9652f6c238f4519fd8cd1297070789db5fcb529c380bab67f9ab28e65b291376",
+      "source_bytes": 3332,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_enforcement_matrix_test.exs",
+          "final_destination_sha256": "9652f6c238f4519fd8cd1297070789db5fcb529c380bab67f9ab28e65b291376",
+          "bytes": 3332
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_grant_owner_security_regression_test.exs",
+      "source_git_blob": "18b128f338a0ce697a001660ab10c0efa1685ff0",
+      "source_sha256": "19445532cd0eb07b24aa784228fb9bcd9e18688ff9c9e7c1c6286a6051928ec7",
+      "source_bytes": 14391,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_security_regression_test.exs",
+          "final_destination_sha256": "19445532cd0eb07b24aa784228fb9bcd9e18688ff9c9e7c1c6286a6051928ec7",
+          "bytes": 14391
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_lifecycle_e2e_test.exs",
+      "source_git_blob": "20cdf961d4a4949ea020f6fb7380ba374ea88f72",
+      "source_sha256": "4153951e296b9aa02281c829f187d176760aad7139db22513cf8e26c11935307",
+      "source_bytes": 24297,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_lifecycle_e2e_test.exs",
+          "final_destination_sha256": "4153951e296b9aa02281c829f187d176760aad7139db22513cf8e26c11935307",
+          "bytes": 24297
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_profile_registry_test.exs",
+      "source_git_blob": "2528c744e4ce296745cddc961a19a96e052468b0",
+      "source_sha256": "b9bd9ffa5a80fb63e9333167adace4ab90a26ea8fee0b81a3853c1839fc8a458",
+      "source_bytes": 8032,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_profile_registry_test.exs",
+          "final_destination_sha256": "837e1dba0ea6a7ec62363b5f3f6694ca78cd5722f74486762180172179b0df64",
+          "bytes": 8171
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_risk_profiles_test.exs",
+      "source_git_blob": "eb7afc62c3dabd3f946fe6cdbe846171e934c63c",
+      "source_sha256": "88df5f824ed0ba49b6dba84d93d886266914cd0b1f5607897098cf7aa9ab6811",
+      "source_bytes": 9367,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_risk_profiles_test.exs",
+          "final_destination_sha256": "88df5f824ed0ba49b6dba84d93d886266914cd0b1f5607897098cf7aa9ab6811",
+          "bytes": 9367
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_authority_security_regression_test.exs",
+      "source_git_blob": "17f7a78bfe1e3412a6b23b4a00ce08692fc76c1f",
+      "source_sha256": "9f6cfb6d308386b46cf92d4709bc952c1b78eafe60987da66b8bdf1b27335075",
+      "source_bytes": 1469,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_authority_security_regression_test.exs",
+          "final_destination_sha256": "9f6cfb6d308386b46cf92d4709bc952c1b78eafe60987da66b8bdf1b27335075",
+          "bytes": 1469
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_integration_test.exs",
+      "source_git_blob": "23789e5c997d082796df0caa49b82e1fe185a7fb",
+      "source_sha256": "8d05e9ea36d84315ff6061f24519f77512d79557ddd1e477c64b1ff55ff78dbf",
+      "source_bytes": 11238,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_integration_test.exs",
+          "final_destination_sha256": "8d05e9ea36d84315ff6061f24519f77512d79557ddd1e477c64b1ff55ff78dbf",
+          "bytes": 11238
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/capability_sync_test.exs",
+      "source_git_blob": "ac46a8ed2ab54fde825ad1d671e3d186ad6ed204",
+      "source_sha256": "a97defb10d3806c3db0b02780a572d9b70c82fea8048954072fd23c1e6dd4275",
+      "source_bytes": 24436,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/capability_sync_test.exs",
+          "final_destination_sha256": "a97defb10d3806c3db0b02780a572d9b70c82fea8048954072fd23c1e6dd4275",
+          "bytes": 24436
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/circuit_breaker_test.exs",
+      "source_git_blob": "2fe0327f544d6d41ee773d1188feb4e86f3e282f",
+      "source_sha256": "22fbf1ed2a30a43686544bf1a0d4fecee2819df3b0edc557db4d9484dc4fc026",
+      "source_bytes": 12390,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/circuit_breaker_test.exs",
+          "final_destination_sha256": "13b93d524d1283f5b8ca7bf3441e80f94580c6be592cc3c7346da09ea33e08b1",
+          "bytes": 12395
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/config_test.exs",
+      "source_git_blob": "553f3ffd4fd294bb370781e897c6d879b74ab4a6",
+      "source_sha256": "79e5e2af0fc954db0a22077cb95c0fb311221d6694eb297bbb7f2f24b308bbc1",
+      "source_bytes": 7316,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/config_test.exs",
+          "final_destination_sha256": "f67a4aa6c53d86ab55f7ab9e79ccf7e87a349982d0c01d3d89ae2fcced95ee6a",
+          "bytes": 7307
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/confirmation_tracker_test.exs",
+      "source_git_blob": "10ea82bbacddcc68e427fcd5d6d7572f2c4f58d0",
+      "source_sha256": "b09eb6cb9a4366de32f826e84562f1c0e43a617161ab8de8b92a2f68367d4011",
+      "source_bytes": 19270,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/confirmation_tracker_test.exs",
+          "final_destination_sha256": "b09eb6cb9a4366de32f826e84562f1c0e43a617161ab8de8b92a2f68367d4011",
+          "bytes": 19270
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_converter_test.exs",
+      "source_git_blob": "49bebb2d2f59c94dfced4e01e3fd69d26ed5a0f9",
+      "source_sha256": "56d25202e71daf72c9c437ad808bfa71a0fb652a7c372d2acdf5401093de694c",
+      "source_bytes": 10617,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_converter_test.exs",
+          "final_destination_sha256": "e8bd1f8eb22f8be1fc83fbe61efe8fe0bef3fbacb2d941d12749a5877f88e239",
+          "bytes": 10651
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_handler_test.exs",
+      "source_git_blob": "052ccca68a875351d08898d59eb9b0dc2d103b52",
+      "source_sha256": "530e2ef64f87a5721bf525512f4f73529b73693240d01a698ef70e364e66e90c",
+      "source_bytes": 16657,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_handler_test.exs",
+          "final_destination_sha256": "dbceb817e4332e5a6389478e51bf4906cdd3d8f099886eb9f164f85c17579a9b",
+          "bytes": 16723
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/event_store_test.exs",
+      "source_git_blob": "939415a924fe2a005d488cd6e964dcb85a08355c",
+      "source_sha256": "c53365be12f4ccff2b4c90cfbd47c55f5fbe62ccc2100da005cd601ba532ecd7",
+      "source_bytes": 18794,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/event_store_test.exs",
+          "final_destination_sha256": "c53365be12f4ccff2b4c90cfbd47c55f5fbe62ccc2100da005cd601ba532ecd7",
+          "bytes": 18794
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/graduation_core_test.exs",
+      "source_git_blob": "2d12c390b1bde98328851d57ad283c070e79e376",
+      "source_sha256": "7e505cbbcf70f2db84a666d8a9447319eb61cfcfcc4f384119cb3141d973c5f0",
+      "source_bytes": 2994,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/graduation_core_test.exs",
+          "final_destination_sha256": "7e505cbbcf70f2db84a666d8a9447319eb61cfcfcc4f384119cb3141d973c5f0",
+          "bytes": 2994
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/graduation_security_regression_test.exs",
+      "source_git_blob": "c0eccccddf2ed2be858def399d89159deb2f951a",
+      "source_sha256": "907650b44e042f3ed58ac4df569807213e02915117bb30af6a1b66eb124ec6e9",
+      "source_bytes": 13811,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/graduation_security_regression_test.exs",
+          "final_destination_sha256": "907650b44e042f3ed58ac4df569807213e02915117bb30af6a1b66eb124ec6e9",
+          "bytes": 13811
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/manager_test.exs",
+      "source_git_blob": "0844729d4f513f6dc38661746a2521926125ee42",
+      "source_sha256": "b99124a21ab19a1095d91e247bfb0d7456baa35c98c8b094c1485a7cfcdba418",
+      "source_bytes": 23656,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/manager_test.exs",
+          "final_destination_sha256": "937733665f4056bc992142381f36b895fce9658eb2a4d9fe6e35b3678c033de9",
+          "bytes": 23728
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+      "source_git_blob": "7f94b1fe95fd108b1c2df1b5c2af748afb0c66b8",
+      "source_sha256": "df7538858d9ed8590a622d689578cdcc0e678a925d16b531bf5a3c5e6820c5ab",
+      "source_bytes": 11144,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/policy_enforcer_test.exs",
+          "final_destination_sha256": "82232c82d3dac53b860fc3b337336f3ed452bfc7de42b91962649a33c1d388a0",
+          "bytes": 11249
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/policy_test.exs",
+      "source_git_blob": "57c90a7176a7728b2e9bea948031b6773e2fb3f4",
+      "source_sha256": "fe14da104b52a5221f96beca028a965a619cc6105cbe7232508471502257a130",
+      "source_bytes": 22402,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/policy_test.exs",
+          "final_destination_sha256": "fe14da104b52a5221f96beca028a965a619cc6105cbe7232508471502257a130",
+          "bytes": 22402
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/presets_historian_security_category_test.exs",
+      "source_git_blob": "56d608c21addc13b79e89eab527c8734398ed8e7",
+      "source_sha256": "f65745c414d5b03733f1eaade63d7053da5163b4d945d8e155dc1322c0ff6f92",
+      "source_bytes": 927,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/presets_historian_security_category_test.exs",
+          "final_destination_sha256": "f65745c414d5b03733f1eaade63d7053da5163b4d945d8e155dc1322c0ff6f92",
+          "bytes": 927
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_exit_audit_test.exs",
+      "source_git_blob": "44e456b6071283f07e00c6b949fbbbc08b15dbb6",
+      "source_sha256": "b543c9e24618ddc3bb84e255d83277bc539a26a140babc51183889b1e250a49f",
+      "source_bytes": 4360,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_exit_audit_test.exs",
+          "final_destination_sha256": "b543c9e24618ddc3bb84e255d83277bc539a26a140babc51183889b1e250a49f",
+          "bytes": 4360
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_integration_test.exs",
+      "source_git_blob": "378489ea3fe3f4653cf0b32d05b11f11a3de7bf8",
+      "source_sha256": "b796b184cd6d1f61765ac0945a06fba67db9a4d6b8fad86402666e6aa3af77b2",
+      "source_bytes": 22098,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_integration_test.exs",
+          "final_destination_sha256": "eb246c7cf4e2ea4c8715613e7dd07310e49502e0b4d647379f56a2b70a0725b5",
+          "bytes": 22952
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_resolver_security_ceilings_config_test.exs",
+      "source_git_blob": "87d8e161c92eec4829360680e9b123db133daf38",
+      "source_sha256": "d111cfc70341b60d12afd20951564f859eb53c827257bac95b06479838ec8be0",
+      "source_bytes": 852,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_resolver_security_ceilings_config_test.exs",
+          "final_destination_sha256": "d111cfc70341b60d12afd20951564f859eb53c827257bac95b06479838ec8be0",
+          "bytes": 852
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_resolver_test.exs",
+      "source_git_blob": "760d97ef08c80f49ee641ae058a04da8a6cfaf9d",
+      "source_sha256": "67f29f2d6d526a5e5f8b531039ee7f3ada68016506872eb3d23e3845b3e0c92b",
+      "source_bytes": 14540,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_resolver_test.exs",
+          "final_destination_sha256": "67f29f2d6d526a5e5f8b531039ee7f3ada68016506872eb3d23e3845b3e0c92b",
+          "bytes": 14540
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/profile_test.exs",
+      "source_git_blob": "a1cc3fa1999abdc8ae97aa84d658221e50d8e3e7",
+      "source_sha256": "92e74547c3b5069430c0eca77a20bfd868bd047902cde4c1285fd4e418946a7b",
+      "source_bytes": 3798,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/profile_test.exs",
+          "final_destination_sha256": "92e74547c3b5069430c0eca77a20bfd868bd047902cde4c1285fd4e418946a7b",
+          "bytes": 3798
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/provider_gate_lifecycle_security_regression_test.exs",
+      "source_git_blob": "d82c6815237dbd12c8a07401a7902585057afd16",
+      "source_sha256": "78855d19e3ccacad1916bef2172fcb8f0d0b6a209f66bd0db4401fcd4b94f8b4",
+      "source_bytes": 4096,
+      "disposition": "whole_product_integration_move",
+      "destinations": [
+        {
+          "path": "apps/arbor_trust_host/test/arbor/trust/provider_gate_lifecycle_security_regression_test.exs",
+          "final_destination_sha256": "78855d19e3ccacad1916bef2172fcb8f0d0b6a209f66bd0db4401fcd4b94f8b4",
+          "bytes": 4096
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/store_distributed_test.exs",
+      "source_git_blob": "dc76efd8a4614c68e19dfcddf2ae5c6b7a709348",
+      "source_sha256": "66e297888c378a210e6c36dfe0129e5140cdaaf5e1513afc9082b22e164e8384",
+      "source_bytes": 2290,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/store_distributed_test.exs",
+          "final_destination_sha256": "d27dc7757c567f28d969b265a2db9984922e5b99ce7ea1ea47ce5d8b0dfea976",
+          "bytes": 2485
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/store_test.exs",
+      "source_git_blob": "1ff6b426f9372f0bc74c3fbfb62d49b9291ead38",
+      "source_sha256": "c582ab70e2265e4ae447f690bda157d34b40abb0731e3bf7825a95e4ce88a503",
+      "source_bytes": 14670,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/store_test.exs",
+          "final_destination_sha256": "c582ab70e2265e4ae447f690bda157d34b40abb0731e3bf7825a95e4ce88a503",
+          "bytes": 14670
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/supervisor_test.exs",
+      "source_git_blob": "319b1d05d68435b352698cdebf890973d090f138",
+      "source_sha256": "05da079d941d90be3778c4a4b38e35752e80857385d2a1ca6e786854b8a5a6b7",
+      "source_bytes": 2542,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/supervisor_test.exs",
+          "final_destination_sha256": "7fad4ff1243658fce2058cdaea5a0e2c69b1a72eee15d4c6fbb7e2903accafd7",
+          "bytes": 2562
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust/taint_conjunct_test.exs",
+      "source_git_blob": "93c4fee1cf44be2ec1f0ef6decfa299def1d92d8",
+      "source_sha256": "326b0ffe2b5960837e1c781f60f325802d8a7727b778de048d5ccf765cd6126c",
+      "source_bytes": 4002,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust/taint_conjunct_test.exs",
+          "final_destination_sha256": "326b0ffe2b5960837e1c781f60f325802d8a7727b778de048d5ccf765cd6126c",
+          "bytes": 4002
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/arbor/trust_test.exs",
+      "source_git_blob": "f0d774c9101503f557d0d2bbcd161b682b7cb489",
+      "source_sha256": "5b4aa2cc575d4d6e55cfa386acb76b7502a0e1ad2acadb35324c847a5cdc6953",
+      "source_bytes": 12434,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/arbor/trust_test.exs",
+          "final_destination_sha256": "5b4aa2cc575d4d6e55cfa386acb76b7502a0e1ad2acadb35324c847a5cdc6953",
+          "bytes": 12434
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/support/test_helpers.ex",
+      "source_git_blob": "52ad0311f3f33110257376e4508dcbf5dd0857e5",
+      "source_sha256": "b334bb84f89463d5ad7e4db279512950fe91c63317717231348912c7d66cd23b",
+      "source_bytes": 4396,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/support/test_helpers.ex",
+          "final_destination_sha256": "ed08eba2f76a7a068df3922264f64c9a7dc2ff1d2c8f667f0edd7ae14d48e5ae",
+          "bytes": 4475
+        }
+      ]
+    },
+    {
+      "source_path": "apps/arbor_trust/test/test_helper.exs",
+      "source_git_blob": "f54b3ba041ba893c6758670d89f2bb0de456e030",
+      "source_sha256": "0f081b8094ec5782d16ae530bf62076283049beaeeac3ea347f13f8902856b5d",
+      "source_bytes": 445,
+      "disposition": "canonical_package_move",
+      "destinations": [
+        {
+          "path": "packages/arbor_trust/test/test_helper.exs",
+          "final_destination_sha256": "011fba5c4fef4c1f9192fe42b413e2ae4b23eeeb5d9b9617d7f47aada7b09ffd",
+          "bytes": 444
+        }
+      ]
+    }
+  ],
+  "new_source_files": [
+    {
+      "path": "apps/arbor_trust_host/lib/arbor/trust/host/observation.ex",
+      "final_destination_sha256": "5eda5d6b2c7014a9363215857bbeb7bc9158e4c5f204e7eff699a52f75ecd63b"
+    },
+    {
+      "path": "apps/arbor_trust_host/lib/arbor/trust/host/profile_sync.ex",
+      "final_destination_sha256": "5972fd186cb20cbb92e5d31b00dbcc5370d5b5613e088246a001c76801915f04"
+    },
+    {
+      "path": "apps/arbor_trust_host/lib/arbor/trust/host/runtime.ex",
+      "final_destination_sha256": "ed23e04ac803dbd4a65af9501fb5d07d0322204d85187d5d4a80d9182408be24"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/contracts/observation.ex",
+      "final_destination_sha256": "603a62f494a13ef3fa1a0a4a23428000ea07e865519505a0f5fd1f6a39ad10f2"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/contracts/profile_sync.ex",
+      "final_destination_sha256": "a4288dd9ca9d5b41c091484d6b9f697ab48b5a7a5cbb101caa0ce383a821a40f"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/contracts/runtime_host.ex",
+      "final_destination_sha256": "1c78cae982a7ba30fa0eb1b840d42c38473d99fc1c620cb2c40d5d7528c01c7b"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/observation.ex",
+      "final_destination_sha256": "109c6d4e02cac0da34dbada1a348d79cda033120cb65c780fb381047fd7bc9a2"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/profile_store.ex",
+      "final_destination_sha256": "b6b2fe35a502c8ed9583a707988ffcc16554af058f2c830e483f5354305cf5cc"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/profile_sync.ex",
+      "final_destination_sha256": "29de1de01e88b0b5b20573c25302cc0301d31a585f0088d3217945fa5ce053ba"
+    },
+    {
+      "path": "packages/arbor_trust/lib/arbor/trust/runtime.ex",
+      "final_destination_sha256": "8bc128907b01b6d05ea6a0705cac8c81392b7e83ee032e9182164adf35ba3546"
+    }
+  ],
+  "qualification": "Source disposition only; BEAM/build/tests/cold/Grok qualification is recorded separately in run-specific receipts.",
+  "new_metadata_files": [
+    {
+      "path": "packages/arbor_trust/mix.lock",
+      "final_destination_sha256": "f6f405f2dec1a0f90814eca03a9f0c8c3623da26b8203cf21062a13d5bc95e1a"
+    },
+    {
+      "path": "packages/arbor_trust/config/config.exs",
+      "final_destination_sha256": "ffb3778b4268883f0fefc7fa4dbc417d9d8053789965fd98ce14d2ba6b5591ff"
+    },
+    {
+      "path": "packages/arbor_trust/config/test.exs",
+      "final_destination_sha256": "caebec2998444311da53cc275d3bd578c37d017d2ddcaabcc661e41dee5e9371"
+    },
+    {
+      "path": "packages/arbor_trust/README.md",
+      "final_destination_sha256": "75fe045e2dc2588bcba187e82ad37680eda956673dde52a799c8a3cdeb11a3ab"
+    },
+    {
+      "path": "packages/arbor_trust/LICENSE",
+      "final_destination_sha256": "487a0e550cea54c8dbfd5044f0791fd1497710a16952eacd572776d6aaf1101b"
+    },
+    {
+      "path": "packages/arbor_trust/.formatter.exs",
+      "final_destination_sha256": "1637a1d132f50f7e77f043c94078324f6fa047d538611a8ff86ac33119ff217e"
+    },
+    {
+      "path": "apps/arbor_trust_host/mix.exs",
+      "final_destination_sha256": "d947a30ffb49b2ca80cb9fb1873ec15c9c35c342f0692a4c802c6767f9b86850"
+    },
+    {
+      "path": "apps/arbor_trust_host/README.md",
+      "final_destination_sha256": "164d5afb6e18cc9abd72262e0a8942f14eca88aadf9f489661d63aeed2701b51"
+    }
+  ],
+  "readability_adjustments": "Extraction-only lint fixes use aliases for new Runtime/Observation/ProfileSync/ProfileStore/Persistence.Core calls and order newly added aliases. Trust Store.init uses case for the closed ProfileSync :ok/{:error, reason} protocol, preserving subscription-before-ETS initialization and exact stop behavior; malformed returns still fail closed."
+}

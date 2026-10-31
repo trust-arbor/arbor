@@ -22,6 +22,8 @@ breeze_locals =
     "packages/arbor_capabilities_signals",
     "packages/arbor_capabilities_oidc",
     "packages/arbor_signals",
+    "packages/arbor_trust",
+    "packages/arbor_historian",
     "packages/arbor_persistence",
     "packages/arbor_persistence_sql",
     "packages/arbor_persistence_eventstore"

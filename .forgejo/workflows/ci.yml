@@ -25,6 +25,8 @@ jobs:
       ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
       ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
       ARBOR_CAPABILITIES_OIDC_PATH: ${{ github.workspace }}/packages/arbor_capabilities_oidc
+      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
+      ARBOR_PERSISTENCE_PATH: ${{ github.workspace }}/packages/arbor_persistence
 
     steps:
       - name: Checkout
@@ -176,7 +178,7 @@ jobs:
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_capabilities arbor_capabilities_signals arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore), fn package ->
+          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_capabilities arbor_capabilities_signals arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore arbor_trust arbor_historian), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -227,7 +229,8 @@ jobs:
           ./bin/mix test apps/arbor_llm/test/arbor/llm/tool_loop_invocation_audit_security_regression_test.exs apps/arbor_llm/test/arbor/llm/execution_provider_identity_test.exs apps/arbor_llm/test/arbor/llm/stock_tool_transport_test.exs --timeout 120000
           ./bin/mix test apps/arbor_ai/test/arbor/ai/acp_session/handler_store_outage_security_regression_test.exs apps/arbor_ai/test/arbor/ai/skill_prompt_security_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_agent/test/arbor/agent/eval/agent_task_precondition_security_regression_test.exs apps/arbor_agent/test/arbor/agent/skill_prompt_version_security_regression_test.exs --timeout 120000
-          ./bin/mix test apps/arbor_historian/test/arbor/historian/security_invocation_sink_test.exs apps/arbor_historian/test/arbor/historian/security_invocation_durability_security_regression_test.exs --timeout 120000
+          (cd packages/arbor_historian && MIX_DEPS_PATH="$CORE_DEPS_PATH" ../../bin/mix test test/arbor/historian/security_invocation_sink_test.exs test/arbor/historian/security_invocation_durability_security_regression_test.exs --timeout 120000)
+          ./bin/mix test apps/arbor_trust_host/test apps/arbor_historian_host/test --exclude database --exclude external --exclude llm --exclude llm_local --exclude distributed --timeout 120000
           ./bin/mix test apps/arbor_kernel_runtime/test/arbor/common/skill_version_security_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_consensus/test/arbor/consensus/evaluators/skill_prompt_security_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_gateway/test/arbor/gateway/skill_prompt_security_regression_test.exs --timeout 120000
@@ -340,6 +343,102 @@ jobs:
           export ARBOR_DATA_DIR="$runtime_root/data"
           export ARBOR_ENV_PATH="$runtime_root/empty.env"
           ../../bin/mix test --timeout 120000
+
+  # Canonical active packages own the moved suites; passive product hosts are
+  # exercised explicitly above and in the database lane, without hiding SQL tests.
+  trust_historian:
+    name: Standalone ${{ matrix.package }}
+    runs-on: native
+    strategy:
+      matrix:
+        package: [arbor_trust, arbor_historian]
+    env:
+      MIX_ENV: test
+      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
+      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
+      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
+      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
+      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
+      ARBOR_PERSISTENCE_PATH: ${{ github.workspace }}/packages/arbor_persistence
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up toolchain
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+      - name: Resolve committed public package closure
+        working-directory: packages/${{ matrix.package }}
+        run: ../../bin/mix deps.get --check-locked
+      - name: Fresh strict compile and complete owning suite
+        run: |
+          set -euo pipefail
+          REPO_ROOT="$(pwd -P)"
+          PACKAGE="${{ matrix.package }}"
+          BUILD_PATH="$(mktemp -d "${TMPDIR:-/tmp}/arbor-paired-owning.XXXXXX")"
+          BUILD_PATH="$(cd "$BUILD_PATH" && pwd -P)"
+          mkdir -p "$BUILD_PATH/tmp" "$BUILD_PATH/home" "$BUILD_PATH/data"
+          ERLANG_ROOT="$(mise where erlang)"
+          ELIXIR_ROOT="$(mise where elixir)"
+          EPMD_PID=""
+          cleanup() {
+            if [ -n "$EPMD_PID" ]; then
+              kill "$EPMD_PID" 2>/dev/null || true
+              wait "$EPMD_PID" 2>/dev/null || true
+            fi
+            rm -rf "$BUILD_PATH"
+          }
+          trap cleanup EXIT
+          ERL_EPMD_PORT="$(python3 - <<'PY'
+          import socket
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              port = sock.getsockname()[1]
+          if port == 4369:
+              raise SystemExit("Private EPMD requires a non-default port")
+          print(port)
+          PY
+          )"
+          export ERL_EPMD_PORT ERL_EPMD_ADDRESS=127.0.0.1
+          export CUSTODY_QA_COOKIE="paired_ci_$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export CUSTODY_QA_COOKIE_SHA256="$(python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ["CUSTODY_QA_COOKIE"].encode()).hexdigest())')"
+          unset ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS ARBOR_CAPABILITIES_OIDC_PATH
+          export ERL_FLAGS="+S4:4 -setcookie $CUSTODY_QA_COOKIE -kernel inet_dist_use_interface {127,0,0,1}"
+          "$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -address 127.0.0.1 >"$BUILD_PATH/epmd.log" 2>&1 &
+          EPMD_PID=$!
+          assert_empty_owned_epmd() {
+            kill -0 "$EPMD_PID" 2>/dev/null || return 1
+            names="$("$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -names 2>/dev/null)" || return 1
+            [ "$names" = "epmd: up and running on port $ERL_EPMD_PORT with data:" ]
+          }
+          ready=0
+          for attempt in {1..100}; do
+            if assert_empty_owned_epmd; then ready=1; break; fi
+            sleep 0.05
+          done
+          [ "$ready" = 1 ] || { echo "Owned EPMD did not become ready" >&2; exit 1; }
+          export MIX_BUILD_PATH="$BUILD_PATH/build"
+          export MIX_DEPS_PATH="$REPO_ROOT/packages/$PACKAGE/deps"
+          export TMPDIR="$BUILD_PATH/tmp" ARBOR_HOME="$BUILD_PATH/home" ARBOR_DATA_DIR="$BUILD_PATH/data"
+          touch "$BUILD_PATH/empty.env"
+          export ARBOR_ENV_PATH="$BUILD_PATH/empty.env"
+          export ARBOR_MIX_CONTAINED=1 ARBOR_ERLANG_ROOT="$ERLANG_ROOT" ARBOR_ELIXIR_ROOT="$ELIXIR_ROOT"
+          (
+            cd "packages/$PACKAGE"
+            ../../bin/mix compile --warnings-as-errors
+            ../../bin/mix test --timeout 120000
+          )
+          assert_empty_owned_epmd
+          for forbidden in arbor_kernel_runtime arbor_security arbor_trust_host arbor_historian_host arbor_signals arbor_capabilities_signals arbor_persistence_host arbor_persistence_sql arbor_persistence_eventstore; do
+            if [ -d "$BUILD_PATH/build/lib/$forbidden" ]; then
+              echo "Forbidden product dependency in standalone $PACKAGE: $forbidden" >&2
+              exit 1
+            fi
+          done
+          if [ "$PACKAGE" = arbor_historian ] && [ -d "$BUILD_PATH/build/lib/arbor_capabilities" ]; then
+            echo "Historian compiled a concrete authority dependency" >&2
+            exit 1
+          fi
 
   # OAuth's primitive suites moved out of Kernel Runtime and are not discovered
   # by the umbrella test runner. Compile and exercise their own package closure.
@@ -743,7 +842,8 @@ jobs:
         run: |
           set -euo pipefail
           ./bin/mix test apps/arbor_agent/test/arbor/agent/eval/security_journey_test.exs apps/arbor_agent/test/arbor/agent/eval/security_qualification_report_test.exs --only database --timeout 120000
-          ./bin/mix test apps/arbor_historian/test/arbor/historian/authority_audit_delivery_security_regression_test.exs --only database --timeout 120000
+          ./bin/mix test apps/arbor_historian_host/test/arbor/historian/authority_audit_delivery_security_regression_test.exs --only database --timeout 120000
+          ./bin/mix test apps/arbor_trust_host/test apps/arbor_historian_host/test --only database --timeout 120000
 
       # Flake guard: a full rerun on failure (the database lane is ~3min, and a
       # full rerun also re-runs setup_all-invalidated tests that `--failed` would

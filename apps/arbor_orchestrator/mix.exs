@@ -70,11 +70,15 @@ defmodule Arbor.Orchestrator.MixProject do
       {:arbor_security, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence_host, in_umbrella: true},
-      {:arbor_historian, in_umbrella: true},
+      {:arbor_historian, "~> 0.1.0",
+       path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
+      {:arbor_historian_host, in_umbrella: true},
       # Source-owned engagement binding after authenticated receipt consumption.
       # arbor_comms is L4 and does not depend on arbor_orchestrator, so this
       # remains a downward, acyclic facade dependency.

@@ -40,7 +40,9 @@ defmodule Arbor.Scheduler.MixProject do
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_persistence_host, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
 
       # Oban — PostgreSQL-backed durable job queue with cron support.
       # We use it as the scheduling substrate; the Arbor.Scheduler facade

@@ -1,10 +1,10 @@
-# Platform inventory scope after Persistence adoption
+# Platform inventory physical-owner scope
 
 The live PlatformInventory report is now
 `arbor.packaging.platform_inventory.v2`. This is a reviewed scope successor
-to the original nine-application E0A census. The Persistence adoption splits
-the two former Persistence owners into four actual owners; every former
-production source remains in the selected family.
+to the original nine-application E0A census. Persistence, Capabilities, Trust
+and Historian retain their complete source families across explicit package
+and product Host roots. Moving a source does not remove it from review.
 
 | Physical root | Actual application owner |
 | --- | --- |
@@ -12,10 +12,17 @@ production source remains in the selected family.
 | `packages/arbor_persistence_sql/lib/` | `arbor_persistence_sql` |
 | `packages/arbor_persistence_eventstore/lib/` | `arbor_persistence_eventstore` |
 | `apps/arbor_persistence_host/lib/` | `arbor_persistence_host` |
+| `packages/arbor_capabilities/lib/` | `arbor_capabilities` |
+| `packages/arbor_capabilities_signals/lib/` | `arbor_capabilities_signals` |
+| `apps/arbor_security/lib/` | `arbor_security` |
+| `packages/arbor_trust/lib/` | `arbor_trust` |
+| `apps/arbor_trust_host/lib/` | `arbor_trust_host` |
+| `packages/arbor_historian/lib/` | `arbor_historian` |
+| `apps/arbor_historian_host/lib/` | `arbor_historian_host` |
 
-The other seven selected owners remain Cartographer, LLM, Security, Shell,
-Sandbox, Historian and Trust under their original `apps/<owner>/lib/` roots.
-The resulting closed scope has eleven owners. Core and encoder share one
+Cartographer, LLM, Shell and Sandbox retain their original
+`apps/<owner>/lib/` roots. The resulting closed scope has fifteen owners.
+Core and encoder share one
 explicit physical-root policy. Files outside those roots cannot acquire an
 owner by declaring a familiar application name; an old embedded copy selected
 by the generic Git reader causes projection to fail closed.
@@ -40,10 +47,12 @@ inputs does not relabel those historical receipts or qualify a new recovery
 release.
 
 `PackageScopePipelineTest` traces real staged blobs through selection, pure
-projection and encoding for all four Persistence owners. It also verifies
-that historical paths cannot silently qualify new owners and that an embedded
-core copy fails closed.
+projection and encoding for the split families, including the canonical Trust
+and Historian packages and both passive Hosts. Adjacent names and unrelated
+packages remain outside the closed scope. Historical paths cannot silently
+qualify new owners; an embedded Core copy fails closed.
 
-All four actual Persistence owners retain the family's `P` band in
-SourceCoupling. Moving mechanisms into packages does not promote them into
-Kernel or exclude adapter and Host edges from the coupling census.
+The adopted families retain their `P` band in SourceCoupling. Moving mechanisms
+into packages does not promote them into Kernel or exclude adapter and Host
+edges from the coupling census. These source-review gates do not attest a
+current product release or close the [Trust/Historian M2 gap](TRUST_HISTORIAN_M2_COUPLING_GAP.md).

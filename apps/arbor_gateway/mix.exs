@@ -38,7 +38,9 @@ defmodule ArborGateway.MixProject do
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_trust, in_umbrella: true},
+      {:arbor_trust, "~> 0.1.0",
+       path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
+      {:arbor_trust_host, in_umbrella: true},
       {:plug, "~> 1.14"},
       {:plug_cowboy, "~> 2.6"},
       # WebSocket upgrade for the chat API (Plug.Cowboy + WebSock behaviour).
