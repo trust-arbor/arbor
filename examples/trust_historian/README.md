@@ -7,6 +7,12 @@ uses explicit nil runtime/observation/sync ports, real durable SQL and canonical
 Trust approval/grant-owner and Historian puller descriptors. This is a single-node
 composition proof, not current M2 product-release boot evidence.
 
+The fixture explicitly selects Main's complete Kernel-owned persistence contract
+set (Record, Revision, Filter and AppendOperation). Application entry verifies the
+exact captured binding before creating directories or starting the Repo or any
+owners. Trust's historical Record identity is preserved on acknowledged SQL writes
+and fresh-VM recovery; there is no struct conversion or contract fallback.
+
 The explicit install stage runs public SQL migrations before canonical roots.
 Write drives the real public Core first-install/operator protocol and
 public signatures, actor-authorized grants/delegation, replay/forgery denials and

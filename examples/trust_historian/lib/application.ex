@@ -2,7 +2,18 @@ defmodule PairedStandaloneConsumer.Application do
   @moduledoc "Owns the private Repo, PubSub and admitted provisioner; canonical OTP apps own authority trees."
   use Application
 
+  alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record, Revision}
+  alias Arbor.Persistence.ContractProviders
+
   def start(_type, _args) do
+    expected_contracts = %{
+      record: Record,
+      revision: Revision,
+      filter: Filter,
+      append_operation: AppendOperation
+    }
+
+    ^expected_contracts = ContractProviders.capture!()
     root = System.fetch_env!("PAIRED_STATE_ROOT")
 
     for path <- [root, Path.join(root, "authority"), Path.join(root, "independent-revocations")] do
