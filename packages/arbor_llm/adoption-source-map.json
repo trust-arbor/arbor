@@ -4149,12 +4149,16 @@
         {
           "path": "packages/arbor_llm/test/arbor/llm/tool_loop_dependency_boundary_test.exs",
           "owner_application": "arbor_llm",
-          "sha256": "edc83b69b646819fe54ac53f484c6ed1f0c3234f0d31074f6a1dd247cd6bf213",
-          "bytes": 497,
+          "sha256": "cc281fa61325a6e16f510978f974155af07d863ba7eb29c15c9252cda236dbbb",
+          "bytes": 549,
           "prior_stage01_formatting": {
             "before_sha256": "edc83b69b646819fe54ac53f484c6ed1f0c3234f0d31074f6a1dd247cd6bf213",
             "after_sha256": "edc83b69b646819fe54ac53f484c6ed1f0c3234f0d31074f6a1dd247cd6bf213",
             "metadata_stripped_ast_equal": true
+          },
+          "prior_to_signal_port_guard_repair_target": {
+            "sha256": "edc83b69b646819fe54ac53f484c6ed1f0c3234f0d31074f6a1dd247cd6bf213",
+            "bytes": 497
           }
         }
       ],
@@ -4415,12 +4419,16 @@
         {
           "path": "packages/arbor_llm/test/arbor/llm/tool_result_sensitivity_security_regression_test.exs",
           "owner_application": "arbor_llm",
-          "sha256": "204e95bbcea9edd850e523e8f0d89ab12c121fc8c6c060af4f1be72d829411ce",
-          "bytes": 4273,
+          "sha256": "9341649dc9911a798401c83e498a6612dcf66046c6512abca8511f5be441adbe",
+          "bytes": 4346,
           "prior_stage01_formatting": {
             "before_sha256": "4e4236e44a8389dd5feadf0f076ec97a7d450278041ad6be2e3be019e8bbf9d6",
             "after_sha256": "204e95bbcea9edd850e523e8f0d89ab12c121fc8c6c060af4f1be72d829411ce",
             "metadata_stripped_ast_equal": true
+          },
+          "prior_to_deterministic_nonce_fixture_target": {
+            "sha256": "204e95bbcea9edd850e523e8f0d89ab12c121fc8c6c060af4f1be72d829411ce",
+            "bytes": 4273
           }
         }
       ],
@@ -17624,5 +17632,130 @@
         "old175ms_failures": "Retained as failures; no retry or reinterpretation."
       }
     }
-  ]
+  ],
+  "test_source_guard_adaptation_stages": [
+    {
+      "stage": "ToolLoop_signal_port_guard_qualified_alias_adaptation",
+      "scope": "Source-only repair of a stale positive spelling assertion after the reviewed production alias pass; no production, runtime, original-source or frozen review/class data change.",
+      "path": "packages/arbor_llm/test/arbor/llm/tool_loop_dependency_boundary_test.exs",
+      "prior_target_sha256": "edc83b69b646819fe54ac53f484c6ed1f0c3234f0d31074f6a1dd247cd6bf213",
+      "prior_target_bytes": 497,
+      "current_target_sha256": "cc281fa61325a6e16f510978f974155af07d863ba7eb29c15c9252cda236dbbb",
+      "current_target_bytes": 549,
+      "case_label": "ToolLoop uses public downward facades instead of Arbor.Orchestrator internals",
+      "prior_current_case_chunk_sha256": "10835d59e4d00cc6909d78e3d0c7e6761e2926840004ac308b2122631ce199c1",
+      "current_case_chunk_sha256": "1565467ee0cb6d2d001705f92ee16d29e38543c3a26c44bab665f3f3985c5ca5",
+      "historical_case_leading_assert_refute_macros": 4,
+      "prior_current_case_leading_assert_refute_macros": 4,
+      "current_case_leading_assert_refute_macros": 5,
+      "current_macro_delta": 1,
+      "macro_count_method": "Static leading assert/refute source lines; not executed ExUnit/AST totals.",
+      "named_cases": 1,
+      "tags": 1,
+      "case_identity_and_tags_unchanged": true,
+      "preserved_negative_guards": [
+        "Arbor.Orchestrator",
+        "Arbor.Signals.Bus"
+      ],
+      "preserved_positive_emit_guard": "apply(signal_module, :emit",
+      "replaced_positive": "Arbor.LLM.Config.signal_module()",
+      "current_positive_guards": [
+        "alias Arbor.LLM.Config",
+        "signal_module = Config.signal_module()"
+      ],
+      "unchanged_production_path": "packages/arbor_llm/lib/arbor/llm/tool_loop.ex",
+      "unchanged_production_sha256": "1bd18c87d9117fb3ba074fdb72d2d987a97d2468d861def22a4c0db2bea75d62",
+      "full_owning_or_runtime_credit": true,
+      "formatting_or_AST_receipt": "No new formatting/AST/runtime receipt is asserted for this source-bound correction.",
+      "status": "ROOT_OWNING_PASS_BOUND",
+      "owning_receipt_sha256": "36724a1682e5653c6e306dfdf4b365e57e00aaf6167fbd4bf6254d74fdecff17",
+      "prior_source_only_stage_status": "SOURCE_BOUND_RUNTIME_PENDING",
+      "prior_source_only_runtime_credit": false
+    }
+  ],
+  "test_fixture_source_stages": [
+    {
+      "stage": "tool_result_sensitivity_fixture_deterministic_prompt_sanitizer_nonce",
+      "status": "ROOT_OWNING_PASS_BOUND",
+      "scope": "Existing test-only shared run helper supplies a fixed supported :prompt_sanitizer_nonce; no production sanitizer/classifier/policy change, no finite route broadening, no changed case assertions.",
+      "path": "packages/arbor_llm/test/arbor/llm/tool_result_sensitivity_security_regression_test.exs",
+      "owner_application": "arbor_llm",
+      "original_source": {
+        "path": "apps/arbor_llm/test/arbor/llm/tool_result_sensitivity_security_regression_test.exs",
+        "git_blob": "fd57639d5f952ae0df3ca23885d546f636dd851f",
+        "sha256": "a0a0c5d6cb55d0db1e28b188694e832224a63976389977fc8452687733ed36f4",
+        "bytes": 4048
+      },
+      "prior_target": {
+        "sha256": "204e95bbcea9edd850e523e8f0d89ab12c121fc8c6c060af4f1be72d829411ce",
+        "bytes": 4273
+      },
+      "current_target": {
+        "sha256": "9341649dc9911a798401c83e498a6612dcf66046c6512abca8511f5be441adbe",
+        "bytes": 4346
+      },
+      "fixture_nonce": "abcdefabcdefabcd",
+      "changed_scope": "Only ToolLoop.run options in private run/1 helper; three test blocks are outside that helper.",
+      "case_conservation": {
+        "named_cases_before": 3,
+        "named_cases_after": 3,
+        "labels_and_order_unchanged": true,
+        "all_three_current_case_chunks_byte_identical_to_prior_target": true,
+        "prior_and_current_chunks": [
+          {
+            "label": "security regression: labeled successful tool output cannot reach the next cloud attempt",
+            "chunk_sha256": "ac4b9e639e7bee10673c5f38e9dc4d240227e0bfc383d50efdd9bc41a7e430dc"
+          },
+          {
+            "label": "security regression: labeled error tool output cannot reach the next cloud attempt",
+            "chunk_sha256": "749584107492e8b85e2af7d4764d11c7599b49990b3df951a174ec32efd1435e"
+          },
+          {
+            "label": "security regression: public tool output still permits the next cloud attempt",
+            "chunk_sha256": "90287b77b89e5601efb3649ccf381cb7cab9c75c599dbe9b6efda654759f128b"
+          }
+        ],
+        "leading_assert_refute_macros_before": 14,
+        "leading_assert_refute_macros_after": 14,
+        "tag_lines_before_after": 2,
+        "count_method": "Static named-case/leading assert-refute (including receive) source lines; not a new AST or executed count."
+      },
+      "source_proposal_sha256": "17e8b85503bfe0cea2f41fdf6b3f1fdc710cfbba24c0c450ee3021633ae0d92e",
+      "source_patch_sha256": "207c72a5cd59b220bcb0a4e2717ff1c21b3f694c3225cba408cf65db53f87ffb",
+      "historical_failure_limit": "The actual failed random nonce was not recorded. This source-bound fixture stage does not prove the historical failure cause or claim the proposed controlled diagnostic ran.",
+      "runtime_and_formatting_limit": "The initial source proposal supplied no runtime/formatting credit. Later exact Source14 controlled-diagnostic and owning receipts are bound separately under post_fixture_repair_owning_qualification. Actual normal-hook formatting evidence is separate. No cold credit.",
+      "owning_receipt_sha256": "36724a1682e5653c6e306dfdf4b365e57e00aaf6167fbd4bf6254d74fdecff17",
+      "prior_source_only_stage_status": "SOURCE_BOUND_RUNTIME_PENDING"
+    }
+  ],
+  "post_fixture_repair_owning_qualification": {
+    "source_staged_tree": "80488eb5426b23c4dac35a9a23a8daf316456191",
+    "source_manifest_sha256": "c86844f46f8594048024d96e13716b8f7bdc1c92e55f470d6d25577f64eeccce",
+    "receipt_sha256": "36724a1682e5653c6e306dfdf4b365e57e00aaf6167fbd4bf6254d74fdecff17",
+    "strict_compile_exit": 0,
+    "strict_compile_stderr_empty": true,
+    "controlled_nonce_diagnostic": {
+      "tests": 1,
+      "failures": 0,
+      "source_sha256": "ab2fe7624313ccf76ba25b4428cc0cd974d6524d2e67d10018098dd003311fb8",
+      "observed": "numeric hex framing classifies internal and is denied by unchanged public-only routes; deterministic letter framing classifies public and is admitted."
+    },
+    "focused_whole_files": {
+      "tests": 44,
+      "failures": 0,
+      "excluded_llm_local": 1
+    },
+    "full_owning": {
+      "tests": 1032,
+      "failures": 0,
+      "excluded_llm_local": 1
+    },
+    "all_preservation_guards_passed": true,
+    "cleanup_errors": [],
+    "owned_realm_empty_and_closed": true,
+    "production_source_unchanged": true,
+    "historical_failures": "All earlier failed attempts remain failed; actual historical random nonce remains unknown.",
+    "cold_credit": false,
+    "normal_hook_format_check": "Separate actual normal commit hook evidence; no new standalone formatting or AST proof asserted by this metadata."
+  }
 }

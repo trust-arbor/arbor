@@ -128,6 +128,11 @@ defmodule Arbor.LLM.ToolResultSensitivitySecurityRegressionTest do
       }
     ]
 
-    ToolLoop.run(client, request, tools: tools, tool_executor: LabeledTools, max_turns: 3)
+    ToolLoop.run(client, request,
+      tools: tools,
+      tool_executor: LabeledTools,
+      max_turns: 3,
+      prompt_sanitizer_nonce: "abcdefabcdefabcd"
+    )
   end
 end

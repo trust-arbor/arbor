@@ -147,3 +147,20 @@ refute-family forms), the passing whole Subject file, and two negative controls
 that fail at the intended deadline/cancellation assertions. The full owning run
 remains failed with two other test-fixture issues under investigation. These
 scoped receipts supply no full-suite or cold qualification credit.
+
+A later source-guard correction retains ToolLoop's two forbidden dependency
+checks and dynamic emit check, while replacing a stale qualified-call spelling
+with the actual `Arbor.LLM.Config` alias and `Config.signal_module()` assignment.
+That single guard case now has five leading assert/refute macros versus four
+historically; the map preserves the old counts and pins this explicit addition.
+
+A separate tool-result fixture stage selects an existing fixed prompt-sanitizer
+nonce in its shared run helper. All three case blocks, fourteen assertions and
+two tags remain unchanged from the prior target, as do the finite policy routes
+and production mechanisms. The failed historical random nonce was not recorded;
+this source-bound correction makes no claim that its historical cause was proved.
+A later fresh run passed strict compilation, the one-case controlled nonce
+diagnostic, all 44 focused tests, and the full 1,032-test suite (one local-provider
+case excluded). The map binds that exact source revision and clean preservation
+and cleanup results. Earlier failed attempts remain failed. Normal hook
+formatting is recorded separately; these results supply no cold release credit.
