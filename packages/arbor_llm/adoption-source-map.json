@@ -17467,20 +17467,64 @@
   ],
   "current_tooling_source_and_synthetic_receipt": {
     "source_path": "packages/arbor_llm/scripts/qualify_standalone.py",
-    "source_sha256": "1b7c71197e1b0ac2de69f808d02a237aa78eb4c55bceb41726027d2ce355be8b",
-    "source_bytes": 44676,
+    "source_sha256": "71fb5b80c16da0b508406ac503143dfef624a70266d5fa23809053dda15738b0",
+    "source_bytes": 45089,
     "helper_path": "packages/arbor_trust/scripts/cold_support.py",
     "helper_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
     "helper_bytes": 17745,
-    "synthetic_receipt_sha256": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f",
+    "synthetic_receipt_sha256": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
     "synthetic_tests_by_owner": {
-      "arbor_llm": 14,
+      "arbor_llm": 24,
       "arbor_trust": 79
     },
     "receipt_exit_codes": {
       "arbor_llm": 0,
       "arbor_trust": 0
     },
-    "scope": "Current-at-refresh stdlib synthetic tooling only; no Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+    "scope": "Current LLM24 stdlib synthetic context/input/metadata cases only; Trust79 is carried from its prior receipt for the byte-identical helper and was not rerun. No Mix/ERTS/native/archive/consumer/cold/runtime qualification.",
+    "test_source_path": "packages/arbor_llm/scripts/tests/test_qualify_standalone.py",
+    "test_source_sha256": "150e0beda14fe92c444f91c44be19394313856b7d694003722812b9a3ee617b8",
+    "test_source_bytes": 15522,
+    "synthetic_receipt_owner": "arbor_llm",
+    "synthetic_log_sha256": "347533ae328fe0c8f018052d09fe9be66dd8d46e0ca14f529a9ad19fa74b42df",
+    "synthetic_receipts_by_owner": {
+      "arbor_llm": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
+      "arbor_trust": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f"
+    },
+    "unchanged_helper_receipt_carry_forward": {
+      "owner": "arbor_trust",
+      "tests": 79,
+      "receipt_sha256": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f",
+      "qualified_source_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
+      "source_bytes_unchanged": true,
+      "rerun_for_this_refresh": false
+    },
+    "prior_to_scoped_home_dotenv_guard": {
+      "source_path": "packages/arbor_llm/scripts/qualify_standalone.py",
+      "source_sha256": "1b7c71197e1b0ac2de69f808d02a237aa78eb4c55bceb41726027d2ce355be8b",
+      "source_bytes": 44676,
+      "helper_path": "packages/arbor_trust/scripts/cold_support.py",
+      "helper_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
+      "helper_bytes": 17745,
+      "synthetic_receipt_sha256": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f",
+      "synthetic_tests_by_owner": {
+        "arbor_llm": 14,
+        "arbor_trust": 79
+      },
+      "receipt_exit_codes": {
+        "arbor_llm": 0,
+        "arbor_trust": 0
+      },
+      "scope": "Current-at-refresh stdlib synthetic tooling only; no Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+    },
+    "scoped_home_dotenv_guard_change": {
+      "prior_test_source_sha256": "532c4445ee29db8d91fcfa11c27adb1722495be1e74bb1d056e404bcb90d67fb",
+      "old_LLM_cases_preserved": 14,
+      "new_temporary_context_cases": 10,
+      "actual_public_prepare_boundary_RED_receipt_sha256": "4dd2575a6f0ab0dfa957535790b6a7f3a74d6512c8a2656fa26d9f6d40e15cee",
+      "actual_public_prepare_boundary_RED_log_sha256": "d33db6c1b315a784b5ccb559a4c34e8ff872d260ec554356ca9f4e9e5a4efaf4",
+      "guards_preserved": "Dotenv admission is checked for consumed repository, launch cwd, work and command cwd. Home .erlang/.iex.exs still rejected; unused Home .env is not queried or modified.",
+      "qualification_limit": "Temporary synthetic stdlib tests only; no operator Home inputs, Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+    }
   }
 }

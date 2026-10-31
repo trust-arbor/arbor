@@ -110,9 +110,13 @@ The later 47 owning-case fixture corrections select finite policies or repair
 caller-owned test setup without changing assertions, case names, tags or timing
 budgets. Their separate source proofs and the final formatted target hashes are
 bound by the map. Historical tooling receipts record 11 LLM and 13 Support stdlib
-cases; separately pinned current tooling records 14 LLM and 79 Trust script
-cases. Neither set qualifies a cold VM. The map is a static source/disposition
-ledger, excluded from the Hex payload. Run-specific
+cases, followed by a separately preserved 14-LLM/79-Trust tooling snapshot.
+The current scoped dotenv guard has 24 LLM stdlib cases, including 10 temporary
+context cases that leave unused Home dotenv inputs unqueried while retaining
+consumed-directory dotenv and Home VM-startup refusals. The byte-identical Trust
+helper retains its prior 79-case receipt without a rerun. These tooling receipts
+do not qualify a cold VM. The map is a static source/disposition ledger,
+excluded from the Hex payload. Run-specific
 qualification receipts establish owning behavior and distribution results.
 
 A later readability pass adds scoped aliases and replaces one single-clause

@@ -9,6 +9,7 @@ from contextlib import redirect_stderr
 import hashlib
 import importlib.util
 import io
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -209,6 +210,142 @@ class ColdPrivateInputTests(unittest.TestCase):
             target.write_bytes(original)
         with self.assertRaisesRegex(RuntimeError, 'archive/member/metadata'):
             Q.check_archives(self.work, {'arbor_llm': {**record, 'files': {}}}, {'arbor_llm': files})
+
+
+class ColdStartupContextTests(unittest.TestCase):
+    """Only temporary paths; main stops at the first post-guard helper boundary."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.repository = self.root / 'repository'
+        self.cwd = self.root / 'caller-cwd'
+        self.home = self.root / 'fake-home'
+        self.work = self.root / 'not-yet-prepared'
+        for root in (self.repository, self.cwd, self.home):
+            root.mkdir()
+
+    def arguments(self):
+        values = {
+            'repository': self.repository,
+            'main-root': self.root / 'main',
+            'work-dir': self.work,
+        }
+        arguments = ['qualify_standalone.py', '--prepare']
+        for option in ('repository', 'main-root', 'work-dir', 'mix', 'erlang-root',
+                       'elixir-root', 'hex-archive', 'cc', 'make', 'rebar3',
+                       'sdk-root', 'developer-dir', 'deps-source-cache', 'guard-helper'):
+            arguments += ['--' + option, str(values.get(option, self.root / option))]
+        return arguments + ['--head', '1' * 40, '--main-head', '2' * 40, '--branch', '']
+
+    def prepare_outcome(self):
+        class GuardBoundaryReached(Exception):
+            pass
+
+        original_home = os.environ.get('HOME')
+        work_existed = self.work.exists()
+        with mock.patch.object(Q.Path, 'home', return_value=self.home), \
+                mock.patch.object(Q.Path, 'cwd', return_value=self.cwd), \
+                mock.patch.object(Q.sys, 'argv', self.arguments()), \
+                mock.patch.object(Q, 'load_guard', side_effect=GuardBoundaryReached) as loader, \
+                mock.patch.object(Q, 'source_inputs') as inputs, \
+                mock.patch.object(Q.shutil, 'copyfile') as copy, \
+                mock.patch.object(Q.subprocess, 'Popen') as process:
+            try:
+                Q.main()
+            except GuardBoundaryReached:
+                outcome = ('admitted', None)
+            except RuntimeError as error:
+                outcome = ('rejected', str(error))
+            else:
+                self.fail('Preparation crossed the pinned helper boundary')
+        self.assertEqual(loader.call_count, int(outcome[0] == 'admitted'))
+        inputs.assert_not_called()
+        copy.assert_not_called()
+        process.assert_not_called()
+        self.assertEqual(self.work.exists(), work_existed)
+        self.assertEqual(os.environ.get('HOME'), original_home)
+        return outcome
+
+    def assert_preparation_rejected(self, path):
+        outcome, message = self.prepare_outcome()
+        self.assertEqual(outcome, 'rejected')
+        self.assertEqual(message, 'Startup/dotenv input is not qualified: ' + str(path))
+
+    def test_prepare_ignores_home_dotenv_without_query_or_mutation(self):
+        path = self.home / '.env'
+        path.write_bytes(b'SYNTHETIC_UNUSED_HOME_VALUE=keep-me\n')
+        original = (path.read_bytes(), path.lstat())
+        exists, is_symlink = Path.exists, Path.is_symlink
+
+        def checked_exists(item):
+            self.assertNotEqual(item, path, 'Unused Home dotenv metadata queried')
+            return exists(item)
+
+        def checked_is_symlink(item):
+            self.assertNotEqual(item, path, 'Unused Home dotenv link queried')
+            return is_symlink(item)
+
+        with mock.patch.object(Q.Path, 'exists', checked_exists), \
+                mock.patch.object(Q.Path, 'is_symlink', checked_is_symlink):
+            self.assertEqual(self.prepare_outcome(), ('admitted', None))
+        self.assertEqual(path.lstat(), original[1])
+        self.assertEqual(path.read_bytes(), original[0])
+
+    def test_prepare_rejects_repository_dotenv_before_helper_or_work_creation(self):
+        path = self.repository / '.env'
+        path.write_text('SYNTHETIC_REPOSITORY_VALUE=refuse\n')
+        self.assert_preparation_rejected(path)
+
+    def test_prepare_rejects_caller_cwd_dotenv_before_helper_or_work_creation(self):
+        path = self.cwd / '.env'
+        path.write_text('SYNTHETIC_CWD_VALUE=refuse\n')
+        self.assert_preparation_rejected(path)
+
+    def test_prepare_rejects_work_dotenv_before_helper_or_source_copy(self):
+        self.work.mkdir()
+        path = self.work / '.env'
+        path.write_text('SYNTHETIC_WORK_VALUE=refuse\n')
+        self.assert_preparation_rejected(path)
+
+    def test_prepare_rejects_home_erlang_before_helper_or_work_creation(self):
+        path = self.home / '.erlang'
+        path.write_text('% synthetic startup input\n')
+        self.assert_preparation_rejected(path)
+
+    def test_prepare_rejects_home_iex_before_helper_or_work_creation(self):
+        path = self.home / '.iex.exs'
+        path.write_text('# synthetic startup input\n')
+        self.assert_preparation_rejected(path)
+
+    def test_prepare_rejects_dangling_repository_dotenv_link(self):
+        path = self.repository / '.env'
+        path.symlink_to(self.root / 'absent-dotenv')
+        self.assert_preparation_rejected(path)
+
+    def test_source_hidden_release_cwd_still_rejects_dotenv(self):
+        cwd = self.root / 'source-hidden' / 'release'
+        cwd.mkdir(parents=True)
+        path = cwd / '.env'
+        path.write_text('SYNTHETIC_RELEASE_VALUE=refuse\n')
+        with self.assertRaisesRegex(RuntimeError, 'Startup/dotenv input'):
+            Q.no_startup_files((cwd,), home=self.home)
+
+    def test_actual_command_cwds_still_reject_vm_startup_files(self):
+        for name in ('.erlang', '.iex.exs'):
+            with self.subTest(startup=name):
+                cwd = self.root / ('command-' + name.removeprefix('.'))
+                cwd.mkdir()
+                (cwd / name).write_text('synthetic startup input\n')
+                with self.assertRaisesRegex(RuntimeError, 'Startup/dotenv input'):
+                    Q.no_startup_files((cwd,), home=self.home)
+
+    def test_home_dotenv_is_rejected_when_home_is_an_actual_consumed_cwd(self):
+        path = self.home / '.env'
+        path.write_text('SYNTHETIC_CWD_HOME_VALUE=refuse\n')
+        with self.assertRaisesRegex(RuntimeError, 'Startup/dotenv input'):
+            Q.no_startup_files((self.home,), home=self.home)
 
 
 if __name__ == '__main__':

@@ -295,9 +295,14 @@ def sdk_inputs(args):
             "probe_sha256": sha(NATIVE_PROBE.encode()), "effective_cc": str(Path(selected).resolve())}
 
 
-def no_startup_files(roots):
-    for root in roots:
-        for name in (".env", ".erlang", ".iex.exs"):
+def no_startup_files(roots, *, home):
+    # ReqLLM reads cwd/.env only. Home is not a dotenv search root, while its
+    # actual VM startup files remain forbidden. If Home is an actual cwd, it
+    # is also an explicit root and its .env is rejected in that context.
+    contexts = [(root, (".env", ".erlang", ".iex.exs")) for root in roots]
+    contexts.append((home, (".erlang", ".iex.exs")))
+    for root, names in contexts:
+        for name in names:
             path = root / name
             require(not path.exists() and not path.is_symlink(), f"Startup/dotenv input is not qualified: {path}")
 
@@ -383,7 +388,7 @@ def main():
     work = args.work_dir
     for source in (args.repository, args.main_root, args.deps_source_cache, args.erlang_root, args.elixir_root, args.hex_archive, args.sdk_root):
         require(not work.is_relative_to(source) and not source.is_relative_to(work) or source == args.main_root and work.is_relative_to(source / "tmp/verification"), "Evidence overlaps a source/tool/build input")
-    no_startup_files((args.repository, Path.home()))
+    no_startup_files((args.repository, Path.cwd(), work), home=Path.home())
     helper = load_guard(args.guard_helper)
     script = Path(__file__).resolve()
     tools = {"mix": args.mix, "erl": args.erlang_root / "bin/erl", "epmd": args.erlang_root / "bin/epmd", "elixir_mix": args.elixir_root / "bin/mix", "elixir": args.elixir_root / "bin/elixir", "cc": args.cc, "make": args.make, "rebar3": args.rebar3}
@@ -461,7 +466,7 @@ def main():
         require(audit["comparison"]["accepted"], "Main compiled/static input guard changed; HOLD")
         require(sha((work / "source-manifest.json").read_bytes()) == state["manifest_sha256"], "Input manifest changed")
         require(git_guards(args, helper) == manifest["preservation"], "Source, stash, operator or dotenv changed")
-        no_startup_files((args.repository, Path.home()))
+        no_startup_files((args.repository, Path.cwd(), work), home=Path.home())
         require(sha(script.read_bytes()) == inputs["script_sha256"] and sha(args.guard_helper.read_bytes()) == GUARD_SHA256 and
                 sha((work / "tooling/cold_support.py").read_bytes()) == GUARD_SHA256, "Qualification tooling changed")
         require(source_inputs(args, helper) == (source, lock) and sdk_inputs(args) == inputs["native_sdk"], "Published/dependency/native source changed")
@@ -537,7 +542,7 @@ def main():
 
     def command(label, cwd, env, argv, mix=True):
         guard("before-" + label)
-        no_startup_files((cwd,))
+        no_startup_files((cwd,), home=Path.home())
         require(daemon.poll() is None and helper.names(port) == "", "Owned EPMD unavailable/occupied before command")
         executable = [str(args.mix), *argv] if mix else list(map(str, argv))
         stdout, stderr = work / (label + ".stdout.log"), work / (label + ".stderr.log")
