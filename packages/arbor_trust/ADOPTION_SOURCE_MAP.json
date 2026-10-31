@@ -140,12 +140,12 @@
       "source_git_blob": "5dd1f12b81bb2d38dda27a448fa8d25a38b4be09",
       "source_sha256": "2f763897a35bae80a828c92380f6ae01aae2ed35eae1536704fc97cccb2ccedf",
       "source_bytes": 17401,
-      "disposition": "canonical_package_move",
+      "disposition": "canonical_package_move_with_json_safe_metadata_timestamp_correction",
       "destinations": [
         {
           "path": "packages/arbor_trust/lib/arbor/trust/capability_grant_owner.ex",
-          "final_destination_sha256": "2f763897a35bae80a828c92380f6ae01aae2ed35eae1536704fc97cccb2ccedf",
-          "bytes": 17401
+          "final_destination_sha256": "62badb9123ce6ff1e5de8aae6e17c88a85c14616fa312978e19cc69b384fe29d",
+          "bytes": 17422
         }
       ]
     },
@@ -1208,6 +1208,18 @@
     {
       "path": "packages/arbor_trust/lib/arbor/trust/runtime.ex",
       "final_destination_sha256": "8bc128907b01b6d05ea6a0705cac8c81392b7e83ee032e9182164adf35ba3546"
+    },
+    {
+      "path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_json_file_security_regression_test.exs",
+      "final_destination_sha256": "46ba20b46002beb1fd10cdc033141619fe7366f7ac5ba86f7b4725bfdbfeea4a",
+      "bytes": 2446,
+      "kind": "owning_security_regression"
+    },
+    {
+      "path": "packages/arbor_trust/test/support/grant_owner_json_peer.ex",
+      "final_destination_sha256": "610b685efa24ea694ae5d3fd8734a63a0a28eda6062e9665e5464e1a199f63e8",
+      "bytes": 20200,
+      "kind": "owning_test_support"
     }
   ],
   "qualification": "Source disposition only; BEAM/build/tests/cold/Grok qualification is recorded separately in run-specific receipts.",
@@ -1226,7 +1238,7 @@
     },
     {
       "path": "packages/arbor_trust/README.md",
-      "final_destination_sha256": "75fe045e2dc2588bcba187e82ad37680eda956673dde52a799c8a3cdeb11a3ab"
+      "final_destination_sha256": "87492a18fb7e39a00f671bb99a60b4700382215e20eef9323641a8956451eee0"
     },
     {
       "path": "packages/arbor_trust/LICENSE",
@@ -1245,5 +1257,23 @@
       "final_destination_sha256": "164d5afb6e18cc9abd72262e0a8942f14eca88aadf9f489661d63aeed2701b51"
     }
   ],
-  "readability_adjustments": "Extraction-only lint fixes use aliases for new Runtime/Observation/ProfileSync/ProfileStore/Persistence.Core calls and order newly added aliases. Trust Store.init uses case for the closed ProfileSync :ok/{:error, reason} protocol, preserving subscription-before-ETS initialization and exact stop behavior; malformed returns still fail closed."
+  "readability_adjustments": "Extraction-only lint fixes use aliases for new Runtime/Observation/ProfileSync/ProfileStore/Persistence.Core calls and order newly added aliases. Trust Store.init uses case for the closed ProfileSync :ok/{:error, reason} protocol, preserving subscription-before-ETS initialization and exact stop behavior; malformed returns still fail closed.",
+  "prerequisite_corrections": [
+    {
+      "id": "json_safe_grant_metadata_timestamp",
+      "source_path": "apps/arbor_trust/lib/arbor/trust/capability_grant_owner.ex",
+      "destination_path": "packages/arbor_trust/lib/arbor/trust/capability_grant_owner.ex",
+      "scope": "Correct the inherited producer incompatibility: nested diagnostic metadata.granted_at is emitted as an ISO8601 string rather than a DateTime struct so the existing strict authenticated JSONFile record can represent it.",
+      "preserved": [
+        "Formal Capability.granted_at remains a DateTime.",
+        "For a fixed instant, actual old/current production signing-payload bytes are unchanged by the nested timestamp representation.",
+        "No Serializer, RecordAuthenticator, TaintEnvelope, signing/domain/version, nonce, ownership or authority-policy change.",
+        "Original Main source Git blob, source SHA and source byte count remain historical facts; original test dispositions and conservation evidence are unchanged."
+      ],
+      "regression_test": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_json_file_security_regression_test.exs",
+      "regression_helper": "packages/arbor_trust/test/support/grant_owner_json_peer.ex",
+      "oracle": "Real canonical Owner.request in a strict fresh-peer JSONFile composition; no FakeSecurity, fixture grant or fabricated app metadata. Public list/authorize are hot behavior controls; physical reopen remains a separate cold gate.",
+      "unfixed_regression_revision": "d419b32280f937d963bd372f9d7b92c8e0515ca7"
+    }
+  ]
 }

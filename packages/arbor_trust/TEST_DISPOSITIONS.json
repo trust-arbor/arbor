@@ -4,7 +4,7 @@
   "owning_suite_source_files": 44,
   "support_and_helper_source_files": 2,
   "original_named_test_and_property_forms": 697,
-  "current_named_test_and_property_forms": 705,
+  "current_named_test_and_property_forms": 706,
   "original_assertion_lines_all_conserved_with_multiplicity": true,
   "test_labels_conserved_after_explicit_renames": true,
   "label_renames": [
@@ -71,6 +71,12 @@
     {
       "kind": "test",
       "label": "product composition explicitly retains the previous PubSub binding"
+    },
+    {
+      "kind": "test",
+      "label": "security regression: real grant owner persists a target-signed JIT grant in authenticated JSONFile",
+      "path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_json_file_security_regression_test.exs",
+      "bound": "Actual canonical grant owner must acknowledge a target-signed policy grant with strict authenticated JSONFile storage; preserve signature/session/replay and JSON-shaped nested metadata."
     }
   ],
   "rows": [
@@ -3858,7 +3864,7 @@
     "Configured pubsub:nil denotes omitted event ingestion/freeze sync, never a healthy subscription. Actual product pubsub assertion is Host-owned.",
     "Owning Manager PubSub fixtures explicitly start the optional third-party application; rejected Store startup probe traps initialization links while asserting the exact public error and absent process/cache ownership."
   ],
-  "fixture_provenance": "Existing Trust.TestHelpers retained with only a test-tooling Boundary. Graduation fixture remains actual Capabilities-owned source loaded only from product Host suite; no new Security behavior stub or foreign-source import in owning package.",
+  "fixture_provenance": "Existing Trust.TestHelpers retained with only a test-tooling Boundary. Graduation fixture remains actual Capabilities-owned source loaded only from product Host suite; no new Security behavior stub or foreign-source import in owning package. The grant-owner JSONFile regression adds genuine Trust-owned compiled support, a separate declared-session provisioner child under the actual canonical Trust supervisor and a fresh peer configured strictly before Core starts. No TestBootstrap or fixture-grant API runs in that peer; only public operator/target enrollment and provisioning are reused from the independent consumer. Its public list/authorization assertions are hot behavior controls, not independent physical durable readback.",
   "qualification": "Static test conservation only; execution results are recorded separately in run-specific receipts.",
   "new_test_files": [
     {
@@ -3887,6 +3893,23 @@
       "bytes": 200,
       "named_forms": [],
       "disposition": "New explicit product Host test bootstrap; canonical package helper remains separately conserved."
+    },
+    {
+      "path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_json_file_security_regression_test.exs",
+      "final_destination_sha256": "46ba20b46002beb1fd10cdc033141619fe7366f7ac5ba86f7b4725bfdbfeea4a",
+      "bytes": 2446,
+      "named_forms": [
+        "security regression: real grant owner persists a target-signed JIT grant in authenticated JSONFile"
+      ],
+      "assertion_form_count": 19,
+      "disposition": "New behavioral owning regression for the inherited JSON-safe producer prerequisite; strict fresh peer and real canonical Owner.request are the RED/GREEN oracle."
+    },
+    {
+      "path": "packages/arbor_trust/test/support/grant_owner_json_peer.ex",
+      "final_destination_sha256": "610b685efa24ea694ae5d3fd8734a63a0a28eda6062e9665e5464e1a199f63e8",
+      "bytes": 20200,
+      "named_forms": [],
+      "disposition": "New genuine owning-app test support compiled by existing test/support elixirc_paths; actual Trust application/supervisor/owner, caller-owned public bootstrap and self-contained private non-distributed peer."
     }
   ],
   "owning_durable_tests_retained": [
@@ -3898,5 +3921,16 @@
     "application_spec_security_regression_test.exs": "actual KernelRuntime restricted-peer product boot composition; active canonical Core app metadata assertions updated to its independent closure",
     "provider_gate_lifecycle_security_regression_test.exs": "actual KernelRuntime name-first provider-root lifecycle and product SQL/PubSub roots",
     "graduation_security_regression_test.exs": "actual production OIDC/JWT/Capabilities answered-human approval fixture; imports remain product-only"
-  }
+  },
+  "prerequisite_security_regressions": [
+    {
+      "id": "json_safe_grant_metadata_timestamp",
+      "test_path": "packages/arbor_trust/test/arbor/trust/capability_grant_owner_json_file_security_regression_test.exs",
+      "helper_path": "packages/arbor_trust/test/support/grant_owner_json_peer.ex",
+      "unfixed_revision": "d419b32280f937d963bd372f9d7b92c8e0515ca7",
+      "production_change": "Only CapabilityGrantOwner nested metadata.granted_at becomes DateTime.to_iso8601(DateTime.utc_now()).",
+      "actual_oracle": "assert {:ok, %Capability{}} on untouched real canonical Owner.request result, after strict JSONFile and genuine app/PID/supervisor provenance checks",
+      "strict_peer": "Normal genuine :arbor_trust application metadata, no name/distribution, own private initial cookie and canonical private state; no fake app spec/provider, private-state reads or nonce preverification."
+    }
+  ]
 }

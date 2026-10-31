@@ -6,6 +6,14 @@ policy, URI, profile encoding, grant-owner custody and supervision identities.
 The product integration is the separate passive `arbor_trust_host` application.
 No frozen sibling implementation or contract/helper copies are used.
 
+Adoption also corrects an inherited JSONFile incompatibility in the grant
+producer: the duplicate diagnostic `metadata.granted_at` is now an ISO 8601
+string rather than a `DateTime` struct. The formal `Capability.granted_at`
+field remains a `DateTime`. For the same instant, the issuer signing payload
+is byte-identical; authenticated-record encoding and its strict JSON data
+model are unchanged. Existing JSON metadata already reads as strings, so this
+producer correction requires no record migration or authority-format change.
+
 ## Explicit composition
 
 The package depends on public Kernel, Capabilities, Support and Persistence
@@ -68,8 +76,14 @@ true defaults; product configuration carries its existing explicit values.
 
 ## Owning and integration tests
 
-Owning tests use private test authority state, an explicit memory profile store
-and the real public Capabilities test bootstrap. They do not load product
+Most owning tests use private test authority state, an explicit memory profile
+store and the real public Capabilities test bootstrap. The grant-owner JSONFile
+regression uses a fresh non-distributed peer with strict durable Core settings
+installed before Core starts. Its provisioner belongs to the genuine Trust
+application and calls the real canonical grant owner; no test bootstrap or
+fixture-grant API runs inside that peer. Public list/authorization checks are
+hot behavior controls; independent durable reopen remains a cold gate.
+Owning tests do not load product
 configuration or import another package's test sources. Product boot/gate,
 repo-source audit and OIDC-backed approval integration assertions are retained
 under `apps/arbor_trust_host/test`. `ADOPTION_SOURCE_MAP.json` and
