@@ -17481,28 +17481,28 @@
   ],
   "current_tooling_source_and_synthetic_receipt": {
     "source_path": "packages/arbor_llm/scripts/qualify_standalone.py",
-    "source_sha256": "71fb5b80c16da0b508406ac503143dfef624a70266d5fa23809053dda15738b0",
-    "source_bytes": 45089,
+    "source_sha256": "376913dee03faadb0782168f55400887760c38d08424223f0aefac6bbd2d3343",
+    "source_bytes": 49456,
     "helper_path": "packages/arbor_trust/scripts/cold_support.py",
     "helper_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
     "helper_bytes": 17745,
-    "synthetic_receipt_sha256": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
+    "synthetic_receipt_sha256": "60d2253fbc7d749ad62fd51fd0a75ab891a046f125cc5d85d2aa33823b783a05",
     "synthetic_tests_by_owner": {
-      "arbor_llm": 24,
+      "arbor_llm": 34,
       "arbor_trust": 79
     },
     "receipt_exit_codes": {
       "arbor_llm": 0,
       "arbor_trust": 0
     },
-    "scope": "Current LLM24 stdlib synthetic context/input/metadata cases only; Trust79 is carried from its prior receipt for the byte-identical helper and was not rerun. No Mix/ERTS/native/archive/consumer/cold/runtime qualification.",
+    "scope": "Current LLM34 stdlib synthetic copied-input/context/source-published-metadata cases passed; old24 literal methods preserved and10 metadata cases added. Trust79 is carried from its prior receipt for the byte-identical helper and was not rerun. No Mix/ERTS/native/archive/consumer/cold/runtime qualification.",
     "test_source_path": "packages/arbor_llm/scripts/tests/test_qualify_standalone.py",
-    "test_source_sha256": "150e0beda14fe92c444f91c44be19394313856b7d694003722812b9a3ee617b8",
-    "test_source_bytes": 15522,
+    "test_source_sha256": "fd7f955ed9a02773a51f25ec383ff47a45be566bed59e70cd011aca81276bde2",
+    "test_source_bytes": 31452,
     "synthetic_receipt_owner": "arbor_llm",
-    "synthetic_log_sha256": "347533ae328fe0c8f018052d09fe9be66dd8d46e0ca14f529a9ad19fa74b42df",
+    "synthetic_log_sha256": "49f315d70ec2462ab0df27ad5c7e4e8d31e19e8d57f5ff5ac77c2c160df2b39b",
     "synthetic_receipts_by_owner": {
-      "arbor_llm": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
+      "arbor_llm": "60d2253fbc7d749ad62fd51fd0a75ab891a046f125cc5d85d2aa33823b783a05",
       "arbor_trust": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f"
     },
     "unchanged_helper_receipt_carry_forward": {
@@ -17539,6 +17539,124 @@
       "actual_public_prepare_boundary_RED_log_sha256": "d33db6c1b315a784b5ccb559a4c34e8ff872d260ec554356ca9f4e9e5a4efaf4",
       "guards_preserved": "Dotenv admission is checked for consumed repository, launch cwd, work and command cwd. Home .erlang/.iex.exs still rejected; unused Home .env is not queried or modified.",
       "qualification_limit": "Temporary synthetic stdlib tests only; no operator Home inputs, Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+    },
+    "prior_to_authenticated_published_app_metadata": {
+      "source_path": "packages/arbor_llm/scripts/qualify_standalone.py",
+      "source_sha256": "71fb5b80c16da0b508406ac503143dfef624a70266d5fa23809053dda15738b0",
+      "source_bytes": 45089,
+      "helper_path": "packages/arbor_trust/scripts/cold_support.py",
+      "helper_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
+      "helper_bytes": 17745,
+      "synthetic_receipt_sha256": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
+      "synthetic_tests_by_owner": {
+        "arbor_llm": 24,
+        "arbor_trust": 79
+      },
+      "receipt_exit_codes": {
+        "arbor_llm": 0,
+        "arbor_trust": 0
+      },
+      "scope": "Current LLM24 stdlib synthetic context/input/metadata cases only; Trust79 is carried from its prior receipt for the byte-identical helper and was not rerun. No Mix/ERTS/native/archive/consumer/cold/runtime qualification.",
+      "test_source_path": "packages/arbor_llm/scripts/tests/test_qualify_standalone.py",
+      "test_source_sha256": "150e0beda14fe92c444f91c44be19394313856b7d694003722812b9a3ee617b8",
+      "test_source_bytes": 15522,
+      "synthetic_receipt_owner": "arbor_llm",
+      "synthetic_log_sha256": "347533ae328fe0c8f018052d09fe9be66dd8d46e0ca14f529a9ad19fa74b42df",
+      "synthetic_receipts_by_owner": {
+        "arbor_llm": "a652fd937ce83569718cb5a3c633d147e20d3256d6fb5afa81c242e62b6c036b",
+        "arbor_trust": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f"
+      },
+      "unchanged_helper_receipt_carry_forward": {
+        "owner": "arbor_trust",
+        "tests": 79,
+        "receipt_sha256": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f",
+        "qualified_source_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
+        "source_bytes_unchanged": true,
+        "rerun_for_this_refresh": false
+      },
+      "prior_to_scoped_home_dotenv_guard": {
+        "source_path": "packages/arbor_llm/scripts/qualify_standalone.py",
+        "source_sha256": "1b7c71197e1b0ac2de69f808d02a237aa78eb4c55bceb41726027d2ce355be8b",
+        "source_bytes": 44676,
+        "helper_path": "packages/arbor_trust/scripts/cold_support.py",
+        "helper_sha256": "8beec5f29d2efc13880db83aaa4d871b505f017efbcc1cf99a675d71a034fbd5",
+        "helper_bytes": 17745,
+        "synthetic_receipt_sha256": "08c606a7b426ce4fe72c266d03328eb75c0d5e1e92cd1431c34ab0884841e81f",
+        "synthetic_tests_by_owner": {
+          "arbor_llm": 14,
+          "arbor_trust": 79
+        },
+        "receipt_exit_codes": {
+          "arbor_llm": 0,
+          "arbor_trust": 0
+        },
+        "scope": "Current-at-refresh stdlib synthetic tooling only; no Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+      },
+      "scoped_home_dotenv_guard_change": {
+        "prior_test_source_sha256": "532c4445ee29db8d91fcfa11c27adb1722495be1e74bb1d056e404bcb90d67fb",
+        "old_LLM_cases_preserved": 14,
+        "new_temporary_context_cases": 10,
+        "actual_public_prepare_boundary_RED_receipt_sha256": "4dd2575a6f0ab0dfa957535790b6a7f3a74d6512c8a2656fa26d9f6d40e15cee",
+        "actual_public_prepare_boundary_RED_log_sha256": "d33db6c1b315a784b5ccb559a4c34e8ff872d260ec554356ca9f4e9e5a4efaf4",
+        "guards_preserved": "Dotenv admission is checked for consumed repository, launch cwd, work and command cwd. Home .erlang/.iex.exs still rejected; unused Home .env is not queried or modified.",
+        "qualification_limit": "Temporary synthetic stdlib tests only; no operator Home inputs, Mix/ERTS/native/archive/consumer/cold/runtime qualification."
+      }
+    },
+    "authenticated_source_published_OTP_metadata_change": {
+      "provenance_receipt_sha256": "f0a0bd4371acada63e09292e9e39aef121774fce506506a93e013a9415a4206e",
+      "source_published_app_specs": {
+        "cowboy": {
+          "archive_outer_sha256": "986dae81f99fcb78ef2d8efc21d738cee189410840eeaf32eca84ada81dcf6d4",
+          "bytes": 756,
+          "hex_metadata_sha256": "320375eec29e5bf340589232f2ae2899b0d48cd5932142b510a5d3d6642bbd83",
+          "path": "ebin/cowboy.app",
+          "sha256": "34f072736f37da31b80c82b2b357a441fa45f69c08211abba6dc8303f201553f",
+          "version": "2.19.0"
+        },
+        "cowlib": {
+          "archive_outer_sha256": "7d41a0dd2c093041ff3779ac5fe8a1585a68ec7cb2dd1de0536bdd2452fd7ba1",
+          "bytes": 572,
+          "hex_metadata_sha256": "4569655b0afdfc44702348e8b74a6db73e93bf5cd77f1b4802ecd4ca2f842823",
+          "path": "ebin/cowlib.app",
+          "sha256": "c64ea2269044c2619912757c6c00b89c2813873ed7abbad4bfadff8c0be5bb19",
+          "version": "2.20.0"
+        },
+        "ranch": {
+          "archive_outer_sha256": "6168ec49409d982f7cfbd83dd083144f6cbe67caa4036551d2f0a3ad67c9d023",
+          "bytes": 550,
+          "hex_metadata_sha256": "5858e89c5c8f1749197f7eb8da8cfc34920327a4fc959bf2d9e994f6a301ec6e",
+          "path": "ebin/ranch.app",
+          "sha256": "924595f963fe157a3b3ab3ee207c934b091afa597e57d40985116d70c613b585",
+          "version": "2.3.0"
+        }
+      },
+      "old_LLM_cases_preserved_literal_source": 24,
+      "new_synthetic_cases_declared": 10,
+      "current_LLM_cases_declared": 34,
+      "actual_new_synthetic_receipt_status": "PASS_SYNTHETIC_SOURCE_SELECTION_AND_GUARD_UNIT_TESTS",
+      "dependency_count": 31,
+      "source_and_data_input_count_before": 1032,
+      "source_and_data_input_count_after": 1035,
+      "extra_selected_files": 3,
+      "Ranch_appup": "src/ranch.appup already selected and byte-identical to ebin/ranch.appup; no duplicate ebin.appup admission.",
+      "selection_limit": "Only3 exact archive/lock-authenticated regular single-link bounded UTF8 app specifications. Whole ebin exclusion and executable artifact bans remain; private declared metadata roots reject extra ebin artifacts.",
+      "source_helper_assessment": "Shared helper8bee sources_only already permits .app; whole ebin exclusion was the omission. Shared helper source/79-case receipt unchanged and not rerun.",
+      "regression_contract": "Existing source_inputs/copier callable must preserve authenticated app specs; predecessor fails missing-metadata assertion, not a missing new API. Existing24 methods literal-source unchanged.",
+      "retained_cold02_failure": {
+        "status": "HOLD",
+        "cause": "Source selector omitted required source-published app specs before Rebar bare compile. Existing8 prior steps passed, consumer-deps-compile failed; cleanup/preservation remained accepted.",
+        "new_cold_pass_credit": false,
+        "result_receipt_sha256": "463827139aa3326d18d10bff3880fe8c62dd99dba777d4f9e804a85acfe8afdc",
+        "closure_receipt_sha256": "43f4da79fe3781b5f6783c7b493280440d1697ee0070b6a1594bb807e5e4f9ac"
+      },
+      "qualification_limit": "Actual34 stdlib synthetic cases only; expected real-cache1035 input count derives from sealed1032 plus3 authenticated source specs. No Mix/ERTS/Rebar/native/consumer/cold/runtime pass asserted.",
+      "actual_new_synthetic_receipt_sha256": "60d2253fbc7d749ad62fd51fd0a75ab891a046f125cc5d85d2aa33823b783a05",
+      "actual_new_synthetic_log_sha256": "49f315d70ec2462ab0df27ad5c7e4e8d31e19e8d57f5ff5ac77c2c160df2b39b",
+      "actual_tests": 34,
+      "actual_failures": 0,
+      "actual_exit_code": 0,
+      "predecessor_existing_callable_RED_receipt_sha256": "972a30e1d09a976006e759fb6c6a32c25534b3911e7366146b035c11a6d1e4bf",
+      "predecessor_observed_failure": "Existing source_inputs omitted ebin/cowboy.app; assertIn failed at the selected existing-callable case, not setup or missing API."
     }
   },
   "test_reliability_source_stages": [

@@ -41,6 +41,9 @@ PACKAGES = {
 DEPENDENCIES = ("abnf_parsec", "boundary", "cowboy", "cowboy_telemetry", "cowlib", "dotenvy", "finch", "hpax", "idna", "jason", "jsv", "llm_db", "mime", "mint", "nimble_options", "nimble_parsec", "nimble_pool", "plug", "plug_cowboy", "plug_crypto", "ranch", "req", "req_llm", "server_sent_events", "splode", "telemetry", "texture", "toml", "typed_struct", "websockex", "zoi")
 CONSUMER_FILES = ("lib", "config", "mix.exs", "mix.lock", "README.md")
 EXCLUDES = frozenset(("_build", "deps", ".git", ".elixir_ls", "cover", "doc", "ebin"))
+# Exact source-published OTP specifications authenticated against public Hex
+# archives/lock checksums. Not generated applications or executable seeds.
+PUBLISHED_APP_METADATA = {'cowboy': {'version': '2.19.0', 'archive_outer_sha256': '986dae81f99fcb78ef2d8efc21d738cee189410840eeaf32eca84ada81dcf6d4', 'path': 'ebin/cowboy.app', 'bytes': 756, 'sha256': '34f072736f37da31b80c82b2b357a441fa45f69c08211abba6dc8303f201553f', 'hex_metadata_sha256': '320375eec29e5bf340589232f2ae2899b0d48cd5932142b510a5d3d6642bbd83'}, 'cowlib': {'version': '2.20.0', 'archive_outer_sha256': '7d41a0dd2c093041ff3779ac5fe8a1585a68ec7cb2dd1de0536bdd2452fd7ba1', 'path': 'ebin/cowlib.app', 'bytes': 572, 'sha256': 'c64ea2269044c2619912757c6c00b89c2813873ed7abbad4bfadff8c0be5bb19', 'hex_metadata_sha256': '4569655b0afdfc44702348e8b74a6db73e93bf5cd77f1b4802ecd4ca2f842823'}, 'ranch': {'version': '2.3.0', 'archive_outer_sha256': '6168ec49409d982f7cfbd83dd083144f6cbe67caa4036551d2f0a3ad67c9d023', 'path': 'ebin/ranch.app', 'bytes': 550, 'sha256': '924595f963fe157a3b3ab3ee207c934b091afa597e57d40985116d70c613b585', 'hex_metadata_sha256': '5858e89c5c8f1749197f7eb8da8cfc34920327a4fc959bf2d9e994f6a301ec6e'}}
 POLICIES = ("strict", "reviewed-boundary-view-v2", "reviewed-boundary-view-v2-nine")
 SDK_INPUTS = ("SDKSettings.json", "SDKSettings.plist", "usr/lib/libSystem.B.tbd", "usr/include/errno.h", "usr/include/fcntl.h", "usr/include/inttypes.h", "usr/include/stdint.h", "usr/include/stdio.h", "usr/include/stdlib.h", "usr/include/string.h", "usr/include/sys/stat.h", "usr/include/sys/types.h", "usr/include/unistd.h")
 NATIVE_PROBE = """#include <errno.h>
@@ -243,6 +246,55 @@ def private_input_root(work, relative):
     return present[0]
 
 
+def published_app_spec(root, name, helper, private=False):
+    """Read only one closed, archive-authenticated source spec; never whole ebin."""
+    spec = PUBLISHED_APP_METADATA[name]
+    path = root / spec["path"]
+    require(path.parent.is_dir() and not path.parent.is_symlink() and path.parent.resolve() == path.parent,
+            "Source-published OTP metadata parent is missing/linked")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == spec["bytes"] <= 4096,
+                "Source-published OTP metadata must be bounded regular single-link text")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(4097)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+        require(all(getattr(before, field) == getattr(after, field) for field in fields),
+                "Source-published OTP metadata changed during read")
+    finally:
+        os.close(fd)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Source-published OTP metadata must be UTF8 text") from error
+    require("\0" not in text and sha(data) == spec["sha256"], "Source-published OTP metadata differs from authenticated archive")
+    require(helper.source_files(root, ("hex_metadata.config",))["hex_metadata.config"] == spec["hex_metadata_sha256"],
+            "Source-published OTP metadata package manifest differs")
+    if private:
+        require(sorted(item.name for item in path.parent.iterdir()) == [path.name],
+                "Private source-published OTP ebin has unreviewed extra outputs")
+    return {spec["path"]: spec["sha256"]}
+
+
+def dependency_source_files(root, name, helper, private=False):
+    files = helper.source_files(root, excludes=EXCLUDES, sources_only=True)
+    if name in PUBLISHED_APP_METADATA:
+        files.update(published_app_spec(root, name, helper, private=private))
+    return dict(sorted(files.items()))
+
+
+def check_published_app_lock(lock):
+    text = lock.decode("utf-8")
+    for name, spec in PUBLISHED_APP_METADATA.items():
+        row = next((line for line in text.splitlines() if line.startswith('  "' + name + '":')), "")
+        require(row.startswith('  "' + name + '": {:hex, :' + name + ', "' + spec["version"] + '", ') and
+                row.endswith(', "hexpm", "' + spec["archive_outer_sha256"] + '"},'),
+                "Source-published OTP metadata version/archive lock differs: " + name)
+
+
 def check_private_inputs(work, records, helper):
     """Exact copied inputs, retaining only explicit compiler-output exclusions."""
     for relative, record in records.items():
@@ -251,7 +303,14 @@ def check_private_inputs(work, records, helper):
         # EXCLUDES also matches the reviewed source-only cache selection; it is
         # never applied to first-party packages, the consumer or the Hex tool.
         excludes = EXCLUDES if record["dependency"] else frozenset()
-        actual = helper.source_files(root, excludes=excludes, sources_only=record["dependency"])
+        name = Path(relative).name
+        spec = PUBLISHED_APP_METADATA.get(name) if record["dependency"] else None
+        # Real new dependency records always include the authenticated spec.
+        # Existing unpinned compiler-output fixtures retain their exclusion rule.
+        if spec and spec["path"] in record["files"]:
+            actual = dependency_source_files(root, name, helper, private=True)
+        else:
+            actual = helper.source_files(root, excludes=excludes, sources_only=record["dependency"])
         require(actual == record["files"], "Copied private source/tool input changed: " + relative)
 
 
@@ -313,10 +372,12 @@ def source_inputs(args, helper):
     lock = public_lock((args.repository / "mix.lock").read_bytes())
     require((args.repository / "packages/arbor_llm/examples/standalone/mix.lock").read_bytes() == lock,
             "Consumer lock differs from the reviewed 31 public Root records")
-    dependencies = {name: helper.source_files(args.deps_source_cache / name, excludes=EXCLUDES, sources_only=True) for name in DEPENDENCIES}
+    check_published_app_lock(lock)
+    dependencies = {name: dependency_source_files(args.deps_source_cache / name, name, helper) for name in DEPENDENCIES}
     require(all(".hex" in files for files in dependencies.values()), "Missing pinned Hex source marker")
     return {"published": published, "consumer": fixture, "dependencies": dependencies,
-            "hex_tool": helper.source_files(args.hex_archive), "public_lock_sha256": sha(lock)}, lock
+            "hex_tool": helper.source_files(args.hex_archive), "public_lock_sha256": sha(lock),
+            "source_published_OTP_metadata": PUBLISHED_APP_METADATA}, lock
 
 
 def git_guards(args, helper):
@@ -584,7 +645,7 @@ def main():
         for name in PACKAGES:
             require(helper.source_files(work / ("producer-" + name), PACKAGES[name][1]) == source["published"][name], "Copied producer input changed")
         require(helper.source_files(work / "consumer", CONSUMER_FILES) == source["consumer"], "Copied fixture changed")
-        require({name: helper.source_files(work / "deps" / name, excludes=EXCLUDES, sources_only=True) for name in DEPENDENCIES} == source["dependencies"], "Copied dependency input changed")
+        require({name: dependency_source_files(work / "deps" / name, name, helper, private=True) for name in DEPENDENCIES} == source["dependencies"], "Copied dependency input changed")
         require(helper.source_files(work / "tool-archives" / args.hex_archive.name) == source["hex_tool"], "Copied Hex tool changed")
         cookie = "llm_cold_" + secrets.token_hex(24)
         with socket.socket() as reservation:

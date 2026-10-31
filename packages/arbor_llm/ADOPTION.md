@@ -111,12 +111,15 @@ caller-owned setup repairs left assertions, case names, tags and timing budgets
 unchanged. Those stage-specific proofs and formatted target hashes remain
 bound by the map; the separate later Subject exception is described below.
 Historical tooling receipts record 11 LLM and 13 Support stdlib
-cases, followed by a separately preserved 14-LLM/79-Trust tooling snapshot.
-The current scoped dotenv guard has 24 LLM stdlib cases, including 10 temporary
-context cases that leave unused Home dotenv inputs unqueried while retaining
-consumed-directory dotenv and Home VM-startup refusals. The byte-identical Trust
-helper retains its prior 79-case receipt without a rerun. These tooling receipts
-do not qualify a cold VM. The map is a static source/disposition ledger,
+cases, followed by separately preserved 14-LLM/79-Trust and scoped-Home-guard
+24-LLM snapshots. The current copier source admits only three authenticated,
+source-published OTP app specifications for Ranch, Cowlib and Cowboy; its 31
+public dependencies select 1035 source/data inputs by the recorded source map
+and three-spec addition. All 34 stdlib cases passed, retaining the prior 24
+literal methods and adding 10 metadata controls. The scoped Home guard stays
+unchanged, and the byte-identical Trust helper retains its prior 79-case receipt
+without a rerun. The retained cold02 copier failure remains a HOLD. These tooling
+records do not qualify a cold VM. The map is a static source/disposition ledger,
 excluded from the Hex payload. Run-specific
 qualification receipts establish owning behavior and distribution results.
 
