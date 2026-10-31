@@ -7,7 +7,9 @@ build artifacts, publishes, changes HOME, mutates Git or removes source/evidence
 A real predecessor rollback release is mandatory for composed final acceptance.
 """
 import argparse
+import contextlib
 import copy
+import ctypes
 import hashlib
 import json
 import os
@@ -17,6 +19,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -294,6 +297,279 @@ def record_main_build_guard(work, sequence, label, initial, root, policy):
                         "reasons": comparison["reasons"]}
 
 
+STATE_MOUNT_LABELS = ("candidate-conflict", "candidate-namespace_rollback_attack", "actual-predecessor-rollback")
+
+
+def owned_state_directory(path, device=None, private=False):
+    require(path.is_absolute() and path.resolve(strict=True) == path, "Noncanonical state directory")
+    value = path.lstat()
+    require(stat.S_ISDIR(value.st_mode) and value.st_uid == os.getuid(), "Unowned state directory")
+    require(device is None or value.st_dev == device, "Cross-device state operation")
+    require(not private or value.st_mode & 0o077 == 0, "State root must be private")
+    return value
+
+
+def state_stat(value):
+    return {key: getattr(value, "st_" + key) for key in
+            ("dev", "ino", "mode", "uid", "gid", "size", "nlink", "mtime_ns", "ctime_ns")}
+
+
+def state_open_flags(directory=False):
+    required = ("O_NOFOLLOW", "O_NONBLOCK") + (("O_DIRECTORY",) if directory else ())
+    require(all(hasattr(os, name) for name in required), "No-follow state IO unavailable")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    for name in required:
+        flags |= getattr(os, name)
+    return flags
+
+
+def walk_state_tree(fd, prefix, device, entries, destination=None):
+    initial = os.fstat(fd)
+    before = state_stat(initial)
+    require(stat.S_ISDIR(initial.st_mode) and initial.st_uid == os.getuid() and initial.st_dev == device,
+            "Unsafe state directory")
+    entries[prefix or "."] = {"kind": "directory", **before}
+    for name in sorted(os.listdir(fd)):
+        require(name not in (".", "..") and "/" not in name, "Unsafe state entry")
+        relative = name if not prefix else prefix + "/" + name
+        expected = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        require(expected.st_uid == os.getuid() and expected.st_dev == device, "Unowned/cross-device state entry")
+        if stat.S_ISDIR(expected.st_mode):
+            child = os.open(name, state_open_flags(directory=True), dir_fd=fd)
+            try:
+                require(state_stat(os.fstat(child)) == state_stat(expected), "State directory changed before read")
+                target = destination / name if destination is not None else None
+                if target is not None:
+                    target.mkdir(mode=0o700)
+                walk_state_tree(child, relative, device, entries, target)
+            finally:
+                os.close(child)
+        else:
+            require(stat.S_ISREG(expected.st_mode) and expected.st_nlink == 1,
+                    "State must contain only single-link regular files and directories")
+            child = os.open(name, state_open_flags(), dir_fd=fd)
+            output = None
+            try:
+                before_file = state_stat(os.fstat(child))
+                require(before_file == state_stat(expected), "State file changed before read")
+                if destination is not None:
+                    output = (destination / name).open("xb")
+                digest, length = hashlib.sha256(), 0
+                while True:
+                    part = os.read(child, min(65_536, before_file["size"] - length + 1))
+                    if not part:
+                        break
+                    length += len(part)
+                    require(length <= before_file["size"], "State file grew during read")
+                    digest.update(part)
+                    if output is not None:
+                        output.write(part)
+                require(length == before_file["size"] and state_stat(os.fstat(child)) == before_file,
+                        "State file changed during read")
+                entries[relative] = {"kind": "file", **before_file, "sha256": digest.hexdigest()}
+                if output is not None:
+                    output.flush()
+                    os.fchmod(output.fileno(), stat.S_IMODE(expected.st_mode))
+            finally:
+                if output is not None:
+                    output.close()
+                os.close(child)
+            if destination is not None:
+                os.utime(destination / name, ns=(expected.st_atime_ns, expected.st_mtime_ns), follow_symlinks=False)
+    require(state_stat(os.fstat(fd)) == before, "State directory changed during read")
+    if destination is not None:
+        os.chmod(destination, stat.S_IMODE(initial.st_mode))
+        os.utime(destination, ns=(initial.st_atime_ns, initial.st_mtime_ns), follow_symlinks=False)
+
+
+def state_tree_inventory(root):
+    expected = owned_state_directory(root)
+    fd = os.open(root, state_open_flags(directory=True))
+    try:
+        require(state_stat(os.fstat(fd)) == state_stat(expected), "State root changed before read")
+        entries = {}
+        walk_state_tree(fd, "", expected.st_dev, entries)
+        return entries
+    finally:
+        os.close(fd)
+
+
+def state_content_projection(inventory):
+    return {path: {key: value[key] for key in ("kind", "mode", "uid", "gid") +
+                  (("size", "sha256") if value["kind"] == "file" else ())}
+            for path, value in inventory.items()}
+
+
+def pristine_state_matches(before, after):
+    left, right = copy.deepcopy(before), copy.deepcopy(after)
+    left["."].pop("ctime_ns")
+    right["."].pop("ctime_ns")
+    return left == right
+
+
+def clone_state_tree(source, destination):
+    before = state_tree_inventory(source)
+    owned_state_directory(destination.parent, before["."]["dev"])
+    require(not destination.exists() and not destination.is_symlink(), "State copy destination already exists")
+    destination.mkdir(mode=0o700)
+    fd = os.open(source, state_open_flags(directory=True))
+    try:
+        copied = {}
+        walk_state_tree(fd, "", before["."]["dev"], copied, destination)
+    finally:
+        os.close(fd)
+    require(copied == before and state_tree_inventory(source) == before, "Source changed while copying state")
+    result = state_tree_inventory(destination)
+    require(state_content_projection(result) == state_content_projection(before), "State copy lost bytes/types/modes")
+    return result
+
+
+def state_directory_identity(path):
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return None
+    require(stat.S_ISDIR(value.st_mode) and value.st_uid == os.getuid(), "Unexpected state path occupant")
+    return (value.st_dev, value.st_ino)
+
+
+def rename_state_directory(source, destination):
+    # Pinned macOS SDK sys/stdio.h: RENAME_EXCL=4. Plain POSIX rename can
+    # replace an unexpected empty directory between a check and the syscall.
+    require(sys.platform == "darwin", "Exclusive state rename is unavailable on this platform")
+    library = ctypes.CDLL(None, use_errno=True)
+    operation = getattr(library, "renamex_np", None)
+    require(operation is not None, "Exclusive state rename is unavailable")
+    operation.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    operation.restype = ctypes.c_int
+    if operation(os.fsencode(source), os.fsencode(destination), 4) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(destination))
+
+
+@contextlib.contextmanager
+def mounted_state_copy(work, evidence_root, label, require_quiescent, require_idle):
+    """Run one owned copied branch at the original authenticated canonical path."""
+    require(label in STATE_MOUNT_LABELS, "Unknown state mount label")
+    device = owned_state_directory(work, private=True).st_dev
+    source = work / "contexts/composed/state"
+    owned_state_directory(source, device, private=True)
+    require(evidence_root.is_absolute() and evidence_root.name == "state-mounts" and
+            not evidence_root.is_relative_to(source) and not source.is_relative_to(evidence_root) and
+            not work.is_relative_to(evidence_root), "Unsafe state mount evidence root")
+    owned_state_directory(evidence_root.parent, device, private=True)
+    if not evidence_root.exists() and not evidence_root.is_symlink():
+        evidence_root.mkdir(mode=0o700)
+    owned_state_directory(evidence_root, device, private=True)
+    area = evidence_root / label
+    require(not area.exists() and not area.is_symlink(), "State mount evidence label already exists")
+    require_quiescent()
+    require_idle()
+    initial = state_tree_inventory(source)
+    original_identity = state_directory_identity(source)
+    area.mkdir(mode=0o700)
+    branch, parked, retained = (area / name for name in ("branch-copy", "pristine-original", "retained-state"))
+    receipt_path = area / "receipt.json"
+    record = {"schema": "arbor.canonical-state-mount.v1", "label": label, "status": "preparing",
+              "execution_root": str(source), "retained_root": str(retained), "parked_original": str(parked),
+              "initial_inventory": initial, "events": []}
+    mount = {"execution_root": source, "retained_root": retained, "receipt_path": receipt_path}
+
+    def progress(stage):
+        record["events"].append(stage)
+        with receipt_path.open("w") as output:
+            output.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+
+    branch_identity = None
+    try:
+        progress("copy-intent")
+        record["copy_inventory"] = clone_state_tree(source, branch)
+        branch_identity = state_directory_identity(branch)
+        progress("copy-verified")
+        require_quiescent()
+        require_idle()
+        require(state_tree_inventory(source) == initial, "Pristine state changed before parking")
+        require(not parked.exists() and not parked.is_symlink(), "Original parking path occupied")
+        progress("park-original-intent")
+        rename_state_directory(source, parked)
+        progress("original-parked")
+        require_idle()
+        require(not source.exists() and not source.is_symlink(), "Canonical mount path occupied")
+        progress("mount-copy-intent")
+        rename_state_directory(branch, source)
+        record["status"] = "mounted"
+        progress("copy-mounted")
+        yield mount
+    finally:
+        cleanup_errors = []
+        record["cleanup_errors"] = cleanup_errors
+
+        def cleanup_error(operation, error):
+            cleanup_errors.append({"operation": operation, "type": type(error).__name__, "reason": str(error)})
+
+        def audit(stage):
+            try:
+                progress(stage)
+            except BaseException as error:
+                # Audit IO can truncate or fail to sync the receipt. Restore
+                # known-safe state first; the caller must receive HOLD afterward.
+                cleanup_error("audit:" + stage, error)
+
+        def move(source_path, destination_path, operation):
+            try:
+                rename_state_directory(source_path, destination_path)
+            except BaseException as error:
+                # Reobserve inode locations: an exception does not prove that
+                # an exclusive rename had no effect.
+                cleanup_error(operation, error)
+
+        try:
+            require_idle()
+            current, saved = state_directory_identity(source), state_directory_identity(parked)
+            if saved == original_identity:
+                if current == branch_identity and branch_identity is not None:
+                    require(not retained.exists() and not retained.is_symlink(), "Retained state path occupied")
+                    audit("retain-mutated-copy-intent")
+                    move(source, retained, "retain-mutated-copy")
+                    current, saved = state_directory_identity(source), state_directory_identity(parked)
+                    require(current is None and saved == original_identity and
+                            state_directory_identity(retained) == branch_identity,
+                            "Mutated copy could not be safely retained; original remains parked")
+                    audit("mutated-copy-retained")
+                else:
+                    require(current is None, "Unexpected canonical path occupant; original remains parked")
+                require_idle()
+                require(state_directory_identity(parked) == original_identity and
+                        not source.exists() and not source.is_symlink(), "Original restoration paths changed")
+                audit("restore-original-intent")
+                move(parked, source, "restore-original")
+                require(state_directory_identity(source) == original_identity and
+                        state_directory_identity(parked) is None, "Original restoration did not complete")
+                audit("original-restored")
+            else:
+                require(current == original_identity and saved is None,
+                        "Original state missing or unexpected parking occupant; HOLD without overwrite")
+            restored = state_tree_inventory(source)
+            require(pristine_state_matches(initial, restored), "Restored pristine state differs")
+            record.update(status="HOLD" if cleanup_errors else "restored", restored_inventory=restored,
+                          original_restored=True)
+            if branch_identity is not None and state_directory_identity(retained) == branch_identity:
+                try:
+                    record["retained_inventory"] = state_tree_inventory(retained)
+                except BaseException as error:
+                    record["retained_inventory_error"] = type(error).__name__ + ": " + str(error)
+            audit("pristine-restoration-verified")
+            require("retained_inventory_error" not in record, "Retained branch inventory unsafe; original restored")
+            require(not cleanup_errors, "State restored with cleanup errors; HOLD; receipt may be incomplete")
+            mount["receipt_sha256"] = sha(receipt_path.read_bytes())
+        except BaseException as error:
+            record.update(status="HOLD", cleanup_error=type(error).__name__ + ": " + str(error))
+            audit("cleanup-hold")
+            raise
+
+
 def prepare(args):
     repository, main, fixture_root, cache = args.repository, args.main_root, args.fixtures_root, args.deps_source_cache
     require(repository != main and not (repository / ".env").exists(), "Use a candidate without dotenv")
@@ -401,6 +677,21 @@ def run(args):
     daemon = daemon_log = None
     port = None
     save = lambda: save_json(work / "results.json", state)
+    active_commands = {}
+    pristine_state_inventory = None
+
+    def require_idle():
+        require(not active_commands, "Owned command has not exited; refuse state swap")
+
+    def require_pristine_quiescent():
+        require_idle()
+        prior = state.get("contexts", {}).get("composed", {}).get("source_hidden_release", {}).get("refused", {})
+        require(prior.get("quiescent") is True and pristine_state_inventory is not None,
+                "Original state has no completed quiescent public proof")
+        record = state["composed_quiescent_state"]
+        require(sha((work / record["path"]).read_bytes()) == record["sha256"], "Quiescent state inventory changed")
+        require(pristine_state_matches(pristine_state_inventory, state_tree_inventory(work / "contexts/composed/state")),
+                "Original state changed since quiescent proof")
 
     def guard(label):
         comparison, reference = record_main_build_guard(
@@ -516,6 +807,7 @@ def run(args):
             process = None
             try:
                 process = subprocess.Popen(executable, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True)
+                active_commands[process.pid] = process
                 entry["owned_pid"] = process.pid
                 save()
                 phase_timeout = max(args.timeout, 3600) if label == "composed-retirement" else args.timeout
@@ -534,6 +826,10 @@ def run(args):
                              stdout_sha256=sha(output.read_bytes()), stderr_sha256=sha(errors.read_bytes()))
                 save()
                 raise
+            finally:
+                if process is not None and process.poll() is not None:
+                    active_commands.pop(process.pid, None)
+                    entry["owned_process_exited"] = True
         entry.update(exit_code=code, elapsed_seconds=round(time.monotonic() - began, 3), status="passed" if code == 0 else "failed",
                      stdout_sha256=sha(output.read_bytes()), stderr_sha256=sha(errors.read_bytes()))
         save()
@@ -616,12 +912,14 @@ def run(args):
             scenarios = ("full", "activation_only", "runtime_unavailable", "profile_sync_unavailable") if context == "trust" else phases
             for phase in scenarios:
                 if context == "composed" and phase == "namespace_seed":
+                    require_idle()
+                    require(normal.get("recover", {}).get("quiescent") is True,
+                            "Namespace snapshot requires the completed quiescent recovery proof")
                     before = namespace_snapshot(folder / "state/authority")
                     snapshot = work / "namespace-pre-seed"
                     snapshot.mkdir(mode=0o700)
                     for name in before:
-                        copy_files(folder / "state/authority" / name, snapshot / name,
-                                   source_files(folder / "state/authority" / name))
+                        clone_state_tree(folder / "state/authority" / name, snapshot / name)
                     state["namespace_before"] = before
                     save()
                 phase_env = scenario_environment(env, folder, context, phase, release=False)
@@ -682,9 +980,18 @@ def run(args):
                 require(released["native_binary_sha256"] == next(iter(state["contexts"][context]["normal"].values()))["native_binary_sha256"],
                         "Embedded native binary changed")
                 state["contexts"][context].setdefault("source_hidden_release", {})[phase] = released
+                if context == "composed":
+                    require(released.get("quiescent") is True, "Composed state is not quiescent")
+                    require_idle()
+                    pristine_state_inventory = state_tree_inventory(folder / "state")
+                    inventory_path = work / "composed-quiescent-state-inventory.json"
+                    with inventory_path.open("x") as output:
+                        output.write(json.dumps(pristine_state_inventory, indent=2, sort_keys=True) + "\n")
+                    state["composed_quiescent_state"] = {"path": str(inventory_path.relative_to(work)),
+                                                         "sha256": sha(inventory_path.read_bytes())}
                 save()
-        run_candidate_attacks(work, state, command, env_for, cookie)
-        run_rollback(args.rollback_manifest, work, state, command, env_for, cookie)
+        run_candidate_attacks(work, state, command, env_for, cookie, require_pristine_quiescent, require_idle)
+        run_rollback(args.rollback_manifest, work, state, command, env_for, cookie, require_pristine_quiescent, require_idle)
         guard("acceptance-final")
         state["status"] = "passed"
     except BaseException as error:
@@ -729,41 +1036,50 @@ def namespace_snapshot(authority):
     return result
 
 
-def run_candidate_attacks(work, state, command, env_for, cookie):
-    """Independent private state branches preserve the clean main/rollback state."""
+def run_candidate_attacks(work, state, command, env_for, cookie, require_quiescent, require_idle):
+    """Fresh copied branches execute at the original authenticated canonical path."""
     source = work / "contexts/composed/state"
     release = work / "contexts/composed/release"
     for phase in ("conflict", "namespace_rollback_attack"):
-        target = work / ("candidate-" + phase + "-state")
-        copy_files(source, target, source_files(source))
-        if phase == "namespace_rollback_attack":
-            namespace = state["capability_namespace"]
-            current = target / "authority" / namespace
-            preserved = work / "namespace-current-preserved"
-            preserved.mkdir(mode=0o700)
-            current.rename(preserved / namespace)
-            old = work / "namespace-pre-seed" / namespace
-            copy_files(old, current, source_files(old))
-            require(namespace_snapshot(target / "authority")[namespace] == state["namespace_before"][namespace],
-                    "Namespace-only restore did not match the actual pre-seed snapshot")
-        env = env_for("attack", "composed")
-        env.update(PAIRED_STATE_ROOT=str(target), CAPABILITIES_COLD_STATE_ROOT=str(target),
-                   CAPABILITIES_COLD_SESSION_SECRET=(target / "session-secret").read_text(), PAIRED_SQL_DATABASE=str(target / "paired.sqlite3"),
-                   PAIRED_PHASE=phase, PAIRED_NO_MIX="1", PAIRED_RELEASE_ROOT=str(release), PAIRED_ALLOWED_CODE_ROOTS=str(release),
-                   ERL_FLAGS="+S 4:4 -kernel inet_dist_use_interface {127,0,0,1}", RELEASE_COOKIE=cookie,
-                   RELEASE_DISTRIBUTION="none", RELEASE_TMP=str(work / "contexts/composed/runtime/tmp"), PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-        for key in list(env):
-            if key.startswith(("MIX_", "HEX_", "ARBOR_")) and key not in ("ARBOR_HOME", "ARBOR_DATA_DIR", "ARBOR_ENV_PATH"):
-                env.pop(key)
-        log = command("candidate-" + phase, release, env, [str(release / "bin/paired_standalone_consumer"), "eval", probe("composed", phase, True)], mix=False)
-        result = parse_result(log)
-        require(result.get("pending_conflict") == 1, "Conflict/namespace attack did not retain exact real pending evidence")
+        label = "candidate-" + phase
+        with mounted_state_copy(work, work / "state-mounts", label, require_quiescent, require_idle) as mount:
+            namespace_preserved = None
+            if phase == "namespace_rollback_attack":
+                namespace = state["capability_namespace"]
+                require(namespace in state["namespace_before"] and Path(namespace).name == namespace,
+                        "Unexpected selected namespace")
+                current = source / "authority" / namespace
+                preserved = mount["retained_root"].parent / "namespace-current-preserved"
+                preserved.mkdir(mode=0o700)
+                namespace_preserved = preserved / namespace
+                rename_state_directory(current, namespace_preserved)
+                old = work / "namespace-pre-seed" / namespace
+                clone_state_tree(old, current)
+                require(namespace_snapshot(source / "authority")[namespace] == state["namespace_before"][namespace],
+                        "Namespace-only restore did not match the actual pre-seed snapshot")
+            env = env_for("attack", "composed")
+            env.update(PAIRED_PHASE=phase, PAIRED_NO_MIX="1", PAIRED_RELEASE_ROOT=str(release),
+                       PAIRED_ALLOWED_CODE_ROOTS=str(release),
+                       ERL_FLAGS="+S 4:4 -kernel inet_dist_use_interface {127,0,0,1}", RELEASE_COOKIE=cookie,
+                       RELEASE_DISTRIBUTION="none", RELEASE_TMP=str(work / "contexts/composed/runtime/tmp"),
+                       PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+            for key in list(env):
+                if key.startswith(("MIX_", "HEX_", "ARBOR_")) and key not in ("ARBOR_HOME", "ARBOR_DATA_DIR", "ARBOR_ENV_PATH"):
+                    env.pop(key)
+            log = command(label, release, env,
+                          [str(release / "bin/paired_standalone_consumer"), "eval", probe("composed", phase, True)], mix=False)
+            result = parse_result(log)
+            require(result.get("pending_conflict") == 1, "Conflict/namespace attack did not retain exact real pending evidence")
+        result.update(execution_state_root=str(source), retained_state_root=str(mount["retained_root"]),
+                      state_mount_receipt=str(mount["receipt_path"]), state_mount_receipt_sha256=mount["receipt_sha256"])
+        if namespace_preserved is not None:
+            result["namespace_current_preserved"] = str(namespace_preserved)
         state.setdefault("candidate_attacks", {})[phase] = result
-    # These are intentionally non-quiescent evidence branches. Neither is the
-    # actual predecessor version rollback, and neither may replace its state.
+    # Each intentionally non-quiescent attack copy is retained separately. The
+    # original quiescent directory is restored before the next branch begins.
 
 
-def run_rollback(path, work, state, command, env_for, cookie):
+def run_rollback(path, work, state, command, env_for, cookie, require_quiescent, require_idle):
     """Actual predecessor raw-driver gate. Only its owned state argument is substituted."""
     data = path.read_bytes()
     value = json.loads(data)
@@ -791,34 +1107,35 @@ def run_rollback(path, work, state, command, env_for, cookie):
     require(value.get("prod_compiled") is True and value.get("driver_compiled") is True and value.get("mix_execution") is False,
             "Actual PROD/sealed compiled raw-driver contract missing; draft producer metadata is not rollback proof")
     original = work / "contexts/composed/state"
-    target = work / "rollback-state"
-    copy_files(original, target, source_files(original))
-    env = env_for("rollback", "composed")
-    env.update(PAIRED_STATE_ROOT=str(target), CAPABILITIES_COLD_STATE_ROOT=str(target), PAIRED_SQL_DATABASE=str(target / "paired.sqlite3"),
-               CAPABILITIES_COLD_SESSION_SECRET=(target / "session-secret").read_text(), PAIRED_PHASE="refused",
-               PAIRED_ROLLBACK_BASE=BASE, ERL_FLAGS=f"+S 4:4 -setcookie {cookie} -kernel inet_dist_use_interface {{127,0,0,1}}",
-               PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-    for key in list(env):
-        if key.startswith(("MIX_", "HEX_", "ARBOR_")) and key not in ("ARBOR_HOME", "ARBOR_DATA_DIR", "ARBOR_ENV_PATH"):
-            env.pop(key)
-    log = command("actual-predecessor-rollback", Path(value["cwd"]), env,
-                  argv + ["--state-root", str(target), "--phase", "verify"], mix=False)
-    rows = [json.loads(line.split("=", 1)[1]) for line in log.read_text().splitlines() if line.startswith("PAIRED_ROLLBACK_RESULT=")]
-    require(len(rows) == 1 and all(rows[0].get(key) is True for key in
-            ("same_authority", "same_profiles", "same_audit_receipts", "revoked_authority_refused", "production_owners_proven", "quiescent")),
-            "Actual predecessor compatible-state proof incomplete")
-    require(rows[0].get("head") == BASE and rows[0].get("mix_available") is False,
-            "Raw predecessor driver did not prove exact actual base/no-Mix execution")
-    rollback_guard()
-    candidate_release = work / "contexts/composed/release"
-    env.update(PAIRED_NO_MIX="1", PAIRED_EXPECTED_APPS=",".join(sorted(PACKAGES)), PAIRED_EXPECTED_STARTED=",".join(sorted(PACKAGES)),
-               PAIRED_RELEASE_ROOT=str(candidate_release), PAIRED_ALLOWED_CODE_ROOTS=str(candidate_release),
-               ERL_FLAGS="+S 4:4 -kernel inet_dist_use_interface {127,0,0,1}", RELEASE_COOKIE=cookie,
-               RELEASE_DISTRIBUTION="none", RELEASE_TMP=str(work / "contexts/composed/runtime/tmp"))
-    log = command("candidate-after-rollback", candidate_release, env,
-                  [str(candidate_release / "bin/paired_standalone_consumer"), "eval", probe("composed", "refused", True)], mix=False)
-    rollback_guard()
-    state["rollback"] = {"manifest_sha256": sha(data), "predecessor": rows[0], "candidate_reopened": parse_result(log)}
+    with mounted_state_copy(work, work / "state-mounts", "actual-predecessor-rollback", require_quiescent, require_idle) as mount:
+        env = env_for("rollback", "composed")
+        env.update(PAIRED_PHASE="refused", PAIRED_ROLLBACK_BASE=BASE,
+                   ERL_FLAGS=f"+S 4:4 -setcookie {cookie} -kernel inet_dist_use_interface {{127,0,0,1}}",
+                   PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+        for key in list(env):
+            if key.startswith(("MIX_", "HEX_", "ARBOR_")) and key not in ("ARBOR_HOME", "ARBOR_DATA_DIR", "ARBOR_ENV_PATH"):
+                env.pop(key)
+        log = command("actual-predecessor-rollback", Path(value["cwd"]), env,
+                      argv + ["--state-root", str(original), "--phase", "verify"], mix=False)
+        rows = [json.loads(line.split("=", 1)[1]) for line in log.read_text().splitlines() if line.startswith("PAIRED_ROLLBACK_RESULT=")]
+        require(len(rows) == 1 and all(rows[0].get(key) is True for key in
+                ("same_authority", "same_profiles", "same_audit_receipts", "revoked_authority_refused", "production_owners_proven", "quiescent")),
+                "Actual predecessor compatible-state proof incomplete")
+        require(rows[0].get("head") == BASE and rows[0].get("mix_available") is False,
+                "Raw predecessor driver did not prove exact actual base/no-Mix execution")
+        rollback_guard()
+        candidate_release = work / "contexts/composed/release"
+        env.update(PAIRED_NO_MIX="1", PAIRED_EXPECTED_APPS=",".join(sorted(PACKAGES)), PAIRED_EXPECTED_STARTED=",".join(sorted(PACKAGES)),
+                   PAIRED_RELEASE_ROOT=str(candidate_release), PAIRED_ALLOWED_CODE_ROOTS=str(candidate_release),
+                   ERL_FLAGS="+S 4:4 -kernel inet_dist_use_interface {127,0,0,1}", RELEASE_COOKIE=cookie,
+                   RELEASE_DISTRIBUTION="none", RELEASE_TMP=str(work / "contexts/composed/runtime/tmp"))
+        log = command("candidate-after-rollback", candidate_release, env,
+                      [str(candidate_release / "bin/paired_standalone_consumer"), "eval", probe("composed", "refused", True)], mix=False)
+        rollback_guard()
+        candidate_reopened = parse_result(log)
+    state["rollback"] = {"manifest_sha256": sha(data), "predecessor": rows[0], "candidate_reopened": candidate_reopened,
+                         "execution_state_root": str(original), "retained_state_root": str(mount["retained_root"]),
+                         "state_mount_receipt": str(mount["receipt_path"]), "state_mount_receipt_sha256": mount["receipt_sha256"]}
 
 
 def build_argument_parser():
