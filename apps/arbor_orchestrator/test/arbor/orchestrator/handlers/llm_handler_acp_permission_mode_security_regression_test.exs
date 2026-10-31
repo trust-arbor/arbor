@@ -49,10 +49,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerAcpPermissionModeSecurityRegress
   setup do
     {:ok, _} = RecordingDispatcher.start()
     RecordingDispatcher.reset()
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+      Application.delete_env(:arbor_llm, :llm_dispatcher)
       RecordingDispatcher.stop()
     end)
 

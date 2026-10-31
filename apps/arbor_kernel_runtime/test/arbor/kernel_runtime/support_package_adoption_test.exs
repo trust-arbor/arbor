@@ -5,6 +5,9 @@ defmodule Arbor.KernelRuntime.SupportPackageAdoptionTest do
 
   @modules [
     Arbor.Common.Pagination.Cursor,
+    Arbor.Common.PromptSanitizer,
+    Arbor.Common.Sanitizers.PromptInjection,
+    Arbor.Common.SensitivityClassifier,
     Arbor.Common.SafeAtom,
     Arbor.Common.SafePath,
     Arbor.Common.SafePath.RootBinding,
@@ -36,9 +39,9 @@ defmodule Arbor.KernelRuntime.SupportPackageAdoptionTest do
     applications = Application.spec(:arbor_support, :applications) || []
     refute :boundary in applications
 
-    refute Enum.any?(applications, fn app ->
+    assert Enum.filter(applications, fn app ->
              String.starts_with?(Atom.to_string(app), "arbor_")
-           end)
+           end) == [:arbor_kernel]
   end
 
   test "the native reader compiler and C source belong only to the support package" do
@@ -56,12 +59,28 @@ defmodule Arbor.KernelRuntime.SupportPackageAdoptionTest do
     assert support_project =~ "Mix.Tasks.Compile.ArborSafePathReader"
     assert File.regular?(Path.join(support_root, "c_src/arbor_safe_path_reader.c"))
 
-    for filename <- ["pagination/cursor.ex", "safe_atom.ex", "safe_path.ex", "sensitive_data.ex"] do
+    for filename <- [
+          "pagination/cursor.ex",
+          "prompt_sanitizer.ex",
+          "safe_atom.ex",
+          "safe_path.ex",
+          "sanitizers/prompt_injection.ex",
+          "sensitive_data.ex",
+          "sensitivity_classifier.ex"
+        ] do
       refute File.exists?(Path.join(runtime_root, "lib/arbor/common/#{filename}"))
       assert File.regular?(Path.join(support_root, "lib/arbor/common/#{filename}"))
     end
 
-    refute File.exists?(Path.join(runtime_root, "test/arbor/common/pagination/cursor_test.exs"))
-    assert File.regular?(Path.join(support_root, "test/arbor/common/pagination/cursor_test.exs"))
+    for filename <- [
+          "pagination/cursor_test.exs",
+          "prompt_sanitizer_test.exs",
+          "sanitizers/prompt_injection_test.exs",
+          "sanitizers/prompt_injection_evasion_test.exs",
+          "sensitivity_classifier_test.exs"
+        ] do
+      refute File.exists?(Path.join(runtime_root, "test/arbor/common/#{filename}"))
+      assert File.regular?(Path.join(support_root, "test/arbor/common/#{filename}"))
+    end
   end
 end

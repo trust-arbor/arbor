@@ -53,7 +53,7 @@ defmodule Arbor.Eval do
 
   use Boundary,
     top_level?: true,
-    deps: [Arbor.Contracts, Arbor.Common, Arbor.Common.SensitiveData, Jason],
+    deps: [Arbor.Contracts, Arbor.Common, Arbor.Common.SensitiveData, Arbor.Eval.Subject, Jason],
     exports: :all
 
   @type violation :: %{

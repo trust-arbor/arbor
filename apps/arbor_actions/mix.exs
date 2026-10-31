@@ -48,7 +48,7 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_persistence_host, in_umbrella: true},
       # L2 — public LLM eval-subject catalog (`Arbor.LLM.eval_subject/1`).
       # Legal: actions (L6) may depend only downward.
-      {:arbor_llm, in_umbrella: true},
+      {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:arbor_ai, in_umbrella: true},
       {:arbor_sandbox, in_umbrella: true},
       {:arbor_historian, "~> 0.1.0",

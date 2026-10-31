@@ -87,10 +87,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
     {:ok, _} = RecordingDispatcher.start_link()
     RecordingDispatcher.reset()
     CapturingAdapter.set_parent(self())
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+      Application.delete_env(:arbor_llm, :llm_dispatcher)
       CapturingAdapter.clear_parent()
 
       if Process.whereis(RecordingDispatcher) do
@@ -301,7 +301,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
       |> Client.register_adapter(CapturingAdapter)
 
     # Tool-loop does not use the orchestrator dispatcher env.
-    Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+    Application.delete_env(:arbor_llm, :llm_dispatcher)
 
     assert %{status: :success} =
              LlmHandler.execute(node, context, graph,

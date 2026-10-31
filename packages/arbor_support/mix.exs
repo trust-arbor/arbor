@@ -11,9 +11,9 @@ defmodule Arbor.Support.MixProject do
       start_permanent: Mix.env() == :prod,
       compilers: [:arbor_safe_path_reader, :boundary] ++ Mix.compilers(),
       boundary: [default: [type: :strict, check: [aliases: true]]],
-      deps: [{:boundary, "~> 0.10", runtime: false}],
+      deps: [kernel_dependency(), {:boundary, "~> 0.10", runtime: false}],
       description:
-        "Filesystem safety, atom conversion, redaction and pagination cursors for Elixir",
+        "Filesystem safety, prompt sanitization, sensitivity screening and pagination for Elixir",
       source_url: @source_url,
       package: [
         licenses: ["MIT"],
@@ -21,6 +21,13 @@ defmodule Arbor.Support.MixProject do
         files: ~w(lib c_src mix.exs README.md LICENSE)
       ]
     ]
+  end
+
+  defp kernel_dependency do
+    case System.get_env("ARBOR_KERNEL_PATH") do
+      nil -> {:arbor_kernel, "~> 2.0.0-dev"}
+      path -> {:arbor_kernel, "~> 2.0.0-dev", path: path, override: true}
+    end
   end
 
   # Loading the library starts no application-owned process or filesystem helper.

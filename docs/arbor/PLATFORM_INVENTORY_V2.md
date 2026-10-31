@@ -2,8 +2,8 @@
 
 The live PlatformInventory report is now
 `arbor.packaging.platform_inventory.v2`. This is a reviewed scope successor
-to the original nine-application E0A census. Persistence, Capabilities, Trust
-and Historian retain their complete source families across explicit package
+to the original nine-application E0A census. Persistence, Capabilities, Trust,
+Historian and LLM retain their complete source families across explicit package
 and product Host roots. Moving a source does not remove it from review.
 
 | Physical root | Actual application owner |
@@ -19,9 +19,25 @@ and product Host roots. Moving a source does not remove it from review.
 | `apps/arbor_trust_host/lib/` | `arbor_trust_host` |
 | `packages/arbor_historian/lib/` | `arbor_historian` |
 | `apps/arbor_historian_host/lib/` | `arbor_historian_host` |
+| `packages/arbor_llm/lib/` | `arbor_llm` |
+| `apps/arbor_llm_host/lib/` | `arbor_llm_host` |
 
-Cartographer, LLM, Shell and Sandbox retain their original
-`apps/<owner>/lib/` roots. The resulting closed scope has fifteen owners.
+Cartographer, Shell and Sandbox retain their original
+`apps/<owner>/lib/` roots. These sixteen owners have whole production-source
+selection. Four former LLM sources also remain selected at their exact new
+paths, without selecting the rest of Commands or Orchestrator:
+
+| Exact relocated source | Actual application owner |
+| --- | --- |
+| `apps/arbor_orchestrator/lib/arbor/llm/arbor_actions_executor.ex` | `arbor_orchestrator` |
+| `apps/arbor_commands/lib/mix/tasks/arbor.login.ex` | `arbor_commands` |
+| `apps/arbor_commands/lib/mix/tasks/arbor.oauth.login.ex` | `arbor_commands` |
+| `apps/arbor_commands/lib/mix/tasks/arbor/llm/free.ex` | `arbor_commands` |
+
+The resulting closed report scope has eighteen physical owners. The Git reader
+receives the whole-owner selection and these four exact production paths
+separately. Extra paths undergo the same stage-zero, regular-mode, OID, size,
+content and selected-index digest checks; they are not path prefixes.
 Core and encoder share one
 explicit physical-root policy. Files outside those roots cannot acquire an
 owner by declaring a familiar application name; an old embedded copy selected
@@ -51,8 +67,15 @@ projection and encoding for the split families, including the canonical Trust
 and Historian packages and both passive Hosts. Adjacent names and unrelated
 packages remain outside the closed scope. Historical paths cannot silently
 qualify new owners; an embedded Core copy fails closed.
+`LLMScopePipelineSecurityRegressionTest` exercises the public production facade
+with the package, passive Host and all four relocated sources. Neighboring
+Commands/Orchestrator paths, adjacent names, tests and unrelated Support sources
+are excluded; former embedded LLM sources fail closed. Old LLM review paths do
+not qualify their relocated replacements, even when the blob bytes match.
 
-The adopted families retain their `P` band in SourceCoupling. Moving mechanisms
+The adopted families and passive LLM Host retain their `P` band in SourceCoupling.
+The four relocated sources retain their actual consumer owners and bands.
+Moving mechanisms
 into packages does not promote them into Kernel or exclude adapter and Host
 edges from the coupling census. These source-review gates do not attest a
 current product release or close the [Trust/Historian M2 gap](TRUST_HISTORIAN_M2_COUPLING_GAP.md).

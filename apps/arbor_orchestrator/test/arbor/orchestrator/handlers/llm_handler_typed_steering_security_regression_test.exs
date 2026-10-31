@@ -138,12 +138,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     SensitivityFixture.setup([HandlerAdapter])
 
     true = Process.register(self(), __MODULE__)
-    previous_dispatcher = Application.get_env(:arbor_orchestrator, :llm_dispatcher)
+    previous_dispatcher = Application.get_env(:arbor_llm, :llm_dispatcher)
 
     on_exit(fn ->
       case previous_dispatcher do
-        nil -> Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
-        module -> Application.put_env(:arbor_orchestrator, :llm_dispatcher, module)
+        nil -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+        module -> Application.put_env(:arbor_llm, :llm_dispatcher, module)
       end
     end)
 
@@ -263,7 +263,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
   end
 
   test "security regression: initial admission is conservative and direct dispatch retains context taint" do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingRouteDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingRouteDispatcher)
     parent = self()
     hostile = %Taint{level: :hostile, source: "direct-context", chain: ["direct-context"]}
     trusted = %Taint{level: :trusted, confidence: :verified, sanitizations: 255}

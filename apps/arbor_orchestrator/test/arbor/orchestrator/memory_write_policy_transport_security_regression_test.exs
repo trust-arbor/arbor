@@ -240,13 +240,13 @@ defmodule Arbor.Orchestrator.MemoryWritePolicyTransportSecurityRegressionTest do
   end
 
   defp configure_route_dispatcher! do
-    previous = Application.fetch_env(:arbor_orchestrator, :llm_dispatcher)
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RouteDispatcher)
+    previous = Application.fetch_env(:arbor_llm, :llm_dispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RouteDispatcher)
 
     on_exit(fn ->
       case previous do
-        {:ok, module} -> Application.put_env(:arbor_orchestrator, :llm_dispatcher, module)
-        :error -> Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+        {:ok, module} -> Application.put_env(:arbor_llm, :llm_dispatcher, module)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
       end
     end)
   end

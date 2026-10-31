@@ -95,7 +95,7 @@ defmodule Arbor.Agent.PromptMemorySensitivitySecurityRegressionTest do
         else: :persistent_term.put(bridge_key, previous_bridge)
 
       if previous_client,
-        do: Client.set_default_client(previous_client),
+        do: :persistent_term.put({Client, :default_client}, previous_client),
         else: Client.clear_default_client()
 
       Enum.each(previous, fn

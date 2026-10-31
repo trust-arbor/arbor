@@ -185,7 +185,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
       uri: Application.get_env(:arbor_capabilities, :uri_registry_enforcement),
       secret: Application.get_env(:arbor_capabilities, :session_token_secret),
       egress: Application.get_env(:arbor_capabilities, :egress_gate_enforcing),
-      dispatcher: Application.get_env(:arbor_orchestrator, :llm_dispatcher)
+      dispatcher: Application.get_env(:arbor_llm, :llm_dispatcher)
     }
 
     Application.put_env(:arbor_capabilities, :identity_verification, true)
@@ -215,8 +215,8 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
       restore_sec(:egress_gate_enforcing, prev.egress)
 
       case prev.dispatcher do
-        nil -> Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
-        v -> Application.put_env(:arbor_orchestrator, :llm_dispatcher, v)
+        nil -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+        v -> Application.put_env(:arbor_llm, :llm_dispatcher, v)
       end
 
       Application.delete_env(:arbor_orchestrator, :_p5_test_pid)
@@ -618,7 +618,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   test "VOICE-17 security regression: LlmHandler without seam reaches external (base path)",
        %{agent_id: agent_id, call_counter: counter} do
     # Proves the fake boundary is live: without Session seam, dark gate admits.
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
 
     context =
@@ -640,7 +640,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 security regression: LlmHandler Session seam blocks before provider I/O",
        %{agent_id: agent_id, call_counter: counter} do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
     :atomics.put(counter, 1, 0)
 
     # Plain arity-1 deny — does not depend on TurnEgress for the assertion path.
@@ -842,7 +842,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     # Exercise the production dispatch, TurnEgress, Trust and Security path.
     # Only the final provider adapter is replaced, so the successful control
     # proves the same route and valid disclosure can actually reach provider I/O.
-    Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+    Application.delete_env(:arbor_llm, :llm_dispatcher)
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     route = external_route()
@@ -980,7 +980,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   test "VOICE-17 security regression: ProviderRouter primary admits fallback denied",
        %{agent_id: agent_id, human_id: human_id} do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
     route = external_route()
     fallback = %{route | provider: "openai", destination: "openai", model: "gpt-fallback"}
 

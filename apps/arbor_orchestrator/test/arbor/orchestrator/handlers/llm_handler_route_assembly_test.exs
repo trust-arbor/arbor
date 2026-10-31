@@ -134,12 +134,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
 
   setup do
     {:ok, _} = RecordingDispatcher.start()
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     prior_profile = Application.get_env(:arbor_ai, :provider_route_profile)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+      Application.delete_env(:arbor_llm, :llm_dispatcher)
       Application.delete_env(:arbor_orchestrator, :_test_legacy_spoof_executed_route)
       Application.delete_env(:arbor_orchestrator, :_test_confirmed_route)
       Application.delete_env(:arbor_orchestrator, :_test_route_override)
@@ -429,7 +429,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
 
   test "incomplete executed_route evidence is ignored even in router mode" do
     Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, IncompleteRouteDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, IncompleteRouteDispatcher)
 
     outcome =
       LlmHandler.execute(

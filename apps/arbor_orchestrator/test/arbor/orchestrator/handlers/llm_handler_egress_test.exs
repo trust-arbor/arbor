@@ -101,14 +101,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
 
   setup do
     {:ok, _} = RecordingDispatcher.start()
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     prev_enforce = Application.get_env(:arbor_capabilities, :egress_gate_enforcing)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
     Application.put_env(:arbor_trust, :policy_module, NoEgressStandingPolicy)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
+      Application.delete_env(:arbor_llm, :llm_dispatcher)
       Application.delete_env(:arbor_orchestrator, :_test_exact_route)
       Application.delete_env(:arbor_orchestrator, :_test_egress_pid)
       _ = RecordingDispatcher.stop()
@@ -260,7 +260,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       }
     }
 
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, ExactRouteDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, ExactRouteDispatcher)
     Application.put_env(:arbor_orchestrator, :_test_exact_route, exact_local_route)
     Application.put_env(:arbor_orchestrator, :_test_egress_pid, self())
 
@@ -297,7 +297,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       }
     }
 
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, ExactRouteDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, ExactRouteDispatcher)
     Application.put_env(:arbor_orchestrator, :_test_exact_route, route)
     Application.put_env(:arbor_orchestrator, :_test_egress_pid, self())
 

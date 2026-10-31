@@ -1,18 +1,21 @@
 # Arbor Support
 
-Filesystem safety, safe atom conversion, sensitive-data screening and
-pagination cursors for Elixir. This passive package owns the existing
-`Arbor.Common.SafePath`, `Arbor.Common.SafeAtom`, `Arbor.Common.SensitiveData`
-and `Arbor.Common.Pagination.Cursor` modules. Their public functions, error
-vocabulary, nested struct and exception identities, and algorithms are unchanged.
+Filesystem safety, safe atom conversion, sensitivity screening, prompt sanitization
+and pagination cursors for Elixir. This passive package owns the existing
+`Arbor.Common.SafePath`, `Arbor.Common.SafeAtom`, `Arbor.Common.SensitiveData`,
+`Arbor.Common.SensitivityClassifier`, `Arbor.Common.PromptSanitizer`,
+`Arbor.Common.Sanitizers.PromptInjection` and `Arbor.Common.Pagination.Cursor`
+modules. Their public functions, error vocabulary, nested struct and exception
+identities, and algorithms are unchanged.
 
 ```elixir
 {:arbor_support, "~> 0.1.0-dev"}
 ```
 
-The library has no first-party dependencies, application callback, supervisor,
-provider gate or background process. Each helper subtree is an independent
-strict Boundary root. SafePath exports its existing `RootBinding` and
+The library depends only on passive `arbor_kernel` among first-party packages,
+for the existing sanitizer behaviour and taint contract. It has no application
+callback, supervisor, provider gate or background process. Each helper subtree
+is an independent strict Boundary root. SafePath exports its existing `RootBinding` and
 `TraversalError` identities; the generated native artifact remains internal.
 
 `SafeAtom` converts only existing or explicitly admitted atoms and preserves
@@ -26,6 +29,11 @@ ordered filtering, including microsecond DateTime comparisons. Invalid cursor
 strings fail closed with `:error` when parsed and an empty list when filtering;
 an empty ID is invalid. A nil filter cursor retains the existing unfiltered result.
 The higher-level `Arbor.Common.Pagination` module remains in Kernel Runtime.
+
+`PromptSanitizer` and `Sanitizers.PromptInjection` retain the existing nonce-tagged
+delimiters, detection rules and taint updates. `SensitivityClassifier` retains
+the existing labels and routing decisions over `SensitiveData`. No classifier,
+sanitizer or taint algorithm changes as part of the ownership move.
 
 ## Native reader
 

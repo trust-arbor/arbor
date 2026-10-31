@@ -34,6 +34,7 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
     "arbor_monitor" => "K",
     "arbor_cartographer" => "P",
     "arbor_llm" => "P",
+    "arbor_llm_host" => "P",
     "arbor_security" => "P",
     # The canonical authority and Signals adapter retain their Security family band.
     "arbor_capabilities" => "P",

@@ -18,6 +18,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @max_files 50_000
   @max_path_bytes 4096
   @max_selected_apps 256
+  @max_extra_paths 256
   @max_app_bytes 255
   @batch_size 64
   @selected_index_domain "arbor.git_inventory.selected_index.v1\0"
@@ -247,6 +248,11 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   `{path, mode, blob_oid}` set. It is domain-separated index provenance and
   must never be labeled as HEAD-tree content. Consumer-specific report
   digests belong in the consumer encoder.
+
+  The optional `:extra_paths` adds at most 256 unique canonical production
+  `.ex` paths outside the whole selected apps. They are exact index paths,
+  not prefixes, and pass the same stage, mode, OID, blob and digest admission.
+  The default is empty and does not change whole-app selection.
   """
   @spec load_selected_blobs(String.t(), [String.t()], keyword()) ::
           {:ok,
@@ -264,11 +270,13 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
     run_git = Keyword.get(opts, :run_git, &default_run_git/3)
     max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
     max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes)
+    extra_paths = Keyword.get(opts, :extra_paths, [])
 
     with {:ok, selected_apps} <- admit_selected_apps(selected_apps),
+         {:ok, extra_paths} <- admit_extra_production_paths(extra_paths),
          {:ok, head_tree_oid} <- rev_parse_tree(root, run_git),
          {:ok, staged} <- ls_files_stage_all(root, run_git),
-         {:ok, admitted} <- admit_selected_production_entries(staged, selected_apps),
+         {:ok, admitted} <- admit_selected_production_entries(staged, selected_apps, extra_paths),
          :ok <- check_file_count(admitted),
          {:ok, object_format} <- infer_selected_object_format(admitted, head_tree_oid),
          :ok <- match_head_tree_format(head_tree_oid, object_format),
@@ -403,8 +411,38 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp admit_selected_apps(_), do: {:error, :invalid_selected_apps}
 
-  defp admit_selected_production_entries(entries, selected_apps) do
-    admit_selected_stage_entries(entries, selected_apps, &selected_production_source_path?/2)
+  defp admit_extra_production_paths(paths),
+    do: admit_extra_production_paths(paths, MapSet.new(), 0)
+
+  defp admit_extra_production_paths([], paths, _count), do: {:ok, paths}
+
+  defp admit_extra_production_paths([path | rest], paths, count) when count < @max_extra_paths do
+    cond do
+      MapSet.member?(paths, path) ->
+        {:error, :duplicate_extra_paths}
+
+      not valid_extra_production_path?(path) ->
+        {:error, :invalid_extra_paths}
+
+      true ->
+        admit_extra_production_paths(rest, MapSet.put(paths, path), count + 1)
+    end
+  end
+
+  defp admit_extra_production_paths([_ | _], _paths, _count), do: {:error, :extra_path_limit}
+  defp admit_extra_production_paths(_, _paths, _count), do: {:error, :invalid_extra_paths}
+
+  defp valid_extra_production_path?(path) when is_binary(path) do
+    literal_repo_path(path) == :ok and check_path_size(path) == :ok and
+      production_source_path?(path)
+  end
+
+  defp valid_extra_production_path?(_), do: false
+
+  defp admit_selected_production_entries(entries, selected_apps, extra_paths) do
+    admit_selected_stage_entries(entries, selected_apps, fn path, apps ->
+      MapSet.member?(extra_paths, path) or selected_production_source_path?(path, apps)
+    end)
   end
 
   defp admit_selected_stage_entries(entries, selected_apps) do

@@ -99,10 +99,10 @@ runtime-false dependencies: 1 + the maximum dependency level. Libraries depend
 only on lower levels. Audited from each `mix.exs` on 2026-10-30.
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
-L1  arbor_signals, arbor_historian, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
-L2  arbor_capabilities, arbor_kernel_runtime, arbor_cartographer, arbor_web
-L3  arbor_capabilities_signals, arbor_llm, arbor_trust
+L0  arbor_kernel, arbor_custody, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L1  arbor_support, arbor_signals, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
+L2  arbor_capabilities, arbor_kernel_runtime, arbor_cartographer, arbor_web, arbor_llm, arbor_historian
+L3  arbor_capabilities_signals, arbor_trust, arbor_llm_host
 L4  arbor_security
 L5  arbor_persistence_host, arbor_shell, arbor_sandbox
 L6  arbor_historian_host, arbor_trust_host, arbor_ai, arbor_comms, arbor_consensus
@@ -116,11 +116,11 @@ L11 arbor_dashboard
 Notes (the levels are enforced by
 [dependency_hierarchy_test.exs](packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs)):
 
-- **Kernel, Custody, Support, OAuth, Multimedia, and Persistence are L0.** Kernel
+- **Kernel, Custody, OAuth, Multimedia, and Persistence are L0.** Kernel
   owns passive contracts, types and identifiers. Signals consumes Kernel taint.
   Kernel Runtime (L2) composes Common, Signals and Monitor after boot admission.
-  OAuth is caller-started; Common owns its pool. Support owns path, atom and
-  redaction guards. Multimedia owns device I/O. Persistence core and adapters
+  OAuth is caller-started; Common owns its pool. L1 Support owns path, atom,
+  redaction and prompt guards, using Kernel taint contracts. Multimedia owns device I/O. Persistence core and adapters
   live in `packages/`; L5 Host retains product APIs and migrations.
 - [Capabilities Core](packages/arbor_capabilities/mix.exs) owns the preserved
   `Arbor.Security` facade, modules and complete authority application. Its
@@ -130,6 +130,8 @@ Notes (the levels are enforced by
   [passive Security host](apps/arbor_security/mix.exs) composes these packages
   with KernelRuntime boot integration and SkillImporter adapters; it owns no
   second authority tree.
+- `arbor_llm` (L2) owns OAuth; passive `arbor_llm_host` (L3) supplies telemetry.
+  AI/Orchestrator adapters stay product-owned.
 - `arbor_orchestrator` is L9: actions, security, AI, memory, trust, shell and
   comms sit below it; commands, dashboard and voice sit above it.
 - `arbor_consensus` is L6. Its `mix.exs` does not declare `arbor_ai`; a comment

@@ -178,11 +178,11 @@ defmodule Arbor.Orchestrator.PrivateMemoryRuntimeConfigTest do
     System.put_env("ARBOR_OLLAMA_CHAT_BASE_URL", configured_endpoint)
     runtime = read_runtime(root)
     assert runtime[:arbor_orchestrator][@route_key][:base_url] == @base_url
-    assert runtime[:arbor_orchestrator][:ollama][:base_url] == configured_endpoint
+    assert runtime[:arbor_llm][:ollama][:base_url] == configured_endpoint
 
     System.put_env("ARBOR_OLLAMA_CHAT_BASE_URL", @base_url)
     matched = read_runtime(root)
-    assert matched[:arbor_orchestrator][:ollama][:base_url] == @base_url
+    assert matched[:arbor_llm][:ollama][:base_url] == @base_url
   end
 
   defp put_enabled do

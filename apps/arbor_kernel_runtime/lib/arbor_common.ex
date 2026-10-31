@@ -27,9 +27,12 @@ defmodule Arbor.Common do
     top_level?: true,
     deps: [
       Arbor.Common.OAuth,
+      Arbor.Common.PromptSanitizer,
       Arbor.Common.SafeAtom,
       Arbor.Common.SafePath,
       Arbor.Common.SensitiveData,
+      Arbor.Common.SensitivityClassifier,
+      Arbor.Common.Sanitizers.PromptInjection,
       Arbor.Contracts,
       Arbor.Custody,
       Finch,

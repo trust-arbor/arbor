@@ -59,7 +59,7 @@ defmodule ArborAgent.MixProject do
       # L3 — public spawn-capable timeout ceiling for legacy coding envelope bounds.
       {:arbor_shell, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
-      {:arbor_llm, in_umbrella: true},
+      {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:yaml_elixir, "~> 2.0"},
       {:jido, override: true},
       {:jido_action, override: true},

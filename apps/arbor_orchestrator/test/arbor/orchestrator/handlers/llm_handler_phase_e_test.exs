@@ -41,8 +41,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
   end
 
   setup do
-    prior_dispatcher = Application.get_env(:arbor_orchestrator, :llm_dispatcher)
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, FailingControlPlaneDispatcher)
+    prior_dispatcher = Application.get_env(:arbor_llm, :llm_dispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, FailingControlPlaneDispatcher)
 
     # Enter each test with a live store when a prior module leaked. Restoration
     # on exit is strict and must fail visibly if the supervised child cannot be
@@ -52,8 +52,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
 
     on_exit(fn ->
       case prior_dispatcher do
-        nil -> Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
-        mod -> Application.put_env(:arbor_orchestrator, :llm_dispatcher, mod)
+        nil -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+        mod -> Application.put_env(:arbor_llm, :llm_dispatcher, mod)
       end
 
       ensure_route_failure_store_running()

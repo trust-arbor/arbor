@@ -14,9 +14,12 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     Arbor.Common => %{
       deps: [
         Arbor.Common.OAuth,
+        Arbor.Common.PromptSanitizer,
         Arbor.Common.SafeAtom,
         Arbor.Common.SafePath,
         Arbor.Common.SensitiveData,
+        Arbor.Common.SensitivityClassifier,
+        Arbor.Common.Sanitizers.PromptInjection,
         Arbor.Contracts,
         Arbor.Custody,
         Finch,
@@ -40,8 +43,24 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
       exports: [RootBinding, TraversalError]
     },
     Arbor.Common.SensitiveData => %{app: :arbor_support, deps: [], exports: []},
+    Arbor.Common.PromptSanitizer => %{
+      app: :arbor_support,
+      deps: [Arbor.Common.Sanitizers.PromptInjection],
+      exports: []
+    },
+    Arbor.Common.Sanitizers.PromptInjection => %{
+      app: :arbor_support,
+      deps: [Arbor.Contracts],
+      exports: []
+    },
+    Arbor.Common.SensitivityClassifier => %{
+      app: :arbor_support,
+      deps: [Arbor.Common.SensitiveData],
+      exports: []
+    },
+    Arbor.Eval.Subject => %{app: :arbor_kernel, deps: [], exports: []},
     Arbor.Eval => %{
-      deps: [Arbor.Contracts, Arbor.Common, Arbor.Common.SensitiveData, Jason],
+      deps: [Arbor.Contracts, Arbor.Common, Arbor.Common.SensitiveData, Arbor.Eval.Subject, Jason],
       exports: :all
     },
     Arbor.Signals => %{

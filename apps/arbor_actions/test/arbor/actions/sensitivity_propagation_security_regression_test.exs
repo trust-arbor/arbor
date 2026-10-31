@@ -27,7 +27,9 @@ defmodule Arbor.Actions.SensitivityPropagationSecurityRegressionTest do
     )
 
     on_exit(fn ->
-      if previous, do: Client.set_default_client(previous), else: Client.clear_default_client()
+      if previous,
+        do: :persistent_term.put({Client, :default_client}, previous),
+        else: Client.clear_default_client()
 
       if previous_bridge == :missing,
         do: :persistent_term.erase(bridge_key),

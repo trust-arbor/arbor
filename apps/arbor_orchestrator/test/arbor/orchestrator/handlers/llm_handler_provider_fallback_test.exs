@@ -41,7 +41,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderFallbackTest do
   setup do
     previous = Map.new(@env_keys, &{&1, Application.get_env(:arbor_orchestrator, &1)})
     {:ok, _} = RecordingDispatcher.start_link()
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
       Enum.each(previous, fn

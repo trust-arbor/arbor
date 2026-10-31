@@ -213,6 +213,16 @@ libraries with a version requirement and path override, preserving the failed
 cache evidence and checking repeated warm compiles. Clearing caches alone does
 not establish stable dependency admission (reconfirmed 2026-10-28).
 
+External Boundary dependencies must name modules that actually belong to the
+declared application. A namespace without a compiled root module does not create
+an implicit boundary, and a separately owned child namespace needs its own
+dependency. Inspect the actual application inventory and the pinned Boundary
+implementation when strict compilation reports unknown or forbidden references.
+Pure Erlang applications are outside Boundary's supported checks; their ordinary
+Mix dependencies and behavioral tests still apply. Keep strict checking enabled
+rather than treating speculative dependency declarations as proof (reconfirmed
+2026-10-31).
+
 <!-- applied-learning: a-baseline-is-only-valid-on-a-pinned-tree -->
 <a id="applied-learning-a-baseline-is-only-valid-on-a-pinned-tree"></a>
 **Compare identical commands on frozen baseline and candidate trees.** Record source revision, dirty-state identity, exact selectors, environment, and executed scope before and after each run; movement in the tree or unexplained test-count changes invalidates the comparison. Compare quality failures with the original pre-task base as well as any test-only parent, since the latter already contains new test code. Separate pre-existing failures from introduced ones and validate owned files and behavior without formatting unrelated backlog. Refresh isolated snapshots with explicit absolute source and destination paths, then verify expected changed bytes or hashes before accepting their evidence. Keep shared-tree mutations such as stash out of observational baseline checks. (Merged 2026-10-16 from 3 entries; first found 2026-07-22, last 2026-10-07.)
@@ -288,7 +298,7 @@ approval regressions).
 
 <!-- applied-learning: qualification-must-prove-a-named-product-or-runtime-claim -->
 <a id="applied-learning-qualification-must-prove-a-named-product-or-runtime-claim"></a>
-**Qualification must prove a named product or runtime claim.** State whether the evidence qualifies a feature/consumer, broad integration, factory restart or distributed authority. Use a deterministic composition fixture for a bounded infrastructure claim, widening coverage when shared state, topology or security requires it. A protocol model does not prove a future runtime, and broad integration is not a prerequisite for every local feature. Freeze shared features, history windows and recovery cases before comparing implementations. When claiming released-API support, verify published distributions, lock selected versions and inspect installed public exports rather than moving upstream source; preserve lookup failures. Never shrink an admitted plan, accept a prefix or let a worker choose tests. Run every locally available admitted consumer check, including teardown, before handoff. Record deferred consumer evidence as incomplete and explicitly review replacement scope. When the operator makes residual bugs non-blocking, record the superseded prerequisite, preserve unresolved failures and unverified observations as follow-ups, then resume the selected milestone. (Trimmed 2026-10-16; first found 2026-09-07.)
+**Qualification must prove a named product or runtime claim.** State whether the evidence qualifies a feature/consumer, broad integration, factory restart or distributed authority. Use a deterministic composition fixture for a bounded infrastructure claim, widening coverage when shared state, topology or security requires it. A protocol model does not prove a future runtime, and broad integration is not a prerequisite for every local feature. Freeze shared features, history windows and recovery cases before comparing implementations. When claiming released-API support, verify published distributions, lock selected versions and inspect installed public exports rather than moving upstream source; preserve lookup failures. Never shrink an admitted plan, accept a prefix or let a worker choose tests. Run every locally available admitted consumer check, including teardown, before handoff. Record deferred consumer evidence as incomplete and explicitly review replacement scope. When the operator makes residual bugs non-blocking, record the superseded prerequisite, preserve unresolved failures and unverified observations as follow-ups, then resume the selected milestone. Exercise the actual raw-runtime launch ABI before consuming state. Raw ERTS plain arguments are not automatically Elixir `System.argv/0`, and an unnamed node may report `:nocookie`; verify the supported initial argument and cookie configuration without rendering secrets. (Trimmed 2026-10-16; first found 2026-09-07.)
 
 <!-- applied-learning: inspect-raw-terminal-frames-for-text-safety -->
 <a id="applied-learning-inspect-raw-terminal-frames-for-text-safety"></a>

@@ -63,7 +63,7 @@ def build_metadata(root):
 # This opt-in classifies only reviewed operational outputs, never qualification
 # inputs. The legacy build_metadata(root) function and its default semantics stay
 # unchanged. Existing failed receipts cannot be reinterpreted with this policy.
-MAIN_BUILD_POLICIES = ("strict", "reviewed-boundary-view-v2")
+MAIN_BUILD_POLICIES = ("strict", "reviewed-boundary-view-v2", "reviewed-boundary-view-v2-nine")
 REVIEWED_BOUNDARY_VIEWS = (
     "dev/lib/arbor_support/.mix/compile.boundary_view_v2",
     "dev/lib/arbor_kernel/.mix/compile.boundary_view_v2",
@@ -73,6 +73,22 @@ REVIEWED_BOUNDARY_VIEWS = (
     "dev/lib/arbor_capabilities/.mix/compile.boundary_view_v2",
     "dev/lib/arbor_capabilities_signals/.mix/compile.boundary_view_v2",
 )
+# A separate, explicit successor inventory; the original seven-policy tuple is
+# intentionally unchanged. Neither policy discovers or widens its own paths.
+REVIEWED_BOUNDARY_VIEWS_NINE = REVIEWED_BOUNDARY_VIEWS + (
+    "dev/lib/arbor_trust/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_historian/.mix/compile.boundary_view_v2",
+)
+
+
+def _reviewed_views_for_policy(policy):
+    if policy == "reviewed-boundary-view-v2":
+        return REVIEWED_BOUNDARY_VIEWS
+    if policy == "reviewed-boundary-view-v2-nine":
+        return REVIEWED_BOUNDARY_VIEWS_NINE
+    raise RuntimeError("Policy has no reviewed output inventory")
+
+
 _BUILD_SNAPSHOT_SCHEMA = "arbor.main-build.guard-snapshot.v1"
 _CACHE_TIME_FIELDS = ("mtime_ns", "ctime_ns")
 _STAT_FIELDS = ("dev", "ino", "mode", "uid", "gid", "size", "nlink", "mtime_ns", "ctime_ns")
@@ -119,7 +135,7 @@ def _read_reviewed_cache(parent_fd, name, expected):
         os.close(fd)
 
 
-def _walk_reviewed_build(fd, prefix, entries, caches):
+def _walk_reviewed_build(fd, prefix, entries, caches, policy):
     before = _stat_record(os.fstat(fd))
     require(before["kind"] == "directory", "Build ancestor is not a directory")
     entries.append((prefix or ".", before))
@@ -127,7 +143,7 @@ def _walk_reviewed_build(fd, prefix, entries, caches):
         require(name not in (".", "..") and "/" not in name, "Unsafe build entry name")
         relative = name if not prefix else prefix + "/" + name
         value = _stat_record(os.stat(name, dir_fd=fd, follow_symlinks=False))
-        if relative in REVIEWED_BOUNDARY_VIEWS:
+        if relative in _reviewed_views_for_policy(policy):
             audit = _read_reviewed_cache(fd, name, value)
             caches[relative] = audit
             stable = {key: item for key, item in value.items() if key not in _CACHE_TIME_FIELDS}
@@ -136,7 +152,7 @@ def _walk_reviewed_build(fd, prefix, entries, caches):
             child_fd = os.open(name, _read_flags(directory=True), dir_fd=fd)
             try:
                 require(_stat_record(os.fstat(child_fd)) == value, "Build directory changed before traversal")
-                _walk_reviewed_build(child_fd, relative, entries, caches)
+                _walk_reviewed_build(child_fd, relative, entries, caches, policy)
             finally:
                 os.close(child_fd)
         else:
@@ -158,10 +174,10 @@ def main_build_snapshot(root, policy="strict"):
     root_fd = os.open(root, _read_flags(directory=True))
     entries, caches = [], {}
     try:
-        _walk_reviewed_build(root_fd, "", entries, caches)
+        _walk_reviewed_build(root_fd, "", entries, caches, policy)
     finally:
         os.close(root_fd)
-    require(set(caches) == set(REVIEWED_BOUNDARY_VIEWS), "All seven reviewed regular caches must already exist")
+    require(set(caches) == set(_reviewed_views_for_policy(policy)), "All selected reviewed regular caches must already exist")
     strict = {"entries": len(entries), "metadata_sha256": sha(json.dumps(sorted(entries), sort_keys=True).encode())}
     return {"schema": _BUILD_SNAPSHOT_SCHEMA, "policy": policy, "root": str(root),
             "strict": strict, "cache_audit": caches}
@@ -196,18 +212,18 @@ def _valid_build_snapshot(value):
     if value["policy"] == "strict":
         return (fingerprint is None or valid_fingerprint) and value["cache_audit"] == {}
     caches = value["cache_audit"]
-    return (valid_fingerprint and isinstance(caches, dict) and set(caches) == set(REVIEWED_BOUNDARY_VIEWS)
+    return (valid_fingerprint and isinstance(caches, dict) and set(caches) == set(_reviewed_views_for_policy(value["policy"]))
             and all(_valid_cache_audit(item) for item in caches.values()))
 
 
 def main_build_cache_audit(before, after):
-    """Return all seven before/after records, without admitting a change or mutating inputs."""
+    """Return all selected before/after records, without admitting changes or mutating inputs."""
     require(_valid_build_snapshot(before) and _valid_build_snapshot(after), "Malformed build snapshot")
     require(before["policy"] == after["policy"], "Main build policy changed")
     if before["policy"] == "strict":
         return {}
     result = {}
-    for path in REVIEWED_BOUNDARY_VIEWS:
+    for path in _reviewed_views_for_policy(before["policy"]):
         left, right = before["cache_audit"][path], after["cache_audit"][path]
         changed = ["metadata." + key for key in left["metadata"] if left["metadata"][key] != right["metadata"][key]]
         if left["sha256"] != right["sha256"]:
@@ -234,7 +250,7 @@ def compare_main_build_snapshots(before, after):
         result["reasons"].append("Main build root changed")
     if before["strict"] != after["strict"]:
         result["reasons"].append("Strict Main build metadata changed")
-    if before["policy"] == "reviewed-boundary-view-v2":
+    if before["policy"] != "strict":
         for path, audit in result["cache_audit"].items():
             stable_left = {key: item for key, item in audit["before"]["metadata"].items() if key not in _CACHE_TIME_FIELDS}
             stable_right = {key: item for key, item in audit["after"]["metadata"].items() if key not in _CACHE_TIME_FIELDS}

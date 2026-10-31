@@ -3,6 +3,15 @@ import Config
 # Only the host composition may register adapters with real effect admission.
 # A request or an adapter's own callbacks cannot confer destination authority.
 config :arbor_llm,
+  tool_invocation_auditor: Arbor.Security,
+  tool_executor: Arbor.LLM.ArborActionsExecutor,
+  sensitivity_policy: Arbor.AI,
+  llm_dispatcher: Arbor.AI.Runtime.Dispatch,
+  preprocessor_provider: Arbor.Orchestrator.Config,
+  external_provider_adapters: %{"acp" => Arbor.AI.LLM.Adapter.Acp},
+  signal_module: Arbor.Signals,
+  telemetry_store: Arbor.LLM.Host.Telemetry,
+  disclosure_prompt: Arbor.Commands.LLM.DisclosurePrompt,
   sensitivity_guarded_adapters: [
     Arbor.LLM.Adapter.ReqLLM,
     Arbor.LLM.Adapter.OAuthResponses,
@@ -10,6 +19,9 @@ config :arbor_llm,
     Arbor.AI.LLM.Adapter.Acp,
     Arbor.Orchestrator.LlmRouting.SensitivityAdapter
   ]
+
+# Product-owned tool discovery keeps both historical definition lookup and formatting.
+config :arbor_actions, llm_tool_adapter: Arbor.LLM.ArborActionsExecutor
 
 # VP-07B0: Hex checksums do not attest Bundlex's secondary native archives.
 # Use the separately admitted system PortAudio library via pkg-config only.

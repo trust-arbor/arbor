@@ -1,10 +1,13 @@
 defmodule Arbor.Kernel.BoundaryConfigurationTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Eval.Subject
+
   @moduletag :fast
 
   @production_boundaries %{
     Arbor.Kernel => %{deps: [], exports: []},
+    Subject => %{deps: [], exports: []},
     Arbor.Types => %{deps: [], exports: :all},
     Arbor.Identifiers => %{deps: [Arbor.Types], exports: :all},
     Arbor.Contracts => %{
@@ -43,6 +46,20 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
       refute Keyword.has_key?(opts, :dirty_xrefs)
       refute disabled_check?(opts)
     end
+  end
+
+  test "the evaluation subject behaviour retains one passive kernel owner" do
+    assert Application.get_application(Subject) == :arbor_kernel
+    assert Subject in Application.spec(:arbor_kernel, :modules)
+    assert Subject.behaviour_info(:callbacks) == [run: 2]
+    assert Application.spec(:arbor_kernel, :mod) in [nil, []]
+
+    runtime_modules = Application.spec(:arbor_kernel_runtime, :modules) || []
+    refute Subject in runtime_modules
+
+    root = umbrella_root()
+    assert File.regular?(Path.join(root, "packages/arbor_kernel/lib/arbor/eval/subject.ex"))
+    refute File.exists?(Path.join(root, "apps/arbor_kernel_runtime/lib/arbor/eval/subject.ex"))
   end
 
   test "the contract Mix tasks are explicitly classified as development tooling" do

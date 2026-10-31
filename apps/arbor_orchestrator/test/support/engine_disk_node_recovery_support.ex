@@ -170,7 +170,7 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
     # default database. All other optional service owners remain disabled.
     Application.put_env(:arbor_persistence_host, :start_children, false)
     Application.put_env(:arbor_orchestrator, :recovery_enabled, false)
-    Application.put_env(:arbor_orchestrator, :discover_local_providers, false)
+    Application.put_env(:arbor_llm, :discover_local_providers, false)
     Application.put_env(:arbor_orchestrator, :preflight_models_on_start, false)
     Application.put_env(:arbor_capabilities, :master_key_path, Path.join(disk_root, "master.key"))
     Application.put_env(:arbor_capabilities, :identity_verification, true)

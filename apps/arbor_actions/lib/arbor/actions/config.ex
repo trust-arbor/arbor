@@ -13,6 +13,16 @@ defmodule Arbor.Actions.Config do
   def scheduler_module,
     do: Application.get_env(:arbor_actions, :scheduler_module, Arbor.Scheduler)
 
+  @doc """
+  Trusted host adapter for LLM tool definitions and schema formatting.
+
+  Implements `definitions/1` and `to_openai_format/1`. An absent or unavailable
+  adapter leaves tool discovery without schemas; request parameters do not
+  select an adapter or enable an implicit product fallback.
+  """
+  @spec llm_tool_adapter() :: module() | nil
+  def llm_tool_adapter, do: Application.get_env(:arbor_actions, :llm_tool_adapter)
+
   @provider_env %{
     github: ["GITHUB_TOKEN", "GH_TOKEN"],
     gitlab: ["GITLAB_TOKEN"],

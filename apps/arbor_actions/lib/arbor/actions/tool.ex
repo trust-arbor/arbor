@@ -45,6 +45,7 @@ defmodule Arbor.Actions.Tool do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Config
 
     require Logger
 
@@ -220,7 +221,7 @@ defmodule Arbor.Actions.Tool do
     end
 
     defp executor_module do
-      Arbor.LLM.ArborActionsExecutor
+      Config.llm_tool_adapter()
     end
 
     # Prefer central Arbor.Actions.pipeline_internal_action?/1; local fallback

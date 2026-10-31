@@ -74,7 +74,7 @@ defmodule Arbor.Orchestrator.MixProject do
        path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
       {:arbor_trust_host, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
-      {:arbor_llm, in_umbrella: true},
+      {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:arbor_persistence_host, in_umbrella: true},
       {:arbor_historian, "~> 0.1.0",
        path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
