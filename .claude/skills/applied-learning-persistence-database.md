@@ -88,6 +88,13 @@ connection while another connection holds the writer lock. An implicit
 <a id="applied-learning-a-persisted-fingerprint-marker-is-not-proof-of-persisted-content"></a>
 **A persisted fingerprint marker is not proof of persisted content.** A competing or legacy writer can copy an operation ID and claimed digest into metadata while storing different type/data/actor fields. Reconciliation must reconstruct the actual durable row and recompute its fingerprint over every bound field; reserved metadata may locate an operation but must never authenticate it, and all fingerprinted fields must round-trip through every backend (found 2026-07-11 reviewing EventStore append reconciliation).
 
+Match producer values to the strictest authentication encoding used by the real
+store. A permissive fingerprint encoder can accept a rich struct that the
+storage authenticator rejects, even when its JSON bytes match a plain value.
+Emit JSON-shaped metadata at the producer boundary and prove the acknowledged
+operation against the authenticated backend; a fake grant or memory store
+misses this failure (reconfirmed 2026-10-30).
+
 <!-- applied-learning: injected-storage-identity-must-thread-through-every-operation-not-only-capability-probes -->
 <a id="applied-learning-injected-storage-identity-must-thread-through-every-operation-not-only-capability-probes"></a>
 **Thread injected storage identity through every operation, not only capability probes.** One normalized authorized store is the target of every internal read and mutation. Public resume drops caller-selected `:journal_opts`, `:server`, `:store`, `:store_name`, `:store_opts`, and `:checkpoint_store_opts` in `sanitize_public_resume_opts/1`. A caller-selected journal or store on the public resume API must not move claim or execution off the canonical target the probe used. A capability probe that succeeds against one store does not authorize a mutation against another. Lookup, claim, and mutation stay on that same authority. (Merged 2026-10-16 from 2 entries; first found 2026-07-13, last 2026-07-15.)

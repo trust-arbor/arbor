@@ -230,7 +230,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
         legacy_source: :policy_enforcer,
         mode: grant_spec.mode,
         granted_by: __MODULE__,
-        granted_at: DateTime.utc_now(),
+        granted_at: DateTime.to_iso8601(DateTime.utc_now()),
         profile_uri: grant_spec.profile.uri_prefix,
         profile_effect_class: grant_spec.profile.effect_class,
         profile_blast_radius: grant_spec.profile.blast_radius,

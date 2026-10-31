@@ -4596,9 +4596,9 @@
       "source_session": "unknown",
       "source_incident": "found 2026-07-11 reviewing EventStore append reconciliation).",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "8a71f5d94d447c336f221de9c380f3d35711b60811afbd6579b57809cf7b430f",
+      "last_confirmed": "2026-10-30",
+      "confirmed_by": "authenticated-json-producer-regression-2026-10-30",
+      "content_sha256": "4b474fe472d3d664367ba7de7d92e6c1590d5b700628d3fce69d0fafc6ee9315",
       "always_loaded": false
     },
     {
