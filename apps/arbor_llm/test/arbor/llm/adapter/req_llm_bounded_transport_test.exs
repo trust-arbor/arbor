@@ -5,8 +5,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
 
   alias Arbor.LLM
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
+  alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
   alias Arbor.LLM.Plugs.Usage.AccountedStream
-  alias Arbor.LLM.{Client, Message, OwnedStream, ProviderError, Request, StreamEvent}
+  alias Arbor.LLM.{Client, Message, OwnedStream, ProviderError, Request, Response, ResponseBudget}
+  alias Arbor.LLM.StreamEvent
 
   setup do
     original = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
@@ -554,6 +556,408 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     _ = Task.await(server, 5_000)
   end
 
+  @tag :stream_compatibility_regression
+  test "security regression: eager streaming counts the initial tool argument prefix once" do
+    chunks = tool_argument_chunks("{\"", ["value\":1}"])
+
+    {url, server} =
+      start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
+
+    owner = self()
+    ref = make_ref()
+    handler = "stream-prefix-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:req_llm, :tool_call_args_lost],
+        fn _event, _measurements, _metadata, pid -> send(pid, {ref, :args_lost}) end,
+        owner
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        request(),
+        fn _event -> :ok end,
+        transport_opts(url)
+      )
+
+    wire = Task.await(server, 2_000)
+
+    assert {:ok, %Response{} = response} = result
+    assert response.finish_reason == :tool_calls
+
+    assert [%{id: "cold_call_1", name: "cold_increment", arguments: arguments}] =
+             Enum.filter(response.content_parts, &(&1.kind == :tool_call))
+
+    assert is_binary(arguments)
+    assert Jason.decode(arguments) == {:ok, %{"value" => 1}}
+    assert response.usage.input_tokens == 3
+    assert response.usage.output_tokens == 2
+    assert response.usage.total_tokens == 5
+    assert response.raw == nil
+    assert wire.body["tools"] in [nil, []]
+    assert wire.body["stream"] == true
+    assert wire.body["model"] == "bounded-test"
+    assert String.starts_with?(wire.request, "POST /v1/chat/completions HTTP/1.1\r\n")
+    refute_received {^ref, :args_lost}
+  end
+
+  @tag :stream_compatibility_regression
+  test "security regression: eager streaming accepts text with SDK callback-bearing tools" do
+    tools = [stream_tool_schema()]
+    assert [%ReqLLM.Tool{callback: callback}] = Adapter.translate_tools(tools)
+    assert is_function(callback, 1)
+
+    {url, server} =
+      start_chunked_server(text_completion_chunks(), 0, "text/event-stream", 200, [], true)
+
+    owner = self()
+    ref = make_ref()
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        %{request() | tools: tools},
+        fn event -> send(owner, {ref, event}) end,
+        transport_opts(url)
+      )
+
+    wire = Task.await(server, 2_000)
+
+    assert {:ok, %Response{} = response} = result
+    assert response.text == "done"
+    assert response.finish_reason == :stop
+    refute Enum.any?(response.content_parts, &(&1.kind == :tool_call))
+    assert response.usage.input_tokens == 3
+    assert response.usage.output_tokens == 2
+    assert response.usage.total_tokens == 5
+    assert response.raw == nil
+    assert ResponseBudget.validate(response, []) == :ok
+    assert_received {^ref, %StreamEvent{type: :delta, data: %{text: "done"}}}
+    refute_received {^ref, _event}
+
+    assert [
+             %{
+               "type" => "function",
+               "function" => %{
+                 "name" => "cold_increment",
+                 "parameters" => %{
+                   "properties" => %{"value" => %{"type" => "integer"}},
+                   "required" => ["value"]
+                 }
+               }
+             }
+           ] = wire.body["tools"]
+
+    assert wire.body["stream"] == true
+    assert wire.body["model"] == "bounded-test"
+    assert String.starts_with?(wire.request, "POST /v1/chat/completions HTTP/1.1\r\n")
+  end
+
+  test "security regression: eager tool assembly still rejects malformed and incomplete JSON" do
+    for tail <- ["value\":}", "value\":1"] do
+      chunks = tool_argument_chunks("{\"", [tail])
+
+      {url, server} =
+        start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
+
+      result =
+        Client.complete_streaming(
+          req_llm_client(),
+          request(),
+          fn _event -> :ok end,
+          transport_opts(url)
+        )
+
+      _wire = Task.await(server, 2_000)
+
+      assert {:error, {:invalid_tool_arguments, {:invalid_json, :malformed}}} = result
+    end
+  end
+
+  test "security regression: eager tool assembly retains the argument depth ceiling" do
+    nested = Enum.reduce(1..40, 0, fn _level, value -> [value] end)
+    <<first::binary-size(2), rest::binary>> = Jason.encode!(%{"value" => nested})
+    chunks = tool_argument_chunks(first, [rest])
+    assert Enum.all?(chunks, &(byte_size(&1) < 1_024))
+    assert IO.iodata_length(chunks) < 4_096
+
+    {url, server} =
+      start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        request(),
+        fn _event -> :ok end,
+        transport_opts(url) ++ [max_response_bytes: 4_096, max_stream_event_bytes: 1_024]
+      )
+
+    _wire = Task.await(server, 2_000)
+
+    assert {:error, {:invalid_tool_arguments, {:decoded_term_limit_exceeded, :depth, 32}}} =
+             result
+  end
+
+  test "security regression: SDK tool handling does not admit executable provider metadata" do
+    safe = ReqLLM.StreamChunk.meta(%{provider_meta: %{sentinel: "retained"}})
+    assert {:ok, response} = BoundedStream.process(bounded_metadata_stream(safe))
+    assert response.provider_meta.sentinel == "retained"
+
+    for value <- [fn -> :untrusted end, make_ref(), self()] do
+      metadata = %{provider_meta: %{untrusted: value}}
+
+      assert {:error, {:decoded_term_invalid, :json_compatible_term_required}} =
+               BoundedStream.process(bounded_metadata_stream(ReqLLM.StreamChunk.meta(metadata)))
+
+      assert {:error, {:decoded_term_invalid, :json_compatible_term_required}} =
+               ResponseBudget.validate(metadata, [])
+    end
+  end
+
+  @tag :stream_prefix_ownership_regression
+  test "security regression: a scalar initial argument is not replaced by a later object" do
+    {url, server} =
+      start_chunked_server(
+        tool_argument_chunks("1", ["{\"value\":99}"]),
+        0,
+        "text/event-stream",
+        200,
+        [],
+        true
+      )
+
+    ref = capture_lost_arguments()
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        request(),
+        fn _event -> :ok end,
+        transport_opts(url)
+      )
+
+    wire = Task.await(server, 2_000)
+
+    assert {:ok, %Response{} = response} = result
+
+    assert [%{id: "cold_call_1", name: "cold_increment", arguments: arguments}] =
+             Enum.filter(response.content_parts, &(&1.kind == :tool_call))
+
+    # Preserve the SDK's existing args-lost fallback, rather than introduce a
+    # different refusal policy or accept the later object as the whole call.
+    assert Jason.decode(arguments) == {:ok, %{}}
+
+    assert_received {^ref, :args_lost,
+                     %{
+                       reason: :json_decode_error,
+                       tool_call_id: "cold_call_1",
+                       tool_name: "cold_increment"
+                     }}
+
+    refute_received {^ref, :args_lost, _metadata}
+    assert response.finish_reason == :tool_calls
+    assert response.raw == nil
+    assert wire.body["tools"] in [nil, []]
+    assert wire.body["stream"] == true
+    assert wire.body["model"] == "bounded-test"
+    assert String.starts_with?(wire.request, "POST /v1/chat/completions HTTP/1.1\r\n")
+  end
+
+  @tag :stream_prefix_ownership_regression
+  test "security regression: recovered prefix ownership remains specific to each tool index" do
+    {url, server} =
+      start_chunked_server(mixed_tool_argument_chunks(), 0, "text/event-stream", 200, [], true)
+
+    ref = capture_lost_arguments()
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        request(),
+        fn _event -> :ok end,
+        transport_opts(url)
+      )
+
+    wire = Task.await(server, 2_000)
+
+    assert {:ok, %Response{} = response} = result
+
+    assert [
+             %{id: "cold_call_1", name: "cold_increment", arguments: recovered},
+             %{id: "cold_scalar_1", name: "cold_increment", arguments: scalar}
+           ] = Enum.filter(response.content_parts, &(&1.kind == :tool_call))
+
+    assert Jason.decode(recovered) == {:ok, %{"value" => 1}}
+    assert Jason.decode(scalar) == {:ok, %{}}
+
+    assert_received {^ref, :args_lost,
+                     %{
+                       reason: :json_decode_error,
+                       tool_call_id: "cold_scalar_1",
+                       tool_name: "cold_increment"
+                     }}
+
+    refute_received {^ref, :args_lost, _metadata}
+    assert response.finish_reason == :tool_calls
+    assert response.raw == nil
+    assert wire.body["tools"] in [nil, []]
+    assert wire.body["stream"] == true
+    assert wire.body["model"] == "bounded-test"
+    assert String.starts_with?(wire.request, "POST /v1/chat/completions HTTP/1.1\r\n")
+  end
+
+  @tag :stream_prefix_ownership_regression
+  test "security regression: an equal continuation does not own the initial scalar seed" do
+    {url, server} =
+      start_chunked_server(
+        tool_argument_chunks("1", ["1"]),
+        0,
+        "text/event-stream",
+        200,
+        [],
+        true
+      )
+
+    ref = capture_lost_arguments()
+
+    result =
+      Client.complete_streaming(
+        req_llm_client(),
+        request(),
+        fn _event -> :ok end,
+        transport_opts(url)
+      )
+
+    wire = Task.await(server, 2_000)
+
+    assert {:ok, %Response{} = response} = result
+
+    assert [%{id: "cold_call_1", name: "cold_increment", arguments: arguments}] =
+             Enum.filter(response.content_parts, &(&1.kind == :tool_call))
+
+    # Equal bytes do not establish ownership: this continuation follows the
+    # scalar seed, so the existing SDK assembly is the valid JSON number 11.
+    assert Jason.decode(arguments) == {:ok, 11}
+    refute_received {^ref, :args_lost, _metadata}
+    assert response.finish_reason == :tool_calls
+    assert response.raw == nil
+    assert wire.body["tools"] in [nil, []]
+    assert wire.body["stream"] == true
+    assert wire.body["model"] == "bounded-test"
+    assert String.starts_with?(wire.request, "POST /v1/chat/completions HTTP/1.1\r\n")
+  end
+
+  defp capture_lost_arguments do
+    ref = make_ref()
+    handler = "stream-prefix-owner-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:req_llm, :tool_call_args_lost],
+        fn _event, _measurements, metadata, {pid, tag} ->
+          send(pid, {tag, :args_lost, Map.take(metadata, [:reason, :tool_call_id, :tool_name])})
+        end,
+        {self(), ref}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    ref
+  end
+
+  defp mixed_tool_argument_chunks do
+    calls = [
+      %{
+        "index" => 0,
+        "id" => "cold_call_1",
+        "type" => "function",
+        "function" => %{"name" => "cold_increment", "arguments" => "{\""}
+      },
+      %{
+        "index" => 1,
+        "id" => "cold_scalar_1",
+        "type" => "function",
+        "function" => %{"name" => "cold_increment", "arguments" => "1"}
+      },
+      %{"index" => 0, "function" => %{"arguments" => "value\":1}"}},
+      %{"index" => 1, "function" => %{"arguments" => "{\"value\":99}"}}
+    ]
+
+    Enum.map(calls, fn call ->
+      stream_event(%{"choices" => [%{"index" => 0, "delta" => %{"tool_calls" => [call]}}]})
+    end) ++ stream_finish("tool_calls")
+  end
+
+  defp stream_tool_schema do
+    %{
+      "type" => "function",
+      "function" => %{
+        "name" => "cold_increment",
+        "description" => "increment one synthetic value",
+        "parameters" => %{
+          "type" => "object",
+          "properties" => %{"value" => %{"type" => "integer"}},
+          "required" => ["value"]
+        }
+      }
+    }
+  end
+
+  defp tool_argument_chunks(first, rest) do
+    initial = %{
+      "index" => 0,
+      "id" => "cold_call_1",
+      "type" => "function",
+      "function" => %{"name" => "cold_increment", "arguments" => first}
+    }
+
+    continuations = Enum.map(rest, &%{"index" => 0, "function" => %{"arguments" => &1}})
+
+    Enum.map([initial | continuations], fn call ->
+      stream_event(%{"choices" => [%{"index" => 0, "delta" => %{"tool_calls" => [call]}}]})
+    end) ++ stream_finish("tool_calls")
+  end
+
+  defp text_completion_chunks do
+    [stream_event(%{"choices" => [%{"index" => 0, "delta" => %{"content" => "done"}}]})] ++
+      stream_finish("stop")
+  end
+
+  defp stream_finish(reason) do
+    [
+      stream_event(%{
+        "choices" => [%{"index" => 0, "delta" => %{}, "finish_reason" => reason}],
+        "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+      }),
+      "data: [DONE]\n\n"
+    ]
+  end
+
+  defp stream_event(value), do: "data: " <> Jason.encode!(value) <> "\n\n"
+
+  defp bounded_metadata_stream(chunk) do
+    %BoundedStream{
+      stream: [chunk],
+      model: LLMDB.Model.new!(%{id: "bounded-test", provider: :openai}),
+      context: ReqLLM.Context.new([]),
+      limits: %{
+        max_response_bytes: 16_777_216,
+        max_events: 100_000,
+        max_event_bytes: 1_048_576,
+        max_work: 1_600_000,
+        max_nodes: 100_000,
+        max_depth: 32,
+        max_map_keys: 10_000,
+        max_list_items: 100_000
+      }
+    }
+  end
+
   defp realistic_openai_sse(text) do
     Jason.encode!(%{
       "id" => "chatcmpl-regression",
@@ -605,7 +1009,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
          delay,
          content_type \\ "text/event-stream",
          status \\ 200,
-         extra_headers \\ []
+         extra_headers \\ [],
+         capture_body? \\ false
        ) do
     {:ok, listener} =
       :gen_tcp.listen(0, [
@@ -622,6 +1027,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
         {:ok, socket} = :gen_tcp.accept(listener)
         :ok = :gen_tcp.close(listener)
         {:ok, request} = receive_request_headers(socket, "")
+        {:ok, body} = capture_request_body(socket, request, capture_body?)
 
         header_result =
           :gen_tcp.send(
@@ -640,8 +1046,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
           end
 
         safe_close(socket)
-        %{sent: sent, closed?: closed?, request: request}
+        result = %{sent: sent, closed?: closed?, request: request}
+        if capture_body?, do: Map.put(result, :body, body), else: result
       end)
+
+    if capture_body? do
+      on_exit(fn -> stop_captured_server(task.pid, listener) end)
+    end
 
     url = "http://127.0.0.1:#{port}/v1"
 
@@ -652,6 +1063,59 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     })
 
     {url, task}
+  end
+
+  defp capture_request_body(_socket, _request, false), do: {:ok, nil}
+
+  defp capture_request_body(socket, request, true) do
+    [headers, body] = :binary.split(request, "\r\n\r\n")
+
+    lengths =
+      headers
+      |> String.split("\r\n")
+      |> Enum.drop(1)
+      |> Enum.flat_map(fn header ->
+        case String.split(header, ":", parts: 2) do
+          [name, value] ->
+            if String.downcase(name) == "content-length", do: [String.trim(value)], else: []
+
+          _ ->
+            []
+        end
+      end)
+
+    with [length] <- lengths,
+         {size, ""} when size >= 0 and size <= 65_536 <- Integer.parse(length) do
+      receive_request_body(socket, body, size)
+    else
+      _ -> {:error, :invalid_request_content_length}
+    end
+  end
+
+  defp receive_request_body(_socket, body, size) when byte_size(body) == size,
+    do: Jason.decode(body)
+
+  defp receive_request_body(socket, body, size) when byte_size(body) < size do
+    case :gen_tcp.recv(socket, size - byte_size(body), 2_000) do
+      {:ok, part} -> receive_request_body(socket, body <> part, size)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp receive_request_body(_socket, _body, _size), do: {:error, :oversized_request_body}
+
+  defp stop_captured_server(pid, listener) do
+    safe_close(listener)
+    monitor = Process.monitor(pid)
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+    after
+      2_000 -> flunk("owned captured-request server did not stop")
+    end
+
+    Process.demonitor(monitor, [:flush])
   end
 
   defp receive_request_headers(socket, acc) when byte_size(acc) <= 65_536 do
