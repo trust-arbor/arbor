@@ -23,6 +23,17 @@ Mix absent, non-distribution and one launcher cookie. Operator HOME is never
 changed. Logs are separate, private and retained; first failure holds with no
 retry, fetch, repair or evidence deletion.
 
+Immediately after verified archive unpack, each package project receives an
+exclusive private `mix.lock` with the same exact public pins as that context's
+consumer: Trust has 13 records, Historian four, and composed 22. This is a
+qualification input, not a published archive member. Archive bytes, checksums,
+metadata and published source-file maps remain unchanged. Each later guard
+requires a regular non-symlink lock with the exact context bytes, including after
+source-hidden relocation. Existing locks are never overwritten; missing,
+malformed or changed locks refuse the guard. This supplies Mix's current-project
+transitive dependency graph without adding load paths, build seeds or weaker
+strict compilation flags.
+
 Canonical fixture locations are closed and explicit:
 
 | Context | Source under `--fixtures-root` |

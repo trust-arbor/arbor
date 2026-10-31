@@ -208,6 +208,24 @@ def make_lock(records, dependencies):
     return b"%{\n" + b"\n".join(b"  " + records[name] for name in sorted(dependencies)) + b"\n}\n"
 
 
+def install_unpacked_package_lock(package, public_lock):
+    require(package.is_dir() and not package.is_symlink(), "Missing/unsafe unpacked package root")
+    with (package / "mix.lock").open("xb") as output:
+        output.write(public_lock)
+
+
+def require_unpacked_package_lock(package, public_lock):
+    path = package / "mix.lock"
+    require(path.is_file() and not path.is_symlink(), "Missing/unsafe unpacked package lock")
+    require(path.read_bytes() == public_lock, "Unpacked exact context public lock changed")
+
+
+def unpack_context_package(archive, destination, expected, metadata_path, public_lock):
+    record = unpack_archive(archive, destination, expected, metadata_path)
+    install_unpacked_package_lock(destination, public_lock)
+    return record
+
+
 def probe(context, phase, no_mix):
     _packages, _deps, _app, module, _phases = CONTEXTS[context]
     if context == "composed":
@@ -418,14 +436,17 @@ def run(args):
         for context, (packages, _deps, _app, _module, _phases) in CONTEXTS.items():
             folder = work / "contexts" / context
             copied = folder / "source-hidden" if (folder / "source-hidden").exists() else folder
+            expected_lock = make_lock(lock_records((args.repository / "mix.lock").read_bytes()), CONTEXTS[context][1])
             for package in packages:
                 path = copied / "packages" / package
+                if context in state.get("archives", {}).get(package, {}):
+                    require(path.is_dir() and not path.is_symlink(), "Verified unpacked package disappeared")
                 if path.exists():
                     require(source_files(path, PACKAGES[package][1], sources_only=True) == manifest["published"][package],
                             "Copied artifact source changed: " + context + "/" + package)
+                    require_unpacked_package_lock(path, expected_lock)
             require(source_files(copied / "consumer", FIXTURE_INPUTS, sources_only=True) == manifest["fixtures"][context],
                     "Copied consumer source changed: " + context)
-            expected_lock = make_lock(lock_records((args.repository / "mix.lock").read_bytes()), CONTEXTS[context][1])
             require((copied / "consumer/mix.lock").read_bytes() == expected_lock, "Copied exact public lock changed")
 
     def env_for(label, context=None):
@@ -568,9 +589,10 @@ def run(args):
             state.setdefault("archives", {})[name] = {}
             for context, (packages, _deps, _app, _module, _phases) in CONTEXTS.items():
                 if name in packages:
-                    state["archives"][name][context] = unpack_archive(archive, work / "contexts" / context / "packages" / name,
+                    state["archives"][name][context] = unpack_context_package(archive, work / "contexts" / context / "packages" / name,
                         manifest["published"][name], work / "metadata" / (name + ".config") if not (work / "metadata" / (name + ".config")).exists()
-                        else work / "metadata" / (name + "-" + context + ".config"))
+                        else work / "metadata" / (name + "-" + context + ".config"),
+                        make_lock(lock_records((args.repository / "mix.lock").read_bytes()), _deps))
             save()
         for context, (packages, _deps, app, _module, phases) in CONTEXTS.items():
             folder = work / "contexts" / context
