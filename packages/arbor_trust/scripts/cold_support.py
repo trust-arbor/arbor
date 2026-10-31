@@ -60,6 +60,190 @@ def build_metadata(root):
     return {"entries": len(entries), "metadata_sha256": sha(json.dumps(sorted(entries)).encode())}
 
 
+# This opt-in classifies only reviewed operational outputs, never qualification
+# inputs. The legacy build_metadata(root) function and its default semantics stay
+# unchanged. Existing failed receipts cannot be reinterpreted with this policy.
+MAIN_BUILD_POLICIES = ("strict", "reviewed-boundary-view-v2")
+REVIEWED_BOUNDARY_VIEWS = (
+    "dev/lib/arbor_support/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_kernel/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_signals/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_oauth/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_capabilities_oidc/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_capabilities/.mix/compile.boundary_view_v2",
+    "dev/lib/arbor_capabilities_signals/.mix/compile.boundary_view_v2",
+)
+_BUILD_SNAPSHOT_SCHEMA = "arbor.main-build.guard-snapshot.v1"
+_CACHE_TIME_FIELDS = ("mtime_ns", "ctime_ns")
+_STAT_FIELDS = ("dev", "ino", "mode", "uid", "gid", "size", "nlink", "mtime_ns", "ctime_ns")
+
+
+def _stat_record(value):
+    kind = ("regular" if stat.S_ISREG(value.st_mode) else
+            "directory" if stat.S_ISDIR(value.st_mode) else
+            "symlink" if stat.S_ISLNK(value.st_mode) else "other")
+    return {"kind": kind, **{key: getattr(value, "st_" + key) for key in _STAT_FIELDS}}
+
+
+def _read_flags(directory=False):
+    required = ("O_NOFOLLOW", "O_NONBLOCK") + (("O_DIRECTORY",) if directory else ())
+    require(all(hasattr(os, name) for name in required), "No-follow snapshot support unavailable")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    for name in required:
+        flags |= getattr(os, name)
+    return flags
+
+
+def _read_reviewed_cache(parent_fd, name, expected):
+    require(expected["kind"] == "regular" and expected["nlink"] == 1,
+            "Reviewed cache must be an existing single-link regular file")
+    fd = os.open(name, _read_flags(), dir_fd=parent_fd)
+    try:
+        before = _stat_record(os.fstat(fd))
+        require(before == expected and before["kind"] == "regular" and before["nlink"] == 1,
+                "Reviewed cache changed before read")
+        digest, length = hashlib.sha256(), 0
+        while True:
+            # At most the admitted size plus one byte is read. A special-file
+            # substitution cannot block: open is nonblocking and fstat precedes IO.
+            part = os.read(fd, min(65_536, before["size"] - length + 1))
+            if not part:
+                break
+            length += len(part)
+            require(length <= before["size"], "Reviewed cache grew during read")
+            digest.update(part)
+        require(length == before["size"], "Reviewed cache length changed during read")
+        require(_stat_record(os.fstat(fd)) == before, "Reviewed cache changed during read")
+        return {"sha256": digest.hexdigest(), "metadata": before}
+    finally:
+        os.close(fd)
+
+
+def _walk_reviewed_build(fd, prefix, entries, caches):
+    before = _stat_record(os.fstat(fd))
+    require(before["kind"] == "directory", "Build ancestor is not a directory")
+    entries.append((prefix or ".", before))
+    for name in sorted(os.listdir(fd)):
+        require(name not in (".", "..") and "/" not in name, "Unsafe build entry name")
+        relative = name if not prefix else prefix + "/" + name
+        value = _stat_record(os.stat(name, dir_fd=fd, follow_symlinks=False))
+        if relative in REVIEWED_BOUNDARY_VIEWS:
+            audit = _read_reviewed_cache(fd, name, value)
+            caches[relative] = audit
+            stable = {key: item for key, item in value.items() if key not in _CACHE_TIME_FIELDS}
+            entries.append((relative, stable))
+        elif value["kind"] == "directory":
+            child_fd = os.open(name, _read_flags(directory=True), dir_fd=fd)
+            try:
+                require(_stat_record(os.fstat(child_fd)) == value, "Build directory changed before traversal")
+                _walk_reviewed_build(child_fd, relative, entries, caches)
+            finally:
+                os.close(child_fd)
+        else:
+            if value["kind"] == "symlink":
+                value = {**value, "link_target": os.readlink(name, dir_fd=fd)}
+            entries.append((relative, value))
+    require(_stat_record(os.fstat(fd)) == before, "Build directory changed during traversal")
+
+
+def main_build_snapshot(root, policy="strict"):
+    """Snapshot one fixed build tree; only an explicit closed policy admits cache outputs."""
+    require(policy in MAIN_BUILD_POLICIES, "Unknown Main build policy")
+    root = Path(root)
+    if policy == "strict":
+        return {"schema": _BUILD_SNAPSHOT_SCHEMA, "policy": policy, "root": str(root),
+                "strict": build_metadata(root), "cache_audit": {}}
+    require(root.is_absolute() and str(root) == os.path.normpath(str(root)), "Canonical absolute build path required")
+    require(root.resolve(strict=True) == root, "Reviewed build path contains a symlinked ancestor")
+    root_fd = os.open(root, _read_flags(directory=True))
+    entries, caches = [], {}
+    try:
+        _walk_reviewed_build(root_fd, "", entries, caches)
+    finally:
+        os.close(root_fd)
+    require(set(caches) == set(REVIEWED_BOUNDARY_VIEWS), "All seven reviewed regular caches must already exist")
+    strict = {"entries": len(entries), "metadata_sha256": sha(json.dumps(sorted(entries), sort_keys=True).encode())}
+    return {"schema": _BUILD_SNAPSHOT_SCHEMA, "policy": policy, "root": str(root),
+            "strict": strict, "cache_audit": caches}
+
+
+def _sha256_value(value):
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _valid_cache_audit(value):
+    if not isinstance(value, dict) or set(value) != {"sha256", "metadata"} or not _sha256_value(value["sha256"]):
+        return False
+    item = value["metadata"]
+    if not isinstance(item, dict) or set(item) != {"kind", *_STAT_FIELDS}:
+        return False
+    if not all(type(item[key]) is int for key in _STAT_FIELDS):
+        return False
+    return (item["kind"] == "regular" and stat.S_ISREG(item["mode"]) and item["size"] >= 0
+            and item["nlink"] == 1 and item["ino"] > 0
+            and all(item[key] >= 0 for key in ("dev", "mode", "uid", "gid")))
+
+
+def _valid_build_snapshot(value):
+    if not isinstance(value, dict) or set(value) != {"schema", "policy", "root", "strict", "cache_audit"}:
+        return False
+    if value["schema"] != _BUILD_SNAPSHOT_SCHEMA or value["policy"] not in MAIN_BUILD_POLICIES or not isinstance(value["root"], str):
+        return False
+    fingerprint = value["strict"]
+    valid_fingerprint = (isinstance(fingerprint, dict) and set(fingerprint) == {"entries", "metadata_sha256"}
+                         and type(fingerprint["entries"]) is int and fingerprint["entries"] >= 1
+                         and _sha256_value(fingerprint["metadata_sha256"]))
+    if value["policy"] == "strict":
+        return (fingerprint is None or valid_fingerprint) and value["cache_audit"] == {}
+    caches = value["cache_audit"]
+    return (valid_fingerprint and isinstance(caches, dict) and set(caches) == set(REVIEWED_BOUNDARY_VIEWS)
+            and all(_valid_cache_audit(item) for item in caches.values()))
+
+
+def main_build_cache_audit(before, after):
+    """Return all seven before/after records, without admitting a change or mutating inputs."""
+    require(_valid_build_snapshot(before) and _valid_build_snapshot(after), "Malformed build snapshot")
+    require(before["policy"] == after["policy"], "Main build policy changed")
+    if before["policy"] == "strict":
+        return {}
+    result = {}
+    for path in REVIEWED_BOUNDARY_VIEWS:
+        left, right = before["cache_audit"][path], after["cache_audit"][path]
+        changed = ["metadata." + key for key in left["metadata"] if left["metadata"][key] != right["metadata"][key]]
+        if left["sha256"] != right["sha256"]:
+            changed.append("sha256")
+        result[path] = {
+            "before": {"sha256": left["sha256"], "metadata": dict(left["metadata"])},
+            "after": {"sha256": right["sha256"], "metadata": dict(right["metadata"])},
+            "changed_fields": sorted(changed),
+        }
+    return result
+
+
+def compare_main_build_snapshots(before, after):
+    """Admit only the selected policy's exact delta; never rebase or repair either snapshot."""
+    result = {"accepted": False, "reasons": [], "cache_audit": {}}
+    if not _valid_build_snapshot(before) or not _valid_build_snapshot(after):
+        result["reasons"].append("Malformed Main build snapshot")
+        return result
+    if before["policy"] != after["policy"]:
+        result["reasons"].append("Main build policy changed")
+        return result
+    result["cache_audit"] = main_build_cache_audit(before, after)
+    if before["root"] != after["root"]:
+        result["reasons"].append("Main build root changed")
+    if before["strict"] != after["strict"]:
+        result["reasons"].append("Strict Main build metadata changed")
+    if before["policy"] == "reviewed-boundary-view-v2":
+        for path, audit in result["cache_audit"].items():
+            stable_left = {key: item for key, item in audit["before"]["metadata"].items() if key not in _CACHE_TIME_FIELDS}
+            stable_right = {key: item for key, item in audit["after"]["metadata"].items() if key not in _CACHE_TIME_FIELDS}
+            if stable_left != stable_right:
+                result["reasons"].append("Reviewed cache identity changed: " + path)
+    result["accepted"] = not result["reasons"]
+    return result
+
+
 def operator_state():
     node_id = Path.home() / ".arbor/node_id"
     node = metadata(node_id)
