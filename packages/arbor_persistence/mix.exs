@@ -1,6 +1,8 @@
 defmodule Arbor.Persistence.Core.MixProject do
   use Mix.Project
 
+  @source_url "https://github.com/trust-arbor/arbor"
+
   def project do
     [
       app: :arbor_persistence,
@@ -14,7 +16,12 @@ defmodule Arbor.Persistence.Core.MixProject do
         {:telemetry, "~> 1.0"}
       ],
       description: "Generic stores, acknowledged buffering and bounded event logs",
-      package: [licenses: ["MIT"], files: ~w(lib mix.exs README.md LICENSE)]
+      source_url: @source_url,
+      package: [
+        licenses: ["MIT"],
+        links: %{"GitHub" => @source_url},
+        files: ~w(lib mix.exs README.md LICENSE)
+      ]
     ]
   end
 
