@@ -200,7 +200,16 @@ defmodule SupportStandaloneConsumer do
       "prompt scan lost detection"
     )
 
-    {:ok, taint} = Taint.new(%{level: :untrusted, confidence: :verified})
+    {:ok, taint} =
+      Taint.new(%{
+        level: :untrusted,
+        sensitivity: :internal,
+        sanitizations: 0,
+        confidence: :verified,
+        source: nil,
+        chain: []
+      })
+
     {:ok, _wrapped, sanitized} = PromptInjection.sanitize("ordinary input", taint, nonce: nonce)
 
     ensure(
