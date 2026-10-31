@@ -2,6 +2,14 @@ import Config
 root = System.fetch_env!("PAIRED_STATE_ROOT")
 repo = Arbor.Persistence.SQL.Repo
 
+config :arbor_persistence,
+  contract_modules: %{
+    record: Arbor.Contracts.Persistence.Record,
+    revision: Arbor.Contracts.Persistence.Revision,
+    filter: Arbor.Contracts.Persistence.Filter,
+    append_operation: Arbor.Contracts.Persistence.AppendOperation
+  }
+
 sql_target = %{
   name: :historian_durable_event_log,
   backend: Arbor.Persistence.EventLog.Ecto,
