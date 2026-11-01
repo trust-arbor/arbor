@@ -54,6 +54,30 @@
     "rationale": "This supervisor owns only Cartographer's registry, scout, and reconnect worker. The whole child set is topology and placement support that should be omitted from the safe profile."
   },
   {
+    "path": "apps/arbor_commands/lib/arbor/commands/llm/disclosure_prompt.ex",
+    "blob_oid": "f27ecc9c25bfa2e0a21f6d214d8c91ab3688d1b4",
+    "class": "optional_extension",
+    "rationale": "Arbor.Commands.LLM.DisclosurePrompt.info/1 (disclosure_prompt.ex:7) prints through Mix.shell().info/1, and yes?/1 (10) asks Mix.shell().yes?/1. It implements Arbor.LLM.Contracts.DisclosurePrompt. Current owner is arbor_commands. This is the product CLI interaction for the OpenCode disclosure question. The library does not embed Mix. Absence of this adapter leaves disclosure unacknowledged; it does not remove Sensitivity or credential custody. Class optional_extension."
+  },
+  {
+    "path": "apps/arbor_commands/lib/mix/tasks/arbor.login.ex",
+    "blob_oid": "962dd1984b45197b55789f1c1fe2b9d31d6781e9",
+    "class": "optional_extension",
+    "rationale": "Mix.Tasks.Arbor.Login.run/1 (arbor.login.ex:60) and execute/2 (71) start an Arbor-owned OpenAI or xAI login or print OAuth status. The moduledoc (4-14) is the operator CLI, including the oauth.login alias. Current owner is arbor_commands. Login UX calls the package login flow and does not own credential publication. Class optional_extension."
+  },
+  {
+    "path": "apps/arbor_commands/lib/mix/tasks/arbor.oauth.login.ex",
+    "blob_oid": "6be069e7eea50e0173746b4baea394868202b70f",
+    "class": "optional_extension",
+    "rationale": "Mix.Tasks.Arbor.Oauth.Login.run/1 (arbor.oauth.login.ex:8) delegates to Mix.Tasks.Arbor.Login.run/1. Current owner is arbor_commands. The alias adds no credential store, refresh, or egress check. Class optional_extension."
+  },
+  {
+    "path": "apps/arbor_commands/lib/mix/tasks/arbor/llm/free.ex",
+    "blob_oid": "b441559f7e8fc340d213aac37119ca6791dc1101",
+    "class": "optional_extension",
+    "rationale": "Mix.Tasks.Arbor.Llm.Free.run/1 (free.ex:17-22) prints Arbor.LLM.OpenCodeZen.listing/0 and tells the operator to acknowledge before the first request. The moduledoc (4-11) says the list comes from recorded eval evidence and prints the disclosure warning. Current owner is arbor_commands. This is OpenCode catalog UX. It does not send a prompt or admit egress for other providers. Class optional_extension."
+  },
+  {
     "path": "apps/arbor_historian/lib/arbor/historian.ex",
     "blob_oid": "a5a3824665c30d31378b48052d8e221e7a094b4d",
     "class": "system_extension",
@@ -150,466 +174,22 @@
     "rationale": "This struct describes time-bounded filters for the optional timeline reconstruction feature. It is query-view vocabulary with no role in mandatory audit append, boot, or extension recovery."
   },
   {
-    "path": "apps/arbor_llm/lib/arbor/llm.ex",
-    "blob_oid": "44387519b1b93d8636b48540a3a7ab0463b9f798",
-    "class": "system_extension",
-    "rationale": "This is the first-party LLM facade for generation, streaming, embeddings, structured output, and normal client dispatch, so its governing responsibility is the normal-profile LLM system extension. The file is mixed: OAuth login and eval entry points should move to optional extensions, tool-loop execution should move to Cognition, and the bounded-result helper facade should remain behind the fixed host boundary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/abort_error.ex",
-    "blob_oid": "2eebf8c7d818f1feacca51ba7fd1e42f82b76c60",
-    "class": "system_extension",
-    "rationale": "Defines the closed error used when a normal LLM operation is aborted; it is LLM domain vocabulary, not an authorization or recovery service."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/adapter/lm_studio.ex",
-    "blob_oid": "bd52f86b8be5e14ce2ce741e4fe9d0344152e64d",
+    "path": "apps/arbor_llm_host/lib/arbor/llm/host.ex",
+    "blob_oid": "bc88da94e091c65bd23429e2ed3c6dfdd11a4e3e",
     "class": "optional_extension",
-    "rationale": "Implements Arbor's opt-in owned LM Studio transport and model-specific request translation. A normal profile can use another provider, so this bundled local-provider adapter is optional."
+    "rationale": "Arbor.LLM.Host (host.ex:1-3) is the product Boundary that depends on Arbor and Arbor.Common and exports Telemetry. It starts no process and reads no credential. Current owner is arbor_llm_host. Product composition of the passive host is separate from package enforcement. Omitting this marker does not remove Boundary, Sensitivity, or RecoveryProofStore. Class optional_extension."
   },
   {
-    "path": "apps/arbor_llm/lib/arbor/llm/adapter/oauth_responses.ex",
-    "blob_oid": "483885d434278fd2088077d7e73eb7cf05dd820f",
+    "path": "apps/arbor_llm_host/lib/arbor/llm/host/telemetry.ex",
+    "blob_oid": "55145a076915f2399650fec69089c2e2d1c791e2",
     "class": "optional_extension",
-    "rationale": "Translates Arbor requests to the OpenAI/xAI subscription Responses transport. Subscription OAuth is one first-party provider option, not required for normal LLM operation or recovery."
+    "rationale": "Arbor.LLM.Host.Telemetry.record_tool/4 (host/telemetry.ex:9-11) implements ToolTelemetry and forwards the observation to Arbor.Common.AgentTelemetry.Store.record_tool/4. Current owner is arbor_llm_host. Tool observation is omittable product telemetry. It does not authorize the tool call or account response bytes. Class optional_extension."
   },
   {
-    "path": "apps/arbor_llm/lib/arbor/llm/adapter/req_llm.ex",
-    "blob_oid": "7de9512bf5be74102a1a8d2db7f110d758f77272",
+    "path": "apps/arbor_orchestrator/lib/arbor/llm/arbor_actions_executor.ex",
+    "blob_oid": "c55ead527f57a136ae6527b581bc618a9afd12be",
     "class": "system_extension",
-    "rationale": "Provides Arbor's bundled general transport adapter over ReqLLM, including request translation and dispatch across the ordinary provider set. Its internal limits and usage hooks do not make this replaceable transport a reference monitor."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
-    "blob_oid": "78365394ba8c2fcb1ab1bd81936db129e9b59951",
-    "class": "system_extension",
-    "rationale": "Owns the ReqLLM-specific streaming worker and bounded stream translation. It is part of the bundled transport implementation, even though it applies defensive resource limits."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/application.ex",
-    "blob_oid": "ff7bda53651cc00499736aa8af3bfcc3c54331b9",
-    "class": "system_extension",
-    "rationale": "Starts the active LLM supervision tree used by the normal profile. The file currently mixes optional OAuth login children with the credential recovery-proof owner; future packaging must move login supervisors out and place only the fixed credential owner in the trusted host so safe boot does not start the whole LLM app."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/arbor_actions_executor.ex",
-    "blob_oid": "9a1b5872402558504b501a14349a77f6ebdafe0c",
-    "class": "system_extension",
-    "rationale": "Converts the first-party Actions catalog to LLM tools and delegates execution to Orchestrator. This is normal-profile Cognition integration and must move out of Platform LLM, not become part of the trusted host."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/boundary.ex",
-    "blob_oid": "e3d1d7de0111e53a7b33172968ac029d00b4d646",
-    "class": "trusted_host",
-    "rationale": "Owns admission of provider completions, stream events, embeddings, usage, provider receipts, and delegated limits. This is the fixed validation point that must sit after any replaceable transport and fail closed on malformed or over-budget provider output."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/call.ex",
-    "blob_oid": "43d93cf45151c9c4548bca52a41aba99bb96e208",
-    "class": "system_extension",
-    "rationale": "Defines the mutable call envelope used to compose Arbor's LLM plug pipeline. It is LLM middleware state rather than a generic pre-Platform activation primitive or reference monitor."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/client.ex",
-    "blob_oid": "2e9767f324493d83f95f686fe45e24dcc3edf478",
-    "class": "system_extension",
-    "rationale": "Owns normal-profile provider routing, adapter registration, completion, streaming, embedding, and middleware orchestration. The file is mixed with Cognition-owned tool hooks and provider preference; those paths should split out while the client invokes only Platform-authorized provider handles."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/configuration_error.ex",
-    "blob_oid": "db1b9819389b72940175b582d5bf6aea2ea3bef5",
-    "class": "system_extension",
-    "rationale": "Defines an LLM client configuration failure and carries no policy, enforcement, or recovery responsibility."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/content_part.ex",
-    "blob_oid": "c4110919435997dd17da398de6863c0972a3e510",
-    "class": "system_extension",
-    "rationale": "Defines and normalizes LLM-domain message parts such as text, media, tool calls, and thinking content. This provider-consumer protocol belongs with the normal LLM system extension."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/deadline.ex",
-    "blob_oid": "d1868d1232f759de5a293bb10fd46c3aa596a550",
-    "class": "trusted_host",
-    "rationale": "Closes caller and delegated timeouts, propagates inherited deadlines, owns workers, and terminates overdue provider operations. The invocation host must retain this resource-enforcement responsibility rather than trust a provider to stop itself."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/dispatcher.ex",
-    "blob_oid": "d05ce2c5c3b963bc80ec16c19b2d68b8ebcd6bab",
-    "class": "system_extension",
-    "rationale": "Defines the high-level dispatch seam for model selection, runtime resolution, telemetry, and fallback, with Arbor.AI as the canonical implementation. That is normal-profile Cognition strategy and should consume authorized candidates rather than live in the Platform host."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/endpoint.ex",
-    "blob_oid": "2728268021bde7e365511802811b617bed3aef5b",
-    "class": "system_extension",
-    "rationale": "Validates provider-specific HTTP origins and paths for ReqLLM, local, eval, and OAuth transports. It is a strong first-party endpoint-policy helper, but it is not the caller-bound non-bypassable egress gate; provider endpoint tables should split into contributions enforced by the Platform egress proxy."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/eval/provider_resolver.ex",
-    "blob_oid": "caf520e6b19f0f3446c78d07bde0c5e5b3de4b28",
-    "class": "optional_extension",
-    "rationale": "Resolves and preflights transports specifically for the evaluation subject. Evaluation provider selection is first-party tooling that is not needed by the normal runtime or recovery."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/eval/subject.ex",
-    "blob_oid": "6bc736b0d2e502b552db9e6a54902e6ffe4dcfdf",
-    "class": "optional_extension",
-    "rationale": "Implements an evaluation subject that runs prompts through selectable LLM providers and reports eval measurements. Evals are an optional first-party feature, despite the file's careful transport bounds."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/external_term.ex",
-    "blob_oid": "e95aa90aecec332c9e337db31405a8581070643b",
-    "class": "trusted_host",
-    "rationale": "Bounds and redacts arbitrary provider terms and exceptions before they cross the LLM boundary or enter errors and logs. This supports the fixed result-admission boundary and must not be supplied by the provider being constrained."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/fallback_loop.ex",
-    "blob_oid": "d27c7c84b161c968a46c032c6831739638594283",
-    "class": "system_extension",
-    "rationale": "Executes model/runtime fallback strategy for Arbor.AI and Orchestrator call paths. Fallback preference is normal-profile Cognition behavior, not provider authorization or recovery."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/file_receipt.ex",
-    "blob_oid": "a10eb5e2a54e80f0b6d34ed956c0380e19ca6399",
-    "class": "optional_extension",
-    "rationale": "Provides race-resistant bounded file reads and publication for record/replay fixtures. Its strong filesystem checks protect optional fixture tooling; they do not make fixture storage a mandatory host service."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/json_preflight.ex",
-    "blob_oid": "3b575b01bd3b90dc9d8455e51fe285e3feb120a1",
-    "class": "trusted_host",
-    "rationale": "Scans untrusted JSON source before decoding to enforce byte, node, depth, collection, string, and numeric limits. It is a support mechanism for the fixed provider-result and credential boundary, not an LLM provider implementation."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/message.ex",
-    "blob_oid": "086a919ef697dbe6634cd3e9f1f0d81e15a05739",
-    "class": "system_extension",
-    "rationale": "Defines the LLM request message value and content normalization used by clients and adapters. It is domain protocol for the normal LLM extension."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/no_object_generated_error.ex",
-    "blob_oid": "fa6831488d346fbd67fd633b8b84afe93c35cdad",
-    "class": "system_extension",
-    "rationale": "Defines the LLM-domain failure returned when structured generation produces no object; it has no enforcement ownership."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth.ex",
-    "blob_oid": "ffd22d0ff9e68c659a04914eaea65d856830a77e",
-    "class": "trusted_host",
-    "rationale": "Owns credential envelopes, secret validation, token custody, atomic publication, generation binding, single-flight refresh, one-shot recovery leases, and bounded provenance. The file is mixed with OpenAI/xAI-specific aliases, refresh policy, and wire calls; those provider implementations must split to optional extensions while credential custody and receipt issuance remain fixed host responsibilities."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/jwt_payload.ex",
-    "blob_oid": "76f7679c36aa17c36b6d4ba77fe41282c509a576",
-    "class": "trusted_host",
-    "rationale": "Performs bounded decoding of credential JWT payloads used to determine expiry without exposing token material. It is part of the fixed credential-validation boundary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login.ex",
-    "blob_oid": "63c47840598e788e3482461ce376d809495898d2",
-    "class": "optional_extension",
-    "rationale": "Coordinates the pinned OpenAI PKCE and xAI device-code acquisition flows. These are provider-specific first-party login implementations and are not needed when another credential or provider mode is used."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/authorization_prompt.ex",
-    "blob_oid": "2f5ece9bf9ec97c96ee5468a01e6e2d48ef599fe",
-    "class": "optional_extension",
-    "rationale": "Defines the redacted user prompt for the optional OpenAI authorization-code login flow."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/device_prompt.ex",
-    "blob_oid": "4213204c25f932b424541ae9672fcce2e7fdd989",
-    "class": "optional_extension",
-    "rationale": "Defines the redacted user-facing values for the optional xAI device-code login flow."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback.ex",
-    "blob_oid": "b30553672ea6e2a11edfa58c05bcfc6f898fa5df",
-    "class": "optional_extension",
-    "rationale": "Starts and resolves the localhost callback flow for OpenAI login. Automatic loopback acquisition is optional operational functionality and must be absent from safe boot."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_flow_supervisor.ex",
-    "blob_oid": "3b5cd83d9b7793e07ed35cd63f60e59033497683",
-    "class": "optional_extension",
-    "rationale": "Supervises one optional OAuth loopback listener, owner, plug, and transport flow."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_owner.ex",
-    "blob_oid": "b29c2770848220b4ea9334c3c70e87644fb2a860",
-    "class": "optional_extension",
-    "rationale": "Owns the lifecycle, correlation state, timeout, and cleanup for one optional loopback login flow; it is not general credential custody."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_plug.ex",
-    "blob_oid": "721b3dde05f83053e311ea2d1dce6116d21cee57",
-    "class": "optional_extension",
-    "rationale": "Handles HTTP callbacks for the optional local OAuth listener and forwards parsed results to the flow owner."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_prompt.ex",
-    "blob_oid": "b30a30d03ca5418a0a3157687b73fc884140771b",
-    "class": "optional_extension",
-    "rationale": "Carries the deliberately redacted authorization URL for the optional automatic loopback login flow."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_query.ex",
-    "blob_oid": "4a96f6218ca970f32d75cef24f79cdbc16c620c9",
-    "class": "optional_extension",
-    "rationale": "Parses and bounds callback query parameters for the optional OAuth loopback transport."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_registry_owner.ex",
-    "blob_oid": "e94971e57025775d9e37c47a78da89973bebbfd1",
-    "class": "optional_extension",
-    "rationale": "Owns the process registry used only to correlate optional loopback login flows."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_resolver.ex",
-    "blob_oid": "1db30426562de20e91aaaf0d95f041cd93e14807",
-    "class": "optional_extension",
-    "rationale": "Resolves and validates loopback IPv4/IPv6 addresses for the optional local OAuth listener."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_root_supervisor.ex",
-    "blob_oid": "5af9d27312d5551ff34f979834c06e81076b61bc",
-    "class": "optional_extension",
-    "rationale": "Starts the registry owner and dynamic supervisor for optional OAuth loopback flows."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_supervisor.ex",
-    "blob_oid": "c31ab7574939dda57bb2b766ebd18c03f96ba2f5",
-    "class": "optional_extension",
-    "rationale": "Dynamically supervises optional per-login loopback flow processes."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_transport.ex",
-    "blob_oid": "2cbd237b4b54d2272dd996d8d2ed64a9947b908f",
-    "class": "optional_extension",
-    "rationale": "Implements the Ranch socket transport restricted to the optional OAuth loopback listener. Its socket hardening does not make the login transport part of recovery."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/pending_store.ex",
-    "blob_oid": "a9934e4f37cd5834c11104b9a003785fdf3147c0",
-    "class": "optional_extension",
-    "rationale": "Stores one-shot PKCE and device-code correlation state for optional provider login flows. It does not own durable provider credentials after acquisition."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/model_catalog.ex",
-    "blob_oid": "90a1ed71511a68b93cbb97cc74ecca0e7f32e0a3",
-    "class": "optional_extension",
-    "rationale": "Fetches and validates subscription-specific OpenAI/xAI model catalogs. Model discovery for these optional provider routes is not required by a normal profile using another transport."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/model_catalog_failure.ex",
-    "blob_oid": "c0174d9fecf8e48aa145fe97c1e7e7cf69d8dfc5",
-    "class": "optional_extension",
-    "rationale": "Defines bounded redacted failures for the optional subscription model-catalog transport."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/provider_policy.ex",
-    "blob_oid": "dea8515af5f5c4d549c52f57653dc528de61a2f4",
-    "class": "optional_extension",
-    "rationale": "Hardcodes OpenAI and xAI OAuth endpoints, client identities, scopes, and refresh settings. This provider policy is replaceable first-party implementation data, not the credential reference monitor."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/recovery_proof_store.ex",
-    "blob_oid": "dd9f7c02f88214d2dd33c18fff04e93eab4f1134",
-    "class": "trusted_host",
-    "rationale": "Issues, binds, consumes, expires, and owner-cleans one-shot proofs that authorize credential recovery after a failed provider request. This is part of the non-replayable credential recovery boundary and cannot be delegated to the provider."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/responses.ex",
-    "blob_oid": "8e5ddb5f13fd88673136285b7de4dd78d4ca6ddb",
-    "class": "optional_extension",
-    "rationale": "Implements the OpenAI/xAI subscription Responses wire protocol, SSE parsing, and tool-call translation. It is a bundled provider transport that remains optional despite using fixed host credential and result helpers."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/oauth/responses_failure.ex",
-    "blob_oid": "deb7adab09a159686fdcc82f2b7eab22ea22f64b",
-    "class": "optional_extension",
-    "rationale": "Defines the closed failure vocabulary for the optional subscription Responses transport; bounded errors do not make the transport mandatory host code."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/owned_stream.ex",
-    "blob_oid": "8919fbc5101a42daaa9723b5e54ceee6a2b3115c",
-    "class": "trusted_host",
-    "rationale": "Owns provider stream producers, enforces single-consumer claims and deadlines, validates each event, and guarantees cancellation and cleanup. This is invocation containment that the constrained provider cannot own for itself."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/pipeline.ex",
-    "blob_oid": "eccd4b208b59eaeed122c379a8957972579905b1",
-    "class": "system_extension",
-    "rationale": "Composes configurable LLM plugs over the call envelope. The composition facility is normal LLM middleware; mandatory host checks must be outside or immutable within this configurable sequence."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plug.ex",
-    "blob_oid": "9a8162041a87f63e124dced1f625c452179355d6",
-    "class": "system_extension",
-    "rationale": "Defines the behavior and convenience macro for LLM call middleware. This is an extension-internal composition protocol, not a generic Kernel activation primitive."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/dispatch.ex",
-    "blob_oid": "b593b614b128b6a843a39b48bb4a2a68efe75868",
-    "class": "system_extension",
-    "rationale": "Invokes ReqLLM operations and translates transport results and errors. It is the effecting portion of the bundled provider implementation; its defensive limits must be backed by the separate host admission boundary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/fixture.ex",
-    "blob_oid": "d4f6c4255cc4ab18380694766da8f0da15a14f28",
-    "class": "optional_extension",
-    "rationale": "Owns hashing, typed serialization, loading, and publication of record/replay fixtures. This developer and test capability is not required by normal LLM operation."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/rate_limit_backoff.ex",
-    "blob_oid": "155a23819bda9416927c57dd158b35f9a37a8ff0",
-    "class": "system_extension",
-    "rationale": "Applies same-provider rate-limit retry policy around dispatch. Retry behavior is normal-profile transport policy rather than provider authorization or recovery."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/record.ex",
-    "blob_oid": "37a1854eb7319b9fe9ddf5b55d1ae87f9f00e2f4",
-    "class": "optional_extension",
-    "rationale": "Records provider results as fixtures for later replay. Recording is optional developer tooling and must not sit in the mandatory invocation path."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/replay.ex",
-    "blob_oid": "54a3649009fe8695a24066b128f8c3f31823e700",
-    "class": "optional_extension",
-    "rationale": "Short-circuits LLM dispatch with persisted fixtures for deterministic tests. Replay is optional tooling, not a normal provider or host service."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/response_limit.ex",
-    "blob_oid": "aa018863f0312f442952b0671d97872befbe79d4",
-    "class": "system_extension",
-    "rationale": "This configurable plug normalizes caller response-size aliases before transport dispatch as defense in depth. The fixed Boundary and ResponseBudget modules own non-bypassable narrowing and receipt enforcement, so an omittable pipeline plug is not itself trusted-host policy."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/staleness_warn.ex",
-    "blob_oid": "239b1985f11ccbea07424471400cfdfe4b83fa79",
-    "class": "optional_extension",
-    "rationale": "Warns when optional replay fixtures are old and has no effect on live call authority or recovery."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/usage.ex",
-    "blob_oid": "b65165ec4c3825182fe49edb2622c4b792b16e20",
-    "class": "system_extension",
-    "rationale": "Emits bounded exactly-once usage telemetry from accepted ReqLLM results, but explicitly rescues failures and returns the call unchanged. It is normal-profile accounting observation, not the missing fail-closed accounting enforcement point."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/plugs/usage/accounted_stream.ex",
-    "blob_oid": "916770aa45a482b9750dfe321c83b1ccfa69add0",
-    "class": "system_extension",
-    "rationale": "Wraps a stream to preserve provenance for the usage telemetry plug. Its responsibility follows the observational normal-profile accounting implementation."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/post_processors.ex",
-    "blob_oid": "a52dd0ecadf4f41f17700b141d97815c07d78b68",
-    "class": "system_extension",
-    "rationale": "Normalizes provider-specific reasoning fields and wrapped JSON into Arbor response content. This is ordinary first-party response adaptation, not result admission authority."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/preflight.ex",
-    "blob_oid": "b2624675ddc114649d6618a05518a2837e92719e",
-    "class": "optional_extension",
-    "rationale": "Performs a warn-only live check of Orchestrator-configured local models against LM Studio and Ollama inventories. This optional operational check must move out of Platform and receive configuration through an injected boundary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/provider_adapter.ex",
-    "blob_oid": "4405347e6ce93b605468f4259320b7ac8567d369",
-    "class": "system_extension",
-    "rationale": "Defines the LLM-domain callback contract implemented by first-party provider transports. Shared provider protocol does not make it a generic pre-Platform primitive or a reference monitor."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/provider_catalog.ex",
-    "blob_oid": "07f38cb71309e391608a8471996878c3e34f6e4a",
-    "class": "system_extension",
-    "rationale": "Discovers and caches available first-party LLM provider capabilities for the normal profile. The file is mixed with ACP adapter selection and direct module identities; Cognition preference must split out and the catalog must consume authorized provider handles."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/provider_error.ex",
-    "blob_oid": "882f27775207c38b00321df6da710034551200a3",
-    "class": "system_extension",
-    "rationale": "Defines the normalized failure returned by LLM provider adapters. It is provider-domain error vocabulary without enforcement ownership."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/provider_registry.ex",
-    "blob_oid": "bf278102ff2399b6669cfa9e46d167209f0f3f6d",
-    "class": "system_extension",
-    "rationale": "Catalogs ReqLLM and local provider names, environment keys, default URLs, and capabilities. This normal-profile implementation registry must be replaced by authorized generation handles, but it is not itself the Platform reference monitor."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/request.ex",
-    "blob_oid": "2664223a93e36de69aaeb9395139b671c60d8fa1",
-    "class": "system_extension",
-    "rationale": "Defines the LLM request struct used by clients, adapters, and Cognition. Its AI runtime selection fields should split from the transport request contract, but the file is governed by normal-profile LLM domain data."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/request_timeout_error.ex",
-    "blob_oid": "97f68b890c267bab731113ec8921353e7a952601",
-    "class": "system_extension",
-    "rationale": "Defines the public timeout failure for LLM calls. The host enforces the deadline, while this error remains ordinary LLM protocol vocabulary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/response.ex",
-    "blob_oid": "56cc8309e9e9645372dc266fa716807577d1a1f5",
-    "class": "system_extension",
-    "rationale": "Defines the normalized LLM response and provider receipt values consumed by normal Arbor profiles. ACP-specific runtime metadata should split from the transport response, while host code separately revalidates any receipt."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/response_budget.ex",
-    "blob_oid": "5eef183735a5560797501924364b5f8bc5baac10",
-    "class": "trusted_host",
-    "rationale": "Enforces hard aggregate limits on provider terms and JSON, installs bounded non-decompressing non-redirecting Req response collection, and validates embedded tool JSON. It is resource enforcement supporting the fixed provider-output boundary."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/retry.ex",
-    "blob_oid": "a46d8d24594afc0a09f5e0b68a3fe14af8d40d46",
-    "class": "system_extension",
-    "rationale": "Classifies LLM failures and executes bounded retry policy shared by AI and Orchestrator call paths. Retry choice is normal-profile strategy rather than host authorization."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/stream_error.ex",
-    "blob_oid": "9ae9dbe09bab6965eaab0e3aa8fb7302bb69551f",
-    "class": "system_extension",
-    "rationale": "Defines the bounded public error raised by an owned LLM stream; it is protocol vocabulary even though the host owns stream containment."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/stream_event.ex",
-    "blob_oid": "3ee53fc61703276b64fdcd5189f47b576c4c8bd6",
-    "class": "system_extension",
-    "rationale": "Defines the normalized event value emitted by LLM streaming adapters. It is LLM provider-consumer protocol, not an enforcement service."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/tool.ex",
-    "blob_oid": "d708fe2ecb44bb6cfd313dfe17369f92bdfd91ad",
-    "class": "system_extension",
-    "rationale": "Defines LLM tool schemas and converts them to provider definitions for the normal agent profile. Tool selection belongs with Cognition rather than the Platform host."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/tool_call_validator.ex",
-    "blob_oid": "0c5a79cc1386543d3c654276bd7754b7fa65b97b",
-    "class": "system_extension",
-    "rationale": "Validates and optionally repairs model-produced tool calls against declared tool schemas. This is Cognition/tool-loop behavior and does not authorize tool execution."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/tool_error.ex",
-    "blob_oid": "93a6ac99e3a6cccb7f00dfeb5fd2cbb03eea1571",
-    "class": "system_extension",
-    "rationale": "Defines failures produced by normal-profile LLM tool processing and carries no grant or execution authority."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/tool_loop.ex",
-    "blob_oid": "d8688b19e76c4516b7e53a96e3c5ad6046897444",
-    "class": "system_extension",
-    "rationale": "Runs multi-turn model/tool interaction, validates Engine authorization context, invokes first-party tool executors, and feeds results back to the model. This is required Cognition behavior for the normal agent profile and must move out of Platform LLM; it consumes authority but is not the reference monitor that grants it."
-  },
-  {
-    "path": "apps/arbor_llm/lib/arbor/llm/tool_result_budget.ex",
-    "blob_oid": "5dccd3509c7ba4b5a40ce106a503ed307bd21a36",
-    "class": "system_extension",
-    "rationale": "Accounts and JSON-encodes aggregate tool results for the LLM tool loop. The bounds are important, but this helper follows the Cognition-owned tool-loop responsibility rather than becoming a host service."
+    "rationale": "Arbor.LLM.ArborActionsExecutor.definitions/1 (arbor_actions_executor.ex:35-42) loads the actions catalog through the orchestrator executor and maps it with to_openai_format/1 (116-124). execute/4 (107-109) apply/3s execute_classified on that executor rather than compiling a direct dependency. Current owner is arbor_orchestrator. This is cognition tool integration: it delegates execution and does not grant the capability the executor checks. Class system_extension."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence.ex",
@@ -1906,5 +1486,605 @@
     "blob_oid": "642236132e19c83e7991e68c416f1b1aaa18ba38",
     "class": "optional_extension",
     "rationale": "This Mix task is an operator presentation for running the profile exit audit or migration locally or over RPC. It is development and migration tooling, not production authorization, boot, or recovery mechanism."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor.ex",
+    "blob_oid": "6abfbc13e49bac356a97bf60c669475c20ed3fdd",
+    "class": "system_extension",
+    "rationale": "The Arbor module (arbor.ex:4-28) is a Boundary.strict grouping for modules compiled by the arbor_llm application. It exports LLM, AI.LLMError, and Orchestrator.ToolHooks and declares deps. The comment at lines 4-8 says it defines no facade and no ownership of modules from other applications. It performs no credential, egress, accounting, or recovery check. Current owner is arbor_llm. Package placement and a pure boundary declaration do not make it a Kernel primitive. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/ai/llm_error.ex",
+    "blob_oid": "d7ca9f54ec7b250ae407e875106fdb9e9f5db8cc",
+    "class": "system_extension",
+    "rationale": "Arbor.AI.LLMError.classify/1 (llm_error.ex:34-36) maps provider, timeout, OAuth, and sensitivity errors into a bounded error_info map. The doc at line 31 says it is pure and never writes control-plane state. control_plane_effect/1 (63-68) returns a quota or route effect only for a closed {type, code} pair and :none otherwise. Current owner is the arbor_llm package despite the Arbor.AI module name. Classification is not an authority grant. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm.ex",
+    "blob_oid": "a0b004bca0c3d781efbeaea55818efacd37d2ec7",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.authorize_sensitivity/4 is defdelegate to Sensitivity.authorize (llm.ex:4-7); the facade does not reimplement the egress gate. configure_provider_client/1 (113-118) installs Client options and the doc at 107-109 says it does not discover credentials, call a provider, or validate adapter modules. read_bounded_regular_file/2 (1890-1891) delegates to FileReceipt. decode_embedding_response/2 (1902-1903) delegates to Boundary. Current owner is arbor_llm. This is the normal-profile LLM facade. Mixed eval and login delegates do not make the facade the fixed boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/abort_error.ex",
+    "blob_oid": "2eebf8c7d818f1feacca51ba7fd1e42f82b76c60",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.AbortError.exception/1 (abort_error.ex:12-15) builds the abort exception with a reason defaulting to :aborted. Current owner is arbor_llm. This is LLM-call error vocabulary for a caller-aborted request. It does not decide admission. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/adapter/lm_studio.ex",
+    "blob_oid": "ede14c56ad5dceec83091baa61e4237cb669bc58",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Adapter.LmStudio.complete/2 (adapter/lm_studio.ex:40) calls Sensitivity.authorize/4 and then Boundary.completion/2 at lines 49-56. provider/0 is at line 35. The moduledoc (3-14) says this owned adapter posts to LM Studio OpenAI-compatible /v1/chat/completions for provider lm_studio_owned. Current owner is arbor_llm. It is one provider transport. Its calls into the gates do not make the adapter the gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/adapter/oauth_responses.ex",
+    "blob_oid": "ae59709df5468581adfbcadbd58f5d38983a2955",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Adapter.OAuthResponses.complete/2 (adapter/oauth_responses.ex:32) translates a Request into Arbor.LLM.OAuth.Responses and is registered for openai_oauth. The moduledoc (8-11) says request.provider goes through OAuth.route_only/1, so grok, bare xai, and Anthropic never build a request here. It calls Sensitivity.authorize at line 71 and Boundary.completion at line 90. Current owner is arbor_llm. Subscription transport is provider-specific. Credential custody stays in Arbor.LLM.OAuth. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/adapter/req_llm.ex",
+    "blob_oid": "8665a953d38c8cbfd9b47a9cdcd18eae6fc428a0",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Adapter.ReqLLM.complete/2 (adapter/req_llm.ex:140) is the bundled transport entry. runtime_contract/0 is at line 87, and validate_live_completion_pipeline/0 at line 130. The moduledoc (3-14) says one adapter delegates transport to upstream req_llm across that library providers. complete wraps the provider result with Boundary.completion/2 at lines 147 and 170. Current owner is arbor_llm. Defensive use of Boundary does not make this replaceable general transport the reference monitor. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
+    "blob_oid": "053aa0f5e80d5b11cfa7c381945383a20d95510f",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Adapter.ReqLLM.BoundedStream.start/4 (bounded_stream.ex:17) and process/2 (89) own the ReqLLM streaming worker. process/2 opens ResponseBudget trackers (94-95). The module caps default response, event, and event-byte ceilings at lines 7-9. It also calls Sensitivity.authorize_wire at line 347 and ResponseBudget.validate_json at line 924. Current owner is arbor_llm. Those calls use the host ceilings; this module remains the bundled stream transport, not the ceiling owner. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/adapter/req_llm/sse_buffer.ex",
+    "blob_oid": "14e2f3007ac847093c1eb89bc1921f8563818015",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Adapter.ReqLLM.SSEBuffer.feed/3 (sse_buffer.ex:44) reassembles Finch/Mint chunks into complete SSE events. new/0 is at line 29 and incomplete?/1 at line 49. The comment at lines 4-8 says network frames are not events and BoundedStream must not JSON-decode a fragment. Current owner is arbor_llm. This is the stream parser for the bundled transport. It does not admit credentials or set the response budget. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/application.ex",
+    "blob_oid": "444c13c01268547f648d17a1146a00b3127c9487",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Application.start/2 (application.ex:9-19) starts PendingStore, RecoveryProofStore, and LoopbackRootSupervisor under one :one_for_one supervisor and warms the LLMDB catalog without failing the supervisor on catalog error (26-45). Current owner is arbor_llm. Startup owns process lifetime for both the credential-recovery store and optional login listeners. Packaging and supervision are not the recovery decision; RecoveryProofStore remains that boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/boundary.ex",
+    "blob_oid": "6fa01881c39b3ce1c06e9a1771bdfe25c6589468",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.Boundary.completion/2 (boundary.ex:53-60) admits only {:ok, %Response{}} or {:error, reason} and validates both under the module ceilings, including @max_response_bytes 16777216 at line 6. track_stream_event/3 (163-168) measures each event and returns response_budget_exceeded from ResponseBudget.track_measurements. embedding_response_with_indices/2 (108-128) rejects count, index, and vector mismatches before any vector is returned. Current owner is the arbor_llm package. Callers such as Client and the adapters cannot raise these ceilings. This is the fixed post-transport result-admission point, separate from replaceable provider transports. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/call.ex",
+    "blob_oid": "43d93cf45151c9c4548bca52a41aba99bb96e208",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Call.new/2 (call.ex:59) builds the plug-pipeline envelope for an operation and request tuple. halt/1 (73), put_metadata/2 (80), and assign/3 (88) are the mutations. The moduledoc (2-7) describes it as the connection struct. Current owner is arbor_llm. It is LLM-call vocabulary, not a passive generic Kernel primitive and not an enforcement decision. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/client.ex",
+    "blob_oid": "a577786f20650606b67c26cb9ee4234c6a2ea90c",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Client.new/1 (client.ex:111) constructs the provider router, adapter map, and middleware. do_embed_batch/5 (653-667) calls Boundary.embedding_inputs/1 and Sensitivity.authorize/4 before adapter.embed/3, then Boundary.embedding_response_with_indices/2 on the result. The module comment at line 6 says it is the package-owned mechanism retaining the historical client identity, and it aliases ToolHooks. Current owner is arbor_llm. Routing and orchestration consume the gates; they are not the credential or egress boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/config.ex",
+    "blob_oid": "a51bd15a2d1310ddbf9f1644c878869610ad9673",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Config.sensitivity_policy/0 (config.ex:8-9) and dispatcher/0 (11) read :arbor_llm application env. tool_invocation_auditor/0 (5-6) documents that a missing required auditor fails closed at the caller. external_provider_adapters/1 (26-41) filters the host registry and drops the acp entry when discover_acp is false; request options cannot insert adapter modules. Current owner is arbor_llm. This is the collaborator lookup seam. It does not itself admit egress or custody credentials. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/configuration_error.ex",
+    "blob_oid": "db1b9819389b72940175b582d5bf6aea2ea3bef5",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ConfigurationError (configuration_error.ex:1-4) is a defexception with a message field and no callbacks. Current owner is arbor_llm. It is the domain error for a bad LLM configuration. It performs no check. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/content_part.ex",
+    "blob_oid": "c4110919435997dd17da398de6863c0972a3e510",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ContentPart.text/1 (content_part.ex:51) and image_url/2 (54) construct text, image, and audio content parts. The type part at lines 4-15 is LLM message vocabulary. Current owner is arbor_llm. Purity and a struct shape do not make this a Kernel primitive. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/contracts/disclosure_prompt.ex",
+    "blob_oid": "40950a731d8961e6c1fb3bbc112d3590f132d381",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Contracts.DisclosurePrompt (contracts/disclosure_prompt.ex:10-11) requires info/1 and yes?/1. The moduledoc (3-8) says the host must display the library exact text and that a missing provider leaves disclosure unacknowledged, with no implicit Mix or IO implementation. Current owner is arbor_llm. Despite the words Trusted host interaction, the effect is the optional OpenCode prompt seam, not credential, egress, or accounting enforcement. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/contracts/sensitivity_policy.ex",
+    "blob_oid": "df1e7dd44472c04ae93b8f013a7e9e6374488c81",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Contracts.SensitivityPolicy (contracts/sensitivity_policy.ex:3-7) is a behaviour whose authorize_llm_sensitivity/1 callback returns :ok or {:error, :destination_disallowed | :invalid_destination}. llm_sensitivity_identity/0 is optional (line 8). Sensitivity.decide/1 calls whatever module Config.sensitivity_policy/0 names and blocks every other return. Current owner is arbor_llm. This is the replaceable clearance-policy contract, not the fail-closed gate. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/deadline.ex",
+    "blob_oid": "29dd14b20bad4978240f13e9dadf3d31f452be25",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.Deadline.receipt/2 (deadline.ex:79-86) closes a requested timeout at @maximum_timeout_ms 900000 and inherits an already-running worker deadline. run/3 (109-118) either runs inline under that deadline or run_owned/5 (190-198), whose run_owner_guard/5 (206-220) links the worker, monitors the caller, and reap_operation/1 (286-295) kills the worker on caller death or timeout. Current owner is arbor_llm. This is invocation containment and recovery: a provider transport is not trusted to stop itself. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/dispatcher.ex",
+    "blob_oid": "6811b41ecccd2b674c3ea32166e1b0ba6a2b168c",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Dispatcher.dispatch/2 (dispatcher.ex:82-90) resolves Config.dispatcher/0 and apply/3s dispatch/2 only when that module is loaded and exports the function; otherwise it returns {:error, :llm_dispatcher_unavailable}. The moduledoc (4-10) names Arbor.AI.Runtime.Dispatch as the canonical implementation selected by application env. Current owner is arbor_llm. The bytes differ from the historical reviewed blob, but the current effect is still a replaceable cognition dispatch seam, not credential or egress enforcement. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/endpoint.ex",
+    "blob_oid": "9794acc4b01fe759ae6a7b1c6555e89cf35d06f6",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Endpoint.validate/2 (endpoint.ex:74-88) canonicalizes a bounded URL and then authorize_endpoint/2. OAuth token, discovery, and catalog clauses (428-475) accept only compile-time lists or an operator-configured list and otherwise return :endpoint_origin_not_trusted. A bare :req_llm_base policy is refused (414-415). Current owner is arbor_llm. Sensitivity.admit_origin/1 is the separate check that the live request URL did not change. This file is the provider endpoint-policy helper, not that non-bypassable egress gate. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/eval/fixture_set.ex",
+    "blob_oid": "fb93d7d2ad26d1fc1781014a59f6ad5276292417",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Eval.FixtureSet.selection/1 (eval/fixture_set.ex:5-12) allows a missing fixture_set option and otherwise resolves the name. resolve/1 (17) accepts only a 1 to 64 byte binary name. The comment (15-16) says a caller cannot supply mode or destination through transport options. Current owner is arbor_llm. Named eval fixtures are optional tooling. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/eval/provider_resolver.ex",
+    "blob_oid": "02b90f67f5c7d4d8001b701d0ea01b46e421f5c2",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Eval.ProviderResolver.resolve_transport/1 (eval/provider_resolver.ex:24) and resolve_fixture_transport/1 (44) choose an eval transport from the catalog or the OAuth adapter. preflight/2 is at line 60. Current owner is arbor_llm. Eval provider selection is optional test and evaluation strategy, not the production egress gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/eval/subject.ex",
+    "blob_oid": "ebe5283bca6208d35fe33c4790b7f9a90b94324f",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Eval.Subject.run/2 (eval/subject.ex:65) sends an eval prompt through a selected LLM provider or a named fixture set. The moduledoc (14-16) says replay never falls through to a provider. It calls ResponseBudget.validate on recorded responses at lines 734 and 744. Current owner is arbor_llm. Evaluation is an optional subject. Using the budget helper does not make the subject the budget. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/execution_provider_identity.ex",
+    "blob_oid": "d6e454100d7209e75c52e29033c86b56eee9e54f",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.ExecutionProviderIdentity.capture/2 (execution_provider_identity.ex:9-16) records provider, model, and an endpoint digest, with artifact_state unreported. The comment (5-8) says it never sends a prompt, warms a model, or fetches weights, and a metadata digest is not a weight-integrity claim. The other clause (51) rejects non-binary arguments. Current owner is arbor_llm. Local serving metadata is optional discovery. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/external_term.ex",
+    "blob_oid": "e95aa90aecec332c9e337db31405a8581070643b",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ExternalTerm.sanitize/1 (external_term.ex:15-18) bounds a term with fixed @max_depth 4, @max_nodes 24, and @max_items 16 (lines 6-8). bounded_binary/1 (168-174) returns a binary of at most @max_binary_bytes 256 unchanged, and otherwise returns {:truncated_binary, prefix, byte_size(value)} where prefix is binary_part(value, 0, 256) passed through String.replace_invalid/2. bounded_string/1 (176-180) keeps that same prefix. replace_invalid drops invalid UTF-8; it does not remove credential text, so a secret in the first 256 bytes is retained. exception/1 (21-26) reduces a struct to its module plus a bounded message, or to the module atom. inspect/1 (36-45) sanitizes, then Kernel.inspect, and falls back to the literal \"external term\". Callers opt in: Boundary.provider_error/1 (boundary.ex:261-265) returns an in-budget ProviderError unchanged and calls ExternalTerm only from bounded_provider_error/1 (278-287) after ResponseBudget.validate/2 rejects @adapter_error_limits; OwnedStream uses sanitize on controller DOWN (owned_stream.ex:93-94); Deadline.safely_apply/1 and bounded_reason/1 (deadline.ex:346-354) bound a raised reason; StreamError.message/1 (stream_error.ex:6-7) interpolates inspect; the facade only delegates (llm.ex:1857-1867). ContentPart.normalize/1 (content_part.ex:181) can place that inspected prefix into text. Current owner is arbor_llm. This is a shared shape helper. It does not admit a completion, custody a credential, or gate egress, and a caller that skips it is not constrained. ResponseBudget and Boundary remain the ceilings. The prior trusted_host row is withdrawn because it called this redaction. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/fallback_loop.ex",
+    "blob_oid": "d27c7c84b161c968a46c032c6831739638594283",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.FallbackLoop.run/3 (fallback_loop.ex:100) walks a caller-supplied attempt chain. The moduledoc (2-10) says Arbor.AI.Runtime.Dispatch and the orchestrator LlmHandler share this loop, with skip, fail, and telemetry supplied as options. Current owner is arbor_llm. Fallback preference is cognition strategy. It is not provider authorization or the recovery-proof store. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/file_receipt.ex",
+    "blob_oid": "a10eb5e2a54e80f0b6d34ed956c0380e19ca6399",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.FileReceipt.read/2 (file_receipt.ex:64) and publish/3 (84) move bounded regular-file bytes, with @hard_maximum 16777216 at line 6 and an embedded /usr/bin/perl helper at line 12. Callers in this package are the fixture publisher (plugs/fixture.ex:369) and Arbor.LLM.read_bounded_regular_file/2 (llm.ex:1890-1891). Current owner is arbor_llm. The helper script is Arbor-authored fixture IO, not an independently supplied plugin and not the OAuth credential store. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/json_preflight.ex",
+    "blob_oid": "3b575b01bd3b90dc9d8455e51fe285e3feb120a1",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.JSONPreflight.scan/3 (json_preflight.ex:8-45) walks untrusted JSON bytes and refuses a body over max_bytes, invalid UTF-8 (54-64), or a document that exceeds node, depth, key, list, string, or number limits before any decode. ResponseBudget.decode_json_with_measurements/2 calls scan before decode_after_preflight (response_budget.ex:145-148), and normalize_limits/1 clamps every caller limit to @hard_limits (244-249). Current owner is arbor_llm. This is the fixed pre-decode accounting scan for provider and credential JSON, not a provider implementation and not a replaceable policy. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/live_completion_format.ex",
+    "blob_oid": "2c1b5e9e04ecfa9bbedbc5bda380f73612a41fc3",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.LiveCompletionFormat.valid?/1 (live_completion_format.ex:8-16) accepts an empty option map or one response_format map, and validates that map with ResponseBudget.validate/2 at a 16384-byte, depth-12 ceiling. Any other shape is false (33). req_options/1 is at line 37. The comment (6-7) admits no schema references or provider controls. Current owner is arbor_llm. This is a domain format contract. The budget module remains the ceiling. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/login_cli_core.ex",
+    "blob_oid": "5cbe526753ca15cb1653cb5eeda5f5dd50a30888",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.LoginCliCore.new/1 (login_cli_core.ex:26) parses mix arbor.login argv into a closed openai, xai, or status command, and the other clause (45) rejects other argv. parse_callback_url/1 (62) extracts a callback without performing login. The moduledoc (3-7) says every function is side-effect free and the Mix task is the shell. Current owner is arbor_llm. Purity does not promote CLI parsing into Kernel. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/message.ex",
+    "blob_oid": "086a919ef697dbe6634cd3e9f1f0d81e15a05739",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Message.new/3 (message.ex:17-18) builds a role, content, and metadata struct. text/1 (21-23) delegates to ContentPart.text_content. Roles at line 6 are system, developer, user, assistant, and tool. Current owner is arbor_llm. This is LLM dialogue vocabulary, not a generic host primitive and not an enforcement gate. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/no_object_generated_error.ex",
+    "blob_oid": "fa6831488d346fbd67fd633b8b84afe93c35cdad",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.NoObjectGeneratedError.exception/1 (no_object_generated_error.ex:12) builds the structured-output failure exception. Current owner is arbor_llm. It records that object generation produced nothing. It does not admit provider output. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth.ex",
+    "blob_oid": "ffd22d0ff9e68c659a04914eaea65d856830a77e",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.OAuth.publish_arbor_owned/2 (oauth.ex:309-326) is the only publication path for a freshly acquired credential: route/1 refuses unknown and Anthropic-family names first (230-246), and the caller cannot set version, origin, owner, source, or generation. access_token/1 (383-384) returns a token only from credential_receipt/1. recover_arbor_owned_credential/1 (473-477) consumes a one-shot recovery lease before refresh. Current owner is arbor_llm. Provider-specific refresh calls remain in this module, but the effect that fixes custody, generation, and recovery is the credential boundary, not the login UX. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/jwt_payload.ex",
+    "blob_oid": "76f7679c36aa17c36b6d4ba77fe41282c509a576",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.OAuth.JwtPayload.decode/1 (jwt_payload.ex:25-34) accepts only a three-segment binary, base64url-decodes the middle segment, and passes those bytes to ResponseBudget.decode_json/2 under the limits at lines 10-14 and 37-44 (65536 bytes, 1000 nodes, depth 8, 200 keys, 1000 list items). decode/1 at line 35 rejects a non-binary. The comment at lines 16-22 says this performs no signature verification and must not be treated as an authentication decision. OAuth.external_auth_expires_in/1 (oauth.ex:409-418) reads an integer exp and clamps the TTL; OAuth.expiring?/2 (1609-1616) treats a missing or non-integer exp as not expiring; Login.extract_openai_account_id/1 (login.ex:271-284) reads a self-asserted chatgpt_account_id, and its comment says that read is not an authentication decision. Current owner is arbor_llm. The structural ceiling is ResponseBudget.decode_json/2. This module does not publish, recover, or authorize a credential. Custody remains OAuth.publish_arbor_owned/2 and RecoveryProofStore. A bounded parse, and the purity of keeping one shared decoder, do not make the decoder the credential or resource boundary. The prior trusted_host row is withdrawn. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login.ex",
+    "blob_oid": "09967f26ff8353b874194951a4733e7528087314",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.start_openai_login/1 (oauth/login.ex:96) and start_openai_loopback_login/1 (122) acquire tokens. The moduledoc (16-24) says completion publishes only through OAuth.publish_arbor_owned/2, never writes the credential file itself, and returns :ok without the token. Endpoints come from ProviderPolicy, not from the caller (8-14). Current owner is arbor_llm. This is the OAuth acquisition implementation. Custody and recovery remain in Arbor.LLM.OAuth and RecoveryProofStore. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/authorization_prompt.ex",
+    "blob_oid": "2f5ece9bf9ec97c96ee5468a01e6e2d48ef599fe",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.AuthorizationPrompt.authorize_url/1 (authorization_prompt.ex:18) returns the OpenAI authorize URL held by the prompt struct. inspect/2 is at line 21. Current owner is arbor_llm. The prompt is login UX. It does not publish a credential. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/device_prompt.ex",
+    "blob_oid": "4213204c25f932b424541ae9672fcce2e7fdd989",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.DevicePrompt.user_code/1 (device_prompt.ex:23) and verification_uri/1 (27) expose the xAI device-code prompt fields. Current owner is arbor_llm. Device-code display is login UX, not token custody. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback.ex",
+    "blob_oid": "ead5161703282a7e11523d2d335c61e5bd638d3d",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.Loopback.start/1 (loopback.ex:15) and start_resolved/2 (24) open the short-lived OpenAI loopback login listener. Current owner is arbor_llm. The listener is an optional login transport. Credential publication still goes through Arbor.LLM.OAuth. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_flow.ex",
+    "blob_oid": "57dc1d54a92778af4bbc5bd2f186f2dc00880039",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackFlow.new/1 (loopback_flow.ex:17) builds a flow from a reference id, and id/1 (21) returns it. Current owner is arbor_llm. The flow id is login correlation state, not a credential or a recovery proof. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_flow_supervisor.ex",
+    "blob_oid": "3b5cd83d9b7793e07ed35cd63f60e59033497683",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackFlowSupervisor.child_spec/1 (loopback_flow_supervisor.ex:11) and start_link/1 (20) supervise one loopback flow. Current owner is arbor_llm. This OTP wrapper exists only for the optional login listener. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_owner.ex",
+    "blob_oid": "89559c39b47e0506f149e71660b4c3ceda2b0054",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackOwner.start_link/1 (loopback_owner.ex:14) and activate/1 (20) own one loopback flow process. Current owner is arbor_llm. Process ownership here is the login listener lifecycle, not provider-stream containment in OwnedStream and not credential recovery. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_plug.ex",
+    "blob_oid": "721b3dde05f83053e311ea2d1dce6116d21cee57",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackPlug.call/2 (loopback_plug.ex:24) and init/1 (21) handle the browser callback HTTP request for the loopback login. Current owner is arbor_llm. Callback parsing is login UX. It is not the platform egress gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_prompt.ex",
+    "blob_oid": "6605b06d23baa5130ee61cf874054a2a2265206b",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackPrompt.authorize_url/1 (loopback_prompt.ex:19) and flow/1 (23) expose the loopback prompt. Current owner is arbor_llm. This is operator-facing login presentation. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_query.ex",
+    "blob_oid": "4a96f6218ca970f32d75cef24f79cdbc16c620c9",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackQuery.parse/1 (loopback_query.ex:36) accepts only a bounded query string, and the other clause (49) rejects anything else as :invalid_callback. Current owner is arbor_llm. Bounded callback parsing supports the optional login listener. It does not custody tokens. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_registry_owner.ex",
+    "blob_oid": "e94971e57025775d9e37c47a78da89973bebbfd1",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackRegistryOwner.start_link/1 (loopback_registry_owner.ex:8) and init/1 (11) own the process registry for loopback flows. Current owner is arbor_llm. The registry exists so optional login flows can be addressed. It is not a capability or credential registry. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_resolver.ex",
+    "blob_oid": "1db30426562de20e91aaaf0d95f041cd93e14807",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackResolver.resolve/0 (loopback_resolver.ex:8) and validate/1 (41) choose and check local addresses for the loopback listener. Current owner is arbor_llm. Address selection is login transport setup. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_root_supervisor.ex",
+    "blob_oid": "5af9d27312d5551ff34f979834c06e81076b61bc",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackRootSupervisor.init/1 (loopback_root_supervisor.ex:9-15) starts LoopbackRegistryOwner and LoopbackSupervisor under rest_for_one. start_link/1 is at line 6. Current owner is arbor_llm. Application.start/2 supervises this tree, but the tree itself is optional login process ownership, not RecoveryProofStore. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_supervisor.ex",
+    "blob_oid": "c31ab7574939dda57bb2b766ebd18c03f96ba2f5",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackSupervisor.start_link/1 (loopback_supervisor.ex:6) and init/1 (11) start a one_for_one DynamicSupervisor for loopback flows. Current owner is arbor_llm. Dynamic children are login sessions. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/loopback_transport.ex",
+    "blob_oid": "2cbd237b4b54d2272dd996d8d2ed64a9947b908f",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.LoopbackTransport.name/0 (loopback_transport.ex:9) and secure/0 (10) delegate to :ranch_tcp for the loopback acceptor. Current owner is arbor_llm. This is the optional login listener socket transport, not the LLM provider egress gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/login/pending_store.ex",
+    "blob_oid": "a9934e4f37cd5834c11104b9a003785fdf3147c0",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Login.PendingStore (pending_store.ex:4-29) is the in-process one-shot handle store for login. issue never accepts a caller-supplied handle; take removes it; a crash restarts empty and invalidates in-flight login handles. It is not the durable OAuth token file. Current owner is arbor_llm. Login correlation is optional acquisition state. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/model_catalog.ex",
+    "blob_oid": "90a1ed71511a68b93cbb97cc74ecca0e7f32e0a3",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.ModelCatalog.fetch/2 (oauth/model_catalog.ex:64) reads the subscription model list. OpenAI uses https://chatgpt.com/backend-api/codex/models and xAI uses https://cli-chat-proxy.grok.com/v1/models (8-10), with a 512-model cap (13). Credential functions are injected options (34-37), not hardcoded store writes. Current owner is arbor_llm. A provider catalog can be omitted without removing credential custody or the egress gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/model_catalog_failure.ex",
+    "blob_oid": "c0174d9fecf8e48aa145fe97c1e7e7cf69d8dfc5",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.ModelCatalogFailure.exception/1 (model_catalog_failure.ex:60) and codes/0 (57) are the typed failure for the subscription model catalog. Current owner is arbor_llm. Catalog errors are part of that optional provider integration. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/provider_policy.ex",
+    "blob_oid": "dea8515af5f5c4d549c52f57653dc528de61a2f4",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.ProviderPolicy.openai/0 and xai/0 (provider_policy.ex:35-38) return the compile-time client id, issuer, and token endpoints. refresh_config/1 (48-61) projects the three fields OAuth refresh already consumes. The comment (4-7) says login and refresh share this table so they cannot drift. Current owner is arbor_llm. These are OpenAI/xAI implementation constants, an Arbor-authored descriptor of external OAuth endpoints, not independently supplied code and not the publication lock. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/recovery_proof_store.ex",
+    "blob_oid": "dd9f7c02f88214d2dd33c18fff04e93eab4f1134",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.OAuth.RecoveryProofStore.issue/6 (recovery_proof_store.ex:52-59) mints a one-shot HMAC handle for an Arbor-owned 401 recovery and refuses a malformed request. take/4 (75-80) consumes the handle once. The module comment (4-12) states it owns no ETS table, never writes the durable token store, stores no raw token, and fails closed when the process is absent; restart rotates the HMAC key. Current owner is arbor_llm. This is the non-replayable credential-recovery lease, not the OAuth login flow and not provider storage. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/responses.ex",
+    "blob_oid": "15a4cd61886194cdbb1424919521f6d2ceffd77f",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.Responses.complete/3 (oauth/responses.ex:77) performs the subscription Responses API call, including tool-call extraction. The moduledoc (3-12) says authentication comes from Arbor.LLM.OAuth and the backends require streaming, which this module buffers. It calls Sensitivity.authorize and protect_request at lines 126 and 391 and ResponseBudget.validate at line 123. Current owner is arbor_llm. This is the OpenAI/xAI subscription wire implementation, not the credential publication boundary. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/oauth/responses_failure.ex",
+    "blob_oid": "deb7adab09a159686fdcc82f2b7eab22ea22f64b",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OAuth.ResponsesFailure.codes/0 (responses_failure.ex:65) and classes/0 (68) expose the closed failure table for the subscription Responses wire. Current owner is arbor_llm. Typed provider failures for that transport are not the credential store and not a third-party executable. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/opencode_zen.ex",
+    "blob_oid": "34e1413fbf1681f1463a4379c0d7bd1756977a12",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OpenCodeZen.provider/0 (opencode_zen.ex:50) is the keyless provider id opencode_zen, and base_url/0 (56) is https://opencode.ai/zen/v1. ensure_acknowledged/0 (71) delegates to Disclosure.ensure/0. The moduledoc (30-35) says dispatch refuses an id that is not in the eval admission file. Current owner is arbor_llm. This is one optional provider. Its disclosure check is not the platform Sensitivity gate. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/opencode_zen/admission_core.ex",
+    "blob_oid": "292ccc37ad1bc44fa6da8ef225dee91ef2710aac",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OpenCodeZen.AdmissionCore.request_permitted?/1 (admission_core.ex:95-98) returns :ok only when the acknowledgement map or true is present, otherwise {:error, :disclosure_not_acknowledged}. admitted_id?/2 (63) checks recorded eval ids. The module is a pure record of that provider admission file. Current owner is arbor_llm. Provider-specific admission is not the host egress monitor. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/opencode_zen/disclosure.ex",
+    "blob_oid": "f9acb46b185b90f35cad7b9c89f48937879c7ecb",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OpenCodeZen.Disclosure.ensure/0 (disclosure.ex:26) fails closed unless the persisted acknowledgement passes AdmissionCore.request_permitted?/1, and it does not auto-accept. prompt/1 (45-50) uses Config.disclosure_prompt/0, and do_prompt/1 (64-69) requires info/1 and yes?/1. persist/1 (33-38) writes the ack file only when called. Current owner is arbor_llm. This is OpenCode consent UX. Other providers do not pass through it. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/opencode_zen/transport.ex",
+    "blob_oid": "44f1aa276dbe06ca8b54f311e083d7a45ac30ed5",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.OpenCodeZen.Transport.attribution_headers/0 (transport.ex:35-41) sends an empty authorization and Arbor own user-agent. The comment (4-8 and 15-19) forbids spoofing opencode/latest and says the placeholder req_llm key is stripped before the wire. discover_free_candidates/1 (78) reads the relay catalog rather than the local admission file. Current owner is arbor_llm. This Arbor-authored transport describes an external provider. It is not third-party executable code. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/owned_stream.ex",
+    "blob_oid": "8919fbc5101a42daaa9723b5e54ceee6a2b3115c",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.OwnedStream.new/2 (owned_stream.ex:17-24) starts a controller only for a non-nested enumerable and a caller-supplied validator. claim/1 (32-55) requires the opaque token and a live controller. demand/1 (60-97) drops items completed after deadline_ms. finalize/1 (107-119) is the cancellation path. Current owner is arbor_llm. The provider stream producer does not own its consumer claim, deadline, or cleanup. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/pipeline.ex",
+    "blob_oid": "eccd4b208b59eaeed122c379a8957972579905b1",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Pipeline.through/2 (pipeline.ex:38-39) reduces a call through plug modules and, by the doc at lines 29-31, does not short-circuit on halted: true. Each plug must honor halt itself. Current owner is arbor_llm. Configurable composition is normal LLM middleware. Mandatory admission stays in plugs that refuse to proceed, not in this reducer. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plug.ex",
+    "blob_oid": "9a8162041a87f63e124dced1f625c452179355d6",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plug (plug.ex:1-36) is the behaviour and use macro for an LLM call plug: call/1 receives and returns an Arbor.LLM.Call. The doc shows halted: true as a per-plug convention. Current owner is arbor_llm. This is the extension-internal composition protocol. It grants no authority and is not a generic Kernel activation primitive. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/dispatch.ex",
+    "blob_oid": "6ff2d6f79866ec75a5e3129efe839dac0e3dd2d1",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plugs.Dispatch.call/1 (plugs/dispatch.ex:48-66) prepares sensitivity, calls Plugs.Sensitivity.call/1, and skips do_dispatch when that plug halts. The moduledoc (3-32) says this terminal plug invokes the ReqLLM operation and stamps one ProviderError, leaving deadline expiry as RequestTimeoutError and bounding errors through Boundary.provider_error/1. Current owner is arbor_llm. Invoking the bundled transport after admission is the effecting mechanism, not the admission boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/eval_record.ex",
+    "blob_oid": "024151615540600bd9e9dbd55e5335991f81cf6c",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.EvalRecord.call/1 (plugs/eval_record.ex:9-12) forwards to Record.call/1 only when metadata says eval_fixture mode :record. Every other call is unchanged. The moduledoc at line 2 limits it to explicitly selected named evaluation completions. Current owner is arbor_llm. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/eval_replay.ex",
+    "blob_oid": "1db844dfde39f4d0701721dafa4b98b69a52b489",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.EvalReplay.call/1 (plugs/eval_replay.ex:9) runs only for eval_fixture mode :replay. The moduledoc at line 2 says replay does not fall through to a provider. Halted calls pass through at line 7. Current owner is arbor_llm. Named eval replay is optional tooling. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/fixture.ex",
+    "blob_oid": "3218592d39ebfd8087f834ff8c2050ae73f60e0e",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.Fixture.path_for/1 (plugs/fixture.ex:143) and fixtures_root/0 (152) address the record/replay fixture store. Publication goes through FileReceipt.publish/4 at line 369. Current owner is arbor_llm. Fixture hashing and publication are developer tooling, not required for credential custody or live egress admission. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/fixture_usage.ex",
+    "blob_oid": "654ec8fda6ddd6e5082d32e82dc4efcf9186f667",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.FixtureUsage.encode/2 and decode/2 (fixture_usage.ex:13-14) transform usage fields through a fixture schema. Current owner is arbor_llm. This codec exists for recorded fixtures. It is not the live usage observation plug and not ResponseBudget. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/rate_limit_backoff.ex",
+    "blob_oid": "29af894de6e6d69dbb3c2b0ac6a890649db1979e",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plugs.RateLimitBackoff.call/1 (plugs/rate_limit_backoff.ex:79-83) passes halted calls and single_attempt calls through. The moduledoc (3-16) sleeps for retry_after_ms or a capped backoff and re-invokes Plugs.Dispatch on the same provider path. Current owner is arbor_llm. Same-path retry policy is normal transport behavior, not authorization or credential recovery. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/record.ex",
+    "blob_oid": "37a1854eb7319b9fe9ddf5b55d1ae87f9f00e2f4",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.Record.call/1 (plugs/record.ex:36-38) records a finished call when metadata asks for a fixture. Halted calls pass through at line 36. Current owner is arbor_llm. Recording is optional developer tooling and is not on the mandatory admission path. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/replay.ex",
+    "blob_oid": "bfe425a7a9805efdd04a0c1598f3c51ab8e1477e",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.Replay.call/1 (plugs/replay.ex:34) can fill a result before Dispatch when a fixture matches, and halted calls pass through at line 32. Current owner is arbor_llm. Replay short-circuits live transport for tests. It is not a provider and not the host admission boundary. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/response_limit.ex",
+    "blob_oid": "aa018863f0312f442952b0671d97872befbe79d4",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plugs.ResponseLimit.call/1 (plugs/response_limit.ex:11-19) drops caller aliases :max_response_bytes, :max_output_bytes, and :arbor_max_response_bytes and writes one :arbor_max_response_bytes. close_limits/1 (43-46) reduces positive integers with min against the 16777216 default and halts on a non-positive value. Current owner is arbor_llm. Boundary and ResponseBudget own the hard ceiling that cannot be raised. This plug is defense in depth inside a pipeline that can be composed, so it is not the accounting boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/sensitivity.ex",
+    "blob_oid": "be0801667348789d0ee34d8241924e24116ebe9a",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.Plugs.Sensitivity.call/1 (plugs/sensitivity.ex:8-16) runs Sensitivity.decide/1 when sensitivity_input is present and halts the call on any error. A call with no destination is halted as {:sensitivity_blocked, :missing_destination} (15-16). Plugs.Dispatch.call/1 invokes this plug before do_dispatch and returns immediately when it halts (plugs/dispatch.ex:51-55). Current owner is arbor_llm. This is the pipelines fail-closed egress admission, distinct from the replaceable SensitivityPolicy behaviour. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/staleness_warn.ex",
+    "blob_oid": "239b1985f11ccbea07424471400cfdfe4b83fa79",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Plugs.StalenessWarn.call/1 (plugs/staleness_warn.ex:41) warns when a replayed fixture carries recorded_at, and the default clause (56) returns the call unchanged. Current owner is arbor_llm. A staleness warning is optional fixture observability. It does not block dispatch or admit egress. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/usage.ex",
+    "blob_oid": "b65165ec4c3825182fe49edb2622c4b792b16e20",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plugs.Usage.finalize_streaming/3 (plugs/usage.ex:135-137) returns nil for nil provenance, and the doc at 122-131 says the caller must invoke it only after Boundary.completion/2 and that missing usage emits nothing. attach_stream_provenance/2 (100-105) wraps a stream for exactly-once observation via an atomics claim. Current owner is arbor_llm. This is bounded usage telemetry after admission. It does not fail closed the request and is not the byte ceiling. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/plugs/usage/accounted_stream.ex",
+    "blob_oid": "916770aa45a482b9750dfe321c83b1ccfa69add0",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Plugs.Usage.AccountedStream.new/2 (accounted_stream.ex:21) wraps an enumerable with provenance, and reduce/3 (27) delegates to Enumerable.reduce on that source. Current owner is arbor_llm. The wrapper exists so Usage can observe a lazy stream without changing the public stream contract. It does not enforce a budget. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/post_processors.ex",
+    "blob_oid": "a52dd0ecadf4f41f17700b141d97815c07d78b68",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.PostProcessors.parse_structured/1 (post_processors.ex:68) normalizes a provider message content string into Arbor structured content, and the other clause (90) returns nil. Current owner is arbor_llm. Provider-specific response adaptation is ordinary first-party conversion. It does not admit the provider result; Boundary does that before content is trusted. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/preflight.ex",
+    "blob_oid": "3c21f4f64ec3593cc62b0dc9740e356be92e0fbd",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.Preflight.check_and_log/0 (preflight.ex:50-64) logs local LM Studio and Ollama model mismatches and returns :ok even when the check raises. The moduledoc at line 17 says the check is warn-only and never blocks startup or a turn. check/1 (73) compares configured ids with loaded ids. Current bytes differ from the historical reviewed blob; the current effect is still that non-blocking inventory. Current owner is arbor_llm. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/provider_adapter.ex",
+    "blob_oid": "4405347e6ce93b605468f4259320b7ac8567d369",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ProviderAdapter (provider_adapter.ex:12-26) defines indexed_embed_batch_result with required association_version 1 and indexed_embeddings. The typedoc says positional embeddings are never used to reconstruct associations at an untrusted transport boundary. Current owner is arbor_llm. This is the LLM-domain callback contract for first-party transports, not a Kernel primitive and not the monitor that checks those results. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/provider_catalog.ex",
+    "blob_oid": "8182d46c7563f08df1953e0d4c6f46bdfb898289",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ProviderCatalog.available/1 (provider_catalog.ex:43-49) returns providers whose runtime check passed, cached in ETS :arbor_provider_catalog for five minutes (33-34). get_contract/1 is at line 79. The moduledoc (3-8) says identity comes from ProviderRegistry and this module adds availability checks. Current owner is arbor_llm. Discovery and caching are a domain service. Removing the cache would not remove Boundary, ResponseBudget, or Sensitivity. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/provider_error.ex",
+    "blob_oid": "571087c1e7672d3ba9fc205173bd94de507311ae",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ProviderError.exception/1 (provider_error.ex:50) builds the one typed provider failure. The moduledoc (3-22) says consumers branch on status, retryable, retry_after_ms, and context_window_exceeded, and Boundary bounds the original term through ExternalTerm.sanitize/1. Current owner is arbor_llm. The exception is the transport error contract, not the admission of a successful response. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/provider_error_core.ex",
+    "blob_oid": "700fabc5031a360534a32da053e45d6ab96232c7",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ProviderErrorCore.from_http/4 (provider_error_core.ex:71) and from_failure/2 (95) classify a failed provider request into one ProviderError. Retryable statuses are the closed list at line 26, and scan length is capped at 4096 bytes (29). Current owner is arbor_llm. Pure error normalization is not third-party code and not the egress gate. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/provider_registry.ex",
+    "blob_oid": "5ce46ffd77c38ce87e3db5a858afed8930231e55",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ProviderRegistry lists cloud providers from ReqLLM and hardcodes local and keyless tables: @local_providers for lm_studio and ollama (provider_registry.ex:49-52) and @keyless_providers for opencode_zen (58-63). Sensitivity.normalize_provider/1 and default_endpoint/1 call ProviderRegistry.normalize/1 and default_base_url/1 (sensitivity.ex:336-343). Current owner is arbor_llm. This is the normal-profile name, env-key, and URL catalog. It is not the reference monitor that admits a destination. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/request.ex",
+    "blob_oid": "9eb24aa4dc644b82648d6679d36c3cccc36f486a",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Request (request.ex:6-40) is the provider, model, messages, tools, sampling, sensitivity, taint, and runtime struct. receive_timeout nil means the transport default (32-36). The runtime field documents :arbor versus :acp (40). Current owner is arbor_llm. Carrying a sensitivity field does not admit egress; Sensitivity.decide/1 does. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/request_timeout_error.ex",
+    "blob_oid": "97f68b890c267bab731113ec8921353e7a952601",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.RequestTimeoutError.exception/1 (request_timeout_error.ex:12) builds the deadline-expiry exception. Dispatch moduledoc (plugs/dispatch.ex:28) keeps deadline expiry on this type rather than ProviderError. Current owner is arbor_llm. The type names the failure Deadline already enforced. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/response.ex",
+    "blob_oid": "56cc8309e9e9645372dc266fa716807577d1a1f5",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Response.ProviderReceipt.new/1 (response.ex:33-45) accepts only the closed field set, and validate_backend/1 (66-67) allows only :openai and :xai. revalidate/1 (50-53) runs the same checks again. Current owner is arbor_llm. This is an Arbor-authored receipt descriptor for a provider payload, not third-party code and not the budget that admits the payload. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/response_budget.ex",
+    "blob_oid": "14182dd0462d4f857bdf7c59217041dbedc283c1",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.ResponseBudget.normalize_limits/1 (response_budget.ex:244-249) takes the minimum of each supplied limit and @hard_limits (8-16), so a caller cannot raise byte, node, depth, key, or list ceilings. decode_json_with_measurements/2 (145-152) scans with JSONPreflight before decode and then measures the decoded term. apply_req_receipt/2 (109-116) installs a halting body collector and forces compressed: false, decode_body: false, redirect: false. Current owner is arbor_llm. This is the fixed resource ceiling under Boundary, not a metering observation and not a transport. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/retry.ex",
+    "blob_oid": "21f508271640a9dfba42e13cc471f1c5663a2c1e",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Retry.execute/2 (retry.ex:5) runs a zero-arity function under the module bounded retry policy. fallback_eligible?/1 (175) returns false for a ProviderError with context_window_exceeded: true. Current owner is arbor_llm. Retry classification is shared call-path strategy. It does not grant credentials or admit egress. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/sensitivity.ex",
+    "blob_oid": "f0567423c2cfc443c0f67d9dfb94436b33066411",
+    "class": "trusted_host",
+    "rationale": "Arbor.LLM.Sensitivity.decide/1 (sensitivity.ex:30-64) is the egress admission: a missing, unloaded, or unexpected sensitivity policy returns {:error, {:sensitivity_blocked, :policy_unavailable}}, and only :ok from authorize_llm_sensitivity proceeds. classify/2 (68-85) never lowers a recorded label and forces :restricted when the classifier reports credential taint. authorize_wire/5 (374-390) blocks when the actual request origin differs from the admitted URL. protect_request/5 (349-371) installs that check as a Req step and halts the request with status 403. Current owner is arbor_llm. The policy module from Config.sensitivity_policy/0 is replaceable; this gate is not. Class trusted_host."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/stock_tool_transport.ex",
+    "blob_oid": "cd4a549776dfbe39de00c719413e99e7737c5c7c",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.StockToolTransport.identity/1 (stock_tool_transport.ex:31-63) returns a digest of the stock Client, ReqLLM pipeline, sensitivity policy identity, and loaded module md5s, or {:error, :stock_tool_transport_unavailable}. It requires the tool-invocation auditor to be the Arbor.Security module and audit mode required (40-42). The facade doc (llm.ex:173-177) says this identity is not proof that a request occurred. Current owner is arbor_llm. Attestation of the stock composition is a domain descriptor. It does not itself admit the outbound call. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/stream_error.ex",
+    "blob_oid": "9ae9dbe09bab6965eaab0e3aa8fb7302bb69551f",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.StreamError.message/1 (stream_error.ex:6-7) renders an owned-stream failure through ExternalTerm.inspect/1. The exception holds only :reason (line 3). Current owner is arbor_llm. The error type is domain vocabulary; OwnedStream and ExternalTerm own containment and redaction. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/stream_event.ex",
+    "blob_oid": "3ee53fc61703276b64fdcd5189f47b576c4c8bd6",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.StreamEvent (stream_event.ex:5-7) is a struct with type and data. The type union at line 5 is start, delta, tool_call, tool_result, step_finish, finish, and error. Boundary.stream_event/2 normalizes and measures values into this struct. Current owner is arbor_llm. The struct is LLM stream vocabulary, not the measurement gate. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool.ex",
+    "blob_oid": "d708fe2ecb44bb6cfd313dfe17369f92bdfd91ad",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.Tool.as_definition/1 (tool.ex:19-24) projects name, description, and input_schema. noop/1 (16) returns an empty map. The struct holds an optional execute function (6-13). Current owner is arbor_llm. A tool descriptor does not execute or authorize the tool. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool_call_validator.ex",
+    "blob_oid": "0c5a79cc1386543d3c654276bd7754b7fa65b97b",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ToolCallValidator.validate/2 (tool_call_validator.ex:7) checks a tool-call map against the supplied tool list, and the catch-all (30) returns {:error, :invalid_call_shape}. Current owner is arbor_llm. Shape validation for the tool loop is a domain check. It is not the capability gate on the eventual action. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool_error.ex",
+    "blob_oid": "93a6ac99e3a6cccb7f00dfeb5fd2cbb03eea1571",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ToolError.exception/1 (tool_error.ex:19) builds the tool-execution exception. Current owner is arbor_llm. It is error vocabulary for a tool failure inside the loop. It does not authorize the tool. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool_loop.ex",
+    "blob_oid": "6e3e8fa2f308cf795b334f6bdffb73e566d89187",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ToolLoop.run/3 (tool_loop.ex:118-126) checks credential exclusivity and memory-write runtime, then tool_configuration/1, before run_loop. @default_max_turns is 50 (line 104). It validates decoded tool arguments with ResponseBudget at the call site on line 1889. Current owner is arbor_llm. Multi-turn tool execution consumes authority and budgets; it is not the reference monitor that grants them. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool_result_budget.ex",
+    "blob_oid": "5dccd3509c7ba4b5a40ce106a503ed307bd21a36",
+    "class": "system_extension",
+    "rationale": "Arbor.LLM.ToolResultBudget.encode/2 (tool_result_budget.ex:32-39) measures a tool result with ResponseBudget.measure/2 under a 16777216-byte ceiling and adds it to an aggregate. account/2 (44-49) does the same without encoding. Current owner is arbor_llm. The aggregate helper serves the tool loop. The non-bypassable ceiling remains ResponseBudget.normalize_limits/1. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/llm/tool_telemetry.ex",
+    "blob_oid": "12fe9be7bc48353906306223ee5298c9c8adcb92",
+    "class": "optional_extension",
+    "rationale": "Arbor.LLM.ToolTelemetry (tool_telemetry.ex:1-4) declares record_tool/4. The moduledoc calls it optional host-owned observation of a completed tool call. Current owner is arbor_llm. The behaviour is the seam for Host.Telemetry. It is not an accounting or authorization boundary. Class optional_extension."
+  },
+  {
+    "path": "packages/arbor_llm/lib/arbor/orchestrator/tool_hooks.ex",
+    "blob_oid": "80014b5a35522e1d6765a167264eedd9c184208d",
+    "class": "system_extension",
+    "rationale": "Arbor.Orchestrator.ToolHooks.run/4 (tool_hooks.ex:16-19) executes a hook and normalizes the result. Function hooks run directly (25-26). A binary command uses run_command/3 (108-115), which calls an injected :tool_hook_runner when present. run_shell_hook/3 (123-126) otherwise returns an error that agent-authored command expansion is disabled and does not spawn a shell. Current owner is arbor_llm despite the Arbor.Orchestrator name. The shell authorization boundary is outside this module. This is a fail-closed hook seam, not that boundary. Class system_extension."
   }
 ]
