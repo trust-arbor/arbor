@@ -645,6 +645,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     {url, server} =
       start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
 
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
+
     owner = self()
     ref = make_ref()
     handler = "stream-prefix-#{System.unique_integer([:positive])}"
@@ -697,6 +701,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     {url, server} =
       start_chunked_server(text_completion_chunks(), 0, "text/event-stream", 200, [], true)
 
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
+
     owner = self()
     ref = make_ref()
 
@@ -747,6 +755,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
       {url, server} =
         start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
 
+      TransportContract.setup([
+        TransportContract.route("lm_studio", "bounded-test", :public, url)
+      ])
+
       result =
         Client.complete_streaming(
           req_llm_client(),
@@ -770,6 +782,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
 
     {url, server} =
       start_chunked_server(chunks, 0, "text/event-stream", 200, [], true)
+
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
 
     result =
       Client.complete_streaming(
@@ -813,6 +829,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
         true
       )
 
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
+
     ref = capture_lost_arguments()
 
     result =
@@ -854,6 +874,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
   test "security regression: recovered prefix ownership remains specific to each tool index" do
     {url, server} =
       start_chunked_server(mixed_tool_argument_chunks(), 0, "text/event-stream", 200, [], true)
+
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
 
     ref = capture_lost_arguments()
 
@@ -904,6 +928,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
         [],
         true
       )
+
+    TransportContract.setup([
+      TransportContract.route("lm_studio", "bounded-test", :public, url)
+    ])
 
     ref = capture_lost_arguments()
 

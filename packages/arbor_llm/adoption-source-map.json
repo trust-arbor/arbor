@@ -2281,8 +2281,8 @@
         {
           "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
           "owner_application": "arbor_llm",
-          "sha256": "f00617de1dcfe52e8ba5328a1419bf6a5536113d991814481c0605ea008ebfe9",
-          "bytes": 40804,
+          "sha256": "b9d490dcfd69f95255f8f7b6a6997bee6655b18f6095429128f6195f31d8547d",
+          "bytes": 41587,
           "prior_stage01_formatting": {
             "before_sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
             "after_sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
@@ -2291,6 +2291,10 @@
           "prior_to_main_87457_sync_target": {
             "sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
             "bytes": 25761
+          },
+          "prior_to_finite_transport_setup_target": {
+            "sha256": "f00617de1dcfe52e8ba5328a1419bf6a5536113d991814481c0605ea008ebfe9",
+            "bytes": 40804
           }
         }
       ],
@@ -17130,7 +17134,7 @@
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: eager streaming counts the initial tool argument prefix once",
-      "current_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
+      "current_chunk_sha256": "ca10b794bd4996f4fdb61bda3b5e49dd9329d5028f2cd9cb5a51e6700f4db760",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17142,18 +17146,24 @@
       "source_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
       "current_lines": [
         642,
-        689
+        693
       ],
       "source_and_current_tag_lines": [
         "  @tag :stream_compatibility_regression"
       ],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
+        642,
+        689
+      ],
+      "prior_to_finite_transport_setup_current_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: eager streaming accepts text with SDK callback-bearing tools",
-      "current_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
+      "current_chunk_sha256": "9ba502f52d1fd40a62b73ea88907ca48a06905ca4dbfb021cbbfaa7cafa1a43f",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17164,19 +17174,25 @@
       ],
       "source_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
       "current_lines": [
-        692,
-        741
+        696,
+        749
       ],
       "source_and_current_tag_lines": [
         "  @tag :stream_compatibility_regression"
       ],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
+        692,
+        741
+      ],
+      "prior_to_finite_transport_setup_current_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: eager tool assembly still rejects malformed and incomplete JSON",
-      "current_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
+      "current_chunk_sha256": "451be4f75793332149fc1347f47f9ebe98c719903e9a10565d2f530c702fb9a6",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17187,17 +17203,23 @@
       ],
       "source_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
       "current_lines": [
+        751,
+        774
+      ],
+      "source_and_current_tag_lines": [],
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
         743,
         762
       ],
-      "source_and_current_tag_lines": [],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "prior_to_finite_transport_setup_current_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: eager tool assembly retains the argument depth ceiling",
-      "current_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
+      "current_chunk_sha256": "4027fe5c02d22b83c85162f096c49573bcd6f74c63a3aab5a0a01a865bbb30c8",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17208,11 +17230,17 @@
       ],
       "source_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
       "current_lines": [
+        776,
+        802
+      ],
+      "source_and_current_tag_lines": [],
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
         764,
         786
       ],
-      "source_and_current_tag_lines": [],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "prior_to_finite_transport_setup_current_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
@@ -17229,17 +17257,21 @@
       ],
       "source_chunk_sha256": "212fb4466b2298d2e8545025a606b8ef76357f13d778f1d69ca2f690589fd8ec",
       "current_lines": [
-        788,
-        802
+        804,
+        818
       ],
       "source_and_current_tag_lines": [],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof.",
+      "prior_to_finite_transport_setup_current_lines": [
+        788,
+        802
+      ]
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: a scalar initial argument is not replaced by a later object",
-      "current_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
+      "current_chunk_sha256": "c4c59b3bdd11faefc7666136f12e9132655ca201cf8dd7f712efa53783fc139d",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17250,19 +17282,25 @@
       ],
       "source_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
       "current_lines": [
-        805,
-        851
+        821,
+        871
       ],
       "source_and_current_tag_lines": [
         "  @tag :stream_prefix_ownership_regression"
       ],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
+        805,
+        851
+      ],
+      "prior_to_finite_transport_setup_current_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: recovered prefix ownership remains specific to each tool index",
-      "current_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
+      "current_chunk_sha256": "e0504c71946f58b45b83a39b835701b5ffa9756428c5d06149db96a9e53307ed",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17273,19 +17311,25 @@
       ],
       "source_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
       "current_lines": [
-        854,
-        894
+        874,
+        918
       ],
       "source_and_current_tag_lines": [
         "  @tag :stream_prefix_ownership_regression"
       ],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
+        854,
+        894
+      ],
+      "prior_to_finite_transport_setup_current_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     },
     {
       "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "owner_application": "arbor_llm",
       "label": "security regression: an equal continuation does not own the initial scalar seed",
-      "current_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
+      "current_chunk_sha256": "fd70cfcc93224344c4e17abd6edaeccb7be0b7ef223b0c4a0181c127454f41dd",
       "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
       "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
       "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
@@ -17296,13 +17340,19 @@
       ],
       "source_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
       "current_lines": [
-        897,
-        935
+        921,
+        963
       ],
       "source_and_current_tag_lines": [
         "  @tag :stream_prefix_ownership_regression"
       ],
-      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+      "preservation": "Exact original Main test block is recovered by removing the recorded finite setup; tags unchanged. Current raw block includes that explicit fixture addition.",
+      "prior_to_finite_transport_setup_current_lines": [
+        897,
+        935
+      ],
+      "prior_to_finite_transport_setup_current_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
+      "prior_Main_sync_preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     }
   ],
   "new_files_and_cases_outside_historical_map": "separate additions; not credited toward original1009, incoming8 or lower87",
@@ -18030,6 +18080,243 @@
       "runtime_and_formatting_limit": "The initial source proposal supplied no runtime/formatting credit. Later exact Source14 controlled-diagnostic and owning receipts are bound separately under post_fixture_repair_owning_qualification. Actual normal-hook formatting evidence is separate. No cold credit.",
       "owning_receipt_sha256": "36724a1682e5653c6e306dfdf4b365e57e00aaf6167fbd4bf6254d74fdecff17",
       "prior_source_only_stage_status": "SOURCE_BOUND_RUNTIME_PENDING"
+    },
+    {
+      "stage": "incoming_Main_transport_cases_explicit_finite_contract_setup",
+      "status": "SOURCE_BOUND_RUNTIME_PENDING",
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "prior_adoption_commit": "47a5eeba9ca1d013c01552be8df48aefaedfd453",
+      "prior_portable_map_sha256": "fd5aa001c3e5cbe0f011b8d4b826723cb4fec58578c16989a9a5648538d0b43a",
+      "prior_target": {
+        "sha256": "f00617de1dcfe52e8ba5328a1419bf6a5536113d991814481c0605ea008ebfe9",
+        "bytes": 40804
+      },
+      "current_target": {
+        "sha256": "b9d490dcfd69f95255f8f7b6a6997bee6655b18f6095429128f6195f31d8547d",
+        "bytes": 41587
+      },
+      "historical_Main_sync_stage_preserved_verbatim": "Main_87457_streaming_compatibility_and_prefix_ownership_sync",
+      "scope": "Seven explicit finite TransportContract setups for eight existing public API invocations; no production change, global policy, refusal bypass or case/assertion/tag/budget change.",
+      "setup_count": 7,
+      "runtime_API_calls_in_existing_control_flow": 8,
+      "runtime_call_count_limit": "Reviewed source control flow, including the existing two-element malformed/incomplete loop; not an executed request count.",
+      "new_cases": 0,
+      "named_cases": 25,
+      "TransportContract_setup_calls_before_after": [
+        20,
+        27
+      ],
+      "setups": [
+        {
+          "label": "security regression: eager streaming counts the initial tool argument prefix once",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 18,
+          "before_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
+          "after_chunk_sha256": "ca10b794bd4996f4fdb61bda3b5e49dd9329d5028f2cd9cb5a51e6700f4db760",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: eager streaming accepts text with SDK callback-bearing tools",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 19,
+          "before_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
+          "after_chunk_sha256": "9ba502f52d1fd40a62b73ea88907ca48a06905ca4dbfb021cbbfaa7cafa1a43f",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: eager tool assembly still rejects malformed and incomplete JSON",
+          "runtime_API_calls": 2,
+          "source_case_ordinal": 20,
+          "before_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
+          "after_chunk_sha256": "451be4f75793332149fc1347f47f9ebe98c719903e9a10565d2f530c702fb9a6",
+          "literal_addition_sha256": "0d0790315acf53894c2de3a02eb0a147018ca99fb49e54c306c015381679575f",
+          "literal_addition_bytes": 117,
+          "indent_spaces": 6,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: eager tool assembly retains the argument depth ceiling",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 21,
+          "before_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
+          "after_chunk_sha256": "4027fe5c02d22b83c85162f096c49573bcd6f74c63a3aab5a0a01a865bbb30c8",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: a scalar initial argument is not replaced by a later object",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 23,
+          "before_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
+          "after_chunk_sha256": "c4c59b3bdd11faefc7666136f12e9132655ca201cf8dd7f712efa53783fc139d",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: recovered prefix ownership remains specific to each tool index",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 24,
+          "before_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
+          "after_chunk_sha256": "e0504c71946f58b45b83a39b835701b5ffa9756428c5d06149db96a9e53307ed",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        },
+        {
+          "label": "security regression: an equal continuation does not own the initial scalar seed",
+          "runtime_API_calls": 1,
+          "source_case_ordinal": 25,
+          "before_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
+          "after_chunk_sha256": "fd70cfcc93224344c4e17abd6edaeccb7be0b7ef223b0c4a0181c127454f41dd",
+          "literal_addition_sha256": "d613583d9d234ddb1d8b5d90bee1d418c161d1480dfdf169b04a5e542bfbea44",
+          "literal_addition_bytes": 111,
+          "indent_spaces": 4,
+          "route": {
+            "provider": "lm_studio",
+            "model": "bounded-test",
+            "sensitivity": "public",
+            "runtime": "arbor",
+            "origin_expression": "url",
+            "origin_binding": "the existing case-owned loopback server URL"
+          }
+        }
+      ],
+      "preservation": {
+        "remove_exact_seven_literal_additions_recovers_entire_prior_test_bytes": true,
+        "case_labels_order_tags_ExUnit_options_and_leading_assert_refute_counts_unchanged": true,
+        "unchanged_18_case_blocks": [
+          {
+            "label": "security regression: Enum.take closes the owned producer and TCP connection synchronously",
+            "chunk_sha256": "2e63a425d8823d45f3e192af2323d0139cc010d86dbdcbc67f60914074e111ed"
+          },
+          {
+            "label": "security regression: aggregate stream bytes close the producer before the full body",
+            "chunk_sha256": "85aee2d683543aa5f4a3bb920756e44ae4a1ff1d361fba5bd4e3d03eac2e55f5"
+          },
+          {
+            "label": "security regression: tiny SSE event floods are work bounded without mailbox residue",
+            "chunk_sha256": "f1edf40cbee446cb714c1f0d47e66916013f58cb8beaa24ec8accb58abea0c25"
+          },
+          {
+            "label": "security regression: tiny transport chunks consume the absolute work budget",
+            "chunk_sha256": "7f93bbaf0b3c9f6d2e6ebd0cf04a41f264c03f6add9df30401370303737bf9da"
+          },
+          {
+            "label": "security regression: malformed media types and encoded streams fail before body buffering",
+            "chunk_sha256": "cd61465562257aa4fc64e8f9337a9c09a337ab46c323ed273409f4f9a0ee7b1a"
+          },
+          {
+            "label": "OpenAI tool-call argument fragments are not rejected as malformed envelope JSON",
+            "chunk_sha256": "3cfbb1db98fc26a0b77439b741cc54b256d7602650590631f83e4fd94765fe58"
+          },
+          {
+            "label": "reassembles OpenAI SSE JSON split across one-byte HTTP chunks including [DONE] and cost trailer",
+            "chunk_sha256": "6602933569ffdbb035bc59e9098c835650dd645b444e661300dc0bbcdb2fa609"
+          },
+          {
+            "label": "security regression: split invalid UTF-8 and partial JSON fail closed",
+            "chunk_sha256": "e4f56d0713e64983079a6dce892bfb2c539a7757a59fdd792fc103c7400e0448"
+          },
+          {
+            "label": "security regression: a huge single chunk and HTTP error body do not escape stream bounds",
+            "chunk_sha256": "8d379147cd669fb5a3b4be53ddee58edaabaa680b109896e331194c8af83015d"
+          },
+          {
+            "label": "security regression: facade abort preserves demand and closes the true socket owner",
+            "chunk_sha256": "6fbfa240bd92c63a16b8f452feb9ba2ad331a7e4c683dc6cc73169e53aa309b5"
+          },
+          {
+            "label": "security regression: absolute facade timeout closes a stalled true socket owner",
+            "chunk_sha256": "ef34ae89d8140d0bda20111ebce1729c66febba66bbaf7c9f7650758ae7ef1c4"
+          },
+          {
+            "label": "security regression: continuous activity cannot reset the absolute stream deadline",
+            "chunk_sha256": "3c14a3a37b264ee1d9153f3682535fb66a0e34481bedb2f53e0304079fb53438"
+          },
+          {
+            "label": "security regression: cloud embedding dispatch consumes the private cap before ReqLLM validation",
+            "chunk_sha256": "4131b0ae6ad0f42237c4856f90a49279957e59ecf08001d5e802fdcdf9a5375c"
+          },
+          {
+            "label": "security regression: local embedding dispatch consumes the private cap before ReqLLM validation",
+            "chunk_sha256": "532c27cd869fecac71ab93030c1af68f18905f7e3fdf13c8e30b6cefdbb808be"
+          },
+          {
+            "label": "security regression: embedding indices must preserve authoritative input order",
+            "chunk_sha256": "95ec81006f5f23d012f9937b7adfd51daa56d6b716b3c14d5834df02922f9557"
+          },
+          {
+            "label": "regression: a tool-call delta packing name with a partial argument fragment still assembles",
+            "chunk_sha256": "646cf0f97b924d8d7b51c20e075fa8bab17c29aada5299f636227f7804c5fb9b"
+          },
+          {
+            "label": "regression: a long stream of realistic chunks is not rejected by the per-event term caps",
+            "chunk_sha256": "e3fdb0aed7fa2f2a682c441571054b1c028362b105c3194b68c23c8e609505ae"
+          },
+          {
+            "label": "security regression: SDK tool handling does not admit executable provider metadata",
+            "chunk_sha256": "212fb4466b2298d2e8545025a606b8ef76357f13d778f1d69ca2f690589fd8ec"
+          }
+        ],
+        "in_process_negative_case_unchanged_without_transport_fixture": "security regression: SDK tool handling does not admit executable provider metadata",
+        "method": "Exact whole-file inverse and bounded lexical case slices; not Elixir AST or test execution."
+      },
+      "historical_facts": "All original8a4d source/blob/hash/count/case records, original1009/incoming8/lower87 inventories, previous stages and receipts remain unchanged. The f006 Main-exact eight-block observation belongs to synchronization commit47a5 and is retained verbatim.",
+      "qualification_limit": "No new formatting/AST/compile/test/owning/cold/Grok/rollback/M2 credit. Subsequent run-specific receipts must qualify the new revision."
     }
   ],
   "post_fixture_repair_owning_qualification": {

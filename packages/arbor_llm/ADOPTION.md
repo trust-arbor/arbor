@@ -171,15 +171,28 @@ formatting is recorded separately; these results supply no cold release credit.
 
 ## Later Main streaming synchronization
 
-Main commit `87457ba2571dd623fbced6dd8968409f247aa80d` is synchronized into the two
-relocated streaming adapter and transport-test owners. The adapter is
-byte-identical to Main; the test file retains its existing package
-TransportContract alias and finite setup. All 17 prior package test blocks
-remain byte-identical, and all eight added Main blocks and their attached
-tags match Main exactly, bringing this file to 25 named source cases. The
-map records those incoming cases separately from the original inventories
-and preserves the prior destination pins and all historical source facts.
-This source-only synchronization carries no new runtime or review credit:
-the earlier package owning result and Main focused result remain bound to
-their own revisions; the combined adoption tip requires fresh qualification
-and Grok review. Earlier cold HOLD records remain unchanged.
+At synchronization commit `47a5eeba9ca1d013c01552be8df48aefaedfd453`, Main commit
+`87457ba2571dd623fbced6dd8968409f247aa80d` was synchronized into the two
+relocated streaming adapter and transport-test owners. The adapter was
+byte-identical to Main; the test file retained its existing package
+TransportContract alias and finite setup. At that stage, all 17 prior package
+test blocks remained byte-identical and all eight added Main blocks and
+their attached tags matched Main exactly, bringing the file to 25 named
+source cases. The map retains that complete stage and its prior pins.
+
+A subsequent fixture-only stage adds seven explicit finite transport setups
+for eight existing public calls, including both iterations of the existing
+malformed/incomplete JSON loop. Each route binds `lm_studio`, `bounded-test`,
+`public`, the existing `:arbor` runtime and the case-owned loopback URL.
+It adds no global policy
+or case and leaves the in-process executable-provider-metadata refusal
+without a transport fixture. Removing exactly those additions recovers the
+entire `f00617de...` synchronization test file; labels, order, tags, assertions
+and budgets remain intact, and the other 18 case blocks are byte-identical.
+The seven current block hashes and all eight current line coordinates
+advance separately from immutable Main source facts and the prior sync proof.
+
+These source observations provide no new formatting, AST, runtime or review
+credit. The earlier package owning and Main focused results remain tied to
+their own revisions; the new adoption tip requires run-specific qualification
+and Grok review. Earlier failed attempts and cold HOLD records remain unchanged.
