@@ -699,6 +699,18 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
     end
   end
 
+  test "AI declares only its required KernelRuntime edge under contract rule10" do
+    direct_kernel_dependencies =
+      dep_graph()
+      |> Map.fetch!("arbor_ai")
+      |> Enum.filter(&(&1 in ["arbor_kernel", "arbor_kernel_runtime"]))
+      |> Enum.sort()
+
+    assert direct_kernel_dependencies == ["arbor_kernel_runtime"],
+           "AI uses active KernelRuntime services; CONTRACT_RULES section10 requires " <>
+             "passive Kernel transitively through its one direct KernelRuntime edge"
+  end
+
   test "the in-umbrella dependency graph is acyclic" do
     # Ordinary Git path via process env (local/CI). Contained validation sets
     # ARBOR_MIX_CONTAINED=1 and supplies the attested inventory instead.
