@@ -34,6 +34,7 @@ defmodule ArborAi.MixProject do
       {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
       {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../../packages/arbor_kernel", env: Mix.env()},
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:arbor_security, in_umbrella: true},
