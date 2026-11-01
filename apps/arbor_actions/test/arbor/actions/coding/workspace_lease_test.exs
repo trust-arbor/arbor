@@ -1818,7 +1818,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
-        dormant = Map.get(:sys.get_state(server).leases, workspace_id)
+        dormant = Map.get(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
         assert dormant.cleanup_armed == false
         assert dormant.owner_death_quarantine_state == :dormant
         assert dormant.owner_death_retry_exhausted == true
